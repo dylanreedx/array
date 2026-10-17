@@ -1,0 +1,306 @@
+{
+  "state": {
+    "zones": {
+      "runtime": {
+        "id": "runtime",
+        "name": "Canvas Runtime",
+        "color": "mint",
+        "frame": {
+          "x": 40,
+          "y": 40,
+          "width": 1070,
+          "height": 498
+        },
+        "collapsed": false
+      }
+    },
+    "tiles": {
+      "stabilize": {
+        "id": "stabilize",
+        "kind": "agent",
+        "title": "Fix tile jump",
+        "zoneId": "runtime",
+        "frame": {
+          "x": 64,
+          "y": 94,
+          "width": 330,
+          "height": 420
+        },
+        "z": 1,
+        "open": true
+      },
+      "audit": {
+        "id": "audit",
+        "kind": "agent",
+        "title": "Audit tokens",
+        "zoneId": "runtime",
+        "frame": {
+          "x": 410,
+          "y": 94,
+          "width": 330,
+          "height": 420
+        },
+        "z": 2,
+        "open": true
+      },
+      "verify": {
+        "id": "verify",
+        "kind": "agent",
+        "title": "Release notes",
+        "zoneId": "runtime",
+        "frame": {
+          "x": 756,
+          "y": 94,
+          "width": 330,
+          "height": 420
+        },
+        "z": 3,
+        "open": true
+      },
+      "shell": {
+        "id": "shell",
+        "kind": "shell",
+        "title": "Shell",
+        "zoneId": "runtime",
+        "frame": {
+          "x": 1102,
+          "y": 94,
+          "width": 330,
+          "height": 420
+        },
+        "z": 4,
+        "open": false
+      }
+    },
+    "agents": {
+      "stabilize": {
+        "id": "stabilize",
+        "tileId": "stabilize",
+        "name": "Fix tile jump",
+        "branch": "agent/tiles-jump-by-their-zone-origin-4b1e9c07",
+        "provider": "Codex",
+        "model": "GPT-5.6 Sol",
+        "effort": "High",
+        "status": "working",
+        "summary": "Running swift test",
+        "draft": "",
+        "transcript": [
+          {
+            "id": "s1",
+            "kind": "user",
+            "text": "Tiles jump by their zone origin after a workspace switch. Find the save path and fix it."
+          },
+          {
+            "id": "s2",
+            "kind": "tool",
+            "tool": "search",
+            "status": "completed",
+            "text": "rg -n \"canvasStateForPersistence\" Sources"
+          },
+          {
+            "id": "s3",
+            "kind": "tool",
+            "tool": "read",
+            "status": "completed",
+            "text": "Read Canvas/CanvasNSView.swift, lines 2190-2260"
+          },
+          {
+            "id": "s4",
+            "kind": "assistant",
+            "text": "The save path copies ZoneLayer frames, which are zone-local, straight into canvas.json, which holds world frames."
+          },
+          {
+            "id": "s5",
+            "kind": "tool",
+            "tool": "edit",
+            "status": "completed",
+            "text": "Edit CanvasNSView.swift: persist tilesInWorldFrames"
+          },
+          {
+            "id": "s6",
+            "kind": "tool",
+            "tool": "edit",
+            "status": "completed",
+            "text": "Edit CanvasPersistenceChecks.swift: add a switch round trip"
+          },
+          {
+            "id": "s7",
+            "kind": "tool",
+            "tool": "shell",
+            "status": "inProgress",
+            "text": "swift test --filter CanvasPersistenceChecks"
+          }
+        ]
+      },
+      "audit": {
+        "id": "audit",
+        "tileId": "audit",
+        "name": "Audit tokens",
+        "branch": "agent/audit-the-website-tokens-compare-a93d2f6e",
+        "provider": "Pi",
+        "model": "GPT-5.6 Luna",
+        "effort": "Low",
+        "status": "working",
+        "summary": "Running the token tests",
+        "draft": "",
+        "transcript": [
+          {
+            "id": "a1",
+            "kind": "user",
+            "text": "Audit the website tokens against the native export, light and dark."
+          },
+          {
+            "id": "a2",
+            "kind": "tool",
+            "tool": "shell",
+            "status": "completed",
+            "text": "swift run array-design-tokens /tmp/tokens"
+          },
+          {
+            "id": "a3",
+            "kind": "tool",
+            "tool": "search",
+            "status": "completed",
+            "text": "rg --count \"--array-\" src/styles/tokens.generated.css"
+          },
+          {
+            "id": "a4",
+            "kind": "assistant",
+            "text": "Both files define 135 properties. In dark mode, done and attention differ from the export by one step."
+          },
+          {
+            "id": "a5",
+            "kind": "tool",
+            "tool": "edit",
+            "status": "completed",
+            "text": "Edit tokens.generated.css: regenerate from the export"
+          },
+          {
+            "id": "a6",
+            "kind": "tool",
+            "tool": "shell",
+            "status": "inProgress",
+            "text": "pnpm vitest run src/styles/tokens.test.ts"
+          }
+        ]
+      },
+      "verify": {
+        "id": "verify",
+        "tileId": "verify",
+        "name": "Release notes",
+        "branch": "agent/notes-for-0-7-24-read-the-ledger-5c1e04a7",
+        "provider": "Claude Code",
+        "model": "Opus 5.5",
+        "effort": "Medium",
+        "status": "working",
+        "summary": "Pushing to origin",
+        "draft": "",
+        "transcript": [
+          {
+            "id": "v1",
+            "kind": "user",
+            "text": "Draft the 0.7.24 release notes from the ledger, then push the branch."
+          },
+          {
+            "id": "v2",
+            "kind": "tool",
+            "tool": "read",
+            "status": "completed",
+            "text": "Read docs/VERSIONING.md"
+          },
+          {
+            "id": "v3",
+            "kind": "tool",
+            "tool": "shell",
+            "status": "completed",
+            "text": "git log --oneline v0.7.23..HEAD"
+          },
+          {
+            "id": "v4",
+            "kind": "assistant",
+            "text": "Two changes users will notice: model lists now come live from each CLI, and switching workspaces skips stale zones."
+          },
+          {
+            "id": "v5",
+            "kind": "tool",
+            "tool": "edit",
+            "status": "completed",
+            "text": "Write docs/release-notes/0.7.24.md"
+          },
+          {
+            "id": "v6",
+            "kind": "tool",
+            "tool": "shell",
+            "status": "completed",
+            "text": "git commit -m \"docs(release): draft the 0.7.24 notes\""
+          },
+          {
+            "id": "v7",
+            "kind": "tool",
+            "tool": "shell",
+            "status": "inProgress",
+            "text": "git push -u origin HEAD"
+          }
+        ]
+      }
+    },
+    "approval": {
+      "id": "approval-push",
+      "agentId": "verify",
+      "title": "Push to origin?",
+      "detail": "git push -u origin HEAD",
+      "state": "accepted",
+      "choices": [
+        "Allow once",
+        "Decline"
+      ]
+    },
+    "shell": {
+      "draft": "",
+      "history": [
+        "swift test"
+      ],
+      "historyIndex": -1,
+      "running": false,
+      "lines": [
+        {
+          "id": "prompt-1",
+          "type": "prompt",
+          "text": "swift test"
+        },
+        {
+          "id": "hero-1",
+          "type": "output",
+          "text": "Building for debugging..."
+        },
+        {
+          "id": "hero-2",
+          "type": "output",
+          "text": "[418/418] Linking ArrayPackageTests"
+        },
+        {
+          "id": "hero-3",
+          "type": "output",
+          "text": "Build complete! (6.84s)"
+        },
+        {
+          "id": "hero-4",
+          "type": "output",
+          "text": "◇ Test run started."
+        },
+        {
+          "id": "hero-5",
+          "type": "success",
+          "text": "✔ Test run with 18 tests in 4 suites passed after 2.412 seconds."
+        }
+      ]
+    },
+    "macCamera": {
+      "x": 204,
+      "y": 214.6,
+      "zoom": 0.6
+    },
+    "selectedEntityId": null,
+    "operationGeneration": 1
+  }
+}

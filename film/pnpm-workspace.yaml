@@ -1,0 +1,6 @@
+# film/ is its own pnpm project, deliberately NOT a workspace member with website/:
+# Vercel builds website/ from its own lockfile, and joining a root workspace would change that.
+packages: []
+allowBuilds:
+  esbuild: true
+  '@remotion/compositor-darwin-arm64': true

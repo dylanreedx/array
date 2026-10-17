@@ -1,0 +1,65 @@
+/*
+  The page every film draws on. The films were first built inside a bundle that loaded the website's
+  production.css (Tailwind v4 preflight plus a body rule), and every frame since was tuned against that
+  page: border-box sizing, zero margins, block images, antialiased glyphs. This is that page, without the
+  website. Remove a rule here and old videos shift by pixels (videos/which-tab/notes.md, the r5.3 proof).
+
+  The reset below is Tailwind CSS v4.3.3 preflight (MIT, Copyright (c) Tailwind Labs, Inc.; see
+  THIRD_PARTY_NOTICES.md), with --theme() resolved to the values the film bundle used.
+*/
+@layer base {
+  *, ::after, ::before, ::backdrop, ::file-selector-button {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    border: 0 solid;
+  }
+  html, :host {
+    line-height: 1.5;
+    -webkit-text-size-adjust: 100%;
+    tab-size: 4;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-feature-settings: normal;
+    font-variation-settings: normal;
+    -webkit-tap-highlight-color: transparent;
+  }
+  hr { height: 0; color: inherit; border-top-width: 1px; }
+  h1, h2, h3, h4, h5, h6 { font-size: inherit; font-weight: inherit; }
+  a { color: inherit; -webkit-text-decoration: inherit; text-decoration: inherit; }
+  b, strong { font-weight: bolder; }
+  code, kbd, samp, pre {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-feature-settings: normal;
+    font-variation-settings: normal;
+    font-size: 1em;
+  }
+  small { font-size: 80%; }
+  sub, sup { font-size: 75%; line-height: 0; position: relative; vertical-align: baseline; }
+  sub { bottom: -0.25em; }
+  sup { top: -0.5em; }
+  table { text-indent: 0; border-color: inherit; border-collapse: collapse; }
+  ol, ul, menu { list-style: none; }
+  img, svg, video, canvas, audio, iframe, embed, object { display: block; vertical-align: middle; }
+  img, video { max-width: 100%; height: auto; }
+  button, input, select, optgroup, textarea, ::file-selector-button {
+    font: inherit;
+    font-feature-settings: inherit;
+    font-variation-settings: inherit;
+    letter-spacing: inherit;
+    color: inherit;
+    border-radius: 0;
+    background-color: transparent;
+    opacity: 1;
+  }
+  [hidden]:where(:not([hidden='until-found'])) { display: none !important; }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  overflow-x: clip;
+  color: #14171c;
+  background: #f2f3f1;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}

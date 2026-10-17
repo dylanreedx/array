@@ -1,0 +1,6 @@
+{
+  "setup": [
+    { "type": "SHUFFLE", "seed": 41 },
+    { "type": "SELECT_ENTITY", "id": null }
+  ]
+}

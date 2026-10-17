@@ -1,0 +1,17 @@
+# pnpm install, the pinned headless Chrome, webpack's cache, the pinned ffmpeg link (scripts/ffmpeg.py).
+node_modules/
+.remotion*
+# Every render round: renders/<video>/r<N>/ (preview.mp4, stills/, contact-sheet.png, notes.md, ...).
+renders/
+# Takes, linked in by scripts/import-take. The frames live in ~/array-scratch/film/takes/<video>/<take>/.
+public/footage/
+# Reference videos and the frames pulled from them (other companies' films: not ours to commit).
+# legacy/scripts/refs.sh regenerates both; refs/notes.md is what we keep.
+refs/raw/
+refs/*.png
+# Python bytecode from the uv-run helpers.
+__pycache__/
+*.pyc
+.DS_Store
+# Generated sound stems (legacy/scripts/day-render.sh writes full-day's).
+videos/*/stems/

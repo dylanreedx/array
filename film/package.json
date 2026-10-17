@@ -1,0 +1,31 @@
+{
+  "name": "array-film",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "description": "Array's film studio: the Remotion edit, the shared kit, probes and scripts. See README.md.",
+  "engines": {
+    "node": "22.x"
+  },
+  "packageManager": "pnpm@11.17.0",
+  "scripts": {
+    "studio": "remotion studio",
+    "typecheck": "tsc --noEmit",
+    "browser": "remotion browser ensure"
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.532",
+    "@remotion/captions": "4.0.532",
+    "@remotion/cli": "4.0.532",
+    "@remotion/renderer": "4.0.532",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "remotion": "4.0.532"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "tsx": "4.23.15",
+    "typescript": "5.9.2"
+  }
+}

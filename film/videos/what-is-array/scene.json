@@ -1,0 +1,350 @@
+{
+ "state": {
+  "zones": {
+   "runtime": {
+    "id": "runtime",
+    "name": "Canvas fixes",
+    "color": "mint",
+    "frame": {
+     "x": 40,
+     "y": 40,
+     "width": 1070,
+     "height": 764
+    },
+    "collapsed": false
+   },
+   "companion": {
+    "id": "companion",
+    "name": "Release 0.7.24",
+    "color": "orange",
+    "frame": {
+     "x": 1134,
+     "y": 40,
+     "width": 378,
+     "height": 298
+    },
+    "collapsed": false
+   }
+  },
+  "tiles": {
+   "stabilize": {
+    "id": "stabilize",
+    "kind": "agent",
+    "title": "Fix tile jump",
+    "zoneId": "runtime",
+    "frame": {
+     "x": 64,
+     "y": 94,
+     "width": 330,
+     "height": 420
+    },
+    "z": 5,
+    "open": true
+   },
+   "audit": {
+    "id": "audit",
+    "kind": "agent",
+    "title": "Audit tokens",
+    "zoneId": "runtime",
+    "frame": {
+     "x": 410,
+     "y": 94,
+     "width": 330,
+     "height": 420
+    },
+    "z": 4,
+    "open": true
+   },
+   "verify": {
+    "id": "verify",
+    "kind": "agent",
+    "title": "Release notes",
+    "zoneId": "runtime",
+    "frame": {
+     "x": 756,
+     "y": 94,
+     "width": 330,
+     "height": 420
+    },
+    "z": 6,
+    "open": true
+   },
+   "shell": {
+    "id": "shell",
+    "kind": "shell",
+    "title": "zsh",
+    "zoneId": "runtime",
+    "frame": {
+     "x": 64,
+     "y": 530,
+     "width": 330,
+     "height": 250
+    },
+    "z": 3,
+    "open": true
+   },
+   "diff": {
+    "id": "diff",
+    "kind": "diff",
+    "title": "Diff Review",
+    "zoneId": "runtime",
+    "frame": {
+     "x": 410,
+     "y": 530,
+     "width": 330,
+     "height": 250
+    },
+    "z": 2,
+    "open": true
+   },
+   "browser": {
+    "id": "browser",
+    "kind": "browser",
+    "title": "http://localhost:4321/appcast.xml",
+    "zoneId": "runtime",
+    "frame": {
+     "x": 756,
+     "y": 530,
+     "width": 330,
+     "height": 250
+    },
+    "z": 1,
+    "open": true
+   },
+   "note": {
+    "id": "note",
+    "kind": "note",
+    "title": "0.7.24 release checklist",
+    "zoneId": "companion",
+    "frame": {
+     "x": 1158,
+     "y": 94,
+     "width": 330,
+     "height": 220
+    },
+    "z": 1,
+    "open": true
+   }
+  },
+  "agents": {
+   "stabilize": {
+    "id": "stabilize",
+    "tileId": "stabilize",
+    "name": "Fix tile jump",
+    "branch": "agent/tiles-jump-by-their-zone-origin-4b1e9c07",
+    "provider": "Codex",
+    "model": "GPT-5.6 Sol",
+    "effort": "High",
+    "status": "working",
+    "summary": "Running swift test",
+    "draft": "",
+    "transcript": [
+     {
+      "id": "s1",
+      "kind": "user",
+      "text": "Tiles jump by their zone origin after a workspace switch. Find the save path and fix it."
+     },
+     {
+      "id": "s2",
+      "kind": "tool",
+      "tool": "search",
+      "status": "completed",
+      "text": "rg -n \"canvasStateForPersistence\" Sources"
+     },
+     {
+      "id": "s3",
+      "kind": "tool",
+      "tool": "read",
+      "status": "completed",
+      "text": "Read Canvas/CanvasNSView.swift, lines 2190-2260"
+     },
+     {
+      "id": "s4",
+      "kind": "assistant",
+      "text": "The save path copies ZoneLayer frames, which are zone-local, straight into canvas.json, which holds world frames."
+     },
+     {
+      "id": "s5",
+      "kind": "tool",
+      "tool": "edit",
+      "status": "completed",
+      "text": "Edit CanvasNSView.swift: persist tilesInWorldFrames"
+     },
+     {
+      "id": "s6",
+      "kind": "tool",
+      "tool": "edit",
+      "status": "completed",
+      "text": "Edit CanvasPersistenceChecks.swift: add a switch round trip"
+     },
+     {
+      "id": "s7",
+      "kind": "tool",
+      "tool": "shell",
+      "status": "inProgress",
+      "text": "swift test --filter CanvasPersistenceChecks"
+     }
+    ]
+   },
+   "audit": {
+    "id": "audit",
+    "tileId": "audit",
+    "name": "Audit tokens",
+    "branch": "agent/audit-the-website-tokens-compare-a93d2f6e",
+    "provider": "Pi",
+    "model": "GPT-5.6 Luna",
+    "effort": "Low",
+    "status": "working",
+    "summary": "Running the token tests",
+    "draft": "",
+    "transcript": [
+     {
+      "id": "a1",
+      "kind": "user",
+      "text": "Audit the website tokens against the native export, light and dark."
+     },
+     {
+      "id": "a2",
+      "kind": "tool",
+      "tool": "shell",
+      "status": "completed",
+      "text": "swift run array-design-tokens /tmp/tokens"
+     },
+     {
+      "id": "a3",
+      "kind": "tool",
+      "tool": "search",
+      "status": "completed",
+      "text": "rg --count \"--array-\" src/styles/tokens.generated.css"
+     },
+     {
+      "id": "a4",
+      "kind": "assistant",
+      "text": "Both files define 135 properties. In dark mode, done and attention differ from the export by one step."
+     },
+     {
+      "id": "a5",
+      "kind": "tool",
+      "tool": "edit",
+      "status": "completed",
+      "text": "Edit tokens.generated.css: regenerate from the export"
+     },
+     {
+      "id": "a6",
+      "kind": "tool",
+      "tool": "shell",
+      "status": "inProgress",
+      "text": "pnpm vitest run src/styles/tokens.test.ts"
+     }
+    ]
+   },
+   "verify": {
+    "id": "verify",
+    "tileId": "verify",
+    "name": "Release notes",
+    "branch": "agent/notes-for-0-7-24-read-the-ledger-5c1e04a7",
+    "provider": "Claude Code",
+    "model": "Opus 5.5",
+    "effort": "Medium",
+    "status": "needsAttention",
+    "summary": "Approval requested · git push",
+    "draft": "",
+    "transcript": [
+     {
+      "id": "v1",
+      "kind": "user",
+      "text": "Draft the 0.7.24 release notes from the ledger, then push the branch."
+     },
+     {
+      "id": "v2",
+      "kind": "tool",
+      "tool": "read",
+      "status": "completed",
+      "text": "Read docs/VERSIONING.md"
+     },
+     {
+      "id": "v3",
+      "kind": "tool",
+      "tool": "shell",
+      "status": "completed",
+      "text": "git log --oneline v0.7.23..HEAD"
+     },
+     {
+      "id": "v4",
+      "kind": "assistant",
+      "text": "Two changes users will notice: model lists now come live from each CLI, and switching workspaces skips stale zones."
+     },
+     {
+      "id": "v5",
+      "kind": "tool",
+      "tool": "edit",
+      "status": "completed",
+      "text": "Write docs/release-notes/0.7.24.md"
+     },
+     {
+      "id": "v6",
+      "kind": "tool",
+      "tool": "shell",
+      "status": "completed",
+      "text": "git commit -m \"docs(release): draft the 0.7.24 notes\""
+     },
+     {
+      "id": "v7",
+      "kind": "tool",
+      "tool": "shell",
+      "status": "inProgress",
+      "text": "git push -u origin HEAD"
+     }
+    ]
+   }
+  },
+  "approval": {
+   "id": "approval-push",
+   "agentId": "verify",
+   "title": "Push to origin?",
+   "detail": "git push -u origin HEAD",
+   "state": "pending",
+   "choices": [
+    "Allow once",
+    "Decline"
+   ]
+  },
+  "shell": {
+   "draft": "",
+   "history": [
+    "swift build"
+   ],
+   "historyIndex": -1,
+   "running": false,
+   "lines": [
+    {
+     "id": "l1",
+     "type": "prompt",
+     "text": "swift build"
+    },
+    {
+     "id": "l2",
+     "type": "output",
+     "text": "Building for debugging..."
+    },
+    {
+     "id": "l3",
+     "type": "output",
+     "text": "[412/412] Linking Array"
+    },
+    {
+     "id": "l4",
+     "type": "success",
+     "text": "Build complete! (38.12s)"
+    }
+   ]
+  },
+  "macCamera": {
+   "x": 27.05,
+   "y": 155.9,
+   "zoom": 0.55
+  },
+  "selectedEntityId": null,
+  "operationGeneration": 1
+ }
+}
