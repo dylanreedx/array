@@ -175,6 +175,12 @@ fi
 ACTUAL_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Contents/Info.plist")"
 [[ "$ACTUAL_ID" == "$BUNDLE_ID" ]] || { echo "refusing: $APP_PATH is $ACTUAL_ID, not $BUNDLE_ID" >&2; exit 2; }
 [[ -z "$(film_pids)" ]] || stop_film_app
+# Every take starts from the same preferences: the film bundle's own defaults domain
+# (dev.arrayapp.macos.film, used by nothing else) is emptied before each launch. A run
+# writes into it (onboarding progress, the palette's recent rows), and the next run
+# used to start from those leftovers, which showed the Getting Started checklist over
+# full-day's zone header and reordered ⌘K.
+defaults delete "$BUNDLE_ID" >/dev/null 2>&1 || true
 
 # The scene's static site, if it has one, on localhost:3000 (what its browser tiles load):
 # the scene's "site" key (relative to the scene file), else site/ beside it; or
