@@ -314,6 +314,10 @@ extension FilmDirector {
         }
         if let card = hoverCardView { put("hoverCard", topLeftRect(of: card, card.bounds)) }
         for key in agents.keys { put("nudge:\(key)", nudgeRect(key)) }
+        for key in agents.keys {
+            put("disclosure:\(key)", ((sidebarRowCell(key) as? AgentInbox96CellView)?.filmDisclosureButton)
+                .map { topLeftRect(of: $0, $0.bounds) })
+        }
         for target in sceneSettingsTargets {
             if let parsed = FilmSettingsTarget(target) { put("settings:\(target)", settingsControlRect(parsed)) }
         }

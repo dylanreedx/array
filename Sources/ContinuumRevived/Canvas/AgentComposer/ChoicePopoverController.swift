@@ -425,10 +425,18 @@ final class ChoicePopoverController {
         // A window on no screen (a check fixture parked off every display) has
         // no screen to clamp to: falling back to the main screen put its menu ON
         // that screen, far from its anchor.
+        #if ARRAY_FILM
+        // Film build only: a film window is parked off every display except a corner
+        // macOS leaves showing, so it HAS a screen, and clamping to that screen drew the
+        // panel on the user's real display. Place it against the film window itself.
+        let screenFrame = FilmScene.isRequested ? window.frame
+            : window.screen?.visibleFrame ?? placementFrame ?? NSScreen.main?.visibleFrame ?? window.frame
+        #else
         let screenFrame = window.screen?.visibleFrame
             ?? placementFrame
             ?? NSScreen.main?.visibleFrame
             ?? window.frame
+        #endif
         let requestedFrame = placementFrame.map { $0.intersection(screenFrame) }
         let visibleFrame: NSRect
         if let requestedFrame, !requestedFrame.isNull, !requestedFrame.isEmpty {

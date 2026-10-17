@@ -86,6 +86,19 @@ extension FilmDirector {
         frameKeys.append(["label": label, "kind": "press"])
     }
 
+    /// Production opens the hold-⌥ leader after a dwell timed on the WALL clock
+    /// (`AppDelegate.scheduleLeaderActivation`). A film steps frames faster or slower
+    /// than real time, so a jump key a scene presses a few frames after ⌥ could reach
+    /// the app before the leader opened (and type into whatever had focus). Wait,
+    /// bounded, for production to open it; the frame does not advance meanwhile.
+    func waitForLeader(_ key: String, timeout: TimeInterval = 2) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !canvas.navModeOverlayQASnapshot().isInstalled, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        if !canvas.navModeOverlayQASnapshot().isInstalled { warn(key, "the hold-⌥ leader did not open within \(timeout)s") }
+    }
+
     /// The jump letter production's leader assigned `tileKey` right now, pressed as
     /// a real key (so `handleLeaderKey` does the jump); the reveal glides as for `key`.
     func applyJump(_ tileKey: String, action: FilmAction, key: String, local: Int) {

@@ -187,7 +187,8 @@ extension FilmSceneCheck {
         var seenBy: [String: [Int]] = [:]
         // Any sidebar click (a row, a nudge, the bulk bar, History) can move the
         // selection or close a row, and production's advance then reads the next row:
-        // an unseen stretch is only owed until the film next touches the sidebar.
+        // an unseen stretch is only owed until the film next touches the sidebar. A
+        // tile's ✕ closes its agent to History the same way, so it counts too.
         var sidebarTouches: [Int] = []
         var dones: [String: [Int]] = [:]
         var starts: [String: [Int]] = [:]
@@ -199,7 +200,9 @@ extension FilmSceneCheck {
             }
             for action in take.actions { if let key = action.reveal { seenBy[key, default: []].append(offsets[takeIndex] + action.at) } }
             for (click, target) in clicksWithTargets(take) {
-                if target?.sidebar != nil || target?.bulk != nil { sidebarTouches.append(offsets[takeIndex] + click.at + 5) }
+                if target?.sidebar != nil || target?.bulk != nil || (target?.tile != nil && target?.at == .close) {
+                    sidebarTouches.append(offsets[takeIndex] + click.at + 5)
+                }
                 guard click.allMods == nil, let key = target?.sidebar ?? target?.tile, target?.at != .nudge else { continue }
                 seenBy[key, default: []].append(offsets[takeIndex] + click.at + 5)
             }
@@ -239,20 +242,21 @@ extension FilmSceneCheck {
             }
         }
 
-        // 5) The close nudge, and what its click does.
+        // 5) The "✓ All set?" nudge, and what its click does: it settles the agent, which
+        //    closes its tile (integration's launch polish, 0ffd832f; it used to archive).
         for (takeIndex, take) in scene.takes.enumerated() {
             guard let frames = records[takeIndex] else { continue }
             for action in take.actions {
                 guard let target = action.pointer?.to, let key = target.sidebar, target.at == .nudge else { continue }
                 let end = action.at + action.duration
                 guard end < frames.count else { continue }
-                expect(frames[end].rects["nudge:\(key)"] != nil, "nudge \(key) at \(action.at): no Close nudge on its row")
+                expect(frames[end].rects["nudge:\(key)"] != nil, "nudge \(key) at \(action.at): no All set? nudge on its row")
                 if (frames[0].index...end).contains(where: { frames[$0].rects["nudge:\(key)"] != nil }) { counts.nudges += 1 }
             }
             for (click, target) in clicksWithTargets(take) {
                 guard let key = target?.sidebar, target?.at == .nudge else { continue }
-                expect(row(key).map { if case .archived = $0.lifecycle { return true } else { return false } } ?? false,
-                       "nudge \(key): its click did not close the agent to History (\(String(describing: row(key)?.lifecycle)))")
+                expect(row(key).map { if case .settled = $0.lifecycle { return true } else { return false } } ?? false,
+                       "nudge \(key): its click did not settle the agent (\(String(describing: row(key)?.lifecycle)))")
                 expect(director.agents[key].map { canvas.tileView(for: $0.tileId) == nil } ?? false,
                        "nudge \(key): its tile is still on the canvas")
                 _ = click
@@ -279,6 +283,26 @@ extension FilmSceneCheck {
                 guard let key = target?.tile, target?.at == .send else { continue }
                 sends[key, default: 0] += 1
             }
+            // Return in a composer the scene clicked into and typed in sends too.
+            var composer: String?
+            var typed = false
+            for action in take.actions.sorted(by: { $0.at < $1.at }) {
+                if action.click != nil {
+                    let target = clicksWithTargets(take).first { $0.click.at == action.at }?.target
+                    composer = target?.at == .composer ? target?.tile : nil
+                    typed = false
+                } else if let text = action.type, composer != nil {
+                    typed = typed || !text.isEmpty
+                } else if action.key == "Return", action.allMods == nil, let key = composer, typed {
+                    sends[key, default: 0] += 1
+                    typed = false
+                } else if action.key != nil || action.jump != nil || action.jumpZone != nil {
+                    // Any other key (⌘K opens the palette, which then owns typing and
+                    // Return) moves focus out of the composer.
+                    composer = nil
+                    typed = false
+                }
+            }
         }
         for (key, count) in sends {
             guard let agent = director.agents[key] else { continue }
@@ -290,16 +314,27 @@ extension FilmSceneCheck {
             }
         }
 
-        // 7) The bulk bar: every ⌘/⇧-selected row closed by Archive.
+        // 7) The bulk bar: every ⌘/⇧-selected row ends where the chosen action puts it
+        //    (Settle: settled, its tile closed; Archive: archived).
         for take in scene.takes {
             var selected: [String] = []
             for (click, target) in clicksWithTargets(take) {
                 if let key = target?.sidebar, let mods = click.allMods, mods.contains(where: { ["cmd", "command", "shift"].contains($0) }) {
                     selected.append(key)
-                } else if let bulk = target?.bulk, bulk == InboxBulkAction.archive.rawValue {
+                } else if let bulk = target?.bulk, let chosen = InboxBulkAction(rawValue: bulk), [.settle, .archive].contains(chosen) {
                     for key in selected {
-                        let archived = row(key).map { if case .archived = $0.lifecycle { return true } else { return false } } ?? false
-                        expect(archived, "bulk archive: \(key) was selected but is \(String(describing: row(key)?.lifecycle))")
+                        let landed = row(key).map {
+                            switch $0.lifecycle {
+                            case .settled: return chosen == .settle
+                            case .archived: return chosen == .archive
+                            default: return false
+                            }
+                        } ?? false
+                        expect(landed, "bulk \(bulk): \(key) was selected but is \(String(describing: row(key)?.lifecycle))")
+                        if chosen == .settle {
+                            expect(director.agents[key].map { canvas.tileView(for: $0.tileId) == nil } ?? false,
+                                   "bulk settle: \(key)'s tile is still on the canvas")
+                        }
                     }
                     counts.bulk += selected.count
                     selected = []

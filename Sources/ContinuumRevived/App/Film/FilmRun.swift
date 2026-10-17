@@ -261,6 +261,12 @@ enum FilmSceneCheck {
         let browserEngine = BrowserEngineContext()
         defer { browserEngine.shutdown() }
         let delegate = AppDelegate()
+        // The app's settings (sidebar shelf and fold state, among others) in a suite of
+        // the check's own: a bare binary's standard domain is shared by every check run,
+        // and the History shelf's remembered state flipped from one run to the next.
+        let settingsSuite = "array.film.scene-check.\(UUID().uuidString)"
+        delegate.qaSettingsDefaults = QAIsolatedDefaults(isolatedSuiteName: settingsSuite)
+        defer { UserDefaults.standard.removePersistentDomain(forName: settingsSuite) }
         // The app's main window, as `applicationDidFinishLaunching` sets it: the ⌘K
         // palette and other window-hosted surfaces present into it, and without it
         // ⌘K was a silent no-op here (full-day, full-day-v2, v2-smoke-day).
@@ -333,6 +339,19 @@ enum FilmSceneCheck {
         var records: [Int: [FilmDirector.FrameRecord]] = [:]
         var clockErrors = 0
         zoneHistory = [:]
+        // Transcript facts sampled as the scene runs, not read after it: Settle closes a
+        // finished agent's tile (integration's launch polish), so by the last frame the
+        // tile that showed a row may be gone.
+        var maxTranscriptCards = 0
+        seenToolTitles = [:]
+        let namedTools: [(agent: String, id: String)] = scene.takes.flatMap { take in
+            take.actions.compactMap { action -> (agent: String, id: String)? in
+                guard let agent = action.agent else { return nil }
+                if let open = action.open { return (agent, open.toolId) }
+                guard let tool = action.tool, let name = tool.name, ArrayWorkspaceTool(toolName: name) != nil else { return nil }
+                return (agent, tool.id)
+            }
+        }
         try await director.run { _, takeIndex, record in
             // Every zone's and tile's LIVE world rect as this frame left it, the geometry
             // the director frames: a camera move is judged against the canvas as it stood
@@ -346,6 +365,13 @@ enum FilmSceneCheck {
                 }
             }
             zoneHistory[takeIndex, default: []].append(live)
+            maxTranscriptCards = max(maxTranscriptCards,
+                                     director.agents.keys.reduce(0) { $0 + (director.agentView($1)?.transcriptCardCount ?? 0) })
+            for tool in namedTools {
+                if let title = director.agentView(tool.agent)?.qaTranscriptForChecks?.qaPresentedToolTitle(forProviderItemID: tool.id) {
+                    seenToolTitles[tool.agent + "/" + tool.id] = title
+                }
+            }
             viewports[takeIndex, default: []].append(record.viewport)
             records[takeIndex, default: []].append(record)
             if let filmTime = director.coreAnimationFilmTime, !near(filmTime, record.time, 1e-6) { clockErrors += 1 }
@@ -474,6 +500,7 @@ enum FilmSceneCheck {
         }
         var transcriptCards = 0
         for key in director.agents.keys { transcriptCards += director.agentView(key)?.transcriptCardCount ?? 0 }
+        transcriptCards = max(transcriptCards, maxTranscriptCards)
         expect(transcriptCards > 0, "no transcript content reached any agent tile")
         director.finish()
 
@@ -888,6 +915,9 @@ enum FilmSceneCheck {
                     if let key = target.sidebar, target.at == .nudge {
                         if let rect = frames[end].rects["nudge:\(key)"] { want = CGPoint(x: rect.midX, y: rect.midY) }
                         else { local.append("pointer move at \(action.at): \(key)'s nudge has no rect") }
+                    } else if let key = target.sidebar, target.at == .disclosure {
+                        if let rect = frames[end].rects["disclosure:\(key)"] { want = CGPoint(x: rect.midX, y: rect.midY) }
+                        else { local.append("pointer move at \(action.at): \(key)'s fold triangle has no rect") }
                     } else if let key = target.sidebar {
                         // A sidebar row is measured from its live cell; a row that is not
                         // there leaves nothing to land on.
@@ -1057,8 +1087,18 @@ enum FilmSceneCheck {
             }
         }
         let lastRecord = records[scene.takes.count - 1]?.last
+        // History is paged (integration's one History shelf, 68c075d7): an agent closed
+        // to it may sit past the page the shelf shows. That is the only row allowed no cell.
+        let listed = delegate.filmSidebar?.agentInbox.qaAllRowsForQA ?? []
         for key in director.agents.keys.sorted() {
-            expect(lastRecord?.rects["sidebar:\(key)"] != nil, "agent \(key) has no sidebar row on the last frame")
+            let inHistory = director.agents[key].flatMap { agent in listed.first { $0.id == agent.agentId.rawValue } }.map {
+                switch $0.lifecycle { case .settled, .archived: return true; default: return false }
+            } ?? false
+            // A subagent the scene adopted leaves the list once it has finished (integration,
+            // 2026-10): absent from the list entirely, it owes no row.
+            let finishedChild = scene.takes.contains { $0.actions.contains { $0.adopt?.as == key && $0.adopt?.child != nil } }
+                && director.agents[key].map { agent in !listed.contains { $0.id == agent.agentId.rawValue } } == true
+            expect(lastRecord?.rects["sidebar:\(key)"] != nil || inHistory || finishedChild, "agent \(key) has no sidebar row on the last frame")
         }
 
         // 2) Elapsed on the film clock: a working row reads the film seconds since its
@@ -1106,7 +1146,9 @@ enum FilmSceneCheck {
         let later = director.sidebarStates()
         let timed = frozen.filter { !$0.value.isEmpty }
         for (key, label) in timed { expect(later[key] == label, "\(key)'s row moved with the wall clock: \"\(label)\" -> \"\(later[key] ?? "nil")\"") }
-        expect(!timed.isEmpty, "no sidebar row showed a time to hold still")
+        // A scene that ends with every agent closed to History has no row left on screen
+        // to hold still; one that ends with rows on screen must show a time on one.
+        expect(!timed.isEmpty || frozen.isEmpty, "no sidebar row showed a time to hold still")
 
         // 3) A finished turn rests in production's uncoloured "ready"; a failed one in
         //    `.failed` (which-tab's Order export ends that way on purpose).
@@ -1194,7 +1236,7 @@ enum FilmSceneCheck {
                 guard let record = director.opens.first(where: { $0.key == open.as }) else {
                     local.append("open \(open.as): never ran"); continue
                 }
-                guard let agent = director.agents[agentKey], let agentFrame = director.worldFrame(of: agent.tileId) else {
+                guard let agent = director.agents[agentKey], let agentFrame = record.agentFrame ?? director.worldFrame(of: agent.tileId) else {
                     local.append("open \(open.as): agent \(agentKey) has no tile"); continue
                 }
                 // The tile registered under the key (what later targets and `rects` use) is
@@ -1202,16 +1244,21 @@ enum FilmSceneCheck {
                 // that checkout file.
                 guard let tileId = director.openedTiles[open.as] else { local.append("open \(open.as): nothing registered"); continue }
                 expect(tileId == record.result.tileId, "open \(open.as): registered tile \(tileId) is not the one production opened, \(String(describing: record.result.tileId))")
-                guard let snapshot = canvas.navigationTileSnapshot(for: tileId) else {
+                guard let snapshot = record.opened ?? canvas.navigationTileSnapshot(for: tileId) else {
                     local.append("open \(open.as): no tile \(tileId) on the canvas"); continue
                 }
                 expect(snapshot.kind == .file, "open \(open.as): tile kind \(snapshot.kind), want file")
                 expect(record.result.document == .opened && record.result.placement == .created,
                        "open \(open.as): production reported document \(record.result.document.rawValue) / placement \(record.result.placement.rawValue), want opened / created")
-                let root = scene.zone(scene.tile(agentKey)?.zone ?? "").flatMap { roots.projects[$0.project] }
+                // The agent's project: its staged zone's, or (an agent adopted from a spawn)
+                // the project of the zone production put it in.
+                let projectKey = scene.zone(scene.tile(agentKey)?.zone ?? "")?.project
+                    ?? delegate.filmWorkspaceRuntime?.document.zones.first { $0.zoneId == agent.zoneId }?.projectId
+                        .flatMap { id in scene.projects.first { scene.projectId($0.key) == id }?.key }
+                let root = projectKey.flatMap { roots.projects[$0] }
                 let want = root.map { $0.appendingPathComponent(open.path).resolvingSymlinksInPath().path }
-                let shown = canvas.allWorkspaceTiles().first { $0.id == tileId }
-                    .flatMap { $0.metadata.documentLocation?.path ?? $0.metadata.filePath }
+                let shown = (record.openedPath ?? canvas.allWorkspaceTiles().first { $0.id == tileId }
+                    .flatMap { $0.metadata.documentLocation?.path ?? $0.metadata.filePath })
                     .map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
                 expect(want != nil && shown == want, "open \(open.as): the tile shows \(shown ?? "nothing"), want \(want ?? "?")")
                 // Placed by production: the live frame IS the rect the API reported.
@@ -1292,7 +1339,7 @@ enum FilmSceneCheck {
                 // The agent's transcript: production's row for the claude MCP call.
                 let list = director.agentView(agentKey)?.qaTranscriptForChecks
                 await list?.qaWaitForToolDetailRefresh()
-                let title = list?.qaPresentedToolTitle(forProviderItemID: open.toolId)
+                let title = list?.qaPresentedToolTitle(forProviderItemID: open.toolId) ?? seenToolTitles[agentKey + "/" + open.toolId]
                 let basename = URL(fileURLWithPath: open.path).lastPathComponent
                 expect(title == "Opened \(basename) on the canvas",
                        "open \(open.as): \(agentKey)'s row reads \(title.map { "\"\($0)\"" } ?? "nothing"), want \"Opened \(basename) on the canvas\"")
@@ -1310,7 +1357,8 @@ enum FilmSceneCheck {
                       let workspaceTool = ArrayWorkspaceTool(toolName: name) else { continue }
                 let list = director.agentView(agentKey)?.qaTranscriptForChecks
                 await list?.qaWaitForToolDetailRefresh()
-                let title = list?.qaPresentedToolTitle(forProviderItemID: tool.id)
+                // The tile may have closed since (Settle): its row as last seen.
+                let title = list?.qaPresentedToolTitle(forProviderItemID: tool.id) ?? seenToolTitles[agentKey + "/" + tool.id]
                 let path: String? = { if case let .string(value)? = tool.input?["relativePath"] { return value }; return nil }()
                 var want = workspaceTool.actionLine(fileBasename: path.map { URL(fileURLWithPath: $0).lastPathComponent })
                 var matches = title == want
@@ -1367,6 +1415,9 @@ enum FilmSceneCheck {
     /// Per take, per frame: every zone's (key) and tile's ("tile:" + key) live world rect
     /// after that frame (the run loop in `run()` records it).
     static var zoneHistory: [Int: [[String: CGRect]]] = [:]
+    /// "<agentKey>/<tool id>" -> the presented title of that workspace-tool row, last
+    /// seen while the scene ran (the run loop in `run()` samples it every frame).
+    static var seenToolTitles: [String: String] = [:]
 
     /// The live geometry a camera move at frame `at` of take `takeIndex` frames: every
     /// staged zone and tile, and every zone the scene drew before `at`, each as it stood

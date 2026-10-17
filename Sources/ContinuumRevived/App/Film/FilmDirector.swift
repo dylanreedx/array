@@ -119,6 +119,12 @@ final class FilmDirector {
         /// The viewport production's `revealResult` would have cut to (nil: it
         /// presented no camera change); the director glides there over the action.
         var production: CanvasViewport?
+        /// The agent's tile and the opened tile as they stood when the open returned:
+        /// the witness judges production's placement there, since a later Settle can
+        /// close the agent's tile and auto layout can move either.
+        var agentFrame: TileFrame?
+        var opened: CanvasNSView.NavigationTileSnapshot?
+        var openedPath: String?
     }
 
     let scene: FilmScene
@@ -445,6 +451,10 @@ final class FilmDirector {
                 try await onFrame?(take, takeIndex, record)
                 globalFrame += 1
             }
+            if delegate.filmSidebar != nil {
+                log("take \(take.name) ends with sidebar rows \(sidebarStates().sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }); "
+                    + "fold choices \(delegate.filmSidebar?.agentInbox.parentFoldChoicesForQA.count ?? 0)")
+            }
         }
     }
 
@@ -605,8 +615,10 @@ final class FilmDirector {
         } else if let name = action.key {
             applyKey(name, action: action, key: key, local: local)
         } else if let tileKey = action.jump {
+            if local == 0 { await waitForLeader(key) }
             applyJump(tileKey, action: action, key: key, local: local)
         } else if let zoneKey = action.jumpZone {
+            if local == 0 { await waitForLeader(key) }
             applyJumpZone(zoneKey, action: action, key: key, local: local)
         } else if let modifier = action.hold {
             applyHold(modifier, action: action, local: local)
@@ -901,7 +913,7 @@ final class FilmDirector {
                 let close = view.qaCloseButtonFrame
                 guard !close.isEmpty else { return nil }
                 local = CGPoint(x: close.midX, y: close.midY)
-            case .overflow, .nudge: return nil
+            case .overflow, .nudge, .disclosure: return nil
             case .address:
                 guard let field = (view as? BrowserTileNSView)?.filmURLField, field.window != nil else { return nil }
                 return topLeft(fromWindow: field.convert(CGPoint(x: field.bounds.midX, y: field.bounds.midY), to: nil))
@@ -922,6 +934,11 @@ final class FilmDirector {
         if let bulk = target.bulk { return bulkTargetRect(bulk).map { CGPoint(x: $0.midX, y: $0.midY) } }
         if let key = target.sidebar {
             if target.at == .nudge { return nudgeRect(key).map { CGPoint(x: $0.midX, y: $0.midY) } }
+            if target.at == .disclosure {
+                guard let button = (sidebarRowCell(key) as? AgentInbox96CellView)?.filmDisclosureButton else { return nil }
+                let rect = topLeftRect(of: button, button.bounds)
+                return CGPoint(x: rect.midX, y: rect.midY)
+            }
             guard let cell = key == "history" ? historyHeaderCell() : sidebarRowCell(key) else { return nil }
             let rect = topLeftRect(of: cell, cell.bounds)
             if case let .fraction(fx, fy) = target.at { return CGPoint(x: rect.minX + rect.width * fx, y: rect.minY + rect.height * fy) }
@@ -942,7 +959,7 @@ final class FilmDirector {
             // is the 24 pt band 26 pt left of the ✕ (`zoneOverflowButtonZoneId`).
             let header = min(32, screen.height)
             switch target.at ?? .header {
-            case .header, .body, .composer, .send, .address, .nudge: local = CGPoint(x: screen.minX + min(110, screen.width / 2), y: screen.minY + header / 2)
+            case .header, .body, .composer, .send, .address, .nudge, .disclosure: local = CGPoint(x: screen.minX + min(110, screen.width / 2), y: screen.minY + header / 2)
             case .center: local = CGPoint(x: screen.midX, y: screen.midY)
             case let .fraction(fx, fy): local = CGPoint(x: screen.minX + screen.width * fx, y: screen.minY + screen.height * fy)
             case .close: local = CGPoint(x: screen.maxX - 4 - 12, y: screen.minY + 4 + min(24, header - 4) / 2)
@@ -1545,7 +1562,11 @@ final class FilmDirector {
         openedTiles[open.as] = tileId
         opens.append(OpenRecord(key: open.as, agentKey: agentKey, path: open.path, toolId: open.toolId, takeIndex: takeIndex,
                                 at: at, result: result, tileId: tileId, before: before, after: canvas.viewport,
-                                production: production))
+                                production: production,
+                                agentFrame: agents[agentKey].flatMap { worldFrame(of: $0.tileId) },
+                                opened: canvas.navigationTileSnapshot(for: tileId),
+                                openedPath: canvas.allWorkspaceTiles().first { $0.id == tileId }
+                                    .flatMap { $0.metadata.documentLocation?.path ?? $0.metadata.filePath }))
         // What the MCP server returns to claude: the reply as one text block.
         let replyText = (try? JSONSerialization.data(withJSONObject: reply, options: [.sortedKeys]))
             .map { String(decoding: $0, as: UTF8.self) } ?? "{}"

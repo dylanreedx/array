@@ -28,7 +28,8 @@
 //                 "window:<label>": [...] (a visible child window of the app's own:
 //                 "picker" for the home-folder picker, "settings" for Settings, else its
 //                 class), "hoverCard" (the sidebar row hover card), "nudge:<agentKey>"
-//                 (that row's "Close" settle nudge), "settings:<target>" (a Settings
+//                 (that row's "All set?" settle nudge), "disclosure:<agentKey>" (that
+//                 row's fold triangle, when it has a subagent group), "settings:<target>" (a Settings
 //                 control a pointer targets), "bulk" / "bulk:menu" / "bulk:<action>" (the
 //                 multi-select bar, its actions button, a row of its open list), "toast"
 //                 (the sidebar's undo toast)}: TOP-LEFT

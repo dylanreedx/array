@@ -870,8 +870,10 @@ enum FilmAnchor: Decodable, Equatable {
     case composer, send
     /// A browser tile's address field.
     case address
-    /// A sidebar row's settle nudge ("Close").
+    /// A sidebar row's settle nudge ("✓ All set?").
     case nudge
+    /// A sidebar row's fold triangle (a parent's subagent group; folded by default).
+    case disclosure
     case fraction(Double, Double)
 
     enum ResizeEdgeName: String, CaseIterable {
@@ -909,6 +911,7 @@ enum FilmAnchor: Decodable, Equatable {
         case "send": self = .send
         case "address": self = .address
         case "nudge": self = .nudge
+        case "disclosure": self = .disclosure
         default:
             guard let edge = ResizeEdgeName(rawValue: name) else { throw FilmError("anchor \(name)") }
             self = .edge(edge)
@@ -1162,8 +1165,8 @@ extension FilmAction {
             guard scene.showsSidebar else { throw FilmError("pointer: a sidebar target needs \"sidebar\": true") }
             switch target.at ?? .center {
             case .center, .fraction: break
-            case .nudge where key != "history": break
-            default: throw FilmError("pointer: a sidebar row anchors at center|[fx, fy]|nudge")
+            case .nudge where key != "history", .disclosure where key != "history": break
+            default: throw FilmError("pointer: a sidebar row anchors at center|[fx, fy]|nudge|disclosure")
             }
         }
         if let delta = target.by, delta.count != 2 { throw FilmError("pointer: by needs [dx, dy]") }
@@ -1171,7 +1174,7 @@ extension FilmAction {
         if let key = target.tile {
             guard scene.knowsTile(key) else { throw FilmError("pointer: unknown tile \(key)") }
             if case .overflow? = target.at { throw FilmError("pointer: overflow is a zone's") }
-            if target.at == .nudge { throw FilmError("pointer: nudge is a sidebar row's") }
+            if target.at == .nudge || target.at == .disclosure { throw FilmError("pointer: nudge and disclosure are a sidebar row's") }
             if target.at == .composer || target.at == .send, !scene.knowsAgent(key) {
                 throw FilmError("pointer: \(key) has no composer (not an agent tile)")
             }
@@ -1182,12 +1185,15 @@ extension FilmAction {
         if let key = target.card, !scene.cardKeys.contains(key) { throw FilmError("pointer: unknown card \(key)") }
         if let key = target.zone {
             guard scene.knowsZone(key) else { throw FilmError("pointer: unknown zone \(key)") }
-            if target.at == .body || target.at == .composer || target.at == .send || target.at == .address || target.at == .nudge {
+            if target.at == .body || target.at == .composer || target.at == .send || target.at == .address || target.at == .nudge
+                || target.at == .disclosure {
                 throw FilmError("pointer: a zone anchors at header|center|an edge|overflow|close")
             }
         }
         if target.choice?.isEmpty == true || target.chip?.isEmpty == true { throw FilmError("pointer: empty choice/chip") }
-        if target.at == .nudge, target.sidebar == nil { throw FilmError("pointer: nudge is a sidebar row's") }
+        if target.at == .nudge || target.at == .disclosure, target.sidebar == nil {
+            throw FilmError("pointer: nudge and disclosure are a sidebar row's")
+        }
         if target.at != nil, target.choice != nil || target.chip != nil || target.world != nil || target.window != nil || target.by != nil
             || target.settings != nil || target.bulk != nil {
             throw FilmError("pointer: at goes with tile, card, zone or sidebar")

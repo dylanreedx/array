@@ -1281,6 +1281,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     @objc private func settleNudgeClicked() { onSettleNudge?() }
 
     var isSettleNudgeShownForQA: Bool { !settleNudge.isHidden && onSettleNudge != nil }
+    #if ARRAY_FILM
+    /// Film build only: the fold triangle a pointer clicks (nil while it is hidden).
+    var filmDisclosureButton: NSView? { disclosureButton.isHidden ? nil : disclosureButton }
+    #endif
     var settleNudgeTitleForQA: String { settleNudge.title }
     @objc private func hoverSnoozeClicked() { onHoverSnooze?() }
     @objc private func hoverSettleClicked() { onHoverSettle?() }
