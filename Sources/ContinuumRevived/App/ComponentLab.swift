@@ -2780,7 +2780,7 @@ enum LabCatalog {
             id: "panel.settings", category: "Palettes & Settings", title: "Settings",
             summary: "The real Settings modal, live schema.",
             content: .launcher(buttonTitle: "Open Settings") { host in
-                let modal = SettingsModal(model: SettingsModel(defaults: .standard, navKeymap: .resolve(), isCompanionEnabled: true))
+                let modal = SettingsModal(model: SettingsModel(defaults: .standard, navKeymap: .resolve()))
                 modal.show(in: host)
                 return modal
             }

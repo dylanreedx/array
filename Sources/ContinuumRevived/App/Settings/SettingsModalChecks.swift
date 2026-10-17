@@ -104,7 +104,7 @@ final class SettingsCheckFixture {
 
         delegate = AppDelegate()
         delegate.qaSettingsDefaults = defaults
-        delegate.qaSettingsCompanionEnabled = false
+        delegate.qaStubsCompanionSettingsView = true
         let runtime = WorkspaceRuntime(
             boot: try zoneRegistry.acquire(projectId: projectId),
             workspaceId: workspaceId, document: document, registry: zoneRegistry,
@@ -520,6 +520,13 @@ enum SettingsSearchChecks {
         try expect(results().contains { $0.anchor == "sounds.master" }, "'chime' must find the sounds")
         try type("background")
         try expect(results().contains { $0.anchor == "canvasBackground.scope" }, "'background' must find the canvas background")
+        // The iPhone pane is always there (decisions pass), with no relay identity
+        // on this Mac — the case that used to hide it on the prod channel.
+        try expect(model.visiblePanes.contains { $0.id == "companion" },
+                   "the iPhone pane must be listed in the Settings sidebar with no relay identity — panes \(model.visiblePanes.map(\.id))")
+        try type("iphone")
+        try expect(results().contains { $0.id == "pane.companion" },
+                   "'iphone' must find the iPhone pane — got \(results().map(\.id))")
         try type("on")
         try expect(!results().isEmpty, "'on' must find something")
         for entry in results() {

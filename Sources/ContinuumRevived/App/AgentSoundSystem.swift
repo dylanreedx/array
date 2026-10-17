@@ -395,7 +395,7 @@ enum AgentAwarenessSelfCheck {
         }
         let (unset, unsetName) = try freshSuite("unset")
         defer { unset.removePersistentDomain(forName: unsetName) }
-        let unsetModel = SettingsModel(defaults: unset, navKeymap: .default, isCompanionEnabled: false, soundLibrary: library)
+        let unsetModel = SettingsModel(defaults: unset, navKeymap: .default, soundLibrary: library)
         try expect(unset.object(forKey: AgentSoundConfig.masterEnabledKey) == nil && unsetModel.soundsEnabled,
                    "an unset master switch must read ON in Settings — read \(unsetModel.soundsEnabled)")
         let freshPlayer = RecordingPlayer()
@@ -412,7 +412,7 @@ enum AgentAwarenessSelfCheck {
         defer { off.removePersistentDomain(forName: offName) }
         off.set(false, forKey: AgentSoundConfig.masterEnabledKey)
         off.set(true, forKey: AgentSoundConfig.enabledKey(for: .completed))
-        let offModel = SettingsModel(defaults: off, navKeymap: .default, isCompanionEnabled: false, soundLibrary: library)
+        let offModel = SettingsModel(defaults: off, navKeymap: .default, soundLibrary: library)
         try expect(!offModel.soundsEnabled, "an explicit OFF master switch must stay off in Settings")
         let offPlayer = RecordingPlayer()
         everyEvent(AgentSignalCenter(defaults: off, library: library, player: offPlayer))

@@ -5095,9 +5095,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var settingsModal: SettingsModal?
     /// QA: the defaults Settings reads and writes (a private suite in checks).
     var qaSettingsDefaults: UserDefaults?
-    /// QA: force the iPhone pane off. Its pairing view reads the keychain and
-    /// calls the relay the moment it is built, which a check must never do.
-    var qaSettingsCompanionEnabled: Bool?
+    /// QA: draw the iPhone pane (always listed) with an inert stand-in. Its
+    /// pairing view reads the keychain and calls the relay the moment it is
+    /// built, which a check must never do.
+    var qaStubsCompanionSettingsView = false
     /// QA: how many times Settings has closed (each close fires exactly once).
     private(set) var qaSettingsCloseCount = 0
     private var settingsDefaults: UserDefaults { qaSettingsDefaults ?? .standard }
@@ -10955,7 +10956,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let model = SettingsModel(
             defaults: defaults,
             navKeymap: navKeymap,
-            isCompanionEnabled: qaSettingsCompanionEnabled ?? Self.showsCompanionSettings,
             initialPaneID: paneID)
         model.onKeymapChanged = { [weak self] keymap in
             self?.applyEditedNavKeymap(keymap)
@@ -10964,7 +10964,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.refreshRegisteredShortcutSurfaces()
         }
         model.customViews = [
-            "companion": { [weak self] in self?.makeCompanionSettingsView() ?? NSView() },
+            "companion": { [weak self] in
+                guard let self, !self.qaStubsCompanionSettingsView else { return NSView() }
+                return self.makeCompanionSettingsView()
+            },
         ]
         model.canvasBackground = makeCanvasBackgroundEditor()
         if let checkForUpdates = ContinuumApp.checkForUpdatesAction {
@@ -10984,13 +10987,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.applyEditedNavKeymap(NavKeymap.resolve(defaults: defaults))
         }
         return modal
-    }
-
-    /// The iPhone pane: the companion is a developer surface in the alpha, and a
-    /// Mac already connected to the relay keeps its pairing controls.
-    private static var showsCompanionSettings: Bool {
-        if Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier { return true }
-        return CompanionRelayProvisioning().hasStoredIdentity()
     }
 
     /// Settings ▸ Agents ▸ "Sign In…": opens the CLI's OWN login flow in a terminal
