@@ -146,8 +146,15 @@ private extension JSONEncoder {
     }
 }
 
+/// What `AgentSignalCenter` plays through — the shipped `AgentSoundPlayer`, or a
+/// recorder in a witness that must hear exactly what a person would.
 @MainActor
-final class AgentSoundPlayer: NSObject, AVAudioPlayerDelegate {
+protocol AgentSoundPlaying: AnyObject {
+    func play(_ reference: AgentSoundReference, priority: Int, volume: Double, library: AgentSoundLibrary)
+}
+
+@MainActor
+final class AgentSoundPlayer: NSObject, AVAudioPlayerDelegate, AgentSoundPlaying {
     static let shared = AgentSoundPlayer()
     private var player: AVAudioPlayer?
     private var currentPriority = 0
@@ -186,11 +193,11 @@ final class AgentSignalCenter {
     private(set) var history: [AgentSignal] = []
     private let defaults: UserDefaults
     private let library: AgentSoundLibrary
-    private let player: AgentSoundPlayer
+    private let player: any AgentSoundPlaying
     var onChanged: ((UUID?) -> Void)?
 
     init(defaults: UserDefaults = .standard, library: AgentSoundLibrary = .shared,
-         player: AgentSoundPlayer = .shared) {
+         player: any AgentSoundPlaying = AgentSoundPlayer.shared) {
         self.defaults = defaults
         self.library = library
         self.player = player
@@ -359,7 +366,59 @@ enum AgentAwarenessSelfCheck {
         try expect(center.currentByTile[tileID]?.kind == .actionRequired,
                    "a Git achievement displaced persistent action-required attention")
         _ = AgentSoundSettingsView(defaults: defaults, library: library)
-        print("Agent awareness checks passed: 20 assets, import lifecycle, accessible visuals, deduped completion")
+
+        // Sound on by default (decisions pass): the master switch reads ON when
+        // nobody has set it, an explicit OFF stays off, and because every event
+        // is still opt-in a fresh install hears nothing until one is enabled.
+        final class RecordingPlayer: AgentSoundPlaying {
+            var played: [AgentSoundReference] = []
+            func play(_ reference: AgentSoundReference, priority: Int, volume: Double, library: AgentSoundLibrary) {
+                played.append(reference)
+            }
+        }
+        func freshSuite(_ label: String) throws -> (UserDefaults, String) {
+            let name = "array.agent-awareness.\(label).\(UUID().uuidString)"
+            guard let suite = UserDefaults(suiteName: name) else { throw Failure(description: "could not create suite \(label)") }
+            return (suite, name)
+        }
+        func everyEvent(_ center: AgentSignalCenter) {
+            let tile = UUID()
+            _ = center.ingest(event: .turnCompleted(threadId: "fresh", turnId: "t1", outcome: .completed, errorMessage: nil),
+                              agentID: nil, tileID: tile)
+            _ = center.ingest(event: .turnCompleted(threadId: "fresh", turnId: "t2", outcome: .failed, errorMessage: "boom"),
+                              agentID: nil, tileID: UUID())
+            _ = center.ingest(event: request, agentID: nil, tileID: UUID())
+            _ = center.ingest(event: .semanticSignal(threadId: "fresh", itemId: "push", kind: .gitPushSucceeded),
+                              agentID: nil, tileID: UUID())
+            _ = center.ingest(event: .semanticSignal(threadId: "fresh", itemId: "merge", kind: .gitMergeSucceeded),
+                              agentID: nil, tileID: UUID())
+        }
+        let (unset, unsetName) = try freshSuite("unset")
+        defer { unset.removePersistentDomain(forName: unsetName) }
+        let unsetModel = SettingsModel(defaults: unset, navKeymap: .default, isCompanionEnabled: false, soundLibrary: library)
+        try expect(unset.object(forKey: AgentSoundConfig.masterEnabledKey) == nil && unsetModel.soundsEnabled,
+                   "an unset master switch must read ON in Settings — read \(unsetModel.soundsEnabled)")
+        let freshPlayer = RecordingPlayer()
+        everyEvent(AgentSignalCenter(defaults: unset, library: library, player: freshPlayer))
+        try expect(freshPlayer.played.isEmpty,
+                   "a fresh install with no event enabled must play NOTHING — played \(freshPlayer.played.map(\.rawValue))")
+        unset.set(true, forKey: AgentSoundConfig.enabledKey(for: .completed))
+        let oneEventPlayer = RecordingPlayer()
+        everyEvent(AgentSignalCenter(defaults: unset, library: library, player: oneEventPlayer))
+        try expect(oneEventPlayer.played == [AgentSoundReference(rawValue: "bloom")],
+                   "turning on ONE event with the master untouched must just work — played \(oneEventPlayer.played.map(\.rawValue))")
+
+        let (off, offName) = try freshSuite("off")
+        defer { off.removePersistentDomain(forName: offName) }
+        off.set(false, forKey: AgentSoundConfig.masterEnabledKey)
+        off.set(true, forKey: AgentSoundConfig.enabledKey(for: .completed))
+        let offModel = SettingsModel(defaults: off, navKeymap: .default, isCompanionEnabled: false, soundLibrary: library)
+        try expect(!offModel.soundsEnabled, "an explicit OFF master switch must stay off in Settings")
+        let offPlayer = RecordingPlayer()
+        everyEvent(AgentSignalCenter(defaults: off, library: library, player: offPlayer))
+        try expect(offPlayer.played.isEmpty,
+                   "an explicit OFF master switch must silence an enabled event — played \(offPlayer.played.map(\.rawValue))")
+        print("Agent awareness checks passed: 20 assets, import lifecycle, accessible visuals, deduped completion, master sound ON when unset and OFF when set off, a fresh install silent until one event is enabled")
     }
 }
 
@@ -392,7 +451,7 @@ final class AgentSoundSettingsView: NSStackView {
 
     private func build() {
         let master = NSButton(checkboxWithTitle: "Play agent sound indicators", target: self, action: #selector(masterChanged(_:)))
-        master.state = defaults.bool(forKey: AgentSoundConfig.masterEnabledKey) ? .on : .off
+        master.state = AgentSoundConfig.isMasterEnabled(defaults: defaults) ? .on : .off
         addArrangedSubview(master)
 
         let slider = NSSlider(value: AgentSoundConfig.resolvedVolume(defaults: defaults), minValue: 0, maxValue: 1,

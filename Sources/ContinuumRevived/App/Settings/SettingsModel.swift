@@ -253,7 +253,7 @@ final class SettingsModel {
     // MARK: Sounds
 
     var soundsEnabled: Bool {
-        get { _ = revision; return defaults.bool(forKey: AgentSoundConfig.masterEnabledKey) }
+        get { _ = revision; return AgentSoundConfig.isMasterEnabled(defaults: defaults) }
         set { defaults.set(newValue, forKey: AgentSoundConfig.masterEnabledKey); revision += 1 }
     }
 
