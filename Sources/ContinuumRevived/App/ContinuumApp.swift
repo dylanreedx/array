@@ -17015,7 +17015,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             return false
         }
-        switch spawner.spawnBoard(title: "New Board") {
+        switch spawner.spawnBoard(title: newBoardTitle()) {
         case let .spawned(_, tileId):
             focusSpawnedTile(tileId)
             return true
@@ -17023,6 +17023,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             fputs("TileSpawner.spawnBoard failed: \(error)\n", stderr)
             return false
         }
+    }
+
+    /// A new board takes the name of the zone it lands in ("Storefront" reads as
+    /// "Board · Storefront"), so a project's board says whose it is. A zone still
+    /// carrying its automatic name ("Zone 3", "Group") gives "New Board".
+    private func newBoardTitle() -> String {
+        guard let zoneId = resolvedCreationScope()?.zoneId,
+              let title = canvasView?.zonePresentation(for: zoneId)?.title else { return "New Board" }
+        return Self.boardTitle(forZoneTitle: title)
+    }
+
+    static func boardTitle(forZoneTitle title: String) -> String {
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let automatic = name.range(of: #"^(Zone|Group)( \d+)?$"#, options: .regularExpression) != nil
+        return name.isEmpty || automatic ? "New Board" : name
     }
 
     private func openFileFromPalette() {

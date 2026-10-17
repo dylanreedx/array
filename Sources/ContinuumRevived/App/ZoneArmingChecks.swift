@@ -731,8 +731,14 @@ enum ZoneArmingChecks {
         // A3 at x 1500) under the seeded camera (300, -100).
         let elmZone = try drawZone("unplaced project", screenRect: CGRect(x: 1300, y: 1110, width: 1200, height: 700),
                                    project: projectElm)
+        // A board takes the zone's name once the user has named it.
+        m.canvas.qaRenameZone(elmZone, to: "Elm site")
         let elmBoard = try spawn("unplaced project: board", .newBoard)
         try expectInside("unplaced project: board", elmBoard, zone: elmZone)
+        let elmBoardTitle = m.canvas.allTilesInWorldFrames().first(where: { $0.id == elmBoard })?.title
+        try expect(elmBoardTitle == "Elm site",
+                   "unplaced project: a board made in the zone named \"Elm site\" must take that name; got "
+                   + "\(String(describing: elmBoardTitle))")
         let elmAgent = try spawn("unplaced project: agent", .newManagedAgent)
         try expectInside("unplaced project: agent", elmAgent, zone: elmZone)
         let supervisor = m.delegate.qaAgentSupervisor
@@ -748,6 +754,15 @@ enum ZoneArmingChecks {
                                      project: Fixture.projectA2)
         let birchBoard = try spawn("placed project: board", .newBoard)
         try expectInside("placed project: board", birchBoard, zone: birchZone)
+        // Birch's second zone is unnamed, so it shows the project's name and the board takes it.
+        let birchBoardTitle = m.canvas.allTilesInWorldFrames().first(where: { $0.id == birchBoard })?.title
+        let birchZoneTitle = m.canvas.qaZoneDisplayName(birchZone) ?? ""
+        try expect(birchBoardTitle == AppDelegate.boardTitle(forZoneTitle: birchZoneTitle),
+                   "placed project: the board must be titled after the zone header \"\(birchZoneTitle)\"; got "
+                   + "\(String(describing: birchBoardTitle))")
+        try expect(AppDelegate.boardTitle(forZoneTitle: "Zone 3") == "New Board"
+                   && AppDelegate.boardTitle(forZoneTitle: "Group") == "New Board",
+                   "an automatically named zone must give \"New Board\"")
 
         // Durable: each tile in its own project's canvas, stamped with the
         // drawn zone, at the frame on screen; and the zones in the workspace file.
