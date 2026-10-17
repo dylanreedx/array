@@ -1960,6 +1960,7 @@ enum ContinuumApp {
             do {
                 _ = NSApplication.shared
                 try CanvasCameraDriverChecks.runMomentum()
+                try CanvasCameraDriverChecks.runNavigationFlight()
                 print("ContinuumRevivedCanvasZoomMomentumChecks passed")
                 Foundation.exit(0)
             } catch {
@@ -6459,6 +6460,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: zoneA, displayName: "Z1"), CanvasNSView.ZoneRenderModel(placement: zoneB, displayName: "Z2")]
         )
         canvas.frame = window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 900, height: 620)
+        // This window is the app's real one, on screen, so jumps would fly; this
+        // check reads each jump's camera back at once. The flight has its own
+        // witness (`--canvas-zoom-momentum-check`, runNavigationFlight).
+        canvas.navigationFlightOverrideForQA = false
         canvas.autoresizingMask = [.width, .height]
         self.canvasView?.detachFocusBroker()
         self.canvasView = canvas
@@ -8610,7 +8615,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             disarmLeader()
             if let targetViewport {
                 recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: targetViewport)
-                canvasView?.setViewport(targetViewport)
+                canvasView?.navigateViewport(to: targetViewport)
             }
             navSelectedZoneId = zoneId
             focusHistory.recordZoneFocus(zoneId, reason: .completedZoneJump)
@@ -9018,7 +9023,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: CanvasViewport) {
         guard let canvasView else { return }
-        let current = canvasView.canvasState.viewport
+        let current = canvasView.navigationViewport
         guard Self.viewportChangeExceedsJumpEpsilon(from: current, to: targetViewport) else { return }
         focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: current, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId))
     }
@@ -9036,7 +9041,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let canvasView, let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return }
         recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: viewport)
         navSelectedZoneId = zoneId
-        canvasView.setViewport(viewport)
+        canvasView.navigateViewport(to: viewport)
         focusHistory.recordZoneFocus(zoneId, reason: .completedZoneJump)
         // Nav mode is still open and still owns input; see completeZoneJump.
         completeZoneJump(zoneId, landingInputOnCanvas: false)
@@ -9046,7 +9051,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let viewport = canvasView?.fitAllToViewport() else { return }
         workspaceRuntime?.noteUserInteraction()
         navSelectedZoneId = nil
-        canvasView?.setViewport(viewport)
+        canvasView?.navigateViewport(to: viewport)
     }
 
     private func handleReservedShortcut(_ event: NSEvent) -> Bool {
@@ -11386,7 +11391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let canvasView,
               let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return false }
         recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: viewport)
-        canvasView.setViewport(viewport)
+        canvasView.navigateViewport(to: viewport)
         navSelectedZoneId = zoneId
         focusHistory.recordZoneFocus(zoneId, reason: .paletteJump)
         return true
@@ -15535,7 +15540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return tileCount() > before
         case .fitCanvasToAll:
             guard let canvasView, let viewport = canvasView.fitAllToViewport() else { return false }
-            canvasView.setViewport(viewport)
+            canvasView.navigateViewport(to: viewport)
             return true
         case .tidyCanvas:
             canvasView?.tidyAutoLayout()
@@ -15655,7 +15660,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.noteUserInteraction()
         if let targetViewport = canvasView.framedViewportForTileJump(tileId) {
             recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: targetViewport)
-            canvasView.setViewport(targetViewport)
+            canvasView.navigateViewport(to: targetViewport)
         }
         focusHistory.recordTileFocus(tileId, zoneId: zoneContainingTile(tileId), reason: historyReason)
         focusBroker.enterScope(.tile(tileId), reason: scopeReason)
@@ -15744,7 +15749,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               canvasView.navZoneRenderModels.contains(where: { $0.placement.zoneId == zoneId }),
               let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return false }
         recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: viewport)
-        canvasView.setViewport(viewport)
+        canvasView.navigateViewport(to: viewport)
         navSelectedZoneId = zoneId
         focusHistory.recordZoneFocus(zoneId, reason: .paletteJump)
         completeZoneJump(zoneId)
@@ -15755,7 +15760,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func restorePreviousView() -> Bool {
         guard let snapshot = focusHistory.previousView(), let canvasView else { NSSound.beep(); return false }
         workspaceRuntime?.noteUserInteraction()
-        canvasView.setViewport(snapshot.viewport)
+        canvasView.navigateViewport(to: snapshot.viewport)
         navSelectedZoneId = snapshot.focusedZoneId
         if let tileId = snapshot.focusedTileId, canvasView.navigationTileSnapshot(for: tileId) != nil {
             focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
@@ -15786,7 +15791,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // deleted.
         if let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) {
             recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: viewport)
-            canvasView.setViewport(viewport)
+            canvasView.navigateViewport(to: viewport)
         }
         focusHistory.recordZoneFocus(zoneId, reason: .previousNavigation)
         completeZoneJump(zoneId)

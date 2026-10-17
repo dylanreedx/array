@@ -3771,7 +3771,9 @@ final class CanvasNSView: NSView, TokenThemed {
         // CX-01: only the USER's camera (trackpad/pinch through the driver, or a
         // pointer pan) counts as an interaction; a navigation snap, a restore, an
         // API reveal or a check is programmatic and must not defer itself.
-        if cameraDriver.isApplying || pointerPanActive { onUserCameraChange?() }
+        // A navigation flight's steps are the driver's, but programmatic: the jump
+        // that started it already noted the user's interaction once.
+        if (cameraDriver.isApplying && !cameraDriver.isFlying) || pointerPanActive { onUserCameraChange?() }
         // Any writer other than the driver — a navigation snap, a pointer-pan
         // drag, a restore, a self-check — owns the camera now: gesture state
         // still in flight (a glide, accumulated scroll) must not keep steering
@@ -4888,11 +4890,11 @@ final class CanvasNSView: NSView, TokenThemed {
     @discardableResult
     func qaDoubleClickZoneHeaderOrBackground(at screenPoint: CGPoint) -> CanvasViewport? {
         if let zoneId = zoneHeaderZoneId(at: screenPoint), let viewport = fitZoneToViewport(zoneId: zoneId) {
-            setViewport(viewport)
+            navigateViewport(to: viewport)
             return viewport
         }
         if tileId(at: screenPoint) == nil, let viewport = fitAllToViewport() {
-            setViewport(viewport)
+            navigateViewport(to: viewport)
             return viewport
         }
         return nil
@@ -5522,7 +5524,35 @@ final class CanvasNSView: NSView, TokenThemed {
     /// `--agent-inbox-check`.
     func centerOnTile(_ tileId: UUID) {
         guard let viewport = framedViewportForTileJump(tileId) else { return }
-        setViewport(viewport)
+        navigateViewport(to: viewport)
+    }
+
+    /// The camera navigation should reason from: where an in-flight jump is
+    /// going, else where the camera is. A jump made mid-flight records THIS as
+    /// the view to go back to, not a point the camera was only passing through.
+    var navigationViewport: CanvasViewport { cameraDriver.flightTarget ?? canvasState.viewport }
+
+    /// QA: force navigation to fly (true) or cut (false) whatever the window's
+    /// visibility. Nil in production.
+    var navigationFlightOverrideForQA: Bool?
+
+    /// The camera for a jump the user asked for: a leader letter or zone key, a
+    /// sidebar row, ⌘K Jump to, fit-all, previous view, a double-click fit. It
+    /// FLIES there (`CameraFlight`, stepped by the camera driver) rather than
+    /// cutting, so you can see where you went. Cuts when Reduce Motion is on, and
+    /// when the window is not on screen (a self-check's off-screen window): there
+    /// nothing is watching, and those callers read the viewport back immediately.
+    /// `--canvas-zoom-momentum-check` (`runNavigationFlight`).
+    func navigateViewport(to target: CanvasViewport) {
+        let flies = navigationFlightOverrideForQA
+            ?? (window?.occlusionState.contains(.visible) == true
+                && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        guard flies, let flight = CameraFlight(
+            from: canvasState.viewport, to: target, viewportSize: bounds.size) else {
+            setViewport(target)
+            return
+        }
+        cameraDriver.fly(flight)
     }
 
     func setLeaderOverlayVisible(_ visible: Bool) {

@@ -296,4 +296,89 @@ enum CanvasCameraDriverChecks {
         print("canvas zoom momentum — flick glided \(glideSteps) steps and terminated; deliberate stop stayed dead; pinch/.began and external writes cancel; pan composed in one commit; clamp stopped the glide in \(clampSteps) steps; stickiness expires")
     }
 
+    /// A jump FLIES (Dylan, 2026-10-05). Every navigation jump used to cut the
+    /// camera in one frame; only the launch film glided, so the film showed motion
+    /// the app did not have. Driven through the app's own entry points in a
+    /// mounted workspace: `revealTileForWork` (a leader letter, ⌘K Jump to, a
+    /// sidebar row) and the palette's fit-all, on an injected clock.
+    @MainActor
+    static func runNavigationFlight() throws {
+        let fixture = try WorkspaceInvariantsFixture(label: "nav-flight")
+        defer { fixture.dispose() }
+        try fixture.mount()
+        let m = try fixture.requireMounted("nav-flight")
+        let canvas = m.canvas, driver = canvas.cameraDriver
+        var now: TimeInterval = 10_000
+        driver.nowProvider = { now }
+        let tile = WorkspaceInvariantsFixture.noteA2a
+        func near(_ a: CanvasViewport, _ b: CanvasViewport) -> Bool {
+            abs(a.x - b.x) < 1e-6 && abs(a.y - b.y) < 1e-6 && abs(a.zoom - b.zoom) < 1e-9
+        }
+
+        // 1. Seen: the jump flies.
+        canvas.navigationFlightOverrideForQA = true
+        let start = CanvasViewport(x: -3_000, y: -2_000, zoom: 0.4)
+        canvas.setViewport(start)
+        guard let target = canvas.framedViewportForTileJump(tile) else { throw Failure.failed("no framing for the tile") }
+        try expect(!near(start, target), "setup: the tile must be somewhere else")
+        try expect(m.delegate.revealTileForWork(tile, historyReason: .paletteJump, scopeReason: .tileSpawned),
+                   "the jump must be accepted")
+        try expect(near(canvas.viewport, start) && driver.isFlightActive,
+                   "a jump must not CUT: the camera is still at the start and a flight is under way; got \(canvas.viewport)")
+        let generation = m.runtime.interactionGeneration
+        var steps = 0, mid: CanvasViewport?
+        while driver.isFlightActive && steps < 200 {
+            now += 1.0 / 60.0
+            driver.qaStepFlight()
+            steps += 1
+            if steps == 10 { mid = canvas.viewport }
+        }
+        guard let mid else { throw Failure.failed("the flight ended in \(steps) steps, before it could be seen") }
+        try expect(!near(mid, start) && !near(mid, target) && mid.zoom > start.zoom && mid.zoom < target.zoom,
+                   "mid-flight the camera is between start and target; got \(mid)")
+        try expect(near(canvas.viewport, target), "the flight lands exactly on the jump's framing; got \(canvas.viewport) wanted \(target)")
+        try expect(Double(steps) / 60.0 >= CameraFlight.minDuration - 0.02 && Double(steps) / 60.0 <= CameraFlight.maxDuration + 0.02,
+                   "the flight takes \(CameraFlight.minDuration)–\(CameraFlight.maxDuration)s; took \(Double(steps) / 60.0)s")
+        try expect(m.runtime.interactionGeneration == generation,
+                   "a flight's frames are not the user moving the camera (CX-01): generation \(generation) → \(m.runtime.interactionGeneration)")
+
+        // 2. The user takes the camera mid-air: a trackpad pan ends the flight there.
+        try expect(m.delegate.qaPerformPaletteAction(.fitCanvasToAll), "fit-all must run")
+        try expect(driver.isFlightActive, "fit-all flies too")
+        now += 0.1
+        driver.qaStepFlight()
+        driver.noteScrollPan(dx: 40, dy: 0, location: CGPoint(x: 100, y: 100))
+        driver.qaFlushPending()
+        let taken = canvas.viewport
+        try expect(!driver.isFlightActive, "a trackpad pan takes the camera from a flight")
+        now += 1
+        driver.qaStepFlight()
+        try expect(near(canvas.viewport, taken), "a cancelled flight never moves the camera again")
+
+        // 3. A jump made mid-flight remembers where the first one was GOING as the
+        // view to go back to, not a point the camera was passing through.
+        canvas.setViewport(start)
+        _ = m.delegate.revealTileForWork(tile, historyReason: .paletteJump, scopeReason: .tileSpawned)
+        now += 0.1
+        driver.qaStepFlight()
+        try expect(!near(canvas.viewport, start) && !near(canvas.viewport, target), "setup: mid-air")
+        try expect(m.delegate.revealTileForWork(WorkspaceInvariantsFixture.noteA1a, historyReason: .paletteJump,
+                                                scopeReason: .tileSpawned), "a second jump mid-flight must run")
+        now += 5
+        driver.qaStepFlight()
+        try expect(m.delegate.qaPerformPaletteAction(.previousView), "previous view must run")
+        now += 5
+        driver.qaStepFlight()
+        try expect(near(canvas.viewport, target),
+                   "previous view after a mid-flight jump returns to the first jump's target; got \(canvas.viewport) wanted \(target)")
+
+        // 4. Unseen (no window on screen, as a self-check or a film run): it cuts.
+        canvas.navigationFlightOverrideForQA = nil
+        canvas.setViewport(start)
+        _ = m.delegate.revealTileForWork(tile, historyReason: .paletteJump, scopeReason: .tileSpawned)
+        try expect(near(canvas.viewport, target) && !driver.isFlightActive,
+                   "with nobody watching the jump cuts, so callers read the target back at once")
+
+        print("navigation flight — a tile jump flew \(steps) frames (\(String(format: "%.2f", Double(steps) / 60.0))s) start → between → exact target without bumping the interaction generation; fit-all flew; a trackpad pan took the camera mid-air; previous view after a mid-flight jump went back to where the first was going; an off-screen canvas cut")
+    }
 }
