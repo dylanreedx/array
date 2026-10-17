@@ -50,24 +50,28 @@ So the video is:
 
 ## Blockers to clear before filming
 
-1. **Dictation is not on `array/integration` yet.**
-   - It lives in bench `.worktrees/dictation-composer` (branch
-     `array/dictation-composer`): one commit, 39bb119e, plus a large
-     uncommitted change. The uncommitted change adds:
-     - `ComposerDictationController`
-     - `ComposerDictationPillView`
-     - `ComposerDictationStripView`
-     - `ComposerDictationButton`
-     - `Packaging/Array.entitlements`
-   - Another session owns that bench. Never edit, commit or stash in it.
-   - Check whether it has landed:
-     `git log array/integration --oneline -i --grep=dictation`.
-     If it hasn't, ask Dylan before going further.
-2. **Agent colours are not on integration yet.**
-   - They live uncommitted in bench `.worktrees/agent-colour` (branch
-     `array/agent-colour`), with witness `AgentIdentityColorChecks.swift`.
-   - Same rule: wait for it to land, and don't touch the bench.
-3. **The film harness can't drive dictation yet.**
+Dictation and agent colours **landed on `array/integration` at `f38c5bf7`**
+(2026-10-17, merged from `array/release-0.7.28`; not yet pushed or released).
+What the film can show:
+
+- **Dictation:** the mic beside Send (a circle) grows with the canvas's jelly
+  spring into a capsule over the provider controls: live waveform, elapsed
+  time, and a stop button where the mic was. Words appear at the caret in the
+  secondary colour while provisional, then settle. ↩ finishes, Esc discards,
+  ⇧⌘D toggles. Code: `ComposerDictationPillView`, `ComposerDictationButton`,
+  `ComposerDictationController`; witness `--composer-dictation-check`.
+- **Agent colours:** none by default; the tile's title-bar menu (and the
+  sidebar row's menu) has Color › None + the zone palette. Top-bar mode washes
+  the whole title bar; Settings › Agents › Agent colour switches to a full
+  border. The sidebar row gets a dot. The dictation pill wears the agent's
+  colour. Witness `--agent-identity-color-check`.
+
+1. **The film harness can't drive dictation yet.**
+   - Head start: a scripted engine already exists. `FakeDictationEngine`
+     (`emitLevel`, `emitVolatile`, `emitFinal`, `emit(.finished)`) is what
+     `--composer-dictation-check` installs through
+     `ComposerDictationController.qaEngineFactory`. A film-only step can
+     install the same seam, so no microphone is ever opened.
    - A capture has no microphone, and must never use the real one.
    - Add film-only director steps behind `#if ARRAY_FILM`. They feed the real
      dictation controller a scripted level sequence (for the waveform) and
@@ -77,7 +81,7 @@ So the video is:
    - Prove it with `--film-scene-check` on the new scene, and keep
      `scripts/check-film-absent.sh` green (the shipped app must carry none of
      this).
-4. **Does "the same prompt flowing through agents" exist in the app?**
+2. **Does "the same prompt flowing through agents" exist in the app?**
    - Find out whether Array can send one prompt to several agents at once.
    - If it can, film that.
    - If it can't, film the same prompt dictated into each agent in turn, and
