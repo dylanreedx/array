@@ -349,123 +349,6 @@
    "clock": "8:45"
   },
   {
-   "name": "02-settings",
-   "frames": 286,
-   "actions": [
-    {
-     "at": 4,
-     "key": ",",
-     "mods": [
-      "cmd"
-     ]
-    },
-    {
-     "at": 20,
-     "pointer": {
-      "to": {
-       "settings": "section.Agents"
-      }
-     },
-     "dur": 22
-    },
-    {
-     "at": 46,
-     "click": {
-      "deliver": true
-     }
-    },
-    {
-     "at": 65,
-     "pointer": {
-      "to": {
-       "window": [
-        900,
-        520
-       ]
-      }
-     },
-     "dur": 16
-    },
-    {
-     "at": 83,
-     "scroll": {
-      "by": [
-       0,
-       -480
-      ]
-     },
-     "dur": 24
-    },
-    {
-     "at": 113,
-     "pointer": {
-      "to": {
-       "settings": "agentSounds.gitPushSucceeded.enabled"
-      }
-     },
-     "dur": 20
-    },
-    {
-     "at": 137,
-     "click": {
-      "deliver": true
-     }
-    },
-    {
-     "at": 150,
-     "pointer": {
-      "to": {
-       "settings": "agentSounds.gitPushSucceeded.preview"
-      }
-     },
-     "dur": 18
-    },
-    {
-     "at": 172,
-     "click": {
-      "deliver": true
-     }
-    },
-    {
-     "at": 189,
-     "pointer": {
-      "to": {
-       "settings": "agentSounds.gitMergeSucceeded.enabled"
-      }
-     },
-     "dur": 20
-    },
-    {
-     "at": 213,
-     "click": {
-      "deliver": true
-     }
-    },
-    {
-     "at": 226,
-     "pointer": {
-      "to": {
-       "settings": "agentSounds.gitMergeSucceeded.preview"
-      }
-     },
-     "dur": 18
-    },
-    {
-     "at": 248,
-     "click": {
-      "deliver": true
-     }
-    },
-    {
-     "at": 265,
-     "key": ",",
-     "mods": [
-      "cmd"
-     ]
-    }
-   ]
-  },
-  {
    "name": "03-lunch",
    "frames": 64,
    "actions": [
@@ -675,7 +558,7 @@
      "at": 179,
      "pointer": {
       "to": {
-       "bulk": "archive"
+       "bulk": "settle"
       }
      },
      "dur": 18

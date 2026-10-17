@@ -409,7 +409,10 @@ def scene():
         'fps': 60,
         'video': 'prores',
         'png': 30,
-        'closeUpMinZoom': 0.85,
+        # A reference film, authored for 0.7.25. Integration's auto layout (2026-10) stacks
+        # this zone's agents in two rows, so its whole-zone shots can no longer frame at the
+        # usual 0.85; the floor is the lowest close-up the layout reaches today (0.42).
+        'closeUpMinZoom': 0.40,
         'site': {'project': 'web', 'path': 'public'},
         'catalog': [
             {'harness': 'claude', 'model': 'anthropic/claude-opus-5', 'displayName': 'Opus 5', 'contextWindow': 200000},

@@ -5,8 +5,8 @@ asserted (FilmRunV2Checks.swift).
 
 Five projects, four staged zones and one drawn in a take; agents that finish unseen; a
 hover card; sidebar clicks and ⌥ jumps that glide; a follow-up through the composer;
-Settings → Agents → Sounds with two ticks and two Previews; the close nudge after a clock
-jump; a ⌘-click multi-select archived from the bulk bar; a History row as a target.
+the “✓ All set?” settle nudge after a clock jump; a ⌘-click multi-select settled from the
+bulk bar; a History row as a target. (No Settings take: see the note above lunch().)
 """
 import json
 import os
@@ -87,21 +87,11 @@ def morning():
     return t
 
 
-def settings():
-    t = Take('02-settings')
-    t.wait(4).key(',', ['cmd'], gap=16)
-    t.point({'settings': 'section.Agents'}, dur=22)
-    t.click(gap=14)
-    # Agents is long: the Sounds rules sit below the fold, so scroll the detail pane.
-    t.point({'window': [900, 520]}, dur=16, gap=2)
-    t.do({'scroll': {'by': [0, -480]}}, dur=24, then=30)
-    for kind in ['gitPushSucceeded', 'gitMergeSucceeded']:
-        t.point({'settings': f'agentSounds.{kind}.enabled'}, dur=20)
-        t.click(gap=8)
-        t.point({'settings': f'agentSounds.{kind}.preview'}, dur=18)
-        t.click(gap=12)
-    t.key(',', ['cmd'], gap=20)
-    return t
+# No Settings take (2026-10-17). Integration's in-window SwiftUI Settings modal (4552acdc)
+# has no AppKit controls the recorder can point at, and it writes the app's real
+# defaults (the old panel's writes went to a throwaway film suite), so a check must not
+# drive it. The former 02-settings take (Agents -> Sounds, two ticks, two Previews)
+# returns once the recorder can target the form through ARRAY_FILM-only code.
 
 
 def lunch():
@@ -134,7 +124,8 @@ def zones():
 
 
 def evening():
-    """18:00: ⌘-click two finished rows, Archive them from the bulk bar; History holds them."""
+    """18:00: ⌘-click two finished rows, Settle them from the bulk bar (which closes their
+    tiles); the one History shelf holds them."""
     t = Take('05-evening', clock='18:00')
     t.do({'camera': {'zone': 'apiZone', 'padding': 40}})
     # A plain click reveals cart and makes it the route-active row (that re-render
@@ -146,7 +137,7 @@ def evening():
     t.click(mods=['cmd'], gap=12)
     t.point({'bulk': 'menu'}, dur=20)
     t.click(gap=20)
-    t.point({'bulk': 'archive'}, dur=18)
+    t.point({'bulk': 'settle'}, dur=18)
     t.click(gap=24)
     t.point({'sidebar': 'history'}, dur=20)
     t.click(gap=20)
@@ -190,7 +181,7 @@ def scene():
             {'key': 'ios1', 'kind': 'agent', 'harness': 'codex', 'zone': 'iosZone', 'frame': [60, 60, 520, 660], 'name': 'Widgets'},
             {'key': 'deploy', 'kind': 'agent', 'zone': 'infraZone', 'frame': [60, 60, 520, 660], 'name': 'Staging deploy'},
         ],
-        'takes': [t.json() for t in (morning(), settings(), lunch(), zones(), evening())],
+        'takes': [t.json() for t in (morning(), lunch(), zones(), evening())],
     }
 
 

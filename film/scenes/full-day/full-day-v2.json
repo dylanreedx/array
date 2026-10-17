@@ -12,7 +12,7 @@
  "fps": 60,
  "video": "prores",
  "png": 30,
- "closeUpMinZoom": 0.85,
+ "closeUpMinZoom": 0.35,
  "site": {
   "project": "web",
   "path": "public"
@@ -3354,7 +3354,7 @@
   },
   {
    "name": "06-ship",
-   "frames": 2309,
+   "frames": 1907,
    "actions": [
     {
      "at": 0,
@@ -3366,142 +3366,22 @@
      }
     },
     {
-     "at": 0,
-     "key": ",",
-     "mods": [
-      "cmd"
-     ],
-     "mark": "settings"
-    },
-    {
      "at": 30,
-     "pointer": {
-      "to": {
-       "settings": "section.Agents"
-      }
-     },
-     "dur": 24
-    },
-    {
-     "at": 58,
-     "click": {
-      "deliver": true
-     }
-    },
-    {
-     "at": 78,
-     "pointer": {
-      "to": {
-       "window": [
-        900,
-        520
-       ]
-      }
-     },
-     "dur": 16
-    },
-    {
-     "at": 96,
-     "scroll": {
-      "by": [
-       0,
-       -480
-      ]
-     },
-     "dur": 24
-    },
-    {
-     "at": 130,
-     "pointer": {
-      "to": {
-       "settings": "agentSounds.gitPushSucceeded.enabled"
-      }
-     },
-     "dur": 24
-    },
-    {
-     "at": 158,
-     "click": {
-      "deliver": true
-     },
-     "mark": "pickPush"
-    },
-    {
-     "at": 172,
-     "pointer": {
-      "to": {
-       "settings": "agentSounds.gitPushSucceeded.preview"
-      }
-     },
-     "dur": 20
-    },
-    {
-     "at": 196,
-     "click": {
-      "deliver": true
-     },
-     "mark": "pickPushPreview"
-    },
-    {
-     "at": 236,
-     "pointer": {
-      "to": {
-       "settings": "agentSounds.gitMergeSucceeded.enabled"
-      }
-     },
-     "dur": 24
-    },
-    {
-     "at": 264,
-     "click": {
-      "deliver": true
-     },
-     "mark": "pickMerge"
-    },
-    {
-     "at": 278,
-     "pointer": {
-      "to": {
-       "settings": "agentSounds.gitMergeSucceeded.preview"
-      }
-     },
-     "dur": 20
-    },
-    {
-     "at": 302,
-     "click": {
-      "deliver": true
-     },
-     "mark": "pickMergePreview"
-    },
-    {
-     "at": 342,
-     "mark": "soundsLine"
-    },
-    {
-     "at": 402,
-     "key": ",",
-     "mods": [
-      "cmd"
-     ]
-    },
-    {
-     "at": 432,
      "agent": "subs",
      "toolDone": "toolu_picker"
     },
     {
-     "at": 438,
+     "at": 36,
      "agent": "subs",
      "toolDone": "toolu_checkout"
     },
     {
-     "at": 444,
+     "at": 42,
      "agent": "subs",
      "toolDone": "toolu_emails"
     },
     {
-     "at": 470,
+     "at": 68,
      "agent": "subs",
      "tool": {
       "id": "test1",
@@ -3514,12 +3394,12 @@
      }
     },
     {
-     "at": 506,
+     "at": 104,
      "agent": "subs",
      "toolDone": "test1"
     },
     {
-     "at": 516,
+     "at": 114,
      "agent": "subs",
      "tool": {
       "id": "push1",
@@ -3532,13 +3412,13 @@
      }
     },
     {
-     "at": 552,
+     "at": 150,
      "agent": "subs",
      "toolDone": "push1",
      "mark": "pushed"
     },
     {
-     "at": 612,
+     "at": 210,
      "agent": "subs",
      "tool": {
       "id": "merge1",
@@ -3551,13 +3431,13 @@
      }
     },
     {
-     "at": 648,
+     "at": 246,
      "agent": "subs",
      "toolDone": "merge1",
      "mark": "merged"
     },
     {
-     "at": 668,
+     "at": 266,
      "agent": "subs",
      "tool": {
       "id": "done2",
@@ -3573,28 +3453,28 @@
      }
     },
     {
-     "at": 678,
+     "at": 276,
      "agent": "subs",
      "toolDone": "done2"
     },
     {
-     "at": 684,
+     "at": 282,
      "agent": "subs",
      "say": "Subscriptions are merged: plan picker, checkout and renewal emails. RST-43 is done.",
      "dur": 36
     },
     {
-     "at": 724,
+     "at": 322,
      "agent": "subs",
      "turn": "done",
      "mark": "subsDone"
     },
     {
-     "at": 734,
+     "at": 332,
      "mark": "shipLine"
     },
     {
-     "at": 824,
+     "at": 422,
      "camera": {
       "all": true,
       "padding": 60
@@ -3603,60 +3483,60 @@
      "mark": "zoomOut"
     },
     {
-     "at": 1068,
+     "at": 666,
      "mark": "canvasLine"
     },
     {
-     "at": 1168,
+     "at": 766,
      "hold": "option",
      "dur": 126
     },
     {
-     "at": 1208,
+     "at": 806,
      "jumpZone": "iosZone",
      "dur": 110,
      "mark": "tour:iosZone"
     },
     {
-     "at": 1362,
+     "at": 960,
      "hold": "option",
      "dur": 126
     },
     {
-     "at": 1402,
+     "at": 1000,
      "jumpZone": "apiZone",
      "dur": 110,
      "mark": "tour:apiZone"
     },
     {
-     "at": 1556,
+     "at": 1154,
      "hold": "option",
      "dur": 126
     },
     {
-     "at": 1596,
+     "at": 1194,
      "jumpZone": "webZone",
      "dur": 110,
      "mark": "tour:webZone"
     },
     {
-     "at": 1750,
+     "at": 1348,
      "hold": "option",
      "dur": 126
     },
     {
-     "at": 1790,
+     "at": 1388,
      "jumpZone": "adminZone",
      "dur": 110,
      "mark": "tour:adminZone"
     },
     {
-     "at": 1944,
+     "at": 1542,
      "hold": "option",
      "dur": 126
     },
     {
-     "at": 1984,
+     "at": 1582,
      "jumpZone": "infraZone",
      "dur": 110,
      "mark": "tour:infraZone"
@@ -3696,7 +3576,7 @@
   },
   {
    "name": "07-evening",
-   "frames": 1375,
+   "frames": 1276,
    "actions": [
     {
      "at": 0,
@@ -3773,65 +3653,11 @@
       "mods": [
        "cmd"
       ]
-     }
-    },
-    {
-     "at": 391,
-     "pointer": {
-      "to": {
-       "sidebar": "subs/toolu_emails"
-      }
-     },
-     "dur": 18
-    },
-    {
-     "at": 412,
-     "click": {
-      "deliver": true,
-      "mods": [
-       "cmd"
-      ]
-     }
-    },
-    {
-     "at": 424,
-     "pointer": {
-      "to": {
-       "sidebar": "subs/toolu_checkout"
-      }
-     },
-     "dur": 18
-    },
-    {
-     "at": 445,
-     "click": {
-      "deliver": true,
-      "mods": [
-       "cmd"
-      ]
-     }
-    },
-    {
-     "at": 457,
-     "pointer": {
-      "to": {
-       "sidebar": "picker"
-      }
-     },
-     "dur": 18
-    },
-    {
-     "at": 478,
-     "click": {
-      "deliver": true,
-      "mods": [
-       "cmd"
-      ]
      },
      "mark": "range"
     },
     {
-     "at": 502,
+     "at": 403,
      "pointer": {
       "to": {
        "bulk": "menu"
@@ -3840,33 +3666,33 @@
      "dur": 26
     },
     {
-     "at": 532,
+     "at": 433,
      "click": {
       "deliver": true
      }
     },
     {
-     "at": 552,
+     "at": 453,
      "pointer": {
       "to": {
-       "bulk": "archive"
+       "bulk": "settle"
       }
      },
      "dur": 20
     },
     {
-     "at": 576,
+     "at": 477,
      "click": {
       "deliver": true
      },
      "mark": "archived"
     },
     {
-     "at": 616,
+     "at": 517,
      "mark": "archiveLine"
     },
     {
-     "at": 716,
+     "at": 617,
      "pointer": {
       "to": {
        "sidebar": "history"
@@ -3875,18 +3701,18 @@
      "dur": 30
     },
     {
-     "at": 750,
+     "at": 651,
      "click": {
       "deliver": true
      },
      "mark": "historyOpen"
     },
     {
-     "at": 770,
+     "at": 671,
      "mark": "historyLine"
     },
     {
-     "at": 860,
+     "at": 761,
      "camera": {
       "all": true,
       "padding": 120
@@ -3895,7 +3721,7 @@
      "mark": "emptyOut"
     },
     {
-     "at": 1224,
+     "at": 1125,
      "mark": "tomorrowLine"
     }
    ],

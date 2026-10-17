@@ -613,6 +613,23 @@
      "mark": "dragHelper"
     },
     {
+     "at": 297,
+     "dur": 8,
+     "pointer": {
+      "to": {
+       "sidebar": "planner",
+       "at": "disclosure"
+      }
+     },
+     "note": "Subagent groups fold by default since integration's launch polish (105f5da4): unfold the Planner's group the way a user does, so the helper's row shows. The click releases before the helper's next event re-renders the row."
+    },
+    {
+     "at": 307,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
      "at": 320,
      "agent": "planner",
      "toolDone": "toolu_sub1"

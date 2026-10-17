@@ -465,23 +465,14 @@ def busy():
 
 
 def ship():
-    """15:30. You'll know when it lands: pick the sounds, then the push and the merge. Then the tour."""
+    """15:30. The push and the merge land. Then the tour."""
     t = Take('06-ship', clock='15:30')
     t.do({'camera': {'tiles': ['subs'], 'padding': 120}})
-    # Settings → Agents → Sounds: tick Pushed and Merged, preview each.
-    t.key(',', ['cmd'], mark='settings', gap=30)
-    t.point({'settings': 'section.Agents'}, dur=24, gap=4)
-    t.click(gap=20)
-    # The Sounds rules sit below the fold: scroll the detail pane under the pointer.
-    t.point({'window': [900, 520]}, dur=16, gap=2)
-    t.do({'scroll': {'by': [0, -480]}}, dur=24, then=34)
-    for kind, mark in (('gitPushSucceeded', 'pickPush'), ('gitMergeSucceeded', 'pickMerge')):
-        t.point({'settings': f'agentSounds.{kind}.enabled'}, dur=24, gap=4)
-        t.click(mark=mark, gap=14)
-        t.point({'settings': f'agentSounds.{kind}.preview'}, dur=20, gap=4)
-        t.click(mark=mark + 'Preview', gap=40)
-    t.mark('soundsLine').wait(60)
-    t.key(',', ['cmd'], gap=30)
+    # No Settings beat (2026-10-17): integration's in-window SwiftUI Settings modal
+    # (4552acdc) has no AppKit controls the recorder can point at, and it writes the app's
+    # real defaults. The former beat (Agents -> Sounds: tick Pushed and Merged, preview
+    # each) returns once the recorder can target the form through ARRAY_FILM-only code.
+    t.wait(30)
     for tid, _, _ in HELPERS:
         t.agent('subs', toolDone=tid, gap=6)
     t.wait(20)
@@ -519,24 +510,27 @@ def dusk():
 
 
 def evening():
-    """18:00. Close the day in one click: select the finished rows, Archive. History holds the day."""
+    """18:00. Close the day in one click: select the finished rows, Settle (which closes their
+    tiles). The one History shelf holds the day."""
     t = Take('07-evening', clock='18:00')
     t.do({'camera': {'all': True, 'padding': 60}})
     lead(t).wait(20)
     # A plain click reveals Rate limits, still working (it stays tonight), and makes it the
     # route-active row; ⌘-clicking the route-active row does not add it to the selection, so the
-    # six finished rows are ⌘-clicked after it. Archiving a parent leaves its subagents' rows
-    # (P2D.6), so the three helpers are picked too. (⇧-click loses its anchor to the reveal.)
+    # finished rows are ⌘-clicked after it. (⇧-click loses its anchor to the reveal.) On
+    # integration (2026-10-17) the Subscriptions helpers, finished at 15:30, no longer have rows
+    # of their own by now (the sidebar's list holds none; Plan picker is one of them), so only
+    # their parent is picked.
     t.point({'sidebar': 'ratelimit'}, dur=26, gap=4)
     glide_click(t, dur=60, gap=12)
-    rows = ['deploy', 'applepay', 'subs', 'subs/toolu_emails', 'subs/toolu_checkout', 'picker']
+    rows = ['deploy', 'applepay', 'subs']
     for i, key in enumerate(rows):
         t.point({'sidebar': key}, dur=18, gap=3)
         t.do({'click': {'deliver': True, 'mods': ['cmd']}}, mark='range' if i == len(rows) - 1 else None, then=12)
     t.wait(12)
     t.point({'bulk': 'menu'}, dur=26, gap=4)
     t.click(gap=20)
-    t.point({'bulk': 'archive'}, dur=20, gap=4)
+    t.point({'bulk': 'settle'}, dur=20, gap=4)
     t.click(mark='archived', gap=40)
     t.mark('archiveLine').wait(100)
     t.point({'sidebar': 'history'}, dur=30, gap=4)
@@ -559,7 +553,10 @@ def scene():
         'fps': 60,
         'video': 'prores',
         'png': 30,
-        'closeUpMinZoom': 0.85,
+        # A reference film, authored for 0.7.25. Integration's auto layout (2026-10) stacks
+        # this zone's agents in two rows, so its whole-zone shots can no longer frame at the
+        # usual 0.85; the floor is the lowest close-up the layout reaches today (0.39).
+        'closeUpMinZoom': 0.35,
         'site': {'project': 'web', 'path': 'public'},
         'catalog': [
             {'harness': 'claude', 'model': 'anthropic/claude-opus-5', 'displayName': 'Opus 5', 'contextWindow': 200000},
