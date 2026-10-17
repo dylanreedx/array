@@ -44,6 +44,34 @@ public enum ZoneColorConfig {
     public static let palette = ["teal", "blue", "mint", "purple", "orange", "yellow", "red"]
 }
 
+/// How an agent's identity colour (`AgentRecord.identityColor`) is drawn on its
+/// tile. The colour itself is per agent and chosen by hand; this is the one
+/// global choice of where it shows. Either way it is muted — an identity mark
+/// beside the name, never a state signal competing with focus or attention.
+public enum AgentIdentityColorStyle: String, CaseIterable, Sendable {
+    /// The tile's title bar washed in the colour. The default: it reads at a
+    /// glance and leaves the tile's outline to focus and attention.
+    case topBar
+    /// The tile's whole outline in the colour, instead of the title bar.
+    case border
+
+    public var title: String {
+        switch self {
+        case .topBar: return "Top bar"
+        case .border: return "Full border"
+        }
+    }
+}
+
+public enum AgentIdentityColorConfig {
+    public static let styleKey = "continuum.agents.identityColorStyle"
+    public static let defaultStyle = AgentIdentityColorStyle.topBar
+
+    public static func style(defaults: UserDefaults = .standard) -> AgentIdentityColorStyle {
+        defaults.string(forKey: styleKey).flatMap(AgentIdentityColorStyle.init(rawValue:)) ?? defaultStyle
+    }
+}
+
 public enum ZoneColorAllocator {
     /// Existing zones are supplied oldest-to-newest. Unused palette entries win;
     /// once exhausted, the color whose latest assignment is oldest wins. Manual

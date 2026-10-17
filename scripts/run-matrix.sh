@@ -889,6 +889,12 @@ run_app_check .build/debug/Array --zone-presentation-check
 # unavailable and refuses a prompt; only a prompt the person sends starts a new
 # agent for the unbound tile.
 run_app_check .build/debug/Array --agent-tile-binding-check
+# An agent's identity colour: no colour by default; the tile's Color submenu
+# persists a zone-palette name through the supervisor (fresh store and relaunch
+# read it back); top bar draws a muted stripe on the title bar's edge, Settings'
+# Full border swaps it for a muted outline; None restores the zero-perimeter rest
+# state; the sidebar row menu's Color › sets it too, with a dot before the name.
+run_app_check .build/debug/Array --agent-identity-color-check
 # .plans/67 ARC-4a: replacing the view of an existing tile is not a spawn.
 # Budget eviction, panning a zone out and back, terminal restart, file-tree
 # restore, hydration on switch and remount, and note conversion (and its

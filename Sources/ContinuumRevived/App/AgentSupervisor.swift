@@ -1065,6 +1065,9 @@ final class AgentSupervisor {
     /// runtime events, so the transcript stream cannot carry first-prompt,
     /// manual, or generated renames to an already-attached tile.
     private var displayNameObservers: [AgentID: [UUID: (String) -> Void]] = [:]
+    /// Live views of an agent's identity colour, for the same reason as names:
+    /// it is record state, so no runtime event carries it to an attached tile.
+    private var identityColorObservers: [AgentID: [UUID: (String?) -> Void]] = [:]
     /// App-lifetime recovery owner. This is deliberately independent of tile
     /// subscriptions so launch failures and provider rejection restore drafts
     /// even when no tile remains bound.
@@ -1096,6 +1099,9 @@ final class AgentSupervisor {
     /// CX-01 (§14.1): fired after `setWorkspaceToolsEnabled` persists a change, so
     /// the host grant table can revoke (or start honouring) the agent's policy.
     var onWorkspaceToolsChanged: ((AgentID, Bool) -> Void)?
+    /// The host's half of an identity-colour change: the sidebar rows derive the
+    /// dot from the record on every build, so the host only has to rebuild them.
+    var onIdentityColorChanged: ((AgentID, String?) -> Void)?
     /// The runner for the prompt currently in flight, if any.
     private var runners: [AgentID: AgentRunning] = [:]
     /// The latest runner generation to own each agent. Unlike `runners`, this is
@@ -1864,6 +1870,23 @@ final class AgentSupervisor {
         displayNameObservers[id]?[token] = nil
         if displayNameObservers[id]?.isEmpty == true {
             displayNameObservers[id] = nil
+        }
+    }
+
+    @discardableResult
+    func addIdentityColorObserver(
+        for id: AgentID,
+        _ observer: @escaping (String?) -> Void
+    ) -> UUID {
+        let token = UUID()
+        identityColorObservers[id, default: [:]][token] = observer
+        return token
+    }
+
+    func removeIdentityColorObserver(_ token: UUID, for id: AgentID) {
+        identityColorObservers[id]?[token] = nil
+        if identityColorObservers[id]?.isEmpty == true {
+            identityColorObservers[id] = nil
         }
     }
 
@@ -5096,6 +5119,30 @@ final class AgentSupervisor {
         records[id] = record
         persist(record)
         onWorkspaceToolsChanged?(id, enabled)
+        return true
+    }
+
+    /// The agent's identity colour — a `ZoneColorConfig.palette` name, or nil for
+    /// none. It lives on the RECORD, like the name, so it follows the agent into
+    /// every tile that renders it and survives a relaunch. A name outside the
+    /// palette is refused rather than stored: nothing could draw it. Returns true
+    /// when the record changed.
+    @discardableResult
+    func setIdentityColor(agentID id: AgentID, _ color: String?) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.setIdentityColor: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        let normalized = color?.lowercased()
+        if let normalized, !ZoneColorConfig.palette.contains(normalized) { return false }
+        guard record.identityColor != normalized else { return false }
+        record.identityColor = normalized
+        records[id] = record
+        persist(record)
+        if let observers = identityColorObservers[id] {
+            for observer in observers.values { observer(normalized) }
+        }
+        onIdentityColorChanged?(id, normalized)
         return true
     }
 

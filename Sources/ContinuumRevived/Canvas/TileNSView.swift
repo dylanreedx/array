@@ -160,6 +160,14 @@ class TileNSView: NSView, TokenThemed {
         titleBar?.setIdentity(title: title, providerModel: providerModel)
     }
 
+    /// A managed agent's identity colour, washed over the whole title bar and
+    /// beneath its text, so the bar reads as the agent's without dimming it.
+    func setTitleBarTint(_ tint: NSColor?) {
+        titleBar?.identityTint = tint
+    }
+
+    var qaTitleBarTint: NSColor? { titleBar?.identityTint }
+
     /// Action vocabulary is tile-kind specific. A managed agent closes by
     /// detaching its view; unlike a terminal tile, that operation never stops or
     /// archives the underlying entity.
@@ -1314,6 +1322,11 @@ private final class TileCloseControl: NSControl {
 /// ordering and `super.hitTest` walking semantics.
 @MainActor
 private final class TitleBarView: NSView, TokenThemed {
+    /// Painted first in `draw(_:)`, over the `tileChrome` layer fill and under
+    /// everything the bar draws. A user-chosen zone colour, like a zone's tint.
+    var identityTint: NSColor? {
+        didSet { if identityTint != oldValue { needsDisplay = true } }
+    }
     // Redraw only when the drawn VALUE moved. `CanvasNSView.layoutTile` re-assigns
     // `tile` on every camera event to keep the view's copy current, so an
     // unconditional `needsDisplay` here re-rasterized the title text of every tile
@@ -1713,6 +1726,10 @@ private final class TitleBarView: NSView, TokenThemed {
 
     override func draw(_ dirtyRect: NSRect) {
         qaDrawCount += 1
+        if let identityTint {
+            identityTint.setFill()
+            bounds.fill(using: .sourceOver)
+        }
         let scale = chromeScale
         let theme = effectiveTokenTheme
         let attrs = titleAttributes(theme: theme)

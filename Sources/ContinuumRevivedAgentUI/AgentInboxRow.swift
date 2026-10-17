@@ -919,6 +919,11 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// distinct from the last status sample and remains the authoritative Stop
     /// capability while a tile is closed or its rendered status is stale.
     public let hasLiveRunner: Bool
+    /// The agent's identity colour as a zone-palette NAME (`AgentRecord.identityColor`),
+    /// drawn as a small dot beside the name. A name, not a colour: this module has
+    /// no AppKit, and the host resolves names exactly as it does a zone's. nil —
+    /// the default — draws nothing and moves nothing.
+    public let identityColor: String?
     /// Whether the card's upper metadata band has something to draw. These
     /// predicates intentionally inspect only the content slots, never a row's
     /// semantic importance or lifecycle. The AppKit cell uses the same facts to
@@ -1032,7 +1037,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         terminalEvent: AgentTerminalEvent? = nil,
         terminalIsUnread: Bool = false,
         closingSince: Date? = nil,
-        hasLiveRunner: Bool = false
+        hasLiveRunner: Bool = false,
+        identityColor: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -1069,6 +1075,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.terminalIsUnread = terminalIsUnread
         self.closingSince = closingSince
         self.hasLiveRunner = hasLiveRunner
+        self.identityColor = identityColor
     }
 
     /// The same row, placed where its PARENT is: a subagent travels with the agent
@@ -1093,7 +1100,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             settlementBlocked: settlementBlocked, zoneName: zoneName,
             harness: harness, checkedOutBranch: checkedOutBranch,
             terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
-            closingSince: closingSince, hasLiveRunner: hasLiveRunner)
+            closingSince: closingSince, hasLiveRunner: hasLiveRunner,
+            identityColor: identityColor)
     }
 
     /// The agent's branch and the checkout's disagree. `checkedOutBranch` is nil
@@ -1138,7 +1146,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             isUnconfirmed: value, settlementBlocked: settlementBlocked,
             zoneName: zoneName, harness: harness, checkedOutBranch: checkedOutBranch,
             terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
-            closingSince: closingSince, hasLiveRunner: hasLiveRunner)
+            closingSince: closingSince, hasLiveRunner: hasLiveRunner,
+            identityColor: identityColor)
     }
 
     /// The status words the row may paint. Unconfirmed is a confidence modifier,

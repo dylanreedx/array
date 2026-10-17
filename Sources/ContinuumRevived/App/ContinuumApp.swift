@@ -2568,6 +2568,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--agent-identity-color-check") {
+            do {
+                _ = NSApplication.shared
+                let summary = try AgentIdentityColorChecks.run()
+                print("ContinuumRevivedAgentIdentityColorChecks passed: \(summary)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-presentation-check") {
             do {
                 _ = NSApplication.shared
@@ -11373,6 +11385,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.agentInbox.onSnoozeSelection = { [weak self] rowIds, wakeAt in
             _ = self?.snoozeAgentsFromInbox(rowIds, wakeAt: wakeAt)
         }
+        // The row menu's Color palette writes through the same supervisor setter
+        // the tile's Color menu uses; `onIdentityColorChanged` rebuilds the rows.
+        sidebar.agentInbox.onIdentityColorSelection = { [weak self] rowIds, color in
+            guard let self else { return }
+            AppDelegate.applyIdentityColorFromInbox(rowIds, color: color, supervisor: self.agentSupervisor)
+        }
         // P4.11's Undo toast, which only the checks ever wired: the reader hands
         // the list the four stored facts, the restorer puts them back — and, for a
         // settle, the tile Settle closed (launch polish, item R).
@@ -11944,13 +11962,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// the capability set is kept explicit so a menu item cannot outrun its host.
     static let wiredInboxRowActions: Set<InboxRowAction> = [
         .settle, .unsettle, .snooze, .wake, .markUnread,
-        .stopAgent, .archive, .delete, .generateName,
+        .stopAgent, .archive, .delete, .generateName, .color,
     ]
     /// The bulk bar's half. No `.stopAgent` — the bar has no such action (`P3.11`'s five
     /// are settle / snooze / mark-unread / archive / delete).
     static let wiredInboxBulkActions: Set<InboxBulkAction> = [
         .settle, .snooze, .markUnread, .archive, .delete,
     ]
+
+    /// The row menu's Color pick, for every agent it was raised over. Static so
+    /// `--agent-identity-color-check` drives this exact body.
+    static func applyIdentityColorFromInbox(_ rowIds: [UUID], color: String?, supervisor: AgentSupervisor) {
+        for rowId in rowIds {
+            _ = supervisor.setIdentityColor(agentID: AgentID(rawValue: rowId), color)
+        }
+    }
 
     /// A row-menu pick, for the agents it was raised over.
     @discardableResult
@@ -11983,9 +12009,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     }
                 })
                 .didAcceptAny
-        // `openInTile` and `rename` have their own paths (P3.9/P3.13). They are
-        // deliberately not wired through this lifecycle callback.
-        case .openInTile, .rename:
+        // `openInTile` and `rename` have their own paths (P3.9/P3.13), and `color`
+        // lands through `onIdentityColorSelection`. They are deliberately not wired
+        // through this lifecycle callback.
+        case .openInTile, .rename, .color:
             fputs("Inbox action \(action.rawValue) has no lifecycle host\n", stderr)
             return false
         }
@@ -18869,6 +18896,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         agentSupervisor.onWorkspaceToolsChanged = { [weak self] agentId, enabled in
             self?.workspaceAPI.policyChanged(agentId: agentId, enabled: enabled)
+        }
+        // The sidebar dot is derived from the record on every row build, so a
+        // colour picked on a tile only needs the rows rebuilt — the same re-push
+        // a rename from the inbox does.
+        agentSupervisor.onIdentityColorChanged = { [weak self] _, _ in
+            self?.reloadWorkspaceSidebar()
         }
         canvasView.onTileHoverChanged = { [weak self] tileId, hovered in
             self?.completionHoverChanged(tileId: tileId, hovered: hovered)

@@ -570,6 +570,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// at every row, and the whole point of the lane is that you can follow it.
     static let rowSpacing = Space.s
 
+    /// The identity colour dot beside an agent's name (`AgentInboxRow.identityColor`),
+    /// in both the card and the slim row. Small enough to sit inside the name's
+    /// x-height; the name's own words stay the identity, the dot only pairs it with
+    /// the tile.
+    static let identityDotSide: CGFloat = 6
+    /// The dot's alpha. A zone tint at full strength is louder than anything else
+    /// in a resting row; this keeps the hue and drops the shout.
+    static let identityDotAlpha: CGFloat = 0.8
+
+    /// A palette name resolved the way a zone's is, then muted.
+    static func identityDotColour(named name: String) -> NSColor {
+        ZoneChromeNSView.color(named: name).withAlphaComponent(identityDotAlpha)
+    }
+
     /// Shown when there is nothing to show. A list that renders as an empty
     /// rectangle reads as broken; it also renders as a uniform fill, which the
     /// phase-0 blankness floor is right to call a failure.
@@ -680,6 +694,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     // Headless checks retain the same ChoiceListView when no AppKit window exists.
     private var qaChoiceListForQA: ChoiceListView?
     private var qaSnoozeChoiceListForQA: ChoiceListView?
+    private var qaIdentityColorChoiceListForQA: ChoiceListView?
+    private var identityColorTargetIds: [UUID] = []
     private let projectFaviconResolver = ProjectFaviconResolver()
     /// Whether Generate Name is offered. Read once at init from the live-titling
     /// gate; building a menu never performs a lookup itself.
@@ -1115,6 +1131,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// it separate from `onRowAction` prevents a row action from silently
     /// defaulting to a stale or recomputed preset.
     var onSnoozeSelection: (([UUID], Date) -> Void)?
+    /// The row menu's Color pick: the agents, and the zone-palette name (nil for
+    /// None). The host writes it to each record.
+    var onIdentityColorSelection: (([UUID], String?) -> Void)?
     /// Called when the derived wake timer expires so the host can rebuild rows
     /// from raw records. A headless view with no host callback falls back to its
     /// own render, which keeps the timer seam observable without inventing a
@@ -3397,6 +3416,77 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             focusReturnView: self)
     }
 
+    /// The Color palette for these agents: None, then the zone palette in the zone
+    /// menu's order. A single agent's current colour is the selected item; a
+    /// mixed selection has none selected.
+    private func presentIdentityColorOptions(for ids: [UUID], anchor: NSRect, relativeTo view: NSView) {
+        guard !ids.isEmpty else { return }
+        identityColorTargetIds = ids
+        let items = [ChoiceItem(id: AgentInboxView.noIdentityColorID, title: "None", icon: .system("circle.slash"))]
+            + ZoneColorConfig.palette.map { ChoiceItem(id: $0, title: $0.capitalized, icon: .system("circle.fill")) }
+        let colours = Set(ids.compactMap { id in rows.first(where: { $0.id == id }) }.map(\.identityColor))
+        let selectedID = colours.count == 1 ? (colours.first! ?? AgentInboxView.noIdentityColorID) : nil
+        let onSelection: (ChoiceItem) -> Void = { [weak self] item in
+            self?.commitIdentityColor(item)
+        }
+        // Headless probes have no panel; they read the same production list.
+        guard view.window != nil else {
+            let list = ChoiceListView(items: items, selectedID: selectedID, presentation: .commands)
+            list.onSelection = onSelection
+            qaIdentityColorChoiceListForQA = list
+            return
+        }
+        qaIdentityColorChoiceListForQA = nil
+        rowChoiceController.present(
+            items: items, selectedID: selectedID, presentation: .commands, anchor: anchor,
+            relativeTo: view, onSelection: onSelection, focusReturnView: self)
+        if rowChoiceController.listView == nil {
+            let list = ChoiceListView(items: items, selectedID: selectedID, presentation: .commands)
+            list.onSelection = onSelection
+            qaIdentityColorChoiceListForQA = list
+        }
+    }
+
+    static let noIdentityColorID = "none"
+
+    private func commitIdentityColor(_ item: ChoiceItem) {
+        let ids = identityColorTargetIds
+        identityColorTargetIds.removeAll()
+        let targets = ids.compactMap { id in rows.first(where: { $0.id == id }) }
+        guard !targets.isEmpty,
+              targets.allSatisfy({ InboxRowAction.color.isAvailable(for: $0, rollups: rollupsByParent) }) else { return }
+        let name: String? = item.id == AgentInboxView.noIdentityColorID ? nil : item.id
+        guard name == nil || ZoneColorConfig.palette.contains(name!) else { return }
+        onIdentityColorSelection?(targets.map(\.id), name)
+    }
+
+    /// The Color palette as the list shows it, and a pick through its own callback.
+    var identityColorChoiceTitlesForQA: [String] {
+        (rowChoiceController.listView ?? qaIdentityColorChoiceListForQA)?.qaItems.map(\.title) ?? []
+    }
+    @discardableResult
+    func chooseIdentityColorForQA(_ title: String) -> Bool {
+        guard let list = rowChoiceController.listView ?? qaIdentityColorChoiceListForQA,
+              let item = list.qaItems.first(where: { $0.title == title }) else { return false }
+        list.choose(id: item.id)
+        return true
+    }
+
+    /// The identity dot and the name's frame on the cell drawn for this agent,
+    /// whichever variant it is — built if the table has not realised it yet.
+    func identityDotForQA(agentId: UUID) -> (dot: (frame: NSRect, colour: NSColor)?, title: NSRect)? {
+        guard let index = rows.firstIndex(where: { $0.id == agentId }),
+              let cell = cellForRow(index) else { return nil }
+        cell.layoutSubtreeIfNeeded()
+        if let card = cell as? AgentInbox96CellView {
+            return (card.qaIdentityDotForQA, card.qaTitleFrameForQA)
+        }
+        if let slim = cell as? AgentInboxSlimCellView {
+            return (slim.qaIdentityDotForQA, slim.qaTitleFrameForQA)
+        }
+        return nil
+    }
+
     private func commitSnoozePreset(_ item: ChoiceItem, options: [SnoozeOption]) {
         guard let preset = SnoozePreset(rawValue: item.id),
               let option = options.first(where: { $0.preset == preset }) else { return }
@@ -3546,6 +3636,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         case .rename:
             guard targets.count == 1, let target = targets.first else { return }
             _ = beginRename(agentId: target.id)
+        case .color:
+            // A palette, not an action: it opens the second list, as Snooze does,
+            // and the pick lands through `onIdentityColorSelection`.
+            guard let first = targets.first, let tableRow = tableRow(forAgentId: first.id) else { return }
+            presentIdentityColorOptions(
+                for: targets.map(\.id), anchor: tableView.rect(ofRow: tableRow), relativeTo: tableView)
         case .settle, .unsettle, .snooze, .wake, .markUnread, .generateName, .stopAgent,
              .archive, .delete:
             // P4.10: armed before the host runs, for the reason `performBulkAction`
@@ -3573,7 +3669,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // Inline rename is a row-local production path; it does not require the
             // lifecycle callback used by the remaining host-owned actions.
             return true
-        case .settle, .unsettle, .snooze, .wake, .markUnread, .generateName, .stopAgent,
+        case .settle, .unsettle, .snooze, .wake, .markUnread, .generateName, .color, .stopAgent,
              .archive, .delete:
             return onRowAction != nil && wiredRowActions.contains(action)
         }
@@ -3619,7 +3715,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     static func advancesSelection(_ action: InboxRowAction) -> Bool {
         switch action {
         case .settle, .snooze, .archive, .delete: return true
-        case .openInTile, .unsettle, .wake, .markUnread, .rename, .generateName, .stopAgent: return false
+        case .openInTile, .unsettle, .wake, .markUnread, .rename, .generateName, .color, .stopAgent:
+            return false
         }
     }
 
@@ -6428,6 +6525,29 @@ enum RowDisclosure: Equatable {
     }
 }
 
+/// The identity colour dot on a slim row: one filled circle in a palette tint.
+/// Not `TokenThemed` — the tint is a user-chosen zone colour outside
+/// `DesignTokens`, and the row that owns it repaints it on every apply. Its
+/// baseline is its bottom edge, so in the row's first-baseline stack a 6pt dot
+/// sits on the name's baseline and fills its x-height.
+@MainActor
+final class InboxIdentityDotView: NSView {
+    var colour: NSColor? { didSet { needsDisplay = true } }
+
+    override var isFlipped: Bool { true }
+    override var firstBaselineOffsetFromTop: CGFloat { bounds.height }
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: AgentInboxView.identityDotSide, height: AgentInboxView.identityDotSide)
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let colour else { return }
+        colour.setFill()
+        NSBezierPath(ovalIn: bounds).fill()
+    }
+}
+
 /// The triangle that folds a parent's children away.
 ///
 /// An `NSButton` with a token-coloured attributed title rather than AppKit's
@@ -6778,6 +6898,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     case markUnread
     case rename
     case generateName
+    case color
     case stopAgent
     case archive
     case delete
@@ -6798,6 +6919,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         case .markUnread: return "Mark Unread"
         case .rename: return "Rename"
         case .generateName: return "Generate Name"
+        case .color: return "Color"
         case .stopAgent: return "Stop Agent"
         case .archive: return "Archive"
         case .delete: return "Delete"
@@ -6814,15 +6936,16 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         case .markUnread: return .system("envelope.badge")
         case .rename: return .system("pencil")
         case .generateName: return .system("sparkles")
+        case .color: return .system("paintpalette")
         case .stopAgent: return .system("stop.circle")
         case .archive: return .system("archivebox")
         case .delete: return .system("trash")
         }
     }
 
-    /// `Snooze` alone: it opens the preset list (P4.5) rather than acting, which is the
-    /// same reason `InboxBulkAction.snooze` carries the arrow.
-    var opensSubmenu: Bool { self == .snooze }
+    /// `Snooze` opens the preset list (P4.5) rather than acting, which is the same
+    /// reason `InboxBulkAction.snooze` carries the arrow; `Color` opens the palette.
+    var opensSubmenu: Bool { self == .snooze || self == .color }
 
     // Ticket: docs/38-tickets/90-agent-ux/P4.11-undo-toast.md
     /// What the toast says this action DID — past tense, because it has already
@@ -6848,7 +6971,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         case .wake: return InboxUndoToast.wokenVerb
         case .archive: return InboxUndoToast.archivedVerb
         case .delete: return InboxUndoToast.deletedVerb
-        case .openInTile, .markUnread, .rename, .generateName, .stopAgent: return nil
+        case .openInTile, .markUnread, .rename, .generateName, .color, .stopAgent: return nil
         }
     }
 
@@ -6882,6 +7005,8 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         // so an archived row has nothing left to rename.
         case .rename: return !InboxBulkAction.isArchived(row)
         case .generateName: return !InboxBulkAction.isArchived(row)
+        // The colour is on the RECORD, like the name, so an archived row has none to set.
+        case .color: return !InboxBulkAction.isArchived(row)
         case .stopAgent: return InboxRowAction.hasTurnInFlight(row)
         case .archive: return InboxBulkAction.archive.isAvailable(for: row)
         case .delete: return InboxBulkAction.delete.isAvailable(for: row)
@@ -6916,8 +7041,8 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         switch self {
         case .settle: return !rows.allSatisfy(InboxBulkAction.isSettled)
         case .unsettle: return rows.allSatisfy(InboxBulkAction.isSettled)
-        case .openInTile, .snooze, .wake, .markUnread, .rename, .generateName, .stopAgent, .archive,
-             .delete:
+        case .openInTile, .snooze, .wake, .markUnread, .rename, .generateName, .color, .stopAgent,
+             .archive, .delete:
             return true
         }
     }
@@ -6988,6 +7113,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
             return row.attention == .unread ? "is already unread." : "is archived."
         case .rename: return "is archived."
         case .generateName: return "is archived."
+        case .color: return "is archived."
         case .stopAgent: return "has no turn in flight."
         case .archive:
             return InboxBulkAction.isRunning(row) ? "is still working." : "is already archived."
@@ -8535,6 +8661,10 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     private let disclosureButton = InboxDisclosureButton()
     var onToggleDisclosure: (() -> Void)?
     private let glyphLabel = NSTextField(labelWithString: "")
+    /// The identity colour dot. An arranged view that is HIDDEN when the agent has
+    /// no colour, and a hidden arranged view is detached from the stack: a row
+    /// with no colour lays out exactly as it did before the dot existed.
+    private let identityDot = InboxIdentityDotView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let branchLabel = NSTextField(labelWithString: "")
     private let timeLabel = NSTextField(labelWithString: "")
@@ -8619,7 +8749,8 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         // nested in the shelf the same way the live block nests. The line uses
         // measured tiers below rather than letting Auto Layout choose which
         // optional fact to squeeze.
-        let line = NSStackView(views: [disclosureButton, glyphLabel, titleLabel, branchLabel, timeLabel])
+        identityDot.isHidden = true
+        let line = NSStackView(views: [disclosureButton, glyphLabel, identityDot, titleLabel, branchLabel, timeLabel])
         line.orientation = .horizontal
         line.alignment = .firstBaseline
         line.distribution = .fill
@@ -8659,6 +8790,8 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             // columns have matching zero-width constraints, so a dropped label
             // cannot keep reserving the room the tier just gave to the name.
             titleLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: AgentInboxCellView.minimumTextWidth(.title)),
+            identityDot.widthAnchor.constraint(equalToConstant: AgentInboxView.identityDotSide),
+            identityDot.heightAnchor.constraint(equalToConstant: AgentInboxView.identityDotSide),
             // The branch floor and the fixed time lane are installed below as
             // switchable constraints, so a dropped column cannot retain a hidden
             // width through a second anonymous constraint.
@@ -8769,9 +8902,12 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         let branch: Double
         let time: Double
         let disclosure: Double
+        /// The identity dot's width, 0 when the agent has no colour — a hidden
+        /// arranged view takes neither its width nor a stack gap.
+        var identityDot: Double = 0
 
         func total(drawsBranch: Bool, drawsTime: Bool) -> Double {
-            let widths = [glyph, title,
+            let widths = [glyph, identityDot, title,
                           drawsBranch ? branch : 0,
                           drawsTime ? time : 0,
                           disclosure]
@@ -8821,7 +8957,8 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
                 unconfirmed: row.isUnconfirmed, closing: row.closingSince != nil),
             disclosure: disclosure == .none
                 ? 0
-                : disclosureWidth ?? measuredDisclosureWidth(disclosure))
+                : disclosureWidth ?? measuredDisclosureWidth(disclosure),
+            identityDot: row.identityColor == nil ? 0 : Double(AgentInboxView.identityDotSide))
         return fitTier(available: available, needs: needs)
     }
 
@@ -8966,6 +9103,8 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         glyphLabel.stringValue = AgentInboxSlimCellView.glyph(for: row.isUnconfirmed ? .ready : row.state)
         glyphLabel.setAccessibilityLabel(row.isUnconfirmed ? "Unconfirmed" : (row.state.label ?? "Ready"))
         glyphLabel.setAccessibilityRole(.image)
+        identityDot.colour = row.identityColor.map(AgentInboxView.identityDotColour(named:))
+        identityDot.isHidden = row.identityColor == nil
         titleLabel.stringValue = row.displayTitle
         branchLabel.stringValue = AgentInboxSlimCellView.branchText(branch: row.branch)
         branchLabel.isHidden = branchLabel.stringValue.isEmpty
@@ -9257,6 +9396,12 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         )
     }
     var qaTitle: String { titleLabel.stringValue }
+    /// The identity dot as drawn, in this cell's coordinates, or nil when hidden.
+    var qaIdentityDotForQA: (frame: NSRect, colour: NSColor)? {
+        guard !identityDot.isHidden, let colour = identityDot.colour else { return nil }
+        return (identityDot.convert(identityDot.bounds, to: self), colour)
+    }
+    var qaTitleFrameForQA: NSRect { titleLabel.convert(titleLabel.bounds, to: self) }
     /// A collapsed row says its state with the glyph, so it has no word to report.
     var qaStateLabel: String { "" }
     var qaMeta: String { "" }
