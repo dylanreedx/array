@@ -636,8 +636,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var undoToastTimer: Timer?
     /// One cadence for the whole list. Cells never own timers; the single oldest
     /// eligible visible row borrows this phase when it is materialized.
+    /// Re-reads the close nudge's five-minute threshold as time passes. It never
+    /// hides the nudge: an on/off blink made it visible half the time.
     private var settleNudgeTimer: Timer?
-    private var settleNudgePhaseVisible = true
     private static let settleNudgePeriod: TimeInterval = 30
     /// One clock for every materialized live duration and relative completion age.
     /// It ticks each second while work is running and only once a minute for a list
@@ -2749,11 +2750,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     childCount: rollupsByParent[parentId]?.children ?? 0)
             }
             redesigned.setParentDisclosureTrailing(parentTrailing)
-            let nudgeTarget = settleNudgePhaseVisible ? settleNudgeTargetID(now: renderNow) : nil
-            redesigned.showSettleNudge(nudgeTarget == model.id) { [weak self] in
+            // The close nudge: a finished agent you read and left asks to be closed
+            // to History, which takes its tile off the canvas (`.archive`, the same
+            // verb as the row menu's Archive, undo toast included).
+            redesigned.showSettleNudge(settleNudgeTargetID(now: renderNow) == model.id) { [weak self] in
                 guard let self else { return }
                 self.rowChoiceTargetIds = [agentId]
-                self.performRowAction(.settle)
+                self.performRowAction(.archive)
             }
             if let projectID = model.projectId {
                 projectFaviconResolver.image(for: projectID) { [weak redesigned] image in
@@ -2845,18 +2848,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return cell.clickBackgroundStopForQA()
     }
 
-    /// At most one nudge is ever offered, and only while the list has no unread or
-    /// action-blocked row. The oldest eligible completion wins, so a clock edge
-    /// cannot make six cards bloom together.
+    /// At most one nudge is ever offered, and only while no row is blocked on the
+    /// person (approval, input, failed). A freshly finished, unread row does NOT
+    /// hide it: with several agents running one almost always is, and the nudge
+    /// then never showed. The oldest eligible completion wins, so a clock edge
+    /// cannot make six cards bloom together; close it and the next one asks.
     private func settleNudgeTargetID(now: Date) -> UUID? {
-        let hasHigherPriorityWork = rows.contains { row in
-            row.terminalIsUnread || row.attention == .unread
-                || row.state == .approval || row.state == .input || row.state == .failed
+        let hasBlockedWork = rows.contains { row in
+            row.state == .approval || row.state == .input || row.state == .failed
         }
-        guard !hasHigherPriorityWork, isWired(.settle) else { return nil }
-        return rows.filter {
-            AgentInbox96CellView.isSettleCandidate($0, now: now)
-                && $0.canSettle(rollup: rollupsByParent[$0.id])
+        guard !hasBlockedWork, isWired(.archive) else { return nil }
+        // Never the agent you are on: one you just opened to read is not one you left.
+        return rows.filter { row in
+            row.id != openAgentId
+                && AgentInbox96CellView.isSettleCandidate(row, now: now)
+                && row.canSettle(rollup: rollupsByParent[row.id])
+                && InboxRowAction.archive.disabledReason(
+                    for: [row], isWired: true, rollups: rollupsByParent) == nil
         }.min {
             ($0.terminalEvent?.endedAt ?? $0.lastActiveAt ?? .distantFuture)
                 < ($1.terminalEvent?.endedAt ?? $1.lastActiveAt ?? .distantFuture)
@@ -3564,6 +3572,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// P3.15, for the checks: the shipped list's own answer, so "Snooze is still
     /// greyed" is asserted against the gate the menu uses rather than a copy of it.
     func isRowActionWiredForQA(_ action: InboxRowAction) -> Bool { isWired(action) }
+    /// The close nudge as the row draws it.
+    func isCloseNudgeShownForQA(agentId: UUID) -> Bool {
+        guard let row = tableRow(forAgentId: agentId),
+              let cell = cellsByRow[row] as? AgentInbox96CellView else { return false }
+        return cell.isSettleNudgeShownForQA
+    }
+    func closeNudgeTitleForQA(agentId: UUID) -> String? {
+        guard let row = tableRow(forAgentId: agentId),
+              let cell = cellsByRow[row] as? AgentInbox96CellView else { return nil }
+        return cell.settleNudgeTitleForQA
+    }
+    /// A click on the nudge's own button, through its target/action.
+    func clickCloseNudgeForQA(agentId: UUID) -> Bool {
+        guard let row = tableRow(forAgentId: agentId),
+              let cell = cellsByRow[row] as? AgentInbox96CellView else { return false }
+        return cell.clickSettleNudgeForQA()
+    }
     func isBulkActionWiredForQA(_ action: InboxBulkAction) -> Bool {
         onBulkAction != nil && wiredBulkActions.contains(action)
     }
@@ -4135,7 +4160,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let timer = Timer(timeInterval: Self.settleNudgePeriod, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.settleNudgePhaseVisible.toggle()
                 self.redraw(tableRows: Array(self.items.indices))
             }
         }

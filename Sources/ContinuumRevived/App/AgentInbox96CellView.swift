@@ -415,18 +415,18 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         disclosureButton.action = #selector(disclosureClicked)
         disclosureButton.isHidden = true
         card.addSubview(disclosureButton)
-        settleNudge.title = "All set?  ×"
+        settleNudge.title = "Close"
         settleNudge.image = NSImage(
             systemSymbolName: "wand.and.stars", accessibilityDescription: nil)
         settleNudge.imagePosition = .imageLeading
-        settleNudge.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        settleNudge.font = .systemFont(ofSize: 11, weight: .medium)
         settleNudge.isBordered = false
         settleNudge.wantsLayer = true
         settleNudge.layer?.cornerRadius = 11
         settleNudge.target = self
         settleNudge.action = #selector(settleNudgeClicked)
         settleNudge.isHidden = true
-        settleNudge.setAccessibilityLabel("Settle agent")
+        settleNudge.setAccessibilityLabel("Close agent to History")
         settleNudge.setAccessibilityIdentifier("ContinuumAgentInboxSettleNudge")
         card.addSubview(settleNudge)
         for button in [hoverSnooze, hoverSettle] {
@@ -553,13 +553,15 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
 
     /// How long a finished row you have ALREADY READ sits before it asks to be put
-    /// away. The settle nudge's threshold, not a status change.
+    /// away. The close nudge's threshold, not a status change. Five minutes (Dylan,
+    /// 2026-10-05): long enough to send a follow-up after reading it, short enough
+    /// that the canvas is tidied the same hour.
     ///
     /// The row this protects against is not the unread one — that one is already
     /// coloured, marked, and sorted where you will see it. It is the one you read
     /// two hours ago, said "yep", and never closed. Forty of those and the list is
     /// a graveyard you have to read past to find live work.
-    static let settleNudgeDelay: TimeInterval = 10 * 60
+    static let settleNudgeDelay: TimeInterval = 5 * 60
 
     /// Work that finished and nobody has looked at it.
     ///
@@ -572,7 +574,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// The whole lifecycle of a finished row is three steps and no vocabulary to
     /// learn: it says `Done` in mint with a check, you look at it and it goes
     /// quiet except for its neutral finish age, and if you leave it for long enough
-    /// it asks to be settled.
+    /// it asks to be closed.
     /// Earlier drafts spent two words (`Landed`, `Waiting`) and a pulsing mark on
     /// the first step alone, which was effort spent on the row that needed it
     /// least.
@@ -590,7 +592,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         guard row.state == .ready, !row.terminalIsUnread, !isUnseen(row), !row.isUnconfirmed,
               case .active = row.lifecycle, let since = row.lastActiveAt
         else { return false }
-        if let outcome = row.terminalEvent?.outcome, outcome != .succeeded { return false }
+        // A finished TURN, not merely an idle record: an agent that was made and never
+        // prompted has nothing to be done with, and its creation time read as "left
+        // sitting" (a fresh ⌘K agent showed Close the moment it appeared).
+        guard row.terminalEvent?.outcome == .succeeded else { return false }
         return now.timeIntervalSince(since) >= settleNudgeDelay
     }
 
@@ -1044,7 +1049,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             x: textRight - actionSide, y: actionY, width: actionSide, height: actionSide))
         hoverSnooze.frame = inCard(NSRect(
             x: textRight - actionSide * 2 - 4, y: actionY, width: actionSide, height: actionSide))
-        let nudgeSize = NSSize(width: 94, height: 22)
+        let nudgeSize = NSSize(width: ceil(settleNudge.intrinsicContentSize.width) + 16, height: 22)
         settleNudge.frame = inCard(NSRect(
             x: max(textLeft, textRight - nudgeSize.width),
             y: (card.bounds.height - nudgeSize.height) / 2,
@@ -1073,6 +1078,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     @objc private func disclosureClicked() { onToggleDisclosure?() }
     @objc private func settleNudgeClicked() { onSettleNudge?() }
+
+    var isSettleNudgeShownForQA: Bool { !settleNudge.isHidden && onSettleNudge != nil }
+    var settleNudgeTitleForQA: String { settleNudge.title }
+    func clickSettleNudgeForQA() -> Bool {
+        guard isSettleNudgeShownForQA else { return false }
+        settleNudge.performClick(nil)
+        return true
+    }
     @objc private func hoverSnoozeClicked() { onHoverSnooze?() }
     @objc private func hoverSettleClicked() { onHoverSettle?() }
 
