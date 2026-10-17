@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Live scrub: Remotion Studio at http://localhost:3480 (never 3000: the recorder's browser tile serves there).
+# Every video in videos/index.ts is listed; the takes imported with scripts/import-take are served from
+# public/footage, so a beat can be scrubbed on the real footage while an agent edits the code (hot reload).
+# Usage: scripts/studio [which-tab--landscape]   (a composition id opens it directly)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec npx remotion studio src/index.ts ${1:+"$1"} --port 3480

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# One render round of one video into renders/<video>/r<N>/. Options: see scripts/render.ts.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec npx tsx scripts/render.ts "$@"

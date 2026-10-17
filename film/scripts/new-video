@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Start a new video. Fresh by default: its own format and its own look, decided in its brief.
+
+Usage: scripts/new-video <name> --purpose <purpose> [--format <format>] [--look <look>] [--title "<title>"]
+
+  <name>      kebab-case, says what the video is (which-tab, first-agent). Never a date.
+  --purpose   one of purposes/*.md. Its brief questions become brief.md.
+  --format    ONLY when Dylan asked to reuse one: formats/<format>.md becomes the starting beat sheet.
+  --look      ONLY when Dylan asked to reuse one: looks/<look>/ becomes the video's look.
+
+Writes videos/<name>/ with brief.md, notes.md, timeline.ts, index.tsx (an empty composition) and, for a
+fresh look, look.ts; then registers the video in videos/index.ts. Nothing is copied from another video.
+"""
+import os
+import re
+import sys
+
+FILM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def die(msg):
+    sys.exit(f'new-video: {msg}')
+
+
+args = sys.argv[1:]
+if not args or args[0] in ('-h', '--help'):
+    print(__doc__.strip())
+    sys.exit(0 if args else 2)
+name = args[0]
+opt = dict(zip(args[1::2], args[2::2]))
+choices = lambda d, ext: sorted(f[: -len(ext)] if ext else f for f in os.listdir(os.path.join(FILM, d)) if (f.endswith(ext) if ext else os.path.isdir(os.path.join(FILM, d, f))))
+
+if not re.fullmatch(r'[a-z][a-z0-9]*(-[a-z0-9]+)*', name):
+    die(f'"{name}": use kebab-case, e.g. first-agent')
+if re.search(r'\d{4}|\d{8}', name):
+    die(f'"{name}" looks dated; name it for what it is, never when it was made')
+vdir = os.path.join(FILM, 'videos', name)
+if os.path.exists(vdir):
+    die(f'videos/{name} already exists')
+purpose = opt.get('--purpose') or die(f'--purpose is required: {", ".join(choices("purposes", ".md"))}')
+if purpose not in choices('purposes', '.md'):
+    die(f'no purpose "{purpose}": {", ".join(choices("purposes", ".md"))}')
+fmt, look = opt.get('--format'), opt.get('--look')
+if fmt and fmt not in choices('formats', '.md'):
+    die(f'no format "{fmt}": {", ".join(choices("formats", ".md"))}')
+if look and look not in choices('looks', ''):
+    die(f'no look "{look}": {", ".join(choices("looks", ""))}')
+if look and not os.path.exists(os.path.join(FILM, 'looks', look, 'look.ts')):
+    die(f'looks/{look} has notes but no look.ts yet: port its tokens to looks/{look}/look.ts first (see looks/ink-lime/look.ts)')
+title = opt.get('--title', name.replace('-', ' ').capitalize())
+ident = re.sub(r'-([a-z0-9])', lambda m: m.group(1).upper(), name)
+
+# ---- brief.md: the purpose's questions, unanswered -------------------------------------------------------
+questions = open(os.path.join(FILM, 'purposes', f'{purpose}.md')).read().split('## Brief questions', 1)[1].strip()
+fmt_section = f'Borrowed, as asked: [{fmt}](../../formats/{fmt}.md). Start from its beat table and change what this video needs.' if fmt else (
+    'New. Write this video\'s own beats here: a table of beat, time, what happens, and its job.\n'
+    'formats/ holds the shapes of earlier films; read them for ideas, don\'t default to one.')
+look_section = (f'Borrowed, as asked: [{look}](../../looks/{look}/README.md).') if look else (
+    'New. Decide this video\'s own palette, type, motion and sound in styleframes (PROCESS.md, step 2), then\n'
+    'write them into look.ts. Saved looks in looks/ are references, not defaults.')
+brief = f"""# {title}
+
+Purpose: [{purpose}](../../purposes/{purpose}.md). Format and look below.
+
+## Brief
+
+Answer each question before the first render. Dylan's answers win.
+
+{questions}
+
+## Format
+
+{fmt_section}
+
+## Look
+
+{look_section}
+
+## Truth
+
+- Real app only: footage from the recorder, never a mock, never an invented state.
+- Real names: every label, model id and tab or tile name exactly as the app and the CLIs show them.
+- Shipped behaviour only (docs/user/). No speed claims we can't back up.
+
+## Takes
+
+Which takes this video needs, and where they live (~/array-scratch/film/takes/{name}/<take>/).
+Bring each in with: scripts/import-take {name} <take dir> --as <take name>
+"""
+
+notes = f"""# {title}: notes
+
+One section per round, newest first. Each round's own notes.md lives with its render in
+renders/{name}/r<N>/notes.md (gitignored); copy the decisions that should outlive a render here.
+
+## State
+
+- Purpose: {purpose}
+- Format: {fmt or 'new'}
+- Look: {look or 'new'}
+- Takes: none yet
+"""
+
+timeline = f"""// {title}: the beats, as data. One timeline for picture, sound and captions (kit/sheet.ts).
+import type {{ Clock }} from '../../kit/clock';
+import type {{ CueSheet }} from '../../kit/sheet';
+
+export const BPM = 120;
+
+export const timeline = (c: Clock): CueSheet => {{
+  const total = c.sec(10);
+  return {{
+    slug: '{name}', title: {title!r}, clock: c, durationInFrames: total,
+    acts: {{ s1: {{ from: 0, dur: total, name: 'S1' }} }},
+    cues: [], lines: [], chapters: [],
+  }};
+}};
+"""
+
+look_import = f"import LOOK from '../../looks/{look}/look';" if look else "import LOOK from './look';"
+index = f"""// {title}: an empty composition. See brief.md for what it is for.
+import {{ AbsoluteFill }} from 'remotion';
+import {{ loadFonts }} from '../../kit/fonts';
+import {{ defineVideo, type CueSheet }} from '../../kit/sheet';
+{look_import}
+import {{ BPM, timeline }} from './timeline';
+
+loadFonts(LOOK.fonts);
+
+const Video: React.FC<{{ sheet: CueSheet; viewport?: {{ width: number; height: number }} }}> = () => (
+  <AbsoluteFill style={{{{ background: LOOK.color.ground }}}} />
+);
+
+export default defineVideo({{
+  slug: '{name}',
+  title: {title!r},
+  bpm: BPM,
+  formats: ['landscape'],
+  build: timeline,
+  Component: Video,
+}});
+"""
+
+fresh_look = f"""// {title}'s look: NOT DECIDED YET. These are neutral placeholders so the composition renders, not a
+// look. Decide palette, type and motion in styleframes (PROCESS.md, step 2) and replace every value.
+import {{ E }} from '../../kit/anim';
+import type {{ Look }} from '../../kit/look';
+
+const LOOK: Look = {{
+  name: '{name}',
+  color: {{ ground: '#000000', text: '#ffffff', textDim: 'rgba(255, 255, 255, 0.6)', accent: '#ffffff' }},
+  type: {{ display: 'system-ui, sans-serif', mono: 'ui-monospace, monospace', system: 'system-ui, sans-serif' }},
+  fonts: [],
+  headline: {{ weight: 600, tracking: '0em', features: 'normal', ascent: 0.92, leave: 0.3, leaveLift: 0.2, leaveEase: E.in }},
+  words: {{ stagger: 0.06, dur: 0.6, ease: E.out, travel: 100, fadeRate: 2, maskTop: 0.08, maskBottom: 0.2, space: 0.25 }},
+}};
+
+export default LOOK;
+"""
+
+os.makedirs(vdir)
+files = {'brief.md': brief, 'notes.md': notes, 'timeline.ts': timeline, 'index.tsx': index}
+if not look:
+    files['look.ts'] = fresh_look
+for f, body in files.items():
+    open(os.path.join(vdir, f), 'w').write(body)
+
+reg = os.path.join(FILM, 'videos', 'index.ts')
+s = open(reg).read()
+s = re.sub(r"(import type \{ VideoDefinition \} from '../kit/sheet';\n)", rf"\1import {ident} from './{name}';\n", s, count=1)
+s = re.sub(r'(export const VIDEOS: readonly VideoDefinition\[\] = \[)([^\]]*)\]', lambda m: f"{m.group(1)}{m.group(2)}, {ident}]", s, count=1)
+open(reg, 'w').write(s)
+
+print(f'videos/{name}/: {", ".join(files)}  (purpose {purpose}, format {fmt or "new"}, look {look or "new"})')
+print(f'registered in videos/index.ts. Next: answer brief.md, then scripts/render {name} --stills 0,5')

@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Bring one recorder take into a video. The footage swap is this one command; code never names a run.
+
+Usage: scripts/import-take <video> <take dir> [--as <name>] [--rects key,key,...]
+
+  <take dir>  a recorder take: frames.json + frames/000000.png ... (normally
+              ~/array-scratch/film/takes/<video>/<take>/; any path works)
+  --as        the name the edit reads it by (default: the take dir's own name). No dates in names.
+  --rects     which frames.json rects to keep (default: every key the take recorded)
+
+Writes:
+  public/footage/<video>/<name>/000000.png ...   hard links to the take's frames (no copy, gitignored)
+  videos/<video>/tracks/<name>.json              frames.json cut down to what the edit reads (committed)
+"""
+import json
+import os
+import re
+import shutil
+import sys
+
+FILM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def die(msg):
+    sys.exit(f'import-take: {msg}')
+
+
+args = sys.argv[1:]
+if len(args) < 2 or args[0] in ('-h', '--help'):
+    print(__doc__.strip())
+    sys.exit(0 if args and args[0] in ('-h', '--help') else 2)
+video, src = args[0], os.path.abspath(os.path.expanduser(args[1]))
+opt = {k: v for k, v in zip(args[2::2], args[3::2])}
+name = opt.get('--as', os.path.basename(src.rstrip('/')))
+if re.search(r'\d{8}|\d{4}-\d{2}-\d{2}|T\d{6}Z', name):
+    die(f'"{name}" looks dated; name a take by what it is (--as pullback), never by when it ran')
+if not os.path.isdir(os.path.join(FILM, 'videos', video)):
+    die(f'no video "{video}" (scripts/new-video {video} --purpose <p> makes one)')
+meta_path = os.path.join(src, 'frames.json')
+if not os.path.isfile(meta_path):
+    die(f'no frames.json in {src}')
+d = json.load(open(meta_path))
+frames_dir = os.path.join(src, 'frames')
+pngs = sorted(f for f in os.listdir(frames_dir) if f.endswith('.png')) if os.path.isdir(frames_dir) else []
+if len(pngs) != d['count']:
+    die(f'{src}: frames.json says {d["count"]} frames, frames/ holds {len(pngs)}')
+
+# 1. frames: hard links (same volume) or copies, never a second 1 GB of PNGs when a link will do
+out = os.path.join(FILM, 'public', 'footage', video, name)
+shutil.rmtree(out, ignore_errors=True)
+os.makedirs(out)
+linked = 0
+for f in pngs:
+    a, b = os.path.join(frames_dir, f), os.path.join(out, f)
+    try:
+        os.link(a, b)
+        linked += 1
+    except OSError:
+        shutil.copy2(a, b)
+
+# 2. the track: per-frame rects (points) and the take's marks
+keys = opt['--rects'].split(',') if '--rects' in opt else sorted({k for fr in d['frames'] for k in fr.get('rects', {})})
+track = {'source': meta_path, 'take': d['take'], 'count': d['count'], 'fps': d['fps'], 'pixelSize': d['pixelSize'], 'pointSize': d['pointSize'], 'marks': d['marks'],
+         'rects': {k: [[round(v, 1) for v in fr['rects'].get(k, [0, 0, 0, 0])] for fr in d['frames']] for k in keys}}
+tracks = os.path.join(FILM, 'videos', video, 'tracks')
+os.makedirs(tracks, exist_ok=True)
+json.dump(track, open(os.path.join(tracks, f'{name}.json'), 'w'), separators=(',', ':'))
+print(f'{video}/{name}: {d["count"]} frames ({linked} linked, {len(pngs) - linked} copied), {d["pixelSize"][0]}x{d["pixelSize"][1]} @ {d["fps"]} fps, '
+      f'marks {d["marks"]}, verdict {d.get("verdict", "-")}')
+print(f'  public/footage/{video}/{name}/   videos/{video}/tracks/{name}.json')
