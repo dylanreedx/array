@@ -593,6 +593,7 @@ leg run_leg scripts/capture-cli-fixtures.sh check
 leg run_leg scripts/check-app-bundle.sh --configuration debug
 leg run_leg scripts/check-color-hygiene.sh
 leg run_leg scripts/check-film-absent.sh
+leg run_leg scripts/check-film-scenes.sh
 leg run_leg scripts/check-matrix-inventory.sh
 leg run_leg scripts/check-root-docs.sh
 leg run_leg swift run ContinuumRevivedAgentContentChecks

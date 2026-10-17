@@ -397,6 +397,10 @@ run_ios_build
 # .plans/73-film-studio: the film recorder is compiled only into the film build
 # (-DARRAY_FILM). The normal binary must carry none of it and refuse --film.
 run_leg scripts/check-film-absent.sh
+# .plans/73-film-studio: every scene in film/scenes/ still runs on this checkout's
+# app, so a UI change that breaks filming is red the day it lands. Builds the film
+# build in its own scratch path (.build-film).
+run_leg scripts/check-film-scenes.sh
 run_leg swift run ContinuumRevivedCoreChecks
 # Directory-aware document identity, symlink-safe/longest-root classification,
 # workspace-v5 migration, and durable agent-document relationship cleanup.
