@@ -102,6 +102,14 @@ extension View {
     func settingsFrame(_ anchor: String) -> some View {
         modifier(SettingsFrameModifier(anchor: anchor))
     }
+
+    /// A state-dependent element: its frame and identifier as `settingsFrame`,
+    /// plus the exact words it rendered in `SettingsModel.renderedTexts`.
+    func settingsRenderedText(_ id: String, _ text: String, model: SettingsModel) -> some View {
+        settingsFrame(id)
+            .onChange(of: text, initial: true) { _, rendered in model.noteRenderedText(id, rendered) }
+            .onDisappear { model.noteRenderedText(id, nil) }
+    }
 }
 
 /// The left half of every row.

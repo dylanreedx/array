@@ -472,11 +472,120 @@ private struct SettingsHarnessRows: View {
         ForEach(AgentHarness.allCases, id: \.self) { harness in
             let readiness = model.readiness(of: harness)
             let (status, symbol, tone, canSignIn) = describe(readiness)
-            StatusRow(title: harness.rawValue, status: status, symbol: symbol, tone: tone,
-                      detail: detail(harness, readiness),
-                      actionTitle: canSignIn && model.onSignIn != nil ? "Sign In…" : nil,
-                      action: { model.onSignIn?(harness) })
-                .settingsAnchor("harness.\(harness.rawValue)", model: model)
+            VStack(alignment: .leading, spacing: 6) {
+                StatusRow(title: harness.rawValue, status: status, symbol: symbol, tone: tone,
+                          detail: detail(harness, readiness),
+                          actionTitle: canSignIn && model.onSignIn != nil ? "Sign In…" : nil,
+                          action: { model.onSignIn?(harness) })
+                if let center = model.cliUpdates, readiness != .missing {
+                    SettingsCLIUpdateLine(harness: harness, center: center, model: model)
+                }
+            }
+            .settingsAnchor("harness.\(harness.rawValue)", model: model)
+        }
+    }
+}
+
+/// Under each CLI row: the installed version, "→ newer" with Update when Array
+/// may run the update, the live output while it runs, then the result. When
+/// Array may not run it (unknown, mise, unwritable) it says why and shows the
+/// command to run instead.
+struct SettingsCLIUpdateLine: View {
+    let harness: AgentHarness
+    let center: AgentCLIUpdateCenter
+    let model: SettingsModel
+    @State private var cornerStyle = CornerStyle.current
+
+    static func identifier(_ part: String, _ harness: AgentHarness) -> String {
+        "cliUpdate.\(part).\(harness.rawValue)"
+    }
+
+    var body: some View {
+        let status = center.status(harness)
+        if let installed = status.installed {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    versionText(installed: installed, status: status)
+                    if let owner = status.plan?.owner, owner != .unknown {
+                        Text("· \(owner.label)").font(.callout).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    if status.isRunning {
+                        ProgressView().controlSize(.small)
+                        Text("Updating…").font(.callout).foregroundStyle(.secondary)
+                            .settingsRenderedText(Self.identifier("spinner", harness), "Updating…", model: model)
+                    } else if status.canUpdate {
+                        Button("Update") { center.update(harness) }
+                            .settingsRenderedText(Self.identifier("button", harness), "Update", model: model)
+                    }
+                }
+                if case let .running(log) = status.phase {
+                    logView(log.isEmpty ? "Starting…" : log)
+                } else if case let .finished(result) = status.phase {
+                    resultView(result)
+                } else if status.hasNewer, let plan = status.plan, !plan.isRunnable {
+                    manualView(plan)
+                }
+            }
+        }
+    }
+
+    private func versionText(installed: String, status: AgentCLIUpdateCenter.Status) -> some View {
+        let text = status.hasNewer ? "\(installed) → \(status.latest ?? "")" : installed
+        return Text(text)
+            .font(.callout.monospacedDigit())
+            .foregroundStyle(status.hasNewer ? Color.primary : Color.secondary)
+            .accessibilityValue(text)
+            .settingsRenderedText(Self.identifier("version", harness), text, model: model)
+    }
+
+    private func logView(_ text: String) -> some View {
+        ScrollView {
+            Text(text)
+                .font(.system(.caption, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+                .settingsRenderedText(Self.identifier("log", harness), text, model: model)
+        }
+        .defaultScrollAnchor(.bottom)
+        .frame(height: 96)
+        .padding(6)
+        .background(RoundedRectangle(cornerRadius: cornerStyle.cgRadius(6), style: .continuous)
+            .fill(Color.secondary.opacity(0.12))
+            .onCornerStyleChange($cornerStyle))
+    }
+
+    @ViewBuilder
+    private func resultView(_ result: AgentCLIUpdateResult) -> some View {
+        let good: Bool = {
+            switch result {
+            case .updated, .unchanged: return true
+            default: return false
+            }
+        }()
+        Label(result.summary, systemImage: good ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+            .font(.callout)
+            .foregroundStyle(good ? Color.green : Color.orange)
+            .settingsRenderedText(Self.identifier("result", harness), result.summary, model: model)
+        if !good, !result.output.isEmpty {
+            logView(result.output)
+        }
+    }
+
+    @ViewBuilder
+    private func manualView(_ plan: AgentCLIUpdatePlan) -> some View {
+        if let guidance = plan.guidance {
+            Text(guidance)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .settingsRenderedText(Self.identifier("guidance", harness), guidance, model: model)
+        }
+        if let command = plan.manualCommand {
+            Text(command)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .settingsRenderedText(Self.identifier("command", harness), command, model: model)
         }
     }
 }

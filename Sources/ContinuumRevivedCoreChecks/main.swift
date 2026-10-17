@@ -42,6 +42,17 @@ if CommandLine.arguments.contains("--sidebar-lifecycle-check") {
     Foundation.exit(0)
 }
 
+// Agent CLI updates: who owns each CLI binary and the exact command Array may
+// run for it, on fake layouts in a temp dir. Never runs a CLI or hits the network.
+if CommandLine.arguments.contains("--cli-install-owner-check") {
+    runAgentCLIInstallOwnerChecks()
+    Foundation.exit(0)
+}
+if CommandLine.arguments.contains("--cli-update-runner-check") {
+    runAgentCLIUpdateRunnerChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--layout-pressure-check") {
     runLayoutPressureChecks()
     runCanvasAutoLayoutChecks()
