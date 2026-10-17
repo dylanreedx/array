@@ -4469,8 +4469,7 @@ enum UIProbeGeometry {
                 // Confidence pass: T3's ONE header row — search first and widest,
                 // the scope control beside it on the same line, the placeholder still
                 // readable at 220pt.
-                guard searchFrame.width > scopeFrame.width,
-                      abs(searchFrame.midY - scopeFrame.midY) <= 1,
+                guard abs(searchFrame.midY - scopeFrame.midY) <= 1,
                       searchFrame.maxX <= scopeFrame.minX,
                       searchDrawing.width >= 40,
                       !searchFrame.intersects(scopeFrame),
@@ -4478,6 +4477,34 @@ enum UIProbeGeometry {
                       searchDrawing.minX >= searchIcon.maxX + CGFloat(Space.s) - 0.5 else {
                     throw fail("\(label): production one-row search/scope geometry or magnifier clearance escaped (search=\(searchFrame), scope=\(scopeFrame), drawing=\(searchDrawing), icon=\(searchIcon))")
                 }
+                // The scope label sizes to its title; it may only ellipsize once the
+                // search field has given up everything above its floor, and the
+                // placeholder the field shows always draws whole. A 104pt cap read
+                // "This w…" beside a mostly empty search field.
+                func assertScopeTitleYieldsOnlyAtSearchFloor(_ phase: String) throws {
+                    // The floor constrains the ALIGNMENT rect; a text field's frame
+                    // is 2pt wider each side.
+                    let search = searchField.alignmentRect(forFrame: probe.inbox.searchFieldFrameForQA)
+                    let drawing = probe.inbox.searchTextDrawingRectForQA
+                    let placeholder = searchField.placeholderString ?? ""
+                    let placeholderNeed = ChoiceLabelMetrics.labelWidth(for: placeholder, font: searchField.font ?? .token(.label))
+                    guard scopeButton.qaTitleDrawsWithoutTruncation
+                            || search.width <= AgentInboxView.searchFieldFloorWidth + 0.5,
+                          !placeholder.isEmpty, placeholderNeed <= drawing.width + 0.5 else {
+                        throw fail("\(label) [\(phase)]: the scope title '\(scopeButton.qaRenderedTitle)' ellipsized at \(probe.inbox.scopeControlFrameForQA.width)pt while search held \(search.width)pt (floor \(AgentInboxView.searchFieldFloorWidth)), or the placeholder '\(placeholder)' needs \(placeholderNeed)pt of a \(drawing.width)pt text rect")
+                    }
+                }
+                try assertScopeTitleYieldsOnlyAtSearchFloor("default scope")
+                // …and with the longest title the corpus offers, which is what a
+                // cap on the control's width actually ellipsizes.
+                let scopeBeforeLongest = probe.inbox.scope
+                guard probe.inbox.pickScopeForQA(.project(longestProject)) else {
+                    throw fail("\(label): could not select the longest project scope '\(longestProject)'")
+                }
+                probe.inbox.layoutForQA()
+                try assertScopeTitleYieldsOnlyAtSearchFloor("scope '\(longestProject)'")
+                probe.inbox.setScope(scopeBeforeLongest)
+                probe.inbox.layoutForQA()
                 let acceptedSearchFocus = probe.window.makeFirstResponder(searchField)
                 let searchHasFocus = probe.window.firstResponder === searchField || searchField.currentEditor() != nil
                 guard scopeButton.accessibilityLabel() == "Agent scope",
@@ -4500,11 +4527,11 @@ enum UIProbeGeometry {
                 scopeButton.keyDown(with: returnKey)
                 let keyboardItems = probe.inbox.scopePopoverItemsForQA
                 guard probe.inbox.isScopePopoverPresentedForQA,
-                      abs((probe.inbox.scopePopoverWidthForQA ?? -1) - 124) < 0.5,
+                      scopeButton.qaTruncatedPresentedRowTitles == [],
                       keyboardItems.contains(where: {
                           $0.id == InboxScope.project(longestProject).storageValue && $0.title == longestProject
                       }) else {
-                    throw fail("\(label): production keyboard popover was not 124pt or omitted the longest project name")
+                    throw fail("\(label): production keyboard popover ellipsized \(scopeButton.qaTruncatedPresentedRowTitles ?? ["<no list>"]) at \(probe.inbox.scopePopoverWidthForQA ?? -1)pt, or omitted the longest project name")
                 }
                 probe.inbox.dismissScopePopoverForQA()
 
@@ -4664,6 +4691,12 @@ enum UIProbeGeometry {
                       probe.inbox.bulkActionTriggerTitleForQA == InboxBulkActionBar.menuTitle,
                       probe.inbox.bulkActionTriggerAccessibilityValueForQA == InboxBulkActionBar.menuTitle else {
                     throw fail("\(label): rendered bar did not offer Delete or leaked selected/confirmation state into its trigger")
+                }
+                // Pinned at 150pt, under the 184pt a command list needs, every
+                // Actions row could ellipsize; the menu now sizes to its rows.
+                let truncatedActions = probe.inbox.bulkActionMenuTruncatedTitlesForQA
+                guard truncatedActions == [] else {
+                    throw fail("\(label): the bulk Actions menu ellipsized \(truncatedActions ?? ["<not presented>"])")
                 }
                 let action = InboxBulkAction.delete
 

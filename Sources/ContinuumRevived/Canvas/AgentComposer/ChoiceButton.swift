@@ -57,9 +57,6 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     /// Some clients include visible management commands that must not replace
     /// the selected value shown by the trigger.
     var keepsSelectionForItem: ((ChoiceItem) -> Bool)?
-    /// Optional per-client width for anchored menus. Nil preserves the intrinsic
-    /// sizing used by composer pickers; fixed-width clients can pin the panel.
-    var preferredPopoverWidth: CGFloat?
     /// Callers offering actions opt into compact command anatomy and optional
     /// leading icons; value pickers retain checkmark rows by default.
     var popoverPresentation: ChoiceListPresentation = .choices
@@ -288,7 +285,8 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     }
 
     /// One presentation seam for mouse, keyboard, VoiceOver, and deterministic
-    /// selection. Client-specific width is applied here, never in a QA-only branch.
+    /// selection. The menu is as wide as its own rows: a client-pinned width
+    /// narrower than them ellipsized every row of the sidebar scope menu.
     func presentPopover() {
         popoverController.pageZoom = pageZoom
         popoverController.present(
@@ -300,12 +298,6 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
             self.handleSelection(item)
             _ = self.sendAction(self.action, to: self.target)
         }
-        pinPopoverWidthIfNeeded()
-    }
-
-    private func pinPopoverWidthIfNeeded() {
-        guard let preferredPopoverWidth, popoverController.listView != nil else { return }
-        popoverController.setSurfaceWidth(preferredPopoverWidth)
     }
 
     func handleSelection(_ item: ChoiceItem) {
@@ -324,6 +316,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     var qaSelectedTitle: String? { items.first(where: { $0.id == selectedID })?.title }
     var qaPresentedItems: [ChoiceItem] { popoverController.listView?.qaItems ?? [] }
     var qaPopoverWidth: CGFloat? { popoverController.surfaceFrame?.width }
+    var qaTruncatedPresentedRowTitles: [String]? { popoverController.listView?.qaTruncatedRowTitles }
     var qaIsPopoverPresented: Bool { popoverController.isPresented }
     func dismissPopoverForQA() { popoverController.dismiss(); applyTokens() }
     @discardableResult

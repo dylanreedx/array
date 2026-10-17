@@ -581,19 +581,6 @@ final class ChoicePopoverController {
         handler?()
     }
 
-    /// Resizes the presented surface to `width`, keeping its origin. The panel
-    /// grows with it, margin included.
-    func setSurfaceWidth(_ width: CGFloat) {
-        guard let panel, let surfaceView else { return }
-        let margin = ChoicePanelShadowView.margin
-        var frame = panel.frame
-        frame.size.width = width + margin * 2
-        panel.setFrame(frame, display: false)
-        panel.contentView?.layoutSubtreeIfNeeded()
-        surfaceView.needsLayout = true
-        surfaceView.layoutSubtreeIfNeeded()
-    }
-
     /// `frame` less every obstacle in it: for each obstacle (grown by the menu
     /// gap) that cuts the frame, keep the largest of the four bands either side
     /// of it. The floating toolbar rests on one canvas edge, so this keeps the

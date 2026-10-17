@@ -5287,10 +5287,11 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
               footer.effortButton.accessibilityRole() == .popUpButton,
               footer.modelButton.accessibilityLabel() == "Model, next turn",
               footer.effortButton.accessibilityLabel() == "Reasoning effort, next turn",
-              footer.qaModelTitles == AgentModelConfig.modelOptions.map(AgentComposerFooterView.abbreviatedModel),
-              footer.qaEffortTitles == AgentModelConfig.thinkingOptions.map(AgentComposerFooterView.abbreviatedEffort),
-              Set(footer.qaModelTitles).count == AgentModelConfig.modelOptions.count else {
-            throw fail("composer provider footer lost custom-only chrome, hid Next turn accessibility, kept the visible inert Next turn label, or lost unambiguous narrow labels")
+              // Narrow shortens the closed triggers only; the menus keep every title.
+              footer.qaFitTier > .full,
+              footer.qaModelTitles == AgentModelConfig.modelOptions,
+              footer.qaEffortTitles == AgentModelConfig.thinkingOptions.map(\.capitalized) else {
+            throw fail("composer provider footer lost custom-only chrome, hid Next turn accessibility, kept the visible inert Next turn label, failed to shorten its triggers at 260pt, or shortened its menu rows (\(footer.qaFitTiersDescription))")
         }
         footer.frame.size.width = 640
         footer.layoutSubtreeIfNeeded()

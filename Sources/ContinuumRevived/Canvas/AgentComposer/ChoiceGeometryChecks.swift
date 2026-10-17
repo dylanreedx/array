@@ -78,6 +78,7 @@ enum ChoiceGeometryChecks {
         try checkTriggerKeepsItsTitleAtIntrinsicWidth()
         try checkFooterDoesNotCondenseWithSurplusWidth()
         try checkCatalogRefreshRerunsTheFitDecision()
+        try checkShortRowShortensOneTriggerAndNoMenu()
         let touched = standardGuard.finish()
         guard touched.isEmpty else {
             throw CheckError.message("the leg wrote the owner's agent keys in the standard defaults domain: \(touched)")
@@ -280,5 +281,60 @@ enum ChoiceGeometryChecks {
                    + "\(footer.modelButton.qaRenderedTitle)\" in \(footer.modelButton.qaTitleFrameWidth)pt "
                    + "but needs \(footer.modelButton.qaMeasuredTitleWidth)pt — the fit decision did not "
                    + "re-run when the longer title arrived")
+    }
+
+    // MARK: - 6. A row a point short shortens ONE trigger, and never a menu
+
+    private static func checkShortRowShortensOneTriggerAndNoMenu() throws {
+        // All-or-nothing compaction turned "Claude Code / Claude Sonnet 4.5 /
+        // Medium" into "Claude / claude-sonnet-4-5 / Med" a point below the full
+        // fit, menu rows included, though each menu sizes to its own content.
+        let model = "anthropic/claude-sonnet-4-5"
+        AgentModelCatalog.shared.resetForQA(options: [model], displayNames: [:])
+        defer { AgentModelCatalog.shared.resetForQA() }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 120),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        let footer = AgentComposerFooterView(
+            frame: NSRect(x: 0, y: 40, width: 640, height: AgentComposerFooterView.height))
+        window.contentView?.addSubview(footer)
+        window.orderFrontOffscreenForChecks()
+        footer.apply(AgentLaunchSelection(harness: .claudeCode, model: model, thinking: "medium"))
+        // The footer's own measure of the full titles, one point short of it.
+        let hostWidth = floor(footer.qaRequiredWidth(for: .full)) - 1
+        try expect(footer.qaRequiredWidth(for: .shortHarness) <= hostWidth,
+                   "fixture is inert: shortening the harness alone does not fit \(hostWidth)pt; \(footer.qaFitTiersDescription)")
+        let fullModelTitle = footer.modelButton.items.first(where: { $0.id == model })?.title ?? ""
+        footer.frame = NSRect(x: 0, y: 40, width: hostWidth, height: AgentComposerFooterView.height)
+        for _ in 0..<2 {
+            window.contentView?.layoutSubtreeIfNeeded()
+            footer.layoutSubtreeIfNeeded()
+        }
+
+        let rendered = [footer.harnessButton, footer.modelButton, footer.effortButton].map(\.qaRenderedTitle)
+        try expect(rendered == ["Claude", fullModelTitle, "Medium"],
+                   "[footer @\(hostWidth)pt, 1pt under the full fit] expected only the harness to shorten "
+                   + "(Claude / \(fullModelTitle) / Medium), got \(rendered); \(footer.qaFitTiersDescription)")
+        for (label, button) in [("harness", footer.harnessButton), ("model", footer.modelButton),
+                                ("effort", footer.effortButton)] {
+            try expect(button.qaTitleDrawsWithoutTruncation,
+                       "[footer @\(hostWidth)pt] the \(label) trigger ellipsizes \"\(button.qaRenderedTitle)\"")
+        }
+        try expect(footer.harnessButton.items.map(\.title) == AgentHarness.allCases.map(\.rawValue)
+                       && fullModelTitle == model
+                       && footer.modelButton.items.allSatisfy {
+                           !$0.id.contains("/") || $0.title != AgentComposerFooterView.abbreviatedModel($0.id)
+                       }
+                       && footer.qaEffortTitles == AgentModelConfig.thinkingOptions.map(\.capitalized),
+                   "a shortened trigger shortened its menu rows too: harness \(footer.harnessButton.items.map(\.title)), "
+                   + "model \(footer.qaModelTitles), effort \(footer.qaEffortTitles)")
+        for (label, button) in [("harness", footer.harnessButton), ("effort", footer.effortButton)] {
+            button.presentPopover()
+            defer { button.dismissPopoverForQA() }
+            try expect(button.qaTruncatedPresentedRowTitles == [],
+                       "the \(label) menu ellipsizes \(button.qaTruncatedPresentedRowTitles ?? ["<not presented>"])")
+        }
     }
 }
