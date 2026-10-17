@@ -3765,6 +3765,9 @@ final class ManagedAgentTileNSView: TileNSView {
     }
     var qaUsesV2HeaderShell: Bool { agentHeader.superview != nil }
     var qaAgentHeaderName: String { agentHeader.qaName }
+    /// The Send button's own action, draft untouched — a board task dropped on
+    /// the tile is sent with whatever the composer holds, as a click sends it.
+    func qaPressSendForChecks() { performV2PrimaryAction() }
     func qaSubmitPrompt(_ prompt: String) {
         guard let composer = v2Composer else { return }
         composer.apply(AgentComposerDraft(

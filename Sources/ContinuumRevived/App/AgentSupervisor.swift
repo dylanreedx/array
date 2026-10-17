@@ -10248,6 +10248,8 @@ func runAgentSupervisorChecks() async throws {
     // MARK: 21 · a status tick never rewrites the document (C10)
 
     let agentReferenceStatusReport = try await checkAgentReferenceLiveStatus(config: config, cwd: cwd, fail: fail)
+    // A board card dropped on an agent and sent with nothing typed keeps its turn.
+    print("AgentSupervisor: " + (try await checkTaskOnlySendKeepsItsTurn(cwd: cwd, fail: fail)))
 
     // MARK: 22 · B7.2 — `/clear` is one transaction, not a notice alone
 
