@@ -3017,7 +3017,7 @@ final class TileSpawner {
         try expect(inspectorField != nil, "Settings surface is missing Safari Web Inspector toggle")
         // The real modal, in an offscreen window: the Browser pane must draw the row,
         // and the row's write must reach the key the policy reads.
-        let settingsModel = SettingsModel(sections: sections, defaults: defaults, navKeymap: .default, isCompanionEnabled: false)
+        let settingsModel = SettingsModel(sections: sections, defaults: defaults, navKeymap: .default)
         // Off before Settings opens, so the switch renders off and one click turns it on.
         defaults.set(false, forKey: BrowserInspectionPolicy.userDefaultsKey)
         let settings = SettingsFixtureWindow(model: settingsModel)

@@ -60,6 +60,10 @@ enum SidebarTruthChecks {
     static let settledAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000A8")!)
     static let backgroundStopAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000A9")!)
     static let otherAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000B1")!)
+    /// Closed to History either side of `settledAgent` in time, so one shelf
+    /// holding both kinds has to interleave them by recency.
+    static let archivedRecentAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000AC")!)
+    static let archivedOldAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000AD")!)
 
     static let idleTile = UUID(uuidString: "5D000000-0000-4000-8000-0000000000E1")!
     static let busyTile = UUID(uuidString: "5D000000-0000-4000-8000-0000000000E2")!
@@ -75,7 +79,7 @@ enum SidebarTruthChecks {
         let world = try makeWorld()
         defer { tearDown(world) }
         try defaultScopeIsTheWorkspace(world)
-        try shelvesFoldAndSinkToTheBottom(world)
+        try historyIsOneShelf(world)
         try await switchCostsOneReload(world)
         try await closeLifecycle(world)
         try eventPushOpensNoFile(world)
@@ -89,8 +93,8 @@ enum SidebarTruthChecks {
               + "project's agent listing unreadable, a close still reached the list; an agent-"
               + "event push opened no file; the default scope was the workspace on screen, "
               + "across a switch; a switch restoring \(switchLoadTileCount) runtime-backed tiles "
-              + "reloaded the sidebar once; Settled folded behind a counted heading and the "
-              + "headings sat at the bottom of the list; the header is one row whose New "
+              + "reloaded the sidebar once; settled and closed agents shared ONE folded History "
+              + "heading, most recent first, at the bottom of the list; the header is one row whose New "
               + "agent button made an agent; hovering it offered Snooze and Settle, and "
               + "Settle settled it")
     }
@@ -214,11 +218,18 @@ enum SidebarTruthChecks {
         ] {
             try agentStore.upsert(value)
         }
-        // Finished work the human already said "done" to: the Settled shelf's row.
+        // Finished work the human already said "done" to, and two agents whose
+        // tiles were closed: all three are History rows.
         var settled = record(settledAgent, "settled agent", project: projectA, root: rootA, tile: nil, age: 900)
         settled.settledOverride = .settled
         settled.settledAt = now.addingTimeInterval(-120)
         try agentStore.upsert(settled)
+        var archivedRecent = record(archivedRecentAgent, "recently closed agent", project: projectA, root: rootA, tile: nil, age: 950)
+        archivedRecent.archivedAt = now.addingTimeInterval(-60)
+        try agentStore.upsert(archivedRecent)
+        var archivedOld = record(archivedOldAgent, "long closed agent", project: projectA, root: rootA, tile: nil, age: 980)
+        archivedOld.archivedAt = now.addingTimeInterval(-300)
+        try agentStore.upsert(archivedOld)
 
         let app = AppDelegate()
         // Fold choices (launch polish, item Q) persist through the app's settings
@@ -279,12 +290,6 @@ enum SidebarTruthChecks {
         let defaults = UserDefaults.standard
         let storedScope = defaults.object(forKey: WorkspaceSidebarConfig.scopeKey)
         defaults.removeObject(forKey: WorkspaceSidebarConfig.scopeKey)
-        let storedShelves = WorkspaceSidebarConfig.Shelf.allCases.map {
-            ($0, defaults.object(forKey: WorkspaceSidebarConfig.shelfKey($0)))
-        }
-        for shelf in WorkspaceSidebarConfig.Shelf.allCases {
-            defaults.removeObject(forKey: WorkspaceSidebarConfig.shelfKey(shelf))
-        }
         // The header's New agent spawns from the ambient Settings selection. Pin it
         // to what a fresh install resolves (Claude Code, the catalogue's own seed),
         // in-process, so a model another leg left in the shared domain cannot refuse it.
@@ -309,13 +314,6 @@ enum SidebarTruthChecks {
             restoreDefaults: {
                 unpinAmbientSelection()
                 UserDefaults(suiteName: settingsSuite)?.removePersistentDomain(forName: settingsSuite)
-                for (shelf, value) in storedShelves {
-                    if let value {
-                        defaults.set(value, forKey: WorkspaceSidebarConfig.shelfKey(shelf))
-                    } else {
-                        defaults.removeObject(forKey: WorkspaceSidebarConfig.shelfKey(shelf))
-                    }
-                }
                 if let storedScope {
                     defaults.set(storedScope, forKey: WorkspaceSidebarConfig.scopeKey)
                 } else {
@@ -699,38 +697,63 @@ enum SidebarTruthChecks {
         print("sidebar-truth: switch cost reloads=\(there.reloads)/\(back.reloads) reads=\(there.reads)/\(back.reads) (one structural reload reads \(oneReload))")
     }
 
-    // MARK: - Shelves: Settled is folded, and the headings sink to the bottom
+    // MARK: - Shelves: ONE History shelf, folded, at the bottom
 
-    static func shelvesFoldAndSinkToTheBottom(_ world: World) throws {
+    /// Dylan: "one history shelf". Settled agents and agents closed to History
+    /// are one section: one heading, one count, one fold, most recent first.
+    static func historyIsOneShelf(_ world: World) throws {
         let inbox = world.inbox
-        try expect(world.supervisor.records[settledAgent]?.settledOverride == .settled,
-                   "setup: the settled agent was adopted settled")
-        try expect(inbox.settledHeaderTitleForQA == "Settled (1)",
-                   "finished work is counted behind a 'Settled' heading — got \(String(describing: inbox.settledHeaderTitleForQA))")
-        try expect(block(world, settledAgent) == nil,
-                   "the Settled shelf opens COLLAPSED: its row must not be drawn until asked for — drawn \(String(describing: block(world, settledAgent)))")
-        // The live list owns the top; the headings meet the bottom of the viewport.
+        guard let settings = world.app.qaSettingsDefaults else {
+            throw Failure(message: "setup: the app must persist through its private settings suite")
+        }
+        try expect(world.supervisor.records[settledAgent]?.settledOverride == .settled
+                   && world.supervisor.records[settledAgent]?.archivedAt == nil,
+                   "setup: the settled agent was adopted settled, not archived")
+        try expect(world.supervisor.records[archivedRecentAgent]?.archivedAt != nil
+                   && world.supervisor.records[archivedOldAgent]?.archivedAt != nil,
+                   "setup: the two closed agents were adopted archived")
+        let history = [archivedRecentAgent, settledAgent, archivedOldAgent]
+        inbox.layoutForQA()
+        let headings = inbox.shelfHeadingTitlesForQA
+        try expect(headings.count == 1 && headings[0].hasPrefix("History ("),
+                   "exactly ONE heading, History, for settled and closed agents together — got \(headings)")
+        for agent in history {
+            try expect(block(world, agent) == nil,
+                       "History opens COLLAPSED: \(agent.rawValue) must not be drawn until asked for — drawn \(String(describing: block(world, agent)))")
+        }
+        // The live list owns the top; the heading meets the bottom of the viewport.
         let viewport = inbox.tableViewportHeightForQA
         guard let heading = inbox.tableRowFrameOfShelfHeadingForQA(),
               let bottom = inbox.lastTableRowMaxYForQA else {
             throw Failure(message: "the list draws a shelf heading")
         }
         try expect(heading.minY > viewport / 2 && abs(bottom - viewport) <= 2,
-                   "the shelf headings must sit at the BOTTOM of the sidebar — first heading at y \(heading.minY), last row ends at \(bottom), viewport \(viewport)")
-        try expect(inbox.clickSettledDisclosureForQA(), "the Settled heading's triangle must be wired")
-        try expect(block(world, settledAgent) == "settled",
-                   "…and opening it draws the settled agent — drawn \(String(describing: block(world, settledAgent)))")
+                   "the History heading must sit at the BOTTOM of the sidebar — heading at y \(heading.minY), last row ends at \(bottom), viewport \(viewport)")
+        try expect(inbox.clickHistoryDisclosureForQA(), "the History heading's triangle must be wired")
+        inbox.layoutForQA()
+        for agent in history {
+            try expect(block(world, agent) == "history",
+                       "opening History draws \(agent.rawValue) inside it — drawn \(String(describing: block(world, agent)))")
+            try expect(inbox.drawnRowForQA(id: agent.rawValue)?.variant == .slim,
+                       "every History row is drawn the same slim way — \(agent.rawValue) is \(String(describing: inbox.drawnRowForQA(id: agent.rawValue)?.variant))")
+        }
+        let inHistory = inbox.rowIdsForQA.filter { inbox.drawnBlockForQA(id: $0) == "history" }
+        try expect(headings[0] == "History (\(inHistory.count))",
+                   "the heading counts exactly the rows it opens onto — '\(headings[0])' over \(inHistory.count) rows")
+        let drawnOrder = inbox.rowIdsForQA.filter { id in history.contains { $0.rawValue == id } }
+        try expect(drawnOrder == history.map(\.rawValue),
+                   "History is most recent first across both kinds (closed 1m, settled 2m, closed 5m ago) — got \(drawnOrder)")
         // Remembered across a relaunch: a freshly configured sidebar opens it.
-        try expect(WorkspaceSidebarConfig.isShelfExpanded(.settled),
-                   "opening the Settled shelf must be persisted")
+        try expect(WorkspaceSidebarConfig.isShelfExpanded(.history, defaults: settings),
+                   "opening History must be persisted in the app's settings")
         let relaunched = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 1_000))
         world.app.qaInstallWorkspaceSidebar(relaunched)
-        try expect(relaunched.inboxForQA.isSettledExpandedForQA,
-                   "a relaunched sidebar opens the Settled shelf as it was left")
+        try expect(relaunched.inboxForQA.isHistoryExpandedForQA,
+                   "a relaunched sidebar opens History as it was left")
         world.app.qaInstallWorkspaceSidebar(world.sidebar)
         world.app.qaRefreshAgentSurfaces()
-        try expect(inbox.clickSettledDisclosureForQA(), "and closes again")
-        try expect(!WorkspaceSidebarConfig.isShelfExpanded(.settled), "…which is persisted too")
+        try expect(inbox.clickHistoryDisclosureForQA(), "and closes again")
+        try expect(!WorkspaceSidebarConfig.isShelfExpanded(.history, defaults: settings), "…which is persisted too")
     }
 
     // MARK: - Header: one row — search, scope, New agent (T3 nightly)

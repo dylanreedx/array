@@ -58,21 +58,6 @@ struct CompanionRelayProvisioning {
         return override
     }
 
-    /// Whether this Mac holds a relay identity, without reading the secret: an
-    /// attributes-only query that fails rather than show a keychain prompt.
-    func hasStoredIdentity() -> Bool {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.keychainService,
-            kSecAttrAccount: Self.keychainAccount,
-            kSecReturnAttributes: true,
-            kSecMatchLimit: kSecMatchLimitOne,
-            kSecUseAuthenticationUI: kSecUseAuthenticationUIFail,
-        ]
-        var item: CFTypeRef?
-        return SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess
-    }
-
     func loadIdentity() throws -> CompanionRelayDesktopIdentity? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,

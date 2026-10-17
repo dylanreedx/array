@@ -97,6 +97,9 @@ public struct CodexAppServerEventTranslator {
     private let now: @Sendable () -> Date
 
     public var onRuntimeObservation: (@Sendable (AgentRuntimeObservation) -> Void)?
+    /// Where `TranscriptShellCommandConfig` is read, per command, so flipping
+    /// the setting applies to the next command a running agent issues.
+    public var settingsDefaults: UserDefaults = .standard
     /// Structured provider-owned child identity. Kept out of
     /// `AgentRuntimeEvent` so provider thread ids remain a local routing detail.
     public var onSubagentAnnouncement: (@Sendable (
@@ -284,8 +287,11 @@ public struct CodexAppServerEventTranslator {
             // only (launch polish, item J).
             if let onRuntimeObservation {
                 var fields: [(key: String, value: String)] = []
-                if let command = AgentShellObservation.commandField(item["command"]) { fields.append(command) }
-                if let cwd = AgentShellObservation.cwdField(item["cwd"] as? String, home: workingDirectory) {
+                if let command = AgentShellObservation.commandField(item["command"], defaults: settingsDefaults) {
+                    fields.append(command)
+                }
+                if let cwd = AgentShellObservation.cwdField(
+                    item["cwd"] as? String, home: workingDirectory, defaults: settingsDefaults) {
                     fields.append(cwd)
                 }
                 onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(

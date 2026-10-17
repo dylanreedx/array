@@ -37,7 +37,7 @@ enum SettleClosesTileChecks {
         }
         guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "\n")) }
         for line in lines { print("  \(line)") }
-        print("SettleClosesTileChecks passed: the nudge, the hover Settle, the row menu and the bulk bar each closed the settled agent's tile from its zone layer and its project's canvas file, kept the record settled and on disk, put the tile back at its world frame and zone on Undo, and opened a tile again from the row")
+        print("SettleClosesTileChecks passed: the nudge, the hover Settle, the row menu and the bulk bar each closed the settled agent's tile from its zone layer and its project's canvas file, kept the record settled and on disk, drew the row in the one History shelf under a 'Moved to History' toast, put the tile back at its world frame and zone on Undo, and opened a tile again from the row")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {
@@ -119,7 +119,7 @@ enum SettleClosesTileChecks {
             try expect(record?.settledOverride == .settled,
                        "\(target.agent.rawValue): Settle did not settle — \(String(describing: record?.settledOverride))")
             try expect(record?.archivedAt == nil,
-                       "\(target.agent.rawValue): Settle is not Archive; the agent must stay in Settled, not move to History")
+                       "\(target.agent.rawValue): Settle is not Archive; the record must stay settled, not archived")
             let stored = try storedRecord(world, target.agent)
             try expect(stored?.settledOverride == .settled,
                        "\(target.agent.rawValue): the settled record is not on disk — \(String(describing: stored?.settledOverride))")
@@ -132,9 +132,25 @@ enum SettleClosesTileChecks {
                        "\(target.agent.rawValue): the record still names the closed tile")
         }
 
+        // ONE History shelf: the settled row is drawn in History, and the toast
+        // names that place.
+        inbox.expandHistoryShelfForQA()
+        inbox.layoutForQA()
+        for target in targets {
+            let drawn = inbox.drawnBlockForQA(id: target.agent.rawValue)
+            try expect(drawn == "history",
+                       "\(target.agent.rawValue): a settled agent is drawn in History — drawn in \(String(describing: drawn)), headings \(inbox.shelfHeadingTitlesForQA)")
+        }
+        try expect(!inbox.shelfHeadingTitlesForQA.contains { $0.hasPrefix("Settled") },
+                   "no Settled heading is drawn — got \(inbox.shelfHeadingTitlesForQA)")
+
         // UNDO puts the lifecycle AND the tile back, where it was.
         try expect(!inbox.undoToastTextForQA.isEmpty, "Settle raised no Undo toast")
         let toast = inbox.undoToastTextForQA
+        let expectedToast = (targets.count > 1 ? "Moved \(targets.count) to History" : "Moved to History")
+            + " \(InboxUndoToast.separator) \(InboxUndoToast.undoTitle)"
+        try expect(toast == expectedToast,
+                   "the Settle toast names the place the agent went — got '\(toast)', want '\(expectedToast)'")
         try expect(inbox.clickUndoForQA(), "the Undo button could not be pressed")
         world.canvas.layoutSubtreeIfNeeded()
         for target in targets {
@@ -160,7 +176,7 @@ enum SettleClosesTileChecks {
         try expect(inbox.openRowMenuForQA(clickedRowId: agent.rawValue) && inbox.pickRowMenuItemForQA(.settle),
                    "could not settle a second time")
         try expect(world.supervisor.records[agent]?.tileId == nil, "the second Settle left the tile bound")
-        if inbox.drawnBlockForQA(id: agent.rawValue) == nil { inbox.expandSettledShelfForQA() }
+        if inbox.drawnBlockForQA(id: agent.rawValue) == nil { inbox.expandHistoryShelfForQA() }
         inbox.layoutForQA()
         try expect(inbox.clickRowForQA(id: agent.rawValue), "the settled row cannot be clicked open")
         world.canvas.layoutSubtreeIfNeeded()

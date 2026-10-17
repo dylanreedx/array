@@ -1525,12 +1525,10 @@ enum UIProbeGeometry {
         return IndependentFanoutExpectation(
             visibleIDs: sorted
                 .filter { !childIDs.contains($0.id) || selectedIDs.contains($0.id) }
-                // .plans/05-close-to-history.md: History is COLLAPSED by default,
-                // so a closed row is counted by a heading and not drawn. Read off
-                // the row's own lifecycle rather than calling `InboxSort.partition`
-                // — this oracle exists to disagree with the renderer's own model,
-                // and borrowing that model is how it would stop being able to.
-                .filter { if case .archived = $0.lifecycle { return false } else { return true } }
+                // Decisions pass: a bare view draws History — settled AND closed
+                // rows — inline under the live list, paged, with no heading of its
+                // own, so a closed row is drawn like a settled one. (The corpus
+                // keeps History within the first page; see the guard below.)
                 .map(\.id),
             remainders: [remainder])
     }
@@ -1548,7 +1546,7 @@ enum UIProbeGeometry {
             let parts = InboxSort.partition(rows: bounded.rows, now: LabFixtures.inboxNow)
             let shelf = parts.shelfCount > 0 ? 1 : 0
             let page = InboxSort.pageSettled(
-                parts.settled, limit: InboxSort.settledPageSize).hasMore ? 1 : 0
+                parts.history, limit: InboxSort.settledPageSize).hasMore ? 1 : 0
             return bounded.rows.count + shelf + page + bounded.remainders.count
         }
         let requiredRows = max(tableRows(for: defaultBounded), tableRows(for: expandedBounded))
@@ -1580,20 +1578,14 @@ enum UIProbeGeometry {
         let sorted = InboxSort.sortForInbox(rows: rows)
         let defaultVisibleRows = sorted.filter { expectedVisible.contains($0.id) }
         let parts = InboxSort.partition(rows: defaultVisibleRows, now: LabFixtures.inboxNow)
-        let page = InboxSort.pageSettled(parts.settled, limit: InboxSort.settledPageSize)
+        let page = InboxSort.pageSettled(parts.history, limit: InboxSort.settledPageSize)
         let expectedAgentIDs = (parts.active + parts.snoozed + page.shown).map(\.id)
         let expectedAgentCells = expectedAgentIDs.count
         let expectedShelfRows = parts.shelfCount > 0 ? 1 : 0
         let expectedPagingRows = page.hasMore ? 1 : 0
-        // .plans/05-close-to-history.md: a closed agent costs one heading row and
-        // no cell, which is the whole point of the section. Counted off `rows`
-        // and not off `parts`, because the closed rows were deliberately taken
-        // out of the visible set above — the heading is drawn for rows that are
-        // NOT on screen.
-        let expectedHistoryRows = rows.contains {
-            if case .archived = $0.lifecycle { return true } else { return false }
-        } ? 1 : 0
-        let expectedNonAgentRows = expectedShelfRows + expectedPagingRows + expectedHistoryRows
+        // Decisions pass: a bare view has no History heading — History is the
+        // inline paged tail, so a closed agent costs a cell like a settled one.
+        let expectedNonAgentRows = expectedShelfRows + expectedPagingRows
         let actualRemainders = probe.inbox.fanoutRemainderRowsForQA
         let expectedRemainderIDs = Set(expected.remainders.map(\.parentID))
         let actualRemainderIDs = Set(actualRemainders.map(\.parentId))
@@ -1795,19 +1787,11 @@ enum UIProbeGeometry {
               let defaultRemainder = probe.inbox.fanoutRemaindersByParentForQA[fanoutParent] else {
             throw fail("\(label): the capped parent did not render an explicit remainder")
         }
-        // EVERY ROW IS ACCOUNTED FOR: drawn, held behind a fan-out remainder, or —
-        // since .plans/05-close-to-history.md — counted by the collapsed History
-        // heading. The third bucket is named here rather than folded into
-        // `visibleIDs`, so "closed rows are off screen" stays a claim this line
-        // makes instead of an absence it cannot see.
-        let closedIDs = Set(rows.compactMap { row -> UUID? in
-            if case .archived = row.lifecycle { return row.id } else { return nil }
-        })
+        // EVERY ROW IS ACCOUNTED FOR: drawn (closed rows included — a bare view
+        // draws History inline, decisions pass) or held behind a fan-out remainder.
         guard Set(defaultRemainder.hiddenDescendantIDs).intersection(Set(expectedDefault.visibleIDs)).isEmpty,
-              closedIDs.intersection(Set(expectedDefault.visibleIDs)).isEmpty,
               Set(defaultRemainder.hiddenDescendantIDs)
-                .union(Set(expectedDefault.visibleIDs))
-                .union(closedIDs) == Set(rows.map(\.id)) else {
+                .union(Set(expectedDefault.visibleIDs)) == Set(rows.map(\.id)) else {
             throw fail("\(label): the remainder did not account for every hidden child without losing a visible id")
         }
 
@@ -1864,19 +1848,6 @@ enum UIProbeGeometry {
         probe.inbox.layoutForQA()
         probe.host.layoutSubtreeIfNeeded()
         probe.inbox.layoutForQA()
-        // .plans/05-close-to-history.md: the corpus carries a CLOSED row, and it
-        // sits behind the collapsed History heading. Open it through the heading's
-        // own control so "every corpus id materializes" stays a claim about the
-        // whole corpus — and so the live AppKit table, not just the model, is
-        // witnessed producing the row.
-        if closedIDs.isEmpty == false {
-            guard probe.inbox.clickHistoryDisclosureForQA(), probe.inbox.isHistoryExpandedForQA else {
-                throw fail("\(label): the History heading did not open, so its rows could not be materialized")
-            }
-            probe.inbox.layoutForQA()
-            probe.host.layoutSubtreeIfNeeded()
-            probe.inbox.layoutForQA()
-        }
         let expandedIDs = probe.inbox.rowIdsForQA
         guard expandedIDs == sortedRows.map(\.id),
               probe.inbox.qaMaterializedRowCellCount == rows.count,
@@ -4260,13 +4231,13 @@ enum UIProbeGeometry {
         guard Set(rows.map(\.id)).count == rows.count else {
             throw fail("sidebar-ux-check: corpus agent ids are not unique")
         }
-        // P4.8 pages the settled tail at `settledPageSize` rows, hiding the rest
-        // behind a footer that is not an agent cell. The corpus keeps its settled
-        // tail within the first page; a packet that needs a longer tail must
-        // expand paging here first.
-        let settledRows = rows.filter { InboxSort.section(for: $0.lifecycle, now: LabFixtures.inboxNow) == .settled }.count
-        guard settledRows <= InboxSort.settledPageSize else {
-            throw fail("sidebar-ux-check: corpus has \(settledRows) settled rows, past the \(InboxSort.settledPageSize)-row first page — expand paging in the probe before asserting cells == rows")
+        // P4.8 pages the History tail at `settledPageSize` rows, hiding the rest
+        // behind a footer that is not an agent cell. The corpus keeps History
+        // within the first page; a packet that needs a longer tail must expand
+        // paging here first.
+        let historyRows = rows.filter { InboxSort.section(for: $0.lifecycle, now: LabFixtures.inboxNow) == .history }.count
+        guard historyRows <= InboxSort.settledPageSize else {
+            throw fail("sidebar-ux-check: corpus has \(historyRows) History rows, past the \(InboxSort.settledPageSize)-row first page — expand paging in the probe before asserting cells == rows")
         }
         // P0.3: derive the host height from both the collapsed bounded contract
         // and the real expansion contract. A viewport must not make either state
@@ -5097,7 +5068,13 @@ enum UIProbeGeometry {
                     }
                     let owner = cell.accessibilityStatusOwner
                     let ownerWords = "\(accessibilityLabel(of: owner) ?? "") \(accessibilityValueString(of: owner))"
-                    let expectedStatus = row.isUnconfirmed ? "Unconfirmed" : (row.label ?? "Ready")
+                    // A bare view now draws History inline (decisions pass), so a
+                    // CLOSED row reaches this walk: it says Closed, never
+                    // Unconfirmed (.plans/05-close-to-history.md).
+                    let isClosedRow: Bool = { if case .archived = row.lifecycle { return true }; return false }()
+                    let expectedStatus = isClosedRow
+                        ? AgentStatusVocabulary.closed
+                        : (row.isUnconfirmed ? "Unconfirmed" : (row.label ?? "Ready"))
                     guard statusOwners.count == 1,
                           statusOwners.first.map({ ObjectIdentifier($0 as AnyObject) })
                               == ObjectIdentifier(owner),
@@ -5105,8 +5082,8 @@ enum UIProbeGeometry {
                               || accessibilityRole(of: owner) == .image),
                           ownerWords.contains("Status"),
                           ownerWords.contains(expectedStatus),
-                          !row.isUnconfirmed || ownerWords.contains("no live agent snapshot") else {
-                        throw fail("\(label): row \(row.displayTitle) did not have exactly one reachable semantic status owner with its current explanation")
+                          isClosedRow || !row.isUnconfirmed || ownerWords.contains("no live agent snapshot") else {
+                        throw fail("\(label): row \(row.displayTitle) did not have exactly one reachable semantic status owner with its current explanation — \(statusOwners.count) owners, said '\(ownerWords)', want '\(expectedStatus)'")
                     }
                     assertions += 6
                 }
@@ -5420,7 +5397,7 @@ enum UIProbeGeometry {
                     accessibilityRole(of: $0) == .button
                         && (accessibilityLabel(of: $0) ?? "").hasPrefix("Show \(InboxSort.settledPageStep) more")
                 }),
-                accessibilityValueString(of: more).contains("settled agents hidden") else {
+                accessibilityValueString(of: more).contains("agents hidden") else {
                     throw fail("\(label): settled-more footer lost enabled button/value semantics")
                 }
                 guard tailProbe.inbox.clickSettledMoreForQA() else {
@@ -5821,20 +5798,6 @@ enum UIProbeGeometry {
                 probe.inbox.layoutForQA()
                 probe.host.layoutSubtreeIfNeeded()
                 probe.inbox.layoutForQA()
-                // .plans/05-close-to-history.md: the corpus's closed row is behind
-                // the collapsed History heading, so "every row materializes" means
-                // opening that section too — through its own control, as with the
-                // fan-out remainder above.
-                if rows.contains(where: {
-                    if case .archived = $0.lifecycle { return true } else { return false }
-                }) {
-                    guard probe.inbox.clickHistoryDisclosureForQA() else {
-                        throw fail("ui-geometry-check: sidebar gate could not open History at \(gate.name)")
-                    }
-                    probe.inbox.layoutForQA()
-                    probe.host.layoutSubtreeIfNeeded()
-                    probe.inbox.layoutForQA()
-                }
                 let geometries = probe.inbox.qaRowGeometriesForQA
                 guard geometries.count == rows.count,
                       probe.inbox.rowIdsForQA == InboxSort.sortForInbox(rows: rows).map(\.id),

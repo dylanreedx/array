@@ -227,6 +227,10 @@ public struct AgentSoundManifestEntry: Codable, Equatable, Identifiable, Sendabl
 
 public enum AgentSoundConfig {
     public static let masterEnabledKey = "continuum.agentSounds.enabled"
+    /// ON when nobody has set it (decisions pass). Every event rule stays opt-in
+    /// (`AgentSoundRules.defaults`), so a fresh install still hears nothing until
+    /// an event is turned on, and turning one on then just works.
+    public static let defaultMasterEnabled = true
     public static let volumeKey = "continuum.agentSounds.volume"
     public static let defaultVolume = 0.72
 
@@ -250,6 +254,12 @@ public enum AgentSoundConfig {
         return AgentSoundRules(rules: values)
     }
 
+    /// The master switch, with an unset key reading `defaultMasterEnabled`. An
+    /// explicit value — on or off — is kept.
+    public static func isMasterEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: masterEnabledKey) == nil ? defaultMasterEnabled : defaults.bool(forKey: masterEnabledKey)
+    }
+
     public static func resolvedVolume(defaults: UserDefaults = .standard) -> Double {
         guard defaults.object(forKey: volumeKey) != nil else { return defaultVolume }
         return min(1, max(0, defaults.double(forKey: volumeKey)))
@@ -261,7 +271,7 @@ public enum AgentSoundConfig {
         available: Set<AgentSoundReference>,
         defaults: UserDefaults = .standard
     ) -> AgentSoundReference? {
-        guard defaults.bool(forKey: masterEnabledKey),
+        guard isMasterEnabled(defaults: defaults),
               let global = resolvedRules(defaults: defaults).rules[kind] else { return nil }
         switch tileOverrides?.values[kind] ?? .inherit {
         case .mute: return nil

@@ -18,8 +18,6 @@ final class SettingsModel {
     @ObservationIgnored let defaults: UserDefaults
     @ObservationIgnored let sections: [SettingsSection]
     @ObservationIgnored let soundLibrary: AgentSoundLibrary
-    /// The iPhone pane appears only when the companion is available.
-    let isCompanionEnabled: Bool
 
     // MARK: Hooks the app supplies
 
@@ -94,16 +92,14 @@ final class SettingsModel {
         sections: [SettingsSection] = SettingsSchema.sections(),
         defaults: UserDefaults,
         navKeymap: NavKeymap,
-        isCompanionEnabled: Bool,
         soundLibrary: AgentSoundLibrary = .shared,
         initialPaneID: String? = nil
     ) {
         self.sections = sections
         self.defaults = defaults
         self.navKeymap = navKeymap
-        self.isCompanionEnabled = isCompanionEnabled
         self.soundLibrary = soundLibrary
-        let visible = sections.filter { $0.id != "companion" || isCompanionEnabled }.map(\.id)
+        let visible = sections.map(\.id)
         let remembered = defaults.string(forKey: Self.lastPaneKey)
         self.selectedPaneID = [initialPaneID, remembered].compactMap { $0 }.first(where: visible.contains)
             ?? visible.first ?? "general"
@@ -126,9 +122,9 @@ final class SettingsModel {
 
     // MARK: Panes
 
-    var visiblePanes: [SettingsSection] {
-        sections.filter { $0.id != "companion" || isCompanionEnabled }
-    }
+    /// Every pane, always — the iPhone pane included (decisions pass: "we can
+    /// always show iPhone page"), whether or not this Mac has a relay identity.
+    var visiblePanes: [SettingsSection] { sections }
 
     var selectedPane: SettingsSection? {
         visiblePanes.first { $0.id == selectedPaneID }
@@ -258,7 +254,7 @@ final class SettingsModel {
     // MARK: Sounds
 
     var soundsEnabled: Bool {
-        get { _ = revision; return defaults.bool(forKey: AgentSoundConfig.masterEnabledKey) }
+        get { _ = revision; return AgentSoundConfig.isMasterEnabled(defaults: defaults) }
         set { defaults.set(newValue, forKey: AgentSoundConfig.masterEnabledKey); revision += 1 }
     }
 

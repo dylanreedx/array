@@ -2517,6 +2517,11 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         await toolDetailRefreshTask?.value
     }
 
+    /// Everything this list's local tool-detail store is holding right now.
+    func qaToolDetailRecords() async -> [AgentToolDetailRecord] {
+        await toolDetailStore?.allDetails() ?? []
+    }
+
     private func scheduleToolDetailRefresh() {
         guard let toolDetailStore else {
             refreshVisibleToolDetails()

@@ -129,8 +129,7 @@ enum SettingsSelfChecks {
         // Custom rows mount the app's views; sentinels prove the mount.
         var mounts: [String: Int] = [:]
         var sentinels: [String: NSView] = [:]
-        let model = SettingsModel(sections: sections, defaults: defaults, navKeymap: .resolve(defaults: defaults, warn: { _ in }),
-                                  isCompanionEnabled: true)
+        let model = SettingsModel(sections: sections, defaults: defaults, navKeymap: .resolve(defaults: defaults, warn: { _ in }))
         for id in ["companion"] {
             let sentinel = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 80))
             sentinels[id] = sentinel
@@ -146,12 +145,11 @@ enum SettingsSelfChecks {
         defer { fixture.tearDown() }
         fixture.show()
 
-        // 1. The sidebar is the schema; the iPhone pane only when the companion is on.
-        try expect(model.visiblePanes.map(\.id) == sections.map(\.id),
-                   "sidebar panes \(model.visiblePanes.map(\.id)) must mirror the schema")
-        let noCompanion = SettingsModel(sections: sections, defaults: defaults, navKeymap: .default, isCompanionEnabled: false)
-        try expect(!noCompanion.visiblePanes.contains { $0.id == "companion" } && noCompanion.visiblePanes.count == sections.count - 1,
-                   "the iPhone pane must be hidden while the companion is off")
+        // 1. The sidebar is the schema, the iPhone pane always included (decisions
+        // pass) — it used to be hidden on prod without a relay identity.
+        try expect(model.visiblePanes.map(\.id) == sections.map(\.id)
+                   && model.visiblePanes.contains { $0.id == "companion" },
+                   "sidebar panes \(model.visiblePanes.map(\.id)) must mirror the schema, iPhone included")
 
         // 2. Census: each pane renders exactly the rows its registry entries name.
         for section in sections {
@@ -314,7 +312,7 @@ enum SettingsSelfChecks {
         defer { defaults.removePersistentDomain(forName: suite) }
 
         let baseKeymap = NavKeymap.resolve(defaults: defaults, warn: { _ in })
-        let model = SettingsModel(defaults: defaults, navKeymap: baseKeymap, isCompanionEnabled: false)
+        let model = SettingsModel(defaults: defaults, navKeymap: baseKeymap)
         var liveKeymap = baseKeymap
         model.onKeymapChanged = { liveKeymap = $0 }
         let fixture = SettingsFixtureWindow(model: model)

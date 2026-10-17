@@ -24,12 +24,12 @@ enum ShellToolRowChecks {
         // Every harness runs and reports, so one red harness cannot hide another.
         var lines: [String] = []
         var failures: [String] = []
-        for section in [checkCodexAppServer, checkCodexExecArgv, checkClaude, checkPi, checkCrossHarnessParity] {
+        for section in [checkCodexAppServer, checkCodexExecArgv, checkClaude, checkPi, checkCrossHarnessParity, checkCommandsSettingOff] {
             do { lines += try await section() } catch { failures.append(String(describing: error)) }
         }
         guard failures.isEmpty else { throw fail(failures.joined(separator: "\n")) }
         for line in lines { print("  \(line)") }
-        print("ShellToolRowChecks passed: \(lines.count) shell rows across codex app-server, codex exec, claude and pi name the command, hide a zero exit, badge a non-zero one, and show a duration only when it is real; codex app-server, codex exec and claude draw the same command as one row geometry and type size")
+        print("ShellToolRowChecks passed: \(lines.count) shell rows across codex app-server, codex exec, claude and pi name the command, hide a zero exit, badge a non-zero one, and show a duration only when it is real; codex app-server, codex exec and claude draw the same command as one row geometry and type size; with \"Show shell commands in transcripts\" off, codex app-server, claude and pi keep no command or cwd on the observation channel or in the store, and their rows name the tool, not the command, with the exit badge intact")
     }
 
     // MARK: - Harness drivers
@@ -67,17 +67,20 @@ enum ShellToolRowChecks {
     /// Feeds raw provider lines through one translator into one tile, the way
     /// production delivers them: observations as the translator fires them,
     /// then the events it returns, each rebound to the tile's thread.
+    @discardableResult
     private static func drive(
         _ tile: ManagedAgentTileNSView,
         lines: [String],
         translate: (String, @escaping @Sendable (AgentRuntimeObservation) -> Void) -> [AgentRuntimeEvent]
-    ) {
+    ) -> [AgentRuntimeObservation] {
         final class Inbox: @unchecked Sendable {
             var observations: [AgentRuntimeObservation] = []
         }
+        var everything: [AgentRuntimeObservation] = []
         for line in lines {
             let inbox = Inbox()
             let events = translate(line) { inbox.observations.append($0) }
+            everything += inbox.observations
             for observation in inbox.observations {
                 tile.qaTranscriptForChecks?.captureRuntimeObservation(observation)
             }
@@ -85,6 +88,7 @@ enum ShellToolRowChecks {
                 tile.ingest(event.withThreadId(tile.qaThreadIdForChecks), originalEvent: event)
             }
         }
+        return everything
     }
 
     /// The tool blocks in the tile's document, keyed by provider item id.
@@ -485,6 +489,167 @@ enum ShellToolRowChecks {
         try expectHeadline(running, contains: "sleep 30", "pi running")
         try expectRunning(running, "pi running")
         return [ok, failed, timedOut, aborted, running].map(\.description)
+    }
+
+    // MARK: - "Show shell commands in transcripts" OFF (decisions pass)
+
+    /// With the setting off, the command and its folder never leave the
+    /// translator: not on the observation channel, not in the tile's store, not
+    /// in the row. The row falls back to the description or the tool's name and
+    /// keeps its status, exit badge included.
+    static func checkCommandsSettingOff() async throws -> [String] {
+        let suiteName = "array.shell-tool-row.off.\(UUID().uuidString)"
+        guard let off = UserDefaults(suiteName: suiteName) else { throw fail("could not create the settings suite") }
+        defer { off.removePersistentDomain(forName: suiteName) }
+        // Written with the key the Settings row writes.
+        off.set(false, forKey: TranscriptShellCommandConfig.key)
+        let commandWords = ["echo", "hi-from-codex", "ls /nope", "/nope", "git status", "sleep", "zsh", "/tmp/fixture"]
+
+        func leaks(_ observations: [AgentRuntimeObservation]) -> [String] {
+            observations.compactMap { observation -> String? in
+                guard case let .toolDetail(id, detail) = observation else { return nil }
+                let keys = detail.fields.map(\.key).filter {
+                    $0 == AgentToolDetailObservation.shellCommandKey || $0 == AgentToolDetailObservation.shellCwdKey
+                }
+                return keys.isEmpty ? nil : "\(id): \(keys)"
+            }
+        }
+        func storeLeaks(_ tile: ManagedAgentTileNSView) async -> [String] {
+            let records = await tile.qaTranscriptForChecks?.qaToolDetailRecords() ?? []
+            return records.flatMap { record in
+                record.arguments.filter {
+                    $0.key == AgentToolDetailObservation.shellCommandKey || $0.key == AgentToolDetailObservation.shellCwdKey
+                }.map { "\(record.identity.providerItemID): \($0.key)=\($0.value.text)" }
+            }
+        }
+        func expectNoCommandText(_ row: RenderedRow, _ label: String) throws {
+            let headline = [row.title, row.compact].joined(separator: " ")
+            for word in commandWords where headline.contains(word) {
+                throw fail("\(label): with the setting off the row must not name the command, found '\(word)' — \(row)")
+            }
+        }
+        var lines: [String] = []
+
+        // Codex app-server: the success and the exit-2 command, run away from home.
+        do {
+            let (tile, window) = makeTile("shell-off-codex")
+            defer { window.orderOut(nil) }
+            let thread = "00000000-0000-4000-8000-0000000000F1"
+            let turn = "00000000-0000-4000-8000-0000000000F2"
+            func frame(_ method: String, id: String, command: String, output: String?, exit: Int?, status: String) -> String {
+                let item: [String: Any] = [
+                    "aggregatedOutput": output as Any? ?? NSNull(), "command": command, "commandActions": [] as [Any],
+                    "cwd": "/tmp/fixture/sub", "durationMs": exit == nil ? NSNull() as Any : 1240 as Any,
+                    "exitCode": exit as Any? ?? NSNull(), "id": id, "processId": "4242",
+                    "source": "unifiedExecStartup", "status": status, "type": "commandExecution",
+                ]
+                let data = try! JSONSerialization.data(withJSONObject: [
+                    "method": method, "params": ["item": item, "threadId": thread, "turnId": turn],
+                ] as [String: Any], options: [.sortedKeys])
+                return String(decoding: data, as: UTF8.self)
+            }
+            var translator = CodexAppServerEventTranslator(
+                workingDirectory: URL(fileURLWithPath: "/tmp/fixture"),
+                now: { Date(timeIntervalSinceReferenceDate: 813_000_000) })
+            translator.settingsDefaults = off
+            let observed = drive(tile, lines: [
+                #"{"method":"thread/started","params":{"thread":{"id":"\#(thread)","cwd":"/tmp/fixture"}}}"#,
+                #"{"method":"turn/started","params":{"threadId":"\#(thread)","turn":{"id":"\#(turn)","items":[],"status":"inProgress","error":null}}}"#,
+                frame("item/started", id: "off-ok", command: "/bin/zsh -lc 'echo hi-from-codex'", output: nil, exit: nil, status: "inProgress"),
+                frame("item/completed", id: "off-ok", command: "/bin/zsh -lc 'echo hi-from-codex'", output: "hi-from-codex\n", exit: 0, status: "completed"),
+                frame("item/started", id: "off-fail", command: "/bin/zsh -lc 'ls /nope'", output: nil, exit: nil, status: "inProgress"),
+                frame("item/completed", id: "off-fail", command: "/bin/zsh -lc 'ls /nope'", output: "ls: /nope: No such file or directory\n", exit: 2, status: "failed"),
+            ]) { line, sink in
+                translator.onRuntimeObservation = sink
+                return translator.translate(line: line)
+            }
+            try await settle(tile)
+            let leaked = leaks(observed)
+            guard leaked.isEmpty else { throw fail("codex app-server off: the command or cwd crossed the observation channel — \(leaked)") }
+            let stored = await storeLeaks(tile)
+            guard stored.isEmpty else { throw fail("codex app-server off: the store kept \(stored)") }
+            let ok = try render(tile, itemID: "off-ok")
+            try expectNoCommandText(ok, "codex app-server off")
+            guard ok.title == "Shell" else { throw fail("codex app-server off: the row falls back to the tool's name 'Shell' — \(ok)") }
+            try expectNoExitText(ok, "codex app-server off")
+            let failed = try render(tile, itemID: "off-fail")
+            try expectNoCommandText(failed, "codex app-server off, exit 2")
+            guard failed.status.contains("exit 2") else { throw fail("codex app-server off: the exit badge must survive — \(failed)") }
+            // The shell's own duration rules survive too: codex measured 1240ms.
+            guard ok.status.contains("1.2s"), failed.status.contains("1.2s") else {
+                throw fail("codex app-server off: codex measured 1240ms, so the rows must say 1.2s, not the frame gap — \(ok) / \(failed)")
+            }
+            lines += ["off " + ok.description, "off " + failed.description]
+        }
+
+        // Claude Code: a Bash call with a description, and one without.
+        do {
+            let (tile, window) = makeTile("shell-off-claude")
+            defer { window.orderOut(nil) }
+            var translator = ClaudeEventTranslator(runToken: "shell-off", now: { Date(timeIntervalSinceReferenceDate: 813_000_000) })
+            translator.settingsDefaults = off
+            let observed = drive(tile, lines: [
+                #"{"type":"system","subtype":"init","session_id":"shell-off","cwd":"/tmp/fixture","model":"claude-fixture"}"#,
+                #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_off_desc","name":"Bash","input":{"command":"git status --short","description":"Check the working tree"}}]},"parent_tool_use_id":null}"#,
+                #"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_off_desc","type":"tool_result","content":" M README.md","is_error":false}]},"parent_tool_use_id":null,"tool_use_result":{"stdout":" M README.md","stderr":"","interrupted":false}}"#,
+                #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_off_fail","name":"Bash","input":{"command":"ls /nope"}}]},"parent_tool_use_id":null}"#,
+                #"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_off_fail","type":"tool_result","content":"Exit code 2\nls: /nope: No such file or directory","is_error":true}]},"parent_tool_use_id":null,"tool_use_result":"Error: Exit code 2\nls: /nope: No such file or directory"}"#,
+            ]) { line, sink in
+                translator.onRuntimeObservation = sink
+                return translator.translate(line: line)
+            }
+            try await settle(tile)
+            let leaked = leaks(observed)
+            guard leaked.isEmpty else { throw fail("claude off: the command crossed the observation channel — \(leaked)") }
+            let stored = await storeLeaks(tile)
+            guard stored.isEmpty else { throw fail("claude off: the store kept \(stored)") }
+            let described = try render(tile, itemID: "toolu_off_desc")
+            try expectNoCommandText(described, "claude off, described")
+            guard described.title.contains("Check the working tree") else {
+                throw fail("claude off: the row falls back to the description — \(described)")
+            }
+            let failed = try render(tile, itemID: "toolu_off_fail")
+            try expectNoCommandText(failed, "claude off, exit 2")
+            guard failed.title == "Bash", failed.status.contains("exit 2") else {
+                throw fail("claude off: no description, so the row reads 'Bash' with its exit badge — \(failed)")
+            }
+            // A clock that never moves: no real duration exists, so none is shown.
+            try expectNoDuration(described, "claude off, described")
+            try expectNoDuration(failed, "claude off, exit 2")
+            lines += ["off " + described.description, "off " + failed.description]
+        }
+
+        // Pi: a bash call that succeeds and one that exits 2.
+        do {
+            let (tile, window) = makeTile("shell-off-pi")
+            defer { window.orderOut(nil) }
+            var translator = PiEventTranslator(now: { Date(timeIntervalSinceReferenceDate: 813_000_000) })
+            translator.settingsDefaults = off
+            let observed = drive(tile, lines: [
+                #"{"type":"session","id":"shell-off-pi","cwd":"/tmp/fixture"}"#,
+                #"{"type":"agent_start"}"#,
+                #"{"ts":"2026-10-16T10:00:00.000Z","type":"tool_execution_start","toolCallId":"pi_off_ok","toolName":"bash","args":{"command":"echo ok-from-pi"}}"#,
+                #"{"ts":"2026-10-16T10:00:00.300Z","type":"tool_execution_end","toolCallId":"pi_off_ok","toolName":"bash","result":{"content":[{"type":"text","text":"ok"}]},"isError":false}"#,
+                #"{"ts":"2026-10-16T10:00:01.000Z","type":"tool_execution_start","toolCallId":"pi_off_fail","toolName":"bash","args":{"command":"ls /nope"}}"#,
+                #"{"ts":"2026-10-16T10:00:03.500Z","type":"tool_execution_end","toolCallId":"pi_off_fail","toolName":"bash","result":{"content":[{"type":"text","text":"ls: /nope: No such file or directory\n\nCommand exited with code 2"}]},"isError":true}"#,
+            ]) { line, sink in
+                translator.onRuntimeObservation = sink
+                return translator.translate(line: line)
+            }
+            try await settle(tile)
+            let leaked = leaks(observed)
+            guard leaked.isEmpty else { throw fail("pi off: the command crossed the observation channel — \(leaked)") }
+            let stored = await storeLeaks(tile)
+            guard stored.isEmpty else { throw fail("pi off: the store kept \(stored)") }
+            let ok = try render(tile, itemID: "pi_off_ok")
+            try expectNoCommandText(ok, "pi off")
+            guard !ok.title.contains("ok-from-pi") else { throw fail("pi off: the row names the command — \(ok)") }
+            let failed = try render(tile, itemID: "pi_off_fail")
+            try expectNoCommandText(failed, "pi off, exit 2")
+            guard failed.status.contains("exit 2") else { throw fail("pi off: the exit badge must survive — \(failed)") }
+            lines += ["off " + ok.description, "off " + failed.description]
+        }
+        return lines
     }
 
     // MARK: - One component across harnesses (launch polish, item M)

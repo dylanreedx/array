@@ -101,8 +101,10 @@ public enum WorkspaceSidebarConfig {
 
     // Confidence pass (sidebar stream): whether each counted shelf was left open.
     // Collapsed is the default (absent key); T3 nightly persists the same fact.
+    // Decisions pass: settled and closed agents share ONE History shelf, so the
+    // former `settled` key is no longer read.
     public enum Shelf: String, CaseIterable, Sendable {
-        case snoozed, settled, history
+        case snoozed, history
     }
 
     public static func shelfKey(_ shelf: Shelf) -> String {

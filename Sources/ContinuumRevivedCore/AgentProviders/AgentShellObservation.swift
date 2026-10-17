@@ -1,6 +1,21 @@
 import ContinuumRevivedAgentContent
 import Foundation
 
+/// Settings › Agents › Transcript › "Show shell commands in transcripts".
+///
+/// ON keeps the command an agent ran (and the folder it ran in) in the tile's
+/// local tool-detail store, so the transcript row can name it. OFF keeps
+/// neither: the translators never put them on the observation channel, so no
+/// store, buffer or row downstream can hold them. Never synced either way.
+public enum TranscriptShellCommandConfig {
+    public static let key = "continuum.transcript.showShellCommands"
+    public static let defaultEnabled = true
+
+    public static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: key) == nil ? defaultEnabled : defaults.bool(forKey: key)
+    }
+}
+
 /// Launch polish, item J — the provider-specific halves of reading one shell
 /// command, shared by the three translators so each harness's quirks live in
 /// one place:
@@ -21,8 +36,10 @@ enum AgentShellObservation {
 
     /// The `command` detail field from a provider's raw command value, wrapper
     /// removed. Newlines and tabs survive (a command can be a script); every
-    /// other control character is dropped.
-    static func commandField(_ raw: Any?) -> (key: String, value: String)? {
+    /// other control character is dropped. Nil, before anything is read, when
+    /// "Show shell commands in transcripts" is off in `defaults`.
+    static func commandField(_ raw: Any?, defaults: UserDefaults) -> (key: String, value: String)? {
+        guard TranscriptShellCommandConfig.isEnabled(defaults: defaults) else { return nil }
         let command: String
         if let string = raw as? String {
             command = AgentShellInvocation.unwrapShellWrapper(string)
@@ -42,9 +59,11 @@ enum AgentShellObservation {
 
     /// The `cwd` detail field, only when the command ran somewhere other than
     /// the agent's home — and then as a path relative to that home, or the last
-    /// two components, never a full machine path.
-    static func cwdField(_ raw: String?, home: URL?) -> (key: String, value: String)? {
-        guard let raw, !raw.isEmpty, (raw as NSString).isAbsolutePath,
+    /// two components, never a full machine path. Nil when the setting is off,
+    /// like the command it belongs to.
+    static func cwdField(_ raw: String?, home: URL?, defaults: UserDefaults) -> (key: String, value: String)? {
+        guard TranscriptShellCommandConfig.isEnabled(defaults: defaults),
+              let raw, !raw.isEmpty, (raw as NSString).isAbsolutePath,
               !raw.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
         else { return nil }
         let cwd = URL(fileURLWithPath: raw, isDirectory: true).standardizedFileURL.pathComponents

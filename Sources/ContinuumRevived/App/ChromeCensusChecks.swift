@@ -391,7 +391,7 @@ enum CornerStyleChecks {
         let observer = CornerStyleController.observeSetting(defaults: defaults)
         defer { NotificationCenter.default.removeObserver(observer) }
 
-        let model = SettingsModel(defaults: defaults, navKeymap: .default, isCompanionEnabled: false)
+        let model = SettingsModel(defaults: defaults, navKeymap: .default)
         guard let appearance = model.sections.first(where: { $0.id == "appearance" }),
               let row = appearance.groups.flatMap(\.rows).first(where: { $0.field.key == CornerStyle.defaultsKey }),
               case let .choice(_, label, options, defaultValue, _) = row.field else {

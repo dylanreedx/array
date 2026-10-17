@@ -449,7 +449,7 @@ enum UITourCheck {
         NSApp?.appearance = appearance
         defer { NSApp?.appearance = appAppearance }
 
-        let model = SettingsModel(defaults: defaults, navKeymap: .default, isCompanionEnabled: false)
+        let model = SettingsModel(defaults: defaults, navKeymap: .default)
         let fixture = SettingsFixtureWindow(model: model, appearance: appearance)
         defer { fixture.tearDown() }
         fixture.show(paneID: "general")

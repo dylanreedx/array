@@ -358,10 +358,10 @@ public struct TilelessAgentPaletteRow: Equatable, Sendable {
     /// Model display name or provider id — the same metadata the inbox row
     /// shows, searchable without becoming part of the command identity.
     public let detail: String?
-    /// Closed (`InboxSection.history`) rather than merely tile-less. Decides
-    /// History vs the live categories, and it is asked of
-    /// `InboxSort.section(for:now:)` at the call site so this type never owns a
-    /// second copy of the rule.
+    /// Closed (archived) rather than merely tile-less. Decides History vs the
+    /// live categories. Asked of `InboxLifecycle.isArchived` at the call site:
+    /// the sidebar's History section also holds SETTLED agents (decisions pass),
+    /// which the command center keeps offering as live agents to open.
     public let isClosed: Bool
     /// Live status word, when the agent has a turn snapshot.
     public let statusLabel: String?

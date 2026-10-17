@@ -362,19 +362,22 @@ private func runInboxLifecycleMovesRowCheck() {
     expect(afterSnooze == [rowThree, rowFour, rowFive, rowTwo, rowOne],
            "snoozing shelves the row between the live rows and history, got \(afterSnooze)")
 
-    // Archiving is the strongest park there is (.plans/05-close-to-history.md), so
-    // it demotes the row PAST history — below even a settled one. Before that plan
-    // this asserted the opposite ("archiving does not reorder"), which was only
-    // true because archiving deleted the record and no archived row could reach a
-    // sort.
+    // Archiving moves the row into History (.plans/05-close-to-history.md) — the
+    // SAME History a settled row is in (decisions pass, "one history shelf"), so
+    // the two order by when each ended: closed at 9000 is newer than settled at
+    // 900, so the closed row leads. Before the one shelf this asserted the
+    // opposite ("the settled row stays ABOVE the closed one"), when History was a
+    // second block below the settled tail.
     var archivedList = settledList
     let middle = archivedList.firstIndex { $0.id == rowThree }!
     archivedList[middle] = withLifecycle(archivedList[middle], .archived(at: sortEpoch.addingTimeInterval(9_000)))
     let afterArchive = InboxSort.sortForInbox(rows: archivedList).map(\.id)
-    expect(afterArchive == [rowTwo, rowFour, rowFive, rowOne, rowThree],
-           "archiving moves the row below history, at the very end of the list, got \(afterArchive)")
-    expect(afterArchive.last == rowThree && afterArchive.dropLast().contains(rowOne),
-           "the settled row stays ABOVE the closed one — History is further away than the tail")
+    expect(afterArchive == [rowTwo, rowFour, rowFive, rowThree, rowOne],
+           "archiving moves the row into History, ordered with the settled row by end time, got \(afterArchive)")
+    var olderClose = settledList
+    olderClose[middle] = withLifecycle(olderClose[middle], .archived(at: sortEpoch.addingTimeInterval(100)))
+    expect(InboxSort.sortForInbox(rows: olderClose).map(\.id) == [rowTwo, rowFour, rowFive, rowOne, rowThree],
+           "…and a close OLDER than the settle sorts after it — one shelf, one order")
 }
 
 // MARK: - 4 · history is ordered by when work ENDED
@@ -766,14 +769,14 @@ private func runInboxPartitionCheck() {
     // 1 · EXHAUSTIVE AND DISJOINT, asserted as the two halves they are: every row
     // is somewhere, and no row is in two places. `all` being a permutation is the
     // conjunction, and it is checked as a SEQUENCE so the section order is pinned
-    // too — active, then the shelf, then the tail.
-    let sectioned = parts.active + parts.snoozed + parts.settled
+    // too — active, then the shelf, then History.
+    let sectioned = parts.active + parts.snoozed + parts.history
     expect(Set(sectioned.map(\.id)) == Set(rows.map(\.id)),
            "every row lands in a section — \(sectioned.count) of \(rows.count)")
     expect(sectioned.count == rows.count && Set(sectioned.map(\.id)).count == sectioned.count,
            "no row lands in two sections — \(sectioned.count) placements for \(Set(sectioned.map(\.id)).count) rows")
     expect(parts.all.map(\.id) == [rowOne, rowFour, rowTwo, rowFive, rowThree],
-           "the sections draw active, then the shelf, then the tail — got \(parts.all.map { $0.title.suffix(2) })")
+           "the sections draw active, then the shelf, then History — got \(parts.all.map { $0.title.suffix(2) })")
     // …and each section keeps the order it was handed, so the frozen order (P3.4)
     // survives the split rather than being re-sorted by it.
     expect(parts.active.map(\.id) == rows.filter { parts.active.contains($0) }.map(\.id)
@@ -785,11 +788,11 @@ private func runInboxPartitionCheck() {
     // holding, not what is on screen.
     expect(parts.shelfCount == 2 && parts.shelfCount == parts.snoozed.count,
            "the shelf count is its own contents — \(parts.shelfCount) against \(parts.snoozed.count)")
-    expect(parts.visible(shelfExpanded: false).map(\.id) == [rowOne, rowFour, rowThree],
-           "a collapsed shelf takes its rows off the list and nothing else — got \(parts.visible(shelfExpanded: false).map { $0.title.suffix(2) })")
-    expect(parts.visible(shelfExpanded: true).map(\.id) == parts.all.map(\.id),
+    expect(parts.visible(shelfExpanded: false, historyExpanded: true).map(\.id) == [rowOne, rowFour, rowThree],
+           "a collapsed shelf takes its rows off the list and nothing else — got \(parts.visible(shelfExpanded: false, historyExpanded: true).map { $0.title.suffix(2) })")
+    expect(parts.visible(shelfExpanded: true, historyExpanded: true).map(\.id) == parts.all.map(\.id),
            "…and an open one shows every row, in the same order")
-    expect(parts.visible(shelfExpanded: false).count + parts.shelfCount == rows.count,
+    expect(parts.visible(shelfExpanded: false, historyExpanded: true).count + parts.shelfCount == rows.count,
            "what is hidden plus what is shown is the whole list")
 
     // 3 · A WOKEN AGENT IS IN `active`, NOT ON THE SHELF. Two wakes, because there
@@ -834,6 +837,17 @@ private func runInboxPartitionCheck() {
     // fifth case cannot fall through the view's `switch` into the wrong block.
     expect(InboxSort.section(for: .archived(at: now), now: now) == .history,
            "a closed row draws in History, the section it was closed into")
+    // ONE HISTORY SHELF (decisions pass): a settled row is in the same section as
+    // a closed one, and the two interleave by when each ended, newest first.
+    expect(InboxSort.section(for: .settled(at: now), now: now) == .history,
+           "a settled row draws in History too — there is no second shelf")
+    let ended = InboxSort.partition(rows: InboxSort.sortForInbox(rows: [
+        sortRow(rowOne, spawnedAfter: 30, lifecycle: .archived(at: now.addingTimeInterval(-300))),
+        sortRow(rowTwo, spawnedAfter: 20, lifecycle: .settled(at: now.addingTimeInterval(-120))),
+        sortRow(rowThree, spawnedAfter: 10, lifecycle: .archived(at: now.addingTimeInterval(-60))),
+    ]), now: now)
+    expect(ended.history.map(\.id) == [rowThree, rowTwo, rowOne] && ended.historyCount == 3,
+           "History holds settled and closed rows together, most recently ended first — got \(ended.history.map { $0.title.suffix(2) })")
     expect(InboxSort.section(for: .snoozed(until: now), now: now) == .active,
            "the shelf boundary is `>`, the same one `resolve` uses")
     expect(InboxSort.partition(rows: [], now: now) == InboxPartition(),
@@ -892,7 +906,7 @@ private func runInboxSettledPagingCheck() {
 
     // 1 · THIRTY SETTLED ROWS SHOW TEN, and the footer's number is the rest.
     let thirty = InboxSort.partition(
-        rows: InboxSort.sortForInbox(rows: (0..<30).map(settledRow)), now: now).settled
+        rows: InboxSort.sortForInbox(rows: (0..<30).map(settledRow)), now: now).history
     expect(thirty.count == 30 && thirty.map(\.title) == (0..<30).map { "S\($0)" },
            "setup: the tail arrives most-recently-ended first — got \(thirty.prefix(3).map(\.title))")
     let first = InboxSort.pageSettled(thirty, limit: InboxSort.settledPageSize)
@@ -909,7 +923,7 @@ private func runInboxSettledPagingCheck() {
     // rest of the list" are the same list, so a page that revealed EVERYTHING on the
     // first press would pass. Here it must reveal exactly 25 more and keep 25 back.
     let sixty = InboxSort.partition(
-        rows: InboxSort.sortForInbox(rows: (0..<60).map(settledRow)), now: now).settled
+        rows: InboxSort.sortForInbox(rows: (0..<60).map(settledRow)), now: now).history
     let opened = InboxSort.pageSettled(
         sixty, limit: InboxSort.settledPageSize + InboxSort.settledPageStep)
     expect(opened.shown.count == 35 && opened.shown.map(\.title) == (0..<35).map { "S\($0)" },
@@ -953,11 +967,11 @@ private func runInboxSettledPagingCheck() {
         sortRow(rowTwo, spawnedAfter: 400, lifecycle: .snoozed(until: now.addingTimeInterval(3_600))),
     ])
     let parts = InboxSort.partition(rows: mixed, now: now)
-    let page = InboxSort.pageSettled(parts.settled, limit: InboxSort.settledPageSize)
+    let page = InboxSort.pageSettled(parts.history, limit: InboxSort.settledPageSize)
     expect(parts.active.map(\.id) == [rowOne] && parts.snoozed.map(\.id) == [rowTwo],
            "paging the tail leaves the active block and the shelf whole — \(parts.active.count) active, \(parts.snoozed.count) shelved")
     expect(page.shown.count == 10 && page.hidden == 2,
-           "…and pages only the settled rows of a mixed list — \(page.shown.count) shown of \(parts.settled.count)")
+           "…and pages only the History rows of a mixed list — \(page.shown.count) shown of \(parts.history.count)")
 
     // Totality at the edges: a tail that fits has no footer, and a limit of nothing
     // still holds a page's worth of nothing rather than trapping the caller.

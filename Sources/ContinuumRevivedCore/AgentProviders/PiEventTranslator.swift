@@ -85,6 +85,9 @@ public struct PiEventTranslator {
     /// The callback fires on the translator's owner queue before the matching
     /// normalized event is returned.
     public var onRuntimeObservation: (@Sendable (AgentRuntimeObservation) -> Void)?
+    /// Where `TranscriptShellCommandConfig` is read, per command, so flipping
+    /// the setting applies to the next command a running agent issues.
+    public var settingsDefaults: UserDefaults = .standard
 
     /// CX-01 (`.plans/59`, §15) — an Array-owned request the pi extension made
     /// through `ctx.ui.input`, arriving as an `extension_ui_request` frame. Local-
@@ -282,7 +285,8 @@ public struct PiEventTranslator {
                     phase: .started,
                     toolName: toolName,
                     fields: Self.toolDetailFields(
-                        toolName: toolName, args: object["args"] as? [String: Any] ?? [:]),
+                        toolName: toolName, args: object["args"] as? [String: Any] ?? [:],
+                        settingsDefaults: settingsDefaults),
                     fileChanges: Self.fileDetails(toolName: toolName, args: object["args"] as? [String: Any] ?? [:]),
                     parentItemID: (object["parentToolCallId"] as? String) ?? (object["parent_tool_call_id"] as? String),
                     observedAt: Self.timestamp(from: object) ?? now()
@@ -675,7 +679,8 @@ public struct PiEventTranslator {
     /// never crosses.
     private static func toolDetailFields(
         toolName: String,
-        args: [String: Any]
+        args: [String: Any],
+        settingsDefaults: UserDefaults
     ) -> [(key: String, value: String)] {
         func string(_ key: String) -> String? {
             guard let value = args[key] as? String else { return nil }
@@ -710,7 +715,7 @@ public struct PiEventTranslator {
         }
         // Launch polish, item J — a SHELL's command, host-local only.
         if AgentShellObservation.isShellTool(toolName),
-           let command = AgentShellObservation.commandField(args["command"]) {
+           let command = AgentShellObservation.commandField(args["command"], defaults: settingsDefaults) {
             fields.append(command)
         }
         // TR-03 — the delegation ROLE, on the same reasoning the claude

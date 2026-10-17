@@ -171,7 +171,7 @@ enum CanvasBackgroundSettingsChecks {
             guard let defaults = QAIsolatedDefaults(isolatedSuiteName: suite) else {
                 throw Failure(description: "could not create the isolated defaults suite")
             }
-            let model = SettingsModel(defaults: defaults, navKeymap: .default, isCompanionEnabled: false)
+            let model = SettingsModel(defaults: defaults, navKeymap: .default)
             model.canvasBackground = editor
             fixture = SettingsFixtureWindow(model: model, size: NSSize(width: 1_100, height: 1_400))
             fixture.show(paneID: "appearance")

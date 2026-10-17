@@ -126,19 +126,14 @@ public enum InboxSort {
     ///      is a lifecycle transition, so it MOVES the row — down here — but the
     ///      shelf is not history: a snoozed agent is coming back, and ordering it
     ///      by a wake-up time would make the shelf shuffle itself as the clock runs.
-    ///   3. **HISTORY** — settled rows, most recently ENDED first. They are a
-    ///      record of finished work, so recency of the ending is the useful order;
-    ///      and an end time stops changing the moment the row settles, so this
-    ///      block is just as still as the other two.
-    ///
-    ///   4. **CLOSED** — archived rows, most recently CLOSED first (.plans/05-close-to-history.md).
-    ///      P4.1 put `.archived` in the live block because archiving deleted the
-    ///      record, so no archived row could ever reach a sort. Closing a tile now
-    ///      parks the agent instead of deleting it, so archived rows are real and
-    ///      need a block of their own — below history, because a closed agent is
-    ///      further from your attention than a finished one, and ordered by close
-    ///      time for the same reason history is ordered by end time: it is the
-    ///      question you are asking when you open the section.
+    ///   3. **HISTORY** — settled AND archived rows together, most recently
+    ///      ENDED first (settle time or close time, whichever the row has). Dylan:
+    ///      "one history shelf" (decisions pass). They are a record of work you
+    ///      are done watching, so recency of the ending is the useful order; and
+    ///      an end time stops changing the moment the row ends, so this block is
+    ///      just as still as the other two. Settle and Archive stay distinct
+    ///      lifecycles (undo restores each exactly); only the block is shared,
+    ///      which is also what lets a settled child nest under an archived parent.
     ///
     /// Within each block, a CHILD is placed immediately after its parent (P2D.4),
     /// depth-first, with siblings ordered by the same comparator as roots, and every
@@ -155,19 +150,16 @@ public enum InboxSort {
         var live: [AgentInboxRow] = []
         var shelf: [AgentInboxRow] = []
         var history: [AgentInboxRow] = []
-        var closed: [AgentInboxRow] = []
         for row in rows {
             switch row.lifecycle {
             case .active: live.append(row)
             case .snoozed: shelf.append(row)
-            case .settled: history.append(row)
-            case .archived: closed.append(row)
+            case .settled, .archived: history.append(row)
             }
         }
         return nest(live, by: newestSpawnedFirst)
             + nest(shelf, by: newestSpawnedFirst)
             + nest(history, by: mostRecentlyEndedFirst)
-            + nest(closed, by: mostRecentlyEndedFirst)
     }
 
     /// Bound direct children without changing the global frozen root order. A
@@ -311,8 +303,8 @@ public enum InboxSort {
 
     /// Most recently ended first, for the history block.
     ///
-    /// Only reachable for settled rows (`endedAt` is non-nil for exactly those),
-    /// but total anyway: a row with no end time sorts as though it ended at
+    /// Only reachable for settled and archived rows (`endedAt` is non-nil for
+    /// exactly those), but total anyway: a row with no end time sorts as though it ended at
     /// `distantPast`, i.e. at the bottom, rather than trapping the comparator in an
     /// inconsistent order.
     public static func mostRecentlyEndedFirst(_ lhs: AgentInboxRow, _ rhs: AgentInboxRow) -> Bool {
@@ -505,7 +497,7 @@ public enum InboxSort {
 
     // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
 
-    /// Which of the list's three sections a row belongs to — the same three blocks
+    /// Which of the list's sections a row belongs to — the same blocks
     /// `sortForInbox` already orders by, named so a view can draw a header between
     /// them.
     ///
@@ -521,11 +513,10 @@ public enum InboxSort {
         case active
         /// The shelf: parked, coming back, and collapsed behind a counted header.
         case snoozed
-        /// The tail: work that is over.
-        case settled
-        /// Closed agents, behind a counted header of their own — the tile is gone
-        /// but the record, the transcript and the worktree are not, so opening one
-        /// brings the agent back (.plans/05-close-to-history.md).
+        /// Work you are done watching: settled agents and agents closed to
+        /// History, in ONE section (decisions pass, "one history shelf"). The
+        /// tile is gone but the record, the transcript and the worktree are not,
+        /// so opening one brings the agent back (.plans/05-close-to-history.md).
         case history
     }
 
@@ -542,24 +533,23 @@ public enum InboxSort {
     /// here as `.snoozed` at all: `snoozeHonoured` withholds the date, `resolve`
     /// answers `.active`, and the row arrives in this function already active.
     ///
-    /// `.archived` has its own section now (.plans/05-close-to-history.md). P4.1
-    /// answered `.active` because archiving deleted the record, so no archived row
-    /// could reach this function; closing a tile parks the agent instead, so the
-    /// honest answer is the section it is actually drawn in.
+    /// `.settled` and `.archived` share History (decisions pass). P4.1 answered
+    /// `.active` for archived because archiving deleted the record; closing a tile
+    /// parks the agent instead, and settling closes its tile too, so both are
+    /// drawn in the one section a closed agent lives in.
     public static func section(for lifecycle: InboxLifecycle, now: Date) -> InboxSection {
         switch lifecycle {
         case .snoozed(let until): return until > now ? .snoozed : .active
-        case .settled: return .settled
-        case .archived: return .history
+        case .settled, .archived: return .history
         case .active: return .active
         }
     }
 
-    /// The list split into its three sections, IN ORDER within each — active, then
-    /// the shelf, then the settled tail.
+    /// The list split into its sections, IN ORDER within each — active, then the
+    /// shelf, then History.
     ///
     /// EXHAUSTIVE AND DISJOINT by construction: every row is appended to exactly one
-    /// of the three, so `active + snoozed + settled` is a permutation of `rows` and
+    /// of the three, so `active + snoozed + history` is a permutation of `rows` and
     /// the view can concatenate the parts it is showing without a second sort.
     /// Concatenation is also what makes the sections CONTIGUOUS even when `now` has
     /// moved a row out of the shelf — `sortForInbox` would still have that row in the
@@ -578,7 +568,6 @@ public enum InboxSort {
             switch section(for: row.lifecycle, now: now) {
             case .active: parts.active.append(row)
             case .snoozed: parts.snoozed.append(row)
-            case .settled: parts.settled.append(row)
             case .history: parts.history.append(row)
             }
         }
@@ -587,7 +576,8 @@ public enum InboxSort {
 
     // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
 
-    /// How many settled rows the tail opens with.
+    /// How many History rows the tail opens with. (The names say "settled" from
+    /// P4.8, when the tail held only settled rows; it pages all of History now.)
     public static let settledPageSize = 10
     /// How many more one press of the footer reveals.
     public static let settledPageStep = 25
@@ -603,7 +593,7 @@ public enum InboxSort {
     /// this cannot become a second opinion about what "settled" means.
     ///
     /// ORDER IS THE CALLER'S, as everywhere else in this file. Hand it
-    /// `InboxPartition.settled` and the page is the most recently ENDED rows
+    /// `InboxPartition.history` and the page is the most recently ENDED rows
     /// (`mostRecentlyEndedFirst`), which is the order `sortForInbox` put history in
     /// and the only order in which "the first ten" means "the ten you just
     /// finished".
@@ -662,33 +652,30 @@ public struct SettledPage: Equatable, Sendable {
 public struct InboxPartition: Equatable, Sendable {
     public var active: [AgentInboxRow]
     public var snoozed: [AgentInboxRow]
-    public var settled: [AgentInboxRow]
-    /// Closed agents (.plans/05-close-to-history.md), behind their own counted
-    /// header. Last, because it is the only section you go looking for.
+    /// Settled agents and agents closed to History (.plans/05-close-to-history.md),
+    /// ONE section behind one counted header (decisions pass). Last, because it
+    /// is the only section you go looking for.
     public var history: [AgentInboxRow]
 
     public init(
         active: [AgentInboxRow] = [],
         snoozed: [AgentInboxRow] = [],
-        settled: [AgentInboxRow] = [],
         history: [AgentInboxRow] = []
     ) {
         self.active = active
         self.snoozed = snoozed
-        self.settled = settled
         self.history = history
     }
 
     /// Everything, in the order the list draws it with both counted sections OPEN.
     /// The headers themselves are the view's, not this type's — a count is a fact
     /// about a section, a header is a row on a screen.
-    public var all: [AgentInboxRow] { active + snoozed + settled + history }
+    public var all: [AgentInboxRow] { active + snoozed + history }
 
     /// The rows on screen with each counted section in the given state — the one
     /// place "collapsed hides that section and nothing else" is written down.
     public func visible(shelfExpanded: Bool, historyExpanded: Bool = false) -> [AgentInboxRow] {
         (shelfExpanded ? active + snoozed : active)
-            + settled
             + (historyExpanded ? history : [])
     }
 
