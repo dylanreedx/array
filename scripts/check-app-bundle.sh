@@ -133,6 +133,12 @@ assert_eq "Array" "$bundle_executable" "CFBundleExecutable"
 assert_eq "$EXPECTED_APP_NAME" "$bundle_name" "CFBundleName"
 assert_eq "$EXPECTED_APP_NAME" "$bundle_display" "CFBundleDisplayName"
 assert_eq "APPL" "$bundle_package" "CFBundlePackageType"
+# Composer dictation: without a usage string macOS terminates the app the
+# first time it touches the microphone.
+for usage_key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription; do
+  usage=$(/usr/libexec/PlistBuddy -c "Print :$usage_key" "$PLIST" 2>/dev/null || true)
+  [[ -n "$usage" ]] || { echo "FAIL: Info.plist has no $usage_key" >&2; exit 1; }
+done
 assert_eq "14.0" "$minimum_system" "LSMinimumSystemVersion"
 [[ -n "$bundle_short_version" ]] || { echo "FAIL: missing short version" >&2; exit 1; }
 [[ -n "$bundle_version" ]] || { echo "FAIL: missing bundle version" >&2; exit 1; }

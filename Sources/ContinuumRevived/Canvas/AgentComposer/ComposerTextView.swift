@@ -22,6 +22,8 @@ protocol ComposerTextViewObserver: AnyObject {
         command: ChoiceListCommand
     ) -> Bool
     func composerRequestedDismissSuggestions(_ textView: ComposerTextView)
+    /// DI-01 — a live dictation session's keys (Esc, ↩) and ⇧⌘D. `true` consumes.
+    func composerHandleDictationKey(_ textView: ComposerTextView, event: NSEvent) -> Bool
     func composerRequestedAttachmentImport(
         _ textView: ComposerTextView,
         intake: ComposerPasteboardIntake
@@ -214,6 +216,7 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate, AgentPageZoomScala
     }
 
     override func keyDown(with event: NSEvent) {
+        if composerObserver?.composerHandleDictationKey(self, event: event) == true { return }
         if handleCompletionKey(event) { return }
         if event.keyCode == 126, string.isEmpty, !hasMarkedText(),
            event.modifierFlags.intersection([.shift, .control, .option, .command]).isEmpty,

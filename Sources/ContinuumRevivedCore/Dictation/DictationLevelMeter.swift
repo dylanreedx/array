@@ -51,7 +51,14 @@ public struct DictationLevelMeter: Equatable, Sendable {
     /// Feed one audio buffer's RMS. `deltaTime` is that buffer's duration, so
     /// the envelope behaves identically at any buffer size.
     public mutating func record(rms: Float, deltaTime: Float) {
-        let target = Self.normalized(rms: rms)
+        record(level: Self.normalized(rms: rms), deltaTime: deltaTime)
+    }
+
+    /// Feed a level the engine has already normalized — `DictationEngineEvent
+    /// .level` carries the perceptual 0...1 value, and normalizing it again
+    /// would flatten speech to the floor.
+    public mutating func record(level: Float, deltaTime: Float) {
+        let target = min(max(level, 0), 1)
         let tau = target > envelope ? Self.attackSeconds : Self.releaseSeconds
         // Standard one-pole follower. A non-positive dt would divide by zero or
         // run the filter backwards; snap instead.

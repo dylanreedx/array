@@ -434,6 +434,13 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
     /// The row's own measured-fit verdict for what is currently installed: when
     /// true, both buttons must sit at (or above) their intrinsic width and render
     /// their selected titles without ellipsis — the truncation gate's precondition.
+    /// The narrowest width at which this row still shows a titled harness, a
+    /// "Model" trigger and no effort. A sibling control that would push the
+    /// row below this yields instead (the dictation mic).
+    var condensedFittingWidth: CGFloat {
+        requiredWidth(usingCompactLabels: true, condenseModelTrigger: true, includeEffort: false)
+    }
+
     var qaFitsCurrentTitles: Bool {
         let gap = CGFloat(pageZoom.scaled(Space.m))
         let needed = harnessButton.intrinsicContentSize.width + gap

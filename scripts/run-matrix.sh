@@ -411,6 +411,9 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 # Standalone: the bare CoreChecks run is KNOWN-RED before the meter sections.
 run_leg .build/debug/ContinuumRevivedCoreChecks --context-meter-contract-check
+# DI-01: the dictation state machine and waveform arithmetic over the fake
+# engine. Standalone: the bare CoreChecks run is KNOWN-RED before it.
+run_leg .build/debug/ContinuumRevivedCoreChecks --dictation-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-parity-check
 # Standalone for the same reason: the runner half (incl. the real 0.159.3
@@ -639,6 +642,10 @@ run_app_check .build/debug/Array --leader-zone-jump-check
 # NSApp.sendEvent with the production monitors — ⌥↩ queues in a working
 # composer, ⌥→ and ⌥3 (#) edit text, a quick ⌥-chord never opens the leader.
 run_app_check .build/debug/Array --composer-key-routing-check
+# DI-01: composer dictation through the real agent tile — a hypothesis never
+# reaches the draft store or sends, ↩ finishes, Esc removes only dictated words,
+# undo, focus loss, unbind, tile close, failure copy and the Settings toggle.
+run_app_check .build/debug/Array --composer-dictation-check
 run_app_check .build/debug/Array --palette-jump-check
 run_app_check .build/debug/Array --palette-zone-check
 # Launch polish: hold-⌥ Quick Jump over text input, ⌥+arrow dock in the

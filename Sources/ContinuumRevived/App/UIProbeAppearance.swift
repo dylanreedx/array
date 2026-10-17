@@ -1013,6 +1013,10 @@ enum UIProbeAppearance {
         // 2026-10-13: the busy send choice's chevron — the composer's own fill
         // and a control boundary, so the accent stays on the default action.
         "ComposerMenuChevronButton",
+        // DI-01: the composer's microphone beside Send — the chevron's shape and
+        // fill; the input accent on its outline and glyph only while live.
+        "ComposerDictationButton",
+        "ComposerDictationPillView",
         // A6 (`.plans/45`): the approval/question dock's one fill,
         // `AgentSurfaceRole.artifact`, painted unconditionally in
         // `applyTokens()` — an open request is always an artifact surface,
@@ -1114,6 +1118,13 @@ enum UIProbeAppearance {
         case "QueueRailItemRow":
             values.insert(hex(AgentLineRole.decorativeHairline.color.cgColor(for: theme)))
         case "ComposerMenuChevronButton":
+            values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
+        case "ComposerDictationButton":
+            // The mic paints the composer fill at rest and the row hover under
+            // the pointer, like the composer's choice buttons.
+            values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
+            values.insert(hex(AgentSurfaceRole.rowHover.color.cgColor(for: theme)))
+        case "ComposerDictationPillView":
             values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
         case "UserPromptView.rule":
             // A1 (ticket rulings 1, 3): the authorship rule is a LINE role
@@ -1611,6 +1622,9 @@ enum UIProbeAppearance {
                     tile.ingest(.requestOpened(
                         threadId: tile.wiringThreadId, requestId: "token-values", kind: .commandExecutionApproval
                     ))
+                    // DI-01: the dictation pill only exists while a session is
+                    // live, so grow it here or the census never sees it paint.
+                    tile.qaShowLiveDictationPill()
                     // ST-01: hazard 8 wants a new TokenThemed view painting in an
                     // ADOPTED surface as well as the appearance sweep, and the Lab
                     // tile has no supervisor to deliver a quota observation. Drive

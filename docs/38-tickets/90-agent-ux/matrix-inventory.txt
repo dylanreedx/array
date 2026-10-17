@@ -73,12 +73,14 @@ check --codex-appserver-runner-check
 check --companion-sync-health-check
 check --completion-awareness-check
 check --component-lab-check
+check --composer-dictation-check
 check --composer-image-components-check
 check --composer-key-routing-check
 check --conductor-queue-tile-check
 check --context-meter-contract-check
 check --corner-style-check
 check --cross-project-agents-check
+check --dictation-check
 check --diff-review-off-main-check
 check --diff-tile-check
 check --document-location-check
@@ -359,6 +361,7 @@ leg run_app_check .build/debug/Array --cli-update-settings-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
 leg run_app_check .build/debug/Array --completion-awareness-check
 leg run_app_check .build/debug/Array --component-lab-check
+leg run_app_check .build/debug/Array --composer-dictation-check
 leg run_app_check .build/debug/Array --composer-image-components-check
 leg run_app_check .build/debug/Array --composer-key-routing-check
 leg run_app_check .build/debug/Array --conductor-queue-tile-check
@@ -572,6 +575,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --cli-update-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-parity-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --context-meter-contract-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --dictation-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
@@ -615,7 +619,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 169
+count ContinuumRevivedCoreChecks 173
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

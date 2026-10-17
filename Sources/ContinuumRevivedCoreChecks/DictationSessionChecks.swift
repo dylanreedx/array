@@ -291,6 +291,16 @@ func runDictationLevelMeterChecks() throws {
     resetting.advanceBar()
     resetting.reset()
     require(resetting.isSilent, "level meter: reset left residue, so cancel would flash old audio")
+    // The engine's `.level` is already perceptual. Feeding it through the
+    // normalized entry must equal the raw-RMS entry, not normalize twice.
+    var fromRMS = DictationLevelMeter(barCount: 4)
+    var fromLevel = DictationLevelMeter(barCount: 4)
+    fromRMS.record(rms: 0.05, deltaTime: 0.02)
+    fromLevel.record(level: DictationLevelMeter.normalized(rms: 0.05), deltaTime: 0.02)
+    require(abs(fromRMS.envelope - fromLevel.envelope) < 0.0001,
+            "level meter: a normalized level must drive the envelope like its raw RMS")
+    require(fromLevel.envelope > 0.2, "level meter: speech-level input must move the envelope")
+
 
     print("DictationLevelMeterChecks: \(assertions) waveform arithmetic assertions")
 }
