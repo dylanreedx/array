@@ -13563,8 +13563,8 @@ private func checkAgentBlockRendererRegistry<Failure: Error>(
     // exact roster size, and that no kind is listed twice, which a bare count
     // cannot tell apart from a missing one.
     // 22: `.compaction` joined the roster — its renderer had been written and
-    // never registered.
-    guard AgentBlockRendererRegistry.builtInKinds.count == 22,
+    // never registered. 23: board-task sends added `.taskReference`.
+    guard AgentBlockRendererRegistry.builtInKinds.count == 23,
           Set(AgentBlockRendererRegistry.builtInKinds).count
             == AgentBlockRendererRegistry.builtInKinds.count else {
         throw fail("block renderer built-in fixture is incomplete or duplicated: \(AgentBlockRendererRegistry.builtInKinds.map(\.rawValue))")

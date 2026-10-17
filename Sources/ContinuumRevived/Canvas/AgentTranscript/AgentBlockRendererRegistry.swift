@@ -30,7 +30,7 @@ final class AgentBlockRendererRegistry {
     static let builtInKinds: [AgentBlockKind] = [
         .paragraph, .heading, .list, .listItem, .quote, .thematicBreak, .table,
         .fencedCode, .toolCall, .commandOutput, .plan, .diff, .approval,
-        .question, .image, .imageGallery, .fileReferences, .agentReference, .error, .notice,
+        .question, .image, .imageGallery, .fileReferences, .agentReference, .taskReference, .error, .notice,
         // `.compaction` was missing from this roster for six weeks, so the
         // `kind == .compaction` branch below never ran: every compaction boundary
         // on every harness rendered as "Unsupported content: compaction".
@@ -69,6 +69,8 @@ final class AgentBlockRendererRegistry {
                     try registry.register(AgentFileReferenceRenderer(), for: kind)
                 } else if kind == .agentReference {
                     try registry.register(AgentReferenceRenderer(), for: kind)
+                } else if kind == .taskReference {
+                    try registry.register(AgentTaskReferenceRenderer(), for: kind)
                 } else if kind == .table {
                     try registry.register(TableRenderer(), for: kind)
                 } else if kind == .thematicBreak {

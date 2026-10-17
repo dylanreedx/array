@@ -454,6 +454,20 @@ public struct AgentTranscriptProjection: Sendable {
         var mutations: [AgentDocumentMutation] = [
             .beginEntry(id: id, role: .user, provenance: .localPrompt(promptID: id.rawValue))
         ]
+        // A board task the user sent: the agent got the whole envelope, the turn
+        // shows what the user did — the task, then their own words. Recognised
+        // here, the one seam the live send and every provider's rehydration
+        // share, so a relaunched transcript reads the same as the live one.
+        var proseText = prompt.text
+        if let task = BoardTaskPromptEnvelope.parse(prompt.text) {
+            mutations.append(.upsertStructured(entryID: id, block: AgentBlock(
+                id: childID(of: id, key: "task"),
+                kind: .taskReference,
+                payload: .taskReference(task.transcriptReference)
+            )))
+            proseText = task.additionalInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let hasStructuredBlocks = mutations.count > 1
         // Attachment blocks precede prose so the sent turn preserves the
         // composer's attachment-above-editor hierarchy. Only path-free metadata
         // enters the semantic document; local URLs remain transport capabilities.
@@ -473,10 +487,10 @@ public struct AgentTranscriptProjection: Sendable {
                 payload: .imageGallery(.init(images: prompt.imageAttachments.map(\.imagePayload)))
             )))
         }
-        if !prompt.text.isEmpty || (prompt.imageAttachments.isEmpty && prompt.fileReferences.isEmpty) {
+        if !proseText.isEmpty || (!hasStructuredBlocks && prompt.imageAttachments.isEmpty && prompt.fileReferences.isEmpty) {
             let blockID = childID(of: id, key: "prompt")
             mutations.append(.upsertStructured(entryID: id, block: AgentBlock(
-                id: blockID, kind: .paragraph, payload: .paragraph([.text(prompt.text)])
+                id: blockID, kind: .paragraph, payload: .paragraph([.text(proseText)])
             )))
         }
         mutations.append(.finishEntry(id: id))

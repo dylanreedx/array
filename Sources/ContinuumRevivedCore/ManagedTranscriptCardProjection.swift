@@ -188,6 +188,7 @@ public enum ManagedTranscriptCardProjection {
         // Legacy structured cards displayed their title but no body.
         case .toolCall, .plan, .diff, .error, .image, .imageGallery, .fileReferences, .compaction: own = ""
         case .agentReference(let payload): own = payload.displayNameAtSpawn
+        case .taskReference(let payload): own = payload.title
         case .thematicBreak: own = "\n"
         // The legacy card is plain text, so a table projects as the Markdown
         // source it came from rather than as a flattened cell soup.

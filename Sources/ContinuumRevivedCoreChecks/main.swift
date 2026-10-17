@@ -306,6 +306,12 @@ if CommandLine.arguments.contains("--board-model-check") {
     Foundation.exit(0)
 }
 
+// Also runs inside --board-model-check, so the matrix reports it.
+if CommandLine.arguments.contains("--board-task-transcript-check") {
+    runBoardTaskTranscriptChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--canvas-entity-index-p7-check") {
     runCanvasEntityIndexP7Checks()
     Foundation.exit(0)
