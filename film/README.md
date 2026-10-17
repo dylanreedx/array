@@ -39,7 +39,7 @@ film/
   scripts/          new-video, import-take, render, studio
   legacy/           the old lib and acts the earlier films run on (frozen; legacy/README.md)
   refs/             reference frames and notes from other people's films
-  public/           fonts (OFL), marks (SVG); footage/ is linked in by import-take (gitignored)
+  public/           fonts (OFL), marks (SVG, see marks/README.md); footage/ is linked in by import-take (gitignored)
   renders/          every render round (gitignored)
 ```
 
