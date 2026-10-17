@@ -755,10 +755,23 @@ public struct ClaudeEventTranslator {
         // never heard of still deserves its query shown, and the privacy rule
         // is about which KEYS may cross — never `command`, never a prompt.
         var fields: [(key: String, value: String)] = []
-        if let query = string("query") { fields.append((key: "query", value: query)) }
+        // `q`/`search`, `jql`/`cql` and an issue key are what an MCP server's
+        // search or lookup is FOR — the line under its row.
+        if let query = string("query") ?? string("q") ?? string("search") { fields.append((key: "query", value: query)) }
+        if let jql = string("jql") { fields.append((key: "jql", value: jql)) }
+        if let cql = string("cql") { fields.append((key: "cql", value: cql)) }
+        if let issue = string("issueKey") ?? string("issueIdOrKey") { fields.append((key: "issueKey", value: issue)) }
         if let pattern = string("pattern") { fields.append((key: "pattern", value: pattern)) }
         if let url = string("url") { fields.append((key: "url", value: url)) }
-        if let path = string("file_path") ?? string("notebook_path") ?? string("path") {
+        // Array's own board change: the op and the card title name the change on
+        // the row; the card BODY never crosses.
+        if ArrayWorkspaceTool(toolName: toolName) == .boardApply {
+            if let op = string("op"), BoardApplyRequest.Op(rawValue: op) != nil { fields.append((key: "op", value: op)) }
+            if let title = string("title") { fields.append((key: "title", value: title)) }
+        }
+        // `relativePath`: Array's own `array_open_document` (CX-01) — the
+        // basename only, like every other path key.
+        if let path = string("file_path") ?? string("notebook_path") ?? string("path") ?? string("relativePath") {
             fields.append((key: "file", value: URL(fileURLWithPath: path).lastPathComponent))
         }
         if let description = string("description") {

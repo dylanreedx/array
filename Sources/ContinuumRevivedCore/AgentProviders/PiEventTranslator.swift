@@ -683,16 +683,27 @@ public struct PiEventTranslator {
         // not names: these five keys may cross for ANY tool, and everything
         // else — command bodies, prompts, unknown schemas — never does.
         var fields: [(key: String, value: String)] = []
-        if let query = string("query") ?? string("q") ?? string("search_query") {
+        if let query = string("query") ?? string("q") ?? string("search_query") ?? string("search") {
             fields.append((key: "query", value: query))
         }
+        if let jql = string("jql") { fields.append((key: "jql", value: jql)) }
+        if let cql = string("cql") { fields.append((key: "cql", value: cql)) }
+        if let issue = string("issueKey") ?? string("issueIdOrKey") { fields.append((key: "issueKey", value: issue)) }
         if let pattern = string("pattern") ?? string("regex") {
             fields.append((key: "pattern", value: pattern))
+        }
+        // Array's own board change: the op and the card title name the change on
+        // the row; the card BODY never crosses.
+        if ArrayWorkspaceTool(toolName: toolName) == .boardApply {
+            if let op = string("op"), BoardApplyRequest.Op(rawValue: op) != nil { fields.append((key: "op", value: op)) }
+            if let title = string("title") { fields.append((key: "title", value: title)) }
         }
         if let url = string("url") {
             fields.append((key: "url", value: url))
         }
-        if let path = string("path") ?? string("file") ?? string("file_path") {
+        // `relativePath`: Array's own `array_open_document` (CX-01) — the
+        // basename only, like every other path key.
+        if let path = string("path") ?? string("file") ?? string("file_path") ?? string("relativePath") {
             fields.append((key: "file", value: URL(fileURLWithPath: path).lastPathComponent))
         }
         if let description = string("description") {

@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentContent
 import ContinuumRevivedCore
 import Foundation
 
@@ -15,6 +16,7 @@ func runAgentToolDetailStoreChecks() async throws {
     try await runAgentToolDetailDisclosureCollisionChecks()
     try await runAgentToolDetailSemanticFileChecks()
     runAgentToolKindChecks()
+    await runArrayWorkspaceToolRowChecks()
     await runAgentToolDetailSupplyContractChecks()
     runAgentToolDetailSourceBoundaryChecks()
     try runAgentToolDetailCompileNegativeBoundaryCheck()
@@ -1252,6 +1254,295 @@ private func runAgentToolKindChecks() {
         expect(humanized == expected,
                "AgentToolKind: '\(raw)' humanized to '\(humanized)', expected '\(expected)'")
     }
+}
+
+/// Array's OWN workspace tools (`array.workspace.v1`), as each runner spells
+/// them. Nothing special-cased them, so the rows read the humanised wire name:
+/// claude's MCP call titled "Mcp array workspace array open document", pi's and
+/// codex's "Array open document" — and `relativePath`, the one argument that says
+/// WHICH file, never crossed any whitelist.
+///
+/// Driven through each provider's real translator (the line a live run emits),
+/// then into the store exactly as the transcript records a start, then through
+/// the presenter that titles the row. Every row is collected before failing, so a
+/// red run lists the whole table.
+private func runArrayWorkspaceToolRowChecks() async {
+    final class Box: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [AgentRuntimeObservation] = []
+        func append(_ value: AgentRuntimeObservation) { lock.withLock { values.append(value) } }
+        var startedDetails: [AgentToolDetailObservation] { details(.started) }
+        var endedDetails: [AgentToolDetailObservation] { details(.ended) }
+        private func details(_ phase: AgentToolDetailObservation.Phase) -> [AgentToolDetailObservation] {
+            lock.withLock {
+                values.compactMap { observation in
+                    guard case let .toolDetail(_, detail) = observation, detail.phase == phase else { return nil }
+                    return detail
+                }
+            }
+        }
+    }
+    func claudeLine(_ name: String, _ input: String) -> String {
+        #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu-ws-\#(name)","name":"\#(name)","input":\#(input)}]}}"#
+    }
+    func claude(_ name: String, _ input: String) -> AgentToolDetailObservation? {
+        let box = Box()
+        var translator = ClaudeEventTranslator(runToken: "ws-rows")
+        translator.onRuntimeObservation = box.append
+        _ = translator.translate(line: claudeLine(name, input))
+        return box.startedDetails.first
+    }
+    func pi(_ name: String, _ args: String) -> AgentToolDetailObservation? {
+        let box = Box()
+        var translator = PiEventTranslator()
+        translator.onRuntimeObservation = box.append
+        _ = translator.translate(stream: [
+            #"{"type":"session","id":"ws-rows","cwd":"/tmp/fixture"}"#,
+            #"{"type":"agent_start"}"#,
+            #"{"type":"tool_execution_start","toolCallId":"pi-ws-\#(name)","toolName":"\#(name)","args":\#(args)}"#,
+        ])
+        return box.startedDetails.first
+    }
+    func codex(_ tool: String) -> AgentToolDetailObservation? {
+        let box = Box()
+        var translator = CodexEventTranslator(runToken: "ws-rows")
+        translator.onRuntimeObservation = box.append
+        _ = translator.translate(stream: [
+            #"{"type":"thread.started","thread_id":"ws-rows"}"#,
+            #"{"type":"turn.started"}"#,
+            #"{"type":"item.started","item":{"id":"codex-ws","type":"mcp_tool_call","server":"array_workspace","tool":"\#(tool)","status":"in_progress"}}"#,
+        ])
+        return box.startedDetails.first
+    }
+    let store = AgentToolDetailStore()
+    var counter = 0
+    func row(_ detail: AgentToolDetailObservation?) async -> (title: String, symbol: String)? {
+        guard let detail, let name = detail.toolName else { return nil }
+        counter += 1
+        let key = testToolDetailKey(AgentToolDetailID("workspace-row-\(counter)")!)
+        // The transcript's own start: `AgentTranscriptListView.detailStart`.
+        _ = await store.recordStart(AgentToolDetailStart(
+            identity: key, toolName: name,
+            arguments: detail.fields.map { AgentToolDetailField(key: $0.key, value: $0.value) },
+            fileChanges: detail.fileChanges))
+        guard let record = await store.detail(for: key) else { return nil }
+        return (AgentToolDetailPresenter.collapsed(record).actionLine, AgentToolKind.symbolName(forToolName: name))
+    }
+
+    let open = #"{"relativePath":"Sources/Array/Canvas/TilePlacement.swift"}"#
+    let cases: [(label: String, detail: AgentToolDetailObservation?, title: String, symbol: String)] = [
+        ("claude open_document", claude("mcp__array_workspace__array_open_document", open),
+         "Opened TilePlacement.swift on the canvas", "eye"),
+        ("pi open_document", pi("array_open_document", open),
+         "Opened TilePlacement.swift on the canvas", "eye"),
+        // codex's exec stream carries no MCP arguments, so it cannot name the file.
+        ("codex open_document", codex("array_open_document"), "Opened a file on the canvas", "eye"),
+        ("claude open_document, no path", claude("mcp__array_workspace__array_open_document", "{}"),
+         "Opened a file on the canvas", "eye"),
+        ("claude canvas_query", claude("mcp__array_workspace__array_canvas_query", #"{"limit":20}"#),
+         "Looked around the canvas", "eye"),
+        ("pi canvas_query", pi("array_canvas_query", "{}"), "Looked around the canvas", "eye"),
+        ("claude workspace_context", claude("mcp__array_workspace__array_workspace_context", "{}"),
+         "Checked its workspace", "scope"),
+        // pi's input names the op but carries ids only: specific, never invented.
+        ("pi board_apply", pi("array_board_apply", #"{"op":"move","boardId":"b","expectedRevision":3,"idempotencyKey":"k"}"#),
+         "Moved a card", "rectangle.split.3x1"),
+        // A query argument must not turn find_agent into "Searched for …", and a
+        // task body on delegate must never surface: both are fixed sentences.
+        ("pi find_agent", pi("array_find_agent", #"{"query":"tile jump"}"#), "Found an agent", "person.crop.circle"),
+        ("pi delegate", pi("array_delegate", #"{"task":"SECRET-TASK-BODY","title":"t","idempotencyKey":"k"}"#),
+         "Handed work to an agent", "person.2"),
+    ]
+    var failures: [String] = []
+    for item in cases {
+        guard let presented = await row(item.detail) else {
+            failures.append("\(item.label): the translator published no started tool detail"); continue
+        }
+        if presented.title != item.title {
+            failures.append("\(item.label): row reads \"\(presented.title)\", want \"\(item.title)\"")
+        }
+        if presented.symbol != item.symbol {
+            failures.append("\(item.label): icon \(presented.symbol), want \(item.symbol)")
+        }
+    }
+    // Every one of the twelve tools, in both spellings, has its own sentence —
+    // none falls back to the humanised wire name.
+    for tool in ArrayWorkspaceTool.allCases {
+        for spelling in [tool.rawValue, "mcp__array_workspace__\(tool.rawValue)"] {
+            guard let presented = await row(AgentToolDetailObservation(phase: .started, toolName: spelling, observedAt: Date())) else {
+                failures.append("\(spelling): no record"); continue
+            }
+            if presented.title.lowercased().contains("array") || presented.title.contains("_") {
+                failures.append("\(spelling): row reads the wire name \"\(presented.title)\"")
+            }
+        }
+    }
+    // Someone else's MCP server that happens to use the same bare tool name under
+    // a different namespace is NOT Array's tool.
+    let foreign = await row(AgentToolDetailObservation(phase: .started, toolName: "mcp__other__array_open_document", observedAt: Date()))
+    if foreign?.title.hasPrefix("Opened") == true {
+        failures.append("mcp__other__array_open_document must not be presented as Array's own tool, got \(foreign!.title)")
+    }
+
+    // ── Someone else's MCP server ────────────────────────────────────────────
+    // A claude.ai connector call rendered "Mcp claude ai atlassian
+    // searchjiraissuesusingjql", and its `jql` — the one argument saying what it
+    // searched for — never crossed the whitelist. The row leads with the server,
+    // then the tool as a phrase; the most useful argument is the line under it.
+    // `detail` is the row's compact second line: the disclosure with the title
+    // line removed, exactly as `ToolCallView.presentedSummary` shows it.
+    func presented(start: AgentToolDetailObservation?, end: AgentToolDetailObservation? = nil,
+                   status: AgentItemStatus = .completed) async -> (title: String, detail: String?)? {
+        guard let start, let name = start.toolName else { return nil }
+        counter += 1
+        let key = testToolDetailKey(AgentToolDetailID("workspace-row-\(counter)")!)
+        _ = await store.recordStart(AgentToolDetailStart(
+            identity: key, toolName: name,
+            arguments: start.fields.map { AgentToolDetailField(key: $0.key, value: $0.value) },
+            fileChanges: start.fileChanges))
+        // The transcript's own completion: ONE recordEnd folding the buffered
+        // `.ended` output with the item's status (`AgentTranscriptListView`).
+        if let end {
+            _ = await store.recordEnd(AgentToolDetailEnd(identity: key, output: end.outputPreview, status: status))
+        }
+        guard let record = await store.detail(for: key) else { return nil }
+        let title = AgentToolDetailPresenter.collapsed(record).actionLine
+        var lines = AgentToolDetailPresenter.observableDisclosureText(record)
+            .split(separator: "\n").map(String.init)
+        if lines.first?.caseInsensitiveCompare(title) == .orderedSame { lines.removeFirst() }
+        return (title, lines.first)
+    }
+    func claudeCall(_ name: String, _ input: String, result: String? = nil, isError: Bool = false)
+        -> (start: AgentToolDetailObservation?, end: AgentToolDetailObservation?) {
+        let box = Box()
+        var translator = ClaudeEventTranslator(runToken: "ws-rows")
+        translator.onRuntimeObservation = box.append
+        _ = translator.translate(line: claudeLine(name, input))
+        if let result {
+            let line: [String: Any] = ["type": "user", "message": ["content": [[
+                "type": "tool_result", "tool_use_id": "toolu-ws-\(name)", "is_error": isError,
+                "content": [["type": "text", "text": result]],
+            ]]]]
+            let data = try! JSONSerialization.data(withJSONObject: line)
+            _ = translator.translate(line: String(decoding: data, as: UTF8.self))
+        }
+        return (box.startedDetails.first, box.endedDetails.first)
+    }
+    func codexMCP(server: String, tool: String) -> AgentToolDetailObservation? {
+        let box = Box()
+        var translator = CodexEventTranslator(runToken: "ws-rows")
+        translator.onRuntimeObservation = box.append
+        _ = translator.translate(stream: [
+            #"{"type":"thread.started","thread_id":"ws-rows"}"#,
+            #"{"type":"turn.started"}"#,
+            #"{"type":"item.started","item":{"id":"codex-mcp","type":"mcp_tool_call","server":"\#(server)","tool":"\#(tool)","status":"in_progress"}}"#,
+        ])
+        return box.startedDetails.first
+    }
+    let jql = "assignee = currentUser() AND sprint in openSprints() ORDER BY priority"
+    let mcpCases: [(label: String, start: AgentToolDetailObservation?, title: String, detail: String?)] = [
+        ("claude Atlassian search",
+         claudeCall("mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql",
+                    #"{"cloudId":"8d3c-cloud","jql":"\#(jql)","maxResults":10}"#).start,
+         "Atlassian · Search Jira issues using JQL", jql),
+        ("claude Atlassian get issue",
+         claudeCall("mcp__claude_ai_Atlassian__getJiraIssue", #"{"cloudId":"8d3c-cloud","issueIdOrKey":"SHOP-42"}"#).start,
+         "Atlassian · Get Jira issue", "SHOP-42"),
+        // The server's own name leading the tool name is said once, not twice.
+        ("claude Notion search", claudeCall("mcp__claude_ai_Notion__notion-search", #"{"query":"launch plan"}"#).start,
+         "Notion · Search", "launch plan"),
+        ("claude GitHub", claudeCall("mcp__github__get_pull_request", #"{"owner":"o","repo":"r","pullNumber":7}"#).start,
+         "GitHub · Get pull request", nil),
+        ("claude two-word connector", claudeCall("mcp__claude_ai_Claude_Docs__batch", "{}").start, "Claude Docs · Batch", nil),
+        ("claude acronyms", claudeCall("mcp__api__getPRUrlsByID", "{}").start, "API · Get PR URLs by ID", nil),
+        ("claude fetch url", claudeCall("mcp__browser__open_page", #"{"url":"https://arrayapp.dev/changelog"}"#).start,
+         "Browser · Open page", "https://arrayapp.dev/changelog"),
+        // codex reports the server and the bare tool separately.
+        ("codex Atlassian search", codexMCP(server: "atlassian", tool: "searchJiraIssuesUsingJql"),
+         "Atlassian · Search Jira issues using JQL", nil),
+        ("pi namespaced", pi("mcp__linear__create_issue", #"{"title":"Dark mode"}"#), "Linear · Create issue", nil),
+        // Someone else's tool reusing Array's bare name is theirs, by server.
+        ("claude foreign array name", claudeCall("mcp__other__array_open_document", "{}").start,
+         "Other · Array open document", nil),
+    ]
+    for item in mcpCases {
+        guard let row = await presented(start: item.start) else {
+            failures.append("\(item.label): no started tool detail"); continue
+        }
+        if row.title != item.title { failures.append("\(item.label): row reads \"\(row.title)\", want \"\(item.title)\"") }
+        if row.detail != item.detail {
+            failures.append("\(item.label): detail reads \(row.detail.map { "\"\($0)\"" } ?? "nothing"), want \(item.detail.map { "\"\($0)\"" } ?? "nothing")")
+        }
+        if row.title.contains("_") || row.title.contains("mcp") || row.title.contains("claude ai") {
+            failures.append("\(item.label): row still reads the wire name \"\(row.title)\"")
+        }
+    }
+
+    // ── array_board_apply names the change ───────────────────────────────────
+    // Every op read "Updated the board". The input carries ids, so the names come
+    // from the reply the workspace API returns (the exact envelope the host
+    // encodes), and only the op survives when there is no reply to read.
+    let boardID = UUID(), cardID = UUID(), columnID = UUID()
+    let stamp = Date(timeIntervalSince1970: 1_900_000_000)
+    let card = BoardQueryCard(cardId: cardID, columnId: columnID, title: "Dark mode for the shop",
+                              body: "Toggle in settings", links: [], attachments: [],
+                              assigneeAgentId: nil, createdAt: stamp, updatedAt: stamp)
+    func reply(_ op: BoardApplyRequest.Op, card: BoardQueryCard?, title: String? = "Dark mode for the shop",
+               column: String? = nil, assignee: String? = nil) -> String {
+        let result = BoardApplyResult(operationId: "op", op: op, boardId: boardID, cardId: cardID, outcome: .applied,
+                                      undoRegistered: true, revision: 4, card: card,
+                                      cardTitle: title, columnName: column, assigneeName: assignee)
+        let object = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(result)) as! [String: Any]
+        return PiHostToolResponse.ok(object).encodedValue(requestId: "req")
+    }
+    func applyInput(_ op: String, _ extra: String = "") -> String {
+        #"{"op":"\#(op)","boardId":"\#(boardID.uuidString)","expectedRevision":3,"idempotencyKey":"k-\#(op)"\#(extra)}"#
+    }
+    let applyName = "mcp__array_workspace__array_board_apply"
+    let cardArg = #","cardId":"\#(cardID.uuidString)""#
+    let longBody = String(repeating: "A long card body. ", count: 200)
+    var longCard = card
+    longCard.body = longBody
+    let boardCases: [(label: String, call: (start: AgentToolDetailObservation?, end: AgentToolDetailObservation?), status: AgentItemStatus, title: String)] = [
+        ("create", claudeCall(applyName, applyInput("create", #","columnId":"\#(columnID.uuidString)","title":"Dark mode for the shop","body":"SECRET-BODY""#),
+                              result: reply(.create, card: card, column: "Todo")), .completed,
+         "Added \u{201C}Dark mode for the shop\u{201D}"),
+        ("create, running", claudeCall(applyName, applyInput("create", #","columnId":"\#(columnID.uuidString)","title":"Dark mode for the shop""#)),
+         .inProgress, "Added \u{201C}Dark mode for the shop\u{201D}"),
+        ("move", claudeCall(applyName, applyInput("move", cardArg + #","columnId":"\#(columnID.uuidString)""#),
+                            result: reply(.move, card: card, column: "Doing")), .completed,
+         "Moved \u{201C}Dark mode for the shop\u{201D} to Doing"),
+        ("move, running", claudeCall(applyName, applyInput("move", cardArg + #","columnId":"\#(columnID.uuidString)""#)),
+         .inProgress, "Moved a card"),
+        ("assign", claudeCall(applyName, applyInput("assign", cardArg + #","assigneeAgentId":"agent-1""#),
+                              result: reply(.assign, card: card, column: "Doing", assignee: "Scout")), .completed,
+         "Assigned \u{201C}Dark mode for the shop\u{201D} to Scout"),
+        ("unassign", claudeCall(applyName, applyInput("unassign", cardArg), result: reply(.unassign, card: card, column: "Doing")),
+         .completed, "Unassigned \u{201C}Dark mode for the shop\u{201D}"),
+        ("edit", claudeCall(applyName, applyInput("edit", cardArg + #","body":"SECRET-BODY""#),
+                            result: reply(.edit, card: card, column: "Doing")), .completed,
+         "Edited \u{201C}Dark mode for the shop\u{201D}"),
+        // A delete's reply has no card: its title is the removed card's.
+        ("delete", claudeCall(applyName, applyInput("delete", cardArg), result: reply(.delete, card: nil)), .completed,
+         "Removed \u{201C}Dark mode for the shop\u{201D}"),
+        ("delete, refused", claudeCall(applyName, applyInput("delete", cardArg),
+                                       result: PiHostToolResponse.error("revision_conflict", "Re-query before writing.").encodedValue(requestId: "req")),
+         .completed, "Removed a card"),
+        // A reply clipped by the output bound must not be half-read into a name.
+        ("move, clipped reply", claudeCall(applyName, applyInput("move", cardArg + #","columnId":"\#(columnID.uuidString)""#),
+                                           result: reply(.move, card: longCard, column: "Doing")), .completed,
+         "Moved a card"),
+    ]
+    for item in boardCases {
+        guard let row = await presented(start: item.call.start, end: item.call.end, status: item.status) else {
+            failures.append("board \(item.label): no started tool detail"); continue
+        }
+        if row.title != item.title { failures.append("board \(item.label): row reads \"\(row.title)\", want \"\(item.title)\"") }
+        for text in [row.title, row.detail ?? ""] where text.contains("SECRET-BODY") || text.contains("op:") {
+            failures.append("board \(item.label): a card body or the raw op leaked into the row: \"\(text)\"")
+        }
+    }
+    expect(failures.isEmpty, "Array workspace tool rows:\n  " + failures.joined(separator: "\n  "))
 }
 
 /// TR-03. What a tool row can SAY is bounded by what the provider whitelists
