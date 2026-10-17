@@ -25,10 +25,27 @@ private func waitForPairingHook(_ recorder: PairingExchangeHookRecorder, expecte
 func runLocalPairingEndpointChecks() async throws {
     try runPairingURLPayloadCheck()
     try await runLocalPairingEndpointContractCheck()
+    try runUserFacingBrandCopyCheck()
     #if os(macOS)
     try await runLocalPairingHTTPListenerSmokeCheck()
     #endif
     print("LocalPairingEndpointChecks passed")
+}
+
+/// The app is Array everywhere a user can see (CLAUDE.md, identity is two-layered):
+/// the pairing page above, the phone's unpaired prompt, and the reason a managed
+/// session says it ended. Internal names keep Continuum; these strings are read.
+private func runUserFacingBrandCopyCheck() throws {
+    let unpaired = CompanionFreshness.derive(CompanionFreshnessInput(sessionState: .unpaired, now: Date()))
+    let mirrors = [false, true].map { hasCanvasData in
+        CanvasMirrorPresentation.freshnessDisplay(
+            freshness: unpaired, hasCanvasData: hasCanvasData,
+            spatialSample: nil, activitySample: nil, now: Date())
+    }
+    var copy = [unpaired.subtitle] + mirrors.map(\.detail)
+    copy += ManagedSessionEndReason.allCases.map(\.displayText)
+    let stale = copy.filter { $0.contains("Continuum") }
+    expect(stale.isEmpty, "user-facing copy must say Array, not Continuum: \(stale)")
 }
 
 private func runPairingURLPayloadCheck() throws {
@@ -108,7 +125,7 @@ private func runLocalPairingEndpointContractCheck() async throws {
     )
     let landing = await endpoint.handle(method: "GET", path: httpRequestTarget(for: landingURL), body: Data())
     expect(landing.statusCode == 200, "Ticket81 endpoint: GET camera landing page succeeds before exchange, got \(landing.statusCode)")
-    expect(String(decoding: landing.body, as: UTF8.self).contains("Open Continuum"), "Ticket81 endpoint: camera landing page is human-readable")
+    expect(String(decoding: landing.body, as: UTF8.self).contains("Open Array"), "Ticket81 endpoint: camera landing page is human-readable")
 
     let invalidLanding = await endpoint.handle(method: "GET", path: "/open-continuum-pairing?link=not-a-pairing-link", body: Data())
     let invalidLandingError = try errorCode(in: invalidLanding.body)

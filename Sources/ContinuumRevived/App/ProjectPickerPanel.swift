@@ -47,7 +47,7 @@ final class ProjectPickerPanel: NSObject, NSTableViewDataSource, NSTableViewDele
     func runModal() -> URL? {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 620, height: 420), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         panel.appearance = NSApp?.effectiveAppearance
-        panel.title = "Choose a Continuum Project"
+        panel.title = "Choose an Array Project"
         panel.isReleasedWhenClosed = false
         panel.center()
         self.panel = panel

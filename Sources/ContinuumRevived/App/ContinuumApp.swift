@@ -5007,7 +5007,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     static let topologyMigrationNoteShownKey = "continuum.topology.migrationNoteShown"
     static let onboardingShownKey = "continuum.onboarding.shown"
     static let topologyMigrationInformativeText = """
-    Continuum now groups terminal tiles by project, so your terminals share one tmux session per project. Your terminal tiles will restart once. Any running agents will need to be re-launched - they are still alive in tmux and can be found with `tmux ls` if needed.
+    Array now groups terminal tiles by project, so your terminals share one tmux session per project. Your terminal tiles will restart once. Any running agents will need to be re-launched - they are still alive in tmux and can be found with `tmux ls` if needed.
     """
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -5066,7 +5066,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let registryStore = RegistryStore(applicationSupportDirectory: appSupportDir)
             companionAuthService = try CompanionAuthService(
                 authDirectory: Self.resolveAuthDirectory(applicationSupportDirectory: appSupportDir),
-                instanceDisplayName: Host.current().localizedName ?? "Continuum"
+                instanceDisplayName: Host.current().localizedName ?? "Array"
             )
             let registry = try registryStore.loadOrEmpty()
             self.registryStore = registryStore
@@ -9928,7 +9928,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let companionAuthService { return companionAuthService }
         let service = try CompanionAuthService(
             authDirectory: Self.resolveAuthDirectory(applicationSupportDirectory: Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)),
-            instanceDisplayName: Host.current().localizedName ?? "Continuum"
+            instanceDisplayName: Host.current().localizedName ?? "Array"
         )
         companionAuthService = service
         return service
@@ -9974,18 +9974,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func presentPairingURL(_ url: URL, cameraURL: URL, listener: LocalPairingEndpointListener, expiresAt: Date) {
         let alert = NSAlert()
-        alert.messageText = "Continuum LAN Pairing"
+        alert.messageText = "Array LAN Pairing"
         alert.informativeText = """
-        Camera-compatible pairing link copied to the clipboard. Scan the QR code with iPhone Camera; it opens a local Mac page that opens Continuum.
+        Camera-compatible pairing link copied to the clipboard. Scan the QR code with iPhone Camera; it opens a local Mac page that opens Array.
 
-        If you are already in Continuum, Pair this phone > Scan Pairing QR also accepts this code.
+        If you are already in Array, Pair this phone > Scan Pairing QR also accepts this code.
 
         Status: Listening on \(listener.endpointURL.absoluteString)
         Expires: \(expiresAt.formatted(date: .abbreviated, time: .standard))
         Scope: Observer
 
         QR URL: \(cameraURL.absoluteString)
-        Continuum link: \(url.absoluteString)
+        Array link: \(url.absoluteString)
         """
         if let qrImage = makePairingQRCode(for: cameraURL) {
             let imageView = NSImageView(image: qrImage)

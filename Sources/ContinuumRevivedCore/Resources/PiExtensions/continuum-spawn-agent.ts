@@ -115,10 +115,10 @@ export default function continuumSpawnAgent(pi: ExtensionAPI) {
     name: "spawn_agent",
     label: "Spawn Agent",
     description:
-      "Delegate work to a new Continuum agent. Returns immediately with a handle; the agent runs in parallel. Collect its result with wait_agents(handles) — never by sleeping or polling.",
+      "Delegate work to a new Array agent. Returns immediately with a handle; the agent runs in parallel. Collect its result with wait_agents(handles) — never by sleeping or polling.",
     // Without promptSnippet a custom tool is left out of the system prompt's "Available tools"
     // section entirely — an orchestrator would have to infer the tool exists from its schema alone.
-    promptSnippet: "Delegate a self-contained task to a new Continuum agent",
+    promptSnippet: "Delegate a self-contained task to a new Array agent",
     promptGuidelines: [
       // Guidelines are appended flat to the shared Guidelines section with no tool-name prefix,
       // so each bullet has to name spawn_agent itself.

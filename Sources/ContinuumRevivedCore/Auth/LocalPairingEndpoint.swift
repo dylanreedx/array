@@ -265,7 +265,7 @@ public actor LocalPairingEndpoint {
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <meta http-equiv="refresh" content="0;url=\(escapedLink)">
-          <title>Open Continuum</title>
+          <title>Open Array</title>
           <style>
             body { font: -apple-system-body; margin: 2rem; line-height: 1.4; }
             a { display: inline-block; padding: 0.9rem 1rem; border-radius: 12px; background: #ff8a00; color: white; text-decoration: none; font-weight: 700; }
@@ -273,9 +273,9 @@ public actor LocalPairingEndpoint {
           </style>
         </head>
         <body>
-          <h1>Open Continuum</h1>
-          <p>If Continuum does not open automatically, tap the button below.</p>
-          <p><a href="\(escapedLink)">Open Continuum to Pair</a></p>
+          <h1>Open Array</h1>
+          <p>If Array does not open automatically, tap the button below.</p>
+          <p><a href="\(escapedLink)">Open Array to Pair</a></p>
           <p><small>This local page expires with the pairing window.</small></p>
         </body>
         </html>
