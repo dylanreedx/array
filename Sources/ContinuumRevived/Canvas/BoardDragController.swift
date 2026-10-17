@@ -289,7 +289,11 @@ extension KanbanTileNSView {
         let command = target.moveCommand(for: session.cardId)
         let cardId = session.cardId
         endDragSession(commit: true)
+        // The settle above already landed the card; the render this command
+        // produces must not animate it again from the stale source frame.
+        suppressesChangeAnimation = true
         onCommand?(command)
+        suppressesChangeAnimation = false
         setFocusState(.selected(cardId))
     }
 

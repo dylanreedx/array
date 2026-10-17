@@ -84,6 +84,21 @@ final class KanbanTileNSView: TileNSView {
     /// Which board this tile's Cmd-Z reaches.
     var boardIdForUndo: UUID?
 
+    /// Injectable for checks; production reads the system setting.
+    var prefersReducedMotion: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    /// Set around the command a local drop issues. The drop's own settle already
+    /// placed the card where the model now puts it, so that render must not
+    /// FLIP it again from the stale source-lane frame.
+    var suppressesChangeAnimation = false
+    /// Nothing animates until the board has been laid out once: the first
+    /// render, hydration and a restore present their content instantly.
+    private var hasLaidOutBoard = false
+    /// Card views that left a lane on the last render, re-hosted in `body` (above
+    /// every lane's clip) while they fly to their new lane or fade out. They
+    /// ignore hits, end at model opacity 0, and live at most until the next
+    /// render. Exposed for the witness.
+    private(set) var departingCardViews: [KanbanCardView] = []
+
     /// The undo stack a focused board tile owns. Deliberately separate from the
     /// canvas geometry stack: one accepted card move is one BOARD undo, and a
     /// geometry mismatch elsewhere must not wipe it.
@@ -179,6 +194,16 @@ final class KanbanTileNSView: TileNSView {
     /// under the pointer instead of destroying it.
     func render(_ board: Board) {
         let structureChanged = board.orderedColumns.map(\.id) != self.board.orderedColumns.map(\.id)
+        // A change from outside a local drag animates (FLIP): capture where every
+        // card is on screen now, apply, lay out once, animate from the delta.
+        // Never on a structure change or a different board, never mid-drag.
+        let animates = !structureChanged && board.id == self.board.id && changeAnimationAllowed
+        purgeDepartingCardViews()
+        let previous = self.board
+        let before = animates ? presentedCardFrames() : [:]
+        let addRowsBefore = animates
+            ? Dictionary(uniqueKeysWithValues: columnViews.map { ($0.columnId, $0.addButtonOrigin) }) : [:]
+        var departed: [KanbanCardView] = []
         self.board = board
         taskDetail?.refresh()
         if structureChanged {
@@ -187,7 +212,7 @@ final class KanbanTileNSView: TileNSView {
             for column in board.orderedColumns {
                 guard let view = columnViews.first(where: { $0.columnId == column.id }) else { continue }
                 view.name = column.name
-                view.setCards(board.orderedCards(in: column.id), assigneeName: { [weak self] id in
+                departed += view.setCards(board.orderedCards(in: column.id), assigneeName: { [weak self] id in
                     self?.agentDisplayName?(id)
                 })
             }
@@ -199,6 +224,9 @@ final class KanbanTileNSView: TileNSView {
         // A card the model no longer has cannot stay selected.
         if let focused = focusState.cardId, board.card(focused) == nil {
             setFocusState(.none)
+        }
+        if animates {
+            animateBoardChange(previous: previous, before: before, addRowsBefore: addRowsBefore, departed: departed)
         }
         needsLayout = true
         // A drag in flight re-resolves against the board that just arrived. This
@@ -240,10 +268,100 @@ final class KanbanTileNSView: TileNSView {
         return nil
     }
 
+    // MARK: - Change animation
+
+    private var changeAnimationAllowed: Bool {
+        window != nil && hasLaidOutBoard && dragSession == nil && !suppressesChangeAnimation
+            && !prefersReducedMotion()
+    }
+
+    /// Where each card is ON SCREEN, in tile coordinates — the model frame plus
+    /// any in-flight slide, so a change landing mid-animation continues from
+    /// where the card visibly is instead of jumping. Once per board change.
+    private func presentedCardFrames() -> [UUID: NSRect] {
+        var frames: [UUID: NSRect] = [:]
+        for column in columnViews {
+            for card in column.cardViews where !card.isHidden {
+                guard let container = card.superview else { continue }
+                var rect = card.frame
+                if let layer = card.layer, let presented = layer.presentation() {
+                    let model = container.convertFromLayer(layer.position)
+                    let shown = container.convertFromLayer(presented.position)
+                    rect.origin.x += shown.x - model.x
+                    rect.origin.y += shown.y - model.y
+                }
+                frames[card.cardId] = convert(rect, from: container)
+            }
+        }
+        return frames
+    }
+
+    /// One forced layout per board change (not per frame), then Core Animation
+    /// owns the motion — the film harness steps CA time, so the capture sees
+    /// exactly this. Nothing here depends on a completion firing: a departing
+    /// card ends at model opacity 0 and is purged by the next render at latest.
+    private func animateBoardChange(
+        previous: Board, before: [UUID: NSRect], addRowsBefore: [UUID: NSPoint], departed: [KanbanCardView]
+    ) {
+        layoutSubtreeIfNeeded()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let crossedLanes = Set(departed.map(\.cardId)).intersection(board.cards.map(\.id))
+        for column in columnViews {
+            for card in column.cardViews {
+                guard let container = card.superview, let layer = card.layer else { continue }
+                if let old = before[card.cardId] {
+                    if crossedLanes.contains(card.cardId) {
+                        // The lane's clip would cut a card sliding in from another
+                        // lane, so its departing view flies above every lane and
+                        // this one stays hidden until that flight lands.
+                        layer.add(KanbanCardMotion.hold(opacity: 0), forKey: KanbanCardMotion.arriveKey)
+                    } else {
+                        KanbanCardMotion.slide(layer, in: container,
+                                               from: container.convert(old, from: self).origin, to: card.frame.origin)
+                    }
+                } else if previous.card(card.cardId) == nil {
+                    layer.add(KanbanCardMotion.enter(layer), forKey: KanbanCardMotion.enterKey)
+                }
+            }
+            if let origin = addRowsBefore[column.columnId] { column.slideAddButton(from: origin) }
+        }
+        for proxy in departed {
+            guard let old = before[proxy.cardId], let layer = proxy.layer else { continue }
+            proxy.ignoresHitTesting = true
+            // `old` is where it visibly was, so an in-flight slide is already
+            // folded in; leaving it running would double the offset.
+            layer.removeAllAnimations()
+            let from = body.convert(old, from: self)
+            body.addSubview(proxy)
+            if let destination = cardView(for: proxy.cardId) {
+                let to = body.convert(destination.bounds, from: destination)
+                proxy.frame = NSRect(origin: to.origin, size: from.size)
+                KanbanCardMotion.slide(layer, in: body, from: from.origin, to: to.origin)
+                layer.add(KanbanCardMotion.hold(opacity: 1), forKey: KanbanCardMotion.carryKey)
+            } else {
+                proxy.frame = from
+                layer.add(KanbanCardMotion.exit(layer), forKey: KanbanCardMotion.exitKey)
+            }
+            layer.opacity = 0
+            departingCardViews.append(proxy)
+        }
+        CATransaction.commit()
+    }
+
+    private func purgeDepartingCardViews() {
+        for proxy in departingCardViews {
+            proxy.removeFromSuperview()
+            cardView(for: proxy.cardId)?.layer?.removeAnimation(forKey: KanbanCardMotion.arriveKey)
+        }
+        departingCardViews.removeAll()
+    }
+
     // MARK: - Layout
 
     override func layout() {
         super.layout()
+        if !bounds.isEmpty { hasLaidOutBoard = true }
         // Recompute the grab-strip inset every layout: it is zoom-dependent, and
         // the canvas rescales chrome without re-creating the tile.
         grabStripInset = max(0, grabHeightInLocalCoordinates - contentTopInsetWorldHeight)
@@ -471,5 +589,93 @@ final class KanbanTileNSView: TileNSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyTokens()
+    }
+}
+
+/// The board's change animations, all explicit Core Animation on the card
+/// layers. Keys are stable: the witness (`--board-interaction-check`) reads them.
+@MainActor
+enum KanbanCardMotion {
+    static let enterKey = "kanban.card.enter"
+    static let moveKey = "kanban.card.move"
+    static let exitKey = "kanban.card.exit"
+    static let arriveKey = "kanban.card.arrive"
+    static let carryKey = "kanban.card.carry"
+
+    static let enterDuration: CFTimeInterval = 0.28
+    static let moveDuration: CFTimeInterval = 0.3
+    static let exitDuration: CFTimeInterval = 0.18
+    /// A gentle overshoot, about half a percent of scale at 0.9 → 1.
+    static let enterTiming = CAMediaTimingFunction(controlPoints: 0.3, 1.25, 0.55, 1)
+    /// Ease-out quint: fast away, long settle.
+    static let moveTiming = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)
+
+    /// Additive position slide from `from` to `to` (both in `container`'s view
+    /// coordinates). The model is already at `to`; the animation carries the
+    /// difference down to zero, so overlapping slides compose.
+    static func slide(_ layer: CALayer, in container: NSView, from: NSPoint, to: NSPoint) {
+        let a = container.convertToLayer(from), b = container.convertToLayer(to)
+        let delta = CGPoint(x: a.x - b.x, y: a.y - b.y)
+        guard abs(delta.x) > 0.5 || abs(delta.y) > 0.5 else { return }
+        let slide = CABasicAnimation(keyPath: "position")
+        slide.isAdditive = true
+        slide.fromValue = NSValue(point: delta)
+        slide.toValue = NSValue(point: .zero)
+        slide.duration = moveDuration
+        slide.timingFunction = moveTiming
+        layer.add(slide, forKey: moveKey)
+    }
+
+    static func enter(_ layer: CALayer) -> CAAnimation {
+        let scale = CABasicAnimation(keyPath: "transform")
+        scale.fromValue = NSValue(caTransform3D: scaledAboutCentre(layer, 0.9))
+        scale.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        scale.duration = enterDuration
+        scale.timingFunction = enterTiming
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        fade.duration = 0.18
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        let group = CAAnimationGroup()
+        group.animations = [scale, fade]
+        group.duration = enterDuration
+        return group
+    }
+
+    /// Fades and shrinks a removed card in place. The caller sets the model
+    /// opacity to 0, so the end state holds without a fill mode.
+    static func exit(_ layer: CALayer) -> CAAnimation {
+        let scale = CABasicAnimation(keyPath: "transform")
+        scale.fromValue = NSValue(caTransform3D: CATransform3DIdentity)
+        scale.toValue = NSValue(caTransform3D: scaledAboutCentre(layer, 0.94))
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1
+        fade.toValue = 0
+        let group = CAAnimationGroup()
+        group.animations = [scale, fade]
+        group.duration = exitDuration
+        group.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        return group
+    }
+
+    /// Holds opacity for one slide's length, then lets the model value show.
+    /// Swaps the flying copy for the landed card on CA time, not a timer.
+    static func hold(opacity: Float) -> CAAnimation {
+        let hold = CABasicAnimation(keyPath: "opacity")
+        hold.fromValue = opacity
+        hold.toValue = opacity
+        hold.duration = moveDuration
+        return hold
+    }
+
+    /// A view's layer anchors at its origin, so a bare scale would grow from a
+    /// corner. Scale about the centre instead.
+    private static func scaledAboutCentre(_ layer: CALayer, _ factor: CGFloat) -> CATransform3D {
+        let dx = layer.bounds.width * (0.5 - layer.anchorPoint.x)
+        let dy = layer.bounds.height * (0.5 - layer.anchorPoint.y)
+        var transform = CATransform3DMakeTranslation(dx, dy, 0)
+        transform = CATransform3DScale(transform, factor, factor, 1)
+        return CATransform3DTranslate(transform, -dx, -dy, 0)
     }
 }
