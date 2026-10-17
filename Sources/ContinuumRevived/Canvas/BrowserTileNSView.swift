@@ -481,6 +481,11 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     /// `⌘]` — navigate forward (mirrors the forward button).
     func performForwardAction() { runtime.goForward() }
 
+    #if ARRAY_FILM
+    /// Film build only: the address field, for a pointer target.
+    var filmURLField: NSView { urlField }
+    #endif
+
     /// `⌘L` — focus + select the URL field for editing.
     func focusURLField() {
         window?.makeFirstResponder(urlField)

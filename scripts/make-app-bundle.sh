@@ -5,10 +5,11 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CONFIGURATION=release
 OUTPUT=""
 CHANNEL=dev
+FILM=0
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/make-app-bundle.sh [--configuration debug|release] [--channel dev|prod] --output <path>
+Usage: scripts/make-app-bundle.sh [--configuration debug|release] [--channel dev|prod] [--film] --output <path>
 
 Builds the SwiftPM Array executable and assembles a macOS .app bundle.
 Channel split: the DEFAULT is the dev channel (bundle id dev.arrayapp.macos.dev,
@@ -16,6 +17,13 @@ name "Array Dev", own Application Support dir and defaults domain, updater
 inert) — only the release pipeline passes --channel prod. This bundle is
 unsigned/unprovisioned CloudKit-wise; use scripts/provisioned-cloudkit-app.sh
 for real iCloud/CloudKit proof.
+
+--film builds the FILM bundle for scripts/film-capture.sh: the film recorder
+compiled in (-DARRAY_FILM), in its own scratch path (.build-film) so ordinary
+builds never rebuild for the flag, stamped with its own identity
+(dev.arrayapp.macos.film, "Array Film"). Dev channel only. Never reuse
+dev.arrayapp.macos.dev for a second bundle: TCC keys folder grants by bundle id,
+and two ad-hoc bundles sharing one id invalidate each other's grants.
 USAGE
 }
 
@@ -30,6 +38,10 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "missing value for --channel" >&2; exit 2; }
       CHANNEL="$2"
       shift 2
+      ;;
+    --film)
+      FILM=1
+      shift
       ;;
     --output)
       [[ $# -ge 2 ]] || { echo "missing value for --output" >&2; exit 2; }
@@ -59,12 +71,22 @@ case "$CHANNEL" in
 esac
 
 [[ -n "$OUTPUT" ]] || { echo "--output <path> is required" >&2; usage >&2; exit 2; }
+[[ "$FILM" == 0 || "$CHANNEL" == dev ]] || { echo "--film is dev-channel only" >&2; exit 2; }
+
+# The film recorder exists only in a -DARRAY_FILM build, kept in its own scratch
+# path; every other bundle (dev-app.sh, the release pipeline) builds without it.
+SCRATCH="$ROOT_DIR/.build"
+BUILD_FLAGS=()
+if [[ "$FILM" == 1 ]]; then
+  SCRATCH="$ROOT_DIR/.build-film"
+  BUILD_FLAGS=(--scratch-path "$SCRATCH" -Xswiftc -DARRAY_FILM)
+fi
 
 cd "$ROOT_DIR"
-swift build -c "$CONFIGURATION" --product Array
-swift build -c "$CONFIGURATION" --product array-workspace-mcp
+swift build -c "$CONFIGURATION" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} --product Array
+swift build -c "$CONFIGURATION" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} --product array-workspace-mcp
 
-BUILD_DIR="$ROOT_DIR/.build/$CONFIGURATION"
+BUILD_DIR="$SCRATCH/$CONFIGURATION"
 EXECUTABLE="$BUILD_DIR/Array"
 MCP_EXECUTABLE="$BUILD_DIR/array-workspace-mcp"
 PLIST_SOURCE="$ROOT_DIR/Packaging/Info.plist"
@@ -73,7 +95,7 @@ BRAND_MARK_SOURCE="$ROOT_DIR/docs/38-tickets/96-agent-sidebar-product-redesign/b
 AGENT_SOUND_SOURCE="$ROOT_DIR/Resources/AgentSounds"
 # Sparkle ships as an SPM binary artifact; layout pinned 2026-08-09 (Sparkle
 # 2.9.5): bin/ tools + the xcframework live under .build/artifacts/sparkle.
-SPARKLE_FRAMEWORK="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+SPARKLE_FRAMEWORK="$SCRATCH/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 # GhosttyKit is linked statically, but the library discovers terminfo and shell
 # integration at runtime from the host app's Contents/Resources directory. The
 # checked-in xcframework is a symlink into the matching Ghostty build, so derive
@@ -141,6 +163,13 @@ if [[ "$CHANNEL" == "dev" ]]; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleName "Array Dev"' "$OUTPUT/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName "Array Dev"' "$OUTPUT/Contents/Info.plist"
 fi
+# The film bundle's own identity, stamped BEFORE signing so the signature seals
+# the id it runs under.
+if [[ "$FILM" == 1 ]]; then
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier dev.arrayapp.macos.film' "$OUTPUT/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleName "Array Film"' "$OUTPUT/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName "Array Film"' "$OUTPUT/Contents/Info.plist"
+fi
 
 # Sparkle: SwiftPM links the executable against @rpath/Sparkle.framework/… but
 # only stamps rpaths for the bare-binary layout (@loader_path). Embed the
@@ -161,5 +190,5 @@ plutil -lint "$OUTPUT/Contents/Info.plist" >/dev/null
 # the provider bridge as modified nested code.
 codesign --force --deep --sign - "$OUTPUT"
 
-printf 'Assembled %s (channel: %s)\n' "$OUTPUT" "$CHANNEL"
+printf 'Assembled %s (channel: %s%s)\n' "$OUTPUT" "$CHANNEL" "$([[ "$FILM" == 1 ]] && echo ', film build')"
 printf 'CloudKit proof: no (unsigned/unprovisioned). Use scripts/provisioned-cloudkit-app.sh with a matching identity/profile.\n'

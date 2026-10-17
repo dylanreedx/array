@@ -349,7 +349,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         descriptor: AgentDescriptor? = nil,
         providerSettings: AgentModelConfig.Resolution? = nil,
         statusRowPlacement: AgentStatusRowPlacement = .aboveComposer,
-        monotonicNow: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+        monotonicNow: @escaping @Sendable () -> TimeInterval = { AgentTranscriptClock.monotonic() }
     ) {
         let fileIndex = AgentFileIndex()
         // No fixtures. The filter here used to drop `fixture.files` and
@@ -1670,7 +1670,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         default:
             break
         }
-        localPresence.reduce(event, at: Date())
+        localPresence.reduce(event, at: AgentElapsedClock.now())
         hasPresenceFacts = true
         let captureEvent = originalEvent ?? event
         let priorEntryIDs = Set(model.document.entries.map(\.id))
@@ -1793,7 +1793,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         }
     }
 
-    private func refreshCompactStatus(at now: Date = Date(), location: AgentLocationSnapshot? = nil) {
+    /// `now` defaults to `AgentElapsedClock` (`Date()` outside the film build), the
+    /// clock the header's own elapsed readout uses, so the two never disagree.
+    private func refreshCompactStatus(at now: Date = AgentElapsedClock.now(), location: AgentLocationSnapshot? = nil) {
         // Turn cards: the newest turn's work strip reads the same presence the
         // row does, on the same tick.
         transcriptCollectionFixture?.setTurnPresence(currentPresence)
@@ -3296,7 +3298,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// A detached tile keeps showing the agent it previously represented, but it
     /// no longer observes that agent. Demote current What immediately rather than
     /// freezing a claim such as “Reading” forever after its source/timer is gone.
-    private func settleLocationForDetach(at now: Date = Date()) {
+    private func settleLocationForDetach(at now: Date = AgentElapsedClock.now()) {
         guard let agentID = projectedAgentID,
               let snapshot = agentSource?.locationSnapshot(for: agentID, at: now) else { return }
         let settled = AgentLocationSnapshot(
@@ -3306,7 +3308,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         refreshCompactStatus(at: now, location: settled)
     }
 
-    private func refreshLocationStatus(at now: Date = Date()) {
+    private func refreshLocationStatus(at now: Date = AgentElapsedClock.now()) {
         locationStaleTimer?.invalidate()
         locationStaleTimer = nil
         guard let agentID = projectedAgentID,
@@ -3518,6 +3520,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     var qaComposerIsOffered: Bool { !(v2Composer?.isHidden ?? true) }
     var qaProviderControlsAreOffered: Bool { !(v2FooterRow?.isHidden ?? true) }
+    #if ARRAY_FILM
+    /// Film build only: where a pointer types and clicks Send (`at: composer|send`).
+    var filmComposerTextView: NSView? { v2Composer?.textView }
+    var filmActionButton: NSView? { v2ActionButton }
+    #endif
     var qaV2ActionTitle: String? { v2ActionButton?.presentation.title }
     /// 2026-10-13 — what the busy send choice offers, read from the real
     /// control: its primary title and its menu rows ("title  chord").

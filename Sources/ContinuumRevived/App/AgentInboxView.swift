@@ -1017,7 +1017,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Nothing else in this view reads a clock — a card row's elapsed time is a
     /// number the ROW carries, computed against the caller's `now` by
     /// `AgentInboxRowBuilder`.
-    var clock: () -> Date = Date.init
+    var clock: () -> Date = { AgentElapsedClock.now() }
 
     // Ticket: docs/38-tickets/90-agent-ux/P4.12-crossfade-in-place.md
     /// Whether the person has asked for less movement. A closure for the reason
@@ -4851,6 +4851,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard !historyExpanded else { return }
         toggleHistory()
     }
+    #if ARRAY_FILM
+    /// Film build only: the heading cell a pointer clicks to open History.
+    var filmHistoryHeaderCell: NSView? { historyHeaderCell }
+    /// Film build only: the live cell drawing this agent's row, or nil when the table
+    /// has not materialized it (scrolled away, filtered out).
+    func filmRowCell(id: UUID) -> NSView? {
+        tableRowByAgentId[id].flatMap { tableView.view(atColumn: 0, row: $0, makeIfNecessary: false) }
+    }
+    /// Film build only: one tick of the shared elapsed clock, on demand (the film
+    /// advances frames, not seconds, so it cannot wait for the 1 s timer).
+    func filmTickElapsedClock() { updateVisibleElapsedClock(now: clock()) }
+    #endif
     /// Open or close History the way the user does — through the heading's own
     /// button, so the check exercises the wiring and not just `toggleHistory`.
     @discardableResult

@@ -1,5 +1,7 @@
 .DS_Store
 .build/
+# The film build (scripts/film-capture.sh, -DARRAY_FILM) keeps its own scratch path.
+.build-film/
 ThirdParty/
 .continuum-revived/
 .conductor/conductor.db

@@ -5575,6 +5575,12 @@ final class CanvasNSView: NSView, TokenThemed {
     /// visibility. Nil in production.
     var navigationFlightOverrideForQA: Bool?
 
+    #if ARRAY_FILM
+    /// Film build only (nil otherwise): receives every user jump's target instead
+    /// of the cut or flight, so the film glides there on its own clock.
+    var filmNavigationCamera: ((CanvasViewport) -> Void)?
+    #endif
+
     /// The camera for a jump the user asked for: a leader letter or zone key, a
     /// sidebar row, ⌘K Jump to, fit-all, previous view, a double-click fit. It
     /// FLIES there (`CameraFlight`, stepped by the camera driver) rather than
@@ -5583,6 +5589,10 @@ final class CanvasNSView: NSView, TokenThemed {
     /// nothing is watching, and those callers read the viewport back immediately.
     /// `--canvas-zoom-momentum-check` (`runNavigationFlight`).
     func navigateViewport(to target: CanvasViewport) {
+        #if ARRAY_FILM
+        // Film build only (Film/FilmDirectorV2.swift): the director glides here.
+        if let filmNavigationCamera { filmNavigationCamera(target); return }
+        #endif
         let flies = navigationFlightOverrideForQA
             ?? (window?.occlusionState.contains(.visible) == true
                 && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
@@ -6135,7 +6145,11 @@ final class CanvasNSView: NSView, TokenThemed {
             menu.addItem(item)
         }
         let header = zoneHeaderScreenRect(for: placement) ?? .zero
+        #if ARRAY_FILM
+        FilmMenuHost.popUp(menu, at: CGPoint(x: header.minX + 18, y: header.maxY), in: self)
+        #else
         menu.popUp(positioning: nil, at: CGPoint(x: header.minX + 18, y: header.maxY), in: self)
+        #endif
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -6154,7 +6168,12 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         if zoneOverflowButtonZoneId(at: point) != nil,
            let zoneMenu = menu(for: event) {
+            #if ARRAY_FILM
+            // Film build only: the director records the menu (Film/FilmDirectorDay.swift).
+            FilmMenuHost.popUp(zoneMenu, at: point, in: self)
+            #else
             zoneMenu.popUp(positioning: nil, at: point, in: self)
+            #endif
             return
         }
         if event.clickCount >= 2 {

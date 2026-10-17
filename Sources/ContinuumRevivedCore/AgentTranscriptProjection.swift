@@ -50,8 +50,8 @@ public struct AgentTranscriptProjection: Sendable {
     public init(threadId: String) {
         self.init(
             threadId: threadId,
-            monotonicNow: { ProcessInfo.processInfo.systemUptime },
-            wallClockNow: { Date() }
+            monotonicNow: { AgentTranscriptClock.monotonic() },
+            wallClockNow: { AgentTranscriptClock.wall() }
         )
     }
 
@@ -944,4 +944,18 @@ private extension Array where Element == AgentDocumentMutation {
             if case .beginEntry = mutation { count += 1 }
         }
     }
+}
+
+/// The production transcript's clocks (tool durations, entry stamps): the live
+/// values. Only the macOS film build (`-DARRAY_FILM`) can redirect them: the film
+/// renders frames slower than real time and substitutes its film clock, so a tool
+/// that ran for three seconds of footage does not read "15s".
+public enum AgentTranscriptClock {
+    #if ARRAY_FILM
+    nonisolated(unsafe) public static var monotonic: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    nonisolated(unsafe) public static var wall: @Sendable () -> Date = { Date() }
+    #else
+    @inline(__always) public static func monotonic() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
+    @inline(__always) public static func wall() -> Date { Date() }
+    #endif
 }

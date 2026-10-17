@@ -162,6 +162,10 @@ final class AgentSoundPlayer: NSObject, AVAudioPlayerDelegate, AgentSoundPlaying
     func play(_ reference: AgentSoundReference, priority: Int, volume: Double,
               library: AgentSoundLibrary = .shared) {
         guard let url = library.url(for: reference) else { return }
+        #if ARRAY_FILM
+        // Film build only: a film records the sound for the edit and never plays it.
+        if let film = FilmPanelHost.sound { film(reference, priority); return }
+        #endif
         if let player, player.isPlaying, priority < currentPriority { return }
         player?.stop()
         do {
@@ -195,6 +199,11 @@ final class AgentSignalCenter {
     private let library: AgentSoundLibrary
     private let player: any AgentSoundPlaying
     var onChanged: ((UUID?) -> Void)?
+    #if ARRAY_FILM
+    /// Film build only (set by `FilmDirector`, nil otherwise): a transient badge's
+    /// 3 s runs on the film clock, so "Pushed" clears 3 s of FILM time later.
+    static var filmDelay: ((TimeInterval) async -> Void)?
+    #endif
 
     init(defaults: UserDefaults = .standard, library: AgentSoundLibrary = .shared,
          player: any AgentSoundPlaying = AgentSoundPlayer.shared) {
@@ -258,7 +267,15 @@ final class AgentSignalCenter {
             if becomesCurrent { currentByTile[tileID] = signal }
             if becomesCurrent && !signal.isPersistent {
                 Task { @MainActor [weak self] in
+                    #if ARRAY_FILM
+                    if let filmDelay = Self.filmDelay {
+                        await filmDelay(AgentSignalReducer.transientVisualDuration)
+                    } else {
+                        try? await Task.sleep(for: .seconds(AgentSignalReducer.transientVisualDuration))
+                    }
+                    #else
                     try? await Task.sleep(for: .seconds(AgentSignalReducer.transientVisualDuration))
+                    #endif
                     guard self?.currentByTile[tileID]?.id == signal.id else { return }
                     self?.currentByTile.removeValue(forKey: tileID)
                     self?.notify(tileID: tileID)

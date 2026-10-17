@@ -6603,6 +6603,31 @@ final class AgentSupervisor {
         deliver(event, to: id, now: now)
     }
 
+    #if ARRAY_FILM
+    /// Film build only: one host-local runtime observation through the production
+    /// fan-out, exactly as a provider translator's `onRuntimeObservation` hands it
+    /// over (tool details: file, line counts, output). No provider process runs.
+    func qaObserve(_ observation: AgentRuntimeObservation, for id: AgentID) {
+        ingestRuntimeObservation(observation, for: id)
+    }
+
+    /// Film build only: one frame of a claude subagent's work routed exactly as
+    /// `deliverSubagentEvent` routes a live runner's child channel (held until the
+    /// child record exists, then restamped to the child), stamped `now`. The film
+    /// feeds the production claude translator itself, so it hands the child
+    /// channel over here.
+    func qaDeliverSubagentEvent(_ event: AgentRuntimeEvent, parent: AgentID, toolUseID: String, now: Date = Date()) {
+        let childID = AgentID(rawValue: AgentRecord.observedChildID(
+            parentAgentID: parent.rawValue, toolUseID: toolUseID))
+        guard records[childID] != nil else {
+            pendingSubagentEvents[childID, default: []].append(event)
+            return
+        }
+        flushPendingSubagentEvents(for: childID)
+        deliver(event.withThreadId(Self.threadId(for: childID)), to: childID, now: now)
+    }
+    #endif
+
     @discardableResult
     func clearSettle(agentID id: AgentID) -> Bool {
         guard var record = records[id] else {
@@ -7724,7 +7749,8 @@ final class AgentSupervisor {
         from runner: AgentRunning,
         generation: RunnerGenerationToken,
         to id: AgentID,
-        now: Date = Date()
+        // The app's elapsed clock (`Date()` outside the film build).
+        now: Date = AgentElapsedClock.now()
     ) {
         // Keep the latest generation after its live slot clears. A nil `runners`
         // entry is not evidence that any retired terminal event is valid: an old

@@ -3556,6 +3556,14 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         guard case .toolCall = presented.payload else { return nil }
         return presented
     }
+    #if ARRAY_FILM
+    /// Film build only: the presented title of the tool row for one provider item id
+    /// (the tool_use id a runner reported), or nil when no row carries it.
+    func qaPresentedToolTitle(forProviderItemID itemID: String) -> String? {
+        guard let blockID = toolDetailIDByBlockID.first(where: { $0.value.providerItemID.rawValue == itemID })?.key else { return nil }
+        return qaPresentedToolTitle(for: blockID)
+    }
+    #endif
     /// TR-01 — the whole presented diff payload, so a witness can drive the real
     /// renderer with it and assert the SENTENCE the user reads, not just the
     /// array behind it.
@@ -3896,7 +3904,7 @@ extension AgentTranscriptListView {
 
     /// What the strip says while the turn is open. Never empty: the tile's own
     /// phase line when it has one, otherwise the presence phase on its clock.
-    private func liveStripText(now: Date = Date()) -> String {
+    private func liveStripText(now: Date = AgentElapsedClock.now()) -> String {
         let tile = liveStatusText.trimmingCharacters(in: .whitespaces)
         if !tile.isEmpty { return tile }
         guard let presence = turnPresence, presence.isLive else { return "Working" }

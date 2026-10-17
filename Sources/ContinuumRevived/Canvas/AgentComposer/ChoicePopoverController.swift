@@ -3,7 +3,14 @@ import ContinuumRevivedAgentUI
 
 @MainActor
 private final class ChoicePanel: NSPanel {
+    #if ARRAY_FILM
+    /// A film run's panel never becomes key: a key non-activating panel takes the
+    /// user's keyboard from whatever app they are in. Its list is still the panel's
+    /// first responder, and the film's real clicks still choose rows.
+    override var canBecomeKey: Bool { !FilmScene.isRequested }
+    #else
     override var canBecomeKey: Bool { true }
+    #endif
     override var canBecomeMain: Bool { false }
 }
 
@@ -733,6 +740,10 @@ final class ChoicePopoverController {
             if event.window !== self.panel { self.dismissAsCancellation() }
             return event
         }
+        #if ARRAY_FILM
+        // Not in a film run: the user's own clicks in other apps would cancel the take's picker.
+        if FilmScene.isRequested { return }
+        #endif
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
             [weak self] _ in Task { @MainActor [weak self] in self?.dismissAsCancellation() }
         }

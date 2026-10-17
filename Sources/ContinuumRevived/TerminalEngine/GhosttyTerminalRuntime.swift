@@ -782,9 +782,22 @@ final class GhosttyRuntimeContext {
         }
         configPointer = config
 
+        #if ARRAY_FILM
+        // Film build only: a run's own config file INSTEAD of the user's (fixed font,
+        // opaque background, no blink, no shader), and no XDG bridge, which writes
+        // into the real ~/.config.
+        if FilmScene.isRequested, let filmConfig = ProcessInfo.processInfo.environment["ARRAY_FILM_GHOSTTY_CONFIG"] {
+            ghostty_config_load_file(config, filmConfig)
+        } else {
+            Self.ensureGhosttyXDGConfigBridge()
+            ghostty_config_load_default_files(config)
+            ghostty_config_load_recursive_files(config)
+        }
+        #else
         Self.ensureGhosttyXDGConfigBridge()
         ghostty_config_load_default_files(config)
         ghostty_config_load_recursive_files(config)
+        #endif
         ghostty_config_finalize(config)
         themeSnapshot = GhosttyThemeSnapshot.capture(config: config)
 

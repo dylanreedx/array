@@ -1741,6 +1741,30 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        #if ARRAY_FILM
+        // Film build only: the recorder's witness (Film/FilmRun.swift). Stages each
+        // committed scene, boots it through `mountWorkspaceSceneAtBoot` off-display,
+        // runs every take with no capture. Re-executes itself once per scene with an
+        // isolated app-support root. A normal build refuses the flag (the guard below).
+        if CommandLine.arguments.contains("--film-scene-check") {
+            if ProcessInfo.processInfo.environment["ARRAY_FILM_CHECK_ROOT"] == nil {
+                Foundation.exit(FilmSceneCheck.runIsolated())
+            }
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let summary = try await FilmSceneCheck.run()
+                    print("FilmSceneChecks passed: \(summary)")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        #endif
+
         // CX-01: the ten-operation walkthrough. NOT a `*-check` flag on purpose —
         // it is a narrated demonstration, not a gate, so it stays out of the check
         // inventory and out of the matrix. See `WorkspaceAPIDemo.swift`.
@@ -4349,11 +4373,41 @@ enum ContinuumApp {
             }
         }
 
+        #if !ARRAY_FILM
+        // The film recorder is compiled only into the film build
+        // (`scripts/film-capture.sh`, -DARRAY_FILM). Here `--film` is an unknown
+        // flag, and like a misspelled check flag it would otherwise fall through and
+        // boot the full app against real state. Witness: scripts/check-film-absent.sh.
+        if let flag = CommandLine.arguments.first(where: { $0 == "--film" || $0 == "--film-out" }) {
+            fputs("FAIL: unknown flag \(flag): this build has no film recorder. "
+                  + "Only scripts/film-capture.sh builds one (-DARRAY_FILM).\n", stderr)
+            Foundation.exit(2)
+        }
+        #endif
+
         // PATH augmentation must precede the first ProcessInfo.environment
         // read (NSProcessInfo caches on first access) — AppDelegate's
         // initializers already read it. See ToolEnvironment.
         ToolEnvironment.shared.bootstrap()
         ToolEnvironment.shared.startLoginShellUpgrade()
+        #if ARRAY_FILM
+        // Film build: `--film` stages its scene on disk BEFORE `AppDelegate` reads
+        // any store, and freezes the catalogue to the scene's. No provider is
+        // probed and no session is titled during a film.
+        if let filmPath = FilmScene.requestedPath {
+            do {
+                let scene = try FilmScene.load(URL(fileURLWithPath: filmPath))
+                try FilmStager.stage(scene, roots: try FilmStager.liveRoots(for: scene))
+                scene.catalogSnapshots.forEach(AgentModelCatalog.shared.resetForQA(snapshot:))
+            } catch {
+                fputs("FILM REFUSED: \(error)\n", stderr)
+                Foundation.exit(2)
+            }
+        } else {
+            AgentModelCatalog.shared.enableLiveRefresh()
+            AgentSupervisor.enableLiveNameTitling()
+        }
+        #else
         // Live model catalogue: opt in to bounded `pi --list-models` probes
         // (startup + throttled re-probes on picker open / onboarding
         // re-check) so the picker offers whatever providers the user has
@@ -4362,6 +4416,7 @@ enum ContinuumApp {
         // Session titles: each harness titles with its own CLI. Same opt-in rule
         // as the catalogue, so no check can ever spend a real provider call.
         AgentSupervisor.enableLiveNameTitling()
+        #endif
 
         // Every `--*-check` flag is handled above and exits. Reaching here with
         // one still on the command line means it was MISSPELLED or belongs to a
@@ -4416,6 +4471,11 @@ enum ContinuumApp {
         }
 
         let application = NSApplication.shared
+        #if ARRAY_FILM
+        // A film's takes must not depend on the host's light/dark setting: the app, and
+        // the pages its browser tiles load (prefers-color-scheme), render dark.
+        if FilmScene.isRequested { application.appearance = NSAppearance(named: .darkAqua) }
+        #endif
         let delegate = AppDelegate()
         Self.delegate = delegate
 
@@ -4887,6 +4947,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     // `liveControllers` for teardown.
     var canvasView: CanvasNSView?
     private var workspaceSidebarView: WorkspaceSidebarView?
+    #if ARRAY_FILM
+    /// Film build only: receives the viewport `revealTileForWork` would move to, so
+    /// the director can glide there instead. Nil: production's own navigation.
+    var filmRevealCamera: ((CanvasViewport) -> Void)?
+    #endif
     private var observedAgentStatuses: [UUID: AgentStatus] = [:]
     // Internal, not private: the WS4 awareness witness reads the live signal
     // from its own file and must see the same instance production drives.
@@ -5005,12 +5070,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private lazy var agentComposerAttachmentStore = AgentComposerAttachmentStore(
         applicationSupportDirectory: Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
     )
+    #if ARRAY_FILM
+    lazy var agentSupervisor = AgentSupervisor(
+        store: AgentStore(smokeTest: smokeTestEnabled),
+        // Film build: a film run never launches a CLI. A real composer send lands in
+        // the film's stub runner (Film/FilmAgentRunner.swift), which the scene's verbs
+        // complete; outside a film run it is exactly `productionRunner`.
+        makeRunner: FilmAgentRunner.runner(for:),
+        attachmentStore: agentComposerAttachmentStore,
+        submissionRecoveryStore: agentComposerDraftStore,
+        transcriptStore: agentTranscriptStore
+    )
+    #else
     lazy var agentSupervisor = AgentSupervisor(
         store: AgentStore(smokeTest: smokeTestEnabled),
         attachmentStore: agentComposerAttachmentStore,
         submissionRecoveryStore: agentComposerDraftStore,
         transcriptStore: agentTranscriptStore
     )
+    #endif
     /// Agent CLI versions and in-app updates (Settings › Agents, ⌘K). `shared`
     /// stays inert unless `applicationDidFinishLaunching` enables it; a check
     /// injects its own center here.
@@ -5281,13 +5359,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // interactive path, after the entire `--*-check` cascade, so no self-check
         // leg can write into the developer's real `~/.pi/agent/extensions`.
         // The installer never overwrites a copy whose bytes are not ours.
-        Task.detached {
+        // A film run (film build only) never writes into the real ~/.pi, never
+        // takes focus, and runs its director instead of the interactive app.
+        #if ARRAY_FILM
+        let isFilmRun = FilmScene.isRequested
+        #else
+        let isFilmRun = false
+        #endif
+        if !isFilmRun { Task.detached {
             let result = PiExtensionInstaller.install()
             if case .leftUserModifiedCopy = result {
                 FileHandle.standardError.write(Data(
                     "PiExtensionInstaller: left a modified continuum-spawn-agent.ts in place\n".utf8))
             }
-        }
+        } }
         launchStartTime = QAPerf.timestamp()
         qaPerf = QAPerf()
         navKeymap = NavKeymap.resolve()
@@ -5533,6 +5618,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let window = makeWorkspaceWindow(
                 canvasView: canvasView,
                 title: Self.mainWindowTitle(for: project, registry: updatedRegistry))
+            #if ARRAY_FILM
+            if let filmPath = FilmScene.requestedPath, let scene = try? FilmScene.load(URL(fileURLWithPath: filmPath)) {
+                FilmDirector.parkWindow(window, scene: scene)
+            }
+            #endif
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(canvasView)
             self.window = window
@@ -5540,7 +5630,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // Activate after runtimes are wired up: NSApp.activate can fire
             // applicationDidBecomeActive synchronously, and the focus path needs
             // a non-nil ghostty to forward set_focus into the surface.
-            NSApp.activate(ignoringOtherApps: true)
+            // A film run (film build only) works behind the user's windows and
+            // never takes focus.
+            if !isFilmRun { NSApp.activate(ignoringOtherApps: true) }
 
             // P5.5 boot regression probe (display-dependent; belongs to the
             // supervised surface legs, never the headless matrix). Offscreen
@@ -5576,6 +5668,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 runTerminalScrollErgonomicsCheck(window: window, runtime: liveControllers.flatMap(\.runtimes).first)
             } else if CommandLine.arguments.contains("--previous-focus-navigation-check") {
                 runPreviousFocusNavigationCheck(window: window)
+            } else if isFilmRun {
+                #if ARRAY_FILM
+                runFilm(window: window)
+                #endif
             } else if smokeTestEnabled {
                 runSmokeTest(window: window, runtime: liveControllers.flatMap(\.runtimes).first)
             } else {
@@ -11580,7 +11676,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     ///
     /// Read-state is layered on here rather than inside the fold, because
     /// `AgentSupervisor` owns it and Core cannot reach a supervisor (P3.3).
-    private func buildAgentInboxRows(now: Date = Date()) -> [AgentInboxRow] {
+    private func buildAgentInboxRows(now: Date = AgentElapsedClock.now()) -> [AgentInboxRow] {
         // In memory (R5): the inputs the last structural rebuild read, with the
         // live canvas over them. An agent event never opens a file.
         let inputs = currentSidebarModelInputs()
@@ -16183,7 +16279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // first moment the signal for it exists.
         if let tileId { applyPendingWatchedArrival(tileID: tileId) }
         guard let draft = ManagedAgentActivityBridge.draft(
-            for: event, agentId: agentId.rawValue, tileId: tileId, status: status, now: Date()
+            for: event, agentId: agentId.rawValue, tileId: tileId, status: status, now: AgentElapsedClock.now()
         ) else { return }
         var buffer = managedAgentActivityByAgent[agentId.rawValue] ?? []
         buffer.append(draft)
@@ -16597,7 +16693,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.noteUserInteraction()
         if let targetViewport = canvasView.framedViewportForTileJump(tileId) {
             recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: targetViewport)
+            #if ARRAY_FILM
+            if let filmRevealCamera {
+                filmRevealCamera(targetViewport)
+            } else {
+                canvasView.navigateViewport(to: targetViewport)
+            }
+            #else
             canvasView.navigateViewport(to: targetViewport)
+            #endif
         }
         focusHistory.recordTileFocus(tileId, zoneId: zoneContainingTile(tileId), reason: historyReason)
         focusBroker.enterScope(.tile(tileId), reason: scopeReason)
@@ -38650,3 +38754,47 @@ static func runAgentInboxHoverGlanceCheck() throws -> String {
     return "hover card: status (Working · elapsed / \(AgentStatusVocabulary.label(for: .needsAttention)) / Done) and the newest assistant line, truncated in-card"
 }
 }
+
+#if ARRAY_FILM
+// Film build only: accessors for the recorder (App/Film/); the members they reach
+// are private to this file.
+extension AppDelegate {
+    var filmCanvas: CanvasNSView? { canvasView }
+    var filmWorkspaceRuntime: WorkspaceRuntime? { workspaceRuntime }
+    func filmBoardRuntime(projectId: UUID) -> BoardRuntime? {
+        workspaceRuntime?.controller(for: projectId).map { configuredBoardRuntime($0) }
+    }
+    func filmRefreshAgentSurfaces() { refreshAgentSurfaces(notify: false) }
+    func filmAwarenessKind(tileId: UUID) -> String? { agentSignalCenter.currentByTile[tileId]?.kind.rawValue }
+    /// The workspace sidebar when it is on screen (nil when hidden or never built).
+    var filmSidebar: WorkspaceSidebarView? {
+        guard let sidebar = workspaceSidebarView, sidebar.window != nil, !sidebar.isHiddenOrHasHiddenAncestor else { return nil }
+        return sidebar
+    }
+    /// The window grew after the split view was built, and NSSplitView scales its panes
+    /// with it; put the divider back where the preference says, the way a launch does.
+    func filmApplySidebarLayout() { applyWorkspaceSidebarVisibility(WorkspaceSidebarConfig.resolveVisible()) }
+    /// One film frame of the sidebar: the inbox's shared elapsed clock ticks now.
+    func filmTickSidebar() { workspaceSidebarView?.agentInbox.filmTickElapsedClock() }
+    /// `--film-scene-check` only: adopt a sidebar the check laid out beside its canvas,
+    /// wired exactly as `makeWorkspaceContentView` wires the real one, but scoped to every
+    /// agent without reading or writing the persisted scope.
+    func filmAdoptSidebarForCheck(_ sidebar: WorkspaceSidebarView) throws {
+        // The launch sweep `applicationDidFinishLaunching` arms; until it runs, the
+        // managed-session listing refuses and the inbox is never pushed.
+        try reconciledManagedSessionSource.reconcile(
+            registry: (try registryStore?.loadOrEmpty()) ?? Registry.empty(), reason: .continuumRestarted, now: Date())
+        workspaceSidebarView = sidebar
+        configureWorkspaceSidebar(sidebar)
+        sidebar.configureInboxScope(.all) { _ in }
+        reloadWorkspaceSidebar()
+    }
+    var filmFocusedTileId: UUID? { canvasView?.canvasState.lastActiveTileId }
+    /// `--film-scene-check` only: the check's off-display window as the app's main
+    /// window, the role boot gives the window it builds.
+    func filmAdoptWindowForCheck(_ window: NSWindow) { self.window = window }
+    /// The host side of a native provider's workspace MCP call, as `WorkspaceMCPHost`
+    /// hands a request on once its capability token checks out.
+    func filmHandleWorkspaceMCP(_ request: [String: Any]) -> [String: Any] { workspaceAPI.handleMCPRequest(request) }
+}
+#endif

@@ -81,6 +81,12 @@ final class WorkspaceAPIService {
     /// Checks-only: makes the presentation step of `agent.delegate` FAIL for the
     /// given tile with the returned message (§10.3 partial-failure witness).
     var _injectPresentationFailure: ((UUID) -> String?)?
+    #if ARRAY_FILM
+    /// Film build only (pattern: `AppDelegate.filmRevealCamera`): receives the
+    /// viewport a `revealResult` presentation would cut to, so the director can glide
+    /// there instead. Nil: the cut happens.
+    var filmRevealCamera: ((CanvasViewport) -> Void)?
+    #endif
     /// Production: `AppDelegate.wireManagedAgentTile` — binds a freshly installed
     /// managed-agent tile view to its agent (P2A.5). Checks may leave it nil; the
     /// durable record binding (`supervisor.attach`) happens regardless.
@@ -707,7 +713,11 @@ final class WorkspaceAPIService {
                 if policy.armedZone == .preserve, let wouldArm, wouldArm != runtime.document.lastActiveZoneId {
                     effects.camera = .unavailable
                 } else {
+                    #if ARRAY_FILM
+                    if let filmRevealCamera { filmRevealCamera(framed) } else { canvas.setViewport(framed) }
+                    #else
                     canvas.setViewport(framed)
+                    #endif
                     effects.camera = .changed
                     navigated = true
                 }

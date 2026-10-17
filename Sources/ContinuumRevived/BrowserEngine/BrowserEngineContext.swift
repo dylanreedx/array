@@ -47,6 +47,11 @@ final class BrowserEngineContext {
         configuration.websiteDataStore = dataStore(for: storageGroupId)
         configuration.preferences.isFraudulentWebsiteWarningEnabled = false
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        #if ARRAY_FILM
+        if FilmScene.isRequested {
+            configuration.userContentController.addUserScript(FilmWebFreeze.userScript)
+        }
+        #endif
         let webView = WKWebView(frame: .zero, configuration: configuration)
         applyInspectionPolicy(to: webView)
         return webView

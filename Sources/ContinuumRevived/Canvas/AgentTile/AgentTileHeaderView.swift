@@ -134,7 +134,7 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         nameLabel.stringValue = next.name
         stateLabel.stringValue = next.stateLabel
         branchChip.apply(next.branch)
-        updateElapsed(now: Date())
+        updateElapsed(now: AgentElapsedClock.now())
         updateTimer(startedAt: next.startedAt)
         setAccessibilityValue(next.stateAccessibilityLabel)
         applyTokens()
@@ -199,7 +199,7 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         elapsedTimer = nil
         guard startedAt != nil else { return }
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.updateElapsed(now: Date()) }
+            MainActor.assumeIsolated { self?.updateElapsed(now: AgentElapsedClock.now()) }
         }
         RunLoop.main.add(timer, forMode: .common)
         elapsedTimer = timer
@@ -358,4 +358,17 @@ final class AgentTileOverflowButton: NSControl, TokenThemed, AgentPageZoomScalab
         super.viewDidChangeEffectiveAppearance()
         applyTokens()
     }
+}
+
+/// The elapsed readout clock of the agent header and the sidebar inbox (rows and
+/// their live tick). Wall time. Only the film build (`-DARRAY_FILM`) can redirect
+/// it: the film renders frames slower than real time and substitutes its film clock
+/// so "Working · 4s" means four seconds of footage, not of rendering.
+enum AgentElapsedClock {
+    #if ARRAY_FILM
+    /// Written only on the main thread, by the film director.
+    nonisolated(unsafe) static var now: () -> Date = { Date() }
+    #else
+    @inline(__always) static func now() -> Date { Date() }
+    #endif
 }
