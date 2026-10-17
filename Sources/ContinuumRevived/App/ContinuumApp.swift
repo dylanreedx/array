@@ -12886,7 +12886,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             cornerReadings[style.rawValue] = reading.joined(separator: " ")
         }
 
-        // 8. In the real window: the controls take their own clicks, the empty bar drags.
+        // 8. The sidebar's New Agent button is the same control.
+        let sidebarView = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 280, height: 480))
+        let newAgent = descendants(sidebarView).first { $0.accessibilityIdentifier() == "ContinuumAgentInboxNewAgent" }
+        let newAgentButton = newAgent as? ChromeIconButton
+        expect(newAgentButton?.symbolName == "square.and.pencil" && newAgentButton?.accessibilityLabel() == "New Agent",
+               "the sidebar's New Agent is a \(newAgent.map { "\(type(of: $0))" } ?? "missing view"), expected a ChromeIconButton drawing square.and.pencil")
+
+        // 9. In the real window: the controls take their own clicks, the empty bar drags.
         let chromeApp = AppDelegate()
         chromeApp.registryStore = registryStore
         try chromeApp.reconciledManagedSessionSource.reconcile(

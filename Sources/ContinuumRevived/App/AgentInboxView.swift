@@ -628,7 +628,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var oneRowHeaderConstraints: [NSLayoutConstraint] = []
     /// The header's New agent button (one-row header only). The host wires it to
     /// the same spawn ⌘K's New Agent makes.
-    private let newAgentButton = NSButton(frame: .zero)
+    private let newAgentButton = ChromeIconButton(symbolName: "square.and.pencil", accessibilityLabel: "New Agent")
     var onNewAgent: (() -> Void)?
     /// The square the New agent button occupies: T3's `size-7`.
     static let headerIconButtonSide: CGFloat = 28
@@ -1353,15 +1353,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         addSubview(scopeButton)
         addSubview(searchField)
         newAgentButton.translatesAutoresizingMaskIntoConstraints = false
-        newAgentButton.isBordered = false
-        newAgentButton.title = ""
-        newAgentButton.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Agent")
-        newAgentButton.imagePosition = .imageOnly
-        newAgentButton.imageScaling = .scaleProportionallyDown
         newAgentButton.target = self
         newAgentButton.action = #selector(newAgentPressed)
         newAgentButton.toolTip = "New Agent"
-        newAgentButton.setAccessibilityLabel("New Agent")
         newAgentButton.setAccessibilityIdentifier("ContinuumAgentInboxNewAgent")
         addSubview(newAgentButton)
         searchIcon.translatesAutoresizingMaskIntoConstraints = false
@@ -1539,7 +1533,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     func applyTokens() {
         layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
         emptyLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
-        newAgentButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         searchField.textColor = TextToken.textPrimary.color.nsColor(in: self)
         applySearchFieldChrome()
     }
