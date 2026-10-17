@@ -5137,8 +5137,8 @@ final class AgentSupervisor {
         if let normalized, !ZoneColorConfig.palette.contains(normalized) { return false }
         guard record.identityColor != normalized else { return false }
         record.identityColor = normalized
-        records[id] = record
-        persist(record)
+        // Publish only a durable pick. persist updates the live record on success.
+        guard persist(record) else { return false }
         if let observers = identityColorObservers[id] {
             for observer in observers.values { observer(normalized) }
         }
@@ -8400,7 +8400,8 @@ final class AgentSupervisor {
         try? handle.write(contentsOf: Data(line.utf8))
     }
 
-    private func persist(_ record: AgentRecord) {
+    @discardableResult
+    private func persist(_ record: AgentRecord) -> Bool {
         do {
             let persisted = try withAgentStoreLock {
                 var candidate = record
@@ -8424,8 +8425,10 @@ final class AgentSupervisor {
             if persisted.previousDisplayName != persisted.record.displayName {
                 notifyDisplayNameChanged(for: persisted.record)
             }
+            return true
         } catch {
             warn("AgentSupervisor: could not persist agent \(record.id.rawValue.uuidString): \(error)")
+            return false
         }
     }
 }

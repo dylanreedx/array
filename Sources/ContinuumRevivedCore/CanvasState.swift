@@ -120,7 +120,7 @@ public struct Tile: Equatable, Sendable {
 }
 
 extension Tile: Codable {
-    private enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         // `zIndex` is decode-only: the pre-v3 integer rank. Never re-emitted.
         case id, kind, title, frame, zPosition, zIndex, zoneId, runtimeRef, metadata
     }
@@ -354,7 +354,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.boardId = boardId
     }
 
-    private enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case launchProfileId
         case projectRelativeCwd
         case url

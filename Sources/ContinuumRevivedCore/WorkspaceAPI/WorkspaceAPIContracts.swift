@@ -44,6 +44,7 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     // existing operations remains stable.
     case boardQuery = "board.query"
     case boardApply = "board.apply"
+    case agentUpdate = "agent.update"
 }
 
 // MARK: - Identity

@@ -424,3 +424,68 @@ public extension WorkspaceToolGrantEvaluator {
             .reduce(into: Set<AgentID>()) { $0.formUnion($1.inspectableAgentIds) }
     }
 }
+
+// MARK: - agent.update
+
+/// Identity belongs to the record, independently of tile geometry/hydration.
+/// Missing is not a reset: clearing requires an explicit JSON null.
+public struct AgentUpdateRequest: Codable, Equatable, Sendable {
+    public var agentId: AgentID
+    public var identityColor: String?
+    public var idempotencyKey: String?
+
+    public init(agentId: AgentID, identityColor: String?, idempotencyKey: String? = nil) {
+        self.agentId = agentId
+        self.identityColor = identityColor
+        self.idempotencyKey = idempotencyKey
+    }
+
+    private enum CodingKeys: String, CodingKey { case agentId, identityColor, idempotencyKey }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        agentId = try c.decode(AgentID.self, forKey: .agentId)
+        guard c.contains(.identityColor) else {
+            throw DecodingError.keyNotFound(CodingKeys.identityColor,
+                .init(codingPath: decoder.codingPath, debugDescription: "identityColor is required; use null to clear"))
+        }
+        identityColor = try c.decodeIfPresent(String.self, forKey: .identityColor)
+        idempotencyKey = try c.decodeIfPresent(String.self, forKey: .idempotencyKey)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(agentId, forKey: .agentId)
+        if let identityColor { try c.encode(identityColor, forKey: .identityColor) }
+        else { try c.encodeNil(forKey: .identityColor) }
+        try c.encodeIfPresent(idempotencyKey, forKey: .idempotencyKey)
+    }
+}
+
+public struct AgentUpdateResult: Codable, Equatable, Sendable {
+    public enum Durability: String, Codable, Sendable { case committed, unchanged }
+    public var schema: String = WorkspaceAPISchema.v1
+    public var operationId: String
+    public var agentId: AgentID
+    public var identityColor: String?
+    public var revision: WorkspaceRevision
+    public var durability: Durability
+
+    public init(operationId: String, agentId: AgentID, identityColor: String?, revision: WorkspaceRevision, durability: Durability) {
+        self.operationId = operationId
+        self.agentId = agentId
+        self.identityColor = identityColor
+        self.revision = revision
+        self.durability = durability
+    }
+
+    private enum CodingKeys: String, CodingKey { case schema, operationId, agentId, identityColor, revision, durability }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(schema, forKey: .schema)
+        try c.encode(operationId, forKey: .operationId)
+        try c.encode(agentId, forKey: .agentId)
+        if let identityColor { try c.encode(identityColor, forKey: .identityColor) }
+        else { try c.encodeNil(forKey: .identityColor) }
+        try c.encode(revision, forKey: .revision)
+        try c.encode(durability, forKey: .durability)
+    }
+}

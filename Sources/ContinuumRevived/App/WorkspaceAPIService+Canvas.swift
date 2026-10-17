@@ -297,7 +297,7 @@ extension WorkspaceAPIService {
 
     /// Mirror of `consumeSingleUseGrant` for the apply op: a once-grant is spent
     /// by the request it authorized unless a durable grant also covers it.
-    private func consumeSingleUseApplyGrant(agentId: AgentID, checkout: CheckoutHandle) {
+    func consumeSingleUseApplyGrant(agentId: AgentID, checkout: CheckoutHandle) {
         guard var live = grants[agentId] else { return }
         let durable = live.contains { !$0.singleUse && $0.checkoutHandles.contains(checkout) && $0.operations.contains(.canvasApply) && $0.revocationGeneration == revocationGeneration(for: agentId) }
         guard !durable, let index = live.firstIndex(where: { $0.singleUse && $0.checkoutHandles.contains(checkout) && $0.operations.contains(.canvasApply) }) else { return }

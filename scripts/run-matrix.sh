@@ -954,6 +954,9 @@ run_app_check .build/debug/Array --workspace-api-open-check
 run_app_check .build/debug/Array --workspace-api-grants-check
 # CX-01 Phase 2a: agent.find / agent.inspect — ranking, ambiguity, self-inspect
 # preset, other-agent approval, byte caps, zero lifecycle side effects.
+# Agent colour: durable record update through the real workspace API.
+run_app_check .build/debug/Array --workspace-api-agent-colour-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
 run_app_check .build/debug/Array --workspace-api-agents-check
 # CX-01 Phase 4: canvas.query paging/coverage/byte cap, and canvas.apply through
 # the drag's own owner route — the persisted WORLD frame, untouched and

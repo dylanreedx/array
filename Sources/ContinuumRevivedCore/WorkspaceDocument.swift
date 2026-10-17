@@ -396,7 +396,7 @@ public struct ZoneScope: Codable, Equatable, Sendable {
 }
 
 extension ZonePlacement: Codable {
-    private enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case zoneId, projectId, homeRelativePath, origin, size, color, collapsed, hydrationPolicy, autoLayoutMode, name, navKey, zPosition
     }
 

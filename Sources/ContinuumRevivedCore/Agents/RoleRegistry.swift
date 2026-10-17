@@ -83,7 +83,7 @@ public struct RoleRegistry: Sendable {
                           "array_delegate", "array_reveal_agent", "array_get_operation",
                           // Messaging is scoped to the caller's OWN children and
                           // authorized per request, like delegation.
-                          "array_message_agent"]
+                          "array_message_agent", "array_update_agent"]
         case .claudeCode, .codex: return []
         }
     }

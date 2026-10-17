@@ -696,6 +696,50 @@
           "idempotencyKey"
         ]
       }
+    },
+    {
+      "name": "array_update_agent",
+      "label": "Array Update Agent",
+      "op": "agent.update",
+      "description": "Set an agent’s identity colour to a palette name, or null for no colour. Your own colour needs no extra approval. Changing another agent in your checkout uses the canvas-write grant, which also permits tile moves and resizes; other checkouts/projects are refused. Returns operationId, agentId, actual identityColor, revision and durability (committed or unchanged). Preserves presentation.",
+      "promptSnippet": "Change your own or a permitted agent’s identity colour",
+      "promptGuidelines": [
+        "Use agentId from array_workspace_context or array_find_agent; never guess an identity.",
+        "Pass identityColor explicitly: teal, blue, mint, purple, orange, yellow, red, or null to clear. Hex is not accepted.",
+        "Reuse the same idempotencyKey for a retry of the same intent. Self updates are allowed; other-agent updates use the canvas-write scope."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "identityColor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "teal",
+              "blue",
+              "mint",
+              "purple",
+              "orange",
+              "yellow",
+              "red",
+              null
+            ]
+          },
+          "idempotencyKey": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agentId",
+          "identityColor"
+        ]
+      }
     }
   ]
 }
