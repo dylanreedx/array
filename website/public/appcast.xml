@@ -10,7 +10,7 @@
             <sparkle:shortVersionString>0.7.29</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/dylanreedx/array-releases/releases/download/v0.7.29/Array-0.7.29.dmg" length="48457268" type="application/octet-stream" sparkle:edSignature="xczS3OzJDn+ABL6WjBTfNjG2j/+ICHfXgoSOCVfDJSzvml+W6ljY2ZLnnRIxbANzuWna6aC0k9b2EliZpryMBA==" />
+            <enclosure url="https://github.com/dylanreedx/array-releases/releases/download/v0.7.29/Array-0.7.29.dmg" length="48637630" type="application/octet-stream" sparkle:edSignature="CCtCVIDuiOXbdjK/H3O+/OgJIKMDwX+p8rJ24HwTobIQdDLBaAuUMgqFu5WXDiHp2xwgeui2YN5wBi8p4oJrBw==" />
         <sparkle:releaseNotesLink>https://github.com/dylanreedx/array-releases/releases/tag/v0.7.29</sparkle:releaseNotesLink></item>
         <item>
             <title>0.7.28</title>
