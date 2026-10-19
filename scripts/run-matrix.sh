@@ -1116,6 +1116,11 @@ run_app_check .build/debug/Array --inbox-reveal-project-check
 # landed in the first (the dictation film's swarm spike). World frame against
 # the parent zone's world rect, not the zone stamp (hazard 9).
 run_app_check .build/debug/Array --subagent-tile-zone-check
+# With auto-layout OFF, a zone's automatic placement clamped only the camera, so
+# a tile could be framed past the zone's edge; auto-layout's settle grew the zone
+# over it and hid that. Toolbar spawns into one zone until it is full, asserting
+# each WORLD frame against the zone's content rect, not the zone stamp (hazard 9).
+run_app_check .build/debug/Array --zone-spawn-containment-check
 # M1.7/M1.9 (.plans/46): AgentRunning.stop() is non-throwing and reports nothing;
 # what happens is that it SIGTERMs the child and run() throws on the way out. The
 # supervisor turned that into .runtimeError -> didFail -> .failed, persisted, and

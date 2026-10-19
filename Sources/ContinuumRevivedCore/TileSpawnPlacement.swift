@@ -31,19 +31,28 @@ public enum TileSpawnPlacement {
         public var siblings: [Tile]
         /// The standard tile gap (`TileGapResolver.resolvedGap()`).
         public var gap: Double
+        /// The rect the new tile must land inside, in the placement space: a zone's
+        /// content rect. `nil` is the unbounded flat canvas. Every candidate is
+        /// shifted inside it before ranking, so a free slot inside wins over a
+        /// colliding one and nothing outside is ever chosen. A full zone therefore
+        /// gets an overlapping tile INSIDE it rather than one hanging out of it; on
+        /// an axis the tile is too big for, it starts at the leading edge.
+        public var bounds: CGRect?
 
         public init(
             newSize: CGSize,
             viewport: CanvasViewport,
             visibleSize: CGSize,
             siblings: [Tile],
-            gap: Double
+            gap: Double,
+            bounds: CGRect? = nil
         ) {
             self.newSize = newSize
             self.viewport = viewport
             self.visibleSize = visibleSize
             self.siblings = siblings
             self.gap = gap
+            self.bounds = bounds
         }
     }
 
@@ -90,21 +99,24 @@ public enum TileSpawnPlacement {
         let centre = CGPoint(x: viewportRect.midX, y: viewportRect.midY)
         let gap = context.gap.isFinite && context.gap > 0 ? context.gap : 0
         let obstacles = context.siblings.map { rect(for: $0.frame) }.filter { $0.width > 0 && $0.height > 0 }
+        let bounds = context.bounds.flatMap(sanitizedBounds)
 
         // A tile bigger than the viewport keeps its working size: centre the axis that
         // fits, and use a stable padded origin on an axis that cannot.
         if size.width > viewportRect.width || size.height > viewportRect.height {
             let x = size.width > viewportRect.width ? viewportRect.minX + gap : centre.x - size.width / 2
             let y = size.height > viewportRect.height ? viewportRect.minY + gap : centre.y - size.height / 2
-            return TileFrame(x: x, y: y, width: size.width, height: size.height)
+            let placed = contained(CGRect(x: x, y: y, width: size.width, height: size.height), in: bounds)
+            return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
         }
 
-        let candidates: [Candidate]
+        let generated: [Candidate]
         if let anchor = anchorRect(at: centre, siblings: context.siblings) {
-            candidates = dockCandidates(anchor: anchor, size: size, gap: gap, obstacles: obstacles)
+            generated = dockCandidates(anchor: anchor, size: size, gap: gap, obstacles: obstacles)
         } else {
-            candidates = centreCandidates(centre: centre, size: size)
+            generated = centreCandidates(centre: centre, size: size)
         }
+        let candidates = generated.map { Candidate(rect: contained($0.rect, in: bounds), side: $0.side, ring: $0.ring) }
 
         // `candidates` is never empty: both generators always emit their ring-0 entries.
         let best = candidates.max { lhs, rhs in
@@ -223,6 +235,16 @@ public enum TileSpawnPlacement {
         let rhsFree = firstBlocker(of: rhs.rect, in: obstacles) == nil
         if lhsFree != rhsFree { return lhsFree }
 
+        // 1b. Between two colliding candidates, the smaller overlap. Only a full
+        //     zone gets here — its `bounds` leave no free candidate — and without
+        //     this the anchor's own slot, clamped back onto the anchor, buried the
+        //     new tile exactly under an existing one.
+        if !lhsFree {
+            let lhsOverlap = overlapArea(lhs.rect, obstacles: obstacles)
+            let rhsOverlap = overlapArea(rhs.rect, obstacles: obstacles)
+            if abs(lhsOverlap - rhsOverlap) > areaEpsilon { return lhsOverlap < rhsOverlap }
+        }
+
         // 2. Visible fraction of the tile. The infinite canvas is not the optimization
         //    target: the user cares where the tile lands NOW.
         let lhsArea = lhs.rect.width * lhs.rect.height
@@ -255,6 +277,27 @@ public enum TileSpawnPlacement {
 
     // MARK: - Geometry helpers
 
+    /// `rect` moved the least distance that puts it inside `bounds`. On an axis
+    /// where it is larger than `bounds` it starts at the leading edge and overflows
+    /// the far one: the tile is never shrunk.
+    private static func contained(_ rect: CGRect, in bounds: CGRect?) -> CGRect {
+        guard let bounds else { return rect }
+        func axis(_ origin: Double, _ length: Double, _ minEdge: Double, _ maxEdge: Double) -> Double {
+            length > maxEdge - minEdge ? minEdge : min(max(origin, minEdge), maxEdge - length)
+        }
+        return CGRect(
+            x: axis(rect.minX, rect.width, bounds.minX, bounds.maxX),
+            y: axis(rect.minY, rect.height, bounds.minY, bounds.maxY),
+            width: rect.width,
+            height: rect.height)
+    }
+
+    private static func sanitizedBounds(_ bounds: CGRect) -> CGRect? {
+        guard !bounds.isNull, bounds.minX.isFinite, bounds.minY.isFinite,
+              bounds.width.isFinite, bounds.height.isFinite else { return nil }
+        return CGRect(x: bounds.minX, y: bounds.minY, width: max(0, bounds.width), height: max(0, bounds.height))
+    }
+
     /// Strict intersection: edge-touching is legal, because the standard gap has
     /// already been applied to every candidate.
     private static func firstBlocker(of candidate: CGRect, in obstacles: [CGRect]) -> CGRect? {
@@ -277,6 +320,10 @@ public enum TileSpawnPlacement {
         case .below: return blocking.max { $0.maxY < $1.maxY }
         case .above: return blocking.min { $0.minY < $1.minY }
         }
+    }
+
+    private static func overlapArea(_ rect: CGRect, obstacles: [CGRect]) -> Double {
+        obstacles.reduce(0) { total, obstacle in total + visibleArea(rect, in: obstacle) }
     }
 
     private static func visibleArea(_ rect: CGRect, in viewport: CGRect) -> Double {

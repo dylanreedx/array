@@ -8313,8 +8313,26 @@ final class TileSpawner {
             // to dodge the wrong zone's tiles and could stack the new tile straight
             // on top of an existing one.
             siblings: siblingTiles(in: canvasView, targetZoneId: zone.zoneId),
-            gap: TileGapResolver.resolvedGap()
+            gap: TileGapResolver.resolvedGap(),
+            // The camera clamp above keeps the point of attention in the zone, not
+            // the tile: a centre near the zone's edge framed an agent half a tile
+            // past it. With auto-layout on, the settle grew the zone over it; with
+            // it off the tile hung out of its own zone. The content rect is the
+            // one the auto-layout engine packs into.
+            bounds: zoneLocalContentRect(zone, defaults: canvasView.autoLayoutDefaults)
         ))
+    }
+
+    /// A zone's content rect in its own local space: inside the header and the
+    /// zone padding, as `CanvasAutoLayoutEngine` lays tiles out.
+    private func zoneLocalContentRect(_ zone: ZonePlacement, defaults: UserDefaults) -> CGRect {
+        let padding = ZoneBoundsConfig.padding(defaults: defaults)
+        let header = Double(ZoneChromeNSView.headerHeight)
+        return CGRect(
+            x: padding,
+            y: header + padding,
+            width: max(0, zone.size.width - 2 * padding),
+            height: max(0, zone.size.height - header - 2 * padding))
     }
 
     /// The camera in a zone's local space, clamped so a new tile always lands

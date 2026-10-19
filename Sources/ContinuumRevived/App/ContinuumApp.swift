@@ -1115,6 +1115,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-spawn-containment-check") {
+            do {
+                _ = NSApplication.shared
+                try ZoneSpawnContainmentChecks.run()
+                print("ContinuumRevivedZoneSpawnContainmentChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--inbox-reveal-project-check") {
             do {
                 _ = NSApplication.shared
