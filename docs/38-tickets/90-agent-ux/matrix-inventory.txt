@@ -25,6 +25,7 @@ check --agent-stop-outcome-check
 check --agent-supervisor-check
 check --agent-tile-binding-check
 check --agent-tile-click-focus-check
+check --agent-tile-file-mention-check
 check --ambient-tile-frame-space-check
 check --app-support-channel-check
 check --attention-notification-check
@@ -323,6 +324,7 @@ leg run_app_check .build/debug/Array --agent-stop-outcome-check
 leg run_app_check .build/debug/Array --agent-supervisor-check
 leg run_app_check .build/debug/Array --agent-tile-binding-check
 leg run_app_check .build/debug/Array --agent-tile-click-focus-check
+leg run_app_check .build/debug/Array --agent-tile-file-mention-check
 leg run_app_check .build/debug/Array --ambient-tile-frame-space-check
 leg run_app_check .build/debug/Array --app-support-channel-check
 leg run_app_check .build/debug/Array --attention-notification-check

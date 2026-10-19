@@ -910,6 +910,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         if !focused { dictation.finish() }
         applyTokens()
         if focused {
+            prepareCompletionSource()
             refreshCompletionSuggestions()
         } else {
             completionController.dismiss()
@@ -1881,6 +1882,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     var qaCompletionFocusedRowIsVisible: Bool { completionController.qaFocusedRowIsVisible }
     var qaCompletionRequestStartCount: Int { completionController.qaRequestStartCount }
     var qaCompletionContext: AgentCompletionContext? { completionContext }
+    /// The context the editor last asked its completion source to prepare.
+    private(set) var qaPreparedCompletionContext: AgentCompletionContext?
 
     func qaBindCompletionSource(_ source: any AgentCompletionSuggestionSource) {
         bindCompletionSource(source)
@@ -1893,14 +1896,44 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     private func bindCompletionSource(_ source: any AgentCompletionSuggestionSource) {
         completionController.dismiss()
         completionSource = source
+        prepareCompletionSource()
         refreshCompletionSuggestions()
     }
 
+    /// The tile rebinds on every runtime event, so a rebind must cost nothing
+    /// when nothing changed: it used to close an open `@` menu and restart its
+    /// query each time, which kept the menu shut while an agent was working.
     func bindCompletionContext(_ context: AgentCompletionContext?) {
+        guard context != completionContext else { return }
+        let sameScope = context.map { new in
+            completionContext.map { Self.sameCompletionScope($0, new) } ?? false
+        } ?? false
+        completionContext = context
+        if sameScope {
+            // Only command rows read what changed (compaction availability); an
+            // open file menu, and the folder it is in, stay as they are.
+            let trigger = AgentCompletionQueryDetector.activeQuery(
+                in: textView.string, selection: textView.selectedRange())?.trigger
+            if trigger != "@" { refreshCompletionSuggestions() }
+            return
+        }
         completionController.dismiss()
         completionNavigationPath = nil
-        completionContext = context
+        prepareCompletionSource()
         refreshCompletionSuggestions()
+    }
+
+    private static func sameCompletionScope(_ a: AgentCompletionContext, _ b: AgentCompletionContext) -> Bool {
+        a.agentID == b.agentID && a.backend == b.backend && a.checkoutRoot == b.checkoutRoot
+            && a.gitRoot == b.gitRoot && a.arrayProjectRoot == b.arrayProjectRoot && a.trustState == b.trustState
+    }
+
+    /// Warms the file index while the user is still reaching for `@`.
+    private func prepareCompletionSource() {
+        guard isEditorFocused, let context = completionContext else { return }
+        let source = completionSource
+        qaPreparedCompletionContext = context
+        Task { await source.prepare(for: context) }
     }
 }
 

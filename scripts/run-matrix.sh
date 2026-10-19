@@ -592,6 +592,11 @@ run_app_check .build/debug/Array --agent-supervisor-check
 # on 2026-08-21 and it was still unregistered at 0.7.15. Offline and
 # display-independent, so it belongs in the gate like any other app leg.
 run_app_check .build/debug/Array --agent-completion-semantic-check
+# The same `@` menu in the agent tile that ships, over the real file index:
+# the semantic check above drives a bare composer and a probe source, so the
+# tile rebinding its context on every agent event (which closed the menu while
+# an agent worked) was invisible to it.
+run_app_check .build/debug/Array --agent-tile-file-mention-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
 # Real installed-provider warning/compaction/task-retention acceptance spends
 # subscription usage. Opt in explicitly; ordinary matrix runs stay offline.

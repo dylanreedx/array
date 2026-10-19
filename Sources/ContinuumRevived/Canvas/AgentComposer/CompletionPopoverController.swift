@@ -14,6 +14,14 @@ final class CompletionPopoverController {
     private weak var textView: ComposerTextView?
     private var insertionInProgress = false
     private var completionsByChoiceID: [String: AgentCompletion] = [:]
+    /// The query on screen or in flight, and where it is anchored. A refresh
+    /// that would ask the same thing again (a selection notification with no
+    /// change, a context rebind) leaves it alone instead of hiding the rows and
+    /// waiting on the provider a second time.
+    private var currentQuery: AgentCompletionQuery?
+    private var currentAnchor: NSRect?
+    /// The generation still waiting on its provider, if any.
+    private var pendingGeneration: UInt64?
     private(set) var qaRequestStartCount = 0
 
     /// WS5: the page zoom the completion panel draws at.
@@ -42,6 +50,30 @@ final class CompletionPopoverController {
         relativeTo textView: ComposerTextView,
         onAccept: @escaping (AgentCompletion, NSRange) -> Void
     ) {
+        let detectedQuery = insertionInProgress
+            ? nil
+            : AgentCompletionQueryDetector.activeQuery(in: text, selection: selection)
+        let query = detectedQuery.map { detectedQuery in
+            let fileNavigation = detectedQuery.trigger == "@"
+                ? Self.fileNavigation(
+                    queryText: detectedQuery.text,
+                    navigationPath: navigationPath,
+                    checkoutRoot: context?.checkoutRoot
+                )
+                : nil
+            return AgentCompletionQuery(
+                trigger: detectedQuery.trigger,
+                text: fileNavigation?.queryText ?? detectedQuery.text,
+                replacementRange: detectedQuery.replacementRange,
+                context: context,
+                navigationPath: fileNavigation?.navigationPath
+            )
+        }
+        if let query, query == currentQuery, anchor == currentAnchor, self.textView === textView,
+           popover.isPresented || pendingGeneration == generation {
+            return
+        }
+
         requestTask?.cancel()
         generation &+= 1
         let requestedGeneration = generation
@@ -50,38 +82,22 @@ final class CompletionPopoverController {
         // TextKit synchronously reports text/selection changes while a completion
         // replacement is being inserted. Do not immediately reopen the accepted
         // query from those callbacks.
-        guard !insertionInProgress else {
+        guard let query else {
             dismissSurface()
             return
         }
-
-        guard let detectedQuery = AgentCompletionQueryDetector.activeQuery(
-            in: text,
-            selection: selection
-        ) else {
-            dismissSurface()
-            return
-        }
-        let fileNavigation = detectedQuery.trigger == "@"
-            ? Self.fileNavigation(
-                queryText: detectedQuery.text,
-                navigationPath: navigationPath,
-                checkoutRoot: context?.checkoutRoot
-            )
-            : nil
-        let query = AgentCompletionQuery(
-            trigger: detectedQuery.trigger,
-            text: fileNavigation?.queryText ?? detectedQuery.text,
-            replacementRange: detectedQuery.replacementRange,
-            context: context,
-            navigationPath: fileNavigation?.navigationPath
-        )
+        currentQuery = query
+        currentAnchor = anchor
 
         // Hide old-query rows immediately instead of leaving actionable stale
         // content visible while a slower replacement provider runs.
         popover.dismiss()
         textView.suggestionsAreVisible = false
+        pendingGeneration = requestedGeneration
         requestTask = Task { [weak self, weak textView] in
+            defer {
+                if self?.pendingGeneration == requestedGeneration { self?.pendingGeneration = nil }
+            }
             self?.qaRequestStartCount += 1
             let suggestions = await source.suggestions(for: query)
             let staleWitness = ProcessInfo.processInfo.environment[
@@ -215,6 +231,8 @@ final class CompletionPopoverController {
         textView?.suggestionsAreVisible = false
         textView = nil
         completionsByChoiceID = [:]
+        currentQuery = nil
+        currentAnchor = nil
     }
 
     private static func fileRowIcon(for completion: AgentCompletion) -> ChoiceIcon {

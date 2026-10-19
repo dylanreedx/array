@@ -130,6 +130,12 @@ public protocol AgentCompletionProvider: Sendable {
     var providerID: String { get }
     var trigger: Character { get }
     func suggestions(for query: AgentCompletionQuery) async -> [AgentCompletion]
+    /// Builds whatever this provider's first query would otherwise wait on.
+    func prepare(for context: AgentCompletionContext) async
+}
+
+extension AgentCompletionProvider {
+    public func prepare(for context: AgentCompletionContext) async {}
 }
 
 /// The presentation depends on this narrow source rather than a concrete actor so
@@ -137,6 +143,13 @@ public protocol AgentCompletionProvider: Sendable {
 /// source. Production uses `AgentCompletionProviderRegistry`.
 public protocol AgentCompletionSuggestionSource: Sendable {
     func suggestions(for query: AgentCompletionQuery) async -> [AgentCompletion]
+    /// Called when the editor takes the keyboard, so a slow first index is built
+    /// before the user's first trigger rather than after it.
+    func prepare(for context: AgentCompletionContext) async
+}
+
+extension AgentCompletionSuggestionSource {
+    public func prepare(for context: AgentCompletionContext) async {}
 }
 
 /// Bounded host-local fixtures for the isolated composer. Runtime command,
@@ -213,6 +226,10 @@ public actor AgentCompletionProviderRegistry: AgentCompletionSuggestionSource {
 
     public func unregister(providerID: String) {
         providersByID.removeValue(forKey: providerID)
+    }
+
+    public func prepare(for context: AgentCompletionContext) async {
+        for provider in providersByID.values { await provider.prepare(for: context) }
     }
 
     public func suggestions(for query: AgentCompletionQuery) async -> [AgentCompletion] {
