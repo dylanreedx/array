@@ -75,6 +75,9 @@ enum ChoiceListChrome {
 
 enum ChoiceListCommand {
     case previous, next, first, last, accept, open, ascend, cancel
+    /// Backspace in a passive completion panel. The composer decides whether
+    /// it climbs out of a folder or deletes text; a list has nothing to do.
+    case deleteBackward
 }
 
 /// Token-painted choice rows with one keyboard and accessibility selection path.
@@ -286,7 +289,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
         case .accept, .open:
             guard let item = items.first(where: { $0.id == focusedID && $0.enabled }) else { return }
             choose(item)
-        case .ascend:
+        case .ascend, .deleteBackward:
             break
         case .cancel:
             onDismiss?()

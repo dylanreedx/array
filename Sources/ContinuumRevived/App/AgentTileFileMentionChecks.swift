@@ -109,6 +109,13 @@ enum AgentTileFileMentionChecks {
         // rebinds the composer's completion context on every one. None of them
         // may close the menu or restart its query: they did, so on a slow index
         // the menu never stayed up long enough to show while an agent worked.
+        // Let the menu settle first: the editor's first layout can move the
+        // caret once, which legitimately re-anchors the panel.
+        var settledCount = -1
+        _ = await waitUntil(timeout: 2, pollInterval: 0.15) {
+            defer { settledCount = composer.qaCompletionRequestStartCount }
+            return settledCount == composer.qaCompletionRequestStartCount && composer.qaCompletionIsPresented
+        }
         let openTitles = composer.qaCompletionTitles
         let requestsWhileOpen = composer.qaCompletionRequestStartCount
         let ingestedBefore = tileView.ingestedEvents.count
@@ -143,6 +150,45 @@ enum AgentTileFileMentionChecks {
                    "Return attaches README.md, got \(composer.qaFileReferences.map(\.displayName))")
         try expect(textView.string.isEmpty, "the accepted query leaves the draft, got \"\(textView.string)\"")
         try expect(!composer.qaCompletionIsPresented, "the menu closes after accepting")
-        return "@ listed the checkout, stayed open through 9 agent events, narrowed, and attached README.md"
+
+        // Backspace. At the checkout root one press deletes a fresh `@`: it used
+        // to climb one parent folder per press, all the way to `/`, first.
+        let backspace = try key("\u{8}", keyCode: 51)
+        window.sendEvent(try key("@", keyCode: 19))
+        let reopened = await waitUntil(timeout: 5, pollInterval: 0.02) {
+            composer.qaCompletionTitles.contains("Sources/")
+        }
+        try expect(reopened, "@ reopens the root list, got \(composer.qaCompletionTitles)")
+        window.sendEvent(backspace)
+        _ = await waitUntil(timeout: 0.3, pollInterval: 0.02) { false }
+        try expect(textView.string.isEmpty && !composer.qaCompletionIsPresented,
+                   "one Backspace deletes a fresh @: text=\"\(textView.string)\", presented=\(composer.qaCompletionIsPresented), breadcrumb=\(composer.qaCompletionBreadcrumb ?? "nil")")
+
+        // Inside a folder opened from the list, Backspace climbs back out first,
+        // then deletes.
+        window.sendEvent(try key("@", keyCode: 19))
+        _ = await waitUntil(timeout: 5, pollInterval: 0.02) { composer.qaCompletionTitles.contains("Sources/") }
+        for _ in composer.qaCompletionTitles where composer.qaCompletionFocusedTitle != "Sources/" {
+            window.sendEvent(try key("", keyCode: 125))
+        }
+        try expect(composer.qaCompletionFocusedTitle == "Sources/",
+                   "↓ focuses Sources/, got \(composer.qaCompletionFocusedTitle ?? "nil")")
+        window.sendEvent(try key("", keyCode: 124))
+        let nested = await waitUntil(timeout: 5, pollInterval: 0.02) {
+            composer.qaCompletionTitles.contains("Main.swift")
+        }
+        try expect(nested && textView.string == "@",
+                   "→ opens Sources/ without touching the draft: titles=\(composer.qaCompletionTitles), text=\"\(textView.string)\"")
+        window.sendEvent(backspace)
+        let climbed = await waitUntil(timeout: 5, pollInterval: 0.02) {
+            composer.qaCompletionTitles.contains("Sources/")
+        }
+        try expect(climbed && textView.string == "@",
+                   "Backspace inside Sources/ climbs back to the root list: titles=\(composer.qaCompletionTitles), text=\"\(textView.string)\"")
+        window.sendEvent(backspace)
+        _ = await waitUntil(timeout: 0.3, pollInterval: 0.02) { false }
+        try expect(textView.string.isEmpty && !composer.qaCompletionIsPresented,
+                   "the next Backspace at the root deletes the @: text=\"\(textView.string)\"")
+        return "@ listed the checkout, stayed open through 9 agent events, narrowed, attached README.md, and Backspace deleted a fresh @ in one press"
     }
 }

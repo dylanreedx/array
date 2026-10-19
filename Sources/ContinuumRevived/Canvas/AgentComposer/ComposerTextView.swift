@@ -265,7 +265,8 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate, AgentPageZoomScala
         case 119: command = .last
         case 36, 76: command = .accept
         case 124, 48: command = .open // Right or Tab descends into a focused directory.
-        case 123, 51: command = .ascend // Left or empty-query Backspace ascends.
+        case 123: command = .ascend // Left ascends, past the checkout root too.
+        case 51: command = .deleteBackward // Backspace ascends only inside the checkout.
         default: return false
         }
         return composerObserver?.composerRequestedCompletionCommand(self, command: command) == true

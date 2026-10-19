@@ -1023,6 +1023,15 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         if command == .ascend {
             return ascendCompletionNavigation(in: textView)
         }
+        if command == .deleteBackward {
+            // Backspace climbs back out of a folder opened inside the checkout.
+            // At the checkout root (or outside it) it deletes: it used to climb
+            // to `/` first, so a fresh `@` took one press per parent folder.
+            guard let root = completionContext?.checkoutRoot.standardizedFileURL,
+                  let current = completionNavigationURL(checkoutRoot: root),
+                  current.path.hasPrefix(root.path + "/") else { return false }
+            return ascendCompletionNavigation(in: textView)
+        }
         if command == .accept,
            let active = AgentCompletionQueryDetector.activeQuery(
                in: textView.string,
