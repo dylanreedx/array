@@ -109,32 +109,58 @@ enum AgentTileFileMentionChecks {
         // rebinds the composer's completion context on every one. None of them
         // may close the menu or restart its query: they did, so on a slow index
         // the menu never stayed up long enough to show while an agent worked.
-        // Let the menu settle first: the editor's first layout can move the
-        // caret once, which legitimately re-anchors the panel.
-        var settledCount = -1
-        _ = await waitUntil(timeout: 2, pollInterval: 0.15) {
-            defer { settledCount = composer.qaCompletionRequestStartCount }
-            return settledCount == composer.qaCompletionRequestStartCount && composer.qaCompletionIsPresented
+        // AppKit closes a passive menu when the app or its window loses
+        // activation, on purpose and outside this check's control: a fixture
+        // launched from a shell can be activated at launch and lose it to the
+        // next click. A pass that saw that happen is run again, and says so; a
+        // close without it is the defect.
+        final class ActivationWatch { var lost = false }
+        let watch = ActivationWatch()
+        let activationObservers = [NSApplication.didResignActiveNotification, NSWindow.didResignKeyNotification].map {
+            NotificationCenter.default.addObserver(forName: $0, object: nil, queue: .main) { _ in watch.lost = true }
         }
-        let openTitles = composer.qaCompletionTitles
-        let requestsWhileOpen = composer.qaCompletionRequestStartCount
-        let ingestedBefore = tileView.ingestedEvents.count
-        supervisor.qaDeliver(.turnStarted(threadId: "thread-main", turnId: "mention-turn"), to: agentId)
-        for word in 0..<8 {
-            supervisor.qaDeliver(.contentDelta(
-                threadId: "thread-main", turnId: "mention-turn", streamKind: .assistant, delta: "word \(word) "
-            ), to: agentId)
+        defer { activationObservers.forEach(NotificationCenter.default.removeObserver) }
+        for attempt in 1...3 {
+            watch.lost = false
+            if !composer.qaCompletionIsPresented {
+                textView.string = ""
+                window.makeKey()
+                window.makeFirstResponder(textView)
+                window.sendEvent(try key("@", keyCode: 19))
+            }
+            // Let the menu settle first: the editor's first layout can move the
+            // caret once, which legitimately re-anchors the panel.
+            var settledCount = -1
+            _ = await waitUntil(timeout: 2, pollInterval: 0.15) {
+                defer { settledCount = composer.qaCompletionRequestStartCount }
+                return settledCount == composer.qaCompletionRequestStartCount && composer.qaCompletionIsPresented
+            }
+            let openTitles = composer.qaCompletionTitles
+            let requestsWhileOpen = composer.qaCompletionRequestStartCount
+            let ingestedBefore = tileView.ingestedEvents.count
+            let turn = "mention-turn-\(attempt)"
+            supervisor.qaDeliver(.turnStarted(threadId: "thread-main", turnId: turn), to: agentId)
+            for word in 0..<8 {
+                supervisor.qaDeliver(.contentDelta(
+                    threadId: "thread-main", turnId: turn, streamKind: .assistant, delta: "word \(word) "
+                ), to: agentId)
+            }
+            let ingested = await waitUntil(timeout: 5, pollInterval: 0.02) {
+                tileView.ingestedEvents.count >= ingestedBefore + 9
+            }
+            try expect(ingested,
+                       "POSITIVE CONTROL: the tile ingested the streamed events, \(tileView.ingestedEvents.count - ingestedBefore) of 9")
+            _ = await waitUntil(timeout: 0.3, pollInterval: 0.02) { false }
+            if watch.lost, attempt < 3 {
+                print("note: the fixture lost activation during the event pass (attempt \(attempt)); running it again")
+                continue
+            }
+            try expect(composer.qaCompletionIsPresented && composer.qaCompletionTitles == openTitles,
+                       "streamed agent events left the @ menu open and unchanged: presented=\(composer.qaCompletionIsPresented), titles=\(composer.qaCompletionTitles), activationLost=\(watch.lost)")
+            try expect(composer.qaCompletionRequestStartCount == requestsWhileOpen,
+                       "streamed agent events restarted the @ query \(composer.qaCompletionRequestStartCount - requestsWhileOpen) times")
+            break
         }
-        let ingested = await waitUntil(timeout: 5, pollInterval: 0.02) {
-            tileView.ingestedEvents.count >= ingestedBefore + 9
-        }
-        try expect(ingested,
-                   "POSITIVE CONTROL: the tile ingested the streamed events, \(tileView.ingestedEvents.count - ingestedBefore) of 9")
-        _ = await waitUntil(timeout: 0.3, pollInterval: 0.02) { false }
-        try expect(composer.qaCompletionIsPresented && composer.qaCompletionTitles == openTitles,
-                   "streamed agent events left the @ menu open and unchanged: presented=\(composer.qaCompletionIsPresented), titles=\(composer.qaCompletionTitles)")
-        try expect(composer.qaCompletionRequestStartCount == requestsWhileOpen,
-                   "streamed agent events restarted the @ query \(composer.qaCompletionRequestStartCount - requestsWhileOpen) times")
 
         // Narrow it, then accept with Return: the file becomes a reference chip
         // and the typed query leaves the draft.
