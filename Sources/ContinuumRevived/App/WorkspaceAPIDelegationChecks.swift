@@ -191,6 +191,10 @@ func runWorkspaceAPIDelegationChecks() async throws {
         applicationSupportDirectory: URL(fileURLWithPath: appSupportPath, isDirectory: true)
             .appendingPathComponent("workspace-api-delegation-check", isDirectory: true)))
     delegate.agentSupervisor = supervisor
+    // Agent permissions Off: new agents start without workspace tools and every
+    // gated request asks — the world this leg was written against. The user's
+    // own setting must not decide it.
+    supervisor.workspaceToolsPermission = { .off }
 
     let runtime = WorkspaceRuntime(
         boot: try zoneRegistry.acquire(projectId: projectPa),
@@ -212,6 +216,7 @@ func runWorkspaceAPIDelegationChecks() async throws {
         canvasView: canvas, spawner: bootSpawner, projectStore: storePa,
         canvasState: bootCanvasState, installsGlobalEventMonitors: false)
     canvas.layoutSubtreeIfNeeded()
+    supervisor.workspaceToolsPermission = { .off }
     defer { supervisor.stopAll() }
 
     let api = delegate.qaWorkspaceAPI
@@ -609,11 +614,11 @@ func runWorkspaceAPIDelegationChecks() async throws {
     try expect(occurrences("something else entirely", in: childPromptLog()) == 0,
                "a conflict delivers nothing")
 
-    // MARK: K — scope: children only, and a refusal discloses nothing
+    // MARK: K — scope while asking first: children and parent, and a refusal discloses nothing
 
     // A peer of the caller in the SAME checkout (a sibling), an unrelated agent
-    // in ANOTHER checkout, the caller's own child's child, and the caller's own
-    // parent are all out of scope. `strangerId` (project Pa) is the unrelated one.
+    // in ANOTHER checkout and the caller's own child's child are all out of
+    // scope; the caller's own parent asks first (below). `strangerId` (project Pa) is the unrelated one.
     let siblingId = supervisor.spawn(role: nil, prompt: nil, cwd: pbRoot, harness: .pi,
                                      model: "fixture-model", thinking: "low", projectId: projectPb, projectRoot: pbRoot)
     let grandchildId = supervisor.spawn(role: nil, prompt: nil, cwd: pbRoot, harness: .pi,
@@ -629,16 +634,24 @@ func runWorkspaceAPIDelegationChecks() async throws {
                    "the refusal for \(label) names no id: \(denial.message)")
         try expect(occurrences("reach \(label)", in: childPromptLog()) == 0, "an out-of-scope message delivers nothing")
     }
-    // Upward is out of scope too: the CHILD may not message its own parent. The
-    // child needs its own policy on to be a caller at all; flipping one agent's
-    // policy leaves every other agent's live grants alone (§14.1), so this
-    // belongs here, where the child first acts, rather than hoisted out of the way.
+    // Upward is IN scope while asking first (Ask first or Off): a child may report to the agent that
+    // created it, but only through the trusted prompt, which names the parent.
+    // Declined here, so nothing reaches the parent's run. The child needs its
+    // own policy on to be a caller at all; flipping one agent's policy leaves
+    // every other agent's live grants alone (§14.1), so this belongs here,
+    // where the child first acts, rather than hoisted out of the way.
     _ = supervisor.setWorkspaceToolsEnabled(agentID: childId, true)
+    var upwardPrompts: [WorkspaceAPIService.ScopeApprovalPrompt] = []
+    let handlerBeforeUpward = api.approvalHandler
+    api.approvalHandler = { prompt in upwardPrompts.append(prompt); return .deny }
     _ = try failure(
         api.dispatch(agentId: childId, requestId: "op-msg-upward",
                      op: "agent.message",
                      payload: ["agentId": parentId.rawValue.uuidString, "text": "reach my parent", "idempotencyKey": "m-up"]),
-        .permissionDenied, "a child messaging its own parent")
+        .permissionDenied, "a child messaging its own parent, declined")
+    api.approvalHandler = handlerBeforeUpward
+    try expect(upwardPrompts.count == 1 && upwardPrompts[0].op == .agentMessage && upwardPrompts[0].targetAgentId == parentId,
+               "a child messaging its parent must reach the trusted prompt naming the parent while asking first, got \(upwardPrompts.map { ($0.op, $0.targetAgentId) })")
     // Messaging SELF is a different mistake, and says so.
     let selfError = try failure(
         dispatch("agent.message", ["agentId": parentId.rawValue.uuidString, "text": "note to self", "idempotencyKey": "m-self"]),

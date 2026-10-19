@@ -23,7 +23,13 @@ The default hold-to-navigate modifier is **Option**, alongside the **⌃Space** 
 
 **Agents** selects the default harness, model, and reasoning effort for new agents. Existing agents retain their own harness, model, checkout, and effort. **Settle finished agents** moves idle agents out of the Activity Dock list after a while. The same pane holds **Dictation** (turn the composer microphone on or off) and **Agent colour** (show an agent’s colour as its title bar or its full border). [Dictation and agent colours](/docs/agents/#dictate-a-prompt).
 
-**Let agents arrange the canvas** seeds the canvas-integration setting for new agents and is off by default. For an existing agent, use **Workspace Tools** in its tile menu. Turning it off revokes that agent’s workspace grants. Enabling it does not bypass operation-specific approvals. [Canvas tools](/docs/canvas-tools/).
+**Agent permissions** decides how much agents may do through workspace tools without asking you:
+
+- **Free within a project** (the default): new agents get workspace tools. Inside their own project they can start child agents, message any other agent, inspect it, open files, and arrange tiles without a dialog. Inspecting an agent or opening a file in another project still asks, and messages never reach another project.
+- **Ask first**: new agents get workspace tools, and the first use of each kind of action asks you. An agent can message only the agents it created and the agent that created it.
+- **Off**: new agents start without workspace tools.
+
+For an existing agent, use **Workspace Tools** in its tile menu. Turning it off revokes that agent’s workspace grants at once, whatever this setting says. [Canvas tools](/docs/canvas-tools/).
 
 Agent status-row controls can show or hide individual readings. Account usage is shared by agents signed into the same provider account; hiding a reading changes the display, not account limits.
 

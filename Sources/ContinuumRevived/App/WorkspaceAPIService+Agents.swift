@@ -46,13 +46,18 @@ extension WorkspaceAPIService {
         let now = Date()
 
         let checkouts = request.checkoutHandle.map { Set([$0]) } ?? discoverable
+        // Under Agent permissions `free` every agent in the caller's project can
+        // be messaged and inspected, so every one of them is findable — the
+        // agents in the project's other checkouts too.
+        let wholeProject = supervisor.workspaceToolsPermission() == .free
         var facts: [AgentFindCandidateFacts] = []
         for candidate in supervisor.records.values {
             let handle = Self.ownCheckoutHandle(candidate)
             let inCheckout = checkouts.contains(handle)
+            let inProject = wholeProject && Self.sameProject(record, candidate.projectId)
             // An approved inspect target is discoverable even outside the caller's
             // checkouts, but an explicit checkout filter still binds.
-            guard inCheckout || (request.checkoutHandle == nil && inspectable.contains(candidate.id)) else { continue }
+            guard inCheckout || (request.checkoutHandle == nil && (inspectable.contains(candidate.id) || inProject)) else { continue }
             let identity = projectionIdentity(for: candidate, handle: handle, canvas: canvas)
             if let zone = request.zoneId, identity.zoneId != zone { continue }
             let document = supervisor.transcriptDocumentProjection(for: candidate.id)
@@ -117,15 +122,15 @@ extension WorkspaceAPIService {
         case .scopeApprovalRequired:
             let promptId = UUID().uuidString
             approvalRequestId = promptId
-            approvalPromptCount += 1
             let targetHandle = Self.ownCheckoutHandle(target)
             let targetCheckoutName = knownCheckouts()[targetHandle]?.displayName
                 ?? URL(fileURLWithPath: CheckoutHandle.canonicalRoot(target.checkoutRoot)).lastPathComponent
-            let decision = approvalHandler(ScopeApprovalPrompt(
+            let decision = decideScope(ScopeApprovalPrompt(
                 requestId: promptId, agentId: agentId, agentDisplayName: record.displayName,
                 checkout: targetHandle, checkoutDisplayName: targetCheckoutName,
                 op: .agentInspect, relativePath: nil,
-                targetAgentId: target.id, targetAgentDisplayName: target.displayName))
+                targetAgentId: target.id, targetAgentDisplayName: target.displayName),
+                withinCallerProject: Self.sameProject(record, target.projectId))
             if isCancelled() { return .cancelled(result: nil) }
             guard supervisor.records[agentId]?.workspaceToolsEnabled == true else {
                 return .error(WorkspaceAPIError(code: .permissionDenied, message: "Workspace tools were disabled for this agent.", approvalRequestId: promptId))
@@ -138,10 +143,10 @@ extension WorkspaceAPIService {
                     agentId: agentId, checkoutHandles: [], operations: [.agentInspect],
                     presentationCeiling: .preserveAll, issuer: .userApprovalOnce(requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId), singleUse: true, inspectableAgentIds: [target.id]))
-            case .allowForSession:
+            case .allowForSession, .allowByPolicy:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [], operations: [.agentInspect],
-                    presentationCeiling: .preserveAll, issuer: .userApprovalSession(requestId: promptId),
+                    presentationCeiling: .preserveAll, issuer: Self.sessionIssuer(decision, requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId), inspectableAgentIds: [target.id]))
             }
             guard case .allowed = WorkspaceToolGrantEvaluator.evaluateAgentInspect(

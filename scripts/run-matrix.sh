@@ -981,6 +981,12 @@ run_app_check .build/debug/Array --workspace-api-board-check
 # a presentation failure repaired by agent.reveal, operation.get per step, and
 # cancellation reporting the child truthfully.
 run_app_check .build/debug/Array --workspace-api-delegation-check
+# Agent permissions (Settings ▸ Agents), Free within a project by default:
+# delegate and message any agent in the project without a prompt, while
+# cross-project reach asks or is refused, the per-agent switch revokes, an
+# agent-to-agent chain stops, leaving Free takes its grants back, Off mints
+# agents without workspace tools.
+run_app_check .build/debug/Array --workspace-api-free-permissions-check
 # CX-01: the bundled pi extensions through the REAL pi's own parser. Nothing else
 # in the repo ever asks pi to PARSE these files, which is how a merge-spliced
 # syntax error in continuum-workspace-tools.ts reached the branch with every leg

@@ -60,11 +60,12 @@ extension WorkspaceAPIService {
                 grants: grants[agentId] ?? [], currentGeneration: generation)
             if case .allowed = verdict {} else {
                 let promptId = UUID().uuidString
-                approvalPromptCount += 1
-                let decision = approvalHandler(ScopeApprovalPrompt(
+                // `targetInScope` proved the target is in this agent's own project.
+                let decision = decideScope(ScopeApprovalPrompt(
                     requestId: promptId, agentId: agentId, agentDisplayName: record.displayName,
                     checkout: ownHandle, checkoutDisplayName: knownCheckouts()[ownHandle]?.displayName ?? record.displayName,
-                    op: .canvasApply, relativePath: nil))
+                    op: .canvasApply, relativePath: nil),
+                    withinCallerProject: true)
                 if isCancelled() { return cancelledAgentUpdate(agentId: agentId, requestId: requestId) }
                 guard supervisor.records[agentId]?.workspaceToolsEnabled == true,
                       revocationGeneration(for: agentId) == generation else {
@@ -76,7 +77,7 @@ extension WorkspaceAPIService {
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.canvasApply],
                     presentationCeiling: .preserveAll,
-                    issuer: decision == .allowOnce ? .userApprovalOnce(requestId: promptId) : .userApprovalSession(requestId: promptId),
+                    issuer: decision == .allowOnce ? .userApprovalOnce(requestId: promptId) : Self.sessionIssuer(decision, requestId: promptId),
                     revocationGeneration: generation, singleUse: decision == .allowOnce))
             }
             consumeSingleUseApplyGrant(agentId: agentId, checkout: ownHandle)

@@ -26,7 +26,7 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     /// server's `initialize` instructions: Claude defers MCP tools behind tool
     /// search, so without it the model never learns Array's tools exist.
     public static let agentGuidance =
-        "You are running in a tile on the user's Array canvas. Use the array_* tools of the array_workspace MCP server (in Claude Code, mcp__array_workspace__*; load them with tool search if they are deferred) to see and manage the canvas. To run work in a visible tile, use array_delegate: your built-in subagent tool runs inside this tile and never creates one. You can message only agents you created (array_message_agent); collect their results with wait_agents."
+        "You are running in a tile on the user's Array canvas. Use the array_* tools of the array_workspace MCP server (in Claude Code, mcp__array_workspace__*; load them with tool search if they are deferred) to see and manage the canvas. To run work in a visible tile, use array_delegate: your built-in subagent tool runs inside this tile and never creates one. Use array_message_agent to start a turn on another agent in your project, and collect delegated children's results with wait_agents."
 
     public init(
         serverExecutable: String,

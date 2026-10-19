@@ -579,6 +579,10 @@ public struct WorkspaceToolGrant: Codable, Equatable, Sendable {
         case sessionPolicy
         case userApprovalOnce(requestId: String)
         case userApprovalSession(requestId: String)
+        /// Approved without a prompt because Agent permissions is `free` and
+        /// the request stayed inside the caller's project. Dropped as soon as
+        /// the setting is anything else.
+        case permissionPolicy(requestId: String)
     }
 
     public var grantId: UUID
@@ -677,13 +681,46 @@ public enum WorkspaceToolGrantEvaluator {
     }
 }
 
-/// Settings ▸ Agents: whether NEW agents are created with workspace tools
-/// enabled. Existing records keep their own flag (`AgentRecord.workspaceToolsEnabled`);
-/// nothing migrates silently (§14.1).
-public enum WorkspaceToolsConfig {
-    public static let newAgentsEnabledKey = "continuum.agents.workspaceTools.newAgentsEnabled"
+/// Settings ▸ Agents ▸ Agent permissions: how much an agent with Workspace
+/// Tools may do without asking.
+///
+/// `free` (the default) approves, without a prompt, every gated operation
+/// that stays inside the caller's own project: delegating, messaging any agent
+/// there, inspecting it, opening its files, arranging its canvas. Anything
+/// that reaches another project still goes to the trusted prompt. `askFirst`
+/// is the CX-01 behaviour: the first use of each gated operation asks. `off`
+/// creates new agents without Workspace Tools; one the user turns on by hand
+/// asks first.
+///
+/// What no value changes: the model never mints a grant, identity is the
+/// supervisor's binding, the per-agent switch revokes at once, and canvas
+/// writes and messages never leave the caller's project.
+public enum WorkspaceToolsPermission: String, CaseIterable, Sendable {
+    case free
+    case askFirst = "ask"
+    case off
 
-    public static func enabledForNewAgents(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: newAgentsEnabledKey) as? Bool ?? false
+    public var title: String {
+        switch self {
+        case .free: return "Free within a project"
+        case .askFirst: return "Ask first"
+        case .off: return "Off"
+        }
+    }
+}
+
+/// Settings ▸ Agents: the agent-permissions choice, and whether NEW agents are
+/// created with workspace tools enabled. Existing records keep their own flag
+/// (`AgentRecord.workspaceToolsEnabled`); nothing migrates silently (§14.1).
+public enum WorkspaceToolsConfig {
+    public static let permissionKey = "continuum.agents.workspaceTools.permission"
+    public static let defaultPermission: WorkspaceToolsPermission = .free
+
+    public static func permission(defaults: UserDefaults = .standard) -> WorkspaceToolsPermission {
+        defaults.string(forKey: permissionKey).flatMap(WorkspaceToolsPermission.init(rawValue:)) ?? defaultPermission
+    }
+
+    public static func enabledForNewAgents(_ permission: WorkspaceToolsPermission) -> Bool {
+        permission != .off
     }
 }

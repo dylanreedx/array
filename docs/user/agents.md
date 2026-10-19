@@ -45,7 +45,7 @@ An agent has no colour until you choose one. Open the agent tile’s menu, choos
 
 The colour belongs to the agent, not the tile, so it follows the agent across relaunches. It washes the tile’s title bar, marks the agent in the Activity Dock, and tints the dictation capsule. To draw it as the tile’s whole outline instead, set **Settings → Agents → Agent colour → Agent colour shows as** to **Full border**. A colour is an identity mark only; it never signals status.
 
-Agents with workspace tools can set colours too, through `array_update_agent`. An agent can change its own colour; changing another agent’s needs the canvas-change permission, which Array asks you for. [Canvas tools](/docs/canvas-tools/).
+Agents with workspace tools can set colours too, through `array_update_agent`. An agent can change its own colour; changing another agent’s needs the canvas-change permission, which Array asks you for when **Agent permissions** is **Ask first**. [Canvas tools](/docs/canvas-tools/).
 
 ## Read the activity
 

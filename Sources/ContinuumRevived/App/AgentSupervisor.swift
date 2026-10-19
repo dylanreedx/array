@@ -1099,6 +1099,11 @@ final class AgentSupervisor {
     /// CX-01 (§14.1): fired after `setWorkspaceToolsEnabled` persists a change, so
     /// the host grant table can revoke (or start honouring) the agent's policy.
     var onWorkspaceToolsChanged: ((AgentID, Bool) -> Void)?
+    /// Settings ▸ Agents ▸ Agent permissions, read at the moment of use: when a
+    /// new agent is minted (`off` creates it without workspace tools) and by
+    /// the workspace API at every gated decision. The host points it at the
+    /// Settings defaults; a check pins a value instead of reading the user's.
+    var workspaceToolsPermission: () -> WorkspaceToolsPermission = { WorkspaceToolsConfig.permission() }
     /// The host's half of an identity-colour change: the sidebar rows derive the
     /// dot from the record on every build, so the host only has to rebuild them.
     var onIdentityColorChanged: ((AgentID, String?) -> Void)?
@@ -2498,7 +2503,7 @@ final class AgentSupervisor {
                 return id
             }
             records[id] = child
-            if WorkspaceToolsConfig.enabledForNewAgents(), !child.workspaceToolsEnabled {
+            if WorkspaceToolsConfig.enabledForNewAgents(workspaceToolsPermission()), !child.workspaceToolsEnabled {
                 var enabled = child
                 enabled.workspaceToolsEnabled = true
                 records[id] = enabled
@@ -2542,7 +2547,7 @@ final class AgentSupervisor {
                 record.displayNameSource = proposal.source
             }
             // CX-01 (§14.1): the Settings default seeds NEW agents only.
-            record.workspaceToolsEnabled = WorkspaceToolsConfig.enabledForNewAgents()
+            record.workspaceToolsEnabled = WorkspaceToolsConfig.enabledForNewAgents(workspaceToolsPermission())
             records[id] = record
             persist(record)
         }

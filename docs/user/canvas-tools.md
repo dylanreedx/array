@@ -9,7 +9,7 @@ Array’s workspace API gives managed agents a structured way to interact with t
 
 ## Enable workspace tools
 
-For an existing agent, enable **Workspace Tools** in its tile menu. To seed future agents, turn on **Settings → Agents → Let agents arrange the canvas**; that default is off. Turning tools off revokes the agent’s workspace grants. The setting and individual operation approvals are separate.
+New agents get workspace tools unless **Settings → Agents → Agent permissions** is **Off**. For an existing agent, use **Workspace Tools** in its tile menu. Turning tools off revokes the agent’s workspace grants. What an agent may do without asking is set by **Agent permissions**; see [Permissions and transport](#permissions-and-transport).
 
 ## Try it in a prompt
 
@@ -35,7 +35,7 @@ This teaches the agent that a workspace API exists. It does not give the agent a
 
 `array_canvas_query` lists zones and tiles with world-coordinate rectangles, a structural revision, and hydration coverage. World coordinates do not change as you pan or zoom. An unhydrated zone may have no tiles in the response even though it contains saved work.
 
-`array_find_agent` searches observed agent metadata. `array_inspect_agent` returns bounded evidence for a particular agent; inspecting another agent asks for approval. A missing transcript means unknown, and ambiguous search results require a choice.
+`array_find_agent` searches observed agent metadata. `array_inspect_agent` returns bounded evidence for a particular agent; inspecting another agent asks for approval unless **Agent permissions** is **Free within a project** and that agent is in the same project. A missing transcript means unknown, and ambiguous search results require a choice.
 
 ## Open documents and change layout
 
@@ -57,7 +57,7 @@ The agent queries before writing and supplies a revision and stable request key.
 
 `array_delegate` creates a child agent in a visible tile, inheriting the parent’s provider, model, and checkout. It creates no worktree. Use it only when the user has asked for delegation.
 
-`array_reveal_agent` presents an existing child without creating a new one. `array_message_agent` can send another turn only to the caller’s own children; it does not interrupt an active turn. `wait_agents` collects child results using the returned operation handles.
+`array_reveal_agent` presents an existing child without creating a new one. `array_message_agent` starts a turn on another agent: under **Free within a project**, any agent in the same project, so you can ask an agent to “message the agent to your right”; under **Ask first**, only the agents it created and the agent that created it. It never interrupts an active turn. A chain of agent-to-agent turns with no prompt from you stops after 20, so two agents cannot keep each other running forever. `wait_agents` collects child results using the returned operation handles.
 
 The provider’s built-in subagent tool is different: it can run work inside the current tile without creating an Array tile. If you want visible parallel work, say so explicitly.
 
@@ -65,7 +65,9 @@ The provider’s built-in subagent tool is different: it can run work inside the
 
 The native MCP bridge communicates with an Array host bound to `127.0.0.1`. Each registered agent has a capability token; the host validates identity and permissions before dispatching an operation. The token is written to a private file rather than put into the agent’s inherited environment or command-line arguments.
 
-The first inspect, delegation, message, open-file, or canvas change asks you in an Array dialog: **Allow Once**, **Allow for This Agent Session**, or **Deny**. Other scopes have their own checks; use `array_workspace_context` for the current capability and approval list. A declined request is not permission to attempt the same action through a shell workaround.
+Under **Free within a project** (the default), nothing an agent does inside its own project asks you. Inspecting an agent or opening a file in another project still does. Under **Ask first**, the first inspect, delegation, message, open-file, or canvas change asks you in an Array dialog: **Allow Once**, **Allow for This Agent Session**, or **Deny**. A session approval lasts until Array quits or that agent’s Workspace Tools are turned off. Use `array_workspace_context` for the current capability and approval list. A declined request is not permission to attempt the same action through a shell workaround.
+
+Whatever the setting, an agent never grants itself anything, never writes to another project’s canvas, and never messages an agent in another project.
 
 This scopes the workspace API. It is not an operating-system sandbox for all programs running under your macOS user.
 

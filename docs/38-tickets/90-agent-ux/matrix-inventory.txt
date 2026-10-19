@@ -245,6 +245,7 @@ check --workspace-api-board-check
 check --workspace-api-canvas-check
 check --workspace-api-delegation-check
 check --workspace-api-exposure-check
+check --workspace-api-free-permissions-check
 check --workspace-api-grants-check
 check --workspace-api-open-check
 check --workspace-api-pi-bridge-check
@@ -522,6 +523,7 @@ leg run_app_check .build/debug/Array --workspace-api-agents-check
 leg run_app_check .build/debug/Array --workspace-api-board-check
 leg run_app_check .build/debug/Array --workspace-api-canvas-check
 leg run_app_check .build/debug/Array --workspace-api-delegation-check
+leg run_app_check .build/debug/Array --workspace-api-free-permissions-check
 leg run_app_check .build/debug/Array --workspace-api-grants-check
 leg run_app_check .build/debug/Array --workspace-api-open-check
 leg run_app_check .build/debug/Array --workspace-api-pi-bridge-check

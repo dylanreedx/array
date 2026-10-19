@@ -19,7 +19,7 @@ Model choices come from the selected harness’s live catalog. Verify the instal
 
 ## The agent cannot see canvas tools
 
-Confirm that this is a managed Agent tile rather than an interactive CLI terminal, and that **Workspace Tools** is enabled in its tile menu. The new-agent default is off unless you enable it in Settings. Ask it to discover `array_workspace_context` from the `array_workspace` MCP server; Claude may need tool search first. Pi uses the bundled extension bridge.
+Confirm that this is a managed Agent tile rather than an interactive CLI terminal, and that **Workspace Tools** is enabled in its tile menu. New agents get it unless **Settings → Agents → Agent permissions** is **Off**. Ask it to discover `array_workspace_context` from the `array_workspace` MCP server; Claude may need tool search first. Pi uses the bundled extension bridge.
 
 If the host bridge did not initialize, prose prompting alone cannot create the missing connection. Report the failure with the selected harness and app version. Do not paste capability tokens or provider credentials into the conversation.
 

@@ -98,11 +98,12 @@ extension WorkspaceAPIService {
         case .denied, .scopeApprovalRequired:
             let promptId = UUID().uuidString
             approvalRequestId = promptId
-            approvalPromptCount += 1
-            let decision = approvalHandler(ScopeApprovalPrompt(
+            // A child is always created in this agent's own project.
+            let decision = decideScope(ScopeApprovalPrompt(
                 requestId: promptId, agentId: agentId, agentDisplayName: record.displayName,
                 checkout: ownHandle, checkoutDisplayName: URL(fileURLWithPath: record.checkoutRoot).lastPathComponent,
-                op: .agentDelegate, relativePath: nil))
+                op: .agentDelegate, relativePath: nil),
+                withinCallerProject: true)
             if isCancelled() {
                 operations.release(operationId: requestId)
                 remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .agentDelegate, outcome: "cancelledBeforeEffect"))
@@ -120,11 +121,11 @@ extension WorkspaceAPIService {
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
                     issuer: .userApprovalOnce(requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId), singleUse: true))
-            case .allowForSession:
+            case .allowForSession, .allowByPolicy:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.agentDelegate],
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
-                    issuer: .userApprovalSession(requestId: promptId),
+                    issuer: Self.sessionIssuer(decision, requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId)))
             }
             guard case let .allowed(_, policy) = WorkspaceToolGrantEvaluator.evaluate(
@@ -164,6 +165,8 @@ extension WorkspaceAPIService {
             op.steps.creation = .succeeded
             op.childAgentId = childId
         }
+        // The child's first turn is agent-started too: it continues the chain.
+        recordMessageChain(target: childId, hops: messageChainHops(for: agentId) + 1)
         let child = supervisor.records[childId]
         var result = AgentDelegateResult(
             operationId: requestId,
@@ -429,26 +432,29 @@ extension WorkspaceAPIService {
         return .result(object)
     }
 
-    // MARK: - agent.message (§10, children only)
+    // MARK: - agent.message (§10)
 
-    /// One text message into a child THIS agent created, delivered through the
-    /// supervisor's own send path (`AgentSupervisor.send` — the function the
-    /// composer's Send button drives). Nothing here writes to a provider, and
-    /// nothing here waits for an answer: the result reports DELIVERY only, and
-    /// the caller collects the reply the existing way (`wait_agents`, or
-    /// `agent.inspect`).
+    /// One text message into another agent, delivered through the supervisor's
+    /// own send path (`AgentSupervisor.send` — the function the composer's Send
+    /// button drives). Nothing here writes to a provider, and nothing here waits
+    /// for an answer: the result reports DELIVERY only, and the caller collects
+    /// the reply the existing way (`wait_agents`, or `agent.inspect`).
     ///
-    /// Scope is the whole feature: the target's `parentAgentID` must be the
-    /// caller. A sibling, the caller's own parent, an unrelated agent and an
-    /// agent in another checkout are all `permission_denied` with a message that
-    /// names no id and no path — so a refusal never even confirms which ids
-    /// exist. Messaging SELF is `invalid_request`, because an agent continues
-    /// its own turn instead.
+    /// Reach depends on Agent permissions (`mayMessage`). Under `free`, any
+    /// other agent in the caller's own project — a child, its parent, a sibling,
+    /// one the user started — so "message the agent to our right" works. Under
+    /// `askFirst`/`off`, only the caller's own children and its own parent.
+    /// Never an agent in another project. A target out of reach is
+    /// `permission_denied` with a message that names no id and no path, so a
+    /// refusal never even confirms which ids exist. Messaging SELF is
+    /// `invalid_request`, because an agent continues its own turn instead.
     ///
     /// `agent.message` is deliberately NOT in `sessionPresetOperations`: writing
-    /// into another agent's run is an effect, so the first message per agent
-    /// session goes through the trusted approval UI, and an approved DELEGATION
-    /// grants nothing here.
+    /// into another agent's run is an effect. Under `askFirst` the first message
+    /// per agent session goes through the trusted approval UI, and an approved
+    /// DELEGATION grants nothing here. A chain of agent-started turns with no
+    /// prompt from the user in between stops at `messageHopLimit`, so two agents
+    /// that can reach each other cannot keep each other running forever.
     func message(
         agentId: AgentID, record: AgentRecord, ownHandle: CheckoutHandle, requestId: String,
         payload: [String: Any], runtime: WorkspaceRuntime, canvas: CanvasNSView,
@@ -478,15 +484,19 @@ extension WorkspaceAPIService {
                 code: .invalidRequest,
                 message: "An agent cannot message itself: continue your own turn instead of starting a second one."))
         }
-        // One message for "not yours" and for "does not exist", so a refusal
+        // One message for "out of reach" and for "does not exist", so a refusal
         // discloses no identity (§14.4).
+        let permission = supervisor.workspaceToolsPermission()
         let notYours = WorkspaceAPIError(
             code: .permissionDenied,
-            message: "This agent may only message the children it created. A sibling, its own parent, another agent's child and an agent in another checkout are all out of scope.")
-        guard let target = supervisor.records[request.agentId], target.parentAgentID == agentId else {
+            message: permission == .free
+                ? "This agent may message only agents in its own project. An agent in another project is out of scope."
+                : "This agent may message only the children it created and the agent that created it, because Agent permissions is set to Ask first. A sibling, an unrelated agent and an agent in another project are out of scope.")
+        guard let target = supervisor.records[request.agentId],
+              Self.mayMessage(from: record, to: target, permission: permission) else {
             return .error(notYours)
         }
-        guard Self.ownCheckoutHandle(target) == ownHandle else { return .error(notYours) }
+        // The service's field names predate wider reach: `childId` is the target.
         let childId = target.id
 
         // 3. Reserve BEFORE any effect (§10.2). EXACTLY ONE DELIVERY PER KEY:
@@ -540,12 +550,13 @@ extension WorkspaceAPIService {
         case .denied, .scopeApprovalRequired:
             let promptId = UUID().uuidString
             approvalRequestId = promptId
-            approvalPromptCount += 1
-            let decision = approvalHandler(ScopeApprovalPrompt(
+            // `mayMessage` proved the target is in this agent's own project.
+            let decision = decideScope(ScopeApprovalPrompt(
                 requestId: promptId, agentId: agentId, agentDisplayName: record.displayName,
                 checkout: ownHandle, checkoutDisplayName: URL(fileURLWithPath: record.checkoutRoot).lastPathComponent,
                 op: .agentMessage, relativePath: nil,
-                targetAgentId: childId, targetAgentDisplayName: target.displayName))
+                targetAgentId: childId, targetAgentDisplayName: target.displayName),
+                withinCallerProject: true)
             if isCancelled() {
                 operations.release(operationId: requestId)
                 remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .agentMessage, outcome: "cancelledBeforeEffect"))
@@ -556,18 +567,18 @@ extension WorkspaceAPIService {
             }
             switch decision {
             case .deny:
-                return failNothingDelivered(.permissionDenied, "The user declined to let this agent message that child.", approvalRequestId: promptId)
+                return failNothingDelivered(.permissionDenied, "The user declined to let this agent message that agent.", approvalRequestId: promptId)
             case .allowOnce:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.agentMessage],
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
                     issuer: .userApprovalOnce(requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId), singleUse: true))
-            case .allowForSession:
+            case .allowForSession, .allowByPolicy:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.agentMessage],
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
-                    issuer: .userApprovalSession(requestId: promptId),
+                    issuer: Self.sessionIssuer(decision, requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId)))
             }
             guard case let .allowed(_, policy) = WorkspaceToolGrantEvaluator.evaluate(
@@ -586,8 +597,16 @@ extension WorkspaceAPIService {
         guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration(for: agentId) == generationAtGrant else {
             return failNothingDelivered(.permissionDenied, "Access was revoked before the message was delivered.", approvalRequestId: approvalRequestId)
         }
-        // The target must still be this agent's child at the moment of delivery.
-        guard supervisor.records[childId]?.parentAgentID == agentId else { return .error(notYours) }
+        // The target must still be in reach at the moment of delivery, under the
+        // setting as it is now.
+        guard let caller = supervisor.records[agentId], let current = supervisor.records[childId],
+              Self.mayMessage(from: caller, to: current, permission: supervisor.workspaceToolsPermission()) else {
+            return .error(notYours)
+        }
+        let hops = messageChainHops(for: agentId) + 1
+        guard hops <= Self.messageHopLimit else {
+            return failNothingDelivered(.unsupported, "Array did not deliver the message: it would be agent-to-agent turn \(hops) in a row with no prompt from the user, and Array stops chains at \(Self.messageHopLimit) so agents cannot keep each other running forever. Report back to the user and let them continue.", approvalRequestId: approvalRequestId)
+        }
         if isCancelled() {
             operations.release(operationId: requestId)
             remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .agentMessage, outcome: "cancelledBeforeEffect"))
@@ -612,6 +631,7 @@ extension WorkspaceAPIService {
             childRunning: supervisor.isRunning(childId))
         let childWasRunning = supervisor.isRunning(childId)
         if supervisor.send(text, to: childId) {
+            recordMessageChain(target: childId, hops: hops)
             result.delivery = .delivered
             result.childRunning = supervisor.isRunning(childId)
             operations.update(operationId: requestId) { op in
@@ -666,6 +686,37 @@ extension WorkspaceAPIService {
             requestId: requestId, op: .agentMessage,
             outcome: result.delivery == .refused ? "refused" : result.delivery.rawValue))
         return .result(object)
+    }
+
+    // MARK: - Message reach and chains
+
+    /// Who `agent.message` may reach. Never self, never another project (an
+    /// agent with no project stamp reaches only its own checkout). Under `free`,
+    /// anyone else in the project; otherwise only the caller's children and
+    /// parent.
+    static func mayMessage(from caller: AgentRecord, to target: AgentRecord, permission: WorkspaceToolsPermission) -> Bool {
+        guard target.id != caller.id else { return false }
+        guard sameProject(caller, target.projectId) || ownCheckoutHandle(caller) == ownCheckoutHandle(target) else { return false }
+        if permission == .free { return true }
+        return target.parentAgentID == caller.id || caller.parentAgentID == target.id
+    }
+
+    /// The most agent-started turns in a row, with no prompt from the user
+    /// between them, that `agent.message` will start.
+    static let messageHopLimit = 20
+
+    /// How many agent-started turns led to this agent's CURRENT turn: zero once
+    /// anything else (the user, a queued draft) has prompted it since.
+    func messageChainHops(for agentId: AgentID) -> Int {
+        guard let chain = messageChains[agentId],
+              chain.promptAt == supervisor.records[agentId]?.latestPromptAt else { return 0 }
+        return chain.hops
+    }
+
+    /// Stamped right after a send succeeds, against the prompt time that send
+    /// just wrote, so the next prompt from anywhere else breaks the chain.
+    func recordMessageChain(target: AgentID, hops: Int) {
+        messageChains[target] = MessageChain(hops: hops, promptAt: supervisor.records[target]?.latestPromptAt)
     }
 
     // MARK: - operation.get (§10.3)

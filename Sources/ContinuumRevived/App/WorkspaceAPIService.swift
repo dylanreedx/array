@@ -54,7 +54,10 @@ final class WorkspaceAPIService {
         var targetAgentDisplayName: String? = nil
     }
 
-    enum ScopeApprovalDecision: Equatable { case deny, allowOnce, allowForSession }
+    /// `allowByPolicy` is never shown to anyone: `decideScope` returns it under
+    /// Agent permissions `free` for a request inside the caller's project, and
+    /// it mints a session grant marked `.permissionPolicy`.
+    enum ScopeApprovalDecision: Equatable { case deny, allowOnce, allowForSession, allowByPolicy }
     typealias ApprovalHandler = (ScopeApprovalPrompt) -> ScopeApprovalDecision
 
     // Internal, not private: the `+Agents`, `+Canvas` and `+Delegation`
@@ -101,10 +104,18 @@ final class WorkspaceAPIService {
     /// One delivery per key: a replay is answered from here and sends nothing.
     var messageReplayResults: [String: [String: AnyHashableJSON]] = [:]
 
+    /// `agent.message` chains (`+Delegation`): per target, how many
+    /// agent-started turns led to its current one, and the prompt time that
+    /// turn was stamped with.
+    struct MessageChain { let hops: Int; let promptAt: Date? }
+    var messageChains: [AgentID: MessageChain] = [:]
+
     // Shared with `WorkspaceAPIService+Canvas.swift` (same pipeline, other file).
     var grants: [AgentID: [WorkspaceToolGrant]] = [:]
     private var revocationGenerations: [AgentID: UInt64] = [:]
     var approvalPromptCount = 0
+    /// Gated requests approved by Agent permissions `free` without a prompt.
+    var policyApprovalCount = 0
     private struct CachedOpen { let payloadHash: String; let result: ArtifactOpenResult }
     private var idempotency: [AgentID: [String: CachedOpen]] = [:]
     private var idempotencyOrder: [AgentID: [String]] = [:]
@@ -255,6 +266,7 @@ final class WorkspaceAPIService {
         }
         let ownHandle = Self.ownCheckoutHandle(record)
         seedGrantsIfNeeded(agentId: agentId, checkout: ownHandle)
+        dropPolicyGrantsUnlessFree(agentId: agentId)
 
         switch op {
         case .workspaceContext:
@@ -319,7 +331,11 @@ final class WorkspaceAPIService {
         // `WorkspaceMCPToolCatalog`'s tools, so an op outside it is not callable
         // and must not be advertised as if it were.
         let exposed = WorkspaceAPIOp.allCases.filter(WorkspaceMCPToolCatalog.exposedOperations.contains)
+        // Under Agent permissions `free` a gated op inside the project needs no
+        // prompt, so it is callable now and must not read as approval-required.
+        let free = supervisor.workspaceToolsPermission() == .free
         let capabilities = exposed.filter { op in
+            if free, WorkspaceAPIOp.approvalGatedOperations.contains(op) { return true }
             if case .allowed = WorkspaceToolGrantEvaluator.evaluate(
                 agentId: agentId, op: op, checkout: ownHandle, requested: .preserveAll,
                 grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId)) { return true }
@@ -478,11 +494,11 @@ final class WorkspaceAPIService {
         case .scopeApprovalRequired:
             let promptId = UUID().uuidString
             approvalRequestId = promptId
-            approvalPromptCount += 1
-            let decision = approvalHandler(ScopeApprovalPrompt(
+            let decision = decideScope(ScopeApprovalPrompt(
                 requestId: promptId, agentId: agentId, agentDisplayName: record.displayName,
                 checkout: target.handle, checkoutDisplayName: target.displayName,
-                op: .artifactOpen, relativePath: relativePath))
+                op: .artifactOpen, relativePath: relativePath),
+                withinCallerProject: Self.sameProject(record, target.projectId))
             if isCancelled() {
                 remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .artifactOpen, outcome: "cancelledBeforeEffect"))
                 return .cancelled(result: nil)
@@ -500,11 +516,11 @@ final class WorkspaceAPIService {
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
                     issuer: .userApprovalOnce(requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId), singleUse: true))
-            case .allowForSession:
+            case .allowForSession, .allowByPolicy:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [target.handle], operations: [.artifactOpen],
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
-                    issuer: .userApprovalSession(requestId: promptId),
+                    issuer: Self.sessionIssuer(decision, requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId)))
             }
             guard case let .allowed(_, policy) = WorkspaceToolGrantEvaluator.evaluate(
@@ -817,6 +833,44 @@ final class WorkspaceAPIService {
         let live = (grants[agentId] ?? []).filter { $0.revocationGeneration == revocationGeneration(for: agentId) }
         if live.contains(where: { $0.issuer == .sessionPolicy }) { return }
         grants[agentId] = live + [WorkspaceToolGrant.phase1Preset(agentId: agentId, checkout: checkout, generation: revocationGeneration(for: agentId))]
+    }
+
+    // MARK: - Agent permissions
+
+    /// The one place a gated operation decides whether to ask. Under Agent
+    /// permissions `free`, a request that stays inside the caller's own
+    /// project is approved without a prompt; anything else — every request
+    /// under `askFirst`/`off`, and a cross-project one under `free` — goes to
+    /// the trusted approval UI. Either way the caller mints the grant and runs
+    /// its own rechecks, so revocation and the per-agent switch still win.
+    func decideScope(_ prompt: ScopeApprovalPrompt, withinCallerProject: Bool) -> ScopeApprovalDecision {
+        if withinCallerProject, supervisor.workspaceToolsPermission() == .free {
+            policyApprovalCount += 1
+            return .allowByPolicy
+        }
+        approvalPromptCount += 1
+        return approvalHandler(prompt)
+    }
+
+    static func sessionIssuer(_ decision: ScopeApprovalDecision, requestId: String) -> WorkspaceToolGrant.Issuer {
+        decision == .allowByPolicy ? .permissionPolicy(requestId: requestId) : .userApprovalSession(requestId: requestId)
+    }
+
+    /// Both agents belong to one known project. An agent with no project
+    /// stamp is never "inside" anything, so it is asked.
+    static func sameProject(_ record: AgentRecord, _ projectId: UUID?) -> Bool {
+        guard let own = record.projectId else { return false }
+        return projectId == own
+    }
+
+    /// Leaving `free` takes back what `free` granted: the next gated request
+    /// asks, exactly as if the agent had never been approved by the policy.
+    func dropPolicyGrantsUnlessFree(agentId: AgentID) {
+        guard let held = grants[agentId], supervisor.workspaceToolsPermission() != .free else { return }
+        grants[agentId] = held.filter { grant in
+            if case .permissionPolicy = grant.issuer { return false }
+            return true
+        }
     }
 
     func mint(_ grant: WorkspaceToolGrant) {

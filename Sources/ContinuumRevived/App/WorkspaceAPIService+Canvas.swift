@@ -177,11 +177,12 @@ extension WorkspaceAPIService {
         if case .allowed = verdict {} else {
             let promptId = UUID().uuidString
             approvalRequestId = promptId
-            approvalPromptCount += 1
-            let decision = approvalHandler(ScopeApprovalPrompt(
+            // The tile was proved to be in this agent's own project above.
+            let decision = decideScope(ScopeApprovalPrompt(
                 requestId: promptId, agentId: agentId, agentDisplayName: record.displayName,
                 checkout: ownHandle, checkoutDisplayName: known[ownHandle]?.displayName ?? record.displayName,
-                op: .canvasApply, relativePath: nil))
+                op: .canvasApply, relativePath: nil),
+                withinCallerProject: true)
             if isCancelled() {
                 remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .canvasApply, outcome: "cancelledBeforeEffect", tileId: request.tileId))
                 return .cancelled(result: nil)
@@ -197,10 +198,10 @@ extension WorkspaceAPIService {
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.canvasApply],
                     presentationCeiling: .preserveAll, issuer: .userApprovalOnce(requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId), singleUse: true))
-            case .allowForSession:
+            case .allowForSession, .allowByPolicy:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.canvasApply],
-                    presentationCeiling: .preserveAll, issuer: .userApprovalSession(requestId: promptId),
+                    presentationCeiling: .preserveAll, issuer: Self.sessionIssuer(decision, requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId)))
             }
             verdict = WorkspaceToolGrantEvaluator.evaluate(

@@ -77,7 +77,12 @@ enum WorkspaceAPIChecks {
         url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 
-    static func makeFixture() throws -> Fixture {
+    /// `settings` nil pins Agent permissions to Off, the world these legs were
+    /// written against: a new agent starts without workspace tools and every
+    /// gated request asks. The user's own setting never decides a check.
+    /// A suite instead goes through the production wiring: the mount points the
+    /// supervisor at `qaSettingsDefaults`, which is that suite.
+    static func makeFixture(settings: QAIsolatedDefaults? = nil) throws -> Fixture {
         let fileManager = FileManager.default
         let now = Date(timeIntervalSince1970: 1_900_000_000)
         let workspaceWA = UUID(uuidString: "00000000-0000-0000-0000-0000000CA101")!
@@ -226,6 +231,15 @@ enum WorkspaceAPIChecks {
         canvas.frame = CGRect(x: 0, y: 0, width: 2000, height: 1200)
 
         let delegate = AppDelegate()
+        delegate.qaSettingsDefaults = settings
+        func pinPermission() {
+            if let settings {
+                delegate.qaAgentSupervisor.workspaceToolsPermission = { WorkspaceToolsConfig.permission(defaults: settings) }
+            } else {
+                delegate.qaAgentSupervisor.workspaceToolsPermission = { .off }
+            }
+        }
+        pinPermission()
         let runtime = WorkspaceRuntime(
             boot: try zoneRegistry.acquire(projectId: projectPa),
             workspaceId: workspaceWA, document: docA, registry: zoneRegistry,
@@ -246,6 +260,8 @@ enum WorkspaceAPIChecks {
             canvasView: canvas, spawner: spawner, projectStore: storePa,
             canvasState: bootCanvasState, installsGlobalEventMonitors: false)
         canvas.layoutSubtreeIfNeeded()
+        // The mount wires the supervisor to Settings; a suite keeps that wiring.
+        if settings == nil { pinPermission() }
 
         return Fixture(
             tempRoot: tempRoot, delegate: delegate, runtime: runtime, canvas: canvas, browserEngine: browserEngine,

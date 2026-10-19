@@ -1812,6 +1812,26 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // Agent permissions (Settings ▸ Agents): Free within a project delegates,
+        // messages any agent in the project and inspects it without a prompt,
+        // while cross-project reach still asks or is refused, the per-agent
+        // switch still revokes, agent-to-agent chains stop, leaving Free takes
+        // its grants back and Off creates agents without workspace tools.
+        if CommandLine.arguments.contains("--workspace-api-free-permissions-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runWorkspaceAPIFreePermissionsChecks()
+                    print("ContinuumRevivedWorkspaceAPIFreePermissionsChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         // Usage-bearing release acceptance is explicitly opt-in and separate
         // from the offline matrix and ordinary startup.
         if CommandLine.arguments.contains("--agent-context-live-compaction-check") {
@@ -18306,9 +18326,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // CX-01 Phase 2c: writing into another agent's run is an effect, so
             // it is never in the preset — and an approved DELEGATION does not
             // imply it.
-            let child = prompt.targetAgentDisplayName ?? "a child agent"
-            alert.messageText = "Allow \(prompt.agentDisplayName) to send a message to \(child)?"
-            detail = "The agent asked Array to start a new turn on \(child) — a child agent it created in \(prompt.checkoutDisplayName) — using text the agent wrote.\n\nIt can reach only the children it created: never a sibling, never its own parent, never any other agent."
+            let target = prompt.targetAgentDisplayName ?? "another agent"
+            alert.messageText = "Allow \(prompt.agentDisplayName) to send a message to \(target)?"
+            detail = "The agent asked Array to start a new turn on \(target), in \(prompt.checkoutDisplayName), using text the agent wrote.\n\nWhile you are asked first, an agent can message only the children it created and the agent that created it. It never interrupts a turn that is running."
         } else if prompt.op == .canvasApply {
             // CX-01 Phase 4: geometry is never in the session preset, so the first
             // move/resize of the agent's OWN checkout lands here.
@@ -18320,7 +18340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let path = prompt.relativePath { detail += "\n\nFile: \(path)" }
             detail += "\n\nOpening never edits the file."
         }
-        detail += " \"Allow for This Agent Session\" lasts until the agent is stopped or its Workspace Tools are turned off."
+        detail += " \"Allow for This Agent Session\" lasts until Array quits or this agent's Workspace Tools are turned off. To stop being asked, choose Free in Settings ▸ Agents ▸ Agent permissions."
         alert.informativeText = detail
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Allow Once")
@@ -19052,6 +19072,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         agentSupervisor.onWorkspaceToolsChanged = { [weak self] agentId, enabled in
             self?.workspaceAPI.policyChanged(agentId: agentId, enabled: enabled)
+        }
+        agentSupervisor.workspaceToolsPermission = { [weak self] in
+            WorkspaceToolsConfig.permission(defaults: self?.settingsDefaults ?? .standard)
         }
         // The sidebar dot is derived from the record on every row build, so a
         // colour picked on a tile only needs the rows rebuilt — the same re-push
