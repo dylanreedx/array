@@ -566,6 +566,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         return [clip.bounds.origin]
     }
 
+    /// A transcript control's action, through the dispatch its renderer calls.
+    func qaPerformRenderAction(_ action: AgentRenderAction) {
+        performV2RenderAction(action)
+    }
+
     /// Scroll the transcript from a witness without reaching into its privates.
     func qaScrollTranscript(toY y: CGFloat) {
         guard let scrollView = transcriptCollectionFixture?.scrollView else { return }

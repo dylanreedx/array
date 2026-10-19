@@ -1111,6 +1111,11 @@ run_app_check .build/debug/Array --zone-tile-detach-sweep-check
 # then committed it. Behavioural on purpose: the pre-existing coverage of this
 # method is a source scan, which stays green while the behaviour is inverted.
 run_app_check .build/debug/Array --inbox-reveal-project-check
+# A subagent opened from its parent's chip was scoped to its project's FIRST
+# zone, so in a project with two zones every child of a parent in the second
+# landed in the first (the dictation film's swarm spike). World frame against
+# the parent zone's world rect, not the zone stamp (hazard 9).
+run_app_check .build/debug/Array --subagent-tile-zone-check
 # M1.7/M1.9 (.plans/46): AgentRunning.stop() is non-throwing and reports nothing;
 # what happens is that it SIGTERMs the child and run() throws on the way out. The
 # supervisor turned that into .runtimeError -> didFail -> .failed, persisted, and

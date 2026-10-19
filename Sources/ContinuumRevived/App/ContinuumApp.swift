@@ -1103,6 +1103,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--subagent-tile-zone-check") {
+            do {
+                _ = NSApplication.shared
+                try SubagentTileZoneChecks.run()
+                print("ContinuumRevivedSubagentTileZoneChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--inbox-reveal-project-check") {
             do {
                 _ = NSApplication.shared
@@ -12963,7 +12975,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         defer { if scopeOverrideApplied { explicitCreationScopeOverride = nil } }
 
         let spawner: TileSpawner
-        if let recordProject, let (scoped, scope) = spawnerAndScope(forProject: recordProject) {
+        var besideParent: (scope: CreationScope, worldPoint: CGPoint?)?
+        if let (scoped, scope, worldPoint) = spawnPlacementBesideParent(of: agentId) {
+            spawner = scoped
+            besideParent = (scope, worldPoint)
+        } else if let recordProject, let (scoped, scope) = spawnerAndScope(forProject: recordProject) {
             spawner = scoped
             explicitCreationScopeOverride = scope
             scopeOverrideApplied = true
@@ -12985,7 +13001,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // in the composer, so a Settings-titled tile read "Claude Opus 5" over a
         // composer saying "GPT-5.6 Sol". The seam takes the supervisor rather than a
         // resolution so this call site cannot omit the lookup again.
-        switch spawner.spawnManagedAgentForExistingAgent(agentId, supervisor: agentSupervisor) {
+        switch spawner.spawnManagedAgentForExistingAgent(
+            agentId, supervisor: agentSupervisor,
+            at: besideParent?.worldPoint, creationScope: besideParent?.scope) {
         case let .spawned(tileId):
             wireManagedAgentTile(tileId, agentID: agentId)
             scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "inbox-reveal-attach", debounce: 0.2)
@@ -12994,6 +13012,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             fputs("Reveal from inbox: could not attach a tile to \(agentId.rawValue.uuidString): \(error)\n", stderr)
             return nil
         }
+    }
+
+    /// Where a subagent's tile goes: beside its parent, in the PARENT's zone.
+    ///
+    /// `spawnerAndScope(forProject:)` answers with the project's FIRST zone, so in a
+    /// project with two zones every child of a parent in the second opened in the
+    /// first, its lineage tether stretched across the canvas (the dictation film's
+    /// swarm spike). One zone id for framing, siblings, z-order and install
+    /// (hazard 9), the parent's, whichever zone is armed.
+    ///
+    /// Children stack in a column at the parent's right, top-aligned with it: the
+    /// first spot that is inside the zone and free. With none, nil, and the zone's
+    /// own automatic placement dodges its tiles. The whole answer is nil when the
+    /// parent has no tile on this canvas or its zone belongs to a project other
+    /// than the child's.
+    private func spawnPlacementBesideParent(of agentId: AgentID) -> (TileSpawner, CreationScope, CGPoint?)? {
+        guard let record = agentSupervisor.records[agentId],
+              let parentId = record.parentAgentID,
+              let parentTileId = agentSupervisor.records[parentId]?.tileId,
+              let (spawner, scope) = spawnerAndScope(forTile: parentTileId),
+              record.projectId == nil || record.projectId == scope.projectId,
+              let zoneId = scope.zoneId,
+              let canvasView,
+              let zone = canvasView.installedZonePlacement(for: zoneId),
+              let parent = canvasView.navigationTileSnapshot(for: parentTileId) else { return nil }
+        let size = CanvasEngine.defaultFrame(for: .managedAgent)
+        let gap = TileGapResolver.resolvedGap()
+        let zoneRect = CGRect(x: zone.origin.x, y: zone.origin.y, width: zone.size.width, height: zone.size.height)
+        let occupied = (canvasView.tilesInWorldFrames(forZoneId: zoneId) ?? []).map {
+            CGRect(x: $0.frame.x, y: $0.frame.y, width: $0.frame.width, height: $0.frame.height)
+        }
+        var slot = CGRect(
+            x: parent.worldFrame.x + parent.worldFrame.width + gap,
+            y: parent.worldFrame.y, width: size.width, height: size.height)
+        while zoneRect.contains(slot) {
+            if !occupied.contains(where: { $0.intersects(slot) }) {
+                return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY))
+            }
+            slot.origin.y += size.height + gap
+        }
+        return (spawner, scope, nil)
     }
 
     @objc func toggleWorkspaceSidebarFromMenu(_ sender: Any?) {
