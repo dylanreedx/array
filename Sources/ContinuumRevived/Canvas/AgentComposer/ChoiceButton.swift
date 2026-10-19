@@ -153,10 +153,17 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
         )
         leadingIcon.frame = NSRect(x: scaledHorizontalPadding, y: (bounds.height - CGFloat(pageZoom.scaled(14))) / 2, width: CGFloat(pageZoom.scaled(14)), height: CGFloat(pageZoom.scaled(14)))
         let titleHeight = scaledTitleHeight
+        // A canvas zoom snaps frames to device pixels, so a stack can hand this
+        // button a fraction of a point under its intrinsic width with the row full
+        // of surplus, and the label then ellipsized a title it had room for ("Cod…"
+        // at zoom 3.13; ChoiceGeometryChecks 7). Up to one point of that comes out
+        // of the gap before the chevron; a real shortfall still shortens the label.
+        let available = max(0, chevronView.frame.minX - scaledTitleGap - scaledHorizontalPadding - iconWidth)
+        let needed = measuredTitleWidth
         titleLabel.frame = NSRect(
             x: scaledHorizontalPadding + iconWidth,
             y: floor((bounds.height - titleHeight) / 2),
-            width: max(0, chevronView.frame.minX - scaledTitleGap - scaledHorizontalPadding - iconWidth),
+            width: needed > available && needed - available <= 1 ? needed : available,
             height: titleHeight
         )
     }

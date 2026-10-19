@@ -79,6 +79,7 @@ enum ChoiceGeometryChecks {
         try checkFooterDoesNotCondenseWithSurplusWidth()
         try checkCatalogRefreshRerunsTheFitDecision()
         try checkShortRowShortensOneTriggerAndNoMenu()
+        try checkSubPointRoundingKeepsTheTitle()
         let touched = standardGuard.finish()
         guard touched.isEmpty else {
             throw CheckError.message("the leg wrote the owner's agent keys in the standard defaults domain: \(touched)")
@@ -336,5 +337,41 @@ enum ChoiceGeometryChecks {
             try expect(button.qaTruncatedPresentedRowTitles == [],
                        "the \(label) menu ellipsizes \(button.qaTruncatedPresentedRowTitles ?? ["<not presented>"])")
         }
+    }
+
+    // MARK: - 7. Sub-point layout rounding never ellipsizes a title
+
+    private static func checkSubPointRoundingKeepsTheTitle() throws {
+        // A canvas zoom snaps view frames to device pixels, so the footer's stack
+        // can hand a trigger a fraction of a point under its intrinsic width with
+        // the row full of surplus. Measured in the dictation film (r10), a working
+        // Codex tile at canvas zoom 3.13: harness frame 103.888pt, intrinsic 104pt,
+        // label 37.888pt for "Codex", which needs 38pt. AppKit drew "Cod…".
+        // `qaTitleDrawsWithoutTruncation` allows 0.5pt and passed it, so this
+        // compares strictly against what the label's own cell needs.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 120),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        let button = ChoiceButton(title: "Codex")
+        button.selectedIcon = .provider("openai/")
+        window.contentView?.addSubview(button)
+        window.orderFrontOffscreenForChecks()
+        let intrinsic = button.intrinsicContentSize.width
+        for deficit in [0.112, 0.25, 0.5, 0.9] as [CGFloat] {
+            button.frame = NSRect(x: 0, y: 40, width: intrinsic - deficit, height: ChoiceButton.controlHeight)
+            button.layoutSubtreeIfNeeded()
+            try expect(button.qaTitleFrameWidth >= button.qaTitleDrawingWidth - 0.001,
+                       "[\"Codex\" trigger \(deficit)pt under its intrinsic \(intrinsic)pt] the label gets "
+                       + "\(button.qaTitleFrameWidth)pt but its cell needs \(button.qaTitleDrawingWidth)pt, "
+                       + "so it ellipsizes a title the row has room for")
+        }
+        // Negative control: a trigger genuinely too narrow still ellipsizes. The
+        // tolerance absorbs rounding, never a real shortfall.
+        button.frame = NSRect(x: 0, y: 40, width: intrinsic - 12, height: ChoiceButton.controlHeight)
+        button.layoutSubtreeIfNeeded()
+        try expect(button.qaTitleFrameWidth < button.qaTitleDrawingWidth - 8,
+                   "a trigger 12pt short must still shorten its label (got \(button.qaTitleFrameWidth)pt for "
+                   + "\(button.qaTitleDrawingWidth)pt)")
     }
 }
