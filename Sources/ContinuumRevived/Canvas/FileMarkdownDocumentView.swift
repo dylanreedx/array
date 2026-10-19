@@ -69,6 +69,9 @@ final class FileMarkdownDocumentView: NSView, RichInlineTextSelectionContainer {
         body.applyTheme(theme)
     }
 
+    /// Where the reader is. A resting tile's picture is only current for this.
+    var scrollOrigin: CGPoint { scrollView.contentView.bounds.origin }
+
     // MARK: - QA introspection
 
     /// The laid-out block views, in document order.
@@ -101,6 +104,11 @@ final class FileMarkdownDocumentView: NSView, RichInlineTextSelectionContainer {
     }
 
     var qaClipHeight: CGFloat { scrollView.contentView.bounds.height }
+    var qaScrollOffsetY: CGFloat { scrollView.contentView.bounds.origin.y }
+    func qaScroll(toY y: CGFloat) {
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
 
     /// How many times a block has been measured since this view was built.
     var qaMeasurementCount: Int { body.measurementCount }
