@@ -526,6 +526,10 @@ run_app_check .build/debug/Array --provider-model-picker-check
 run_app_check .build/debug/Array --choice-geometry-check
 run_app_check .build/debug/Array --zone-cancel-menu-check
 run_app_check .build/debug/Array --border-census-check
+# The outline measured in the window server's own composite, at canvas zooms
+# and off-pixel origins: the census only caps widths, and a 0.5pt line passed
+# it while one edge of the composer read half as strong as the others.
+run_app_check .build/debug/Array --composer-outline-check
 run_app_check .build/debug/Array --corner-style-check
 # Channel split: the bare binary must resolve the DEV store ("Array Dev").
 run_app_check .build/debug/Array --app-support-channel-check

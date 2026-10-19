@@ -1019,7 +1019,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// Full border mode: a stroke a muted tint still reads at, kept under
     /// `LineWidth.rule` (the state-bearing edge) and drawn under the canvas's
     /// focus and attention overlays, which therefore still win.
-    static let identityBorderWidth = CGFloat(LineWidth.hairline * 2)
+    static let identityBorderWidth = CGFloat(LineWidth.hairline)
     static let identityBorderAlpha: CGFloat = 0.7
 
     /// The agent's identity tint, unmuted — nil when the agent has none or the

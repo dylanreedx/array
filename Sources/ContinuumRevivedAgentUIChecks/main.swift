@@ -1275,13 +1275,14 @@ func runSidebarSurfaceChecks() {
                "SidebarTokens: \(pin.foreground)'s worst background in \(pin.theme.rawValue) is \(measured.background), not \(SidebarSurfaceRole.active.rawValue) — the sidebar ladder moved")
     }
 
-    // 11. The hairline width token. One declaration, pinned: `_DESIGN.md`
-    //     caps any sidebar boundary at 0.5 pt, and ticket 93's app-wide
-    //     sweep consumes this same token, so a drift here drifts everywhere.
+    // 11. The hairline width token. One declaration, pinned: ticket 93's
+    //     app-wide sweep consumes this same token, so a drift here drifts
+    //     everywhere. 1pt since 2026-10-19 (Dylan: 0.5pt smeared unevenly on
+    //     the zoomable canvas; "1pt max is good enough").
     expect(LineWidth.hairline > 0,
            "LineWidth: the hairline must be a positive width, got \(LineWidth.hairline)")
-    expect(LineWidth.hairline == 0.5,
-           "LineWidth: the shared hairline must stay 0.5 pt, got \(LineWidth.hairline) — _DESIGN.md caps any sidebar boundary at 0.5 pt, and ticket 93 sweeps the whole app with this one token")
+    expect(LineWidth.hairline == 1,
+           "LineWidth: the shared hairline must stay 1 pt, got \(LineWidth.hairline) — half a point smears on the canvas, and 2pt read as a thick grey frame")
 
     print("SidebarSurface checks passed: \(SidebarSurfaceRole.allCases.count) roles resolve from existing tokens (resting IS panel), "
         + "emphasis selected/hover/active measured " + emphasisSummary.joined(separator: ", ")

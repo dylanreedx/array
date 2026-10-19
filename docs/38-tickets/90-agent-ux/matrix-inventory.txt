@@ -78,6 +78,7 @@ check --component-lab-check
 check --composer-dictation-check
 check --composer-image-components-check
 check --composer-key-routing-check
+check --composer-outline-check
 check --conductor-queue-tile-check
 check --context-meter-contract-check
 check --corner-style-check
@@ -370,6 +371,7 @@ leg run_app_check .build/debug/Array --component-lab-check
 leg run_app_check .build/debug/Array --composer-dictation-check
 leg run_app_check .build/debug/Array --composer-image-components-check
 leg run_app_check .build/debug/Array --composer-key-routing-check
+leg run_app_check .build/debug/Array --composer-outline-check
 leg run_app_check .build/debug/Array --conductor-queue-tile-check
 leg run_app_check .build/debug/Array --corner-style-check
 leg run_app_check .build/debug/Array --cross-project-agents-check

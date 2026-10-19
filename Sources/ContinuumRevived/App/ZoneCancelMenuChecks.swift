@@ -131,7 +131,8 @@ enum ZoneCancelMenuChecks {
         try expect(!panel.hasShadow,
                    "[\(edge)/\(anchorCase)] the menu window casts a server shadow, whose rim draws a light border around it")
         let border = surfaceView.layer?.borderWidth ?? 0
-        try expect(border > 0 && border <= 0.5, "[\(edge)/\(anchorCase)] the menu's border is \(border)pt, not a ≤0.5pt hairline")
+        try expect(border > 0 && border <= CGFloat(LineWidth.hairline),
+                   "[\(edge)/\(anchorCase)] the menu's border is \(border)pt, past the \(LineWidth.hairline)pt hairline")
 
         // 4. The destructive row speaks in the destructive colour.
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {

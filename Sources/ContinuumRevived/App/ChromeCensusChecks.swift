@@ -144,7 +144,7 @@ enum ChromeCensusSurfaces {
 }
 
 /// `--border-census-check`: no border anywhere in the app's chrome is wider
-/// than THE hairline (`LineWidth.hairline`, 0.5pt).
+/// than THE hairline (`LineWidth.hairline`, 1pt).
 ///
 /// Walks the real view trees of every census surface in both appearances and
 /// reads what Core Animation will draw: every layer's `borderWidth` (with a

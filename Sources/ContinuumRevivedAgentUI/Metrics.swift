@@ -229,7 +229,13 @@ public enum LineWidth {
     /// exemptions (the focus ring, the moving highlight, glyph strokes, native
     /// control chrome). A hairline is a device property, not a metric: it never
     /// scales with a page zoom.
-    public static let hairline = 0.5
+    ///
+    /// 1pt, not 0.5 (2026-10-19). Half a point is one device pixel at 2x, and
+    /// almost nothing on a zoomable canvas lands on a whole pixel, so the line
+    /// smeared across two half-grey pixels on some edges and stayed crisp on
+    /// others: the composer's outline looked uneven. Two device pixels survive
+    /// any half-pixel offset. Still the ceiling: 2pt read as a thick grey frame.
+    public static let hairline = 1.0
     /// An authorship rule: a state-bearing edge, not a decorative boundary, so
     /// it does not reuse `hairline` or `Space.xs` (a SPACING token that happens
     /// to share this value today but is not guaranteed to keep doing so in a
