@@ -3,6 +3,7 @@ import type { AgentStatus, DemoAction, DemoState, TranscriptEntry } from '../../
 import { Glyph } from '../Glyph';
 import { AgentGyro } from './AgentGyro';
 import { ProviderMark } from '../ProviderMark';
+import { DICTATION } from '../../../lib/guided-dictation';
 import styles from './AgentTile.module.css';
 
 export type AgentEvent =
@@ -262,21 +263,28 @@ export function AgentTile({ state, dispatch, agentId, onEvent, className = '', p
           onChange={(event) => dispatch({ type: 'SET_AGENT_DRAFT', id: agent.id, draft: event.target.value })}
           onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submitMessage(); } }}
         />
+        {/* A live dictation session: settled words, then the hypothesis in the secondary colour, at the caret. */}
+        <div className={styles.dictationText} data-dictation-text hidden aria-hidden="true" />
+        <span className={styles.dictationHint} data-dictation-hint hidden>{DICTATION.hint}</span>
       </form>
 
       <div className={styles.config} aria-label="Next turn settings">
-        <div className={styles.configControl}>
+        <div className={styles.configControl} data-dictation-covered>
           <button type="button" className={styles.configTrigger} aria-label="Provider" aria-haspopup="listbox" aria-expanded={openConfig === 'provider'} data-interaction-id={`agent-provider-${agent.id}`} onClick={() => setOpenConfig(openConfig === 'provider' ? null : 'provider')}><ProviderMark provider={agent.provider} /><span>{agent.provider}</span><Glyph name="chevronDown" /></button>
           <div className={`${styles.configMenu} ${styles.providerMenu}`} role="listbox" aria-label="Choose provider" data-demo-menu="provider" hidden={openConfig !== 'provider'} aria-hidden={openConfig !== 'provider'}>{providerChoices.map((provider) => <button type="button" role="option" aria-selected={agent.provider === provider} data-selected={agent.provider === provider ? 'true' : undefined} data-demo-provider-option={provider} key={provider} onClick={() => changeConfig('provider', provider)}><ProviderMark provider={provider} /><span>{provider}</span>{agent.provider === provider && <Glyph name="check" />}</button>)}</div>
         </div>
-        <div className={styles.configControl}>
+        <div className={styles.configControl} data-dictation-covered>
           <button type="button" className={styles.configTrigger} aria-label="Model" aria-haspopup="listbox" aria-expanded={openConfig === 'model'} data-interaction-id={`agent-model-${agent.id}`} onClick={() => setOpenConfig(openConfig === 'model' ? null : 'model')}><span>{agent.model}</span><Glyph name="chevronDown" /></button>
           {openConfig === 'model' && <div className={styles.configMenu} role="listbox" aria-label="Choose model">{(models.includes(agent.model) ? models : [agent.model, ...models]).map((model) => <button type="button" role="option" aria-selected={agent.model === model} key={model} onClick={() => changeConfig('model', model)}><span>{model}</span>{agent.model === model && <Glyph name="check" />}</button>)}</div>}
         </div>
-        <div className={styles.configControl}>
+        <div className={styles.configControl} data-dictation-covered>
           <button type="button" className={styles.configTrigger} aria-label="Reasoning effort" aria-haspopup="listbox" aria-expanded={openConfig === 'effort'} data-interaction-id={`agent-effort-${agent.id}`} onClick={() => setOpenConfig(openConfig === 'effort' ? null : 'effort')}><span>{agent.effort}</span><Glyph name="chevronDown" /></button>
           {openConfig === 'effort' && <div className={styles.configMenu} role="listbox" aria-label="Choose reasoning effort">{effortLevels.map((effort) => <button type="button" role="option" aria-selected={agent.effort === effort} key={effort} onClick={() => changeConfig('effort', effort)}><span>{effort}</span>{agent.effort === effort && <Glyph name="check" />}</button>)}</div>}
         </div>
+        {/* ComposerDictationButton: a 32 pt circle beside Send, SF Symbol "mic". */}
+        <button type="button" className={styles.dictationMic} data-dictation-mic data-interaction-id={`agent-mic-${agent.id}`} aria-label="Dictate (⇧⌘D)" title="Dictate (⇧⌘D)">
+          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="5.6" y="1.7" width="4.8" height="7.9" rx="2.4" /><path d="M3.7 7.6a4.3 4.3 0 0 0 8.6 0M8 11.9v2.4" /></svg>
+        </button>
         <button type="button" className={styles.primaryAction} data-interaction-id={`agent-send-${agent.id}`} data-demo-agent-action="true" data-action={active ? 'stop' : displayedStatus === 'stopped' ? 'restart' : 'send'} aria-label={active ? 'Stop current turn' : displayedStatus === 'stopped' ? 'Restart agent' : 'Send message'} disabled={!active && displayedStatus !== 'stopped' && !agent.draft.trim()} onClick={activatePrimaryAction}>
           <span className={styles.actionIcons} aria-hidden="true">
             <span data-demo-agent-action-icon="send"><Glyph name="send" /></span>
@@ -285,6 +293,12 @@ export function AgentTile({ state, dispatch, agentId, onEvent, className = '', p
           </span>
           <span data-demo-agent-action-label="true">{active ? 'Stop' : displayedStatus === 'stopped' ? 'Restart' : 'Send'}</span>
         </button>
+        {/* ComposerDictationPillView: grows out of the mic over the provider controls. */}
+        <div className={styles.dictationPill} data-dictation-pill data-state="idle" hidden aria-hidden="true">
+          <span className={styles.dictationWave} data-dictation-wave>{Array.from({ length: DICTATION.bars }, (_, index) => <i key={index} data-dictation-bar />)}</span>
+          <span className={styles.dictationTime} data-dictation-time>0:00</span>
+          <span className={styles.dictationStop} data-dictation-stop />
+        </div>
       </div>
     </section>
   );

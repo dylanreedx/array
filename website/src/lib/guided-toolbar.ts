@@ -59,7 +59,7 @@ const smooth = (p: number) => p * p * (3 - 2 * p);
 const mix = (a: number, b: number, p: number) => a + (b - a) * p;
 
 /** The app's damped springs, solved in closed form so any scroll seek lands on the same frame. */
-function spring(elapsed: number, response: number, damping: number) {
+export function spring(elapsed: number, response: number, damping: number) {
   if (elapsed <= 0) return 0;
   const omega = 2 * Math.PI / response, decay = damping * omega, wd = omega * Math.sqrt(1 - damping * damping);
   return 1 - Math.exp(-decay * elapsed) * (Math.cos(wd * elapsed) + decay / wd * Math.sin(wd * elapsed));

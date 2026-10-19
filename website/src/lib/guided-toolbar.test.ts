@@ -27,7 +27,7 @@ describe('inserted beats keep the authored story intact', () => {
   });
   test('every authored beat keeps its original 970svh scroll distance', () => {
     const svh = (a: number, b: number) => (scrollForProgress(b) - scrollForProgress(a)) * GUIDED_TRACK_SVH;
-    expect(GUIDED_TRACK_SVH).toBe(1125);
+    expect(GUIDED_TRACK_SVH).toBe(1222);
     expect(svh(.38, .445)).toBeCloseTo(.065 * 970, 0);
     expect(svh(.86, .985)).toBeCloseTo(.125 * 970, 0);
   });

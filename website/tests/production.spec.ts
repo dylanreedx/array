@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { scrollForProgress } from '../src/lib/guided-timeline';
+import { DICTATION_BEAT } from '../src/lib/guided-dictation';
 const tileIDs = ['stabilize', 'verify', 'audit', 'browser', 'shell', 'note'];
 /** Seek by authored progress; an inserted beat's own point lands on its first frame. */
 async function seek(page: Page, progress: number, insertT?: number) {
@@ -221,7 +222,9 @@ test('golden flow creates a native agent before focus, typing and send', async (
     await seek(page, progress);
     await expect(root).toHaveAttribute('data-demo-focused-tile', id);
     await expect(root).toHaveAttribute('data-demo-selected-tile', id);
-    expect(await page.locator(`[data-assembly-surface=${id}] textarea`).inputValue()).not.toBe('');
+    // The audit prompt is dictated and already sent by .575 (see the dictation test).
+    if (id === 'verify') expect(await page.locator(`[data-assembly-surface=${id}] textarea`).inputValue()).not.toBe('');
+    else await expect(page.locator(`[data-assembly-surface=${id}] [data-kind=user]`)).toContainText('Review the native spacing');
   }
   await seek(page, .40);
   expect(await demoSnapshot(page)).toEqual(focused);
@@ -819,3 +822,78 @@ test('reduced motion still shows the toolbar, lying flat above the tiles', async
   expect(box!.width).toBeGreaterThan(box!.height * 5);
   await expect(page.locator('[data-toolbar-pill]:visible')).toHaveCount(0);
 });
+for (const [label, width, height] of [['desktop', 1440, 960], ['phone', 390, 844]] as const) {
+  test(`dictation: the mic grows into the agent's capsule and the words land in the composer (${label})`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto('/');
+    const tile = page.locator('[data-assembly-surface=audit]');
+    const mic = tile.locator('[data-dictation-mic]');
+    const pill = tile.locator('[data-dictation-pill]');
+    const draft = tile.locator('textarea');
+    // Every agent's composer has the mic: a circle, right before Send.
+    const mics = page.locator('[data-guided-world] [data-agent-id] [data-dictation-mic]');
+    await expect(mics).toHaveCount(3);
+    for (const node of await mics.all()) {
+      expect(await node.evaluate(el => [el.nextElementSibling?.getAttribute('data-demo-agent-action'), getComputedStyle(el).borderRadius, (el as HTMLElement).offsetWidth, (el as HTMLElement).offsetHeight]))
+        .toEqual(['true', '50%', 32, 32]);
+    }
+
+    await seek(page, .565, 0);
+    await expect(pill).toBeHidden();
+    await expect(mic).toHaveCSS('opacity', '1');
+
+    // Listening: the capsule covers the provider controls, its stop button
+    // sits where the mic was, and it wears the agent's colour.
+    await seek(page, .565, .5);
+    await expect(page.locator('[data-guided-demo]')).toHaveAttribute('data-demo-step', 'dictation');
+    await expect(pill).toBeVisible();
+    await expect(pill).toHaveAttribute('data-state', 'listening');
+    await expect(pill).toHaveCSS('border-top-color', 'rgb(191, 90, 242)');
+    await expect(mic).toHaveCSS('opacity', '0');
+    // Measured now: the camera pushes in on the composer while it listens.
+    const micBox = (await mic.boundingBox())!;
+    const pillBox = (await pill.boundingBox())!;
+    const provider = (await tile.locator('[aria-label="Provider"]').boundingBox())!;
+    expect(pillBox.x).toBeLessThanOrEqual(provider.x + 1);
+    expect(Math.abs(pillBox.x + pillBox.width - (micBox.x + micBox.width))).toBeLessThan(1.5);
+    expect(Math.abs(pillBox.height - micBox.height)).toBeLessThan(1);
+    const stop = (await pill.locator('[data-dictation-stop]').boundingBox())!;
+    expect(Math.abs(stop.x + stop.width / 2 - (micBox.x + micBox.width / 2))).toBeLessThan(1.5);
+    expect(Math.abs(stop.y + stop.height / 2 - (micBox.y + micBox.height / 2))).toBeLessThan(1.5);
+    await expect(pill.locator('[data-dictation-time]')).toHaveText(/^0:0[1-9]$/);
+    expect(await pill.locator('[data-dictation-bar]:visible').count()).toBeGreaterThan(20);
+    await expect(tile.locator('[data-dictation-hint]')).toHaveText('↩ done · esc discard');
+    await expect(pill).toBeInViewport();
+
+    // The words at the caret: settled in the primary colour, the live
+    // hypothesis in the secondary colour.
+    await expect(draft).toHaveValue(/^Review the native spacing, colors/);
+    const settled = tile.locator('[data-dictation-settled]'), provisional = tile.locator('[data-dictation-provisional]');
+    await expect(settled).toHaveText('Review the native spacing,');
+    await expect(settled).toHaveCSS('color', 'rgb(242, 244, 248)');
+    await expect(provisional).toHaveText(/^ colors/);
+    await expect(provisional).toHaveCSS('color', 'rgb(175, 182, 194)');
+    await expect(page.locator('[data-demo-caption]')).toHaveText(/talk/i);
+
+    // Return finishes: everything settles, the capsule folds back into the mic.
+    await seek(page, .565, DICTATION_BEAT.finish);
+    await expect(page.locator('[data-demo-key-hud]')).toBeVisible();
+    await expect(page.locator('[data-demo-key-hud]')).toHaveText('↩');
+    await seek(page, .565, DICTATION_BEAT.hidden + .01);
+    await expect(pill).toBeHidden();
+    await expect(mic).toHaveCSS('opacity', '1');
+    await expect(draft).toHaveValue('Review the native spacing, colors, and canvas controls.');
+    await expect(provisional).toHaveCount(0);
+
+    // Send: the prompt goes to the agent, and it starts working.
+    await seek(page, .58);
+    await expect(draft).toHaveValue('');
+    await expect(tile.locator('[data-kind=user]')).toContainText('Review the native spacing, colors, and canvas controls.');
+    await expect(tile.locator('[data-demo-agent-action]')).toHaveAttribute('data-action', 'stop');
+
+    // Seeking back reproduces the live capsule exactly.
+    await seek(page, .565, .5);
+    await expect(pill).toBeVisible();
+    await expect(settled).toHaveText('Review the native spacing,');
+  });
+}

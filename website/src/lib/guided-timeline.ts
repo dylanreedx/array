@@ -2,12 +2,15 @@
 // are INSERTED into the scroll rather than squeezed into it: while one plays,
 // authored progress holds at `at` and the beat runs on its own 0…1 clock. Every
 // authored beat therefore keeps its original scroll distance.
-export type GuidedInsertId = 'toolbar' | 'terminal';
+export type GuidedInsertId = 'toolbar' | 'dictation' | 'terminal';
 export interface GuidedInsert { id: GuidedInsertId; t: number }
 
 export const GUIDED_INSERTS: ReadonlyArray<{ id: GuidedInsertId; at: number; length: number }> = [
   // Tour the creation toolbar, then drag it from the bottom edge to the left.
   { id: 'toolbar', at: .27, length: .1 },
+  // Dictate the audit agent's prompt instead of typing it: the mic grows into
+  // the capsule, the words land, Return finishes, Send hands them over.
+  { id: 'dictation', at: .565, length: .1 },
   // Open the build terminal from the toolbar before running the tests.
   { id: 'terminal', at: .815, length: .06 },
 ];

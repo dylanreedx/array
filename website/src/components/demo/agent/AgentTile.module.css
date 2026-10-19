@@ -123,11 +123,11 @@
 .contextTrack { stroke: var(--separator, #2e343e); }
 .contextProgress { stroke: var(--done, #4fd07a); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 10px 10px; }
 
-.composer { grid-area: composer; display: block; margin: 0 12px 4px; padding: 3px; background: var(--app-overlay, #232935); border: .5px solid var(--border, #7a8290); border-radius: 9px; }
+.composer { grid-area: composer; position: relative; display: block; margin: 0 12px 4px; padding: 3px; background: var(--app-overlay, #232935); border: .5px solid var(--border, #7a8290); border-radius: 9px; }
 .composer textarea { display: block; box-sizing: border-box; width: 100%; min-width: 0; min-height: 35px; max-height: 136px; resize: none; padding: 8px; color: var(--text, var(--app-text, #f2f4f8)); background: transparent; border: 0; outline: none; font-size: 12px; line-height: 17px; }
 .composer textarea::placeholder { color: var(--muted, var(--app-text-secondary, #afb6c2)); }
 
-.config { grid-area: config; display: flex; align-items: center; gap: 4px; min-width: 0; padding: 0 12px 6px; background: var(--tile, var(--app-body, #14171c)); }
+.config { grid-area: config; position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; padding: 0 12px 6px; background: var(--tile, var(--app-body, #14171c)); }
 .configControl { position: relative; display: flex; flex: 1 1 0; min-width: 0; border-right: .5px solid var(--separator, #2e343e); }
 .configControl:first-child { flex: 1.1 1 0; }
 .configControl:nth-child(3) { flex: .8 1 0; border-right: 0; }
@@ -151,6 +151,27 @@
 .primaryAction[data-action="stop"] { color: var(--failed, #ff8a85); }
 .primaryAction[data-action="restart"] { color: var(--working, #5fa8ff); }
 .primaryAction:disabled { opacity: .35; cursor: default; }
+
+/* Composer dictation, from ComposerDictationButton / ComposerDictationPillView. */
+.dictationMic { display: grid; place-items: center; flex: none; box-sizing: border-box; width: 32px; height: 32px; margin: 0 4px; padding: 0; color: var(--muted, #afb6c2); background: #1a1f28; border: .5px solid var(--border, #7a8290); border-radius: 50%; }
+.dictationMic:hover { background: #1b2028; }
+.dictationMic svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.1px; stroke-linecap: round; stroke-linejoin: round; }
+.dictationPill { --tint: var(--agent-tint, #c08cff); position: absolute; z-index: 2; top: 0; left: 0; box-sizing: border-box; width: 32px; height: 32px; overflow: hidden; background: #1a1f28; border: .5px solid var(--tint); border-radius: 16px; }
+.dictationPill[hidden] { display: none; }
+.dictationWave { position: absolute; top: 7.5px; left: 11.5px; display: flex; align-items: center; gap: 1px; height: 16px; overflow: hidden; }
+.dictationWave i { display: block; flex: none; width: 2px; height: 2px; border-radius: 1px; background: var(--tint); }
+.dictationWave i[hidden] { display: none; }
+.dictationTime { position: absolute; top: 50%; right: 31.5px; color: var(--muted, #afb6c2); font: 500 9px/11px var(--font-sans, system-ui, sans-serif); font-variant-numeric: tabular-nums; transform: translateY(-50%); }
+.dictationStop { position: absolute; top: 10.5px; right: 10.5px; width: 10px; height: 10px; border-radius: 2.5px; background: var(--tint); }
+.dictationText { position: absolute; inset: 3px; box-sizing: border-box; padding: 8px; overflow: hidden; color: var(--text, #f2f4f8); font-size: 12px; line-height: 17px; white-space: pre-wrap; overflow-wrap: break-word; pointer-events: none; }
+.dictationText[hidden] { display: none; }
+.dictationText [data-dictation-provisional] { color: var(--muted, #afb6c2); }
+.dictationText [data-dictation-caret] { display: inline-block; width: 1.5px; height: 1.15em; margin-left: 1px; vertical-align: -.2em; background: var(--text, #f2f4f8); animation: dictationCaret 1.06s steps(1) infinite; }
+.composer textarea[data-dictating="true"] { color: transparent; }
+.dictationHint { display: block; margin-top: -4px; padding: 0 8px 4px; overflow: hidden; color: var(--muted, #afb6c2); font: 9px/11px var(--font-sans, system-ui, sans-serif); white-space: nowrap; text-overflow: ellipsis; }
+.dictationHint[hidden] { display: none; }
+@keyframes dictationCaret { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .dictationText [data-dictation-caret] { animation: none; } }
 
 .tile button:focus-visible,.tile textarea:focus-visible,.transcript:focus-visible { outline: 2px solid var(--working, #5fa8ff); outline-offset: 1px; }
 

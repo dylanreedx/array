@@ -1,4 +1,4 @@
-import type { Dispatch } from 'react';
+import type { CSSProperties, Dispatch } from 'react';
 import type { DemoAction, DemoState } from '../../features/demo/types';
 import { makeInitialState } from '../../features/demo/fixture';
 import { AgentTile } from './agent';
@@ -9,6 +9,7 @@ import { NativeBoardTile, NativeBoardDetails, NativeBoardChrome } from './board/
 import { NativeEditorTile, NativeEditorChrome } from './editor/NativeEditorTile';
 import { GuidedTerminal } from './tools/GuidedTerminal';
 import { CanvasToolbar } from './toolbar/CanvasToolbar';
+import { DICTATION_TINT } from '../../lib/guided-dictation';
 import styles from './GuidedWorkspace.module.css';
 
 const worldTiles = [
@@ -21,6 +22,8 @@ const worldTiles = [
 ] as const;
 
 const agentOrder = ['stabilize', 'verify', 'audit'] as const;
+/** The agent that dictates wears an identity colour, as picked from its tile's Color menu. */
+const identityColor: Partial<Record<typeof agentOrder[number], typeof DICTATION_TINT>> = { audit: DICTATION_TINT };
 const noOpDispatch: Dispatch<DemoAction> = () => undefined;
 
 export default function GuidedWorkspace() {
@@ -117,13 +120,13 @@ export default function GuidedWorkspace() {
                 {agentOrder.map((id) => {
                   const agent = state.agents[id];
                   return (
-                    <div className={styles.agentRow} data-demo-agent-row={id} data-demo-selected="false" data-demo-main-row={id === 'stabilize' ? '' : undefined} hidden={id === 'stabilize'} role="listitem" key={id}>
+                    <div className={styles.agentRow} data-demo-agent-row={id} style={identityColor[id] ? { '--agent-tint': identityColor[id]!.color } as CSSProperties : undefined} data-demo-selected="false" data-demo-main-row={id === 'stabilize' ? '' : undefined} hidden={id === 'stabilize'} role="listitem" key={id}>
                       <div className={styles.agentRowTop}>
                         <ProviderMark provider={agent.provider} />
                         <span>Array</span>
                         <span className={styles.recency}>{id === 'stabilize' ? 'now' : id === 'verify' ? '2m' : '5m'}</span>
                       </div>
-                      <strong>{agent.name}</strong>
+                      <strong>{identityColor[id] && <i className={styles.identityDot} aria-hidden="true" />}{agent.name}</strong>
                       <span className={styles.agentBranch}>{agent.branch}</span>
                       <span className={`${styles.agentState} ${styles[`state_${agent.status}`]}`} data-demo-statusmirror={id}>
                         <i aria-hidden="true" />Ready
@@ -157,7 +160,9 @@ export default function GuidedWorkspace() {
                         data-demo-visible={tile.id === 'stabilize' || tile.id === 'shell' ? 'false' : 'true'}
                         data-demo-created={tile.id === 'stabilize' || tile.id === 'shell' ? 'false' : 'true'}
                         aria-label={`${tile.title}, ${tile.kind} tile`}
-                        style={{ left: tile.x, top: tile.y, width: tile.id === 'browser' ? 'var(--demo-editor-initial-width, 560px)' : tile.width, height: tile.height }}
+                        data-identity-color={identityColor[tile.id as typeof agentOrder[number]]?.name}
+                        style={{ left: tile.x, top: tile.y, width: tile.id === 'browser' ? 'var(--demo-editor-initial-width, 560px)' : tile.width, height: tile.height,
+                          ...(identityColor[tile.id as typeof agentOrder[number]] ? { '--agent-tint': identityColor[tile.id as typeof agentOrder[number]]!.color } : {}) } as CSSProperties}
                       >
                         <header className={styles.tileHeader} data-demo-drag-handle={tile.id}>
                           <span className={styles.tileGlyph} aria-hidden="true">

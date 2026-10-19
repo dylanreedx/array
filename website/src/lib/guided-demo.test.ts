@@ -20,7 +20,8 @@ describe('native golden workspace flow', () => {
   });
   test('camera and focus settle before each prompt, then hold while typing', () => {
     for (const [id, start, middle, end] of [
-      ['stabilize', .38, .40, .425], ['verify', .51, .53, .55], ['audit', .56, .575, .595],
+      // The audit prompt is dictated instead (guided-dictation.test).
+      ['stabilize', .38, .40, .425], ['verify', .51, .53, .55],
     ] as const) {
       const before = guidedSnapshot(start, desktop), during = guidedSnapshot(middle, desktop), complete = guidedSnapshot(end, desktop);
       expect(during.focusedTile).toBe(id);

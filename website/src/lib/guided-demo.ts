@@ -1,10 +1,11 @@
 import { guidedLayout } from './guided-layout';
 import type { GuidedInsert } from './guided-timeline';
-import { toolbarReleasePoint, toolbarSnapshot, TOOLBAR_TOUR, type ToolbarSnapshot } from './guided-toolbar';
+import { TOOLBAR, toolbarReleasePoint, toolbarScale, toolbarSnapshot, TOOLBAR_TOUR, type ToolbarSnapshot } from './guided-toolbar';
+import { DICTATION_BEAT, IDLE_DICTATION, dictationSnapshot, type DictationSnapshot } from './guided-dictation';
 
 export const WORLD_WIDTH = 2060;
 export const WORLD_HEIGHT = 1320;
-export type DemoStep = 'landing' | 'toolbar' | 'creation' | 'task' | 'providers' | 'approval' | 'verification' | 'layout' | 'overview';
+export type DemoStep = 'landing' | 'toolbar' | 'creation' | 'task' | 'providers' | 'dictation' | 'approval' | 'verification' | 'layout' | 'overview';
 export type DemoAgent = 'stabilize' | 'verify' | 'audit';
 export type DemoTile = DemoAgent | 'browser' | 'shell' | 'note';
 type Point = { x: number; y: number };
@@ -21,8 +22,11 @@ export const STEPS = [
 /** Captions for the beats inserted into the authored scroll (see guided-timeline). */
 export const INSERT_CAPTIONS = {
   toolbar: 'Add anything from the toolbar. Drag it to any edge of the canvas.',
+  dictation: 'Talk instead of typing. Your words land in the prompt as you speak.',
   terminal: 'Open a terminal from the toolbar, right beside the work.',
 } as const;
+/** The audit agent's prompt is dictated, not typed (see guided-dictation). */
+export const DICTATED_AT = .565;
 /** When the toolbar's terminal arrives, in authored progress. */
 export const SHELL_AT = .815;
 export const DEMO_TEXT = {
@@ -31,7 +35,7 @@ export const DEMO_TEXT = {
   audit: 'Review the native spacing, colors, and canvas controls.',
 } as const;
 export type CreationStage = 'absent' | 'command' | 'models' | 'spawning' | 'focused' | 'sent';
-export type CursorTarget = 'toolbar-zone' | 'toolbar-agent' | 'toolbar-terminal' | 'toolbar-menu-shell' | 'command-trigger' | 'command-agent' | 'creation-model' | 'stabilize-composer' | 'stabilize-send' | 'verify-provider' | 'verify-composer' | 'verify-send' | 'audit-composer' | 'audit-send' | 'verify-allow' | 'board-placement' | 'editor-line' | 'shell-input' | 'stabilize-header' | 'editor-header' | 'editor-resize' | 'stabilize-resize' | 'shell-resize' | null;
+export type CursorTarget = 'toolbar-zone' | 'toolbar-agent' | 'toolbar-terminal' | 'toolbar-menu-shell' | 'command-trigger' | 'command-agent' | 'creation-model' | 'stabilize-composer' | 'stabilize-send' | 'verify-provider' | 'verify-composer' | 'verify-send' | 'audit-composer' | 'audit-mic' | 'audit-send' | 'verify-allow' | 'board-placement' | 'editor-line' | 'shell-input' | 'stabilize-header' | 'editor-header' | 'editor-resize' | 'stabilize-resize' | 'shell-resize' | null;
 export interface TileFrameSnapshot {
   x: number; y: number; width: number; height: number; visible: boolean; selected: boolean; zIndex: number;
   drag: { active: boolean; lift: number; rotation: number; scaleX: number; scaleY: number };
@@ -61,8 +65,11 @@ export interface GuidedSnapshot {
   /** `screen` pins the hand in canvas pixels; `fromScreen` starts an approach from there. */
   cursor: Point & { visible: boolean; pressed: boolean; approach: number; fromTarget: CursorTarget; screen: Point | null; fromScreen: Point | null };
   toolbar: ToolbarSnapshot;
-  /** The ⌘K keystroke readout, 0 hidden … 1 shown. */
+  /** The keystroke readout (⌘K, or ↩ finishing dictation), 0 hidden … 1 shown. */
   keyHud: number;
+  keyHudKeys: readonly string[];
+  /** The audit agent's composer dictation; idle outside its beat. */
+  dictation: DictationSnapshot & { agent: DemoAgent };
   terminal: { lines: number; typed: string; phase: 'idle' | 'typing' | 'running' | 'done' };
   typing: Record<DemoAgent, string>;
   status: Record<DemoAgent, string>;
@@ -210,6 +217,17 @@ function guidedCamera(p: number, insert: GuidedInsert | null, width: number, hei
     const scale = mix(from.scale, to.scale, t), center = { x: mix(from.center.x, to.center.x, t), y: mix(from.center.y, to.center.y, t) };
     return { x: width / 2 - center.x * scale, y: height / 2 - center.y * scale, scale, center };
   }
+  if (insert?.id === 'dictation') {
+    // A gentle push in on the composer while it listens, back out as the agent starts.
+    const base = cameraAt(p, width, height), beat = DICTATION_BEAT.camera, mobile = width < 700;
+    const k = smooth(between(insert.t, beat.in[0], beat.in[1])) * (1 - smooth(between(insert.t, beat.out[0], beat.out[1])));
+    const scale = base.scale * (1 + (mobile ? 0 : .12) * k), center = { x: base.center.x, y: base.center.y + 40 * k };
+    // A phone's tile is as wide as the screen: slide it clear of the toolbar on the left edge.
+    const tile = guidedLayout(p, mobile).frames.audit;
+    const clear = TOOLBAR.margin + TOOLBAR.thickness * toolbarScale(width) + 8;
+    center.x = mix(center.x, Math.min(center.x, tile.x + (width / 2 - clear) / scale), k);
+    return { x: width / 2 - center.x * scale, y: height / 2 - center.y * scale, scale, center };
+  }
   return cameraAt(p >= SHELL_AT && p < terminal ? terminal : p, width, height);
 }
 function focusAt(p: number): DemoTile | null {
@@ -255,8 +273,6 @@ function targetAt(p: number): CursorTarget {
   if (p >= .47 && p < .505) return 'verify-provider';
   if (p >= .515 && p < .55) return 'verify-composer';
   if (p >= .55 && p < .56) return 'verify-send';
-  if (p >= .565 && p < .595) return 'audit-composer';
-  if (p >= .595 && p < .615) return 'audit-send';
   if (p >= .625 && p < .695) return 'verify-allow';
   if (p >= .735 && p < .775) return 'board-placement';
   if (p >= .775 && p < SHELL_AT) return 'editor-line';
@@ -280,6 +296,12 @@ function insertCursor(insert: GuidedInsert, width: number, height: number): Inse
     if (t < tour.agent[1]) return { ...none, target: 'toolbar-agent', from: 'toolbar-zone', approach: smooth(between(t, tour.zone[1], tour.agent[0])), pressed };
     return { ...none, target: 'toolbar-terminal', from: 'toolbar-agent', approach: smooth(between(t, tour.agent[1], tour.terminal[0])), pressed };
   }
+  if (insert.id === 'dictation') {
+    const beat = DICTATION_BEAT, none = { fromScreen: null, screen: null };
+    const pressed = (t >= beat.press[0] && t < beat.press[1]) || (t >= beat.sendPress[0] && t < beat.sendPress[1]);
+    if (t < beat.toSend[0]) return { ...none, target: 'audit-mic', from: null, approach: smooth(between(t, beat.approach[0], beat.approach[1])), pressed };
+    return { ...none, target: 'audit-send', from: 'audit-mic', approach: smooth(between(t, beat.toSend[0], beat.toSend[1])), pressed };
+  }
   const pressed = (t >= .26 && t < .29) || (t >= .58 && t < .61);
   if (t < .3) return { target: 'toolbar-terminal', from: 'editor-line', fromScreen: null, approach: smooth(between(t, 0, .2)), screen: null, pressed };
   return { target: 'toolbar-menu-shell', from: 'toolbar-terminal', fromScreen: null, approach: smooth(between(t, .3, .48)), screen: null, pressed };
@@ -298,16 +320,20 @@ export function guidedSnapshot(value: number, options: { width: number; height: 
   const creationStage: CreationStage = p < .27 || insert?.id === 'toolbar' ? 'absent' : p < .295 ? 'command' : p < .335 ? 'models' : p < .38 ? 'spawning' : p < .435 ? 'focused' : 'sent';
   const layout = guidedLayout(p, width < 700);
   const resizing: DemoTile | null = p >= .93 && p < .95 ? 'browser' : p >= .957 && p < .970 ? 'stabilize' : p >= .976 && p < .985 ? 'shell' : null;
-  const approaches: ReadonlyArray<readonly [number, number, CursorTarget]> = [[SHELL_AT, .83, 'toolbar-menu-shell'], [.86, .873, 'shell-input'], [.903, .909, 'stabilize-header'], [.923, .93, 'editor-header'], [.95, .957, 'editor-resize'], [.970, .976, 'stabilize-resize']];
+  const approaches: ReadonlyArray<readonly [number, number, CursorTarget]> = [[DICTATED_AT, .58, 'audit-send'], [SHELL_AT, .83, 'toolbar-menu-shell'], [.86, .873, 'shell-input'], [.903, .909, 'stabilize-header'], [.923, .93, 'editor-header'], [.95, .957, 'editor-resize'], [.970, .976, 'stabilize-resize']];
   const approach = approaches.find(([start, end]) => p >= start && p < end);
   // After the toolbar beat the hand travels from where it let go of the bar to the palette.
   const fromRelease = p >= .27 && p < .283 && !insert;
   const inserted = insert && !reducedMotion ? insertCursor(insert, width, height) : null;
-  const pressTimes = [.285, .332, .435, .49, .555, .605, .68, .755, .80, .835];
+  const pressTimes = [.285, .332, .435, .49, .555, .68, .755, .80, .835];
   const held = tileFrames.stabilize.drag.active || tileFrames.browser.drag.active || !!resizing;
+  const dictation = insert?.id === 'dictation' ? dictationSnapshot(insert.t) : IDLE_DICTATION;
+  // The audit prompt is dictated: it is in the composer once the beat has run, and sent with it.
+  const auditSent = insert?.id === 'dictation' ? insert.t >= DICTATION_BEAT.sent : p >= DICTATED_AT;
+  const auditText = insert?.id === 'dictation' ? dictation.settled + dictation.provisional : p >= DICTATED_AT ? DEMO_TEXT.audit : '';
   const typed = p >= TERMINAL_COMMAND.typed ? 'swift test' : type('swift test', p, TERMINAL_COMMAND.start, TERMINAL_COMMAND.typed);
   return {
-    progress: p, step: insert?.id === 'toolbar' ? 'toolbar' : step.id, caption: insert ? INSERT_CAPTIONS[insert.id] : step.caption,
+    progress: p, step: insert?.id === 'toolbar' || insert?.id === 'dictation' ? insert.id : step.id, caption: insert ? INSERT_CAPTIONS[insert.id] : step.caption,
     heroOpacity: 1 - between(p, 0, .18), chromeOpacity: smooth(between(p, .10, .18)), takeover: smooth(between(p, .08, .26)),
     camera: guidedCamera(p, insert, width, height), tiles: tileMotions(tileFrames, shell), tileFrames,
     mainCreated: p >= .34, selectedTile, focusedTile,
@@ -324,11 +350,13 @@ export function guidedSnapshot(value: number, options: { width: number; height: 
         fromTarget: fromRelease ? null : approach?.[2] ?? null, screen: null, fromScreen: fromRelease ? toolbarReleasePoint(width, height) : null,
         pressed: held || pressTimes.some(time => p >= time && p < time + .009) },
     toolbar: toolbarSnapshot(p, insert, width, height),
-    keyHud: reducedMotion || insert ? 0 : smooth(between(p, .27, .273)) * (1 - smooth(between(p, .284, .288))),
-    typing: { stabilize: type(DEMO_TEXT.stabilize, p, .385, .425), verify: type(DEMO_TEXT.verify, p, .515, .55), audit: type(DEMO_TEXT.audit, p, .565, .595) },
+    keyHud: insert?.id === 'dictation' ? dictation.keyHud : reducedMotion || insert ? 0 : smooth(between(p, .27, .273)) * (1 - smooth(between(p, .284, .288))),
+    keyHudKeys: insert?.id === 'dictation' ? ['↩'] : ['⌘', 'K'],
+    dictation: { ...dictation, agent: 'audit' },
+    typing: { stabilize: type(DEMO_TEXT.stabilize, p, .385, .425), verify: type(DEMO_TEXT.verify, p, .515, .55), audit: auditText },
     status: { stabilize: p < .435 ? 'Ready' : p < .855 ? 'Working' : 'Complete',
       verify: p < .56 ? 'Ready' : p < .595 ? 'Working' : p < .68 ? 'Needs approval' : p < .855 ? 'Working' : 'Passed',
-      audit: p < .605 ? 'Ready' : p < .855 ? 'Reviewing' : 'Complete' },
+      audit: !auditSent ? 'Ready' : p < .855 ? 'Reviewing' : 'Complete' },
     menu: creationStage === 'command' ? 'toolbar' : creationStage === 'models' ? 'models' : p >= .47 && p < .505 ? 'provider' : null,
     approval: p < .595 ? 'hidden' : p < .68 ? 'waiting' : 'approved',
     terminal: { lines: TERMINAL_LINES.filter(line => p >= line.at).length, typed,

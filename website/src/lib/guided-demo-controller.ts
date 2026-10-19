@@ -3,6 +3,7 @@ import { installGuidedGyros } from '../components/demo/agent/AgentGyroModel';
 import { guidedSnapshot, type DemoTile, type DemoAgent, type GuidedSnapshot } from './guided-demo';
 import type { GuidedInsert } from './guided-timeline';
 import { TOOLBAR } from './guided-toolbar';
+import { DICTATION } from './guided-dictation';
 const clamp = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
 const between = (p: number, a: number, b: number) => clamp((p - a) / (b - a));
 const smooth = (p: number) => p * p * (3 - 2 * p);
@@ -73,6 +74,74 @@ export function installGuidedDemo() {
       menu.dataset.open = String(!!state?.open && !snapshot.reducedMotion);
       for (const row of menu.querySelectorAll<HTMLElement>('[data-toolbar-choice]')) row.dataset.highlighted = String(row.dataset.toolbarChoice === state?.highlighted);
       if (state) beside(toolbarButtons.find(button => button.dataset.toolbarItem === menu.dataset.toolbarMenu), menu);
+    }
+  };
+  // The composer's mic and the capsule it grows into (ComposerDictationPillView):
+  // pinned by its trailing edge to the mic's, grown leading-ward over the
+  // provider controls, which fade as it covers them.
+  const dictationTiles = new Map<string, { mic: HTMLElement; pill: HTMLElement; covered: HTMLElement[]; bars: HTMLElement[]; time: HTMLElement; text: HTMLElement; hint: HTMLElement; textarea: HTMLTextAreaElement | null; wave: HTMLElement; spoken: string }>();
+  for (const agent of nodes<HTMLElement>('[data-guided-world] [data-agent-id]')) {
+    const mic = agent.querySelector<HTMLElement>('[data-dictation-mic]'), pill = agent.querySelector<HTMLElement>('[data-dictation-pill]');
+    const text = agent.querySelector<HTMLElement>('[data-dictation-text]'), hint = agent.querySelector<HTMLElement>('[data-dictation-hint]');
+    const time = pill?.querySelector<HTMLElement>('[data-dictation-time]'), wave = pill?.querySelector<HTMLElement>('[data-dictation-wave]');
+    if (!mic || !pill || !text || !hint || !time || !wave) continue;
+    dictationTiles.set(agent.dataset.agentId!, { mic, pill, text, hint, time, wave, spoken: '',
+      covered: Array.from(agent.querySelectorAll<HTMLElement>('[data-dictation-covered]')),
+      bars: Array.from(pill.querySelectorAll<HTMLElement>('[data-dictation-bar]')), textarea: agent.querySelector('textarea') });
+  }
+  const writeDictation = (snapshot: GuidedSnapshot) => {
+    for (const [id, tile] of dictationTiles) {
+      const state = id === snapshot.dictation.agent && !snapshot.reducedMotion ? snapshot.dictation : null;
+      const visible = !!state?.visible;
+      tile.pill.hidden = !visible;
+      tile.pill.dataset.state = state?.state ?? 'idle';
+      tile.mic.style.opacity = visible ? '0' : '1';
+      const expansion = visible ? state!.expansion : 0;
+      for (const node of tile.covered) node.style.opacity = expansion ? String(1 - expansion) : '';
+      const live = !!state && state.state !== 'idle';
+      tile.hint.hidden = !state?.hint;
+      if (tile.textarea) tile.textarea.dataset.dictating = String(live);
+      tile.text.hidden = !live;
+      const spoken = live ? `${state!.settled}\u0000${state!.provisional}` : '';
+      if (spoken !== tile.spoken) {
+        tile.spoken = spoken;
+        tile.text.replaceChildren();
+        if (live) {
+          const settled = document.createElement('span');
+          settled.dataset.dictationSettled = ''; settled.textContent = state!.settled;
+          tile.text.append(settled);
+          if (state!.provisional) {
+            const provisional = document.createElement('span');
+            provisional.dataset.dictationProvisional = ''; provisional.textContent = state!.provisional;
+            tile.text.append(provisional);
+          }
+          const caret = document.createElement('span');
+          caret.dataset.dictationCaret = '';
+          tile.text.append(caret);
+        }
+      }
+      if (!visible || !state) continue;
+      // Layout px inside the provider row: unaffected by the camera's scale.
+      const height = tile.mic.offsetHeight || DICTATION.control;
+      const maxX = tile.mic.offsetLeft + tile.mic.offsetWidth;
+      const minX = tile.covered[0]?.offsetLeft ?? 0;
+      const expanded = Math.max(height, maxX - minX);
+      const shown = Math.max(height, height + (expanded - height) * state.growth);
+      tile.pill.style.left = `${maxX - shown}px`;
+      tile.pill.style.top = `${tile.mic.offsetTop}px`;
+      tile.pill.style.width = `${shown}px`;
+      text(tile.time, state.elapsed);
+      // Nothing is legible half-clipped: the waveform and time wait for room.
+      const reveal = clamp((expansion - DICTATION.reveal[0]) / DICTATION.reveal[1]);
+      tile.wave.style.opacity = tile.time.style.opacity = String(reveal);
+      // The newest bars that fit; a narrower capsule drops the oldest.
+      const waveWidth = Math.max(0, shown - height - tile.time.offsetWidth - DICTATION.gap - DICTATION.inset);
+      const fitting = Math.max(0, Math.floor((waveWidth + DICTATION.barGap) / (DICTATION.barWidth + DICTATION.barGap)));
+      tile.wave.style.width = `${waveWidth}px`;
+      tile.bars.forEach((bar, index) => {
+        bar.hidden = index < tile.bars.length - fitting;
+        bar.style.height = `${Math.max(DICTATION.barWidth, state.bars[index] * DICTATION.waveHeight)}px`;
+      });
     }
   };
   const write = (p: number, beat: GuidedInsert | null = null) => {
@@ -290,8 +359,10 @@ export function installGuidedDemo() {
     writeToolbar(snapshot);
     root.style.setProperty('--demo-toolbar-bottom', String(snapshot.reducedMotion ? 0 : snapshot.toolbar.bottomness));
     const hud = root.querySelector<HTMLElement>('[data-demo-key-hud]');
+    if (hud && hud.textContent !== snapshot.keyHudKeys.join('')) hud.replaceChildren(...snapshot.keyHudKeys.map(key => Object.assign(document.createElement('kbd'), { textContent: key })));
     if (hud) { hud.hidden = snapshot.keyHud < .01; hud.style.setProperty('--demo-key-hud', String(.86 + .14 * snapshot.keyHud)); hud.style.opacity = String(snapshot.keyHud); }
-    root.querySelector<HTMLElement>('[data-demo-menu-trigger="toolbar"]')?.setAttribute('data-pressed', String(snapshot.keyHud > .01));
+    root.querySelector<HTMLElement>('[data-demo-menu-trigger="toolbar"]')?.setAttribute('data-pressed', String(snapshot.keyHud > .01 && snapshot.keyHudKeys[0] === '⌘'));
+    writeDictation(snapshot);
     for (const node of menus) {
       const command = node.dataset.demoMenu === 'toolbar';
       const provider = node.dataset.demoMenu === 'provider';
@@ -341,6 +412,7 @@ export function installGuidedDemo() {
         'verify-provider': '[data-agent-id="verify"] [data-demo-menu="provider"] [data-selected="true"]',
         'verify-composer': '[data-interaction-id="agent-composer-verify"]', 'verify-send': '[data-interaction-id="agent-send-verify"]',
         'audit-composer': '[data-interaction-id="agent-composer-audit"]', 'audit-send': '[data-interaction-id="agent-send-audit"]',
+        'audit-mic': '[data-interaction-id="agent-mic-audit"]',
         'verify-allow': '[data-interaction-id="approval-approve"]', 'board-placement': '[data-demo-board-card="placement"]',
         'editor-line': '[data-demo-editor-line="14"]', 'shell-input': '[data-interaction-id="shell-input"]',
         'stabilize-header': '[data-demo-drag-handle="stabilize"]', 'editor-header': '[data-demo-drag-handle="browser"]',
@@ -362,6 +434,14 @@ export function installGuidedDemo() {
         } else if (snapshot.cursor.fromScreen) [x, y] = onCanvas(snapshot.cursor.fromScreen);
         x += (targetX - x) * snapshot.cursor.approach;
         y += (targetY - y) * snapshot.cursor.approach;
+      } else if (snapshot.cursor.fromTarget && snapshot.cursor.approach < 1) {
+        // Leaving a control for the authored path: from the control to the world point.
+        const from = root.querySelector<HTMLElement>(targetSelectors[snapshot.cursor.fromTarget as keyof typeof targetSelectors])?.getBoundingClientRect();
+        if (from?.width) {
+          const fromX = from.left + from.width / 2 - (origin?.left ?? 0), fromY = from.top + from.height / 2 - (origin?.top ?? 0);
+          x = fromX + (x - fromX) * snapshot.cursor.approach;
+          y = fromY + (y - fromY) * snapshot.cursor.approach;
+        }
       }
       node.style.transform = `translate(${x}px, ${y}px)`;
       node.dataset.pressed = String(snapshot.cursor.pressed);
