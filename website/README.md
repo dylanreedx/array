@@ -61,3 +61,12 @@ Do not introduce a second static demo or presentation clone tree. Detached hero 
 - [`REDESIGN_NOTES.md`](./REDESIGN_NOTES.md) records the production redesign and current verification state.
 
 The checked-in Swift and SwiftUI applications remain the authority for native component styling and behavior. Update the documentation whenever a deliberate website rule changes.
+
+## Public documentation
+
+`/docs/` renders the Markdown guides in `../docs/user/` directly through an
+Astro content collection. Titles, groups, ordering, full-text search, and page
+outlines come from that single source. See
+[`public-documentation.md`](../docs/internals/public-documentation.md) for the
+frontmatter contract and source audit. Documentation deploys with the existing
+Vercel website; it requires no separate service.

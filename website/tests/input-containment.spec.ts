@@ -26,5 +26,8 @@ test('compact download has only essential copy and header has no obsolete sectio
   await navDownload.locator('[data-testid="download-trigger"]').click();
   await expect(navDownload.locator('[data-testid="download-popover"]')).toHaveText(/Array for Mac/);
   await expect(navDownload.locator('[data-testid="download-popover"]')).toHaveText(/Array CompanionComing soon/);
-  await expect(page.locator('.production-header nav a')).toHaveAttribute('href', 'https://github.com/dylanreedx/array');
+  // The header's only section links: the docs and the source.
+  await expect(page.locator('.production-header nav a')).toHaveText(['Docs', 'GitHub']);
+  await expect(page.locator('.production-header nav a').nth(0)).toHaveAttribute('href', '/docs/');
+  await expect(page.locator('.production-header nav a').nth(1)).toHaveAttribute('href', 'https://github.com/dylanreedx/array');
 });

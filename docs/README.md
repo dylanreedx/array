@@ -2,7 +2,25 @@
 
 ## Using Array
 
-- [Install and first run](./user/install.md)
+Public documentation is served at `/docs/` on the website. The Markdown in
+[`user/`](./user/) is the single source; Astro renders it directly.
+
+- [Start here](./user/overview.md)
+- [Install and connect](./user/install.md)
+- [Everyday workflows](./user/workflows.md)
+- [Navigation](./user/navigation.md)
+- [Every tile](./user/tiles.md)
+- [Boards and task handoff](./user/boards.md)
+- [Settings and customization](./user/settings.md)
+- [Managed agents](./user/agents.md)
+- [CLI connections](./user/cli-connections.md)
+- [Canvas tools and prompting](./user/canvas-tools.md)
+- [Compaction](./user/compaction.md)
+- [Storage](./user/storage.md)
+- [Troubleshooting](./user/troubleshooting.md)
+- [Companion (coming soon)](./user/companion.md)
+
+Authoring and source verification: [Website documentation](./internals/public-documentation.md).
 
 ## Working on Array
 

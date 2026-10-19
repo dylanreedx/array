@@ -1,0 +1,94 @@
+---
+import ProductionLayout from './ProductionLayout.astro';
+import SiteHeader from '../components/marketing/SiteHeader.astro';
+import { docSections, docURL, getDocs } from '../lib/docs';
+import '../styles/docs.css';
+interface Props {
+  title: string;
+  description: string;
+  current?: string;
+  headings?: { depth: number; slug: string; text: string }[];
+}
+const { title, description, current, headings = [] } = Astro.props;
+const docs = await getDocs();
+const position = docs.findIndex(doc => doc.id === current);
+const previous = position > 0 ? docs[position - 1] : undefined;
+const next = position >= 0 ? docs[position + 1] : undefined;
+const searchIndex = docs.map(doc => ({ title: doc.data.title, description: doc.data.description, url: docURL(doc.id), body: doc.body ?? '' }));
+---
+<ProductionLayout title={`${title} · Array Docs`} description={description} canonicalPath={current ? docURL(current) : '/docs/'}>
+  <a class="docs-skip" href="#docs-content">Skip to content</a>
+  <SiteHeader />
+  <div class="docs-shell">
+    <aside class="docs-sidebar" aria-label="Documentation navigation">
+      <a class="docs-wordmark" href="/docs/">Array <span>Documentation</span></a>
+      <label class="docs-search-label" for="docs-search">Search documentation</label>
+      <input id="docs-search" class="docs-search" type="search" placeholder="Search anything…" autocomplete="off" aria-controls="docs-search-results" />
+      <p class="docs-search-status sr-only" aria-live="polite" role="status"></p>
+      <div id="docs-search-results" class="docs-search-results" hidden></div>
+      <details class="docs-browse" open>
+        <summary>Browse documentation <span aria-hidden="true">⌄</span></summary>
+        <nav aria-label="Guides">
+          <a class="docs-home-link" href="/docs/" aria-current={!current ? 'page' : undefined}>Explore the docs</a>
+          {docSections.map(section => <div class="docs-nav-group">
+            <p>{section}</p>
+            {docs.filter(doc => doc.data.section === section).map(doc => <a href={docURL(doc.id)} aria-current={doc.id === current ? 'page' : undefined}>{doc.data.title}</a>)}
+          </div>)}
+        </nav>
+      </details>
+      <a class="docs-help" href="https://github.com/dylanreedx/array-releases/issues">Report a problem <span aria-hidden="true">↗</span></a>
+    </aside>
+    <main id="docs-content" class:list={['docs-main', { 'docs-main--index': !current }]} tabindex="-1">
+      <header class="docs-article-header">
+        <p class="docs-eyebrow">{current ? docs[position]?.data.section : 'The Array guide'}</p>
+        <h1>{title}</h1>
+        <p class="docs-description">{description}</p>
+      </header>
+      <div class="docs-prose"><slot /></div>
+      {current && <nav class="docs-pagination" aria-label="Adjacent guides">
+        <div>{previous && <a href={docURL(previous.id)}><span>← Previous</span>{previous.data.title}</a>}</div>
+        <div>{next && <a href={docURL(next.id)}><span>Next →</span>{next.data.title}</a>}</div>
+      </nav>}
+      <footer class="docs-footer"><span>Built for understanding.</span><a href="/privacy">Privacy</a><a href="/terms">Terms</a></footer>
+    </main>
+    {headings.length > 0 && <aside class="docs-outline"><nav aria-label="On this page"><p>On this page</p>{headings.filter(h => h.depth === 2).map(h => <a href={`#${h.slug}`}>{h.text}</a>)}</nav></aside>}
+  </div>
+  <script is:inline define:vars={{ searchIndex }}>
+    const input = document.querySelector('#docs-search');
+    const results = document.querySelector('#docs-search-results');
+    const status = document.querySelector('.docs-search-status');
+    const browse = document.querySelector('.docs-browse');
+    const mobile = matchMedia('(max-width: 760px)');
+    const syncNavigation = () => { browse.open = !mobile.matches; };
+    syncNavigation();
+    mobile.addEventListener('change', syncNavigation);
+    input?.addEventListener('input', () => {
+      const query = input.value.trim().toLocaleLowerCase();
+      results.replaceChildren();
+      results.hidden = !query;
+      browse.hidden = Boolean(query);
+      if (!query) { status.textContent = ''; return; }
+      const words = query.split(/\s+/);
+      const matches = searchIndex.filter(doc => words.every(word => `${doc.title} ${doc.description} ${doc.body}`.toLocaleLowerCase().includes(word)));
+      status.textContent = `${matches.length} ${matches.length === 1 ? 'guide' : 'guides'} found`;
+      if (!matches.length) {
+        const empty = document.createElement('p');
+        empty.textContent = 'No guides found. Try a tool name, tile, or feature.';
+        results.append(empty);
+      }
+      for (const doc of matches) {
+        const link = document.createElement('a');
+        link.href = doc.url;
+        const title = document.createElement('strong');
+        title.textContent = doc.title;
+        const description = document.createElement('span');
+        description.textContent = doc.description;
+        link.append(title, description);
+        results.append(link);
+      }
+    });
+    input?.addEventListener('keydown', event => {
+      if (event.key === 'Escape') { input.value = ''; input.dispatchEvent(new Event('input')); }
+    });
+  </script>
+</ProductionLayout>

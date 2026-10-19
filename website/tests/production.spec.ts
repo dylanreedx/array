@@ -71,7 +71,10 @@ async function assertTileContinuity(page: Page) {
 test('homepage links, downloads and theme work', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Keep every agent in view.', level: 1 })).toBeVisible();
-  await expect(page.locator('.production-header nav a')).toHaveAttribute('href', 'https://github.com/dylanreedx/array');
+  // The header's only section links: the docs and the source.
+  await expect(page.locator('.production-header nav a')).toHaveText(['Docs', 'GitHub']);
+  await expect(page.locator('.production-header nav a').nth(0)).toHaveAttribute('href', '/docs/');
+  await expect(page.locator('.production-header nav a').nth(1)).toHaveAttribute('href', 'https://github.com/dylanreedx/array');
   await expect(page.locator('[data-testid=download-main]').first()).toHaveAttribute('href', /Array\.dmg$/);
   await page.locator('[data-testid=download-trigger]').first().click();
   await expect(page.locator('[data-testid=download-popover]').first()).toBeVisible();

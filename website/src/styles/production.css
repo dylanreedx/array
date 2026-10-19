@@ -224,6 +224,8 @@ html[data-theme="dark"] .brand__logo--dark { display: block; }
 .production-footer { display: flex; align-items: center; justify-content: space-between; max-width: 1320px; margin: auto; padding: 32px 24px 48px; color: var(--ink-2); font-size: 12px; }
 
 @media (max-width: 900px) {
+  .production-header nav { display: flex; }
+  .production-header nav a:not(.site-docs-link) { display: none; }
   .living-assembly { height: 300svh; }
   .hero-copy { top: 116px; }
   .production-footer { align-items: flex-start; flex-direction: column; gap: 18px; }

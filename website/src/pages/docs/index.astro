@@ -1,0 +1,22 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import { docSections, docURL, getDocs } from '../../lib/docs';
+const docs = await getDocs();
+---
+<DocsLayout title="Know what’s possible." description="Learn the features. Understand the mechanics. Make the workspace yours.">
+  <a class="docs-start" href="/docs/overview/">
+    <span class="docs-start__label">New to Array?</span>
+    <strong>A workspace you can see <span aria-hidden="true">↗</span></strong>
+    <span>Start with the big picture, then build your first useful workspace.</span>
+  </a>
+  <div class="docs-feature-line" aria-label="How Array connects your work">
+    <span>Your project</span><span aria-hidden="true">→</span><span>Tiles & agents</span><span aria-hidden="true">→</span><span>Visible work</span>
+  </div>
+  {docSections.map(section => <section class="docs-index-section" aria-label={section}>
+    <h2>{section}</h2>
+    <div class="docs-card-grid">{docs.filter(doc => doc.data.section === section).map(doc => <a class="docs-card" href={docURL(doc.id)}>
+      <h3>{doc.data.title}<span aria-hidden="true">↗</span></h3>
+      <p>{doc.data.description}</p>
+    </a>)}</div>
+  </section>)}
+</DocsLayout>
