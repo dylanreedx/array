@@ -330,6 +330,7 @@ enum TileSurfaceResidencyChecks {
         try checkAccessibilityFindsTheRealBody()
         try checkAPassiveAccessibilitySweepPromotesNothing()
         try checkFileAndNoteTilesSurface()
+        try checkAMarkdownPreviewKeepsItsScrollThroughASurface()
         try checkAGestureThatBeginsAllNativeConvergesAtSettle()
         try checkSurfaceMemoryIsBounded()
         try checkLeavingTheWindowRestoresEveryBody()
@@ -1699,6 +1700,71 @@ enum TileSurfaceResidencyChecks {
     /// overrides target views inside the (possibly parked) body directly, and the
     /// file tile SWAPS its content view between modes, which would replace the
     /// surface host and strand the parked body without its promote-first guard.
+    /// A Markdown preview read halfway down must still be halfway down after the
+    /// tile rests as a picture and comes back: Dylan saw it jump to the top of
+    /// the file every time the tile lost focus.
+    private static func checkAMarkdownPreviewKeepsItsScrollThroughASurface() throws {
+        let world = World(tileCount: 1)
+        defer { world.teardown() }
+        let markdownPath = NSTemporaryDirectory() + "surface-scroll-\(UUID().uuidString).md"
+        let markdown = (1...80).map { "## Section \($0)\n\nA paragraph long enough to wrap and to scroll past.\n" }
+            .joined(separator: "\n")
+        try markdown.write(toFile: markdownPath, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: markdownPath) }
+        var metadata = TileMetadata()
+        metadata.filePath = markdownPath
+        let fileTile = Tile(
+            id: UUID(), kind: .file, title: "steps.md",
+            frame: TileFrame(x: 40, y: 800, width: 420, height: 300),
+            zPosition: .fromLegacyRank(90), zoneId: world.layer.placement.zoneId, runtimeRef: nil, metadata: metadata
+        )
+        let fileView = FileTileNSView(tile: fileTile)
+        world.layer.tileViews[fileTile.id] = fileView
+        world.layer.tiles.append(fileTile)
+        world.canvas.setZones([world.layer])
+        world.canvas.surfaceResidencyEnabled = true
+        world.pump()
+        guard let document = fileView.qaMarkdownDocument else {
+            throw Failure(message: "the markdown file tile has no preview document")
+        }
+        try expect(document.qaDocumentHeight > document.qaClipHeight + 600,
+                   "precondition: the document must scroll (\(document.qaDocumentHeight) in \(document.qaClipHeight))")
+
+        // At rest at the top of the file: the picture it keeps is of the top.
+        world.quiesceAndSurface()
+        try expect(fileView.surfaceResidency == .surfaced, "precondition: the quiet preview surfaces")
+        let topPicture = world.canvas.tileSurfaceStore.surface(for: fileTile.id)?.image
+        try expect(topPicture != nil, "precondition: a surfaced tile has a stored picture")
+
+        // Click in and read halfway down, as Dylan did.
+        _ = fileView.acquireFocus(reason: .userClick)
+        world.pump()
+        try expect(fileView.surfaceResidency == .native, "precondition: focus gives the body back")
+        document.qaScroll(toY: 600)
+        world.pump()
+        try expect(abs(document.qaScrollOffsetY - 600) < 1, "precondition: scrolled to 600, got \(document.qaScrollOffsetY)")
+
+        // Focus leaves; the tile rests again. It must not show the top picture.
+        world.window.makeFirstResponder(nil)
+        world.quiesceAndSurface()
+        try expect(fileView.surfaceResidency == .surfaced, "precondition: the quiet preview surfaces again")
+        guard let shown = world.canvas.tileSurfaceStore.surface(for: fileTile.id) else {
+            throw Failure(message: "a surfaced tile must have a stored picture")
+        }
+        try expect(shown.image !== topPicture,
+                   "losing focus showed the picture taken at the top of the file: the preview jumped back to the top")
+        try expect(shown.bakedScrollOffsets.contains { abs($0.y - 600) < 1 },
+                   "the resting picture was not taken at the reader's position: \(shown.bakedScrollOffsets)")
+        try expect(abs(document.qaScrollOffsetY - 600) < 1,
+                   "resting moved the parked preview to \(document.qaScrollOffsetY), not 600")
+
+        _ = fileView.acquireFocus(reason: .userClick)
+        world.pump()
+        try expect(abs(document.qaScrollOffsetY - 600) < 1,
+                   "coming back from the picture moved the preview to \(document.qaScrollOffsetY), not 600")
+        world.window.makeFirstResponder(nil)
+    }
+
     private static func checkFileAndNoteTilesSurface() throws {
         let world = World(tileCount: 2)
         defer { world.teardown() }

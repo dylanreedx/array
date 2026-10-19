@@ -249,8 +249,14 @@ let harnessOrder = ["action:new-agent:codex", "action:new-agent:claude-code", "a
 expect(harnessOrder.count == 3 && harnessOrder == harnessOrder.sorted() && searchedAgentIDs.first == "action:new-agent",
        "searching 'agent' ranks New Agent… first, then the harness rows default first, not alphabetically: \(searchedAgentIDs)")
 let homeIDs = LaunchPaletteModel.makeSections(rows: harnessAgentRows, query: "").flatMap(\.items).map(\.stableID)
-expect(homeIDs.first == "action:new-agent" && !homeIDs.contains(where: { $0.hasPrefix("action:new-agent:") }),
-       "the empty-query home keeps its budget: plain New Agent leads it and the harness rows stay search-only: \(homeIDs)")
+// The empty ⌘K offers every OTHER CLI that can run, straight under plain New
+// Agent (which is the default's): it was search-only, so a person whose default
+// was Claude could only start Claude agents without knowing to type "codex".
+// The default's own row stays off (plain New Agent is it), and so does a CLI
+// that cannot run.
+expect(Array(homeIDs.prefix(2)) == ["action:new-agent", "action:new-agent:claude-code"]
+           && !homeIDs.contains("action:new-agent:codex") && !homeIDs.contains("action:new-agent:pi"),
+       "the empty-query home offers each ready non-default CLI under New Agent: \(homeIDs)")
 
 let build = try runSwift(["build", "--product", "Array"])
 guard build.status == 0 else { Foundation.exit(build.status) }

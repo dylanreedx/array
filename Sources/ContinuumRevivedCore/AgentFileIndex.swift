@@ -24,6 +24,16 @@ public actor AgentFileIndex {
         let root: String
     }
 
+    /// An entry with what every query needs from it, worked out once when the
+    /// index is built: its case- and diacritic-folded path, and the guarantee
+    /// that a file is one a prompt can reference. Doing either per keystroke,
+    /// and ranking through `String`, cost a 45k-entry folder half a second a key.
+    private struct Indexed {
+        let entry: AgentFileIndexEntry
+        /// `canonical` of the relative path as UTF-8, without a trailing slash.
+        let folded: [UInt8]
+    }
+
     private struct Ranked {
         let entry: AgentFileIndexEntry
         let tier: Int
@@ -33,7 +43,7 @@ public actor AgentFileIndex {
     private let entryLimit: Int
     private let resultLimit: Int
     private let pathDiscovery: PathDiscovery?
-    private var cache: [CacheKey: [AgentFileIndexEntry]] = [:]
+    private var cache: [CacheKey: [Indexed]] = [:]
 
     public init(
         entryLimit: Int = 50_000,
@@ -57,25 +67,36 @@ public actor AgentFileIndex {
 
     public func entries(for context: AgentCompletionContext) async -> [AgentFileIndexEntry] {
         guard context.trustState == .trusted, !Task.isCancelled else { return [] }
-        return await entries(for: context, root: context.checkoutRoot.standardizedFileURL)
+        return await indexed(for: context, root: context.checkoutRoot.standardizedFileURL).map(\.entry)
     }
 
-    private func entries(
+    /// Builds the checkout's index ahead of the first `@`, which otherwise waits
+    /// on the whole scan (about 4s for a 45k-entry folder that is not a repo).
+    public func prepare(for context: AgentCompletionContext) async {
+        guard context.trustState == .trusted, !Task.isCancelled else { return }
+        _ = await indexed(for: context, root: context.checkoutRoot.standardizedFileURL)
+    }
+
+    private func indexed(
         for context: AgentCompletionContext,
         root: URL
-    ) async -> [AgentFileIndexEntry] {
+    ) async -> [Indexed] {
         let root = root.standardizedFileURL
         let key = cacheKey(for: context, root: root)
         if let cached = cache[key] { return cached }
         guard isDirectory(root), !isSymbolicLink(root) else { return [] }
 
-        let paths = pathDiscovery?(root) ?? gitPaths(root: root) ?? fallbackPaths(root: root)
         // Finish and cache a scan once it has started, even when the query that
         // initiated it has already been superseded by another keystroke. The
         // actor serializes requests: abandoning materialization here made every
         // queued query start the same full repository scan again, so normal
         // typing could keep `@` completion permanently behind the editor.
-        let entries = materialize(paths: paths, root: root)
+        let entries: [Indexed]
+        if let paths = pathDiscovery?(root) ?? gitPaths(root: root) {
+            entries = materialize(paths: paths, root: root)
+        } else {
+            entries = walk(root: root)
+        }
         cache[key] = entries
         return entries
     }
@@ -111,17 +132,16 @@ public actor AgentFileIndex {
         // scope. Checkout-local fuzzy search keeps its existing recursive index.
         let indexed = !isInsideCheckout
             ? immediateEntries(root: scopeURL)
-            : await entries(for: context, root: indexRoot)
+            : await indexed(for: context, root: indexRoot)
         guard !Task.isCancelled else { return [] }
-        let visible = indexed.filter { entry in
-            guard FileManager.default.fileExists(atPath: entry.fileURL.path) else { return false }
-            guard entry.isDirectory || AgentFileReferenceRules.referenceableContentType(for: entry.fileURL) != nil else { return false }
-            return path(entry.relativePath, isInside: scope)
-        }
+        let visible = scope.isEmpty ? indexed : indexed.filter { path($0.entry.relativePath, isInside: scope) }
+        let foldedScope = Array(canonical(scope).utf8)
+        let foldedNeedle = Array(needle.utf8)
 
         let selected: [Ranked]
         if needle.isEmpty {
-            selected = visible.compactMap { entry in
+            selected = visible.compactMap { item in
+                let entry = item.entry
                 let local = localPath(entry.relativePath, inside: scope)
                 guard !local.isEmpty,
                       !local.dropLast(entry.isDirectory ? 1 : 0).contains("/")
@@ -129,19 +149,36 @@ public actor AgentFileIndex {
                 return Ranked(entry: entry, tier: entry.isDirectory ? 0 : 1, gap: 0)
             }
         } else {
-            selected = visible.compactMap { entry in
-                let local = localPath(entry.relativePath, inside: scope)
-                guard let rank = fuzzyRank(needle: needle, path: local) else { return nil }
-                return Ranked(entry: entry, tier: rank.tier, gap: rank.gap)
+            selected = visible.compactMap { item in
+                let local: ArraySlice<UInt8>
+                if foldedScope.isEmpty {
+                    local = item.folded[...]
+                } else if item.folded.count > foldedScope.count,
+                          item.folded[foldedScope.count] == UInt8(ascii: "/"),
+                          item.folded.starts(with: foldedScope) {
+                    local = item.folded[(foldedScope.count + 1)...]
+                } else {
+                    local = Array(canonical(localPath(item.entry.relativePath, inside: scope))
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "/")).utf8)[...]
+                }
+                guard let rank = fuzzyRank(needle: foldedNeedle, folded: local) else { return nil }
+                return Ranked(entry: item.entry, tier: rank.tier, gap: rank.gap)
             }
         }
 
-        return selected.sorted(by: rankedBefore)
-            .prefix(resultLimit)
-            .compactMap { completion(for: $0, context: context, root: indexRoot, scope: scope) }
+        // The index is a snapshot, so a path deleted since may still be in it.
+        // Only the rows that will be shown pay for checking.
+        var results: [AgentCompletion] = []
+        for ranked in selected.sorted(by: rankedBefore) where results.count < resultLimit {
+            guard FileManager.default.fileExists(atPath: ranked.entry.fileURL.path),
+                  let completion = completion(for: ranked, context: context, root: indexRoot, scope: scope)
+            else { continue }
+            results.append(completion)
+        }
+        return results
     }
 
-    private func immediateEntries(root: URL) -> [AgentFileIndexEntry] {
+    private func immediateEntries(root: URL) -> [Indexed] {
         let excluded = Set([".git", ".array", ".build", "build", "DerivedData", "node_modules", ".cache"])
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .isHiddenKey]
         let children = (try? FileManager.default.contentsOfDirectory(
@@ -154,13 +191,25 @@ public actor AgentFileIndex {
                   values.isHidden != true,
                   values.isSymbolicLink != true,
                   !excluded.contains(child.lastPathComponent) else { return nil }
-            let isDirectory = values.isDirectory == true
-            return AgentFileIndexEntry(
-                relativePath: child.lastPathComponent + (isDirectory ? "/" : ""),
+            return indexedEntry(
+                relativePath: child.lastPathComponent,
                 fileURL: child.standardizedFileURL,
-                isDirectory: isDirectory
+                isDirectory: values.isDirectory == true
             )
         }
+    }
+
+    /// Nil for a file no prompt can reference, so no query has to ask again.
+    private func indexedEntry(relativePath: String, fileURL: URL, isDirectory: Bool) -> Indexed? {
+        guard isDirectory || AgentFileReferenceRules.referenceableContentType(for: fileURL) != nil else { return nil }
+        return Indexed(
+            entry: AgentFileIndexEntry(
+                relativePath: isDirectory ? relativePath + "/" : relativePath,
+                fileURL: fileURL,
+                isDirectory: isDirectory
+            ),
+            folded: Array(canonical(relativePath).utf8)
+        )
     }
 
     private func completion(
@@ -206,32 +255,45 @@ public actor AgentFileIndex {
         )
     }
 
-    private func materialize(paths: [String], root: URL) -> [AgentFileIndexEntry] {
-        var allPaths: Set<String> = []
+    /// Discovered paths (git's or an injected discovery's) become entries with
+    /// one `lstat` each. Their parent directories are derived, not re-read: a
+    /// directory holding a real, non-symlinked file is a directory.
+    private func materialize(paths: [String], root: URL) -> [Indexed] {
+        var kinds: [String: Bool] = [:]
         for rawPath in paths.prefix(entryLimit) {
             let relative = normalizedRelativePath(rawPath)
             guard !relative.isEmpty,
                   let url = containedURL(relativePath: relative, root: root),
-                  FileManager.default.fileExists(atPath: url.path),
-                  !isSymbolicLink(url) else { continue }
-            allPaths.insert(relative)
+                  let isDirectory = nonSymlinkKind(url) else { continue }
+            // git lists a nested repository as one directory entry; it was never
+            // offered, since nothing inside it is indexed.
+            if !isDirectory { kinds[relative] = false }
             var parent = (relative as NSString).deletingLastPathComponent
-            while !parent.isEmpty && parent != "." {
-                allPaths.insert(parent + "/")
+            while !parent.isEmpty && parent != "." && kinds[parent] == nil {
+                kinds[parent] = true
                 parent = (parent as NSString).deletingLastPathComponent
             }
         }
-        return allPaths.sorted().prefix(entryLimit).compactMap { relative in
-            let directory = relative.hasSuffix("/")
-            let clean = relative.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard let url = containedURL(relativePath: clean, root: root),
-                  directory ? isDirectory(url) : !isDirectory(url) else { return nil }
-            return AgentFileIndexEntry(relativePath: directory ? clean + "/" : clean, fileURL: url, isDirectory: directory)
+        return kinds.keys.sorted().prefix(entryLimit).compactMap { relative in
+            guard let url = containedURL(relativePath: relative, root: root) else { return nil }
+            return indexedEntry(relativePath: relative, fileURL: url, isDirectory: kinds[relative] == true)
+        }
+    }
+
+    /// Whether `url` is a directory, from one `lstat`; nil when it is missing or
+    /// a symbolic link.
+    private func nonSymlinkKind(_ url: URL) -> Bool? {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return nil }
+        switch info.st_mode & S_IFMT {
+        case S_IFLNK: return nil
+        case S_IFDIR: return true
+        default: return false
         }
     }
 
     /// `git ls-files` when it is available, nil otherwise — the caller then walks
-    /// the directory tree itself (`fallbackPaths`), the same path a checkout with
+    /// the directory tree itself (`walk`), the same path a checkout with
     /// no `.git` already takes.
     ///
     /// Subprocess-free on iOS: `Process` does not exist there, and this file lives
@@ -258,11 +320,14 @@ public actor AgentFileIndex {
 #endif
     }
 
-    private func fallbackPaths(root: URL) -> [String] {
+    /// The tree walk for a folder git cannot list. It already knows each
+    /// child's kind, so its entries need no second look at the disk.
+    private func walk(root: URL) -> [Indexed] {
         let excluded = Set([".git", ".array", ".build", "build", "DerivedData", "node_modules", ".cache"])
         var queue = [root]
-        var result: [String] = []
-        while !queue.isEmpty && result.count < entryLimit {
+        var walked = 0
+        var result: [Indexed] = []
+        while !queue.isEmpty && walked < entryLimit {
             let directory = queue.removeFirst()
             let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .isHiddenKey]
             let children = (try? FileManager.default.contentsOfDirectory(
@@ -270,45 +335,56 @@ public actor AgentFileIndex {
                 includingPropertiesForKeys: Array(keys),
                 options: [.skipsPackageDescendants]
             ))?.sorted { $0.lastPathComponent < $1.lastPathComponent } ?? []
-            for child in children where result.count < entryLimit {
+            for child in children where walked < entryLimit {
                 guard let values = try? child.resourceValues(forKeys: keys),
                       values.isHidden != true,
                       values.isSymbolicLink != true,
                       !excluded.contains(child.lastPathComponent),
                       let relative = relativePath(of: child, root: root) else { continue }
-                result.append(relative)
-                if values.isDirectory == true { queue.append(child) }
+                walked += 1
+                let isDirectory = values.isDirectory == true
+                if let item = indexedEntry(
+                    relativePath: relative, fileURL: child.standardizedFileURL, isDirectory: isDirectory
+                ) { result.append(item) }
+                if isDirectory { queue.append(child) }
             }
         }
         return result
     }
 
-    private func fuzzyRank(needle: String, path: String) -> (tier: Int, gap: Int)? {
-        let candidate = canonical(path.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
-        let basename = canonical((candidate as NSString).lastPathComponent)
-        if basename == needle { return (0, 0) }
-        if basename.hasPrefix(needle) { return (1, basename.count - needle.count) }
+    /// Both sides are `canonical` UTF-8; `candidate` has no leading or
+    /// trailing slash. Gaps count bytes, which only reorders ties between
+    /// non-ASCII names.
+    private func fuzzyRank(needle: [UInt8], folded candidate: ArraySlice<UInt8>) -> (tier: Int, gap: Int)? {
+        let slash = UInt8(ascii: "/")
+        let basenameStart = candidate.lastIndex(of: slash).map { $0 + 1 } ?? candidate.startIndex
+        let basename = candidate[basenameStart...]
+        if basename.elementsEqual(needle) { return (0, 0) }
+        if basename.starts(with: needle) { return (1, basename.count - needle.count) }
         if let gap = subsequenceGap(needle: needle, candidate: basename) { return (2, gap) }
-        if candidate.split(separator: "/").contains(where: { $0.hasPrefix(needle) }) {
-            return (3, candidate.count - needle.count)
+        var componentStart = candidate.startIndex
+        while componentStart < candidate.endIndex {
+            if candidate[componentStart...].starts(with: needle) { return (3, candidate.count - needle.count) }
+            guard let next = candidate[componentStart...].firstIndex(of: slash) else { break }
+            componentStart = next + 1
         }
         if let gap = subsequenceGap(needle: needle, candidate: candidate) { return (4, gap) }
         return nil
     }
 
-    private func subsequenceGap(needle: String, candidate: String) -> Int? {
+    private func subsequenceGap(needle: [UInt8], candidate: ArraySlice<UInt8>) -> Int? {
         var index = needle.startIndex
-        var first: String.Index?
-        var last: String.Index?
+        var first = -1
+        var last = -1
         for position in candidate.indices where index < needle.endIndex {
             if candidate[position] == needle[index] {
-                first = first ?? position
+                if first < 0 { first = position }
                 last = position
-                index = needle.index(after: index)
+                index += 1
             }
         }
-        guard index == needle.endIndex, let first, let last else { return nil }
-        return candidate.distance(from: first, to: last) + 1 - needle.count
+        guard index == needle.endIndex, first >= 0 else { return nil }
+        return last - first + 1 - needle.count
     }
 
     private func rankedBefore(_ lhs: Ranked, _ rhs: Ranked) -> Bool {
@@ -385,5 +461,9 @@ public struct AgentFileCompletionProvider: AgentCompletionProvider {
 
     public func suggestions(for query: AgentCompletionQuery) async -> [AgentCompletion] {
         await index.suggestions(for: query)
+    }
+
+    public func prepare(for context: AgentCompletionContext) async {
+        await index.prepare(for: context)
     }
 }

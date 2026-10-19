@@ -72,6 +72,20 @@ final class MarkdownDocumentSurface: NSObject, NSSplitViewDelegate {
     }
 
     var activeBody: NSView { body(for: mode) }
+
+    /// The scroll positions the current mode shows, source first. The
+    /// preview's scroller is inside the document view, so a one-level walk of
+    /// `activeBody` misses it in Split, and a resting picture taken before a
+    /// scroll there would still read as current.
+    var visibleScrollOrigins: [CGPoint] {
+        let source = [sourceScrollView.contentView.bounds.origin]
+        let preview = previewView.map { [$0.scrollOrigin] } ?? []
+        switch mode {
+        case .edit: return source
+        case .preview: return preview
+        case .split: return source + preview
+        }
+    }
     var currentDraft: String { draft }
 
     /// A rich repository editor can provide its own source view while reusing

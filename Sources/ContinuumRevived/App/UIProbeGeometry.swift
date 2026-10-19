@@ -6683,8 +6683,8 @@ enum UIProbeGeometry {
         guard (34...36).contains(ChoiceListView.rowHeight) else {
             throw fail("choice popover: row height \(ChoiceListView.rowHeight) left the approved 34–36pt density band")
         }
-        guard let panelBorder = list.layer?.borderWidth, panelBorder <= 0.5, panelBorder > 0 else {
-            throw fail("choice popover: panel boundary is missing or heavier than 0.5pt")
+        guard let panelBorder = list.layer?.borderWidth, panelBorder <= CGFloat(LineWidth.hairline), panelBorder > 0 else {
+            throw fail("choice popover: panel boundary is missing or heavier than the \(LineWidth.hairline)pt hairline")
         }
 
         let commands = ChoiceListView(items: [

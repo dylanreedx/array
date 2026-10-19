@@ -1899,6 +1899,35 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--composer-outline-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    print("ContinuumRevivedComposerOutlineChecks passed: \(try ComposerOutlineChecks.run())")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--agent-tile-file-mention-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let summary = try await AgentTileFileMentionChecks.run()
+                    print("ContinuumRevivedAgentTileFileMentionChecks passed: \(summary)")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-completion-semantic-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -29329,7 +29358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 rgba(atPixelX: Int(point.x * backingScale), pixelY: pixelY(point))
             }
             // A border is found, not assumed: every border in the app is a
-            // hairline (0.5pt — one device pixel at 2x, and drawn a point
+            // hairline (1pt — two device pixels at 2x, and drawn a point
             // inside the edge by some owners), so a probe parked one point in
             // from the edge lands on the body. Scan perpendicular to the left
             // edge, device pixel by device pixel, from 3pt outside to 4pt

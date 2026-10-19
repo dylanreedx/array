@@ -234,6 +234,13 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     /// one for others, so both shapes are covered — one level only, deliberately:
     /// this is polled per residency pass.
     override var surfaceScrollOffsets: [CGPoint] {
+        // The preview's scroller sits inside the document view, inside the
+        // Markdown surface: deeper than the walk below. Unreported, a picture
+        // baked at the top of the file stayed "current" after any scroll, and
+        // the resting tile jumped back to it every time it lost focus.
+        if presentation == .markdown, mode == .preview, let preview = markdownSurface?.previewView {
+            return [preview.scrollOrigin]
+        }
         guard let body = activeBody else { return [] }
         if let scrollView = body as? NSScrollView { return [scrollView.contentView.bounds.origin] }
         return body.subviews.compactMap { ($0 as? NSScrollView)?.contentView.bounds.origin }

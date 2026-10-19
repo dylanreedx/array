@@ -648,8 +648,16 @@ public enum LaunchPaletteModel {
         // Keep the actions that establish Array's basic workflow visible in
         // a stable order. A terminal is a dynamic launch profile, so find it by
         // its product-facing title rather than assuming a profile id.
-        let pinnedStableIDs = [
-            "action:new-agent",
+        // Plain New Agent is the default CLI's; every other CLI that can run
+        // follows it, so starting a non-default agent never needs a search.
+        // Those rows ride on top of the twelve slots rather than evicting the
+        // categories below them.
+        let otherHarnessIDs = allItems.compactMap { item -> String? in
+            guard case let .agentHarness(harness) = item.row, !harness.isDefault else { return nil }
+            return item.stableID
+        }
+        let homeLimit = defaultItemLimit + otherHarnessIDs.count
+        let pinnedStableIDs = ["action:new-agent"] + otherHarnessIDs + [
             allItems.first(where: { item in
                 if case .profile = item.row { return item.title == "Terminal" }
                 return false
@@ -661,14 +669,14 @@ public enum LaunchPaletteModel {
         ].compactMap { $0 }
         let pinnedItems = Array(pinnedStableIDs.compactMap { byID[$0] }
             .filter { !needsYouIDs.contains($0.stableID) }
-            .prefix(max(0, defaultItemLimit - needsYouItems.count)))
+            .prefix(max(0, homeLimit - needsYouItems.count)))
         let pinnedIDs = Set(pinnedItems.map(\.stableID))
 
         let recentItems = Array(sanitizeRecentIDs(recentIDs, rows: rows)
             .compactMap { byID[$0] }
             .filter { !needsYouIDs.contains($0.stableID) && !pinnedIDs.contains($0.stableID) }
-            .prefix(max(0, defaultItemLimit - needsYouItems.count - pinnedItems.count)))
-        var remaining = max(0, defaultItemLimit - needsYouItems.count - pinnedItems.count - recentItems.count)
+            .prefix(max(0, homeLimit - needsYouItems.count - pinnedItems.count)))
+        var remaining = max(0, homeLimit - needsYouItems.count - pinnedItems.count - recentItems.count)
         var homeItems: [CommandCenterItem] = []
         for category in [CommandCenterCategory.create, .models, .workspacesAndProjects, .actions] {
             let candidates = allItems.filter {
@@ -703,9 +711,9 @@ public enum LaunchPaletteModel {
             let name = harness.harness.rawValue
             let subtitle = harness.unavailableReason
                 ?? (harness.isDefault ? "Default · Start a \(name) session" : "Start a \(name) session")
-            // Not on the empty-query home: its twelve slots are budgeted, and the
-            // plain New Agent row already leads it. Any agent or CLI word finds
-            // all three, the default first (`rankPrecedes`).
+            // The empty-query home pins the ready non-default rows under plain
+            // New Agent (which is the default's); search finds all three, the
+            // default first (`rankPrecedes`).
             return item(row, .create, "\(name) Agent", subtitle, "sparkles", ["new", "agent", "managed"] + harness.keywords, false, true, harness.stableID)
         case let .project(project):
             let subtitle = project.worktreeOf == nil ? project.rootPath : "Worktree · \(project.rootPath)"

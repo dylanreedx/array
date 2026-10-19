@@ -506,6 +506,25 @@ func runAgentCompletionChecks() async throws {
         "AgentCompletion: a superseded in-flight scan was not reused by the next typed query"
     )
 
+    // The composer warms the index when its editor takes the keyboard, through
+    // the registry a tile owns. The first `@` must reuse that scan.
+    let warmDiscovery = BlockingPathDiscovery()
+    warmDiscovery.release.signal()
+    let warmRegistry = AgentCompletionProviderRegistry(providers: [
+        AgentFileCompletionProvider(index: AgentFileIndex(
+            entryLimit: 100, resultLimit: 3, pathDiscovery: warmDiscovery.discover
+        )),
+    ])
+    await warmRegistry.prepare(for: falconContext)
+    expect(warmDiscovery.invocationCount == 1, "AgentCompletion: preparing the registry did not build the file index")
+    let warmResults = await warmRegistry.suggestions(for: AgentCompletionQuery(
+        trigger: "@", text: "read", replacementRange: NSRange(location: 0, length: 5), context: falconContext
+    ))
+    expect(
+        warmResults.first?.title == "README.md" && warmDiscovery.invocationCount == 1,
+        "AgentCompletion: the first @ after preparing scanned the checkout again (\(warmDiscovery.invocationCount) scans)"
+    )
+
     let untrusted = AgentCompletionContext(
         agentID: falconContext.agentID,
         backend: falconContext.backend,

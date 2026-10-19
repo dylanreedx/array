@@ -25,6 +25,7 @@ check --agent-stop-outcome-check
 check --agent-supervisor-check
 check --agent-tile-binding-check
 check --agent-tile-click-focus-check
+check --agent-tile-file-mention-check
 check --ambient-tile-frame-space-check
 check --app-support-channel-check
 check --attention-notification-check
@@ -77,6 +78,7 @@ check --component-lab-check
 check --composer-dictation-check
 check --composer-image-components-check
 check --composer-key-routing-check
+check --composer-outline-check
 check --conductor-queue-tile-check
 check --context-meter-contract-check
 check --corner-style-check
@@ -323,6 +325,7 @@ leg run_app_check .build/debug/Array --agent-stop-outcome-check
 leg run_app_check .build/debug/Array --agent-supervisor-check
 leg run_app_check .build/debug/Array --agent-tile-binding-check
 leg run_app_check .build/debug/Array --agent-tile-click-focus-check
+leg run_app_check .build/debug/Array --agent-tile-file-mention-check
 leg run_app_check .build/debug/Array --ambient-tile-frame-space-check
 leg run_app_check .build/debug/Array --app-support-channel-check
 leg run_app_check .build/debug/Array --attention-notification-check
@@ -368,6 +371,7 @@ leg run_app_check .build/debug/Array --component-lab-check
 leg run_app_check .build/debug/Array --composer-dictation-check
 leg run_app_check .build/debug/Array --composer-image-components-check
 leg run_app_check .build/debug/Array --composer-key-routing-check
+leg run_app_check .build/debug/Array --composer-outline-check
 leg run_app_check .build/debug/Array --conductor-queue-tile-check
 leg run_app_check .build/debug/Array --corner-style-check
 leg run_app_check .build/debug/Array --cross-project-agents-check

@@ -219,10 +219,7 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
     private var surfaceEpoch: UInt64 = 1
     override var surfaceableBody: NSView? { activeBody }
     override var surfaceContentRevision: UInt64? { surfaceEpoch }
-    override var surfaceScrollOffsets: [CGPoint] {
-        if let scroll = activeBody as? NSScrollView { return [scroll.contentView.bounds.origin] }
-        return activeBody?.subviews.compactMap { ($0 as? NSScrollView)?.contentView.bounds.origin } ?? []
-    }
+    override var surfaceScrollOffsets: [CGPoint] { markdownSurface?.visibleScrollOrigins ?? [] }
 
     /// QA access to the real title-bar control.
     var qaModeControl: NSSegmentedControl? { modeControl }
