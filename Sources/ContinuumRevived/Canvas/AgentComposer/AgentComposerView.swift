@@ -1882,6 +1882,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     var qaPlaceholderColor: NSColor? { placeholderLabel.textColor }
     var qaHeightMeasurement: ComposerHeightController.Measurement? { heightController.measurement }
     var qaCompletionIsPresented: Bool { completionController.isPresented }
+    var qaCompletionSelfDismissal: String? { completionController.qaLastSelfDismissal }
     var qaCompletionTitles: [String] { completionController.qaTitles }
     var qaCompletionDetails: [String?] { completionController.qaDetails }
     var qaCompletionFocusedTitle: String? { completionController.qaFocusedTitle }

@@ -109,11 +109,12 @@ enum AgentTileFileMentionChecks {
         // rebinds the composer's completion context on every one. None of them
         // may close the menu or restart its query: they did, so on a slow index
         // the menu never stayed up long enough to show while an agent worked.
-        // AppKit closes a passive menu when the app or its window loses
-        // activation, on purpose and outside this check's control: a fixture
-        // launched from a shell can be activated at launch and lose it to the
-        // next click. A pass that saw that happen is run again, and says so; a
-        // close without it is the defect.
+        // The menu closes itself, on purpose, when its window or app loses
+        // focus and when the person clicks in another app. A matrix run is on
+        // the same Mac Dylan is working on, so one of his clicks elsewhere
+        // closed it mid-check (0.7.29). A pass that saw any of those is run
+        // again, and says so; any other close, the editor moving included,
+        // is the defect.
         final class ActivationWatch { var lost = false }
         let watch = ActivationWatch()
         let activationObservers = [NSApplication.didResignActiveNotification, NSWindow.didResignKeyNotification].map {
@@ -151,12 +152,14 @@ enum AgentTileFileMentionChecks {
             try expect(ingested,
                        "POSITIVE CONTROL: the tile ingested the streamed events, \(tileView.ingestedEvents.count - ingestedBefore) of 9")
             _ = await waitUntil(timeout: 0.3, pollInterval: 0.02) { false }
-            if watch.lost, attempt < 3 {
-                print("note: the fixture lost activation during the event pass (attempt \(attempt)); running it again")
+            let selfDismissal = composer.qaCompletionIsPresented ? nil : composer.qaCompletionSelfDismissal
+            let outsideClose = ["resignKey", "resignActive", "otherAppClick"].contains(selfDismissal ?? "")
+            if watch.lost || outsideClose, attempt < 3 {
+                print("note: the fixture lost activation during the event pass (attempt \(attempt), \(selfDismissal ?? "observed")); running it again")
                 continue
             }
             try expect(composer.qaCompletionIsPresented && composer.qaCompletionTitles == openTitles,
-                       "streamed agent events left the @ menu open and unchanged: presented=\(composer.qaCompletionIsPresented), titles=\(composer.qaCompletionTitles), activationLost=\(watch.lost)")
+                       "streamed agent events left the @ menu open and unchanged: presented=\(composer.qaCompletionIsPresented), titles=\(composer.qaCompletionTitles), activationLost=\(watch.lost), closedItself=\(selfDismissal ?? "no")")
             try expect(composer.qaCompletionRequestStartCount == requestsWhileOpen,
                        "streamed agent events restarted the @ query \(composer.qaCompletionRequestStartCount - requestsWhileOpen) times")
             break
@@ -170,7 +173,7 @@ enum AgentTileFileMentionChecks {
         let narrowed = await waitUntil(timeout: 5, pollInterval: 0.02) {
             composer.qaCompletionTitles.first == "README.md"
         }
-        try expect(narrowed, "@rea narrows to README.md, got \(composer.qaCompletionTitles), text=\"\(textView.string)\"")
+        try expect(narrowed, "@rea narrows to README.md, got \(composer.qaCompletionTitles), text=\"\(textView.string)\", closedItself=\(composer.qaCompletionSelfDismissal ?? "no")")
         window.sendEvent(try key("\r", keyCode: 36))
         try expect(composer.qaFileReferences.map(\.displayName) == ["README.md"],
                    "Return attaches README.md, got \(composer.qaFileReferences.map(\.displayName))")
@@ -184,7 +187,7 @@ enum AgentTileFileMentionChecks {
         let reopened = await waitUntil(timeout: 5, pollInterval: 0.02) {
             composer.qaCompletionTitles.contains("Sources/")
         }
-        try expect(reopened, "@ reopens the root list, got \(composer.qaCompletionTitles)")
+        try expect(reopened, "@ reopens the root list, got \(composer.qaCompletionTitles), closedItself=\(composer.qaCompletionSelfDismissal ?? "no")")
         window.sendEvent(backspace)
         _ = await waitUntil(timeout: 0.3, pollInterval: 0.02) { false }
         try expect(textView.string.isEmpty && !composer.qaCompletionIsPresented,
@@ -198,7 +201,7 @@ enum AgentTileFileMentionChecks {
             window.sendEvent(try key("", keyCode: 125))
         }
         try expect(composer.qaCompletionFocusedTitle == "Sources/",
-                   "↓ focuses Sources/, got \(composer.qaCompletionFocusedTitle ?? "nil")")
+                   "↓ focuses Sources/, got \(composer.qaCompletionFocusedTitle ?? "nil"), closedItself=\(composer.qaCompletionSelfDismissal ?? "no")")
         window.sendEvent(try key("", keyCode: 124))
         let nested = await waitUntil(timeout: 5, pollInterval: 0.02) {
             composer.qaCompletionTitles.contains("Main.swift")

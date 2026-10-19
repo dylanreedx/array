@@ -384,6 +384,10 @@ final class ChoicePopoverController {
     var pageZoom: AgentPageZoom = .default
 
     var isPresented: Bool { panel?.isVisible == true }
+    /// Why the panel last closed ITSELF, cleared on each present: a check can
+    /// then tell the window or app losing focus (outside its control) from a
+    /// close the owner caused.
+    private(set) var qaLastSelfDismissal: String?
 
     deinit {
         // This controller is created, retained, and released only by MainActor
@@ -407,6 +411,7 @@ final class ChoicePopoverController {
         onDismiss: (() -> Void)? = nil
     ) {
         dismiss()
+        qaLastSelfDismissal = nil
         lastAccessibilityAnnouncementForQA = nil
         guard !items.isEmpty else { return }
         // Build the production choice list before asking AppKit for a window. QA
@@ -590,6 +595,11 @@ final class ChoicePopoverController {
         }
     }
 
+    private func dismissItself(_ reason: String) {
+        if isPresented { qaLastSelfDismissal = reason }
+        dismissAsCancellation()
+    }
+
     private func dismissAsCancellation() {
         let handler = cancellationHandler
         dismiss()
@@ -708,17 +718,17 @@ final class ChoicePopoverController {
             // completion panels leave the editor's parent key and observe it.
             observers.append(center.addObserver(
                 forName: NSWindow.didResignKeyNotification, object: resignationOwner, queue: .main
-            ) { [weak self] _ in MainActor.assumeIsolated { self?.dismissAsCancellation() } })
+            ) { [weak self] _ in MainActor.assumeIsolated { self?.dismissItself("resignKey") } })
         }
         observers.append(center.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
-        ) { [weak self] _ in MainActor.assumeIsolated { self?.dismiss() } })
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.qaLastSelfDismissal = "windowClose"; self?.dismiss() } })
         observers.append(center.addObserver(
             forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main
-        ) { [weak self] _ in MainActor.assumeIsolated { self?.dismissAsCancellation() } })
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.dismissItself("resignActive") } })
         observers.append(center.addObserver(
             forName: NSView.frameDidChangeNotification, object: anchor, queue: .main
-        ) { [weak self] _ in MainActor.assumeIsolated { self?.dismissAsCancellation() } })
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.dismissItself("anchorMoved") } })
         anchor.postsFrameChangedNotifications = true
         anchorWindowObservation = anchor.observe(\.window, options: [.old, .new]) { [weak self] _, change in
             // `window` is optional, so KVO wraps both values in a second Optional.
@@ -732,7 +742,7 @@ final class ChoicePopoverController {
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
             [weak self] event in
             guard let self else { return event }
-            if event.window !== self.panel { self.dismissAsCancellation() }
+            if event.window !== self.panel { self.dismissItself("outsideClick") }
             return event
         }
         #if ARRAY_FILM
@@ -740,7 +750,7 @@ final class ChoicePopoverController {
         if FilmScene.isRequested { return }
         #endif
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
-            [weak self] _ in Task { @MainActor [weak self] in self?.dismissAsCancellation() }
+            [weak self] _ in Task { @MainActor [weak self] in self?.dismissItself("otherAppClick") }
         }
     }
 

@@ -34,6 +34,7 @@ final class CompletionPopoverController {
     }
 
     var isPresented: Bool { popover.isPresented }
+    var qaLastSelfDismissal: String? { popover.qaLastSelfDismissal }
 
     deinit {
         requestTask?.cancel()
