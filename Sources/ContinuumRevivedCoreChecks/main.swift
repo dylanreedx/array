@@ -5962,6 +5962,24 @@ do {
 }
 
 do {
+    // An empty centre in the gap between two stacked tiles. No tile contains the
+    // centre (400,300), so there is no anchor, and every centre ring offset (at most
+    // 64pt) still overlaps one of the pair, which spans x 300..500, y 195..403. The
+    // dictation film's third subagent opened this way, on top of its siblings. The
+    // nearest tile is the lower one (3pt away, the upper is 5pt), so the new tile
+    // docks to its right: x 500 + gap 8 = 508, centred on its midY 353.
+    let upper = spawnSibling(TileFrame(x: 300, y: 195, width: 200, height: 100))
+    let lower = spawnSibling(TileFrame(x: 300, y: 303, width: 200, height: 100))
+    let placed = TileSpawnPlacement.automatic(spawnContext(
+        size: CGSize(width: 200, height: 100),
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        visible: CGSize(width: 800, height: 600),
+        siblings: [upper, lower]
+    ))
+    expect(placed == TileFrame(x: 508, y: 303, width: 200, height: 100), "A centre in the gap between two tiles docks beside the nearest one instead of overlapping, got \(placed)")
+}
+
+do {
     // A tile larger than the viewport keeps its working size: the axis that fits is
     // centred, the axis that cannot gets a stable padded origin.
     let placed = TileSpawnPlacement.automatic(spawnContext(

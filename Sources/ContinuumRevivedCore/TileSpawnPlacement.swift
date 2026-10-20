@@ -110,13 +110,24 @@ public enum TileSpawnPlacement {
             return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
         }
 
-        let generated: [Candidate]
+        var candidates: [Candidate]
         if let anchor = anchorRect(at: centre, siblings: context.siblings) {
-            generated = dockCandidates(anchor: anchor, size: size, gap: gap, obstacles: obstacles)
+            candidates = dockCandidates(anchor: anchor, size: size, gap: gap, obstacles: obstacles)
+                .map { Candidate(rect: contained($0.rect, in: bounds), side: $0.side, ring: $0.ring) }
         } else {
-            generated = centreCandidates(centre: centre, size: size)
+            candidates = centreCandidates(centre: centre, size: size)
+                .map { Candidate(rect: contained($0.rect, in: bounds), side: $0.side, ring: $0.ring) }
+            // An empty centre in a gap narrower than the new tile: every ring offset
+            // still overlaps the tiles on either side of it, so the least-overlap rule
+            // stacked the tile on top of them (the dictation film's third subagent,
+            // with the camera centred between two stacked siblings). Dock beside the
+            // tile nearest the centre as well, as if it were under the centre.
+            if !candidates.contains(where: { firstBlocker(of: $0.rect, in: obstacles) == nil }),
+               let nearest = nearestRect(to: centre, in: obstacles) {
+                candidates += dockCandidates(anchor: nearest, size: size, gap: gap, obstacles: obstacles)
+                    .map { Candidate(rect: contained($0.rect, in: bounds), side: $0.side, ring: $0.ring) }
+            }
         }
-        let candidates = generated.map { Candidate(rect: contained($0.rect, in: bounds), side: $0.side, ring: $0.ring) }
 
         // `candidates` is never empty: both generators always emit their ring-0 entries.
         let best = candidates.max { lhs, rhs in
@@ -137,6 +148,17 @@ public enum TileSpawnPlacement {
         guard let tile = CanvasEngine.hitTest(worldPoint: centre, tiles: siblings) else { return nil }
         let frame = rect(for: tile.frame)
         return frame.width > 0 && frame.height > 0 ? frame : nil
+    }
+
+    /// The rect closest to `point` (zero inside it). Ties keep the first in sibling
+    /// order, so the same input always docks against the same tile.
+    private static func nearestRect(to point: CGPoint, in rects: [CGRect]) -> CGRect? {
+        func distance(_ rect: CGRect) -> Double {
+            let dx = max(rect.minX - point.x, 0, point.x - rect.maxX)
+            let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
+            return (dx * dx + dy * dy).squareRoot()
+        }
+        return rects.min { distance($0) < distance($1) }
     }
 
     // MARK: - Candidate generation
