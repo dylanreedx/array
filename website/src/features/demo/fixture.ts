@@ -4,7 +4,7 @@ export const DOWNLOAD_URL = 'https://github.com/dylanreedx/array-releases/releas
 
 export const canonicalCopy = {
   headline: 'Keep every agent in view.',
-  body: 'Launch agents and tools from anywhere. Array keeps everything they touch visible on one native workspace.',
+  body: 'Claude Code, Codex and Pi side by side on one canvas, next to their terminals, browser previews and diffs, so you can see which one is working, done or failed.',
   primary: 'Download for Mac',
   secondary: 'See all of it ↓',
   requirements: 'macOS 14+ · Apple silicon · Free and open source · Alpha'

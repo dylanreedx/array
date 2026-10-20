@@ -88,7 +88,7 @@ test('homepage links, downloads and theme work', async ({ page }) => {
 });
 test('original hero copy and the same six floating tiles form the DOM story', async ({ page }) => {
   await page.goto('/');
-  await expect(page.locator('.hero-copy__body')).toHaveText('Launch agents and tools from anywhere. Array keeps everything they touch visible on one native workspace.');
+  await expect(page.locator('.hero-copy__body')).toHaveText('Claude Code, Codex and Pi side by side on one canvas, next to their terminals, browser previews and diffs, so you can see which one is working, done or failed.');
   await expect(page.getByText('A native workspace for your coding agents', { exact: true })).toHaveCount(0);
   await expect(page.locator('[data-assembly-surface]')).toHaveCount(6);
   for (const id of tileIDs) await expect(page.locator(`[data-assembly-surface=${id}]`)).toHaveCount(1);
@@ -611,7 +611,7 @@ test('page has no ready gate and keyboard scrolling reaches download', async ({ 
   await expect.poll(async () => Number(await page.locator('[data-guided-demo]').getAttribute('data-demo-progress'))).toBeCloseTo(.26, 2);
   await expect(page.getByTestId('interaction-ready-cue')).toHaveCount(0);
   await page.keyboard.press('End');
-  await expect(page.getByRole('heading', { name: 'More work. Less hidden state.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Stop losing your agents in your terminal.' })).toBeVisible();
 });
 for (const width of [390, 320]) {
   test(`mobile ${width}px keeps the focused work readable without page overflow`, async ({ page }) => {
@@ -711,7 +711,7 @@ test('desktop story and reduced motion expose accessible ordinary copy and capti
   await page.locator('[data-assembly-surface=browser]').scrollIntoViewIfNeeded();
   await expect(page.locator('[data-demo-editor-line="14"]')).toBeVisible();
   await page.keyboard.press('End');
-  await expect(page.getByRole('heading', { name: 'More work. Less hidden state.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Stop losing your agents in your terminal.' })).toBeVisible();
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 test('home and legal pages emit complete metadata and accurate linked legal copy', async ({ page }) => {
