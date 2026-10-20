@@ -454,13 +454,13 @@ final class DualPlaneGyroTiltedThinkingIndicatorView: NSView, AgentThinkingIndic
         removeCompositorAnimations()
 
         let geometry = Self.geometry(in: bounds)
-        let phaseNow = timelinePhase()
+        let now = layerClockNow()
+        let phaseNow = timelinePhase(at: now)
         applyModelState(phase: phaseNow)
         // Local time zero has to land where phase zero is, `phaseNow * duration`
         // ago. Expressed in the layer's own time space so an ancestor with
         // non-default timing cannot shift it.
-        let beginTime = (layer?.convertTime(CACurrentMediaTime(), from: nil) ?? CACurrentMediaTime())
-            - Double(phaseNow) * Metrics.masterDuration
+        let beginTime = now - Double(phaseNow) * Metrics.masterDuration
         let keyTimes = (0...Metrics.nodeSampleCount).map { step in
             NSNumber(value: Double(step) / Double(Metrics.nodeSampleCount))
         }
@@ -522,13 +522,21 @@ final class DualPlaneGyroTiltedThinkingIndicatorView: NSView, AgentThinkingIndic
     /// The phase live motion should be showing right now: the shared wall clock,
     /// plus this instance's offset. A pure function of time, which is exactly what
     /// makes the motion survive a rebuild.
-    private func timelinePhase(at time: CFTimeInterval = CACurrentMediaTime()) -> CGFloat {
+    /// The clock the motion runs on: this layer's own time. That is the media clock
+    /// unless an ancestor retimes the tree, as the film recorder does (it pauses the
+    /// window's root and steps `timeOffset` per frame). Phase read off any other clock
+    /// makes every rebuild snap to that clock's pose (`--throbber-timeline-check`).
+    private func layerClockNow() -> CFTimeInterval {
+        layer?.convertTime(CACurrentMediaTime(), from: nil) ?? CACurrentMediaTime()
+    }
+
+    private func timelinePhase(at time: CFTimeInterval) -> CGFloat {
         Self.normalizedPhase(CGFloat(time / Metrics.masterDuration) + phaseOffset)
     }
 
     private func modelPhaseForCurrentMode() -> CGFloat {
         guard animationRequested else { return currentSnapshotPhase }
-        return reducedMotionEnabled ? Metrics.reducedMotionPhase : timelinePhase()
+        return reducedMotionEnabled ? Metrics.reducedMotionPhase : timelinePhase(at: layerClockNow())
     }
 
     private func animationKey(_ base: String, index: Int) -> String {

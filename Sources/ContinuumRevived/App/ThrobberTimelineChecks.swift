@@ -87,11 +87,58 @@ enum ThrobberTimelineChecks {
         try checkStaggeredAgentsShowDifferentPhases()
         try checkTheSidebarOffsetIsStableAndSpread()
         try checkTheSidebarCellHandsItsRowsOffsetToTheGyro()
+        try checkAFreshGyroRidesItsLayersClock()
         print("ThrobberTimelineChecks: a layout pass neither resampled nor restarted the gyro, "
               + "a geometry change resampled it seamlessly, and each agent rides its own phase in "
               + "both its sidebar row and its own tile; a working sidebar row animates the tile's "
               + "gyro at the tile's phase through reload, hover, cell reuse and a fresh cell, its "
-              + "time still ticks, and a hidden or off-window row animates nothing")
+              + "time still ticks, and a hidden or off-window row animates nothing; a gyro built "
+            + "under a retimed tree rides that tree's clock")
+    }
+
+    /// A gyro installed under a retimed layer tree presents the phase of ITS clock.
+    ///
+    /// The film recorder pauses its window's root layer and advances `timeOffset`
+    /// one film frame at a time. The sidebar rebuilds a working row's gyro whenever
+    /// the row redraws, and the rebuild anchored its phase to `CACurrentMediaTime()`
+    /// while the keyframes ran on the layer's own (film) time: every rebuild snapped
+    /// back to the wall-clock pose, which barely moves between captured frames, so
+    /// the sidebar's throbber read as frozen in the dictation film (notes-r14 3). In
+    /// the app nothing retimes the window, the two clocks are one, and this is the
+    /// wall-clock contract above.
+    private static func checkAFreshGyroRidesItsLayersClock() throws {
+        let fixture = makeFixture(phaseOffset: 0.25)
+        defer { fixture.window.orderOut(nil) }
+        let duration = fixture.indicator.qaMasterDuration
+        // Paused, and 0.37 of a cycle away from the wall clock, so the two clocks'
+        // phases cannot coincide.
+        // The layer the recorder pauses: the window's frame view (FilmDirector.pauseCoreAnimation).
+        fixture.host.wantsLayer = true
+        fixture.window.displayIfNeeded()
+        CATransaction.flush()
+        guard let rootLayer = fixture.window.contentView?.superview?.layer ?? fixture.host.layer else {
+            throw Failure(message: "control: the window has no layer to retime")
+        }
+        let filmTime = rootLayer.convertTime(CACurrentMediaTime(), from: nil) + 0.37 * duration
+        rootLayer.speed = 0
+        rootLayer.timeOffset = filmTime
+        let indicator = fixture.indicator
+        let indicatorNow = indicator.layer?.convertTime(CACurrentMediaTime(), from: nil) ?? .nan
+        try expect(abs(indicatorNow - filmTime) < 1e-6,
+                   "control: the gyro's layer must read the retimed clock \(filmTime), got \(indicatorNow)")
+        indicator.startAnimating()
+        indicator.layoutSubtreeIfNeeded()
+        try expect(indicator.qaActiveAnimationCount == 12,
+                   "control: the gyro must be animating under the paused host, got "
+                   + "\(indicator.qaActiveAnimationCount) of 12 animations")
+        guard let presented = indicator.qaPresentedPhase(at: filmTime) else {
+            throw Failure(message: "control: no installed animation to read a phase from")
+        }
+        let expected = wallClockPhase(filmTime, offset: indicator.qaPhaseOffset, duration: duration)
+        try expect(phaseDistance(presented, expected) < 1e-3,
+                   "a gyro built under a retimed tree must present its layer clock's phase "
+                   + "\(expected) now, not \(presented): anchored to the wall clock, every rebuild "
+                   + "snaps back to the wall-clock pose")
     }
 
     /// The reported defect, plus the resample that is genuinely necessary.
