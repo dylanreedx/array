@@ -119,6 +119,11 @@ button { cursor: pointer; }
 .brand__logo--dark { display: none; }
 html[data-theme="dark"] .brand__logo--light { display: none; }
 html[data-theme="dark"] .brand__logo--dark { display: block; }
+.ph-badge { display: inline-block; margin-top: 14px; line-height: 0; }
+.ph-badge__img { width: 250px; height: 54px; }
+.ph-badge__img--dark { display: none; }
+html[data-theme="dark"] .ph-badge__img--light { display: none; }
+html[data-theme="dark"] .ph-badge__img--dark { display: block; }
 
 .download-split {
   position: relative;
