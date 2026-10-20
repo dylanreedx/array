@@ -89,7 +89,7 @@ enum SubagentTileZoneChecks {
             tiles: [], groups: [], lastActiveTileId: nil))
 
         // Non-zero, different origins, so a frame computed against the wrong zone
-        // is arithmetically visible. Fan-out has room for a column of children
+        // is arithmetically visible. Fan-out has room for two columns of children
         // beside the parent.
         let reviewPlacement = ZonePlacement(
             zoneId: zoneReview, projectId: projectId,
@@ -97,7 +97,7 @@ enum SubagentTileZoneChecks {
             color: "blue", collapsed: false, hydrationPolicy: .automatic)
         let fanOutPlacement = ZonePlacement(
             zoneId: zoneFanOut, projectId: projectId,
-            origin: ZonePoint(x: 1_300, y: 200), size: ZoneSize(width: 2_600, height: 2_200),
+            origin: ZonePoint(x: 1_300, y: 200), size: ZoneSize(width: 3_400, height: 2_200),
             color: "purple", collapsed: false, hydrationPolicy: .automatic)
         let document = WorkspaceDocument(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 0.5),
@@ -212,7 +212,8 @@ enum SubagentTileZoneChecks {
         }
         let fanOutRect = CanvasEngine.zoneWorldFrame(fanOutZone)
         var opened: [UUID] = []
-        for (index, childId) in children.enumerated() {
+        @discardableResult
+        func openFromChip(_ childId: AgentID, index: Int) throws -> UUID {
             let route = "\(mode), child \(index + 1)"
             // The chip click, through the parent tile's own dispatch.
             guard let blockID = AgentNodeID(rawValue: "subagent-\(index)") else {
@@ -240,6 +241,10 @@ enum SubagentTileZoneChecks {
                        && frame.y + frame.height <= fanOutRect.y + fanOutRect.height + 0.001,
                        "\(route): the child's WORLD frame \(describe(frame)) must sit inside the "
                        + "parent's zone \(describe(fanOutRect))")
+            return childTile
+        }
+        for (index, childId) in children.enumerated() {
+            try openFromChip(childId, index: index)
         }
 
         // Beside, not merely inside: the first child docks to the parent's right,
@@ -260,7 +265,52 @@ enum SubagentTileZoneChecks {
                    "\(mode): the second child must stack under the first, beside the parent; first "
                    + "\(describe(first)), second \(describe(second))")
 
-        print("subagent-tile-zone: \(mode): two children opened from the parent's chip landed beside it in its zone, "
-              + "with another zone of the same project armed")
+        // A full column. The film's fan-out zone held two children beside its
+        // Lead; the third found no free slot in the column, fell back to the
+        // zone's automatic placement, whose camera centre sat in the gap between
+        // the two children, and opened on top of the Lead and the second child.
+        // Children past the column's last row start the next column at the
+        // parent's top, and no child ever overlaps another tile of the zone.
+        let rowHeight = first.height + gap
+        let rowsInColumn = Int((fanOutRect.y + fanOutRect.height - parentFrame.y + gap) / rowHeight)
+        let overflow = mintChild("child-overflow")
+        for index in 2..<rowsInColumn {
+            let filler = mintChild("child-\(index + 1)")
+            try openFromChip(filler, index: index)
+        }
+        // The film's camera: centred on the gap under the first child, where
+        // automatic placement finds no anchor and every nearby offset collides.
+        guard let lastInColumn = try store.loadCanvas().tiles.first(where: { $0.id == opened[0] })?.frame else {
+            throw Failure(message: "\(mode): the first child vanished")
+        }
+        let zoom = canvas.viewport.zoom
+        let gapCentre = CGPoint(x: lastInColumn.x + lastInColumn.width / 2,
+                                y: lastInColumn.y + lastInColumn.height + gap / 2)
+        canvas.setViewport(CanvasViewport(
+            x: gapCentre.x - canvas.bounds.width / zoom / 2,
+            y: gapCentre.y - canvas.bounds.height / zoom / 2,
+            zoom: zoom))
+        let overflowTile = try openFromChip(overflow, index: rowsInColumn)
+        let zoneTiles = try store.loadCanvas().tiles.filter { canvas.zoneId(containing: $0.id) == zoneFanOut }
+        func rect(_ frame: TileFrame) -> CGRect { CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height) }
+        for tile in zoneTiles where tile.id != parentTile {
+            for other in zoneTiles where other.id != tile.id {
+                let overlap = rect(tile.frame).intersection(rect(other.frame))
+                try expect(overlap.isNull || overlap.width < 0.5 || overlap.height < 0.5,
+                           "\(mode): child \(describe(tile.frame)) overlaps \(describe(other.frame)) after "
+                           + "\(rowsInColumn + 1) children filled the column beside the parent")
+            }
+        }
+        guard let overflowFrame = try store.loadCanvas().tiles.first(where: { $0.id == overflowTile })?.frame else {
+            throw Failure(message: "\(mode): the overflow child was not persisted")
+        }
+        let columnGap = overflowFrame.x - (first.x + first.width)
+        try expect(abs(overflowFrame.y - parentFrame.y) < 0.5 && columnGap >= 0
+                   && columnGap <= TileGapResolver.defaultGap * 3,
+                   "\(mode): the child past a full column must start the next column at the parent's top; "
+                   + "first \(describe(first)), overflow \(describe(overflowFrame))")
+
+        print("subagent-tile-zone: \(mode): \(rowsInColumn + 1) children opened from the parent's chip landed beside it in its zone, "
+              + "a full column wrapping to the next, with another zone of the same project armed")
     }
 }

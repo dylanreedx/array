@@ -13035,8 +13035,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// (hazard 9), the parent's, whichever zone is armed.
     ///
     /// Children stack in a column at the parent's right, top-aligned with it: the
-    /// first spot that is inside the zone and free. With none, nil, and the zone's
-    /// own automatic placement dodges its tiles. The whole answer is nil when the
+    /// first spot that is inside the zone and free. A full column starts the next
+    /// one to its right, at the parent's top: the film's fan-out zone held two
+    /// children beside its Lead, and the third fell through to automatic placement,
+    /// whose camera centre sat in the gap between them and opened it on top of the
+    /// Lead. With no free spot in any column, nil, and the zone's own automatic
+    /// placement takes over. The whole answer is nil when the
     /// parent has no tile on this canvas or its zone belongs to a project other
     /// than the child's.
     private func spawnPlacementBesideParent(of agentId: AgentID) -> (TileSpawner, CreationScope, CGPoint?)? {
@@ -13055,14 +13059,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let occupied = (canvasView.tilesInWorldFrames(forZoneId: zoneId) ?? []).map {
             CGRect(x: $0.frame.x, y: $0.frame.y, width: $0.frame.width, height: $0.frame.height)
         }
-        var slot = CGRect(
+        var column = CGRect(
             x: parent.worldFrame.x + parent.worldFrame.width + gap,
             y: parent.worldFrame.y, width: size.width, height: size.height)
-        while zoneRect.contains(slot) {
-            if !occupied.contains(where: { $0.intersects(slot) }) {
-                return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY))
+        while zoneRect.contains(column) {
+            var slot = column
+            while zoneRect.contains(slot) {
+                if !occupied.contains(where: { $0.intersects(slot) }) {
+                    return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY))
+                }
+                slot.origin.y += size.height + gap
             }
-            slot.origin.y += size.height + gap
+            column.origin.x += size.width + gap
         }
         return (spawner, scope, nil)
     }
