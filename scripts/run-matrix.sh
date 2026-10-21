@@ -298,7 +298,7 @@ run_app_check() {
   app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-matrix-appsupport.XXXXXX")
 
   case " $* " in
-    *" --terminal-tmux-"*|*" --terminal-theme-fidelity-check"*) ;;
+    *" --terminal-tmux-"*|*" --terminal-theme-fidelity-check"*|*" --shell-open-as-agent-check"*) ;;
     *) tmux_args=(-continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path "") ;;
   esac
 

@@ -818,7 +818,8 @@ enum ContinuumApp {
             let next = CommandLine.arguments.dropFirst(index + 1).first
             MainActor.assumeIsolated {
                 do {
-                    print(try ExternalSessionsSidebarChecks.run(pngPath: next.flatMap { $0.hasPrefix("--") ? nil : $0 }))
+                    // A PNG folder, never the matrix's `-continuum.…` defaults that follow.
+                    print(try ExternalSessionsSidebarChecks.run(pngPath: next.flatMap { $0.hasPrefix("-") ? nil : $0 }))
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
@@ -838,7 +839,7 @@ enum ContinuumApp {
             let next = CommandLine.arguments.dropFirst(index + 1).first
             MainActor.assumeIsolated {
                 do {
-                    print(try leg(next.flatMap { $0.hasPrefix("--") ? nil : $0 }))
+                    print(try leg(next.flatMap { $0.hasPrefix("-") ? nil : $0 }))
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
