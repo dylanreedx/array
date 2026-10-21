@@ -67,7 +67,8 @@ public enum ClaudeTerminalFace {
         model: String,
         effort: String?,
         processOwner: String,
-        path: String
+        path: String,
+        forkSession: Bool = false
     ) -> [String] {
         let environment = [
             "\(AgentProcessAttribution.ownerEnvironmentKey)=\(processOwner)",
@@ -77,7 +78,11 @@ public enum ClaudeTerminalFace {
         ]
         // An agent that has never had a turn has no conversation to resume yet:
         // `--resume` would exit at once with "No conversation found".
-        let session = conversationExists ? ["--resume", sessionId] : ["--session-id", sessionId]
+        // A pending fork (Copy before its first turn, a `/clear` rotation) names
+        // a session another process may still write: claude forks it into a
+        // new one rather than continuing it.
+        let session = forkSession ? ["--resume", sessionId, "--fork-session"]
+            : conversationExists ? ["--resume", sessionId] : ["--session-id", sessionId]
         return ["/usr/bin/env"] + environment + [claude.executable] + claude.prefixArgs
             + session + ["--model", model] + (effort.map { ["--effort", $0] } ?? [])
     }
@@ -126,6 +131,18 @@ public enum ClaudeTerminalFace {
         var lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
         if start > 0, !lines.isEmpty { lines.removeFirst() }
         return lines
+    }
+
+    /// `lines` without any whose `uuid` is in `known`. A fork's file starts as a
+    /// copy of the session it forked, so what it shares with that session's
+    /// part already on screen is not the Terminal face's to append again.
+    public static func lines(_ lines: [String], droppingUUIDsIn known: [String]) -> [String] {
+        let uuids = Set(known.compactMap { ManagedTranscriptRehydrator.jsonObject($0)?["uuid"] as? String })
+        guard !uuids.isEmpty else { return lines }
+        return lines.filter { line in
+            guard let uuid = ManagedTranscriptRehydrator.jsonObject(line)?["uuid"] as? String else { return true }
+            return !uuids.contains(uuid)
+        }
     }
 
     /// The model the last assistant line ran on, as a catalogue id

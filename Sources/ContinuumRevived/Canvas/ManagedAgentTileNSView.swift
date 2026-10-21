@@ -1221,7 +1221,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             model: launch.model,
             effort: launch.effort,
             processOwner: launch.processOwner,
-            path: PiAgentRunner.childEnvironment()["PATH"] ?? "/usr/bin:/bin")
+            path: PiAgentRunner.childEnvironment()["PATH"] ?? "/usr/bin:/bin",
+            forkSession: launch.forkSession)
         let session = AgentTerminalFaceSession(
             tileId: tile.id, arguments: arguments, cwd: state.cwd,
             sessionIds: state.sessionIds, environment: environment)
@@ -1354,11 +1355,16 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// What the Terminal face wrote: the mark is a byte offset into the first
     /// session's file only; any later session's file is all the face's.
     private func terminalFaceLines(_ state: AgentTerminalFaceState, sessionIds: [String]) -> [String] {
-        sessionIds.flatMap { sessionId in
+        let lines = sessionIds.flatMap { sessionId in
             ClaudeTerminalFace.lines(
                 in: ClaudeTerminalFace.sessionFileURL(claudeHome: terminalFaceClaudeHome, cwd: state.cwd, sessionId: sessionId),
                 after: sessionId == state.sessionId ? state.sessionFileOffset : 0)
         }
+        // A fork's file opens with a copy of what came before the mark.
+        guard sessionIds.count > 1 else { return lines }
+        return ClaudeTerminalFace.lines(lines, droppingUUIDsIn: ClaudeTerminalFace.lines(
+            in: ClaudeTerminalFace.sessionFileURL(claudeHome: terminalFaceClaudeHome, cwd: state.cwd, sessionId: state.sessionId),
+            before: state.sessionFileOffset))
     }
 
     private func persistTerminalFace(_ state: AgentTerminalFaceState?) {

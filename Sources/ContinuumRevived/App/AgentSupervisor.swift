@@ -3647,6 +3647,8 @@ final class AgentSupervisor {
         var effort: String?
         var conversationExists: Bool
         var processOwner: String
+        /// `sessionId` is a pending fork's source: the face forks it.
+        var forkSession: Bool
     }
 
     func isInTerminalFace(_ id: AgentID) -> Bool { terminalFaceAgents.contains(id) }
@@ -3711,7 +3713,8 @@ final class AgentSupervisor {
             model: config.model,
             effort: config.effort,
             conversationExists: config.conversationMayExist,
-            processOwner: AgentProcessAttribution.ownerTag(for: id))
+            processOwner: AgentProcessAttribution.ownerTag(for: id),
+            forkSession: config.forkSession)
     }
 
     /// The Terminal face let go. What it learned comes back to the record: the
@@ -3723,7 +3726,17 @@ final class AgentSupervisor {
         terminalFaceBusyAgents.remove(id)
         if var record = records[id] {
             var changed = false
-            if let sessionId, sessionId != Self.claudeSessionLocation(for: record).sessionId {
+            if let source = record.pendingSessionForkFrom {
+                // The face forked `source`, which another process may still be
+                // writing (Copy) or this agent left behind (`/clear`). Only the
+                // fork's own id is this agent's; the source never is, so a face
+                // that ended before claude reported its fork leaves it pending.
+                if let sessionId, sessionId != source {
+                    record.providerSessionId = sessionId
+                    record.pendingSessionForkFrom = nil
+                    changed = true
+                }
+            } else if let sessionId, sessionId != Self.claudeSessionLocation(for: record).sessionId {
                 record.providerSessionId = sessionId
                 changed = true
             }
