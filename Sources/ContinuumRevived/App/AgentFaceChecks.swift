@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
@@ -70,7 +71,9 @@ enum AgentFaceChecks {
                 makeRunner: AgentSupervisor.productionRunner,
                 submissionRecoveryStore: AgentComposerDraftStore(
                     applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true),
-                    debounceInterval: 0))
+                    debounceInterval: 0),
+                // The saved transcript a reopened tile reads its history from.
+                transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts", isDirectory: true)))
             agentID = supervisor.spawn(
                 role: nil, prompt: nil, cwd: work, harness: .claudeCode,
                 model: "anthropic/claude-haiku-4-5-20251001", thinking: "low", displayName: "Fix login redirect")
@@ -523,8 +526,21 @@ extension AgentFaceChecks {
         Task { @MainActor in queued = await supervisor.accept(.queue(AgentPrompt("queued one")), for: agentID) }
         try expect(fixture.pump(until: { queued != nil }, timeout: 3) && queued == .accepted, "queueing failed: \(String(describing: queued))")
         try click(try segment("face.terminal", of: view), in: fixture.window)
-        try expect(view.face == .array && !view.qaFaceFlipBannerVisible,
+        try expect(view.face == .array && !view.pendingTerminalFlip,
                    "a queued message must block the flip, not wait on it")
+        // The refusal is news about the click: the banner slot, for a few
+        // seconds, and never an entry in the transcript or its saved copy.
+        let refusal = "Send or clear the queued messages first."
+        try expect(view.qaFaceFlipBannerVisible && view.qaFaceFlipBanner.content == .refusal(refusal),
+                   "the refusal must show in the banner slot; banner \(String(describing: view.qaFaceFlipBanner.content))")
+        func mentionsRefusal(_ document: AgentDocument?) -> Bool {
+            (document?.entries ?? []).contains { AgentTranscriptCopyController.plainText(for: $0.blocks).contains(refusal) }
+        }
+        try expect(!mentionsRefusal(view.qaDocumentForChecks) && !mentionsRefusal(supervisor.transcriptDocumentProjection(for: agentID)),
+                   "a refused flip must not write the refusal into the transcript")
+        try expect(fixture.pump(until: { !view.qaFaceFlipBannerVisible }, timeout: AgentFaceFlipBanner.refusalDuration + 2),
+                   "the refusal must go by itself")
+        log.append("refusal: banner for a few seconds, never in the transcript")
         supervisor.clearQueuedMessages(for: agentID)
         try click(try segment("face.terminal", of: view), in: fixture.window)
         try expect(view.pendingTerminalFlip && view.qaFaceFlipBannerVisible && view.face == .array,
@@ -575,11 +591,20 @@ extension AgentFaceChecks {
         type("/model claude-sonnet-5-5")
         type("slow third")
         try expect(fixture.pump(until: { session.isBusy }, timeout: 6), "the face must read claude's busy status")
+        // The band's pill and the sidebar row read the turn snapshot, which the
+        // face's poll keeps from claude's own status file.
+        try expect(fixture.pump(until: { supervisor.turnSnapshot(for: agentID)?.state == .working && view.agentStatus == .working },
+                                timeout: 3),
+                   "while claude is busy the pill must say Working; snapshot \(String(describing: supervisor.turnSnapshot(for: agentID)?.state)), pill \(String(describing: view.agentStatus))")
+        let pillWorking = view.qaBandShowsStatusPill
         // × on a busy terminal asks first; refusing keeps everything.
         try click(try segment("close", of: view), in: fixture.window)
         try expect(confirmations.count == 1 && view.face == .terminal && fixture.closeRequests.isEmpty,
                    "× on a busy terminal must ask, and Cancel must keep the tile and claude; asked \(confirmations)")
         try expect(fixture.pump(until: { !session.isBusy }, timeout: 8), "the slow turn never ended")
+        try expect(fixture.pump(until: { view.agentStatus != .working && supervisor.turnSnapshot(for: agentID)?.state != .working }, timeout: 3),
+                   "once claude is idle the pill must stop saying Working; pill \(String(describing: view.agentStatus))")
+        log.append("terminal pill: working while claude was busy (pill in band: \(pillWorking)), idle after")
         type("/clear")
         try expect(fixture.pump(until: { session.sessionIds.count == 2 }, timeout: 8),
                    "/clear must move the face to claude's new session; ids \(session.sessionIds)")
@@ -601,6 +626,21 @@ extension AgentFaceChecks {
         let joined = added.joined(separator: "\n")
         try expect(added.first?.contains("In Terminal · 2 turns") == true,
                    "the terminal's turns must follow an 'In Terminal · 2 turns' divider; got \(added)")
+        let dividerEntry = view.qaDocumentForChecks.entries[before.count]
+        try expect(dividerEntry.blocks.map(\.kind) == [.sessionBoundary]
+                   && !view.qaDocumentForChecks.entries.contains { $0.blocks.contains { $0.kind == .notice } && AgentTranscriptCopyController.plainText(for: $0.blocks).contains("In Terminal") },
+                   "the divider must be a session boundary, not a notice card; got \(dividerEntry.blocks.map(\.kind.rawValue))")
+        fixture.window.contentView?.layoutSubtreeIfNeeded()
+        view.layoutSubtreeIfNeeded()
+        fixture.pump(0.2)
+        try expect(view.qaSessionBoundaryViews.contains { $0.qaLabelText == "In Terminal · 2 turns" && $0.qaGlyphVisible },
+                   "the divider must draw as a rule with the terminal glyph and its label")
+        // The flip stopped the Array face's turn to hand the session over; that
+        // is not the user stopping it, and the terminal's turns are newer.
+        let tail = view.qaTailStatusText
+        let strip = view.qaNewestWorkStripText ?? ""
+        try expect(![tail, strip].contains { $0.contains("You stopped") || $0.contains("Interrupted") },
+                   "after the flip back nothing may say the user stopped or the turn was interrupted; tail '\(tail)', strip '\(strip)'")
         try expect(joined.components(separatedBy: "terminal: slow third").count == 2
                    && joined.components(separatedBy: "terminal: fourth").count == 2
                    && !joined.contains("PLAIN first question"),
@@ -663,6 +703,34 @@ extension AgentFaceChecks {
                    && orphaned.tile.metadata.agentTerminalFace == nil && !supervisor.isInTerminalFace(agentID),
                    "with the tmux session gone the tile must come back in the Array face and release the session")
         log.append("relaunch: reattached without a second claude; tmux gone came back in Array")
+
+        // 7. The terminal's turns are the agent's, not the tile's: a tile opened
+        //    later shows them, and so does one after a close from the Terminal face.
+        func showsTerminalTurns(_ tile: ManagedAgentTileNSView, _ marks: [String]) -> Bool {
+            let text = entriesText(tile).joined(separator: "\n")
+            return text.contains("In Terminal") && marks.allSatisfy { text.components(separatedBy: $0).count == 2 }
+        }
+        try expect(showsTerminalTurns(orphaned, ["terminal: slow third", "terminal: fourth"]),
+                   "a tile opened later must show the terminal's turns once each; got \(entriesText(orphaned))")
+        try click(try segment("face.terminal", of: orphaned), in: fixture.window)
+        guard fixture.pump(until: { orphaned.face == .terminal && orphaned.terminalFaceSession?.claudePid != nil }, timeout: 10),
+              let closing = orphaned.terminalFaceSession else {
+            throw Failure(description: "the reopened tile must flip to its Terminal face")
+        }
+        _ = closing.runtime.dispatchInsertedText("sixth")
+        closing.runtime.sendReturn()
+        try expect(fixture.pump(until: { closing.isBusy }, timeout: 6) && fixture.pump(until: { !closing.isBusy }, timeout: 8),
+                   "the sixth turn must run in the terminal")
+        try click(try segment("close", of: orphaned), in: fixture.window)
+        try expect(fixture.closeRequests.contains(orphaned.tile.id) && orphaned.face == .array,
+                   "× in the Terminal face closes the tile")
+        orphaned.prepareForRemovalFromScene()
+        fixture.canvas.removeTile(id: orphaned.tile.id)
+        let reopened = fixture.makeTile(width: 760, height: 560, environment: environment)
+        liveViews.append(reopened)
+        try expect(showsTerminalTurns(reopened, ["terminal: slow third", "terminal: fourth", "terminal: sixth"]),
+                   "a tile closed from the Terminal face must leave its turns in the agent's transcript; got \(entriesText(reopened))")
+        log.append("reopen: terminal turns survive a close from the Terminal face and a later reopen")
 
         let manifest: [String: Any] = ["log": log, "launches": launches().map { $0.mapValues { "\($0)" } }]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

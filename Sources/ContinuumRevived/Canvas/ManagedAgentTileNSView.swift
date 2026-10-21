@@ -1127,10 +1127,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             enterTerminalFace()
         case .busy:
             pendingTerminalFlip = true
-            faceFlipBanner.isHidden = false
+            faceFlipBanner.show(.pendingFlip)
             refreshFaceSwitch()
         case .unavailable(let reason):
-            showActionFailedNotice(reason)
+            // News about a click, not part of the conversation: the banner
+            // slot, for a few seconds, never a transcript entry.
+            faceFlipBanner.show(.refusal(reason))
             refreshFaceSwitch()
         }
     }
@@ -1146,7 +1148,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             enterTerminalFace()
         case .unavailable(let reason):
             clearPendingTerminalFlip()
-            showActionFailedNotice(reason)
+            faceFlipBanner.show(.refusal(reason))
         }
     }
 
@@ -1161,7 +1163,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     private func clearPendingTerminalFlip() {
         pendingTerminalFlip = false
-        faceFlipBanner.isHidden = true
+        faceFlipBanner.dismiss(.pendingFlip)
         refreshFaceSwitch()
     }
 
@@ -1242,6 +1244,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             }
             self.startTerminalFaceSession(state: state, launch: launch, environment: environment)
         }
+        session.onBusyChange = { [weak self] busy in
+            guard let self, let agentID = self.attachedAgentID else { return }
+            // The band pill and the sidebar row read it from the supervisor.
+            self.agentSource?.noteTerminalFaceBusy(agentID, busy: busy)
+        }
         session.onSessionChange = { [weak self] sessionId in
             guard let self, var state = self.tile.metadata.agentTerminalFace else { return }
             // Persisted, so a relaunch that finds tmux gone still adopts it.
@@ -1293,13 +1300,16 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let appended = ClaudeSessionTranscriptReader.parse(
             lines: added, threadId: threadId,
             limits: RehydrationLimits(maxMessages: Int.max, maxBytes: Int.max))
-        let turns = appended.steps.filter { if case .userPrompt = $0 { return true } else { return false } }.count
+        let turns = Self.promptCount(appended)
         if !appended.steps.isEmpty {
-            model.appendNotice(
-                id: "notice-terminal-face-\(UUID().uuidString)",
-                title: "in terminal",
-                text: "In Terminal · \(turns) \(turns == 1 ? "turn" : "turns")")
+            let boundary = Self.terminalBoundaryText(turns: turns)
+            model.appendSessionBoundary(
+                id: "terminal-face-\(UUID().uuidString)", text: boundary, symbolName: Self.terminalBoundarySymbol)
             replayRehydratedSteps(appended)
+            if let agentID = attachedAgentID {
+                agentSource?.appendOutsideTurns(
+                    appended, boundaryText: boundary, symbolName: Self.terminalBoundarySymbol, for: agentID)
+            }
         }
         if let agentID = attachedAgentID, let supervisor = agentSource {
             supervisor.endTerminalFace(
@@ -1316,6 +1326,17 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         synchronizeV2Transcript(final: true)
         refreshFaceSwitch()
         qaTerminalFaceAppendedTurns = turns
+    }
+
+    static let terminalBoundarySymbol = "apple.terminal"
+
+    /// "In Terminal · 1 turn" — the divider over the turns the face took.
+    static func terminalBoundaryText(turns: Int, place: String = "Terminal") -> String {
+        "In \(place) · \(turns) \(turns == 1 ? "turn" : "turns")"
+    }
+
+    static func promptCount(_ transcript: RehydratedTranscript) -> Int {
+        transcript.steps.filter { if case .userPrompt = $0 { return true } else { return false } }.count
     }
 
     private var terminalFaceClaudeHome: URL {
@@ -1355,6 +1376,14 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         session.endClaude()
         if let agentID = attachedAgentID, let supervisor = agentSource, let state = tile.metadata.agentTerminalFace {
             let added = terminalFaceLines(state, sessionIds: session.sessionIds)
+            // The tile goes, the agent stays: what the terminal did is in its
+            // saved transcript for the next tile that opens it.
+            let appended = ClaudeSessionTranscriptReader.parse(
+                lines: added, threadId: threadId,
+                limits: RehydrationLimits(maxMessages: Int.max, maxBytes: Int.max))
+            supervisor.appendOutsideTurns(
+                appended, boundaryText: Self.terminalBoundaryText(turns: Self.promptCount(appended)),
+                symbolName: Self.terminalBoundarySymbol, for: agentID)
             supervisor.endTerminalFace(
                 for: agentID, sessionId: session.currentSessionId,
                 model: ClaudeTerminalFace.lastModel(in: added), tookTurns: !added.isEmpty)
@@ -3028,7 +3057,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let pendingDock = PendingMessageDockView(rail: composer.pendingMessageRail)
         pendingDock.identifier = NSUserInterfaceItemIdentifier("agentTile.pendingMessages")
         v2PendingDock = pendingDock
-        faceFlipBanner.isHidden = true
         faceFlipBanner.onStopNow = { [weak self] in self?.stopTurnForPendingFlip() }
         faceFlipBanner.onCancel = { [weak self] in self?.cancelPendingTerminalFlip() }
         let layout = NSStackView(views: [agentHeader, locationStatus, transcript, pendingDock, faceFlipBanner, composeBackdrop])
@@ -4130,6 +4158,16 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         return true
     }
     var qaDocumentForChecks: AgentDocument { model.document }
+    /// The strip the newest turn shows ("Worked 3s", "You stopped after 2s").
+    var qaNewestWorkStripText: String? { transcriptCollectionFixture?.qaNewestWorkStripModelForChecks?.text }
+    /// Every session-boundary divider drawn now.
+    var qaSessionBoundaryViews: [CompactionBoundaryView] {
+        func walk(_ view: NSView) -> [CompactionBoundaryView] {
+            let own = view.identifier?.rawValue == "agent.sessionBoundary" ? [view as? CompactionBoundaryView].compactMap { $0 } : []
+            return own + view.subviews.flatMap(walk)
+        }
+        return transcriptCollectionFixture.map(walk) ?? []
+    }
     var qaStatusThinkingIndicatorVisible: Bool { compactStatusRow.qaThinkingSlotVisible }
     var qaCompactStatusPhase: AgentCompactActivityPhase? { compactStatusResolution.phase }
     var qaCompactStatusContextState: AgentRadialContextMeterState { compactStatusRow.qaContextState }

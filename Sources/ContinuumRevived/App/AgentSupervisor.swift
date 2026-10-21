@@ -3685,6 +3685,12 @@ final class AgentSupervisor {
             interruptWorkingClaudeMirroredChildren(of: id)
         }
         terminalFaceAgents.insert(id)
+        // The Array face's submission ends at the hand-off. A turn the flip
+        // stopped (Stop now, or the pooled claude it ended) was stopped so the
+        // session could move, not by the user, and the turns the terminal takes
+        // next are not this presence's to settle: left in place, its "You
+        // stopped after 3s" stood under the terminal's turns after the flip back.
+        turnFacts[id]?.presence = AgentTurnPresence()
         notifyTurnCapabilitiesChanged(id)
         let config = Self.claudeRunnerConfig(for: record)
         return TerminalFaceLaunch(
@@ -3702,6 +3708,7 @@ final class AgentSupervisor {
     /// exactly where the terminal stopped.
     func endTerminalFace(for id: AgentID, sessionId: String?, model: String?, tookTurns: Bool) {
         guard terminalFaceAgents.remove(id) != nil else { return }
+        terminalFaceBusyAgents.remove(id)
         if var record = records[id] {
             var changed = false
             if let sessionId, sessionId != Self.claudeSessionLocation(for: record).sessionId {
@@ -3725,6 +3732,47 @@ final class AgentSupervisor {
             }
         }
         notifyTurnCapabilitiesChanged(id)
+    }
+
+    /// Agents whose Terminal face claude says it is mid-turn, from claude's own
+    /// `~/.claude/sessions/<pid>.json` (the face's poll). The tile's band pill
+    /// and the sidebar row read it through `turnSnapshot`, like any turn.
+    private var terminalFaceBusyAgents: Set<AgentID> = []
+
+    /// The Terminal face read claude's status. Only a change notifies.
+    func noteTerminalFaceBusy(_ id: AgentID, busy: Bool) {
+        guard terminalFaceAgents.contains(id) else { return }
+        let changed = busy ? terminalFaceBusyAgents.insert(id).inserted : terminalFaceBusyAgents.remove(id) != nil
+        if changed { notifyTurnCapabilitiesChanged(id) }
+    }
+
+    /// Turns taken outside Array — in the Terminal face, or in the shell a
+    /// session was opened from — written into the agent's saved transcript
+    /// after a boundary, exactly as the tile appended them. Without this they
+    /// lived only in the tile that flipped back: a tile closed and reopened, or
+    /// one opened later, showed the conversation with a hole in it.
+    /// Display-only like a restore: never delivered, so never re-synced.
+    func appendOutsideTurns(
+        _ transcript: RehydratedTranscript, boundaryText: String, symbolName: String?, for id: AgentID
+    ) {
+        guard transcriptStore != nil, records[id] != nil, !transcript.steps.isEmpty else { return }
+        let threadId = Self.threadId(for: id)
+        var projection = transcriptProjections[id] ?? ManagedAgentTranscriptModel(threadId: threadId)
+        projection.appendSessionBoundary(
+            id: "outside-\(UUID().uuidString)", text: boundaryText, symbolName: symbolName)
+        for step in transcript.steps {
+            switch step {
+            case .userPrompt(let text):
+                guard let promptID = AgentNodeID(rawValue: "outside-prompt-\(UUID().uuidString)") else { continue }
+                projection.appendUserPrompt(id: promptID, prompt: AgentPrompt(text))
+            case .event(let event):
+                projection.ingest(event.withThreadId(threadId))
+            case .observation:
+                break
+            }
+        }
+        transcriptProjections[id] = projection
+        scheduleTranscriptPersist(for: id, final: true)
     }
 
     // MARK: - Agent CLI updates
@@ -5885,6 +5933,8 @@ final class AgentSupervisor {
         } else if compactingAgents.contains(id) {
             state = .compacting
         } else if activeCompactionOperations.contains(id) {
+            state = .working
+        } else if terminalFaceBusyAgents.contains(id) {
             state = .working
         } else if facts.execution == .working {
             state = .working
