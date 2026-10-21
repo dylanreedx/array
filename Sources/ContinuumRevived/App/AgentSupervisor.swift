@@ -3653,6 +3653,22 @@ final class AgentSupervisor {
 
     func isInTerminalFace(_ id: AgentID) -> Bool { terminalFaceAgents.contains(id) }
 
+    /// A Terminal face no tile is showing still owns its session: a tile saved
+    /// in that face whose view is not built (another workspace, below the live
+    /// tier, a relaunch before the reattach), or a face claude discovery still
+    /// sees. The app holds the agent here so no runner of Array's starts beside
+    /// that claude; `endTerminalFace` lets go, as it does for a shown face.
+    func holdForTerminalFace(_ id: AgentID) {
+        guard records[id]?.harness == .claudeCode, terminalFaceAgents.insert(id).inserted else { return }
+        if let idle = idleSessionRunners.removeValue(forKey: id) {
+            idleReapTokens[id] = nil
+            idle.stop()
+            interruptWorkingClaudeMirroredChildren(of: id)
+        }
+        if runners[id] != nil { retireSessionAfterTurn.insert(id) }
+        notifyTurnCapabilitiesChanged(id)
+    }
+
     /// Whether the Terminal face could take this agent now. Claude Code only:
     /// codex and pi have no per-process session file to say whether the TUI
     /// is busy or which session it moved to, and the flip-back reader is

@@ -123,8 +123,10 @@ enum ExternalSessionHandoffChecks {
         }
     }
 
-    private static func makeWorld(pngDirectory: String?) throws -> World {
-        let fixture = try WorkspaceAPIChecks.makeFixture()
+    private static func makeWorld(
+        pngDirectory: String?, beforeMount: ((AppDelegate, URL) throws -> Void)? = nil
+    ) throws -> World {
+        let fixture = try WorkspaceAPIChecks.makeFixture(beforeMount: beforeMount)
         let delegate = fixture.delegate
         AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
         guard let claudeModel = AgentCatalogQAFixture.claude.seedModel else { throw Failure(message: "no claude fixture model") }
@@ -513,13 +515,67 @@ enum ExternalSessionHandoffChecks {
     // MARK: - --agent-paused-elsewhere-check
 
     static func runPaused(pngDirectory: String?) throws -> String {
-        let world = try makeWorld(pngDirectory: pngDirectory)
+        // Review finding 3, as a relaunch leaves it: a Claude agent whose tile
+        // was saved in its Terminal face, in ANOTHER workspace's project, so no
+        // tile of it is built — and the claude that face runs is still alive in
+        // tmux. Nothing has been sent and discovery has not looked yet.
+        var faceAgent: AgentID?
+        let faceTile = UUID()
+        let world = try makeWorld(pngDirectory: pngDirectory) { delegate, tempRoot in
+            guard let model = AgentCatalogQAFixture.claude.seedModel else { throw Failure(message: "no claude fixture model") }
+            let pcRoot = tempRoot.appendingPathComponent("Pc", isDirectory: true)
+            let projects = try RegistryStore(applicationSupportDirectory: tempRoot.appendingPathComponent("AppSupport", isDirectory: true))
+                .loadOrEmpty().projects
+            guard let pc = projects.first(where: { $0.name == "Pc" }) else { throw Failure(message: "no project Pc") }
+            let id = delegate.qaAgentSupervisor.spawn(
+                role: nil, prompt: nil, cwd: pcRoot, harness: .claudeCode, model: model, thinking: "",
+                projectId: pc.id, projectRoot: pcRoot, tileId: faceTile, displayName: "Face in workspace B")
+            faceAgent = id
+            let store = ProjectStore(projectRoot: pcRoot)
+            var canvas = try store.loadCanvas()
+            var tile = Tile(id: faceTile, kind: .managedAgent, title: "Face in workspace B",
+                            frame: TileFrame(x: 300, y: 40, width: 560, height: 520),
+                            zPosition: .fromLegacyRank(2), runtimeRef: nil,
+                            metadata: TileMetadata(agentTerminalFace: AgentTerminalFaceState(
+                                sessionId: AgentSupervisor.claudeSessionId(for: id), cwd: pcRoot.path, sessionFileOffset: 0)))
+            tile.zoneId = canvas.tiles.first?.zoneId
+            canvas.tiles.append(tile)
+            try store.saveCanvas(canvas)
+        }
         defer { world.tearDown() }
         let supervisor = world.supervisor
         let delegate = world.delegate
         let bin = world.bin
         var activated: [(Int32?, String)] = []
         delegate.activateExternalSessionHostForQA = { activated.append(($0, $1)) }
+
+        guard let faceAgent else { throw Failure(message: "no Terminal-face agent") }
+        try expect(world.fixture.canvas.tileView(for: faceTile) == nil, "precondition: the face agent's tile is not built")
+        // The saved face holds the session from the moment the scene mounts:
+        // the production send path refuses, and no claude starts.
+        try expect(supervisor.isSessionHeld(faceAgent) && !supervisor.send("PLAIN from Array", to: faceAgent)
+                   && supervisor.sendRefusal(for: faceAgent)?.contains("Terminal face") == true,
+                   "an agent saved in its Terminal face must be held at boot, tile or no tile; refusal \(String(describing: supervisor.sendRefusal(for: faceAgent)))")
+        try expect(AgentSteeringQAFakes.spawnCount(in: bin) == 0, "no claude ran for the held face agent")
+        // Discovery finds its claude still running in the Terminal face: held.
+        let faceProcess = try liveHolder()
+        defer { end(faceProcess) }
+        let faceSession = session(AgentSupervisor.claudeSessionId(for: faceAgent), pid: faceProcess.processIdentifier,
+                                  cwd: world.fixture.pcRoot, title: "Face in workspace B", status: .idle,
+                                  host: .arrayTerminalFace(agentId: AgentProcessAttribution.ownerTag(for: faceAgent)),
+                                  transcript: nil)
+        world.publish([faceSession])
+        try expect(supervisor.isSessionHeld(faceAgent) && !supervisor.send("PLAIN from Array", to: faceAgent),
+                   "a face claude discovery still sees keeps the agent held")
+        // One pass without it while it still runs is not its exit (finding 6).
+        world.publish([])
+        try expect(supervisor.isSessionHeld(faceAgent), "a pass that misses a running face claude must not release it")
+        // That claude exits: the agent is Array's again.
+        end(faceProcess)
+        world.publish([])
+        try expect(!supervisor.isSessionHeld(faceAgent) && supervisor.sendRefusal(for: faceAgent) == nil,
+                   "once its face claude is gone the agent sends from Array again; refusal \(String(describing: supervisor.sendRefusal(for: faceAgent)))")
+        try expect(AgentSteeringQAFakes.spawnCount(in: bin) == 0, "no claude ran while the face held the session")
 
         // An Array Claude agent with a tile, its claude pooled after a turn.
         guard let model = AgentCatalogQAFixture.claude.seedModel else { throw Failure(message: "no claude fixture model") }
@@ -554,7 +610,8 @@ enum ExternalSessionHandoffChecks {
         //    an untagged runner from an older Array. None of them pauses it.
         world.publish([holder(.arrayManaged(agentId: tag), pid: pooledPid)])
         try assertNotPaused("its own tagged runner")
-        world.publish([holder(.arrayTerminalFace(agentId: tag), pid: 42_001)])
+        // A face claude that has exited (a running one holds the agent: finding 3).
+        world.publish([holder(.arrayTerminalFace(agentId: tag), pid: try exitedPid())])
         try assertNotPaused("its own Terminal face")
         world.publish([holder(.arrayManaged(agentId: nil), pid: 42_002)])
         try assertNotPaused("an untagged runner under Array")

@@ -20,6 +20,14 @@ import Darwin
 //   runner stops, sends are refused, and when the other process exits what it
 //   wrote is appended and the agent carries on.
 
+/// A Terminal face no tile shows: the claude discovery last saw running it,
+/// and the session it was on, which the agent continues once that claude exits.
+struct UnshownTerminalFace: Equatable {
+    var pid: Int32?
+    var startedAt: Date?
+    var sessionId: String?
+}
+
 /// One paused agent: where its session is open, and the byte the file ended at
 /// when the pause began.
 struct ExternalSessionPause: Equatable {
@@ -39,6 +47,7 @@ extension AppDelegate {
         let snapshot = externalSessionMonitor.snapshot
         let discovered = externalSessionMonitor.hasDiscovered
         dropDetachedExternalSessionAgents()
+        reconcileTerminalFaceHolds()
         for record in Array(agentSupervisor.records.values) {
             if let link = record.externalSession {
                 let holding = ExternalSessionHandoff.holding(link, in: snapshot, discovered: discovered)
@@ -266,6 +275,57 @@ extension AppDelegate {
             }
         }
         agentSupervisor.endExternalHold(for: id, tookTurns: tookTurns)
+    }
+
+    // MARK: - Terminal faces no tile shows (review finding 3)
+
+    /// Holds every Claude agent whose Terminal face runs, or may run, without a
+    /// tile showing it, and lets go once its claude has exited. The evidence:
+    /// discovery's claude carrying the agent's tag in its Terminal face; and,
+    /// until discovery's first pass, a tile saved in that face. A tile on
+    /// screen in its Terminal face owns its own face and is left to it.
+    func reconcileTerminalFaceHolds() {
+        let monitor = externalSessionMonitor
+        var running: [String: ExternalAgentSession] = [:]
+        for session in monitor.snapshot.sessions {
+            // Alive now: a pass from before a face's claude exited still lists it.
+            guard case let .arrayTerminalFace(tag) = session.host,
+                  let pid = session.pid, ExternalSessionHandoff.processStart(pid) != nil else { continue }
+            running[tag] = session
+        }
+        let saved = monitor.hasDiscovered ? [:] : savedTerminalFaces()
+        for record in agentSupervisor.records.values where record.harness == .claudeCode {
+            let id = record.id
+            if let tileId = record.tileId,
+               let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView,
+               view.attachedAgentID == id, view.face == .terminal {
+                unshownTerminalFaces[id] = nil
+                continue
+            }
+            if let live = running[AgentProcessAttribution.ownerTag(for: id)] {
+                var face = unshownTerminalFaces[id] ?? UnshownTerminalFace()
+                if face.pid != live.pid {
+                    face.pid = live.pid
+                    face.startedAt = live.pid.flatMap(ExternalSessionHandoff.processStart)
+                }
+                face.sessionId = live.sessionId
+                unshownTerminalFaces[id] = face
+                agentSupervisor.holdForTerminalFace(id)
+            } else if let state = record.tileId.flatMap({ saved[$0] }) {
+                if unshownTerminalFaces[id] == nil {
+                    unshownTerminalFaces[id] = UnshownTerminalFace(sessionId: state.sessionIds.last)
+                }
+                agentSupervisor.holdForTerminalFace(id)
+            } else if let face = unshownTerminalFaces[id], monitor.hasDiscovered,
+                      !monitor.snapshot.claudeUnreadable,
+                      ExternalSessionHandoff.holderIsGone(pid: face.pid, startedAt: face.startedAt) {
+                unshownTerminalFaces[id] = nil
+                agentSupervisor.endTerminalFace(for: id, sessionId: face.sessionId, model: nil, tookTurns: false)
+            }
+        }
+        for id in unshownTerminalFaces.keys where agentSupervisor.records[id] == nil {
+            unshownTerminalFaces[id] = nil
+        }
     }
 
     /// "Show Ghostty": the app the holding process runs in, from its ancestry;

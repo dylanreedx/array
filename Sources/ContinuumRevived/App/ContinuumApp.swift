@@ -5174,6 +5174,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `.plans/79` phase 2: Array agents paused because another app opened
     /// their session (edge case 1), with where to append from when it closes.
     var externalSessionPauses: [AgentID: ExternalSessionPause] = [:]
+    /// Review finding 3: agents held for a Terminal face no tile shows, with
+    /// the claude discovery last saw running it.
+    var unshownTerminalFaces: [AgentID: UnshownTerminalFace] = [:]
     /// QA: stands in for bringing another app forward ("Show Ghostty").
     var activateExternalSessionHostForQA: ((_ pid: Int32?, _ hostName: String) -> Void)?
     private var canvasShortcutRailView: CanvasShortcutRailView?
@@ -11678,7 +11681,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         externalSessionMonitor.arrayShellPanes = { [weak self] in self?.shellTilePanes() ?? [:] }
         externalSessionMonitor.reportsEveryPass = { [weak self] in
             guard let self else { return false }
-            return !self.externalSessionPauses.isEmpty
+            return !self.externalSessionPauses.isEmpty || !self.unshownTerminalFaces.isEmpty
                 || self.agentSupervisor.records.values.contains { $0.externalSession != nil }
         }
         externalSessionMonitor.onChange = { [weak self] in
@@ -12883,6 +12886,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let tag = AgentProcessAttribution.ownerTag(for: agentId)
         return externalSessionMonitor.snapshot.sessions.contains { $0.host == .arrayTerminalFace(agentId: tag) }
             ? .terminal : .array
+    }
+
+    /// Every tile saved in its Terminal face, in every project's canvas —
+    /// whether or not its zone is hydrated or its workspace is on screen.
+    func savedTerminalFaces() -> [UUID: AgentTerminalFaceState] {
+        var faces: [UUID: AgentTerminalFaceState] = [:]
+        for canvas in currentSidebarModelInputs().projectCanvases.values {
+            for tile in canvas.tiles {
+                if let face = tile.metadata.agentTerminalFace { faces[tile.id] = face }
+            }
+        }
+        return faces
     }
 
     /// Agent tiles persisted in their Terminal face, resident or not.
@@ -19765,6 +19780,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if !agentRestore.restored.isEmpty || !agentRestore.stale.isEmpty {
             fputs("AgentSupervisor: restored \(agentRestore.restored.count) agent(s) idle from the previous launch, skipped \(agentRestore.stale.count) whose project root is gone\n", stderr)
         }
+        // `.plans/79` review 3: an agent saved in its Terminal face is held from
+        // here, before anything can send — its tile may never be built this
+        // launch, and its claude may still be running in tmux.
+        reconcileTerminalFaceHolds()
 
         // Persisted workspaces use one installer on both cold launch and switching.
         // The old launch-only flat scene loaded just the remembered project's
