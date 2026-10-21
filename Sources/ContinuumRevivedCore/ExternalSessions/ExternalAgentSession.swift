@@ -22,7 +22,7 @@ public enum ExternalSessionStatus: String, Equatable, Sendable {
     /// The source cannot say (a Codex app thread).
     case unknown
 
-    /// Live or waiting on you: what the default sidebar scope lists.
+    /// Working or waiting on you: an attention signal, independent of location scope.
     public var isLive: Bool { self == .busy || self == .waiting }
 }
 

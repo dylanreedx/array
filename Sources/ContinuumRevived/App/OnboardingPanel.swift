@@ -28,6 +28,7 @@ final class OnboardingPanel {
         /// Launch profile that opens a real tile so the CLI's own login/auth
         /// flow runs inside Array; nil for non-tile tools (tmux, git).
         let connectProfileId: String?
+        var isOptional = false
         /// Returns a short display string when satisfied (a path, or an auth
         /// status), nil when not. May run a bounded subprocess — refresh is
         /// synchronous, so keep probes under ~a second each.
@@ -192,10 +193,11 @@ final class OnboardingPanel {
             ),
             Probe(
                 id: "tmux",
-                title: "tmux",
-                detail: "Keeps terminal sessions alive across app restarts (optional).",
-                missingGuidance: "Install: brew install tmux",
+                title: "Keep terminals running (optional)",
+                detail: "tmux keeps Terminal sessions alive when Array quits. Opening sessions and switching views work without it.",
+                missingGuidance: "Optional: brew install tmux",
                 connectProfileId: nil,
+                isOptional: true,
                 locate: { TmuxLocator.resolve(defaults: defaults) }
             ),
             Probe(
@@ -332,7 +334,7 @@ final class OnboardingPanel {
         stack.addArrangedSubview(intro)
         intro.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
 
-        let envHeader = NSTextField(labelWithString: "Environment · only items needing attention")
+        let envHeader = NSTextField(labelWithString: "Environment setup")
         envHeader.font = NSFont.boldSystemFont(ofSize: 13)
         stack.addArrangedSubview(envHeader)
 
@@ -417,8 +419,8 @@ final class OnboardingPanel {
                 guidance.stringValue = located
                 guidance.textColor = .secondaryLabelColor
             } else {
-                status.stringValue = "✗"
-                status.textColor = .systemOrange
+                status.stringValue = probe.isOptional ? "○" : "✗"
+                status.textColor = probe.isOptional ? .secondaryLabelColor : .systemOrange
                 guidance.stringValue = probe.missingGuidance
                 guidance.textColor = .labelColor
             }
@@ -506,6 +508,7 @@ final class OnboardingPanel {
     /// panel doesn't leak its window.
     static func runSelfCheck() throws {
         try runCodexAuthProbeSelfCheck()
+        try AppDelegate.runClaudeSessionOnboardingSelfCheck()
         final class MutableLocation: @unchecked Sendable {
             var path: String?
             init(_ path: String?) { self.path = path }
@@ -523,8 +526,8 @@ final class OnboardingPanel {
             Probe(id: "pi-auth", title: "Claude models (pi ▸ anthropic)", detail: "auth",
                   missingGuidance: "Sign in: /login anthropic", connectProfileId: nil,
                   locate: { authLocation.path }),
-            Probe(id: "tmux", title: "tmux", detail: "persistence", missingGuidance: "Install: brew install tmux",
-                  connectProfileId: nil, locate: { nil })
+            Probe(id: "tmux", title: "tmux", detail: "persistence", missingGuidance: "Optional: brew install tmux",
+                  connectProfileId: nil, isOptional: true, locate: { nil })
         ]
         let panel = OnboardingPanel(probes: probes)
         var opened: [String] = []
@@ -545,6 +548,9 @@ final class OnboardingPanel {
         }
         guard panel.connectButtonForQA("codex")?.isEnabled == false else {
             throw SelfCheckError.message("codex connect button should be disabled when missing")
+        }
+        guard panel.statusTextForQA("tmux") == "○" else {
+            throw SelfCheckError.message("missing optional tmux must appear as a suggestion, not a failed requirement")
         }
         guard panel.connectButtonForQA("tmux") == nil else {
             throw SelfCheckError.message("tmux must not offer a connect tile")

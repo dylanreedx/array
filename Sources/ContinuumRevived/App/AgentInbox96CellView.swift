@@ -455,6 +455,43 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     private let placementLabel = NSTextField(labelWithString: "")
     private let projectIcon = NSImageView(frame: .zero)
+    private static let metadataIconSide: CGFloat = 12
+    private static var metadataSymbols: [String: NSImage] = [:]
+    private static let metadataInkCenters: NSCache<NSImage, NSNumber> = {
+        let cache = NSCache<NSImage, NSNumber>()
+        cache.countLimit = 128
+        return cache
+    }()
+    private var projectIconInkCenterY: CGFloat = 6
+    private var whereIconInkCenterY: CGFloat = 6
+
+    private static func metadataSymbol(_ name: String, pointSize: CGFloat? = nil) -> NSImage? {
+        let key = "\(name):\(pointSize ?? 0)"
+        if let image = metadataSymbols[key] { return image }
+        guard var image = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
+        if let pointSize { image = image.withSymbolConfiguration(.init(pointSize: pointSize, weight: .medium)) ?? image }
+        image.isTemplate = true
+        metadataSymbols[key] = image
+        return image
+    }
+
+    /// NSImageView's baseline includes symbol padding, so equal baselines can
+    /// still put the visible glyphs on different lines. Measure the native cell
+    /// once per image, when it changes; layout only uses the cached offset.
+    private static func metadataInkCenter(of image: NSImage?) -> CGFloat {
+        guard let image else { return metadataIconSide / 2 }
+        if let cached = metadataInkCenters.object(forKey: image) { return CGFloat(cached.doubleValue) }
+        let view = NSImageView(frame: NSRect(x: 0, y: 0, width: metadataIconSide, height: metadataIconSide))
+        view.imageScaling = .scaleProportionallyDown
+        view.image = image
+        let rendered = NSImage(size: view.bounds.size, flipped: false) { rect in
+            view.cell?.draw(withFrame: rect, in: view)
+            return true
+        }
+        let center = (InkAlignedSymbol.measureInk(of: rendered)?.midY ?? 0.5) * metadataIconSide
+        metadataInkCenters.setObject(NSNumber(value: Double(center)), forKey: image)
+        return center
+    }
     private let stateLabel = NSTextField(labelWithString: "")
     private let titleLabel = NSTextField(labelWithString: "")
     private let branchLabel = NSTextField(labelWithString: "")
@@ -702,14 +739,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         placementLabel.stringValue = placement
         whereLabel.stringValue = row.whereMarker?.text ?? ""
         whereIcon.image = row.whereMarker.flatMap {
-            NSImage(systemSymbolName: $0.symbol, accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: Typography.style(for: .caption).size - 1, weight: .medium))
+            Self.metadataSymbol($0.symbol, pointSize: Typography.style(for: .caption).size - 1)
         }
-        whereIcon.image?.isTemplate = true
+        whereIconInkCenterY = Self.metadataInkCenter(of: whereIcon.image)
         for view in [whereDot, whereIcon, whereLabel] as [NSView] { view.isHidden = row.whereMarker == nil }
         projectIcon.image = !placement.isEmpty
-            ? NSImage(systemSymbolName: "folder", accessibilityDescription: nil) : nil
-        projectIcon.image?.isTemplate = true
+            ? Self.metadataSymbol("folder") : nil
+        projectIconInkCenterY = Self.metadataInkCenter(of: projectIcon.image)
         titleLabel.stringValue = row.displayTitle
         let rollupSummary: String?
         if disclosure == .collapsed {
@@ -1211,7 +1247,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // the throbber directly on top of the folder/favicon.
         var projectIconFrame: NSRect?
         if projectIcon.image != nil {
-            let side: CGFloat = 12
+            let side = Self.metadataIconSide
             projectIconFrame = NSRect(
                 x: placementLeft, y: bandY + (proposal.bandTop - side) / 2,
                 width: side, height: side)
@@ -1227,7 +1263,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // The where marker follows the project name at its natural width, and
         // the name gives way first: `· cmux` is what says the row is elsewhere.
         let markerGap: CGFloat = 4
-        let markerIconSide: CGFloat = 12
+        let markerIconSide = Self.metadataIconSide
         let markerWidth = whereLabel.isHidden ? 0
             : Self.width(of: whereDot) + markerGap + markerIconSide + 3 + Self.width(of: whereLabel)
         let placementWidth = whereLabel.isHidden ? placementRoom
@@ -1261,6 +1297,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 + placementLabel.firstBaselineOffsetFromTop
                 - projectIcon.firstBaselineOffsetFromTop
             projectIcon.frame = inCard(iconFrame)
+        }
+        if !whereIcon.isHidden {
+            let target = projectIcon.image != nil
+                ? projectIcon.frame.maxY - projectIconInkCenterY
+                : whereLabel.frame.maxY - whereLabel.firstBaselineOffsetFromTop + (whereLabel.font?.capHeight ?? 0) / 2
+            whereIcon.frame.origin.y += target - (whereIcon.frame.maxY - whereIconInkCenterY)
         }
         stateLabel.frame = inCard(NSRect(
             x: metaRight - stateWidth, y: bandY,
@@ -1471,6 +1513,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     func setProjectIcon(_ image: NSImage?, for rowID: UUID) {
         guard shown?.row.id == rowID, let image else { return }
         projectIcon.image = image
+        projectIconInkCenterY = Self.metadataInkCenter(of: image)
         projectIcon.contentTintColor = nil
         needsLayout = true
     }
@@ -1492,9 +1535,18 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
     /// The where marker as drawn: its text, and whether it sits clear of the
     /// project name on the same line.
-    var qaWhereMarker: (text: String, frame: NSRect, placementFrame: NSRect)? {
+    var qaWhereMarker: (text: String, frame: NSRect, placementFrame: NSRect, iconInkCenterDelta: CGFloat, projectIconBaselineDelta: CGFloat)? {
         guard !whereLabel.isHidden else { return nil }
-        return (whereLabel.stringValue, whereLabel.frame, placementLabel.frame)
+        func inkCenter(_ view: NSImageView) -> CGFloat {
+            let rendered = NSImage(size: view.bounds.size, flipped: false) { rect in
+                view.cell?.draw(withFrame: rect, in: view)
+                return true
+            }
+            guard let ink = InkAlignedSymbol.measureInk(of: rendered) else { return .nan }
+            return view.frame.maxY - ink.midY * view.bounds.height
+        }
+        return (whereLabel.stringValue, whereLabel.frame, placementLabel.frame,
+                inkCenter(whereIcon) - inkCenter(projectIcon), qaProjectBaselineDeltaForQA)
     }
     /// Presses a shown external action through its own target/action.
     func clickExternalActionForQA(_ action: InboxExternalSessionAction) -> Bool {

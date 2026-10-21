@@ -2,6 +2,7 @@ import Foundation
 
 public enum OnboardingMilestone: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
     case terminalAdded
+    case claudeSessionOpened
     case toolbarDragged
     case commandCenterOpened
     case quickJumpUsed
@@ -13,6 +14,7 @@ public enum OnboardingMilestone: String, Codable, CaseIterable, Equatable, Hasha
 }
 
 public enum GettingStartedTask: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
+    case openClaudeSession
     case secondAgent
     case addTerminal
     case dragToolbar
@@ -21,7 +23,7 @@ public enum GettingStartedTask: String, Codable, CaseIterable, Equatable, Hashab
     case personalizeZone
 
     /// Legacy task values remain decodable; new profiles show the launch checklist.
-    public static let launchTasks: [GettingStartedTask] = [.secondAgent, .addTerminal, .openCommandCenter, .dragToolbar]
+    public static let launchTasks: [GettingStartedTask] = [.openClaudeSession, .secondAgent, .addTerminal, .openCommandCenter, .dragToolbar]
 }
 
 public enum StarterPhase: String, Codable, Equatable, Sendable {
@@ -109,6 +111,7 @@ public struct OnboardingProgress: Codable, Equatable, Sendable {
 
     public func isTaskComplete(_ task: GettingStartedTask) -> Bool {
         switch task {
+        case .openClaudeSession: return milestones.contains(.claudeSessionOpened)
         case .secondAgent: return startedAgentIDs.count >= 2
         case .addTerminal: return milestones.contains(.terminalAdded)
         case .dragToolbar: return milestones.contains(.toolbarDragged)

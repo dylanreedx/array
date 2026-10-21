@@ -2321,18 +2321,6 @@ enum ContinuumApp {
             }
         }
 
-        if CommandLine.arguments.contains("--onboarding-panel-check") {
-            do {
-                _ = NSApplication.shared
-                try OnboardingPanel.runSelfCheck()
-                print("ContinuumRevivedOnboardingPanelChecks passed")
-                Foundation.exit(0)
-            } catch {
-                fputs("FAIL: \(error)\n", stderr)
-                Foundation.exit(1)
-            }
-        }
-
         if CommandLine.arguments.contains("--browser-url-focus-check") {
             do {
                 _ = NSApplication.shared
@@ -4126,6 +4114,20 @@ enum ContinuumApp {
         guard ghosttyInitStatus == GHOSTTY_SUCCESS else {
             fputs("ghostty_init failed\n", stderr)
             Foundation.exit(1)
+        }
+
+        // The onboarding witness exercises its real Terminal-view action and
+        // therefore needs the same Ghostty bootstrap as the face checks below.
+        if CommandLine.arguments.contains("--onboarding-panel-check") {
+            do {
+                _ = NSApplication.shared
+                try OnboardingPanel.runSelfCheck()
+                print("ContinuumRevivedOnboardingPanelChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
         }
 
         // `.plans/79`: the Array | Terminal switch, clicked for real at every
@@ -10343,11 +10345,144 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         refreshGettingStartedTasks()
     }
 
+    private var onboardingClaudeAgentID: AgentID?
+    private let onboardingSessionPicker = ChoicePopoverController()
+
+    private var onboardingClaudeSessions: [ExternalAgentSession] {
+        let owned = Set(sessionOwners().keys)
+        return externalSessionMonitor.snapshot.sessions.filter {
+            $0.provider == .claude && $0.transcriptURL != nil
+                && ExternalSessionRows.isListed($0, ownedSessionIds: owned)
+        }.sorted {
+            let left = $0.title ?? $0.cwd
+            let right = $1.title ?? $1.cwd
+            let order = left.localizedCaseInsensitiveCompare(right)
+            return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+        }
+    }
+
+    private func configureGettingStartedActions(_ view: CanvasGettingStartedView) {
+        view.onOpenClaudeSession = { [weak self] in self?.openClaudeSessionForOnboarding() }
+        view.onAddAgent = { [weak self] in _ = self?.spawnManagedAgentFromPalette() }
+        view.onAddTerminal = { [weak self] in _ = self?.spawnTerminalFromProfile("shell", trigger: "onboarding:add-terminal") }
+        view.onOpenCommandCenter = { [weak self] in self?.openProfilePalette() }
+        view.onShowZoneActions = { [weak self] in self?.openProfilePalette(initialQuery: "This Zone") }
+        view.onSkipTask = { [weak self] task in self?.skipGettingStartedTask(task) }
+    }
+
+    private func openClaudeSessionForOnboarding() {
+        guard externalSessionMonitor.hasDiscovered else { return }
+        let sessions = onboardingClaudeSessions
+        guard !sessions.isEmpty else {
+            startClaudeSessionForOnboarding()
+            return
+        }
+        canvasGettingStartedView?.layoutSubtreeIfNeeded()
+        guard let anchor = canvasGettingStartedView?.claudeSessionActionAnchor else { return }
+        var items = [ChoiceItem(
+            id: "new-claude-session", title: "Start a new Claude Code session",
+            detail: "New chat in Array · tmux optional", icon: .system("plus"))]
+        let now = Date()
+        let timestampFormatter = DateFormatter()
+        timestampFormatter.dateStyle = .medium
+        timestampFormatter.timeStyle = .long
+        for session in sessions {
+            let title = (session.title ?? "Claude session").replacingOccurrences(of: "\n", with: " ")
+            let project = (session.cwd as NSString).lastPathComponent
+            let state: String
+            switch session.status {
+            case .busy: state = "Working"
+            case .waiting: state = "Needs input"
+            case .idle: state = "Idle"
+            case .unknown: state = "Open"
+            }
+            let activity: String
+            if session.status == .busy {
+                activity = "Active now"
+            } else if let last = session.lastActivity {
+                activity = now.timeIntervalSince(last) < 60
+                    ? "Last active just now"
+                    : "Last active \(AgentBackgroundJobText.uptime(since: last, now: now)) ago"
+            } else {
+                activity = "Activity time unknown"
+            }
+            let timing = "Opened: \(timestampFormatter.string(from: session.startedAt))\n"
+                + "Last activity: \(session.lastActivity.map { timestampFormatter.string(from: $0) } ?? "Unknown")\n"
+                + "Activity reflects Claude’s latest status update. Opened may be a resumed conversation."
+            items.append(ChoiceItem(
+                id: session.id, title: title,
+                detail: "\(activity) · \(project) · \(state) · \(externalHostName(of: session))",
+                icon: .system("bubble.left.and.bubble.right"), toolTip: timing))
+        }
+        onboardingSessionPicker.present(
+            items: items, selectedID: nil, presentation: .completions,
+            layout: .completion(.init(
+                breadcrumb: "Open a Claude Code session",
+                footer: "Existing sessions open read-only · Esc Cancel",
+                maximumVisibleRows: 8, minimumWidth: 420, maximumWidth: 520,
+                headerSymbol: "bubble.left.and.bubble.right",
+                headerAccessibilityLabel: "Open a Claude Code session")),
+            anchor: anchor.bounds, relativeTo: anchor,
+            placementFrame: anchor.window?.frame,
+            accessibilityLabel: "Claude Code sessions",
+            onSelection: { [weak self] item in
+                if item.id == "new-claude-session" { self?.startClaudeSessionForOnboarding() }
+                else { self?.chooseOnboardingClaudeSession(item.id) }
+            }, focusReturnView: anchor)
+    }
+
+    private func chooseOnboardingClaudeSession(_ key: String) {
+        guard let session = onboardingClaudeSessions.first(where: { $0.id == key }) else {
+            setWorkspaceManagementMessage("That session is no longer available in this list. Choose another session or start a new one.", action: nil)
+            refreshGettingStartedTasks()
+            return
+        }
+        guard let id = watchExternalSession(session), agentSupervisor.records[id]?.tileId != nil else { return }
+        completeClaudeSessionOnboarding(id)
+    }
+
+    private func startClaudeSessionForOnboarding() {
+        guard resolvedCreationScope() != nil else {
+            requestCreationScope { [weak self] in self?.startClaudeSessionForOnboarding() }
+            return
+        }
+        let before = Set(agentSupervisor.records.keys)
+        guard spawnManagedAgentForHarness(.claudeCode),
+              let id = Set(agentSupervisor.records.keys).subtracting(before).first,
+              agentSupervisor.records[id]?.tileId != nil else { return }
+        completeClaudeSessionOnboarding(id)
+    }
+
+    private func completeClaudeSessionOnboarding(_ id: AgentID) {
+        onboardingClaudeAgentID = id
+        demonstrateOnboarding(.claudeSessionOpened)
+        offerClaudeSessionEducation(id)
+    }
+
+    /// The same nonblocking message surface used for other workspace guidance.
+    /// A watched conversation gets ownership guidance; an owned one can try the
+    /// real face action. No process is started merely by displaying this hint.
+    func offerClaudeSessionEducation(_ id: AgentID) {
+        guard onboardingClaudeAgentID == id, let record = agentSupervisor.records[id] else { return }
+        if record.externalSession != nil {
+            setWorkspaceManagementMessage("Opened read-only. Move here continues after the original closes; Copy starts a separate conversation with its history.", kind: .success, action: nil)
+        } else {
+            setWorkspaceManagementMessage("Chat and Terminal share this conversation. tmux is optional; it keeps Terminal running when Array quits.", kind: .success, action: ("Try Terminal", { [weak self] in
+                guard let self, let tileID = self.agentSupervisor.records[id]?.tileId,
+                      self.revealAgentFromInbox(id.rawValue),
+                      let view = self.canvasView?.tileView(for: tileID) as? ManagedAgentTileNSView else { return }
+                if view.face == .array { _ = view.toggleFace() }
+            }))
+        }
+    }
+
     private func refreshGettingStartedTasks() {
         canvasGettingStartedView?.reload(
             progress: onboardingProgressStore.load(),
             commandCenterShortcut: resolvedShortcutDisplay(commandID: "app.commandCenter"),
-            navKeymap: navKeymap
+            navKeymap: navKeymap,
+            claudeSessionCount: onboardingClaudeSessions.count,
+            claudeDiscoveryComplete: externalSessionMonitor.hasDiscovered
         )
     }
 
@@ -11457,12 +11592,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         shortcutRail.onOpenCommandCenter = { [weak self] in self?.openProfilePalette() }
         shortcutRail.onOpenKeybindings = { [weak self] in self?.openKeybindingsSettings() }
         let gettingStarted = CanvasGettingStartedView(frame: .zero)
-        gettingStarted.onAddAgent = { [weak self] in _ = self?.spawnManagedAgentFromPalette() }
-        gettingStarted.onAddTerminal = { [weak self] in _ = self?.spawnTerminalFromProfile("shell", trigger: "onboarding:add-terminal") }
-        gettingStarted.onOpenCommandCenter = { [weak self] in self?.openProfilePalette() }
-        gettingStarted.onShowZoneActions = { [weak self] in self?.openProfilePalette(initialQuery: "This Zone") }
-        gettingStarted.onSkipTask = { [weak self] task in self?.skipGettingStartedTask(task) }
-
+        configureGettingStartedActions(gettingStarted)
         canvasView.translatesAutoresizingMaskIntoConstraints = false
         contentPane.addSubview(canvasView)
         shortcutRail.translatesAutoresizingMaskIntoConstraints = false
@@ -11689,6 +11819,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.reconcileExternalSessions()
             self?.pushExternalSessionRows()
             self?.refreshShellTileSessions()
+            self?.refreshGettingStartedTasks()
         }
         sidebar.configureInboxRename { [weak self] agentId, name in
             self?.renameAgentFromInbox(agentId, to: name)
@@ -20890,6 +21021,253 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             FileHandle.standardError.write(Data("snapshot write failed: \(error)\n".utf8))
             return false
         }
+    }
+
+    static func runClaudeSessionOnboardingSelfCheck() throws {
+        func expect(_ value: Bool, _ message: String) throws {
+            if !value { throw NSError(domain: "ClaudeOnboardingCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+        }
+        let view = CanvasGettingStartedView(frame: .zero)
+        let pending = OnboardingProgress(starter: StarterLayoutProgress(phase: .complete))
+        view.reload(progress: pending, commandCenterShortcut: "⌘K", navKeymap: .default)
+        func labels(_ root: NSView) -> [String] {
+            (root as? NSTextField).map { [$0.stringValue] } ?? root.subviews.flatMap(labels)
+        }
+        try expect(labels(view).contains("Open a Claude Code session in Array"),
+                   "Getting Started must offer opening an existing or new Claude session")
+        let suite = "array.qa.claude-onboarding.\(UUID().uuidString)"
+        guard let defaults = QAIsolatedDefaults(isolatedSuiteName: suite) else { throw CocoaError(.fileReadUnknown) }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(false, forKey: TmuxPersistenceConfig.enabledKey)
+        let fixture = try WorkspaceAPIChecks.makeFixture(settings: defaults)
+        defer { fixture.tearDown() }
+        let app = fixture.delegate
+        let canvasHost = NSWindow(contentRect: fixture.canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        canvasHost.contentView = fixture.canvas
+        canvasHost.orderFrontOffscreenForChecks()
+        app.window = canvasHost
+        fixture.canvas.addSubview(view)
+        view.frame = NSRect(x: 16, y: 16, width: 356, height: view.intrinsicContentSize.height)
+        view.layoutSubtreeIfNeeded()
+        defer { app.onboardingSessionPicker.dismiss() }
+        defer { canvasHost.orderOut(nil) }
+        defer { app.agentSupervisor.stopAll() }
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
+        guard let model = AgentCatalogQAFixture.claude.seedModel else { throw CocoaError(.fileReadUnknown) }
+        let unpin = AgentCatalogQAFixture.pinAmbientSelection(harness: .pi, model: "openai-codex/gpt-5.6-sol")
+        defer { unpin() }
+        app.onboardingProgressStore = OnboardingProgressStore(defaults: defaults)
+        app.onboardingProgressStore.save(pending)
+        app.canvasGettingStartedView = view
+        app.configureGettingStartedActions(view)
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 320, height: 900))
+        app.qaInstallWorkspaceSidebar(sidebar)
+        app.refreshGettingStartedTasks()
+        let before = Set(app.agentSupervisor.records.keys)
+        view.performClaudeSessionActionForQA()
+        try expect(Set(app.agentSupervisor.records.keys) == before,
+                   "a click before discovery completes must not invent a new session")
+        let transcript = fixture.tempRoot.appendingPathComponent("onboarding-history.jsonl")
+        try Data("{\"type\":\"user\",\"uuid\":\"u1\",\"message\":{\"role\":\"user\",\"content\":\"Existing work\"}}\n".utf8).write(to: transcript)
+        let outside = fixture.tempRoot.appendingPathComponent("NotRegistered", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let now = Date()
+        func session(_ id: String, cwd: URL) -> ExternalAgentSession {
+            ExternalAgentSession(provider: .claude, sessionId: id, pid: 424242,
+                cwd: cwd.path, title: "Idle work \(id)", status: .idle,
+                startedAt: now.addingTimeInterval(-4 * 86400), lastActivity: now.addingTimeInterval(-3 * 86400),
+                host: .app("Terminal.app"), transcriptURL: transcript)
+        }
+        let registered = session("registered", cwd: fixture.pbRoot)
+        let unknown = session("outside", cwd: outside)
+        let elsewhere = session("elsewhere", cwd: fixture.pcRoot)
+        let snapshot = ExternalSessionSnapshot(sessions: [registered, unknown, elsewhere])
+        app.externalSessionMonitor.publish(snapshot)
+        try expect(labels(view).contains(where: { $0.contains("3 open sessions found") }),
+                   "discovery must update the live onboarding row with idle sessions across all projects")
+        var chooserOpenCount = 0
+        func openChooser() throws -> ChoiceListView {
+            chooserOpenCount += 1
+            view.performClaudeSessionActionForQA()
+            guard app.onboardingSessionPicker.isPresented,
+                  let list = app.onboardingSessionPicker.listView else {
+                throw NSError(domain: "ClaudeOnboardingCheck", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                    "the session chooser must render Array's shared choice popover instead of a stock menu (attempt \(chooserOpenCount), list \(app.onboardingSessionPicker.listView?.items.count ?? -1), anchor attached \(view.claudeSessionActionAnchor?.window != nil), dismissal \(app.onboardingSessionPicker.qaLastSelfDismissal ?? "none"))"])
+            }
+            return list
+        }
+        let list = try openChooser()
+        try expect(list.items.filter { $0.id != "new-claude-session" }.count == 3,
+                   "the chooser must include idle sessions outside this workspace and unregistered folders")
+        try expect(list.items.first?.id == "new-claude-session"
+                   && list.items.dropFirst().allSatisfy { $0.title.hasPrefix("Idle work") && $0.detail?.contains("Idle") == true },
+                   "the Array chooser must keep Start first and separate session titles from location/status details")
+        try expect(app.onboardingSessionPicker.surfaceView is CompletionPopoverContentView
+                   && app.onboardingSessionPicker.qaCompletionBreadcrumb == "Open a Claude Code session"
+                   && list.accessibilityLabel() == "Claude Code sessions",
+                   "the chooser must use the shared token-painted surface with its own heading and accessibility label")
+        let accessibleRows = (list.accessibilityChildren() ?? []).compactMap { $0 as? NSView }
+        try expect(list.items.dropFirst().allSatisfy { $0.detail?.hasPrefix("Last active 3d ago") == true }
+                   && accessibleRows.dropFirst().allSatisfy {
+                       $0.toolTip?.contains("Opened:") == true
+                           && $0.accessibilityHelp()?.contains("Last activity:") == true
+                   }, "session rows must show activity age and expose exact opened/activity dates on hover and to accessibility")
+        try expect(list.isAccessibilityElement() && accessibleRows.count == list.items.count
+                   && accessibleRows.allSatisfy { $0.isAccessibilityElement() && $0.accessibilityRole() == .row },
+                   "the shared chooser must expose its list and every actionable row to accessibility clients")
+        try expect(!app.onboardingProgressStore.load().isTaskComplete(.openClaudeSession),
+                   "showing the chooser must not complete the task")
+        _ = app.onboardingSessionPicker.perform(.cancel)
+        try expect(!app.onboardingSessionPicker.isPresented && !app.onboardingProgressStore.load().isTaskComplete(.openClaudeSession),
+                   "Escape must dismiss the Array chooser without completing onboarding")
+        var working = registered
+        working.status = .busy
+        var undated = unknown
+        undated.lastActivity = nil
+        var clockSkewed = elsewhere
+        clockSkewed.lastActivity = now.addingTimeInterval(120)
+        app.externalSessionMonitor.publish(.init(sessions: [working, undated, clockSkewed]))
+        let timingList = try openChooser()
+        try expect(timingList.items.first(where: { $0.id == working.id })?.detail?.hasPrefix("Active now") == true
+                   && timingList.items.first(where: { $0.id == undated.id })?.detail?.hasPrefix("Activity time unknown") == true
+                   && timingList.items.first(where: { $0.id == clockSkewed.id })?.detail?.hasPrefix("Last active just now") == true,
+                   "working, missing timestamps and clock skew must not show misleading old or negative activity ages")
+        let undatedRow = (timingList.accessibilityChildren() ?? []).compactMap { $0 as? NSView }
+            .first { $0.accessibilityLabel()?.hasPrefix(undated.title ?? "") == true }
+        try expect(undatedRow?.toolTip?.contains("Last activity: Unknown") == true
+                   && undatedRow?.accessibilityHelp()?.contains("Opened:") == true,
+                   "unknown activity must remain distinct from the known opened date")
+        _ = app.onboardingSessionPicker.perform(.cancel)
+        let many = ExternalSessionSnapshot(sessions: snapshot.sessions + (0..<10).map {
+            session("extra-\($0)", cwd: fixture.pbRoot)
+        })
+        app.externalSessionMonitor.publish(many)
+        let scrollingList = try openChooser()
+        try expect((app.onboardingSessionPicker.qaCompletionDocumentHeight ?? 0)
+                   > (app.onboardingSessionPicker.qaCompletionViewportHeight ?? .infinity),
+                   "a long session list must scroll inside a bounded Array popover")
+        try expect(abs((app.onboardingSessionPicker.qaCompletionViewportHeight ?? 0)
+                       - scrollingList.layoutRowHeight * 8) < 0.5,
+                   "the chooser must show eight whole rows, without a clipped title against its footer")
+        _ = app.onboardingSessionPicker.perform(.last)
+        try expect(scrollingList.focusedID == scrollingList.items.last?.id && scrollingList.qaFocusedRowIsVisible,
+                   "keyboard navigation must scroll the last session into view")
+        _ = app.onboardingSessionPicker.perform(.first)
+        try expect(scrollingList.focusedID == "new-claude-session" && scrollingList.qaFocusedRowIsVisible,
+                   "keyboard navigation must return to the visible new-session action")
+        let chooserArtifacts = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs/array-session-chooser")
+        try FileManager.default.createDirectory(at: chooserArtifacts, withIntermediateDirectories: true)
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            guard let surface = app.onboardingSessionPicker.surfaceView else { throw CocoaError(.fileReadUnknown) }
+            app.onboardingSessionPicker.panel?.appearance = NSAppearance(named: appearance)
+            (surface as? TokenThemed)?.applyTokens()
+            surface.layoutSubtreeIfNeeded()
+            guard let rep = surface.bitmapImageRepForCachingDisplay(in: surface.bounds) else { throw CocoaError(.fileReadUnknown) }
+            surface.cacheDisplay(in: surface.bounds, to: rep)
+            try rep.representation(using: .png, properties: [:])?.write(to: chooserArtifacts.appendingPathComponent("chooser-\(name).png"))
+        }
+        _ = app.onboardingSessionPicker.perform(.cancel)
+        app.externalSessionMonitor.publish(snapshot)
+        let outsideList = try openChooser()
+        app.externalSessionFolderChoiceForQA = { _ in false }
+        outsideList.choose(id: unknown.id)
+        try expect(Set(app.agentSupervisor.records.keys) == before && !app.onboardingProgressStore.load().isTaskComplete(.openClaudeSession),
+                   "cancelling the folder request must create nothing and leave onboarding pending")
+        let staleList = try openChooser()
+        app.externalSessionMonitor.publish(.empty)
+        staleList.choose(id: registered.id)
+        try expect(Set(app.agentSupervisor.records.keys) == before && !app.onboardingProgressStore.load().isTaskComplete(.openClaudeSession),
+                   "a session that closed while the menu was open must not be adopted or complete onboarding")
+        app.externalSessionMonitor.publish(snapshot)
+        let watchList = try openChooser()
+        watchList.choose(id: registered.id)
+        let watches = Set(app.agentSupervisor.records.keys).subtracting(before)
+        try expect(watches.count == 1 && app.onboardingProgressStore.load().isTaskComplete(.openClaudeSession),
+                   "opening a real watch tile must complete the onboarding task")
+        guard let watchID = watches.first, let watched = app.agentSupervisor.records[watchID] else { throw CocoaError(.fileReadUnknown) }
+        try expect(watched.externalSession?.mode == .watching && watched.externalSession?.sessionId == registered.sessionId
+                   && watched.tileId.flatMap { fixture.canvas.tileView(for: $0) as? ManagedAgentTileNSView } != nil,
+                   "the existing-session path must open the production read-only watch tile")
+        try expect(app.workspaceManagementMessage?.contains("Opened read-only") == true,
+                   "the watch path must explain Move here and Copy")
+        app.onboardingProgressStore.save(pending)
+        app.refreshGettingStartedTasks()
+        let beforePickerStart = Set(app.agentSupervisor.records.keys)
+        _ = try openChooser()
+        try expect(app.onboardingSessionPicker.perform(.accept),
+                   "Return must accept the focused new-session action")
+        let pickerAdded = Set(app.agentSupervisor.records.keys).subtracting(beforePickerStart)
+        try expect(pickerAdded.count == 1
+                   && pickerAdded.first.flatMap { app.agentSupervisor.records[$0]?.harness } == .claudeCode
+                   && app.onboardingProgressStore.load().isTaskComplete(.openClaudeSession),
+                   "the chooser's new-session action must create a real Claude agent and complete onboarding")
+        // No session exists: the same real button explicitly creates Claude,
+        // despite Pi being the ambient harness and tmux being disabled.
+        app.onboardingProgressStore.save(pending)
+        app.externalSessionMonitor.publish(.empty)
+        let beforeNew = Set(app.agentSupervisor.records.keys)
+        app.refreshGettingStartedTasks()
+        try expect(labels(view).contains(where: { $0.contains("Start a session here") && $0.contains("tmux is optional") }),
+                   "the empty path must explain starting a new session without tmux")
+        view.performClaudeSessionActionForQA()
+        let added = Set(app.agentSupervisor.records.keys).subtracting(beforeNew)
+        try expect(added.count == 1 && app.onboardingProgressStore.load().isTaskComplete(.openClaudeSession),
+                   "Start must create exactly one real agent and complete onboarding")
+        guard let id = added.first, let record = app.agentSupervisor.records[id],
+              let tileID = record.tileId, let tile = fixture.canvas.tileView(for: tileID) as? ManagedAgentTileNSView else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        try expect(record.harness == .claudeCode && record.externalSession == nil && record.model == model && tile.face == .array,
+                   "the new path must create an owned Claude tile in chat using its live catalogue, without changing the ambient harness")
+        try expect(defaults.bool(forKey: TmuxPersistenceConfig.enabledKey) == false
+                   && app.workspaceManagementMessage?.contains("Chat and Terminal share this conversation") == true,
+                   "the new path must work without tmux and offer the Terminal-view introduction")
+        let ghostty = try GhosttyRuntimeContext()
+        defer { tile.prepareForRemovalFromScene(); ghostty.shutdown() }
+        let bin = fixture.tempRoot.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let command = try AgentFaceChecks.installWaitingClaude(in: bin)
+        var terminal = AgentTerminalFaceEnvironment(ghostty: ghostty, tmuxPath: nil, defaults: defaults, claudeHome: fixture.tempRoot)
+        terminal.claudeCommand = { command }
+        terminal.confirm = { _, _ in true }
+        tile.terminalFaceEnvironment = terminal
+        try expect(app.qaPerformWorkspaceNotificationAction() == "Try Terminal" && tile.face == .terminal,
+                   "the onboarding introduction's real action must open this agent's Terminal view with tmux off")
+        _ = tile.toggleFace()
+        let deadline = Date().addingTimeInterval(5)
+        while tile.face != .array && Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        try expect(tile.face == .array, "the introduced Terminal view must return to the same chat")
+        let artifact = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs/claude-onboarding")
+        try FileManager.default.createDirectory(at: artifact, withIntermediateDirectories: true)
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 390, height: 620), styleMask: [.borderless], backing: .buffered, defer: false)
+        host.contentView?.addSubview(view)
+        view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: host.contentView!.leadingAnchor, constant: 12),
+            view.topAnchor.constraint(equalTo: host.contentView!.topAnchor, constant: -12)
+        ])
+        host.orderFrontOffscreenForChecks()
+        defer { host.orderOut(nil) }
+        for count in [0, 3] {
+            view.reload(progress: pending, commandCenterShortcut: "⌘K", navKeymap: .default, claudeSessionCount: count)
+            host.contentView?.layoutSubtreeIfNeeded()
+            func buttons(_ root: NSView) -> [NSButton] {
+                (root as? NSButton).map { [$0] } ?? root.subviews.flatMap(buttons)
+            }
+            for button in buttons(view) where !button.isHiddenOrHasHiddenAncestor {
+                let frame = button.convert(button.bounds, to: view)
+                try expect(frame.minX >= 0 && frame.maxX <= view.bounds.width - 10,
+                           "every onboarding action, including Choose and Skip, must remain inside the card: \(button.title) \(frame)")
+            }
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw CocoaError(.fileReadUnknown) }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try rep.representation(using: .png, properties: [:])?.write(to: artifact.appendingPathComponent("getting-started-\(count).png"))
+        }
+        print("Claude onboarding: scanning, live discovery, idle cross-project chooser, cancellation, stale selection, read-only watch, and new Claude/chat with tmux off passed")
     }
 
     static func runFreshInstallSelfCheck() throws {

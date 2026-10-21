@@ -2903,7 +2903,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     /// The where marker drawn on row `id`, read off its cell.
-    func whereMarkerForQA(id: UUID) -> (text: String, frame: NSRect, placementFrame: NSRect)? {
+    func whereMarkerForQA(id: UUID) -> (text: String, frame: NSRect, placementFrame: NSRect, iconInkCenterDelta: CGFloat, projectIconBaselineDelta: CGFloat)? {
         guard let tableRow = tableRow(forAgentId: id),
               let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
         else { return nil }

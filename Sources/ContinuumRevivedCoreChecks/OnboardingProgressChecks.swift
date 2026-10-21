@@ -25,8 +25,11 @@ func runOnboardingProgressChecks() throws {
     expect(progress.isTaskComplete(.secondAgent), "two distinct agents really starting completes second agent task")
     progress.demonstrate(.terminalAdded)
     progress.demonstrate(.toolbarDragged)
-    expect(!progress.hasPendingGettingStartedTasks, "new real creation, command and drag evidence resolves launch checklist")
-    expect(GettingStartedTask.launchTasks == [.secondAgent, .addTerminal, .openCommandCenter, .dragToolbar], "launch checklist contains the requested four tasks")
+    expect(!progress.isTaskComplete(.openClaudeSession), "unrelated creation and navigation do not invent opening a Claude session")
+    expect(progress.hasPendingGettingStartedTasks, "the Claude session task remains pending until a real session opens")
+    progress.demonstrate(.claudeSessionOpened)
+    expect(!progress.hasPendingGettingStartedTasks, "real session opening, creation, command and drag evidence resolves launch checklist")
+    expect(GettingStartedTask.launchTasks == [.openClaudeSession, .secondAgent, .addTerminal, .openCommandCenter, .dragToolbar], "launch checklist contains the Claude session and existing launch tasks")
 
     let firstProject = UUID()
     let zone = UUID()

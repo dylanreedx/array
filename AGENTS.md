@@ -98,6 +98,16 @@ in checks only; a live app whose probe found nothing offers nothing.
 - **KNOWN-RED** — a documented pre-existing failing gate (see go-live doc);
   never bisect it as a regression.
 
+## Array UI components
+
+New and changed features must use Array's existing styled components, typography,
+spacing, colours and interaction patterns. Dropdowns and in-app choice menus use
+`ChoiceButton` / `ChoicePopoverController` / `ChoiceListView`; do not introduce
+stock `NSMenu`, `NSPopUpButton` or default SwiftUI picker styling for them. Reuse
+or extend the shared component before creating a feature-specific control.
+Verify the rendered result in light and dark appearances before presenting a
+preview. Dylan's explicit design direction in this chat governs this rule.
+
 ## Where code lives
 
 - `Sources/ContinuumRevived/` — the app target. `App/` (AppDelegate,

@@ -243,8 +243,8 @@ func runExternalSessionDiscoveryChecks() {
     expect(changed.claudeUnreadable && !changed.sessions.contains { $0.provider == .claude },
            "session files that no longer parse hide Claude's sessions rather than guess; got \(changed)")
 
-    // Rows: Array-owned sessions are never rows, and the default scope shows only
-    // live sessions in this workspace's projects.
+    // Rows: Array-owned sessions are never rows, and location scopes retain
+    // idle sessions in this workspace's projects.
     let projectId = UUID(uuidString: "CCCCCCCC-0000-4000-8000-0000000000C1")!
     let workspaceId = UUID(uuidString: "CCCCCCCC-0000-4000-8000-0000000000C2")!
     let context = ExternalSessionRows.Context(
@@ -273,8 +273,12 @@ func runExternalSessionDiscoveryChecks() {
            "a Codex app thread reads 'Codex app · 4m ago' and offers no Copy; got \(String(describing: row("t-app")?.whereMarker))")
     expect(row("s-cmux")?.externalSession?.canCopy == true, "a Claude session can be copied")
     let defaultScope = InboxScope.filter(rows: rows, scope: .currentWorkspace, currentWorkspaceId: workspaceId)
-    expect(defaultScope.map(\.id) == [row("s-cmux")!.id],
-           "the default scope lists only live sessions in this workspace's projects; got \(defaultScope.map(\.title))")
+    let workspaceSessionIds = ["s-cmux", "s-shell", "s-shared", "s-unclaimed", "s-dup", "t-app"]
+    expect(defaultScope.count == workspaceSessionIds.count
+           && Set(defaultScope.map(\.id)) == Set(workspaceSessionIds.compactMap { row($0)?.id }),
+           "the default scope retains busy and idle sessions in this workspace's projects, excluding other folders; got \(defaultScope.map(\.title))")
+    expect(InboxScope.filter(rows: rows, scope: .all).count == rows.count,
+           "All agents includes every discovered row, including idle sessions and unregistered folders")
     expect(InboxScope.filter(rows: rows, scope: .thisMac).count == rows.count,
            "This Mac lists every external session, quiet and project-less ones included")
     expect(ExternalSessionRows.rowId(forSessionKey: "claude:s-cmux") == ExternalSessionRows.rowId(forSessionKey: "claude:s-cmux")

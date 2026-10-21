@@ -42,11 +42,12 @@ struct ChoiceItem: Identifiable, Equatable {
     let icon: ChoiceIcon?
     let enabled: Bool
     let destructive: Bool
+    let toolTip: String?
 
     init(
         id: String, title: String, detail: String? = nil,
         icon: ChoiceIcon? = nil, enabled: Bool = true,
-        destructive: Bool = false
+        destructive: Bool = false, toolTip: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -54,6 +55,7 @@ struct ChoiceItem: Identifiable, Equatable {
         self.icon = icon
         self.enabled = enabled
         self.destructive = destructive
+        self.toolTip = toolTip
     }
 }
 
@@ -141,6 +143,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
         destructiveSeparator.isHidden = true
         addSubview(destructiveSeparator)
         setAccessibilityRole(.list)
+        setAccessibilityElement(true)
         setAccessibilityLabel("Choices")
         rebuildRows()
         applyTokens()
@@ -499,8 +502,11 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         addSubview(titleLabel)
         addSubview(detailLabel)
         setAccessibilityRole(.row)
+        setAccessibilityElement(true)
         setAccessibilityLabel([item.title, item.detail].compactMap { $0 }.joined(separator: ", "))
-        let help = item.destructive ? "Destructive action. \(item.detail ?? "")" : item.detail
+        toolTip = item.toolTip
+        let detailHelp = item.destructive ? "Destructive action. \(item.detail ?? "")" : item.detail
+        let help = item.toolTip.map { [detailHelp, $0].compactMap { $0 }.joined(separator: "\n") } ?? detailHelp
         setAccessibilityHelp(help)
         setAccessibilityEnabled(item.enabled)
         setAccessibilitySelected(selected)

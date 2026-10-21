@@ -172,3 +172,213 @@ The bench remains in place with uncommitted work; no Git mutation was requested.
 The shared Desktop preview was overwritten by another build during the gate
 (the replacement lacked the new setting); `scripts/dev-app.sh` was rerun after
 verification to restore this tested handoff checkout on `~/array-scratch`.
+
+## Idle-session discovery and onboarding follow-up
+
+Dylan requested findable idle sessions, onboarding for both existing-session
+and new-session users, optional tmux, and an updated preview. Review started
+from `452ef528`; this follow-up has not staged, committed, merged or pushed.
+
+- Sidebar scopes now select location independently of activity. This workspace
+  and project scopes retain their idle sessions; All agents and This Mac include
+  all discovered sessions, including folders not registered as projects.
+  Discovery still requires a live process: this does not add closed-session
+  history to the sidebar.
+- Getting Started adds “Open a Claude Code session in Array.” After discovery,
+  it offers a chooser across this Mac (including idle sessions), plus a new
+  Claude session action. With no existing sessions, Start opens a new owned
+  Claude chat using the live catalogue. Choosing existing work opens the
+  production read-only watch tile and explains Move here / Copy.
+- The owned-session introduction offers the real Try Terminal action. Chat is
+  still the initial face. Missing tmux is a neutral optional suggestion in
+  environment setup, with an explanation that persistence across Array quits
+  is its benefit; neither onboarding path requires it.
+
+Verification:
+
+- RED: the production sidebar witness rejected hidden idle sessions, and the
+  onboarding witness rejected the missing Getting Started task.
+- GREEN: sidebar location scopes and All agents; live discovery refresh;
+  chooser entries for idle sessions in another workspace and an unregistered
+  folder; cancelled folder consent; a selection that closed while the menu
+  was open; opening the real watch tile; and creating exactly one Claude
+  chat despite Pi being the ambient harness, with tmux disabled.
+- GREEN: the introduction's real Try Terminal action mounts a Ghostty face
+  with tmux disabled and returns to the same chat. Fresh-install, full face
+  flip and face-switch checks also passed in focused runs.
+- The deeper Terminal witness initially crashed because onboarding checks
+  ran before global Ghostty initialization. Moved that check after the same
+  bootstrap used by the face checks; the final onboarding, sidebar and
+  fresh-install rerun passed. An earlier compile error from an omitted enum
+  case was corrected before those runs.
+- Rendered both empty and existing-session cards. Corrected button clipping
+  by constraining the task stack and wrapping the title; final PNGs and native
+  button-bounds assertions passed.
+- `scripts/dev-app.sh` rebuilt and launched the debug Desktop preview on
+  `~/array-scratch`; its process survived the launching shell. Native UI
+  inspection found 13 open Claude sessions, including idle sessions, in the
+  actual chooser alongside Start a new Claude Code session. Opened and
+  dismissed the menu without selecting a real session. Production Array
+  remained running under its original PID.
+- In the full matrix, macOS and generic iOS Simulator builds passed. All twelve
+  film scenes passed (995 s), including both full-day scenes and the smoke scene
+  that failed in the preceding compact-toggle run. No film code or expectation
+  changed in this follow-up.
+- The matrix exposed an older core discovery assertion requiring idle sessions
+  to be hidden. Updated it to require all six known busy/idle workspace rows,
+  exclude the two outside-folder rows, and retain every row under All agents.
+  Rebuilt only `ContinuumRevivedCoreChecks`, leaving the app executable unchanged.
+  Discovery and onboarding-foundation checks both passed in the
+  independent `discovery-green/` rerun. The original matrix failure remains in
+  its log, rather than being relabelled as a pass.
+
+Final gate: **331 legs reported; 317 passed, 12 documented KNOWN-RED, and 2
+failures**, exit 1. The two failures were the old discovery assertion corrected
+above and the same absent installed-CLI captures (Claude 2.1.306, Codex 0.163.0,
+Pi 1.3.0) already reproduced at the pre-feature baseline in the earlier review.
+All 280 app checks completed, including onboarding, the updated external-session
+sidebar, face switch/flip, watch, Move here, shell handoff and fresh install,
+with only the documented app reds. Dev bundle assembly, launch probe, signature
+validation, root docs and `git diff --check` passed. No baseline or known-red
+allowlist was changed. The full matrix was not repeated after the test-only
+discovery assertion correction; its discovery and onboarding-foundation reruns
+passed independently on the final checks executable.
+
+Coverage limits: real-model context compaction was not opted into; remote-reach's
+ssh-wrapped tmux attach backend skipped because there was no controlling terminal
+for its pty; CloudKit integration skipped because CLOUDKIT_ENABLED was not set
+and this dev bundle is unprovisioned. These are unrelated to the changed flows.
+
+The final Desktop preview still contains both the new onboarding row and the
+compact Terminal-toggle setting, and remained running as PID 85990. Production
+Array remained PID 41344. The canonical checkout's final bench inventory reports
+this bench as dirty and unlanded; it was retained. Changes remain unstaged and
+uncommitted. The pre-existing untracked `-continuum.terminal.tmux.enabled/`
+directory was left untouched.
+
+Artifacts and logs: `qa-runs/claude-onboarding/`, including `red/`,
+`bootstrap-green/results.jsonl`, `getting-started-0.png`,
+`getting-started-3.png`, `preview.log` and `matrix.log`. Automated tmux checks
+use disposable namespaces, unset inherited TMUX/TMUX_PANE, and verify their
+private socket before use. No default tmux server is used by checks.
+
+## Sidebar metadata icon alignment
+
+Dylan's screenshot showed the host icon below the directory icon. The existing
+AppKit baseline readings appeared equal, so a baseline-only assertion passed
+while the rendered defect remained. A check of the native image cells' visible
+ink caught the host 2.25pt below the folder (RED in `ink-red/`).
+
+The row now aligns the host's visible glyph center to the folder/favicon's
+visible glyph center. Symbol images and their measured offsets are cached;
+measurement happens when an image changes, never inside `layout()`. Existing
+folder/text baseline alignment and metadata spacing are retained.
+
+- `swift build --product Array` passed.
+- `--external-sessions-sidebar-check` passed, including visible icon-center and
+  folder/text baseline assertions across the terminal and app-window host rows.
+- `--sidebar-screenshot-check` passed, covering the existing width and appearance
+  sweep; inspected the final production-sidebar PNG against the RED image.
+- `--sidebar-ux-check` passed, including the 220/280/320pt Aqua/Dark Aqua checks.
+- `scripts/dev-app.sh` rebuilt and launched the Desktop preview on
+  `/Users/dylan/array-scratch`; a separate tool call verified the new alignment
+  implementation in the bundle and the surviving preview process. Production
+  Array remained PID 41344.
+- The full matrix was not repeated for this macOS sidebar-only layout change;
+  the preceding full-gate result above is unchanged historical evidence.
+  No baseline was updated, and no Git staging/commit/merge/push was performed.
+
+Logs and RED/GREEN images: `qa-runs/sidebar-icon-alignment/`. All targeted checks
+used verified private tmux sockets with inherited TMUX/TMUX_PANE unset.
+
+## Array-native session chooser
+
+Dylan rejected the stock session dropdown and required Array styling/components
+for future features. Added that explicit rule to `AGENTS.md`. This chooser now
+uses the existing `ChoicePopoverController` / `ChoiceListView`, with a heading,
+session titles above quieter project/activity/host details, conversation icons,
+and Start a new Claude Code session first. Existing sessions remain read-only
+on entry, with the explanation in the fixed footer.
+
+Extended the shared popover's existing header configuration for a caller-owned
+symbol and accessibility label (file pickers keep their prior defaults). Long
+completion lists now size to whole rows rather than leaving a clipped title
+fragment against the footer. Settling Getting Started's layout before opening
+also prevents its changing discovery copy from moving the anchor and immediately
+dismissing the panel.
+
+Verification:
+
+- RED: `--onboarding-panel-check` rejected the previous stock menu, requiring
+  the actual shared Array choice surface.
+- GREEN on the final binary: onboarding-panel, choice-geometry,
+  completion-awareness, fresh-install, ui-probe, zone-cancel-menu and
+  managed-agent-page-zoom checks (all seven exit 0). The onboarding check opens
+  the real panel, exercises a 13-session scrolling list, Home/End visibility,
+  Escape dismissal, folder-consent cancellation, stale selection, opening a
+  real watch tile, Return on Start with sessions present, and the empty-list
+  Start / Try Terminal path with tmux off.
+- Captured and inspected the actual Array component in light and dark. The
+  final viewport assertion requires eight complete rows above the footer.
+- Native inspection found the shared list/row NSViews were absent from the
+  accessibility tree despite their configured roles/children. Marked those
+  views as accessibility elements and added a native-property assertion.
+  Rebuilt and repeated all seven checks successfully. In the final running
+  preview, computer-use inspection saw the named list, Start row and all 13
+  real session rows; Escape restored focus to Choose without selecting one.
+- Intermediate build failure: an internal Core host-classification helper was
+  inaccessible from the app; removed that dependency and used the shared
+  conversation icon. The first custom-panel check exposed the anchor-layout
+  dismissal above; it passed after settling layout before presentation.
+- macOS debug build, root-doc checks, colour hygiene (0 new violations), and
+  `git diff --check` passed. The full matrix/iOS build were not repeated for
+  this macOS UI change; the earlier full-gate results remain historical.
+- `scripts/dev-app.sh` rebuilt/relaunched the Desktop preview on
+  `/Users/dylan/array-scratch`; a separate tool call verified the surviving
+  process and the final code markers. Production Array remained PID 41344.
+  Final canonical bench inventory was run; the dirty/unlanded bench remains.
+  No Git staging, commit, merge, push or baseline update was performed.
+
+Artifacts: `qa-runs/array-session-chooser/`, including `red/`,
+`accessibility-green/results.jsonl`, `chooser-light.png`, `chooser-dark.png`,
+and `preview-final.log`. Targeted checks used verified disposable tmux sockets
+with inherited TMUX/TMUX_PANE unset.
+
+### Session age in the Array chooser (2026-10-21)
+
+Added an activity age at the start of each existing-session subtitle, keeping
+it visible ahead of the project/status/host metadata. Working sessions say
+`Active now`; missing activity timestamps say `Activity time unknown`; future
+timestamps from clock skew clamp to `just now`. The shared `ChoiceItem` now
+accepts an optional tooltip, exposed as both native hover text and accessibility
+help, containing exact opened/activity dates with the local timezone.
+
+Claude discovery supplies `lastActivity` from `statusUpdatedAt` (or `updatedAt`)
+and `startedAt` from the session record (falling back to process start). The
+tooltip explains that activity reflects the latest Claude status update and
+that opened may mean a resumed conversation. It deliberately does not label
+the process/session start as the conversation's creation date.
+
+- RED: rebuilt Array and ran `--onboarding-panel-check`; exit 1 because the
+  existing rows lacked activity ages and exact hover/accessibility dates.
+- GREEN: rebuilt Array and ran onboarding-panel, choice-geometry,
+  completion-awareness, fresh-install, ui-probe, zone-cancel-menu and
+  managed-agent-page-zoom checks; all seven exit 0. The onboarding witness
+  checks actual rendered/native row properties for old activity, busy status,
+  missing timestamps and clock skew, alongside the existing real chooser flows.
+- Inspected the captured light and dark chooser renders. Root-doc checks,
+  colour hygiene (27 existing allowlisted lines, 0 new) and `git diff --check`
+  passed. Full matrix/iOS were not repeated for this macOS-only follow-up.
+- Rebuilt the Desktop preview with `scripts/dev-app.sh`, pinned to
+  `/Users/dylan/array-scratch`. A separate post-launch check verified preview
+  PID 20339 and the new timing strings in its binary; production remained
+  PID 41344. Native inspection of the running preview exposed all 13 real
+  session ages and their exact opened/activity dates through accessibility.
+  Inspected its live chooser screenshot and left that chooser open for review.
+  No Git staging/commit/push/merge or baseline
+  changes. Canonical bench inventory retained the dirty/unlanded bench.
+
+Artifacts: `qa-runs/session-age/red/`, `green/results.jsonl`,
+`chooser-light.png`, `chooser-dark.png`, and `preview.log`. All targeted
+checks used verified private disposable tmux sockets, with inherited
+TMUX/TMUX_PANE unset.

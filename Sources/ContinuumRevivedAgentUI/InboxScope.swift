@@ -27,8 +27,8 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     /// host has no ID; with neither fact available, it filters nothing.
     case currentWorkspace
     // Plan: .plans/79-session-handoff/README.md
-    /// Everything, plus the sessions from other apps that every other scope
-    /// leaves out: quiet ones, and ones in folders that are not projects.
+    /// All locally discovered sessions, including idle sessions and folders
+    /// that have not been added as projects. Retained as an explicit Mac scope.
     case thisMac
 
     /// The word on the popup entry. A project or workspace shows its own NAME and
@@ -204,10 +204,9 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         currentWorkspace: String? = nil,
         currentWorkspaceId: UUID? = nil
     ) -> [AgentInboxRow] {
-        // A session from another app shows outside "This Mac" only while it is
-        // live or waiting on you, in one of this workspace's projects.
+        // Scope selects location, independently of activity. An open idle
+        // session remains discoverable; attention/ranking belongs to InboxSort.
         guard scope != .thisMac else { return rows }
-        let rows = rows.filter { $0.externalSession?.isProminent ?? true }
         let resolved: InboxScope
         if scope == .currentWorkspace {
             if let currentWorkspaceId {

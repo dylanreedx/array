@@ -108,13 +108,17 @@ enum ExternalSessionsSidebarChecks {
         inbox.layoutForQA()
         func rowId(_ session: ExternalAgentSession) -> UUID { ExternalSessionRows.rowId(forSessionKey: session.id) }
 
-        // Default scope: live or waiting, in this workspace's projects.
+        // Workspace scope includes idle/unknown open sessions in its projects.
         let defaultIds = Set(inbox.rowIdsForQA)
         try expect(defaultIds.contains(rowId(cmux)) && defaultIds.contains(rowId(shell)),
                    "the default scope lists live and waiting sessions in this workspace's projects; got \(inbox.titlesForQA)")
-        for quiet in [desktop, codexApp, ghostty, otherWorkspace] {
+        for idle in [desktop, codexApp] {
+            try expect(defaultIds.contains(rowId(idle)),
+                       "idle and unknown open sessions in this workspace must remain findable: \(idle.title ?? "")")
+        }
+        for quiet in [ghostty, otherWorkspace] {
             try expect(!defaultIds.contains(rowId(quiet)),
-                       "the default scope hides '\(quiet.title ?? "")' (quiet, not a project, or another workspace); got \(inbox.titlesForQA)")
+                       "the default scope hides '\(quiet.title ?? "")' (outside this workspace); got \(inbox.titlesForQA)")
         }
         try expect(inbox.row(forAgentId: rowId(cmux))?.state == .working, "a busy session is a Working row")
         guard let marker = inbox.whereMarkerForQA(id: rowId(cmux)) else {
@@ -128,6 +132,15 @@ enum ExternalSessionsSidebarChecks {
         try expect(inbox.scopeTitlesForQA.prefix(3) == ["This workspace", "All agents", "This Mac"],
                    "the scope menu offers This Mac after All agents; got \(inbox.scopeTitlesForQA)")
 
+        // All agents is truly all, even idle and unregistered-folder sessions.
+        inbox.setScope(.all)
+        inbox.layoutForQA()
+        for listed in [cmux, shell, desktop, codexApp, ghostty, otherWorkspace] {
+            try expect(inbox.rowIdsForQA.contains(rowId(listed)), "All agents must include \(listed.title ?? "")")
+        }
+        inbox.setScope(.project(inbox.row(forAgentId: rowId(desktop))?.projectName ?? ""))
+        inbox.layoutForQA()
+        try expect(inbox.rowIdsForQA.contains(rowId(desktop)), "project scope must retain its idle external session")
         // This Mac: everything, each session once.
         inbox.setScope(.thisMac)
         inbox.layoutForQA()
@@ -151,6 +164,13 @@ enum ExternalSessionsSidebarChecks {
                    "hovering a Claude session offers Move here and Copy; got \(String(describing: inbox.hoverActionsForQA(id: rowId(cmux))))")
         if let pngPath {
             try writePNG(of: sidebar, to: URL(fileURLWithPath: pngPath))
+        }
+        for session in [cmux, shell, desktop, codexApp, ghostty, otherWorkspace] {
+            guard let marker = inbox.whereMarkerForQA(id: rowId(session)) else {
+                throw Failure(message: "missing metadata for \(session.title ?? session.id)")
+            }
+            try expect(abs(marker.iconInkCenterDelta) <= 0.5 && abs(marker.projectIconBaselineDelta) <= 0.5,
+                       "folder and host icons must align visually for \(marker.text); folder baseline delta \(marker.projectIconBaselineDelta)pt, icon ink center delta \(marker.iconInkCenterDelta)pt")
         }
         try expect(inbox.hoverRowForQA(id: rowId(codexApp)), "the Codex row must be hoverable")
         // Nor Move here: the Codex app runs every thread in one server, so a
@@ -216,7 +236,7 @@ enum ExternalSessionsSidebarChecks {
                    "the folder is registered as a project")
 
         return "ExternalSessionsSidebarChecks: sessions from other apps are rows keyed by session, marked where they live, "
-            + "hidden by the default scope unless live here, listed by This Mac, never doubled; Copy forked one into its project"
+            + "idle sessions retained by location scopes, All agents and This Mac include all discovered sessions, never doubled; Copy forked one into its project"
             + (pngPath.map { " (png: \($0))" } ?? "")
     }
 

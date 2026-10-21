@@ -72,6 +72,8 @@ struct CompletionPopoverLayout: Equatable {
     var maximumVisibleRows = 8
     var minimumWidth: CGFloat = 360
     var maximumWidth: CGFloat = 520
+    var headerSymbol = "folder"
+    var headerAccessibilityLabel: String? = nil
 }
 
 struct CommandPopoverLayout: Equatable {
@@ -121,12 +123,12 @@ final class CompletionPopoverContentView: NSView, TokenThemed, AgentPageZoomScal
         layer?.masksToBounds = true
 
         breadcrumbLabel.lineBreakMode = .byTruncatingMiddle
-        breadcrumbLabel.setAccessibilityLabel("Current folder: \(layout.breadcrumb)")
+        breadcrumbLabel.setAccessibilityLabel(layout.headerAccessibilityLabel ?? "Current folder: \(layout.breadcrumb)")
 
         // Use the same frozen symbol representation as result rows so the root
         // glyph has identical optical bounds instead of AppKit's baseline-heavy
         // live SF Symbol metrics.
-        locationIcon.image = CanvasSymbolImage.image(named: "folder")
+        locationIcon.image = CanvasSymbolImage.image(named: layout.headerSymbol)
         locationIcon.imageScaling = .scaleProportionallyDown
         locationIcon.setAccessibilityElement(false)
 
@@ -532,6 +534,7 @@ final class ChoicePopoverController {
         case .commands: defaultAccessibilityLabel = "Commands"
         }
         let accessibilityLabel = customAccessibilityLabel ?? defaultAccessibilityLabel
+        if customAccessibilityLabel != nil { contentView.setAccessibilityLabel(accessibilityLabel) }
         list.setAccessibilityLabel(accessibilityLabel)
         panel.setAccessibilityLabel(accessibilityLabel)
         anchorWasPostingFrameChanges = view.postsFrameChangedNotifications
@@ -673,7 +676,8 @@ final class ChoicePopoverController {
         let width = min(upperWidth, max(lowerWidth, list.intrinsicContentSize.width, breadcrumbWidth, footerWidth))
 
         let visibleRows = min(max(1, configuration.maximumVisibleRows), max(1, list.items.count))
-        let desiredListHeight = CGFloat(visibleRows) * ChoiceListView.rowHeight(zoom: zoom)
+        let rowHeight = list.layoutRowHeight
+        let desiredListHeight = CGFloat(visibleRows) * rowHeight
             + CGFloat(zoom.scaled(8))
         let desiredHeight = CompletionPopoverContentView.headerHeight(zoom: zoom)
             + desiredListHeight
@@ -682,7 +686,17 @@ final class ChoicePopoverController {
         let roomBelow = screenAnchor.minY - visibleFrame.minY
         let roomAbove = visibleFrame.maxY - screenAnchor.maxY
         let availableHeight = max(1, max(roomBelow, roomAbove) - gap)
-        return NSSize(width: width, height: min(desiredHeight, availableHeight))
+        let height = min(desiredHeight, availableHeight)
+        let chromeHeight = CompletionPopoverContentView.headerHeight(zoom: zoom)
+            + CompletionPopoverContentView.footerHeight(zoom: zoom)
+        let viewportHeight = max(0, height - chromeHeight)
+        if list.intrinsicContentSize.height > viewportHeight {
+            // A scrolling list ends on a whole row. Document padding must not
+            // expose a few pixels of the next title against the fixed footer.
+            let rowsHeight = floor(viewportHeight / rowHeight) * rowHeight
+            return NSSize(width: width, height: min(height, chromeHeight + max(rowHeight, rowsHeight)))
+        }
+        return NSSize(width: width, height: height)
     }
 
     private static func commandContentSize(

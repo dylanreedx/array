@@ -215,6 +215,7 @@ extension AppDelegate {
                 : CodexSessionTranscriptReader.parse(lines: tail.lines, threadId: threadId, truncated: tail.truncated)
             await MainActor.run {
                 self?.agentSupervisor.finishAdoptingSessionHistory(transcript, for: agentId, url: url, offset: tail.end)
+                self?.offerClaudeSessionEducation(agentId)
             }
         }
     }

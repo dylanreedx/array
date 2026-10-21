@@ -783,8 +783,8 @@ public struct InboxExternalSession: Equatable, Sendable {
     /// `ExternalAgentSession.id`: the provider-qualified session id the host
     /// resolves every action against.
     public let sessionKey: String
-    /// Live or waiting on you, in this workspace's projects. Only these show
-    /// outside the "This Mac" scope.
+    /// Live or waiting on you, in this workspace's projects. An activity hint;
+    /// location scopes retain idle sessions independently of this value.
     public let isProminent: Bool
     public let canMoveHere: Bool
     public let canCopy: Bool
