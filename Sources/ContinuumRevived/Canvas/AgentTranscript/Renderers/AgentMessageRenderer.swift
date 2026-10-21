@@ -184,26 +184,33 @@ final class AgentMessageCardView: NSView {
     override func layout() {
         super.layout()
         // Arithmetic only, plus the body cell's own wrap: the row's height was
-        // measured by the renderer with the same cell and width.
+        // measured by the renderer with the same cell and width. Frames are
+        // assigned only when they move (performance.md, trap 3).
         let inset = Self.rowInset(zoom: zoom)
         let width = Self.cardWidth(rowWidth: bounds.width, zoom: zoom)
-        card.frame = NSRect(x: 0, y: inset, width: width, height: max(0, bounds.height - inset * 2))
+        let cardFrame = NSRect(x: 0, y: inset, width: width, height: max(0, bounds.height - inset * 2))
+        if card.frame != cardFrame { card.frame = cardFrame }
         let accentWidth = Self.accentWidth(zoom: zoom)
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        accent.frame = CGRect(x: 0, y: 0, width: accentWidth, height: card.bounds.height)
-        CATransaction.commit()
+        let accentFrame = CGRect(x: 0, y: 0, width: accentWidth, height: cardFrame.height)
+        if accent.frame != accentFrame {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            accent.frame = accentFrame
+            CATransaction.commit()
+        }
         let padding = Self.padding(zoom: zoom)
         let x = accentWidth + padding
         let contentWidth = Self.bodyWidth(cardWidth: width, zoom: zoom)
         let headerHeight = Self.headerHeight(zoom: zoom)
         // `card` is not flipped: y grows upward inside it.
-        let headerY = card.bounds.height - padding - headerHeight
-        senderButton.frame = NSRect(
+        let headerY = cardFrame.height - padding - headerHeight
+        let headerFrame = NSRect(
             x: x, y: headerY,
             width: min(contentWidth, senderButton.intrinsicContentSize.width), height: headerHeight)
-        let bodyHeight = max(0, headerY - Self.headerGap(zoom: zoom) - padding)
-        bodyLabel.frame = NSRect(x: x, y: padding, width: contentWidth, height: bodyHeight)
+        if senderButton.frame != headerFrame { senderButton.frame = headerFrame }
+        let bodyFrame = NSRect(x: x, y: padding, width: contentWidth,
+                               height: max(0, headerY - Self.headerGap(zoom: zoom) - padding))
+        if bodyLabel.frame != bodyFrame { bodyLabel.frame = bodyFrame }
     }
 }
 
@@ -289,10 +296,12 @@ final class AgentMessageSenderButton: NSButton {
 
     override func layout() {
         super.layout()
-        glyphView.frame = NSRect(x: 0, y: floor((bounds.height - glyphSide) / 2), width: glyphSide, height: glyphSide)
-        nameLabel.frame = NSRect(
+        let glyphFrame = NSRect(x: 0, y: floor((bounds.height - glyphSide) / 2), width: glyphSide, height: glyphSide)
+        if glyphView.frame != glyphFrame { glyphView.frame = glyphFrame }
+        let nameFrame = NSRect(
             x: glyphSide + gap, y: floor((bounds.height - titleSize.height) / 2),
             width: max(0, bounds.width - glyphSide - gap), height: titleSize.height)
+        if nameLabel.frame != nameFrame { nameLabel.frame = nameFrame }
     }
 
     override func resetCursorRects() {

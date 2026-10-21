@@ -249,7 +249,15 @@ func runAgentMessageCardChecks() async throws {
         !supervisor.isRunning(childId) && !supervisor.isRunning(parentId)
     }
     try expect(bothSettled, "both agents must settle after the message")
-    let liveCards = try cards(childView).map(drawn)
+    let liveCardViews = try cards(childView)
+    let liveCards = liveCardViews.map(drawn)
+    // Drawn at the height it was measured: no body line clipped by the row.
+    for card in liveCardViews {
+        let label = card.bodyLabel
+        let needed = label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: label.frame.width, height: .greatestFiniteMagnitude)).height ?? 0
+        try expect(label.frame.width > 40 && needed <= label.frame.height + 0.5,
+                   "a card's body is clipped: it needs \(needed)pt and has \(label.frame)")
+    }
     try expect(liveCards.count == 2, "the child must draw a card for the task and one for the message, got \(liveCards.count)")
     try expectFromParent(liveCards[1], text: message, "agent.message")
     let prose = try userProse(childView)
