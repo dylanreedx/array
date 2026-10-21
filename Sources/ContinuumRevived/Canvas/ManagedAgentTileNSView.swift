@@ -213,6 +213,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private var capabilityObserverToken: UUID?
     private var promptEchoObserverToken: UUID?
     private var localNoticeObserverToken: UUID?
+    private var outsideHistoryObserverToken: UUID?
     private var runtimeObservationObserverToken: UUID?
     private var displayNameObserverToken: UUID?
     /// 0.7.30 — the process tracker's change notification, while attached.
@@ -793,9 +794,21 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // snapshot draws, so a freshly wired tile does not draw every row
         // against a context that knows no supervisor.
         try? transcriptCollectionFixture?.updateRenderContext(v2RenderContext)
+        // Turns the session took outside Array, as the supervisor appends them
+        // to the agent's transcript (`.plans/79`: one rule for history).
+        outsideHistoryObserverToken = supervisor.addOutsideHistoryObserver(for: agentID) { [weak self] history in
+            guard let self, self.attachedAgentID == agentID else { return }
+            switch history {
+            case .restored(let transcript): self.renderRehydratedPreviousSession(transcript)
+            case let .turns(transcript, boundary): self.appendTurnsTakenOutside(transcript, boundary: boundary)
+            }
+            self.synchronizeV2Transcript(final: true)
+        }
         let attachment = supervisor.transcriptAttachment(for: agentID, reboundTo: threadId)
         if let snapshot = attachment.snapshot {
             installTranscriptSnapshot(snapshot)
+            // The agent's transcript starts from its restore: it is drawn.
+            if supervisor.rehydratedTranscript(for: agentID) != nil { hasRenderedRehydratedSession = true }
         }
         let stream = attachment.tail
         eventSubscription = Task { @MainActor [weak self] in
@@ -816,7 +829,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // read from its session file. Render it directly (display-only, see
         // renderRehydratedPreviousSession) so any tile attaching to the agent —
         // including a re-attach after a detach — shows the restored history.
-        if let rehydrated = supervisor.rehydratedTranscript(for: agentID) {
+        if attachment.snapshot == nil, let rehydrated = supervisor.rehydratedTranscript(for: agentID) {
             renderRehydratedPreviousSession(rehydrated)
         }
         refreshTranscriptThinkingIndicator()
@@ -1338,6 +1351,15 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
 
+    /// Turns the supervisor appended to the agent's transcript, drawn the same
+    /// way: its boundary, then the restore's own replay.
+    func appendTurnsTakenOutside(_ appended: RehydratedTranscript, boundary: String) {
+        guard !appended.steps.isEmpty else { return }
+        model.appendSessionBoundary(
+            id: "outside-\(UUID().uuidString)", text: boundary, symbolName: Self.terminalBoundarySymbol)
+        replayRehydratedSteps(appended)
+    }
+
     /// "In Terminal · 1 turn" — the divider over the turns the face took.
     static func terminalBoundaryText(turns: Int, place: String = "Terminal") -> String {
         "In \(place) · \(turns) \(turns == 1 ? "turn" : "turns")"
@@ -1521,35 +1543,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 self.sessionFollow = follow.finishing ? nil : follow
             }
         }
-    }
-
-    /// What a session file holds past `offset`, appended through the restore's
-    /// own replay loop. `notice` leads the appended turns (`In Ghostty · 2
-    /// turns`). Returns the turns appended and the offset after them.
-    @discardableResult
-    func appendSessionFile(
-        _ url: URL, from offset: UInt64, provider: ExternalSessionProvider, notice: String?
-    ) -> (turns: Int, end: UInt64) {
-        let chunk = SessionFileTail.lines(in: url, from: offset)
-        return (appendSessionLines(chunk.lines, provider: provider, notice: notice), chunk.end)
-    }
-
-    private func appendSessionLines(_ lines: [String], provider: ExternalSessionProvider, notice: String?) -> Int {
-        guard !lines.isEmpty else { return 0 }
-        let transcript = Self.parseSession(
-            lines, provider: provider, threadId: threadId,
-            limits: RehydrationLimits(maxMessages: Int.max, maxBytes: Int.max))
-        guard !transcript.steps.isEmpty else { return 0 }
-        let turns = transcript.steps.filter { if case .userPrompt = $0 { return true } else { return false } }.count
-        if let notice {
-            // The same quiet divider the Terminal face's turns follow.
-            model.appendSessionBoundary(
-                id: "session-elsewhere-\(UUID().uuidString)",
-                text: "\(notice) \u{00B7} \(turns) \(turns == 1 ? "turn" : "turns")",
-                symbolName: Self.terminalBoundarySymbol)
-        }
-        replayRehydratedSteps(transcript)
-        return turns
     }
 
     nonisolated private static func parseSession(
@@ -1821,6 +1814,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         if let localNoticeObserverToken, let agentID = attachedAgentID {
             agentSource?.removeLocalNoticeObserver(localNoticeObserverToken, for: agentID)
             self.localNoticeObserverToken = nil
+        }
+        if let outsideHistoryObserverToken, let agentID = attachedAgentID {
+            agentSource?.removeOutsideHistoryObserver(outsideHistoryObserverToken, for: agentID)
+            self.outsideHistoryObserverToken = nil
         }
         // Before the flush: a closing or parked tile keeps no hypothesis, and
         // the draft it flushes is the one the user had before speaking.

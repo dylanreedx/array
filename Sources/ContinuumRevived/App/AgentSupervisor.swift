@@ -2339,7 +2339,7 @@ final class AgentSupervisor {
     /// OFF it. `nil` for an agent this supervisor does not know.
     func rehydrationInputs(for id: AgentID) -> ManagedTranscriptRehydrator.Inputs? {
         guard let record = records[id] else { return nil }
-        let homeURL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let homeURL = sessionFilesHome
         let codexHomeURL = ProcessInfo.processInfo.environment["CODEX_HOME"]
             .flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
             ?? homeURL.appendingPathComponent(".codex", isDirectory: true)
@@ -3842,7 +3842,7 @@ final class AgentSupervisor {
     ) {
         guard transcriptStore != nil, records[id] != nil, !transcript.steps.isEmpty else { return }
         let threadId = Self.threadId(for: id)
-        var projection = transcriptProjections[id] ?? ManagedAgentTranscriptModel(threadId: threadId)
+        var projection = transcriptProjection(for: id)
         projection.appendSessionBoundary(
             id: "outside-\(UUID().uuidString)", text: boundaryText, symbolName: symbolName)
         for step in transcript.steps {
@@ -3858,6 +3858,192 @@ final class AgentSupervisor {
         }
         transcriptProjections[id] = projection
         scheduleTranscriptPersist(for: id, final: true)
+    }
+
+    // MARK: - Turns Array did not run: one rule for history (.plans/79 review)
+    //
+    // The provider's session file is the source of truth for every turn Array
+    // did not run — the Terminal face's, and those of an app that held the
+    // session while the agent was paused here. This launch's transcript of an
+    // agent (`transcriptProjections`, which starts from the restore it was
+    // seeded with) holds the file up to a mark. What lies past the mark is read
+    // once, off the main thread, when the session comes back to Array — the
+    // face ending, however it ends; a pause ending — and appended to that
+    // transcript under a boundary, and the mark moves past it. No tile appends
+    // such turns itself: every tile following the agent is told
+    // (`addOutsideHistoryObserver`), and a tile opened later installs the
+    // transcript that already holds them. After a relaunch nothing of this
+    // launch's transcript exists and the restore reads the file whole, so no
+    // turn is ever counted twice.
+
+    /// What a session file held up to: everything before `offset` is in the
+    /// agent's transcript.
+    struct SessionFileMark: Equatable {
+        var url: URL
+        var offset: UInt64
+    }
+    private var sessionFileMarks: [AgentID: SessionFileMark] = [:]
+
+    /// The home the CLIs keep their session files under (`.claude/`, `.pi/`,
+    /// `.codex/`): the user's. Only checks move it.
+    var sessionFilesHome = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+
+    /// The mark in `url`, when the agent's transcript is known to end there:
+    /// where Array's own last turn left the file, or where the last read of it
+    /// stopped. A pause begins from here, not from wherever the file had got
+    /// to by the time discovery noticed (review #11).
+    func sessionFileMark(for id: AgentID, url: URL) -> UInt64? {
+        guard let mark = sessionFileMarks[id], mark.url.standardizedFileURL == url.standardizedFileURL else { return nil }
+        return mark.offset
+    }
+
+    /// Array's own claude just finished a turn: the file ends where its turn
+    /// did. One stat.
+    private func markOwnClaudeTurn(for id: AgentID) {
+        guard let record = records[id], record.harness == .claudeCode else { return }
+        let location = Self.claudeSessionLocation(for: record)
+        let url = ClaudeSessionTranscriptReader.sessionFileURL(homeURL: sessionFilesHome, cwd: location.cwd, sessionId: location.sessionId)
+        sessionFileMarks[id] = SessionFileMark(url: url, offset: SessionFileTail.length(url))
+    }
+
+    /// This launch's transcript of `id`, made on its first write. An agent
+    /// this launch restored from its session file starts from that restore, so
+    /// the transcript every later tile installs reads the history first and
+    /// this launch's turns after it (review #8).
+    private func transcriptProjection(for id: AgentID) -> ManagedAgentTranscriptModel {
+        if let projection = transcriptProjections[id] { return projection }
+        var projection = ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+        if let restored = rehydratedTranscripts[id] {
+            // The tile's own restore draws the same notice and steps.
+            projection.appendNotice(id: "notice-previous-session", title: "previous session", text: restored.boundaryNoticeText)
+            Self.replay(restored, into: &projection, threadId: Self.threadId(for: id))
+        }
+        return projection
+    }
+
+    private static func replay(_ transcript: RehydratedTranscript, into projection: inout ManagedAgentTranscriptModel, threadId: String) {
+        for step in transcript.steps {
+            switch step {
+            case .userPrompt(let text):
+                guard let promptID = AgentNodeID(rawValue: "outside-prompt-\(UUID().uuidString)") else { continue }
+                projection.appendUserPrompt(id: promptID, prompt: AgentPrompt(text))
+            case .event(let event):
+                projection.ingest(event.withThreadId(threadId))
+            case .observation:
+                break
+            }
+        }
+    }
+
+    /// Whether this launch holds any of the agent's history yet: a restore, a
+    /// transcript of its own, or a live event.
+    private func hasLoadedHistory(_ id: AgentID) -> Bool {
+        transcriptProjections[id] != nil || rehydratedTranscripts[id] != nil || !(history[id]?.isEmpty ?? true)
+    }
+
+    /// What a tile following the agent appends, exactly as the transcript did.
+    enum OutsideHistory {
+        /// The history before the mark, read because this launch had none.
+        case restored(RehydratedTranscript)
+        /// Turns taken outside, under their boundary.
+        case turns(RehydratedTranscript, boundary: String)
+    }
+    private var outsideHistoryObservers: [AgentID: [UUID: (OutsideHistory) -> Void]] = [:]
+
+    func addOutsideHistoryObserver(for id: AgentID, _ observer: @escaping (OutsideHistory) -> Void) -> UUID {
+        let token = UUID()
+        outsideHistoryObservers[id, default: [:]][token] = observer
+        return token
+    }
+
+    func removeOutsideHistoryObserver(_ token: UUID, for id: AgentID) {
+        outsideHistoryObservers[id]?.removeValue(forKey: token)
+        if outsideHistoryObservers[id]?.isEmpty == true { outsideHistoryObservers.removeValue(forKey: id) }
+    }
+
+    /// "In Terminal · 2 turns" — the divider over turns taken outside.
+    nonisolated static func outsideBoundaryText(turns: Int, place: String, omittedEarlier: Bool = false) -> String {
+        "In \(place) \u{00B7} \(turns) \(turns == 1 ? "turn" : "turns")"
+            + (omittedEarlier ? " \u{00B7} earlier turns not shown" : "")
+    }
+
+    nonisolated static func promptCount(_ transcript: RehydratedTranscript) -> Int {
+        transcript.steps.filter { if case .userPrompt = $0 { return true } else { return false } }.count
+    }
+
+    /// One read of what lies past the mark — bounded as a restore is, never
+    /// the whole file — and of the history before it when asked for.
+    struct OutsideRead: Sendable {
+        var prefix: RehydratedTranscript?
+        var turns: RehydratedTranscript
+        var lines: [String]
+        /// Just past the last whole line of the last file read.
+        var end: (url: URL, offset: UInt64)?
+    }
+
+    nonisolated static func readOutsideTurns(
+        segments: [(url: URL, offset: UInt64)], prefixBefore: (url: URL, offset: UInt64)?,
+        provider: ExternalSessionProvider, threadId: String
+    ) -> OutsideRead {
+        let limits = RehydrationLimits()
+        func parse(_ lines: [String], truncated: Bool) -> RehydratedTranscript {
+            switch provider {
+            case .claude: return ClaudeSessionTranscriptReader.parse(lines: lines, threadId: threadId, truncated: truncated, limits: limits)
+            case .codex: return CodexSessionTranscriptReader.parse(lines: lines, threadId: threadId, truncated: truncated, limits: limits)
+            }
+        }
+        var lines: [String] = []
+        var truncated = false
+        var end: (url: URL, offset: UInt64)?
+        for segment in segments {
+            let window = SessionFileTail.lines(in: segment.url, from: segment.offset, maxBytes: limits.maxBytes)
+            // A bounded window that left bytes out drops everything before it.
+            if window.truncated { lines = []; truncated = true }
+            lines += window.lines
+            end = (segment.url, window.end)
+        }
+        let prefix = prefixBefore.map { before -> RehydratedTranscript in
+            let window = ClaudeTerminalFace.lines(in: before.url, before: before.offset, maxBytes: limits.maxBytes)
+            return parse(window, truncated: before.offset > UInt64(limits.maxBytes))
+        }
+        return OutsideRead(prefix: prefix, turns: parse(lines, truncated: truncated), lines: lines, end: end)
+    }
+
+    /// Lands one read in the transcript and tells every tile following the
+    /// agent. Returns the turns appended.
+    @discardableResult
+    private func applyOutsideRead(_ read: OutsideRead, for id: AgentID, place: String) -> Int {
+        if let prefix = read.prefix, !prefix.steps.isEmpty, !hasLoadedHistory(id) {
+            seedRehydratedTranscript(prefix, for: id)
+            outsideHistoryObservers[id]?.values.forEach { $0(.restored(prefix)) }
+        }
+        if let end = read.end { sessionFileMarks[id] = SessionFileMark(url: end.url, offset: end.offset) }
+        guard !read.turns.steps.isEmpty else { return 0 }
+        let turns = Self.promptCount(read.turns)
+        let boundary = Self.outsideBoundaryText(turns: turns, place: place, omittedEarlier: read.turns.omittedEarlier)
+        appendOutsideTurns(read.turns, boundaryText: boundary, symbolName: Self.outsideBoundarySymbol, for: id)
+        outsideHistoryObservers[id]?.values.forEach { $0(.turns(read.turns, boundary: boundary)) }
+        return turns
+    }
+
+    nonisolated static let outsideBoundarySymbol = "apple.terminal"
+
+    /// An app that held the session let go (edge case 1): what it wrote past
+    /// `offset` comes in once, then `completion` says how many lines it wrote.
+    func takeBackOutsideTurns(
+        for id: AgentID, url: URL, from offset: UInt64, provider: ExternalSessionProvider, place: String,
+        completion: @escaping @MainActor (_ wroteLines: Int) -> Void
+    ) {
+        let prefix = hasLoadedHistory(id) ? nil : (url: url, offset: offset)
+        let threadId = Self.threadId(for: id)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let read = Self.readOutsideTurns(segments: [(url, offset)], prefixBefore: prefix, provider: provider, threadId: threadId)
+            await MainActor.run {
+                guard let self, self.records[id] != nil else { return completion(0) }
+                self.applyOutsideRead(read, for: id, place: place)
+                completion(read.lines.count)
+            }
+        }
     }
 
     // MARK: - Agent CLI updates
@@ -7084,8 +7270,7 @@ final class AgentSupervisor {
     /// every check that does not pass one.
     private func ingestTranscriptEvent(_ event: AgentRuntimeEvent, for id: AgentID) {
         guard transcriptStore != nil else { return }
-        var projection = transcriptProjections[id]
-            ?? ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+        var projection = transcriptProjection(for: id)
         projection.ingest(event)
         transcriptProjections[id] = projection
         scheduleTranscriptPersist(for: id, final: Self.isTranscriptPersistBoundary(event))
@@ -7097,8 +7282,7 @@ final class AgentSupervisor {
     private func recordTranscriptUserPrompt(_ prompt: AgentPrompt, for id: AgentID) {
         guard transcriptStore != nil else { return }
         guard let promptID = AgentNodeID(rawValue: "supervisor-prompt-\(UUID().uuidString)") else { return }
-        var projection = transcriptProjections[id]
-            ?? ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+        var projection = transcriptProjection(for: id)
         projection.appendUserPrompt(id: promptID, prompt: prompt)
         transcriptProjections[id] = projection
         // A user's own words must not wait behind the streaming debounce below.
@@ -7255,8 +7439,7 @@ final class AgentSupervisor {
             observe(AgentLocalNotice(id: noticeID, title: title, body: body))
         }
         guard transcriptStore != nil else { return }
-        var projection = transcriptProjections[id]
-            ?? ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+        var projection = transcriptProjection(for: id)
         projection.appendNotice(id: noticeID, title: title, text: body)
         transcriptProjections[id] = projection
         scheduleTranscriptPersist(for: id, final: true)
@@ -8595,6 +8778,7 @@ final class AgentSupervisor {
         // finishing must not have its runner cleared by the old one's completion.
         if runnerGenerationTokens[id] == generation, runners[id] === runner {
             runners[id] = nil
+            markOwnClaudeTurn(for: id)
             interruptingAgents.remove(id)
             openToolItems[id] = nil
             // A CLI update landed while this turn ran: its session process is the

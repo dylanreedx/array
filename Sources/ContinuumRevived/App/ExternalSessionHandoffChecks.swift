@@ -452,16 +452,23 @@ enum ExternalSessionHandoffChecks {
             projectId: world.fixture.projectPb, projectRoot: world.fixture.pbRoot, displayName: "Fix flaky upload test")
         try expect(delegate.revealAgentFromInbox(agentId.rawValue), "the agent gets a tile through the inbox's attach")
         guard let view = world.tileView(agentId) else { throw Failure(message: "the agent has no tile") }
+        // The session file where claude keeps it, under a home of the leg's:
+        // written as the turn runs, as claude writes it, so the turn's end is
+        // where the agent's own transcript ends.
+        let home = world.fixture.tempRoot.appendingPathComponent("home", isDirectory: true)
+        supervisor.sessionFilesHome = home
+        let sessionId = AgentSupervisor.claudeSessionId(for: agentId)
+        let file = ClaudeSessionTranscriptReader.sessionFileURL(
+            homeURL: home, cwd: supervisor.records[agentId]?.lastObservedWhere ?? "", sessionId: sessionId)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(([userLine("u1", "PLAIN first question"), assistantLine("a1", "ok")].joined(separator: "\n") + "\n").utf8)
+            .write(to: file)
         try expect(supervisor.send("PLAIN first question", to: agentId), "the agent's own turn was refused")
         try expect(world.pump(until: { !supervisor.isRunning(agentId) && supervisor.qaHasIdleSession(agentId) }, timeout: 15),
                    "the turn must end with its claude pooled")
         guard let pooledPid = AgentSteeringQAFakes.latestPid(in: bin), kill(pooledPid, 0) == 0 else {
             throw Failure(message: "the pooled claude must be alive")
         }
-        let sessionId = AgentSupervisor.claudeSessionId(for: agentId)
-        let file = try world.writeSession(sessionId, [
-            userLine("u1", "PLAIN first question"), assistantLine("a1", "ok"),
-        ])
         let tag = AgentProcessAttribution.ownerTag(for: agentId)
         func holder(_ host: ExternalSessionHost, pid: Int32?) -> ExternalAgentSession {
             session(sessionId, pid: pid, cwd: world.fixture.pbRoot, title: "Fix flaky upload test", host: host, transcript: file)
@@ -505,7 +512,10 @@ enum ExternalSessionHandoffChecks {
         world.inbox.layoutForQA()
         try expect(world.inbox.row(forAgentId: agentId.rawValue)?.whereMarker == nil, "…and no marker in its Array face")
 
-        // 2. Someone resumes it in Ghostty: paused.
+        // 2. Someone resumes it in Ghostty: paused. Discovery looks every few
+        //    seconds, so Ghostty's first prompt is in the file before Array
+        //    knows (review #11).
+        try world.append(userLine("u2", "From Ghostty, rename the test.") + "\n", to: file)
         world.publish([holder(.app("Ghostty"), pid: 42_100)])
         try expect(delegate.externalSessionPauses[agentId]?.hostName == "Ghostty" && supervisor.externalHold(for: agentId) == "Ghostty",
                    "a session opened in Ghostty pauses the agent")
@@ -528,12 +538,15 @@ enum ExternalSessionHandoffChecks {
         try expect(activated.last.map { $0.0 == 42_100 && $0.1 == "Ghostty" } == true, "Show Ghostty brings Ghostty's process forward")
         world.snapshot(view, "paused")
 
-        // 3. Ghostty writes a turn and exits: appended once, the agent resumes.
-        try world.append(userLine("u2", "From Ghostty, rename the test.") + "\n" + assistantLine("a2", "Renamed it in Ghostty.") + "\n", to: file)
+        // 3. Ghostty finishes its turn and exits: appended once, the agent resumes.
+        try world.append(assistantLine("a2", "Renamed it in Ghostty.") + "\n", to: file)
         let onScreen = world.texts(view)
+        let readsBeforeResume = QAMainThreadIO.fileReads
         world.publish([])
-        try expect(delegate.externalSessionPauses[agentId] == nil && supervisor.externalHold(for: agentId) == nil,
+        try expect(world.pump(until: { delegate.externalSessionPauses[agentId] == nil && supervisor.externalHold(for: agentId) == nil }),
                    "the other process gone, the pause ends")
+        try expect(QAMainThreadIO.fileReads == readsBeforeResume,
+                   "the pause's end must read the session file off the main thread; \(QAMainThreadIO.fileReads - readsBeforeResume) reads on main")
         try expect(view.sessionHandoffState == nil && !view.qaComposerHidden && view.agentStatusOverride == nil, "the banner goes")
         for needle in ["From Ghostty, rename the test.", "Renamed it in Ghostty."] {
             try expect(world.count(needle, in: view) == 1, "'\(needle)' is appended exactly once; got \(world.texts(view))")
@@ -542,6 +555,19 @@ enum ExternalSessionHandoffChecks {
         try expect(Array(afterResume.prefix(onScreen.count)) == onScreen && afterResume.count == onScreen.count + 3,
                    "only what Ghostty wrote after the pause began is appended, under one divider; before \(onScreen), after \(afterResume)")
         try expect(world.texts(view).contains { $0.contains("In Ghostty \u{00B7} 1 turn") }, "a divider says where the turn was taken")
+        // The agent's transcript, not the tile, holds them (review #7): a tile
+        // opened on the agent now shows them once, after its own turn.
+        let reopened = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "Reopened", frame: TileFrame(x: 0, y: 0, width: 560, height: 620),
+            zPosition: .first, runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed-agent")))
+        reopened.attach(agentID: agentId, supervisor: supervisor)
+        let reopenedTexts = world.texts(reopened)
+        let order = ["PLAIN first question", "From Ghostty, rename the test.", "Renamed it in Ghostty."].map { needle in
+            reopenedTexts.indices.filter { reopenedTexts[$0].contains(needle) }
+        }
+        try expect(order.allSatisfy { $0.count == 1 } && order.map { $0[0] } == order.map { $0[0] }.sorted(),
+                   "a tile opened after the pause shows the agent's turn and Ghostty's, once each and in order; got \(reopenedTexts)")
+        reopened.detach()
         try expect(AgentSteeringQAFakes.spawnCount(in: bin) == spawnsWhilePaused, "nothing ran while paused")
         try expect(supervisor.send("PLAIN carry on", to: agentId), "the agent sends again")
         try expect(world.pump(until: { !supervisor.isRunning(agentId) && AgentSteeringQAFakes.spawnCount(in: bin) == spawnsWhilePaused + 1 }, timeout: 15),

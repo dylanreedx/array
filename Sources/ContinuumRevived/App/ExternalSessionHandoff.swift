@@ -235,9 +235,14 @@ extension AppDelegate {
                 claudeHome: URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true),
                 cwd: AgentSupervisor.claudeSessionLocation(for: record).cwd,
                 sessionId: holder.sessionId) : nil)
-            // The mark: everything before it is on screen already. Just past
-            // the last whole line, so a line mid-write is appended whole later.
-            let offset = url.map { SessionFileTail.tail(in: $0, maxBytes: 64 * 1024).end } ?? 0
+            // The mark: where the agent's own transcript ends — where its last
+            // turn left the file — not where the file had got to by the time
+            // discovery noticed, which already holds the other app's first
+            // prompt (review #11). Without one, just past the last whole line,
+            // so a line mid-write is appended whole later.
+            let offset = url.map {
+                agentSupervisor.sessionFileMark(for: id, url: $0) ?? SessionFileTail.tail(in: $0, maxBytes: 64 * 1024).end
+            } ?? 0
             externalSessionPauses[id] = ExternalSessionPause(
                 hostName: name, pid: holder.pid, provider: provider, url: url, offset: offset)
             agentSupervisor.beginExternalHold(for: id, hostName: name)
@@ -245,18 +250,21 @@ extension AppDelegate {
         }
         guard let pause = externalSessionPauses[id],
               discovered, !(provider == .claude && snapshot.claudeUnreadable) else { return }
-        // The other process let go: what it wrote comes into the transcript,
-        // then the agent is Array's again.
+        // The other process let go: what it wrote comes into the agent's
+        // transcript — once, read off the main thread, for every tile of the
+        // agent now and later (review #7) — then the agent is Array's again.
         externalSessionPauses[id] = nil
-        var tookTurns = false
-        if let url = pause.url {
-            if let view = record.tileId.flatMap({ canvasView?.tileView(for: $0) as? ManagedAgentTileNSView }) {
-                tookTurns = view.appendSessionFile(url, from: pause.offset, provider: provider, notice: "In \(pause.hostName)").turns > 0
-            } else {
-                tookTurns = !SessionFileTail.lines(in: url, from: pause.offset).lines.isEmpty
-            }
+        guard let url = pause.url else {
+            agentSupervisor.endExternalHold(for: id, tookTurns: false)
+            return
         }
-        agentSupervisor.endExternalHold(for: id, tookTurns: tookTurns)
+        agentSupervisor.takeBackOutsideTurns(
+            for: id, url: url, from: pause.offset, provider: provider, place: pause.hostName
+        ) { [weak self] wroteLines in
+            // Opened elsewhere again while the read ran: that pause holds it.
+            guard let self, self.externalSessionPauses[id] == nil else { return }
+            self.agentSupervisor.endExternalHold(for: id, tookTurns: wroteLines > 0)
+        }
     }
 
     /// "Show Ghostty": the app the holding process runs in, from its ancestry;
