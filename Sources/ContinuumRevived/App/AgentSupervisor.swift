@@ -3723,6 +3723,10 @@ final class AgentSupervisor {
     func endTerminalFace(for id: AgentID, sessionId: String?, model: String?, tookTurns: Bool) {
         guard terminalFaceAgents.remove(id) != nil else { return }
         terminalFaceBusyAgents.remove(id)
+        adoptTerminalFaceOutcome(for: id, sessionId: sessionId, model: model, tookTurns: tookTurns)
+    }
+
+    private func adoptTerminalFaceOutcome(for id: AgentID, sessionId: String?, model: String?, tookTurns: Bool) {
         if var record = records[id] {
             var changed = false
             if let sessionId, sessionId != Self.claudeSessionLocation(for: record).sessionId {
@@ -4042,6 +4046,77 @@ final class AgentSupervisor {
                 guard let self, self.records[id] != nil else { return completion(0) }
                 self.applyOutsideRead(read, for: id, place: place)
                 completion(read.lines.count)
+            }
+        }
+    }
+
+    // MARK: Terminal face lifecycle, by agent (review #9)
+
+    private var terminalFaceWatches: [AgentID: AgentTerminalFaceWatch] = [:]
+    /// Tiles whose face ended this launch; the face their canvas still
+    /// remembers is over, and its turns are in the transcript already.
+    private var endedTerminalFaceTiles: Set<UUID> = []
+    private var endingTerminalFaces: Set<AgentID> = []
+
+    func terminalFaceWatch(for id: AgentID) -> AgentTerminalFaceWatch? { terminalFaceWatches[id] }
+
+    func hasEndedTerminalFace(onTile tileId: UUID) -> Bool { endedTerminalFaceTiles.contains(tileId) }
+
+    /// The face's watch, made when the face starts (or a relaunch finds claude
+    /// still in tmux) and kept until claude is gone, whatever its tiles do.
+    @discardableResult
+    func watchTerminalFace(
+        for id: AgentID, tileId: UUID, state: AgentTerminalFaceState, environment: AgentTerminalFaceEnvironment
+    ) -> AgentTerminalFaceWatch {
+        if let watch = terminalFaceWatches[id] { return watch }
+        let watch = AgentTerminalFaceWatch(agentID: id, tileId: tileId, state: state, environment: environment)
+        watch.onBusyChange = { [weak self] busy in self?.noteTerminalFaceBusy(id, busy: busy) }
+        watch.onGone = { [weak self] in self?.finishTerminalFace(for: id) }
+        terminalFaceWatches[id] = watch
+        endedTerminalFaceTiles.remove(tileId)
+        sessionFileMarks[id] = SessionFileMark(
+            url: ClaudeTerminalFace.sessionFileURL(claudeHome: environment.claudeHome, cwd: state.cwd, sessionId: state.sessionId),
+            offset: state.sessionFileOffset)
+        watch.start()
+        return watch
+    }
+
+    /// The one end of a Terminal face, however claude left — `/exit`, Switch
+    /// to Array, ×, a crash, tmux gone while the tile was parked or closed, or
+    /// gone by the time a relaunch looked (`persisted`, the tile's own record
+    /// of a face this launch never watched). Off the main thread it reads what
+    /// claude wrote past the mark in every session it moved through, and the
+    /// history before the mark when this launch has none; then the turns land
+    /// once in the transcript, the record adopts the session and model claude
+    /// ended on (review #10), and the session is Array's again.
+    func finishTerminalFace(for id: AgentID, persisted: AgentTerminalFaceState? = nil, tileId: UUID? = nil, claudeHome home: URL? = nil) {
+        let watch = terminalFaceWatches[id]
+        guard let state = watch?.state ?? persisted, endingTerminalFaces.insert(id).inserted else { return }
+        watch?.stopPolling()
+        let sessionIds = watch?.sessionIds ?? state.sessionIds
+        let claudeHome = watch?.environment.claudeHome ?? home ?? sessionFilesHome
+        let segments = sessionIds.map { sessionId in
+            (url: ClaudeTerminalFace.sessionFileURL(claudeHome: claudeHome, cwd: state.cwd, sessionId: sessionId),
+             offset: sessionId == state.sessionId ? state.sessionFileOffset : UInt64(0))
+        }
+        let prefix = hasLoadedHistory(id) ? nil : segments.first.map { (url: $0.url, offset: state.sessionFileOffset) }
+        let threadId = Self.threadId(for: id)
+        let faceTile = watch?.tileId ?? tileId
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let read = Self.readOutsideTurns(segments: segments, prefixBefore: prefix, provider: .claude, threadId: threadId)
+            let model = ClaudeTerminalFace.lastModel(in: read.lines)
+            await MainActor.run {
+                guard let self else { return }
+                self.endingTerminalFaces.remove(id)
+                if let watch, self.terminalFaceWatches[id] === watch { self.terminalFaceWatches[id] = nil }
+                if let faceTile { self.endedTerminalFaceTiles.insert(faceTile) }
+                let turns = self.applyOutsideRead(read, for: id, place: "Terminal")
+                self.terminalFaceAgents.remove(id)
+                self.terminalFaceBusyAgents.remove(id)
+                self.adoptTerminalFaceOutcome(
+                    for: id, sessionId: sessionIds.last, model: model, tookTurns: !read.lines.isEmpty)
+                self.notifyTurnCapabilitiesChanged(id)
+                watch?.end(appendedTurns: turns)
             }
         }
     }

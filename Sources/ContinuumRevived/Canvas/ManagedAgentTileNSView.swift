@@ -1063,9 +1063,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private(set) var pendingTerminalFlip = false
     private let faceFlipBanner = AgentFaceFlipBanner(frame: .zero)
     private var terminalFaceReattachments = 0
-    /// A relaunch reattached in the Terminal face before the Array face showed
-    /// any history; the flip back restores the history before the mark too.
-    private var terminalFaceRestoresPrefix = false
 
     /// The Terminal face is Claude Code's alone. Codex is hidden on purpose:
     /// `codex resume <thread>` exists, but codex writes no per-process session
@@ -1192,138 +1189,129 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let state = AgentTerminalFaceState(
             sessionId: launch.sessionId, cwd: launch.cwd,
             sessionFileOffset: ClaudeTerminalFace.sessionFileLength(url))
-        startTerminalFaceSession(state: state, launch: launch, environment: environment)
+        let watch = supervisor.watchTerminalFace(for: agentID, tileId: tile.id, state: state, environment: environment)
+        startTerminalFaceSurface(watch: watch, launch: launch)
         persistTerminalFace(state)
     }
 
-    /// A relaunch (or a workspace's return) with the tile in its Terminal face.
-    /// Reattaches to the claude tmux kept; when that session is gone the tile
-    /// comes back in the Array face, keeping whatever the terminal learned.
-    /// Returns whether the tile is in its Terminal face now.
+    /// A tile wired with its Terminal face persisted: a relaunch, a
+    /// workspace's return, a tile rebuilt for the agent. Returns whether the
+    /// face owns this tile's history — the tile is in its Terminal face, or
+    /// will be once tmux has answered, or the face's end is bringing the
+    /// turns in — so the host runs no restore of its own over it.
     @discardableResult
     func reattachTerminalFaceIfNeeded() -> Bool {
-        guard terminalFaceSession == nil, let state = tile.metadata.agentTerminalFace else { return false }
+        guard let state = tile.metadata.agentTerminalFace else { return false }
+        // A parked tile coming back: its surface never went (review #9).
+        if terminalFaceSession != nil { return true }
         guard let environment = terminalFaceEnvironment, let agentID = attachedAgentID,
-              let supervisor = agentSource,
-              AgentTerminalFaceSession.tmuxSessionExists(tileId: tile.id, environment: environment),
-              let launch = supervisor.beginTerminalFace(for: agentID, reattaching: true) else {
-            // The Array face's restore reads the session file, so the turns
-            // are on screen already; what comes back is the record's half.
-            if let agentID = attachedAgentID, let supervisor = agentSource {
-                let added = terminalFaceLines(state, sessionIds: state.sessionIds)
-                supervisor.endTerminalFace(
-                    for: agentID, sessionId: state.sessionIds.last,
-                    model: ClaudeTerminalFace.lastModel(in: added), tookTurns: !added.isEmpty)
-            }
+              let supervisor = agentSource else { return false }
+        // It ended while the tile was away; its turns are in the transcript.
+        if supervisor.hasEndedTerminalFace(onTile: tile.id) {
             persistTerminalFace(nil)
             return false
         }
-        terminalFaceRestoresPrefix = !hasRenderedRehydratedSession && model.document.entries.isEmpty
-        startTerminalFaceSession(state: state, launch: launch, environment: environment)
+        // This launch watches it, and kept its surface: show it again.
+        let watched = supervisor.terminalFaceWatch(for: agentID)
+        if let watch = watched, let kept = watch.takeKeptSurface() {
+            host(watch: watch, surface: kept, start: false)
+            return true
+        }
+        // Otherwise tmux answers, off the main thread, whether claude is still
+        // there — a new client must never start a claude that just left.
+        let control = environment.tmuxPath.map { ProcessTmuxControl(tmuxPath: $0, defaults: environment.defaults) }
+        let tileId = tile.id
+        Task { @MainActor [weak self, weak supervisor] in
+            let alive = await AgentTerminalFaceWatch.tmuxSessionExists(tileId: tileId, control: control)
+            guard let self, let supervisor, self.attachedAgentID == agentID, self.terminalFaceSession == nil,
+                  self.tile.metadata.agentTerminalFace == state else { return }
+            if let watch = watched {
+                guard supervisor.terminalFaceWatch(for: agentID) === watch else { return }
+                if alive, !watch.launchArguments.isEmpty {
+                    self.host(watch: watch, surface: AgentTerminalFaceSession(watch: watch, arguments: watch.launchArguments))
+                } else {
+                    self.persistTerminalFace(nil)
+                    supervisor.finishTerminalFace(for: agentID)
+                }
+                return
+            }
+            if alive, let launch = supervisor.beginTerminalFace(for: agentID, reattaching: true) {
+                let watch = supervisor.watchTerminalFace(for: agentID, tileId: tileId, state: state, environment: environment)
+                self.startTerminalFaceSurface(watch: watch, launch: launch)
+            } else {
+                // Gone: what the terminal did comes home through the face's one
+                // end, and the record adopts the session and model claude ended
+                // on (review #10).
+                self.persistTerminalFace(nil)
+                supervisor.finishTerminalFace(for: agentID, persisted: state, tileId: tileId, claudeHome: environment.claudeHome)
+            }
+        }
         return true
     }
 
-    private func startTerminalFaceSession(
-        state: AgentTerminalFaceState, launch: AgentSupervisor.TerminalFaceLaunch,
-        environment: AgentTerminalFaceEnvironment
-    ) {
+    private func startTerminalFaceSurface(watch: AgentTerminalFaceWatch, launch: AgentSupervisor.TerminalFaceLaunch) {
         let arguments = ClaudeTerminalFace.launchArguments(
-            claude: environment.claudeCommand(),
-            sessionId: state.sessionId,
+            claude: watch.environment.claudeCommand(),
+            sessionId: watch.state.sessionId,
             conversationExists: launch.conversationExists,
             model: launch.model,
             effort: launch.effort,
             processOwner: launch.processOwner,
             path: PiAgentRunner.childEnvironment()["PATH"] ?? "/usr/bin:/bin")
-        let session = AgentTerminalFaceSession(
-            tileId: tile.id, arguments: arguments, cwd: state.cwd,
-            sessionIds: state.sessionIds, environment: environment)
-        session.onExit = { [weak self, weak session] in
-            guard let self, let session, self.terminalFaceSession === session else { return }
-            self.flipBackToArrayFace(from: session)
-        }
-        session.onClientDetached = { [weak self, weak session] in
-            guard let self, let session, self.terminalFaceSession === session,
-                  let state = self.tile.metadata.agentTerminalFace else { return }
+        watch.launchArguments = arguments
+        host(watch: watch, surface: AgentTerminalFaceSession(watch: watch, arguments: arguments))
+    }
+
+    /// Shows `surface` in this tile and reflects its face. What happens to the
+    /// agent is the watch's; this tile only follows it.
+    private func host(watch: AgentTerminalFaceWatch, surface: AgentTerminalFaceSession, start: Bool = true) {
+        watch.onHostClientDetached = { [weak self, weak watch] in
+            guard let self, let watch, self.terminalFaceSession?.watch === watch else { return }
+            self.terminalFaceSession?.detachSurface()
             self.terminalFaceSession = nil
-            session.detachSurface()
             // A client that keeps dying is not worth chasing: end claude, and
-            // the next exit flips the tile back with nothing left writing.
+            // its exit ends the face with nothing left writing.
             self.terminalFaceReattachments += 1
             guard self.terminalFaceReattachments <= 3 else {
-                session.endClaude()
-                self.flipBackToArrayFace(from: session)
+                watch.endClaude(surface: nil)
                 return
             }
-            self.startTerminalFaceSession(state: state, launch: launch, environment: environment)
+            self.host(watch: watch, surface: AgentTerminalFaceSession(watch: watch, arguments: watch.launchArguments))
         }
-        session.onBusyChange = { [weak self] busy in
-            guard let self, let agentID = self.attachedAgentID else { return }
-            // The band pill and the sidebar row read it from the supervisor.
-            self.agentSource?.noteTerminalFaceBusy(agentID, busy: busy)
-        }
-        session.onSessionChange = { [weak self] sessionId in
-            guard let self, var state = self.tile.metadata.agentTerminalFace else { return }
-            // Persisted, so a relaunch that finds tmux gone still adopts it.
-            state.latestSessionId = sessionId
-            self.persistTerminalFace(state)
-        }
+        watch.onHostSessionChange = { [weak self] state in self?.persistTerminalFace(state) }
+        watch.onHostEnded = { [weak self] turns in self?.showArrayFaceAfterTerminal(appendedTurns: turns) }
         promoteBodyToNative()
-        terminalFaceSession = session
-        setContentView(session.hostView)
-        session.start()
+        terminalFaceSession = surface
+        setContentView(surface.hostView)
+        if start { surface.start() }
         refreshFaceSwitch()
         if window?.firstResponder === v2Composer?.textView || window?.firstResponder == nil {
-            session.runtime.focus()
+            surface.runtime.focus()
         }
     }
 
     /// Switch to Array from the Terminal face. Claude has to go first — two
     /// writers is the one thing the faces exist to prevent — so a busy claude
-    /// is asked about, and then the exit path does the flip.
+    /// is asked about, and then its exit ends the face.
     private func requestArrayFace() {
         guard let session = terminalFaceSession else { return }
         if session.isBusy, let environment = terminalFaceEnvironment,
            !environment.confirm("Claude is working in this terminal.", "Stop and Switch") { return }
-        session.endClaude()
+        session.watch.endClaude(surface: session)
     }
 
-    /// claude left (`/exit`, a crash, or Array ended it). Never closes the
-    /// tile: the Array face comes back with the terminal's turns appended.
-    private func flipBackToArrayFace(from session: AgentTerminalFaceSession) {
+    /// The face is over (`/exit`, a crash, Array ending it). Never closes the
+    /// tile: the Array face comes back, and the terminal's turns are already
+    /// in its transcript, appended by the supervisor.
+    private func showArrayFaceAfterTerminal(appendedTurns turns: Int) {
         terminalFaceReattachments = 0
-        let state = tile.metadata.agentTerminalFace
-        // Every session the process passed through: the first from the mark,
-        // any `/clear` or `/resume` moved it to from their start.
-        let added = state.map { terminalFaceLines($0, sessionIds: session.sessionIds) } ?? []
+        terminalFaceSession?.detachSurface()
         terminalFaceSession = nil
-        session.detachSurface()
         setContentView(contentBackdrop)
         persistTerminalFace(nil)
-
-        if terminalFaceRestoresPrefix, let state {
-            terminalFaceRestoresPrefix = false
-            let url = ClaudeTerminalFace.sessionFileURL(
-                claudeHome: terminalFaceClaudeHome, cwd: state.cwd, sessionId: state.sessionId)
-            let prefix = ClaudeTerminalFace.lines(in: url, before: state.sessionFileOffset)
-            if !prefix.isEmpty {
-                renderRehydratedPreviousSession(ClaudeSessionTranscriptReader.parse(lines: prefix, threadId: threadId))
-            }
-        }
-        let appended = ClaudeSessionTranscriptReader.parse(
-            lines: added, threadId: threadId,
-            limits: RehydrationLimits(maxMessages: Int.max, maxBytes: Int.max))
-        let turns = Self.promptCount(appended)
-        if let boundary = appendTurnsTakenOutside(appended, place: "Terminal"), let agentID = attachedAgentID {
-            agentSource?.appendOutsideTurns(
-                appended, boundaryText: boundary, symbolName: Self.terminalBoundarySymbol, for: agentID)
-        }
-        if let agentID = attachedAgentID, let supervisor = agentSource {
-            supervisor.endTerminalFace(
-                for: agentID, sessionId: session.currentSessionId,
-                model: ClaudeTerminalFace.lastModel(in: added), tookTurns: turns > 0)
-            // Edge case 12: the picker shows what the terminal actually ran.
-            if let selection = supervisor.launchSelection(for: agentID) { applyLaunchSelection(selection) }
+        // Edge case 12: the picker shows what the terminal actually ran.
+        if let agentID = attachedAgentID, let selection = agentSource?.launchSelection(for: agentID) {
+            applyLaunchSelection(selection)
         }
         descriptor.status = .idle
         descriptor.statusUpdatedAt = Date()
@@ -1335,24 +1323,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         qaTerminalFaceAppendedTurns = turns
     }
 
-    static let terminalBoundarySymbol = "apple.terminal"
+    static let terminalBoundarySymbol = AgentSupervisor.outsideBoundarySymbol
 
-    /// Appends turns this agent's session took outside the tile under a
-    /// boundary ("In Terminal · 2 turns"), through the restore's own replay.
-    /// Returns the boundary's text, nil when there was nothing to append.
-    @discardableResult
-    func appendTurnsTakenOutside(_ appended: RehydratedTranscript, place: String) -> String? {
-        guard !appended.steps.isEmpty else { return nil }
-        let boundary = Self.terminalBoundaryText(turns: Self.promptCount(appended), place: place)
-        model.appendSessionBoundary(
-            id: "outside-\(UUID().uuidString)", text: boundary, symbolName: Self.terminalBoundarySymbol)
-        replayRehydratedSteps(appended)
-        return boundary
-    }
-
-
-    /// Turns the supervisor appended to the agent's transcript, drawn the same
-    /// way: its boundary, then the restore's own replay.
+    /// Appends turns this agent's session took outside the tile under the
+    /// supervisor's boundary ("In Terminal · 2 turns"), through the restore's
+    /// own replay — the same steps the agent's transcript took.
     func appendTurnsTakenOutside(_ appended: RehydratedTranscript, boundary: String) {
         guard !appended.steps.isEmpty else { return }
         model.appendSessionBoundary(
@@ -1362,25 +1337,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     /// "In Terminal · 1 turn" — the divider over the turns the face took.
     static func terminalBoundaryText(turns: Int, place: String = "Terminal") -> String {
-        "In \(place) · \(turns) \(turns == 1 ? "turn" : "turns")"
-    }
-
-    static func promptCount(_ transcript: RehydratedTranscript) -> Int {
-        transcript.steps.filter { if case .userPrompt = $0 { return true } else { return false } }.count
-    }
-
-    private var terminalFaceClaudeHome: URL {
-        terminalFaceEnvironment?.claudeHome ?? FileManager.default.homeDirectoryForCurrentUser
-    }
-
-    /// What the Terminal face wrote: the mark is a byte offset into the first
-    /// session's file only; any later session's file is all the face's.
-    private func terminalFaceLines(_ state: AgentTerminalFaceState, sessionIds: [String]) -> [String] {
-        sessionIds.flatMap { sessionId in
-            ClaudeTerminalFace.lines(
-                in: ClaudeTerminalFace.sessionFileURL(claudeHome: terminalFaceClaudeHome, cwd: state.cwd, sessionId: sessionId),
-                after: sessionId == state.sessionId ? state.sessionFileOffset : 0)
-        }
+        AgentSupervisor.outsideBoundaryText(turns: turns, place: place)
     }
 
     private func persistTerminalFace(_ state: AgentTerminalFaceState?) {
@@ -1393,7 +1350,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     /// × in the Terminal face closes the agent's tile as it always has, after
     /// asking when claude is mid-turn (edge case 6). Claude ends with it: a
-    /// session nobody can see must not keep writing.
+    /// session nobody can see must not keep writing. Its turns reach the
+    /// agent's transcript through the face's one end, for the next tile.
     override func handleCloseRequest() {
         guard let session = terminalFaceSession else {
             super.handleCloseRequest()
@@ -1401,22 +1359,20 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         }
         if session.isBusy, let environment = terminalFaceEnvironment,
            !environment.confirm("Claude is working in this terminal.", "Stop and Close") { return }
+        let watch = session.watch
+        watch.onHostEnded = nil
+        watch.onHostClientDetached = nil
+        watch.onHostSessionChange = nil
         terminalFaceSession = nil
-        session.detachSurface()
-        session.endClaude()
-        if let agentID = attachedAgentID, let supervisor = agentSource, let state = tile.metadata.agentTerminalFace {
-            let added = terminalFaceLines(state, sessionIds: session.sessionIds)
-            // The tile goes, the agent stays: what the terminal did is in its
-            // saved transcript for the next tile that opens it.
-            let appended = ClaudeSessionTranscriptReader.parse(
-                lines: added, threadId: threadId,
-                limits: RehydrationLimits(maxMessages: Int.max, maxBytes: Int.max))
-            supervisor.appendOutsideTurns(
-                appended, boundaryText: Self.terminalBoundaryText(turns: Self.promptCount(appended)),
-                symbolName: Self.terminalBoundarySymbol, for: agentID)
-            supervisor.endTerminalFace(
-                for: agentID, sessionId: session.currentSessionId,
-                model: ClaudeTerminalFace.lastModel(in: added), tookTurns: !added.isEmpty)
+        if session.tmuxSessionName != nil {
+            // The client goes now; claude's session is killed off the main
+            // thread, and the watch sees it gone.
+            session.detachSurface()
+            watch.endClaude(surface: nil)
+        } else {
+            // Claude is this surface's child and ends with it.
+            session.detachSurface()
+            agentSource?.finishTerminalFace(for: watch.agentID)
         }
         persistTerminalFace(nil)
         setContentView(contentBackdrop)
@@ -1748,10 +1704,24 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// M1.4: a workspace switch is a removal, and a removal must detach. See
     /// `TileNSView.prepareForRemovalFromScene`.
     override func prepareForRemovalFromScene() {
-        // The surface goes; claude stays in tmux, and the rebuilt tile
-        // reattaches to it from the persisted face.
-        terminalFaceSession?.detachSurface()
-        terminalFaceSession = nil
+        if let session = terminalFaceSession {
+            terminalFaceSession = nil
+            let watch = session.watch
+            watch.onHostEnded = nil
+            watch.onHostClientDetached = nil
+            watch.onHostSessionChange = nil
+            if session.tmuxSessionName == nil, !watch.isEnded {
+                // tmux off: claude is this surface's child, and ending it here
+                // would stop a turn nobody was asked about (review #17). The
+                // surface keeps running with no tile; a tile rebuilt for the
+                // agent shows it again, and claude's exit still ends the face.
+                session.hostView.removeFromSuperview()
+                watch.keepSurfaceAlive(session)
+            } else {
+                // The client goes; claude stays in tmux, and the watch follows it.
+                session.detachSurface()
+            }
+        }
         detach()
     }
 

@@ -44,67 +44,71 @@ private extension AgentFaceFlipBanner.Content {
     }
 }
 
-/// One running Terminal face: its surface, its claude, and what claude says
-/// about itself while it runs.
+/// One agent's Terminal face, from the flip until claude is gone: the mark,
+/// every session claude moved through, and what claude says about itself.
+///
+/// Owned by the supervisor and keyed by the agent (`AgentSupervisor
+/// .terminalFaceWatch(for:)`), never by a tile view: a tile can be parked in
+/// another workspace, evicted, or rebuilt while claude runs, and claude
+/// leaving must still end the face, release the session and bring its turns
+/// home (`.plans/79` review #9). A view only hosts a surface — a Ghostty
+/// client onto this face — and reflects what the watch reports.
 @MainActor
-final class AgentTerminalFaceSession {
+final class AgentTerminalFaceWatch {
+    let agentID: AgentID
     let tileId: UUID
-    let hostView = TerminalHostView(frame: .zero)
-    let runtime: GhosttyTerminalRuntime
-    /// The tmux session the face lives in, when tmux runs it.
-    let tmuxSessionName: String?
+    /// The flip's mark and the first session. `latestSessionId` follows claude.
+    private(set) var state: AgentTerminalFaceState
     /// Every session id claude reported, oldest first. `/clear` and `/resume`
-    /// move a running claude to a new session (edge case 3); flipping back
+    /// move a running claude to a new session (edge case 3); the face's end
     /// reads all of them.
     private(set) var sessionIds: [String]
     private(set) var claudePid: Int32?
     private(set) var live: ClaudeTerminalFace.LiveSession?
-    /// Called once when claude is gone — `/exit`, a crash, or Array ending it.
-    var onExit: (() -> Void)?
-    /// Called when claude reports a different session id than the last one.
-    var onSessionChange: ((String) -> Void)?
-    /// Called when claude's own status file flips between busy and idle.
+    /// The tmux session claude lives in, when tmux runs it.
+    let tmuxSessionName: String?
+    let environment: AgentTerminalFaceEnvironment
+    /// The argv a surface runs: with tmux, `new-session -A` attaches a new
+    /// client to the running claude.
+    var launchArguments: [String] = []
+    /// The agent's consequences, set by the supervisor: the busy pill, a new
+    /// session id, and claude being gone.
     var onBusyChange: ((Bool) -> Void)?
-    /// The surface ended but claude did not (tmux still holds it — its client
-    /// was detached, or the app is going away). The tile attaches again.
-    var onClientDetached: (() -> Void)?
-    /// Array is tearing the surface down on purpose (a workspace switch, a
-    /// close): the exit that follows is not claude leaving.
-    private var detaching = false
+    var onSessionChange: ((String) -> Void)?
+    var onGone: (() -> Void)?
+    /// The hosting view's, set while a view shows this face: its tmux client
+    /// went while claude runs, claude moved session, and the face is over
+    /// (with the turns the transcript gained).
+    var onHostClientDetached: (() -> Void)?
+    var onHostSessionChange: ((AgentTerminalFaceState) -> Void)?
+    var onHostEnded: ((Int) -> Void)?
+    /// A surface kept running with no tile to show it in (tmux off, the tile
+    /// left its workspace): claude is that surface's child, so dropping it
+    /// would end claude mid-turn without asking (review #17).
+    private(set) var keptSurface: AgentTerminalFaceSession?
     private var pollTimer: Timer?
     private var pollInFlight = false
-    private let environment: AgentTerminalFaceEnvironment
-    private let cwd: String
+    private(set) var isEnded = false
+    /// tmux has shown claude's session. Until then a missing session is one
+    /// not made yet, not one that ended.
+    private var sawTmuxSession = false
 
-    init(tileId: UUID, arguments: [String], cwd: String, sessionIds: [String], environment: AgentTerminalFaceEnvironment) {
+    init(agentID: AgentID, tileId: UUID, state: AgentTerminalFaceState, environment: AgentTerminalFaceEnvironment) {
+        self.agentID = agentID
         self.tileId = tileId
-        self.cwd = cwd
+        self.state = state
+        self.sessionIds = state.sessionIds
         self.environment = environment
-        self.sessionIds = sessionIds
-        let inner = LaunchProfile(
-            command: arguments[0], arguments: Array(arguments.dropFirst()), cwd: cwd, title: "Claude Code")
-        let profile: LaunchProfile
-        if let tmuxPath = environment.tmuxPath {
-            // `new-session -A`: attaches when the session already exists, which
-            // is the relaunch reattach; creates it running claude otherwise.
-            profile = TmuxSession.wrap(profile: inner, tileId: tileId, tmuxPath: tmuxPath, defaults: environment.defaults)
-            tmuxSessionName = TmuxSession.sessionName(tileId: tileId)
-        } else {
-            profile = inner
-            tmuxSessionName = nil
-        }
-        runtime = GhosttyTerminalRuntime(
-            tileId: tileId, title: "Claude Code", launchProfile: profile,
-            ghostty: environment.ghostty, displayDefaults: environment.defaults)
-        runtime.reservedShortcutHandler = environment.reservedShortcutHandler
-        runtime.onRuntimeExited = { [weak self] _, _ in self?.surfaceExited() }
+        tmuxSessionName = environment.tmuxPath == nil ? nil : TmuxSession.sessionName(tileId: tileId)
     }
 
     var isBusy: Bool { live?.isBusy ?? false }
-    var currentSessionId: String { sessionIds.last! }
+    var currentSessionId: String { sessionIds.last ?? state.sessionId }
 
+    /// One timer per running face, whatever its tiles do: it is how claude
+    /// leaving is seen when no surface is up to report it.
     func start() {
-        hostView.attach(runtime: runtime)
+        guard pollTimer == nil, !isEnded else { return }
         let timer = Timer(timeInterval: environment.pollInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
         }
@@ -113,50 +117,105 @@ final class AgentTerminalFaceSession {
         poll()
     }
 
-    /// Ends the surface without ending claude — tmux keeps it.
-    func detachSurface() {
-        detaching = true
+    /// Claude is gone and its turns are being read: nothing more to ask.
+    func stopPolling() {
+        isEnded = true
         pollTimer?.invalidate()
         pollTimer = nil
-        runtime.terminate(policy: .force)
-        hostView.detachRuntime()
     }
 
-    /// Ends claude itself. With tmux that is the session; the surface's exit
-    /// follows and reports through `onExit`.
-    func endClaude() {
+    /// The face is over and its turns are in the transcript: the host flips
+    /// back, and a kept surface is let go.
+    func end(appendedTurns: Int) {
+        stopPolling()
+        let ended = onHostEnded
+        onHostEnded = nil
+        onHostClientDetached = nil
+        onHostSessionChange = nil
+        keptSurface?.detachSurface()
+        keptSurface = nil
+        ended?(appendedTurns)
+    }
+
+    func keepSurfaceAlive(_ surface: AgentTerminalFaceSession) {
+        keptSurface = surface
+    }
+
+    func takeKeptSurface() -> AgentTerminalFaceSession? {
+        defer { keptSurface = nil }
+        return keptSurface
+    }
+
+    /// Ends claude itself. With tmux that is its session, killed off the main
+    /// thread; without, the surface it runs in. Either way the exit that
+    /// follows ends the face.
+    func endClaude(surface: AgentTerminalFaceSession?) {
         if let tmuxPath = environment.tmuxPath, let name = tmuxSessionName {
-            _ = try? ProcessTmuxControl(tmuxPath: tmuxPath, defaults: environment.defaults)
-                .run(["kill-session", "-t", name])
+            let control = ProcessTmuxControl(tmuxPath: tmuxPath, defaults: environment.defaults)
+            Task.detached(priority: .userInitiated) { [weak self] in
+                _ = try? control.run(["kill-session", "-t", name])
+                await MainActor.run { self?.poll() }
+            }
         } else {
-            runtime.terminate(policy: .force)
+            (surface ?? keptSurface)?.runtime.terminate(policy: .force)
         }
     }
 
-    /// Whether a tmux session for this tile is running now.
-    static func tmuxSessionExists(tileId: UUID, environment: AgentTerminalFaceEnvironment) -> Bool {
-        guard let tmuxPath = environment.tmuxPath else { return false }
-        let control = ProcessTmuxControl(tmuxPath: tmuxPath, defaults: environment.defaults)
-        return (try? control.run(["has-session", "-t", TmuxSession.sessionName(tileId: tileId)])) != nil
+    /// A surface showing this face ended. Only a gone claude ends the face:
+    /// a tmux client can end while claude runs (detached, or the app going
+    /// away), and the host attaches again.
+    func surfaceExited(_ surface: AgentTerminalFaceSession) {
+        if keptSurface === surface { keptSurface = nil }
+        guard !isEnded else { return }
+        guard let control = tmuxControl, let name = tmuxSessionName else {
+            onGone?()
+            return
+        }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let alive = (try? control.run(["has-session", "-t", name])) != nil
+            await MainActor.run {
+                guard let self, !self.isEnded else { return }
+                if alive { self.onHostClientDetached?() } else { self.onGone?() }
+            }
+        }
+    }
+
+    /// Whether a tmux session for `tileId` runs now, asked off the main thread.
+    nonisolated static func tmuxSessionExists(tileId: UUID, control: ProcessTmuxControl?) async -> Bool {
+        guard let control else { return false }
+        let name = TmuxSession.sessionName(tileId: tileId)
+        return await Task.detached(priority: .userInitiated) {
+            (try? control.run(["has-session", "-t", name])) != nil
+        }.value
+    }
+
+    private var tmuxControl: ProcessTmuxControl? {
+        environment.tmuxPath.map { ProcessTmuxControl(tmuxPath: $0, defaults: environment.defaults) }
     }
 
     /// One read of what claude says about the process, off the main thread.
     func poll() {
-        guard !pollInFlight, !detaching else { return }
+        guard !pollInFlight, !isEnded else { return }
         pollInFlight = true
         let known = claudePid
         // `ProcessTmuxControl` is Sendable; the defaults it holds are not.
-        let control = environment.tmuxPath.map { ProcessTmuxControl(tmuxPath: $0, defaults: environment.defaults) }
+        let control = tmuxControl
         let name = tmuxSessionName
         let home = environment.claudeHome
         let lastSession = currentSessionId
-        let cwd = self.cwd
+        let cwd = state.cwd
         Task { @MainActor [weak self] in
-            let (pid, live) = await Self.readProcess(
+            let (pid, live, tmuxGone) = await Self.readProcess(
                 known: known, control: control, sessionName: name,
                 lastSession: lastSession, cwd: cwd, claudeHome: home)
             guard let self else { return }
             self.pollInFlight = false
+            guard !self.isEnded else { return }
+            if tmuxGone {
+                if self.sawTmuxSession { self.onGone?() }
+                return
+            }
+            self.sawTmuxSession = true
             if self.claudePid == nil { self.claudePid = pid }
             guard let live else { return }
             let wasBusy = self.live?.isBusy ?? false
@@ -164,7 +223,10 @@ final class AgentTerminalFaceSession {
             if live.isBusy != wasBusy { self.onBusyChange?(live.isBusy) }
             if live.sessionId != self.currentSessionId {
                 self.sessionIds.append(live.sessionId)
+                // Persisted, so a relaunch that finds tmux gone still adopts it.
+                self.state.latestSessionId = live.sessionId
                 self.onSessionChange?(live.sessionId)
+                self.onHostSessionChange?(self.state)
             }
         }
     }
@@ -173,7 +235,10 @@ final class AgentTerminalFaceSession {
     nonisolated private static func readProcess(
         known: Int32?, control: ProcessTmuxControl?, sessionName: String?,
         lastSession: String, cwd: String, claudeHome: URL
-    ) async -> (Int32?, ClaudeTerminalFace.LiveSession?) {
+    ) async -> (Int32?, ClaudeTerminalFace.LiveSession?, tmuxGone: Bool) {
+        if let control, let sessionName, (try? control.run(["has-session", "-t", sessionName])) == nil {
+            return (known, nil, true)
+        }
         var pid = known
         if pid == nil, let control, let sessionName {
             // `/usr/bin/env` execs claude, so the pane's pid IS claude's.
@@ -183,7 +248,7 @@ final class AgentTerminalFaceSession {
         if pid == nil {
             pid = pidFromSessionFiles(sessionId: lastSession, cwd: cwd, claudeHome: claudeHome)
         }
-        return (pid, pid.flatMap { ClaudeTerminalFace.liveSession(pid: $0, claudeHome: claudeHome) })
+        return (pid, pid.flatMap { ClaudeTerminalFace.liveSession(pid: $0, claudeHome: claudeHome) }, false)
     }
 
     /// Without tmux there is no pane to ask; claude's own file for our session
@@ -199,18 +264,63 @@ final class AgentTerminalFaceSession {
         }
         return nil
     }
+}
 
-    private func surfaceExited() {
-        pollTimer?.invalidate()
-        pollTimer = nil
-        guard !detaching else { return }
-        // The tmux CLIENT ended. Only a gone session means claude left;
-        // flipping back while it still runs would put a second writer on it.
-        if tmuxSessionName != nil, Self.tmuxSessionExists(tileId: tileId, environment: environment) {
-            onClientDetached?()
-            return
+/// One surface onto a Terminal face: a Ghostty client inside a tile. With
+/// tmux it is a client of claude's tmux session and can come and go; without,
+/// claude is its child. What claude is doing is the watch's to know.
+@MainActor
+final class AgentTerminalFaceSession {
+    let tileId: UUID
+    let hostView = TerminalHostView(frame: .zero)
+    let runtime: GhosttyTerminalRuntime
+    /// The tmux session the face lives in, when tmux runs it.
+    let tmuxSessionName: String?
+    let watch: AgentTerminalFaceWatch
+    /// Array is tearing the surface down on purpose (a workspace switch, a
+    /// close): its exit is not claude leaving.
+    private var detaching = false
+
+    init(watch: AgentTerminalFaceWatch, arguments: [String]) {
+        self.watch = watch
+        tileId = watch.tileId
+        let environment = watch.environment
+        let inner = LaunchProfile(
+            command: arguments[0], arguments: Array(arguments.dropFirst()), cwd: watch.state.cwd, title: "Claude Code")
+        let profile: LaunchProfile
+        if let tmuxPath = environment.tmuxPath {
+            // `new-session -A`: attaches when the session already exists, which
+            // is the relaunch reattach; creates it running claude otherwise.
+            profile = TmuxSession.wrap(profile: inner, tileId: watch.tileId, tmuxPath: tmuxPath, defaults: environment.defaults)
+            tmuxSessionName = TmuxSession.sessionName(tileId: watch.tileId)
+        } else {
+            profile = inner
+            tmuxSessionName = nil
         }
-        onExit?()
+        runtime = GhosttyTerminalRuntime(
+            tileId: watch.tileId, title: "Claude Code", launchProfile: profile,
+            ghostty: environment.ghostty, displayDefaults: environment.defaults)
+        runtime.reservedShortcutHandler = environment.reservedShortcutHandler
+        runtime.onRuntimeExited = { [weak self] _, _ in
+            guard let self, !self.detaching else { return }
+            self.watch.surfaceExited(self)
+        }
+    }
+
+    var isBusy: Bool { watch.isBusy }
+    var claudePid: Int32? { watch.claudePid }
+    var sessionIds: [String] { watch.sessionIds }
+    var currentSessionId: String { watch.currentSessionId }
+
+    func start() {
+        hostView.attach(runtime: runtime)
+    }
+
+    /// Ends the surface. With tmux claude stays in its session.
+    func detachSurface() {
+        detaching = true
+        runtime.terminate(policy: .force)
+        hostView.detachRuntime()
     }
 }
 

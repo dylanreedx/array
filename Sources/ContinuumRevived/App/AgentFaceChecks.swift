@@ -520,6 +520,12 @@ extension AgentFaceChecks {
             }
             return windowPoint(of: frame, in: tile)
         }
+        /// A real click on a band control, at the band's current layout.
+        func clickSegment(_ name: String, of tile: ManagedAgentTileNSView) throws {
+            fixture.window.contentView?.layoutSubtreeIfNeeded()
+            tile.layoutSubtreeIfNeeded()
+            try click(try segment(name, of: tile), in: fixture.window)
+        }
         func entriesText(_ tile: ManagedAgentTileNSView) -> [String] {
             tile.qaDocumentForChecks.entries.map { AgentTranscriptCopyController.plainText(for: $0.blocks) }
         }
@@ -636,11 +642,15 @@ extension AgentFaceChecks {
         fixture.pump(1.5)
         saveWindowPNG(fixture.window, to: directory.appendingPathComponent("face-terminal.png"))
 
-        // 5. /exit flips back, never closes; the terminal's turns append once.
+        // 5. /exit flips back, never closes; the terminal's turns append once,
+        //    read off the main thread (review #12).
+        let readsBeforeExit = QAMainThreadIO.fileReads
         type("/exit")
         try expect(fixture.pump(until: { view.face == .array }, timeout: 10), "/exit must flip the tile back to the Array face")
         try expect(fixture.closeRequests.isEmpty && fixture.canvas.tileView(for: view.tile.id) === view,
                    "/exit must never close the tile")
+        try expect(QAMainThreadIO.fileReads == readsBeforeExit,
+                   "the flip back must read the session file off the main thread; \(QAMainThreadIO.fileReads - readsBeforeExit) reads on main")
         try expect(!tmuxSessionAlive(view.tile.id), "claude's tmux session must be gone after /exit")
         let after = entriesText(view)
         try expect(Array(after.prefix(before.count)) == before,
@@ -710,7 +720,8 @@ extension AgentFaceChecks {
         try expect(tmuxSessionAlive(persisted.id), "claude must outlive the tile's view")
         let relaunched = fixture.makeTile(width: 760, height: 560, metadata: persisted.metadata, id: persisted.id, environment: environment)
         liveViews.append(relaunched)
-        try expect(relaunched.reattachTerminalFaceIfNeeded() && relaunched.face == .terminal,
+        // tmux answers off the main thread first (review #12).
+        try expect(relaunched.reattachTerminalFaceIfNeeded() && fixture.pump(until: { relaunched.face == .terminal }, timeout: 5),
                    "a relaunched tile must come back in its Terminal face")
         fixture.pump(1.0)
         try expect(launches().count == 2, "reattaching must not start a second claude; launches \(launches().count)")
@@ -722,9 +733,10 @@ extension AgentFaceChecks {
         fixture.pump(0.5)
         let orphaned = fixture.makeTile(width: 760, height: 560, metadata: persisted.metadata, id: persisted.id, environment: environment)
         liveViews.append(orphaned)
-        try expect(!orphaned.reattachTerminalFaceIfNeeded() && orphaned.face == .array
-                   && orphaned.tile.metadata.agentTerminalFace == nil && !supervisor.isInTerminalFace(agentID),
-                   "with the tmux session gone the tile must come back in the Array face and release the session")
+        orphaned.reattachTerminalFaceIfNeeded()
+        try expect(fixture.pump(until: {
+            orphaned.face == .array && orphaned.tile.metadata.agentTerminalFace == nil && !supervisor.isInTerminalFace(agentID)
+        }, timeout: 5), "with the tmux session gone the tile must come back in the Array face and release the session")
         log.append("relaunch: reattached without a second claude; tmux gone came back in Array")
 
         // 7. The terminal's turns are the agent's, not the tile's: a tile opened
@@ -735,25 +747,175 @@ extension AgentFaceChecks {
         }
         try expect(showsTerminalTurns(orphaned, ["terminal: slow third", "terminal: fourth"]),
                    "a tile opened later must show the terminal's turns once each; got \(entriesText(orphaned))")
-        try click(try segment("face.terminal", of: orphaned), in: fixture.window)
+        try clickSegment("face.terminal", of: orphaned)
         guard fixture.pump(until: { orphaned.face == .terminal && orphaned.terminalFaceSession?.claudePid != nil }, timeout: 10),
               let closing = orphaned.terminalFaceSession else {
-            throw Failure(description: "the reopened tile must flip to its Terminal face")
+            throw Failure(description: "the reopened tile must flip to its Terminal face; face \(orphaned.face), banner \(String(describing: orphaned.qaFaceFlipBanner.content)), held \(supervisor.isInTerminalFace(agentID)), launches \(launches().count), pid \(String(describing: orphaned.terminalFaceSession?.claudePid))")
         }
         _ = closing.runtime.dispatchInsertedText("sixth")
         closing.runtime.sendReturn()
         try expect(fixture.pump(until: { closing.isBusy }, timeout: 6) && fixture.pump(until: { !closing.isBusy }, timeout: 8),
                    "the sixth turn must run in the terminal")
+        let tmuxBeforeClose = QAMainThreadIO.tmuxRuns
         try click(try segment("close", of: orphaned), in: fixture.window)
         try expect(fixture.closeRequests.contains(orphaned.tile.id) && orphaned.face == .array,
                    "× in the Terminal face closes the tile")
         orphaned.prepareForRemovalFromScene()
         fixture.canvas.removeTile(id: orphaned.tile.id)
+        try expect(fixture.pump(until: { !supervisor.isInTerminalFace(agentID) }, timeout: 8),
+                   "× in the Terminal face must end the face and release the session")
+        try expect(QAMainThreadIO.tmuxRuns == tmuxBeforeClose,
+                   "× must end claude's tmux session off the main thread; \(QAMainThreadIO.tmuxRuns - tmuxBeforeClose) tmux runs on main")
         let reopened = fixture.makeTile(width: 760, height: 560, environment: environment)
         liveViews.append(reopened)
         try expect(showsTerminalTurns(reopened, ["terminal: slow third", "terminal: fourth", "terminal: sixth"]),
                    "a tile closed from the Terminal face must leave its turns in the agent's transcript; got \(entriesText(reopened))")
         log.append("reopen: terminal turns survive a close from the Terminal face and a later reopen")
+
+        /// Each marker in exactly one entry, the entries in the markers' order.
+        func onceInOrder(_ texts: [String], _ markers: [String]) -> Bool {
+            let rows = markers.map { marker in texts.indices.filter { texts[$0].contains(marker) } }
+            return rows.allSatisfy { $0.count == 1 } && rows.map { $0[0] } == rows.map { $0[0] }.sorted()
+        }
+        var turnsInOrder = ["PLAIN first question", "terminal: slow third", "terminal: fourth", "PLAIN fifth", "terminal: sixth"]
+        try expect(onceInOrder(entriesText(reopened), turnsInOrder),
+                   "the reopened tile must show every turn once, in order; got \(entriesText(reopened))")
+
+        // 8. The face is the agent's, not the tile's (review #9). Parked
+        //    mid-face (as `parkZoneLayers` parks a tile: detached, its surface
+        //    kept), the tile comes back still in its face, so no restore runs
+        //    over it; parked again, claude leaves while nobody shows it, and
+        //    the face still ends, releases the session and brings the turn home.
+        try clickSegment("face.terminal", of: reopened)
+        guard fixture.pump(until: { reopened.face == .terminal && reopened.terminalFaceSession?.claudePid != nil }, timeout: 10),
+              let parkedSurface = reopened.terminalFaceSession else {
+            throw Failure(description: "step 8: the reopened tile must flip to its Terminal face; face \(reopened.face), banner \(String(describing: reopened.qaFaceFlipBanner.content)), held \(supervisor.isInTerminalFace(agentID)), launches \(launches().count)")
+        }
+        _ = parkedSurface.runtime.dispatchInsertedText("parked seventh")
+        parkedSurface.runtime.sendReturn()
+        try expect(fixture.pump(until: { parkedSurface.isBusy }, timeout: 6) && fixture.pump(until: { !parkedSurface.isBusy }, timeout: 8),
+                   "the seventh turn must run in the terminal")
+        reopened.prepareForParking()
+        reopened.attach(agentID: agentID, supervisor: supervisor)
+        try expect(reopened.reattachTerminalFaceIfNeeded() && reopened.face == .terminal && reopened.terminalFaceSession === parkedSurface,
+                   "back from parking mid-face, the tile is still in its face and owns its history (no restore runs over it)")
+        reopened.prepareForParking()
+        _ = try? ProcessTmuxControl(tmuxPath: tmuxPath, defaults: fixture.defaults)
+            .run(["send-keys", "-t", TmuxSession.sessionName(tileId: reopened.tile.id), "/exit", "Enter"])
+        try expect(fixture.pump(until: { !supervisor.isInTerminalFace(agentID) && supervisor.sendRefusal(for: agentID) == nil }, timeout: 10),
+                   "claude leaving while its tile is parked must end the face and release the session; held \(supervisor.isInTerminalFace(agentID))")
+        reopened.attach(agentID: agentID, supervisor: supervisor)
+        try expect(!reopened.reattachTerminalFaceIfNeeded() && reopened.face == .array && reopened.tile.metadata.agentTerminalFace == nil,
+                   "back from parking after claude left, the tile shows its Array face")
+        turnsInOrder.append("terminal: parked seventh")
+        try expect(onceInOrder(entriesText(reopened), turnsInOrder),
+                   "after the parked exit every turn must show once, in order; got \(entriesText(reopened))")
+        log.append("parked: claude left while the tile was parked; the face ended, the session was released, every turn once")
+
+        // 9. tmux off: claude is its surface's child. A tile retired from its
+        //    workspace keeps claude running — a busy turn is never ended
+        //    without asking — and the tile rebuilt for the agent shows the
+        //    same claude again (review #17).
+        var plain = environment
+        plain.tmuxPath = nil
+        let keepView = fixture.makeTile(width: 760, height: 560, environment: plain)
+        liveViews.append(keepView)
+        try clickSegment("face.terminal", of: keepView)
+        guard fixture.pump(until: { keepView.face == .terminal && keepView.terminalFaceSession?.claudePid != nil }, timeout: 10),
+              let keptSurface = keepView.terminalFaceSession, let keptPid = keptSurface.claudePid else {
+            throw Failure(description: "the tmux-less tile must flip to its Terminal face")
+        }
+        _ = keptSurface.runtime.dispatchInsertedText("slow eighth")
+        keptSurface.runtime.sendReturn()
+        try expect(fixture.pump(until: { keptSurface.isBusy }, timeout: 6), "the eighth turn must start")
+        let keptTile = try fixture.canvas.tileRecord(for: keepView.tile.id).unwrap("the tmux-less tile record")
+        keepView.prepareForRemovalFromScene()
+        fixture.canvas.removeTile(id: keepView.tile.id)
+        fixture.pump(0.5)
+        try expect(kill(keptPid, 0) == 0 && supervisor.isInTerminalFace(agentID),
+                   "with tmux off, a tile leaving its workspace must not end its busy claude (pid \(keptPid) alive: \(kill(keptPid, 0) == 0))")
+        let rebuilt = fixture.makeTile(width: 760, height: 560, metadata: keptTile.metadata, id: keptTile.id, environment: plain)
+        liveViews.append(rebuilt)
+        try expect(rebuilt.reattachTerminalFaceIfNeeded() && rebuilt.face == .terminal && rebuilt.terminalFaceSession?.claudePid == keptPid,
+                   "the rebuilt tile must show the same claude again")
+        try expect(fixture.pump(until: { !keptSurface.isBusy }, timeout: 8), "the eighth turn never ended")
+        _ = keptSurface.runtime.dispatchInsertedText("/exit")
+        keptSurface.runtime.sendReturn()
+        try expect(fixture.pump(until: { rebuilt.face == .array && !supervisor.isInTerminalFace(agentID) }, timeout: 10),
+                   "/exit in the rebuilt tile must flip it back")
+        turnsInOrder.append("terminal: slow eighth")
+        try expect(onceInOrder(entriesText(rebuilt), turnsInOrder),
+                   "the rebuilt tile must show every turn once, in order; got \(entriesText(rebuilt))")
+        log.append("tmux off: a retired tile left claude running mid-turn; the rebuilt tile showed the same claude")
+
+        // 10. A relaunch that finds claude gone (reviews #10, #8). The tile
+        //     remembers a face no process of this launch watched: claude
+        //     answered past the mark, `/clear`ed and answered again on another
+        //     model. The record adopts the session and model it ended on, and
+        //     the turns land once, after the history before the mark, with no
+        //     second restore to come.
+        let relaunch = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: fixture.root.appendingPathComponent("support", isDirectory: true)),
+            makeRunner: AgentSupervisor.productionRunner,
+            transcriptStore: AgentTranscriptStore(root: fixture.root.appendingPathComponent("transcripts-relaunch", isDirectory: true)))
+        defer { relaunch.stopAll() }
+        relaunch.sessionFilesHome = fixture.claudeHome
+        _ = relaunch.restore()
+        guard let restored = relaunch.records[agentID] else { throw Failure(description: "the relaunch did not restore the agent") }
+        let resumedId = AgentSupervisor.claudeSessionLocation(for: restored).sessionId
+        let resumedURL = ClaudeTerminalFace.sessionFileURL(claudeHome: fixture.claudeHome, cwd: restored.lastObservedWhere, sessionId: resumedId)
+        let relaunchMark = ClaudeTerminalFace.sessionFileLength(resumedURL)
+        func line(_ object: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self) + "\n"
+        }
+        func turn(_ text: String, model: String, session: String) throws -> String {
+            try line(["type": "user", "isSidechain": false, "uuid": UUID().uuidString, "sessionId": session,
+                      "message": ["role": "user", "content": text]])
+            + line(["type": "assistant", "isSidechain": false, "uuid": UUID().uuidString, "sessionId": session,
+                    "message": ["role": "assistant", "model": model, "content": [["type": "text", "text": "terminal: " + text]]]])
+        }
+        let handle = try FileHandle(forWritingTo: resumedURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(try turn("tenth", model: "claude-haiku-4-5-20251001", session: resumedId).utf8))
+        try handle.close()
+        let afterClear = UUID().uuidString.lowercased()
+        try Data(try turn("eleventh", model: "claude-opus-5-5", session: afterClear).utf8).write(
+            to: ClaudeTerminalFace.sessionFileURL(claudeHome: fixture.claudeHome, cwd: restored.lastObservedWhere, sessionId: afterClear))
+        var remembered = TileMetadata(launchProfileId: "managed")
+        remembered.agentTerminalFace = AgentTerminalFaceState(
+            sessionId: resumedId, cwd: restored.lastObservedWhere, sessionFileOffset: relaunchMark, latestSessionId: afterClear)
+        func relaunchedTile(_ metadata: TileMetadata) -> ManagedAgentTileNSView {
+            let tile = Tile(id: UUID(), kind: .managedAgent, title: "Fix login redirect",
+                            frame: TileFrame(x: 40, y: 40, width: 760, height: 560),
+                            zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: metadata)
+            let view = ManagedAgentTileNSView(tile: tile)
+            fixture.canvas.install(tileView: view, for: tile)
+            view.terminalFaceEnvironment = environment
+            view.attach(agentID: agentID, supervisor: relaunch)
+            liveViews.append(view)
+            return view
+        }
+        let readsBeforeRelaunch = QAMainThreadIO.fileReads
+        let comeback = relaunchedTile(remembered)
+        try expect(comeback.reattachTerminalFaceIfNeeded(), "a remembered face owns the tile's history until it has ended")
+        try expect(fixture.pump(until: {
+            relaunch.records[agentID]?.providerSessionId == afterClear && comeback.tile.metadata.agentTerminalFace == nil
+        }, timeout: 5), "with claude gone the record must adopt the session /clear moved to; record has \(String(describing: relaunch.records[agentID]?.providerSessionId)), want \(afterClear)")
+        try expect(relaunch.records[agentID]?.model == "anthropic/claude-opus-5-5" && comeback.face == .array
+                   && !relaunch.isInTerminalFace(agentID),
+                   "…and the model the terminal last ran; record has \(String(describing: relaunch.records[agentID]?.model))")
+        try expect(QAMainThreadIO.fileReads == readsBeforeRelaunch,
+                   "the relaunch's face end must read off the main thread; \(QAMainThreadIO.fileReads - readsBeforeRelaunch) reads on main")
+        try expect(!relaunch.needsPreviousSessionNotice(agentID),
+                   "the face's end restored the history, so no second restore of the session file may run over it")
+        let relaunchedTurns = ["terminal: fourth", "terminal: sixth", "terminal: parked seventh", "terminal: slow eighth",
+                               "In Terminal · 2 turns", "terminal: tenth", "terminal: eleventh"]
+        try expect(onceInOrder(entriesText(comeback), relaunchedTurns),
+                   "after the relaunch the history and the terminal's turns must show once each, in order; got \(entriesText(comeback))")
+        let reopenedAfterRelaunch = relaunchedTile(TileMetadata(launchProfileId: "managed"))
+        try expect(onceInOrder(entriesText(reopenedAfterRelaunch), relaunchedTurns),
+                   "a tile opened after that must show the same, once each, in order; got \(entriesText(reopenedAfterRelaunch))")
+        log.append("relaunch: claude gone; the record adopted \(afterClear) and claude-opus-5-5; turns once, in order")
 
         let manifest: [String: Any] = ["log": log, "launches": launches().map { $0.mapValues { "\($0)" } }]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
