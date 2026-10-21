@@ -2532,6 +2532,16 @@ final class WorkspaceRuntime {
         })?.tiles.first { $0.id == tileId }
     }
 
+    /// A Terminal face may finish after its view was evicted from a warm
+    /// scene. Clear the layer's model too, so remount cannot save it back.
+    func clearParkedTerminalFace(for tileId: UUID, projectId: UUID) {
+        for layer in warmScenes.flatMap(\.layers) where layer.placement.projectId == projectId {
+            guard let index = layer.tiles.firstIndex(where: { $0.id == tileId }) else { continue }
+            layer.tiles[index].metadata.agentTerminalFace = nil
+            if let view = layer.tileViews[tileId] { view.tile = layer.tiles[index] }
+        }
+    }
+
     func parkedTileView(for tileId: UUID, projectId: UUID) -> TileNSView? {
         warmScenes.flatMap(\.layers).first(where: {
             $0.placement.projectId == projectId && $0.tiles.contains { $0.id == tileId }

@@ -118,6 +118,10 @@ struct NormalizedTranscriptMessage: Equatable {
         /// boundary, so the card would otherwise lose the directory it needs to
         /// tell two `index.ts` apart.
         var absolutePath: String? = nil
+        /// `array_message_agent`'s text, the one argument its live row carries
+        /// (`AgentToolDetailObservation.messageTextKey`), so a restored row says
+        /// what was sent too.
+        var messageText: String? = nil
     }
 
     var role: Role
@@ -301,6 +305,15 @@ public enum ManagedTranscriptRehydrator {
                                 fileChanges: call.fileChanges,
                                 observedAt: now()))))
                     }
+                    if let messageText = call.messageText {
+                        append(.observation(.toolDetail(
+                            itemId: call.id,
+                            detail: AgentToolDetailObservation(
+                                phase: .started,
+                                toolName: call.name,
+                                fields: [(key: AgentToolDetailObservation.messageTextKey, value: messageText)],
+                                observedAt: now()))))
+                    }
                     append(.event(.itemStarted(
                         threadId: threadId, itemId: call.id, kind: kind, title: title)))
                 }
@@ -413,6 +426,10 @@ extension ManagedTranscriptRehydrator {
         public var codexThreadId: String?
         public var codexHomeURL: URL
         public var limits: RehydrationLimits
+        /// The claude session the agent adopted (`AgentRecord.providerSessionId`):
+        /// a session moved in from another app, a fork, a `/clear`. nil reads
+        /// the id Array derives from the agent.
+        public var claudeSessionId: String?
 
         public init(
             agentUUID: UUID,
@@ -423,7 +440,8 @@ extension ManagedTranscriptRehydrator {
             homeURL: URL,
             codexThreadId: String? = nil,
             codexHomeURL: URL? = nil,
-            limits: RehydrationLimits = RehydrationLimits()
+            limits: RehydrationLimits = RehydrationLimits(),
+            claudeSessionId: String? = nil
         ) {
             self.agentUUID = agentUUID
             self.cwd = cwd
@@ -435,6 +453,7 @@ extension ManagedTranscriptRehydrator {
             self.codexHomeURL = codexHomeURL
                 ?? homeURL.appendingPathComponent(".codex", isDirectory: true)
             self.limits = limits
+            self.claudeSessionId = claudeSessionId
         }
     }
 
@@ -450,7 +469,7 @@ extension ManagedTranscriptRehydrator {
         let claudeURL = ClaudeSessionTranscriptReader.sessionFileURL(
             homeURL: inputs.homeURL,
             cwd: inputs.cwd,
-            sessionId: claudeSessionId(forAgentUUID: inputs.agentUUID))
+            sessionId: inputs.claudeSessionId ?? claudeSessionId(forAgentUUID: inputs.agentUUID))
         let piURL = PiSessionTranscriptReader.locateSessionFile(
             homeURL: inputs.homeURL,
             cwd: inputs.cwd,

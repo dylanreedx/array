@@ -113,11 +113,29 @@ class TileNSView: NSView, TokenThemed {
     }
 
     var agentStatus: AgentStatus? {
-        didSet {
-            titleBar?.agentStatus = agentStatus
-            canvas?.updateAttentionBorder(for: tile.id, status: agentStatus)
-        }
+        didSet { applyShownAgentStatus() }
     }
+
+    /// What the band says instead of `agentStatus` while something outside the
+    /// agent's own turns decides it: a watched session's status in another app,
+    /// or a paused agent waiting on one (`.plans/79` phase 2).
+    var agentStatusOverride: AgentStatus? {
+        didSet { if agentStatusOverride != oldValue { applyShownAgentStatus() } }
+    }
+
+    private func applyShownAgentStatus() {
+        let shown = agentStatusOverride ?? agentStatus
+        titleBar?.agentStatus = shown
+        canvas?.updateAttentionBorder(for: tile.id, status: shown)
+    }
+
+    /// A quiet "where" after the title — `cmux · read-only` — for a tile whose
+    /// session another app holds (`.plans/79` phase 2). nil draws none.
+    func setTitleBarWhereMarker(_ text: String?) {
+        titleBar?.whereMarker = text
+    }
+
+    var qaTitleBarWhereMarker: String? { titleBar?.whereMarker }
 
     /// Non-empty description of why the tile is in a failed/stale state (e.g. a
     /// lazy-resume recovery error). Surfaced as the tile's tooltip and carried
@@ -142,6 +160,77 @@ class TileNSView: NSView, TokenThemed {
     func setTitleBarAccessory(_ accessory: NSView?) {
         invalidateTitleBarAccessory()
         titleBar?.setAccessory(accessory)
+    }
+
+    /// The compact Terminal toggle an agent tile shows in its band
+    /// (`.plans/79-session-handoff`). nil removes it.
+    struct FaceSwitchState: Equatable {
+        var selected: AgentTileFace
+        /// The flip to Terminal is waiting for the turn to end.
+        var pendingTerminal = false
+        /// Why the other face cannot be shown now. The toggle dims, and a
+        /// press still reaches the tile so it can say why.
+        var unavailableReason: String?
+    }
+
+    func setTitleBarFaceSwitch(_ state: FaceSwitchState?) {
+        titleBar?.setFaceSwitch(state)
+    }
+
+    /// A session the tile's terminal is running, offered as a move
+    /// (`.plans/79`, edge case 4): a quiet "✦ Claude Code" and an "Open as
+    /// agent tile" button in the band (`mocks/3-moving-sessions.png`, bottom
+    /// right). nil removes both.
+    struct SessionActionState: Equatable {
+        /// What runs in the terminal: "Claude Code".
+        var label: String
+        /// The button: "Open as agent tile".
+        var action: String
+    }
+
+    func setTitleBarSessionAction(_ state: SessionActionState?) {
+        titleBar?.setSessionAction(state)
+    }
+
+    /// The band's session action was pressed. Terminal tiles route it.
+    func sessionActionRequested() {}
+
+    /// QA: how the band's budget placed the session action: labelled, button,
+    /// icon, hidden.
+    var qaSessionActionMode: String { titleBar?.sessionActionMode.rawValue ?? "hidden" }
+    /// QA: the session action's button text, nil when the band offers none.
+    var qaSessionActionTitle: String? { titleBar?.qaSessionActionTitle }
+
+    /// Actions VoiceOver offers on the band's always-present controls (× and
+    /// ⋯), so they stay reachable when the band has no room for a control of
+    /// their own. The tile view itself is not an accessibility element.
+    func setTitleBarAccessibilityActions(_ actions: [NSAccessibilityCustomAction]?) {
+        titleBar?.setBandAccessibilityActions(actions)
+    }
+
+    /// The face toggle was pressed. Agent tiles route this to their flip.
+    func faceSwitchRequested(_ face: AgentTileFace) {}
+
+    /// The band's × (and the menu's close item). The base closes; an agent in
+    /// its Terminal face confirms first when claude is busy.
+    func handleCloseRequest() { onClose?() }
+
+    /// QA: presents a band menu instead of `NSMenu.popUp`, whose modal tracking
+    /// would block a check. Only checks set it.
+    static var qaMenuPresenter: ((NSMenu) -> Void)?
+
+    /// QA: every band control on screen now, in this view's coordinates.
+    var qaBandControlFrames: [(name: String, frame: NSRect)] {
+        guard let titleBar else { return [] }
+        return titleBar.qaVisibleControls.map { ($0.name, titleBar.convert($0.frame, to: self)) }
+    }
+
+    /// QA: how the band's width budget placed the toggle: icon or hidden.
+    var qaFaceSwitchMode: String { titleBar?.faceSwitchMode.rawValue ?? "hidden" }
+    /// QA: whether the budget left the status pill in the band.
+    var qaBandShowsStatusPill: Bool {
+        guard let agentStatus else { return false }
+        return titleBar?.qaStatusPillRect(for: agentStatus) != nil
     }
 
     var surfacesTitleAccessory: Bool { false }
@@ -196,6 +285,24 @@ class TileNSView: NSView, TokenThemed {
 
     func titleBarContextMenuForQA() -> NSMenu {
         titleBar?.makeTileContextMenu() ?? NSMenu(title: "Tile")
+    }
+
+    /// A right-click anywhere on the band opens the tile menu. `hitTest`
+    /// claims the band's grab strip for this view, not the title bar, so the
+    /// bar's own `menu(for:)` only ever answered clicks on its controls — and
+    /// where ⋯ has left a narrow band, this is how its menu stays reachable.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let local = convert(event.locationInWindow, from: nil)
+        guard let titleBar, local.y < grabHeightInLocalCoordinates else { return super.menu(for: event) }
+        return titleBar.makeTileContextMenu()
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        if let present = Self.qaMenuPresenter, let menu = menu(for: event), menu.title == "Tile" {
+            present(menu)
+            return
+        }
+        super.rightMouseDown(with: event)
     }
 
     /// Invoked when the user clicks the title bar's × button. The app sets
@@ -493,7 +600,9 @@ class TileNSView: NSView, TokenThemed {
         // `layout()` keeps it spanning the full world width at the floored height.
         bar.translatesAutoresizingMaskIntoConstraints = true
         bar.autoresizingMask = []
-        bar.onCloseRequested = { [weak self] in self?.onClose?() }
+        bar.onCloseRequested = { [weak self] in self?.handleCloseRequest() }
+        bar.onFaceTogglePressed = { [weak self] face in self?.faceSwitchRequested(face) }
+        bar.onSessionActionPressed = { [weak self] in self?.sessionActionRequested() }
         bar.onStopRunRequested = { [weak self] in self?.onStopRun?() }
         bar.additionalMenuItemsProvider = { [weak self] in self?.makeAdditionalTitleBarMenuItems() ?? [] }
         addSubview(bar)
@@ -542,6 +651,7 @@ class TileNSView: NSView, TokenThemed {
     /// can assert the pill clears the dots. `nil` if the bar is gone.
     func qaStatusPillRect(for status: AgentStatus) -> NSRect? { titleBar?.qaStatusPillRect(for: status) }
     var qaDragHandleLeadingX: CGFloat? { titleBar?.qaDragHandleLeadingX }
+    var qaTitleBarLayoutPasses: Int { titleBar?.qaLayoutPasses ?? 0 }
     /// The rect the tile title is really drawn into. `agentStatus` has to be set on
     /// the bar first — the title's available width depends on the pill.
     var qaTitleRect: NSRect? { titleBar?.qaTitleRect() }
@@ -1314,6 +1424,253 @@ private final class TileCloseControl: NSControl {
     override func drawFocusRingMask() { NSBezierPath(ovalIn: bounds).fill() }
 }
 
+/// Widths of the band's few fixed labels — the status pill and a shell tile's
+/// session action — measured once per string and font and
+/// scaled, so `TitleBarView.layout()` measures nothing (performance.md: no
+/// measurement inside `layout()`; the band lays out on every zoom frame).
+/// Text advances scale linearly with point size, so a width measured at the
+/// unscaled size serves every chrome scale.
+@MainActor
+enum BandTextWidth {
+    private static var widths: [String: CGFloat] = [:]
+    /// QA: how many times a band label was actually measured.
+    private(set) static var qaMeasurements = 0
+
+    static func width(_ text: String, font: NSFont, scale: CGFloat = 1) -> CGFloat {
+        let key = "\(font.fontName)|\(font.pointSize)|\(text)"
+        if let width = widths[key] { return width * scale }
+        qaMeasurements += 1
+        // A handful of labels in practice; bounded in case one is not.
+        if widths.count > 256 { widths.removeAll() }
+        let width = (text as NSString).size(withAttributes: [.font: font]).width
+        widths[key] = width
+        return width * scale
+    }
+}
+
+/// One compact Terminal toggle. Hand-framed in world units so its hit target
+/// keeps the same screen-space floor as × under canvas zoom.
+@MainActor
+private final class FaceToggleControl: NSControl {
+    private(set) var requestedFace: AgentTileFace = .terminal
+    private var isTerminal = false
+    private var isPending = false
+    private var unavailableReason: String?
+    private var chromeScale: CGFloat = 1
+    private var isPressed = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = true
+        autoresizingMask = []
+        setAccessibilityElement(true)
+        setAccessibilityRole(.checkBox)
+        setAccessibilityLabel("Terminal view")
+        focusRingType = .exterior
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    func apply(_ state: TileNSView.FaceSwitchState) {
+        isTerminal = state.selected == .terminal
+        isPending = state.pendingTerminal
+        requestedFace = isTerminal || isPending ? .array : .terminal
+        unavailableReason = isTerminal || isPending ? nil : state.unavailableReason
+        setAccessibilityValue(isTerminal || isPending ? 1 : 0)
+        let verb = isPending ? "Cancel switch to Terminal" : isTerminal ? "Return to chat" : "Switch to Terminal"
+        let help = unavailableReason ?? "\(verb) (⌃⌘T)"
+        toolTip = help
+        setAccessibilityHelp(help)
+        needsDisplay = true
+    }
+
+    func configure(chromeScale: CGFloat) {
+        guard chromeScale != self.chromeScale else { return }
+        self.chromeScale = chromeScale
+        needsDisplay = true
+    }
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let theme = effectiveTokenTheme
+        let radius = CornerStyle.current == .sharp ? 0 : CGFloat(Radius.card) * chromeScale
+        if isTerminal || isPending || isPressed {
+            AgentSurfaceRole.rowSelected.color.nsColor(for: theme).setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+        }
+        let ink = (isTerminal ? TextToken.textPrimary : TextToken.textSecondary).color.nsColor(for: theme)
+            .withAlphaComponent(unavailableReason == nil ? (isPressed ? 0.6 : 1) : 0.45)
+        let symbol = isPending ? "ellipsis" : "apple.terminal"
+        let side = 13 * chromeScale
+        guard let glyph = CanvasSymbolImage.image(named: symbol, pointSize: 11 * chromeScale),
+              let context = NSGraphicsContext.current?.cgContext else { return }
+        let glyphSize = fitted(glyph.size, into: side)
+        let rect = NSRect(x: (bounds.width - glyphSize.width) / 2, y: (bounds.height - glyphSize.height) / 2,
+                          width: glyphSize.width, height: glyphSize.height)
+        context.beginTransparencyLayer(auxiliaryInfo: nil)
+        glyph.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        ink.setFill()
+        rect.fill(using: .sourceAtop)
+        context.endTransparencyLayer()
+    }
+
+    private func fitted(_ size: NSSize, into side: CGFloat) -> NSSize {
+        guard size.width > 0, size.height > 0 else { return .zero }
+        let scale = min(side / size.width, side / size.height)
+        return NSSize(width: size.width * scale, height: size.height * scale)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        defer { isPressed = false; needsDisplay = true }
+        isPressed = true
+        needsDisplay = true
+        while let next = window.nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
+            let inside = bounds.contains(convert(next.locationInWindow, from: nil))
+            if isPressed != inside { isPressed = inside; needsDisplay = true }
+            if next.type == .leftMouseUp {
+                if inside { _ = sendAction(action, to: target) }
+                return
+            }
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 49 {
+            _ = sendAction(action, to: target)
+        } else { super.keyDown(with: event) }
+    }
+
+    override func accessibilityPerformPress() -> Bool { sendAction(action, to: target) }
+    override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() {
+        let radius = CornerStyle.current == .sharp ? 0 : CGFloat(Radius.card) * chromeScale
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+    }
+}
+
+/// The band's "Open as agent tile" button (`.plans/79`, edge case 4). Drawn and
+/// tracked by hand for the reason `FaceToggleControl` is: the band is framed in
+/// world units under the canvas zoom, and the band's own `hitTest` routes to it
+/// ahead of the tile drag. Activation is release-inside, like ×.
+@MainActor
+private final class BandActionControl: NSControl {
+    private var title = ""
+    private let symbolName = "square.grid.2x2"
+    private var labelled = true
+    private var chromeScale: CGFloat = 1
+    private var isPressed = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = true
+        autoresizingMask = []
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        focusRingType = .exterior
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    func apply(title: String) {
+        guard title != self.title else { return }
+        self.title = title
+        toolTip = title
+        setAccessibilityLabel(title)
+        needsDisplay = true
+    }
+
+    func configure(labelled: Bool, chromeScale: CGFloat) {
+        guard labelled != self.labelled || chromeScale != self.chromeScale else { return }
+        self.labelled = labelled
+        self.chromeScale = chromeScale
+        needsDisplay = true
+    }
+
+    private static func font(scale: CGFloat) -> NSFont { .systemFont(ofSize: 11 * scale, weight: .semibold) }
+    private static func glyphSize(scale: CGFloat) -> CGFloat { 11 * scale }
+
+    func preferredWidth(labelled: Bool, scale: CGFloat, minimum: CGFloat) -> CGFloat {
+        let pad = CGFloat(Space.m) * scale
+        let glyph = Self.glyphSize(scale: scale) + 2
+        guard labelled else { return max(minimum, ceil(glyph + 2 * pad)) }
+        let text = BandTextWidth.width(title, font: Self.font(scale: 1), scale: scale)
+        return max(minimum, ceil(glyph + CGFloat(Space.s) * scale + text + 2 * pad))
+    }
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let theme = effectiveTokenTheme
+        let radius = CornerStyle.current == .sharp ? 0 : bounds.height / 2
+        (isPressed ? AgentSurfaceRole.rowSelected : AgentSurfaceRole.rowHover).color.nsColor(for: theme).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+        let ink = TextToken.textPrimary.color.nsColor(for: theme)
+        let attributes: [NSAttributedString.Key: Any] = [.font: Self.font(scale: chromeScale), .foregroundColor: ink]
+        let text = labelled ? (title as NSString) : nil
+        let textSize = text?.size(withAttributes: attributes) ?? .zero
+        let side = Self.glyphSize(scale: chromeScale)
+        let glyph = CanvasSymbolImage.image(named: symbolName, pointSize: side)
+        let glyphSize = glyph.map { image -> NSSize in
+            let fit = min((side + 2) / max(image.size.width, 1), (side + 2) / max(image.size.height, 1))
+            return NSSize(width: image.size.width * fit, height: image.size.height * fit)
+        } ?? .zero
+        let spacing = text == nil ? 0 : CGFloat(Space.s) * chromeScale
+        var x = (bounds.width - glyphSize.width - spacing - textSize.width) / 2
+        if let glyph, let context = NSGraphicsContext.current?.cgContext {
+            let rect = NSRect(x: x, y: (bounds.height - glyphSize.height) / 2,
+                              width: glyphSize.width, height: glyphSize.height)
+            // Tinted in place, inside a layer so the fill reaches only the glyph.
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+            glyph.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            ink.setFill()
+            rect.fill(using: .sourceAtop)
+            context.endTransparencyLayer()
+            x = rect.maxX + spacing
+        }
+        text?.draw(at: NSPoint(x: x, y: (bounds.height - textSize.height) / 2), withAttributes: attributes)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        defer { isPressed = false; needsDisplay = true }
+        isPressed = true
+        needsDisplay = true
+        while let next = window.nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
+            let inside = bounds.contains(convert(next.locationInWindow, from: nil))
+            if isPressed != inside { isPressed = inside; needsDisplay = true }
+            if next.type == .leftMouseUp {
+                if inside { _ = sendAction(action, to: target) }
+                return
+            }
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 49 {
+            _ = sendAction(action, to: target)
+        } else { super.keyDown(with: event) }
+    }
+
+    override func accessibilityPerformPress() -> Bool { sendAction(action, to: target) }
+    override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() {
+        let radius = CornerStyle.current == .sharp ? 0 : bounds.height / 2
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+    }
+}
+
 /// Lightweight chrome view drawing the tile title, a drag-handle indicator,
 /// and a close button. Claims its own clicks (`hitTest` returns self for
 /// non-button areas) and forwards mouse events to its parent `TileNSView`,
@@ -1335,7 +1692,14 @@ private final class TitleBarView: NSView, TokenThemed {
     // chrome scale is a function of the bar's height, and `layoutChrome`
     // invalidates explicitly when that height changes.
     var tile: Tile { didSet { if tile != oldValue { invalidateChrome() } } }
-    var agentStatus: AgentStatus? { didSet { if agentStatus != oldValue { invalidateChrome() } } }
+    var agentStatus: AgentStatus? {
+        didSet {
+            guard agentStatus != oldValue else { return }
+            invalidateChrome()
+            // The pill's width is part of the switch's budget.
+            if faceSwitchState != nil { needsLayout = true }
+        }
+    }
     var agentStatusErrorMessage: String? { didSet { toolTip = agentStatusErrorMessage } }
 
     /// Counts the redraws the bar actually asks for, so a check can witness that a
@@ -1362,6 +1726,10 @@ private final class TitleBarView: NSView, TokenThemed {
     private var displayTitleOverride: String?
     private var closeActionTitle = "Close tile"
     private var stopActionTitle = "Stop run"
+
+    var whereMarker: String? {
+        didSet { if whereMarker != oldValue { invalidateChrome() } }
+    }
 
     private var displayedTitle: String {
         displayTitleOverride ?? "\(tile.kind.displayName) · \(tile.title)"
@@ -1395,7 +1763,223 @@ private final class TitleBarView: NSView, TokenThemed {
     }
 
     @objc private func showTileActions(_ sender: AgentTileOverflowButton) {
-        makeTileContextMenu().popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY), in: sender)
+        let menu = makeTileContextMenu()
+        if let present = TileNSView.qaMenuPresenter { present(menu); return }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY), in: sender)
+    }
+
+    // MARK: - Face switch (.plans/79-session-handoff)
+    //
+    // A third band control beside × and ⋯: framed by hand, floored at the same
+    // 22px on screen, and claimed by its own branch in `hitTest`. NOT the
+    // accessory slot — a segmented control there was swallowed by the tile drag
+    // (083d7ba6), and the slot has no on-screen floor.
+
+    enum FaceSwitchMode: String { case icon, hidden }
+    private var faceToggle: FaceToggleControl?
+    private var faceSwitchState: TileNSView.FaceSwitchState?
+    var onFaceTogglePressed: ((AgentTileFace) -> Void)?
+    private(set) var faceSwitchMode: FaceSwitchMode = .hidden
+    /// False when the width budget gave the status pill's room to the switch.
+    /// The header below the band still shows the status.
+    private var budgetAllowsStatusPill = true
+
+    /// What the title always keeps, at chrome scale 1, before the switch may
+    /// take the rest. It is also the band's grab area: a band that is all
+    /// controls cannot be dragged.
+    private static let titleMinimumWidth: CGFloat = 104
+
+    func setFaceSwitch(_ state: TileNSView.FaceSwitchState?) {
+        guard state != faceSwitchState else { return }
+        faceSwitchState = state
+        if let state {
+            if faceToggle == nil {
+                let toggle = FaceToggleControl(frame: .zero)
+                toggle.target = self
+                toggle.action = #selector(handleFaceToggle(_:))
+                addSubview(toggle)
+                faceToggle = toggle
+            }
+            faceToggle?.apply(state)
+        } else {
+            faceToggle?.removeFromSuperview()
+            faceToggle = nil
+            faceSwitchMode = .hidden
+            budgetAllowsStatusPill = true
+        }
+        needsLayout = true
+        invalidateChrome()
+    }
+
+    func setBandAccessibilityActions(_ actions: [NSAccessibilityCustomAction]?) {
+        closeButton.setAccessibilityCustomActions(actions)
+        actionsButton?.setAccessibilityCustomActions(actions)
+    }
+
+    @objc private func handleFaceToggle(_ sender: FaceToggleControl) {
+        onFaceTogglePressed?(sender.requestedFace)
+    }
+
+    /// One square icon slot, with the same usable hit floor as ×. Give the
+    /// title a grab area first; the menu still offers switching when it cannot fit.
+    private func layoutFaceSwitch(trailingEdge: CGFloat) {
+        budgetAllowsStatusPill = true
+        guard faceSwitchState != nil, let faceToggle else {
+            faceSwitchMode = .hidden
+            return
+        }
+        let scale = chromeScale
+        let gap = CGFloat(Space.s) * scale
+        let side = closeButtonWorldSize
+        let titleFloor = titleLeadingX + Self.titleMinimumWidth * scale
+        let available = trailingEdge - gap - side - gap
+        let fits = available >= titleFloor
+        faceSwitchMode = fits ? .icon : .hidden
+        faceToggle.isHidden = !fits
+        guard fits else { return }
+        let pill = agentStatus.map { statusPillWidth(for: $0) + gap } ?? 0
+        budgetAllowsStatusPill = available - pill >= titleFloor
+        faceToggle.configure(chromeScale: scale)
+        faceToggle.frame = NSRect(x: trailingEdge - gap - side, y: (bounds.height - side) / 2, width: side, height: side)
+    }
+
+    // MARK: - Session action (.plans/79, edge case 4)
+    //
+    // "✦ Claude Code  [⊞ Open as agent tile]" on a shell tile whose terminal
+    // runs claude. Framed by hand with the face switch's 22px floor and its own
+    // `hitTest` branch; as the band narrows the quiet label goes first, then
+    // the button's words, then the button — and the tile menu offers it always.
+
+    enum SessionActionMode: String { case labelled, button, icon, hidden }
+    private var sessionActionControl: BandActionControl?
+    private var sessionActionState: TileNSView.SessionActionState?
+    private(set) var sessionActionMode: SessionActionMode = .hidden
+    var qaSessionActionTitle: String? { sessionActionState?.action }
+    /// Where the quiet "✦ Claude Code" draws, when the budget left room for it.
+    private var sessionLabelRect: NSRect?
+    var onSessionActionPressed: (() -> Void)?
+
+    func setSessionAction(_ state: TileNSView.SessionActionState?) {
+        guard state != sessionActionState else { return }
+        sessionActionState = state
+        if let state {
+            let control = sessionActionControl ?? {
+                let control = BandActionControl(frame: .zero)
+                control.target = self
+                control.action = #selector(handleSessionAction(_:))
+                addSubview(control)
+                sessionActionControl = control
+                return control
+            }()
+            control.apply(title: state.action)
+        } else {
+            sessionActionControl?.removeFromSuperview()
+            sessionActionControl = nil
+            sessionActionMode = .hidden
+            sessionLabelRect = nil
+        }
+        needsLayout = true
+        invalidateChrome()
+    }
+
+    @objc private func handleSessionAction(_ sender: BandActionControl) {
+        onSessionActionPressed?()
+    }
+
+    private func sessionLabelAttributes(theme: TokenTheme) -> [NSAttributedString.Key: Any] {
+        [.font: NSFont.systemFont(ofSize: 11 * chromeScale, weight: .medium),
+         .foregroundColor: TextToken.textSecondary.color.nsColor(for: theme)]
+    }
+
+    private var sessionLabelGlyphSide: CGFloat { 10 * chromeScale }
+    /// The quiet label's line height, from its font's own metrics: no
+    /// measurement in `layout()`.
+    private var sessionLabelLineHeight: CGFloat {
+        let font = NSFont.systemFont(ofSize: 11 * chromeScale, weight: .medium)
+        return font.ascender - font.descender + font.leading
+    }
+
+    private func layoutSessionAction(trailingEdge: CGFloat) {
+        sessionLabelRect = nil
+        guard let state = sessionActionState, let control = sessionActionControl else {
+            sessionActionMode = .hidden
+            return
+        }
+        let scale = chromeScale
+        let gap = CGFloat(Space.s) * scale
+        let height = closeButtonWorldSize
+        let titleFloor = titleLeadingX + Self.titleMinimumWidth * scale
+        let labelText = NSSize(
+            width: BandTextWidth.width(state.label, font: .systemFont(ofSize: 11, weight: .medium), scale: scale),
+            height: sessionLabelLineHeight)
+        let labelWidth = ceil(sessionLabelGlyphSide + CGFloat(Space.xs) * scale + labelText.width)
+        let full = control.preferredWidth(labelled: true, scale: scale, minimum: height)
+        let icon = control.preferredWidth(labelled: false, scale: scale, minimum: height)
+        func fits(_ used: CGFloat) -> Bool { trailingEdge - gap - used - gap >= titleFloor }
+        let mode: SessionActionMode
+        if fits(full + gap + labelWidth) {
+            mode = .labelled
+        } else if fits(full) {
+            mode = .button
+        } else if fits(icon) {
+            mode = .icon
+        } else {
+            mode = .hidden
+        }
+        sessionActionMode = mode
+        control.isHidden = mode == .hidden
+        guard mode != .hidden else { return }
+        let width = mode == .icon ? icon : full
+        control.configure(labelled: mode != .icon, chromeScale: scale)
+        control.frame = NSRect(x: trailingEdge - gap - width, y: (bounds.height - height) / 2, width: width, height: height)
+        if mode == .labelled {
+            sessionLabelRect = NSRect(
+                x: control.frame.minX - gap - labelWidth, y: (bounds.height - labelText.height) / 2,
+                width: labelWidth, height: labelText.height)
+        }
+    }
+
+    private func drawSessionLabel(theme: TokenTheme) {
+        guard let rect = sessionLabelRect, let state = sessionActionState else { return }
+        let attributes = sessionLabelAttributes(theme: theme)
+        let side = sessionLabelGlyphSide
+        if let glyph = CanvasSymbolImage.image(named: "sparkle", pointSize: side),
+           let context = NSGraphicsContext.current?.cgContext {
+            let glyphRect = NSRect(x: rect.minX, y: rect.midY - side / 2, width: side, height: side)
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+            glyph.draw(in: glyphRect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            TextToken.textSecondary.color.nsColor(for: theme).setFill()
+            glyphRect.fill(using: .sourceAtop)
+            context.endTransparencyLayer()
+        }
+        (state.label as NSString).draw(
+            at: NSPoint(x: rect.minX + side + CGFloat(Space.xs) * chromeScale, y: rect.minY), withAttributes: attributes)
+    }
+
+    /// Where the title starts: past the provider mark when there is one.
+    private var titleLeadingX: CGFloat {
+        let scale = chromeScale
+        return providerMarkView.isHidden
+            ? CGFloat(Space.m) * scale
+            : providerMarkView.frame.maxX + CGFloat(Space.s) * scale
+    }
+
+    /// The leftmost band control on screen — what the pill and title stop at.
+    private var leadingBandControlX: CGFloat {
+        (qaVisibleControls.map(\.frame.minX) + [sessionLabelRect?.minX].compactMap { $0 }).min() ?? bounds.width
+    }
+
+    /// QA: the band's controls that are on screen, by name.
+    var qaVisibleControls: [(name: String, frame: NSRect)] {
+        var controls: [(String, NSRect)] = [("close", closeButton.frame)]
+        if let actionsButton, !actionsButton.isHidden { controls.append(("actions", actionsButton.frame)) }
+        if let faceToggle, !faceToggle.isHidden {
+            controls.append(("face.toggle", faceToggle.frame))
+        }
+        if let sessionActionControl, !sessionActionControl.isHidden {
+            controls.append(("sessionAction", sessionActionControl.frame))
+        }
+        return controls
     }
 
     private let closeButton: TileCloseControl
@@ -1481,8 +2065,12 @@ private final class TitleBarView: NSView, TokenThemed {
         }
     }
 
+    /// QA: how many times the band has laid out.
+    private(set) var qaLayoutPasses = 0
+
     override func layout() {
         super.layout()
+        qaLayoutPasses += 1
         // Right-align + vertically center the close button at its (zoom-floored)
         // world size. Manual framing so the size is exactly what we set.
         let size = closeButtonWorldSize
@@ -1492,8 +2080,6 @@ private final class TitleBarView: NSView, TokenThemed {
             width: size,
             height: size
         )
-        actionsButton?.frame = NSRect(x: qaDragHandleLeadingX - 4, y: (bounds.height - closeButtonWorldSize) / 2, width: closeButtonWorldSize, height: closeButtonWorldSize)
-        actionsButton?.applyTokens()
         let markSize = 14 * chromeScale
         providerMarkView.frame = NSRect(
             x: CGFloat(Space.m) * chromeScale,
@@ -1501,6 +2087,25 @@ private final class TitleBarView: NSView, TokenThemed {
             width: markSize,
             height: markSize
         )
+        var trailingEdge = closeButton.frame.minX
+        if let actionsButton {
+            // ⋯ sits left of × and never on it. It used to hang off the drag-dot
+            // cluster, which grows with the chrome scale faster than × does, so
+            // at zoom 0.1 on a 320pt tile the two overlapped. Where the band
+            // has no room left for it, it leaves; the band's context menu is
+            // the same menu.
+            let x = min(qaDragHandleLeadingX - 4, closeButton.frame.minX - CGFloat(Space.xs) * chromeScale - size)
+            actionsButton.isHidden = x < 0
+            actionsButton.frame = NSRect(x: x, y: (bounds.height - size) / 2, width: size, height: size)
+            if !actionsButton.isHidden { trailingEdge = x }
+            actionsButton.applyTokens()
+        }
+        layoutFaceSwitch(trailingEdge: trailingEdge)
+        // Left of the switch when there is one; without ⋯, left of the drag
+        // dots, which are the band's grab affordance.
+        let switchEdge = faceToggle.flatMap { $0.isHidden ? nil : $0.frame.minX }
+        layoutSessionAction(trailingEdge: switchEdge
+            ?? (actionsButton == nil ? min(trailingEdge, qaDragHandleLeadingX) : trailingEdge))
     }
 
     /// QA: the close button's laid-out frame (world units) so the parent's
@@ -1605,7 +2210,16 @@ private final class TitleBarView: NSView, TokenThemed {
         if closeButton.frame.contains(point) {
             return closeButton
         }
-        if let actionsButton, actionsButton.frame.contains(point) { return actionsButton }
+        if let actionsButton, !actionsButton.isHidden, actionsButton.frame.contains(point) { return actionsButton }
+        // The face switch, ahead of the drag fallback below. Without this
+        // branch a press on the toggle starts a tile drag.
+        if let faceToggle, !faceToggle.isHidden, faceToggle.frame.contains(point) {
+            return faceToggle
+        }
+        // "Open as agent tile", for the same reason.
+        if let sessionActionControl, !sessionActionControl.isHidden, sessionActionControl.frame.contains(point) {
+            return sessionActionControl
+        }
         if let accessoryView, accessoryView.frame.contains(point) {
             // NSStackView reports itself for this hierarchy. Return its native
             // leaf control so tracking/action is not swallowed by title-bar drag.
@@ -1639,6 +2253,15 @@ private final class TitleBarView: NSView, TokenThemed {
     override func menu(for event: NSEvent) -> NSMenu? {
         makeTileContextMenu()
     }
+
+    override func rightMouseDown(with event: NSEvent) {
+        if let present = TileNSView.qaMenuPresenter {
+            present(makeTileContextMenu())
+            return
+        }
+        super.rightMouseDown(with: event)
+    }
+
 
     func makeTileContextMenu() -> NSMenu {
         let menu = NSMenu(title: "Tile")
@@ -1702,14 +2325,12 @@ private final class TitleBarView: NSView, TokenThemed {
     /// pill-layout census. The clamp only moves rects that are already empty.
     private func titleRect(theme: TokenTheme) -> NSRect {
         let scale = chromeScale
+        // `+ Space.s`: the gap ⋯ has always kept from the drag dots, so a band
+        // whose ⋯ did not move keeps its title rect exactly.
         let blockedFrom = agentStatus.flatMap { statusPillRect(for: $0, theme: theme)?.minX }
-            ?? qaDragHandleLeadingX
+            ?? min(qaDragHandleLeadingX, leadingBandControlX + CGFloat(Space.s))
         let limit = max(0, blockedFrom - CGFloat(Space.s) * scale)
-        let baseLeading = CGFloat(Space.m) * scale
-        let requestedLeading = providerMarkView.isHidden
-            ? baseLeading
-            : providerMarkView.frame.maxX + CGFloat(Space.s) * scale
-        let leading = min(requestedLeading, limit)
+        let leading = min(titleLeadingX, limit)
         let available = max(0, limit - leading)
         let height = ("X" as NSString).size(withAttributes: titleAttributes(theme: theme)).height
         return NSRect(
@@ -1733,12 +2354,19 @@ private final class TitleBarView: NSView, TokenThemed {
         let scale = chromeScale
         let theme = effectiveTokenTheme
         let attrs = titleAttributes(theme: theme)
-        let title = displayedTitle as NSString
-        title.draw(in: titleRect(theme: theme), withAttributes: attrs)
+        let title = NSMutableAttributedString(string: displayedTitle, attributes: attrs)
+        if let whereMarker {
+            var quiet = attrs
+            quiet[.foregroundColor] = TextToken.textSecondary.color.nsColor(for: theme)
+            quiet[.font] = NSFont.systemFont(ofSize: titleFontWorldSize * 11 / 12, weight: .regular)
+            title.append(NSAttributedString(string: "  ·  \(whereMarker)", attributes: quiet))
+        }
+        title.draw(in: titleRect(theme: theme))
 
         if let agentStatus {
             drawAgentStatus(agentStatus)
         }
+        drawSessionLabel(theme: theme)
 
         // Three-dot drag handle indicator, left of the × close button. Sizes +
         // gap scale with the chrome; positioned relative to the floored button.
@@ -1824,16 +2452,22 @@ private final class TitleBarView: NSView, TokenThemed {
     /// overprinting, and costs nothing readable: `Typography.minimumLegibleZoom(for:
     /// .caption)` is 1.0, so a 9pt pill label is already illegible at that zoom.
     private func statusPillRect(for status: AgentStatus, theme: TokenTheme) -> NSRect? {
-        let label = StatusChipPresenter.display(for: status).label as NSString
-        let textSize = label.size(withAttributes: statusPillTextAttributes(theme: theme))
-        let dot = Self.statusPillDotDiameter
-        let pillWidth = textSize.width + dot + 3 * Self.statusPillPad
+        if faceSwitchMode != .hidden, !budgetAllowsStatusPill { return nil }
+        let pillWidth = statusPillWidth(for: status)
         let pillHeight = Self.statusPillHeight
-        let x = bounds.width - statusPillTrailingInset - pillWidth
+        // Left of every band control on screen — ⋯ moved left of × at low
+        // zoom, and the switch sits left of both.
+        let maxX = min(bounds.width - statusPillTrailingInset, leadingBandControlX - CGFloat(Space.s))
+        let x = maxX - pillWidth
         guard x >= CGFloat(Space.m) * chromeScale else { return nil }
         return NSRect(
             x: x, y: (bounds.height - pillHeight) / 2,
             width: pillWidth, height: pillHeight)
+    }
+
+    private func statusPillWidth(for status: AgentStatus) -> CGFloat {
+        let width = BandTextWidth.width(StatusChipPresenter.display(for: status).label, font: .token(.caption))
+        return width + Self.statusPillDotDiameter + 3 * Self.statusPillPad
     }
 
     private func drawAgentStatus(_ status: AgentStatus) {

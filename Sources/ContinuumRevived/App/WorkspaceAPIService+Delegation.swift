@@ -512,6 +512,7 @@ extension WorkspaceAPIService {
                 operationId: existing.operationId,
                 delivery: existing.steps.creation == .succeeded ? .delivered : .refused,
                 childAgentId: existing.childAgentId ?? childId, parentAgentId: agentId,
+                childName: supervisor.records[existing.childAgentId ?? childId]?.humanDisplayName,
                 childRunning: supervisor.records[childId] != nil ? supervisor.isRunning(childId) : nil,
                 refusalReason: existing.failureMessage)
             return .result(Self.jsonObject(replay) ?? [:])
@@ -625,12 +626,14 @@ extension WorkspaceAPIService {
 
         // 7. Delivery, through the composer's own path. `send` starts the turn on
         //    the child's OWN runner; it never queues, so a child that is mid-turn
-        //    declines rather than being double-prompted.
+        //    declines rather than being double-prompted. The text arrives wrapped
+        //    as a message from the caller (`AgentMessageEnvelope`), so the child
+        //    and its tile both know who wrote it.
         var result = AgentMessageResult(
             operationId: requestId, delivery: .refused, childAgentId: childId, parentAgentId: agentId,
-            childRunning: supervisor.isRunning(childId))
+            childName: current.humanDisplayName, childRunning: supervisor.isRunning(childId))
         let childWasRunning = supervisor.isRunning(childId)
-        if supervisor.send(text, to: childId) {
+        if supervisor.sendAgentMessage(text, from: agentId, to: childId) {
             recordMessageChain(target: childId, hops: hops)
             result.delivery = .delivered
             result.childRunning = supervisor.isRunning(childId)

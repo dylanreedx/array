@@ -441,6 +441,17 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private var onHoverSnooze: (() -> Void)?
     private var onHoverSettle: (() -> Void)?
     private var hoverActionsShown = false
+    // Plan: .plans/79-session-handoff/README.md
+    /// A session from another app offers these instead, on the bottom line beside
+    /// the provider mark (mock 4). Clicking the row itself is Watch.
+    private let hoverMoveHere = InboxSettleNudgeButton(frame: .zero)
+    private let hoverCopy = InboxSettleNudgeButton(frame: .zero)
+    private var onHoverMoveHere: (() -> Void)?
+    private var onHoverCopy: (() -> Void)?
+    /// Where the session lives (`· cmux`), after the project name.
+    private let whereDot = NSTextField(labelWithString: "·")
+    private let whereIcon = NSImageView(frame: .zero)
+    private let whereLabel = NSTextField(labelWithString: "")
 
     private let placementLabel = NSTextField(labelWithString: "")
     private let projectIcon = NSImageView(frame: .zero)
@@ -599,6 +610,33 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         hoverSnooze.action = #selector(hoverSnoozeClicked)
         hoverSettle.action = #selector(hoverSettleClicked)
+        for (button, title, symbol) in [
+            (hoverMoveHere, InboxExternalSessionAction.moveHere.title, "arrow.down.right.square"),
+            (hoverCopy, InboxExternalSessionAction.copy.title, "plus.square.on.square"),
+        ] {
+            button.title = title
+            button.font = .systemFont(ofSize: metaSize, weight: .medium)
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: metaSize - 2, weight: .semibold))
+            button.image?.isTemplate = true
+            button.imagePosition = .imageLeading
+            button.setAccessibilityLabel(title)
+            button.target = self
+            button.isHidden = true
+            card.addSubview(button)
+        }
+        hoverMoveHere.action = #selector(hoverMoveHereClicked)
+        hoverCopy.action = #selector(hoverCopyClicked)
+        for label in [whereDot, whereLabel] {
+            label.font = .token(.caption)
+            label.lineBreakMode = .byTruncatingTail
+            label.isHidden = true
+            card.addSubview(label)
+        }
+        whereIcon.imageScaling = .scaleProportionallyDown
+        whereIcon.setAccessibilityElement(false)
+        whereIcon.isHidden = true
+        card.addSubview(whereIcon)
         // An OVERLAY, never an arranged subview: a pill that joins the row's stack
         // pushes the status label out of the line. That regression has a name in
         // this codebase — holding ⌘ blanked out "Working".
@@ -662,6 +700,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
         let placement = row.directoryName ?? row.projectName ?? ""
         placementLabel.stringValue = placement
+        whereLabel.stringValue = row.whereMarker?.text ?? ""
+        whereIcon.image = row.whereMarker.flatMap {
+            NSImage(systemSymbolName: $0.symbol, accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: Typography.style(for: .caption).size - 1, weight: .medium))
+        }
+        whereIcon.image?.isTemplate = true
+        for view in [whereDot, whereIcon, whereLabel] as [NSView] { view.isHidden = row.whereMarker == nil }
         projectIcon.image = !placement.isEmpty
             ? NSImage(systemSymbolName: "folder", accessibilityDescription: nil) : nil
         projectIcon.image?.isTemplate = true
@@ -910,6 +955,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let row = shown.row
         placementLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         projectIcon.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+        whereDot.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        whereLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        whereIcon.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+        hoverMoveHere.applyTokens()
+        hoverCopy.applyTokens()
         titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         branchLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         modelLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
@@ -1173,11 +1223,35 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if let slot = statusSlot {
             if let throbber { throbber.frame = inCard(slot) } else { statusGlyph.frame = inCard(slot) }
         }
+        let placementRoom = max(0, metaRight - stateWidth - trailingIconWidth - 6 - placementLeft)
+        // The where marker follows the project name at its natural width, and
+        // the name gives way first: `· cmux` is what says the row is elsewhere.
+        let markerGap: CGFloat = 4
+        let markerIconSide: CGFloat = 12
+        let markerWidth = whereLabel.isHidden ? 0
+            : Self.width(of: whereDot) + markerGap + markerIconSide + 3 + Self.width(of: whereLabel)
+        let placementWidth = whereLabel.isHidden ? placementRoom
+            : min(Self.width(of: placementLabel), max(0, placementRoom - markerWidth - markerGap))
         let placementFrame = NSRect(
             x: placementLeft, y: bandY,
-            width: max(0, metaRight - stateWidth - trailingIconWidth - 6 - placementLeft),
+            width: placementWidth,
             height: proposal.bandTop)
         placementLabel.frame = inCard(placementFrame)
+        if !whereLabel.isHidden {
+            var x = placementFrame.maxX + markerGap
+            let dotWidth = Self.width(of: whereDot)
+            whereDot.frame = inCard(NSRect(x: x, y: bandY, width: dotWidth, height: proposal.bandTop))
+            x += dotWidth
+            let iconFrame = NSRect(
+                x: x, y: bandY + (proposal.bandTop - markerIconSide) / 2,
+                width: markerIconSide, height: markerIconSide)
+            whereIcon.frame = inCard(iconFrame)
+            x += markerIconSide + 3
+            whereLabel.frame = inCard(NSRect(
+                x: x, y: bandY,
+                width: max(0, min(Self.width(of: whereLabel), placementLeft + placementRoom - x)),
+                height: proposal.bandTop))
+        }
         if var iconFrame = projectIconFrame {
             // A folder symbol and an NSTextField report different baselines inside
             // equally centred boxes. Align the baselines AppKit exposes instead of
@@ -1242,6 +1316,22 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         modelLabel.frame = inCard(NSRect(
             x: textRight - modelWidth, y: bandY,
             width: modelWidth, height: proposal.bandDetail))
+        // An external row's hover actions sit left of the mark, and the branch
+        // ends where they begin.
+        var actionRight = textRight - trailing - 6
+        for button in [hoverCopy, hoverMoveHere] where !button.isHidden {
+            let size = button.intrinsicContentSize
+            button.frame = inCard(NSRect(
+                x: actionRight - size.width,
+                y: (bandY + (proposal.bandDetail - size.height) / 2).rounded(),
+                width: size.width, height: size.height))
+            actionRight -= size.width + 6
+        }
+        if actionRight < textRight - trailing - 6 {
+            var branchFrame = branchLabel.frame
+            branchFrame.size.width = max(0, min(branchFrame.width, actionRight - branchLeft))
+            branchLabel.frame = branchFrame
+        }
         decorations.removeAllToolTips()
         markToolTipRect = nil
         if let slot = decorations.markSlot, let markToolTip {
@@ -1302,6 +1392,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var settleNudgeTitleForQA: String { settleNudge.title }
     @objc private func hoverSnoozeClicked() { onHoverSnooze?() }
     @objc private func hoverSettleClicked() { onHoverSettle?() }
+    @objc private func hoverMoveHereClicked() { onHoverMoveHere?() }
+    @objc private func hoverCopyClicked() { onHoverCopy?() }
+
+    /// A session from another app's hover actions; nil hides one.
+    func configureExternalActions(moveHere: (() -> Void)?, copy: (() -> Void)?) {
+        onHoverMoveHere = moveHere
+        onHoverCopy = copy
+    }
 
     /// Which hover actions this row offers; nil hides one. Set by the list, which
     /// owns the action predicates, after every `apply`.
@@ -1318,7 +1416,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // is the duplicate the first version drew.
         let settleOn = shown && onHoverSettle != nil && settleNudge.isHidden
         let any = snoozeOn || settleOn
-        hoverActionsShown = any
+        let moveOn = shown && onHoverMoveHere != nil
+        let copyOn = shown && onHoverCopy != nil
+        if hoverMoveHere.isHidden == moveOn || hoverCopy.isHidden == copyOn {
+            hoverMoveHere.isHidden = !moveOn
+            hoverCopy.isHidden = !copyOn
+            needsLayout = true
+        }
+        hoverActionsShown = any || moveOn || copyOn
         let statusAlpha: CGFloat = any ? 0 : CGFloat(self.shown?.emphasis.accentOpacity ?? 1)
         hoverSnooze.isHidden = !snoozeOn
         hoverSettle.isHidden = !settleOn
@@ -1382,7 +1487,26 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Whether the hover actions are what the status slot shows right now.
     var qaHoverActionsShown: Bool { hoverActionsShown }
     var qaHoverActionTitles: [String] {
-        [hoverSnooze, hoverSettle].filter { !$0.isHidden }.compactMap { $0.accessibilityLabel() }
+        [hoverSnooze, hoverSettle, hoverMoveHere, hoverCopy].filter { !$0.isHidden }
+            .compactMap { $0.accessibilityLabel() }
+    }
+    /// The where marker as drawn: its text, and whether it sits clear of the
+    /// project name on the same line.
+    var qaWhereMarker: (text: String, frame: NSRect, placementFrame: NSRect)? {
+        guard !whereLabel.isHidden else { return nil }
+        return (whereLabel.stringValue, whereLabel.frame, placementLabel.frame)
+    }
+    /// Presses a shown external action through its own target/action.
+    func clickExternalActionForQA(_ action: InboxExternalSessionAction) -> Bool {
+        let button: NSButton
+        switch action {
+        case .moveHere: button = hoverMoveHere
+        case .copy: button = hoverCopy
+        case .watch: return false
+        }
+        guard !button.isHidden else { return false }
+        button.performClick(nil)
+        return true
     }
     func clickHoverSettleForQA() -> Bool {
         guard !hoverSettle.isHidden else { return false }

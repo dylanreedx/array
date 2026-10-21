@@ -1366,6 +1366,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         submittedRevision: UInt64
     ) {
         guard actionTask == nil, let actionSink, let agentID = draftAgentID else { return }
+        // Before the echo: the bubble painted now is the text that is sent.
+        let intent = intent.neutralizingTypedEnvelopes
         let generation = bindingGeneration
         let submittedTaskContext = draft.taskContext
         let isPromptSubmission: Bool

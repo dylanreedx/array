@@ -60,8 +60,12 @@ struct AgentTranscriptCopyController {
             return reference.displayNameAtSpawn
         case let .taskReference(task):
             return [task.title, task.summary].compactMap { $0 }.joined(separator: "\n")
+        case let .agentMessage(message):
+            return "\(message.senderName): \(message.text)"
         case let .compaction(compaction):
             return CompactionRenderer.label(compaction)
+        case let .sessionBoundary(boundary):
+            return boundary.text
         case let .table(table):
             // Copy yields the table the user saw. `source` is retained by the
             // payload precisely so a redesign of the table VIEW can never

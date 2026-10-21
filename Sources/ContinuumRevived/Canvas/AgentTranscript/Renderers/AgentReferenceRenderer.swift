@@ -198,9 +198,12 @@ final class AgentReferenceChipRowView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        for chip in chips {
-            let chipPoint = chip.convert(point, from: self)
-            if chip.bounds.contains(chipPoint) { return chip.hitTest(chipPoint) }
+        // AppKit supplies a point in this row's superview, not in the row.
+        // Normalize once, then pass the row point to each child's hitTest.
+        let local = superview.map { convert(point, from: $0) } ?? point
+        guard bounds.contains(local) else { return nil }
+        for chip in chips where !chip.isHidden {
+            if let hit = chip.hitTest(local) { return hit }
         }
         return nil
     }
@@ -327,7 +330,8 @@ final class AgentReferenceChipView: NSButton {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        bounds.contains(point) ? self : nil
+        let local = superview.map { convert(point, from: $0) } ?? point
+        return bounds.contains(local) ? self : nil
     }
 
     /// Suppress `NSButtonCell` painting completely. The layer owns the capsule

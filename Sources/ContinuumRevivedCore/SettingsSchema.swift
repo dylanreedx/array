@@ -190,6 +190,10 @@ public enum SettingsSchema {
                             keywords: ["dictation", "voice", "speech", "microphone", "mic", "talk"]),
             ]),
             SettingsGroup(id: "agents.transcript", title: "Transcript", rows: [
+                SettingsRow(.toggle(key: AgentTerminalFaceConfig.showToggleKey, label: "Show Terminal toggle",
+                                    default: AgentTerminalFaceConfig.defaultShowToggle),
+                            help: "Adds a small icon to Claude Code tiles to switch between chat and Terminal. You can always switch from the tile menu or with ⌃⌘T.",
+                            keywords: ["terminal", "chat", "toggle", "switch", "CLI", "title bar"]),
                 SettingsRow(.toggle(key: TranscriptShellCommandConfig.key, label: "Show shell commands in transcripts",
                                     default: TranscriptShellCommandConfig.defaultEnabled),
                             help: "Keeps the commands agents run on this Mac so transcript rows can show them. Never synced.",

@@ -213,6 +213,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private var capabilityObserverToken: UUID?
     private var promptEchoObserverToken: UUID?
     private var localNoticeObserverToken: UUID?
+    private var outsideHistoryObserverToken: UUID?
     private var runtimeObservationObserverToken: UUID?
     private var displayNameObserverToken: UUID?
     /// 0.7.30 — the process tracker's change notification, while attached.
@@ -363,6 +364,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// path. A tile never creates another agent; it asks the app to reveal or
     /// attach the existing identity.
     var onRevealAgent: ((_ agentID: AgentID, _ parentAgentID: AgentID) -> Void)?
+    /// An agent-message card's sender, revealed through the same app-owned path.
+    var onRevealMessageSender: ((AgentID) -> Void)?
     /// Fired after this tile ingests an event, so the app can mirror the stream
     /// onto the syncable activity timeline (88.4c) without owning the subscription.
     var onIngestedEvent: ((AgentRuntimeEvent) -> Void)?
@@ -424,6 +427,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         NotificationCenter.default.addObserver(
             self, selector: #selector(identityStyleSettingChanged(_:)),
             name: SettingChangeEvent.name(for: SettingID(rawValue: AgentIdentityColorConfig.styleKey)),
+            object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(terminalToggleSettingChanged(_:)),
+            name: SettingChangeEvent.name(for: SettingID(rawValue: AgentTerminalFaceConfig.showToggleKey)),
             object: nil)
         agentHeader.installStatusBadge(awarenessBadge)
         enableTitleBarActions()
@@ -537,7 +544,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// `contentBackdrop` and not `contentView`: once surfaced, `contentView` IS the
     /// surface host, and returning that would let a tile bake a picture of a
     /// picture.
-    override var surfaceableBody: NSView? { contentBackdrop }
+    override var surfaceableBody: NSView? { terminalFaceSession == nil ? contentBackdrop : nil }
 
     /// **A fingerprint of everything this body renders, not just its transcript.**
     ///
@@ -785,9 +792,27 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             if case .providerRetry = observation { self?.refreshCompactStatus() }
         }
         hydrateManagedImagesFromDocument()
+        // The render context reads `agentSource` (a chip's live status, an agent
+        // message's sender), and the app binds the composer — the context's
+        // other refresh — BEFORE it attaches. Refreshed here, before the
+        // snapshot draws, so a freshly wired tile does not draw every row
+        // against a context that knows no supervisor.
+        try? transcriptCollectionFixture?.updateRenderContext(v2RenderContext)
+        // Turns the session took outside Array, as the supervisor appends them
+        // to the agent's transcript (`.plans/79`: one rule for history).
+        outsideHistoryObserverToken = supervisor.addOutsideHistoryObserver(for: agentID) { [weak self] history in
+            guard let self, self.attachedAgentID == agentID else { return }
+            switch history {
+            case .restored(let transcript): self.renderRehydratedPreviousSession(transcript)
+            case let .turns(transcript, boundary): self.appendTurnsTakenOutside(transcript, boundary: boundary)
+            }
+            self.synchronizeV2Transcript(final: true)
+        }
         let attachment = supervisor.transcriptAttachment(for: agentID, reboundTo: threadId)
         if let snapshot = attachment.snapshot {
             installTranscriptSnapshot(snapshot)
+            // The agent's transcript starts from its restore: it is drawn.
+            if supervisor.rehydratedTranscript(for: agentID) != nil { hasRenderedRehydratedSession = true }
         }
         let stream = attachment.tail
         eventSubscription = Task { @MainActor [weak self] in
@@ -808,10 +833,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // read from its session file. Render it directly (display-only, see
         // renderRehydratedPreviousSession) so any tile attaching to the agent —
         // including a re-attach after a detach — shows the restored history.
-        if let rehydrated = supervisor.rehydratedTranscript(for: agentID) {
+        if attachment.snapshot == nil, let rehydrated = supervisor.rehydratedTranscript(for: agentID) {
             renderRehydratedPreviousSession(rehydrated)
         }
         refreshTranscriptThinkingIndicator()
+        refreshFaceSwitch()
     }
 
     /// Install the supervisor-owned semantic truth before following its live tail.
@@ -1018,9 +1044,519 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let location = projectedAgentID.flatMap { locationMenuProvider?($0) }
         let locationItems = location?.items ?? []
         locationItems.forEach { location?.removeItem($0) }
-        return locationItems + (locationItems.isEmpty ? [] : [.separator()]) + makePageZoomMenuItems() + [root]
+        return makeFaceMenuItems() + locationItems + (locationItems.isEmpty ? [] : [.separator()]) + makePageZoomMenuItems() + [root]
             + makeIdentityColorMenuItems() + makeWorkspaceToolsMenuItems() + makeBackgroundProcessesMenuItems()
     }
+
+    // MARK: - Terminal face (.plans/79-session-handoff)
+    //
+    // One tile, two faces. The Array face is this tile's own transcript and
+    // composer; the Terminal face is the real `claude` TUI on the same
+    // conversation, in a Ghostty surface in the same frame, under the same name,
+    // colour and sidebar row. Exactly one of them owns the session at a time:
+    // the supervisor refuses every send while the Terminal face holds it.
+
+    /// Set by the host. nil (checks that never flip, an unwired tile) means no
+    /// switch at all.
+    var terminalFaceEnvironment: AgentTerminalFaceEnvironment? {
+        didSet { refreshFaceSwitch() }
+    }
+    private(set) var terminalFaceSession: AgentTerminalFaceSession?
+    var face: AgentTileFace { terminalFaceSession == nil ? .array : .terminal }
+    /// The flip to Terminal is waiting for the turn to end (edge case 9).
+    private(set) var pendingTerminalFlip = false
+    private let faceFlipBanner = AgentFaceFlipBanner(frame: .zero)
+    private var terminalFaceReattachments = 0
+
+    /// The Terminal face is Claude Code's alone. Codex is hidden on purpose:
+    /// `codex resume <thread>` exists, but codex writes no per-process session
+    /// file, so Array could not tell when that TUI is busy or follow it to a
+    /// new thread, and the flip-back reader is claude's. Pi has no TUI resume.
+    private var supportsTerminalFace: Bool {
+        guard terminalFaceEnvironment != nil, let agentID = attachedAgentID ?? projectedAgentID else { return false }
+        return agentSource?.records[agentID]?.harness == .claudeCode
+    }
+
+    private func refreshFaceSwitch() {
+        guard supportsTerminalFace || terminalFaceSession != nil else {
+            setTitleBarFaceSwitch(nil)
+            refreshFaceAccessibilityActions()
+            return
+        }
+        // Keep the return/cancel affordance while Terminal is active or pending,
+        // even for people who hide the entry toggle from their chat headers.
+        if face == .array, !pendingTerminalFlip,
+           !AgentTerminalFaceConfig.showsToggle(defaults: terminalFaceEnvironment?.defaults ?? .standard) {
+            setTitleBarFaceSwitch(nil)
+            refreshFaceAccessibilityActions()
+            return
+        }
+        var reason: String?
+        if terminalFaceSession == nil, let agentID = attachedAgentID,
+           case .unavailable(let why)? = agentSource?.terminalFaceReadiness(for: agentID) {
+            reason = why
+        }
+        setTitleBarFaceSwitch(FaceSwitchState(
+            selected: face, pendingTerminal: pendingTerminalFlip, unavailableReason: reason))
+        refreshFaceAccessibilityActions()
+    }
+
+    @objc private func terminalToggleSettingChanged(_ notification: Notification) {
+        refreshFaceSwitch()
+    }
+
+    override func faceSwitchRequested(_ requested: AgentTileFace) {
+        switch requested {
+        case .terminal where face == .array: requestTerminalFace()
+        case .array where face == .terminal: requestArrayFace()
+        case .array where pendingTerminalFlip: cancelPendingTerminalFlip()
+        default: break
+        }
+    }
+
+    /// ⌃⌘T, the ⋯ menu and the accessibility action. Returns whether the tile
+    /// took it.
+    @discardableResult
+    func toggleFace() -> Bool {
+        guard supportsTerminalFace || terminalFaceSession != nil else { return false }
+        faceSwitchRequested(face == .array && !pendingTerminalFlip ? .terminal : .array)
+        return true
+    }
+
+    private func makeFaceMenuItems() -> [NSMenuItem] {
+        guard supportsTerminalFace || terminalFaceSession != nil else { return [] }
+        let title = face == .array ? "Switch to Terminal" : "Switch to Array"
+        let item = NSMenuItem(title: title, action: #selector(toggleFaceFromMenu(_:)), keyEquivalent: "t")
+        item.keyEquivalentModifierMask = [.command, .control]
+        item.target = self
+        item.identifier = NSUserInterfaceItemIdentifier("agentTile.switchFace")
+        return [item, .separator()]
+    }
+
+    @objc private func toggleFaceFromMenu(_ sender: Any?) { toggleFace() }
+
+    private func refreshFaceAccessibilityActions() {
+        guard supportsTerminalFace || terminalFaceSession != nil else {
+            setTitleBarAccessibilityActions(nil)
+            return
+        }
+        let name = face == .array ? "Switch to Terminal" : "Switch to Array"
+        setTitleBarAccessibilityActions([NSAccessibilityCustomAction(name: name) { [weak self] in
+            self?.toggleFace() ?? false
+        }])
+    }
+
+    private func requestTerminalFace() {
+        guard let agentID = attachedAgentID, let supervisor = agentSource else { return }
+        switch supervisor.terminalFaceReadiness(for: agentID) {
+        case .ready:
+            enterTerminalFace()
+        case .busy:
+            pendingTerminalFlip = true
+            faceFlipBanner.show(.pendingFlip)
+            refreshFaceSwitch()
+        case .unavailable(let reason):
+            // News about a click, not part of the conversation: the banner
+            // slot, for a few seconds, never a transcript entry.
+            faceFlipBanner.show(.refusal(reason))
+            refreshFaceSwitch()
+        }
+    }
+
+    /// The turn moved; a waiting flip goes now, or learns why it cannot.
+    private func evaluatePendingTerminalFlip() {
+        guard pendingTerminalFlip, let agentID = attachedAgentID, let supervisor = agentSource else { return }
+        switch supervisor.terminalFaceReadiness(for: agentID) {
+        case .busy:
+            return
+        case .ready:
+            clearPendingTerminalFlip()
+            enterTerminalFace()
+        case .unavailable(let reason):
+            clearPendingTerminalFlip()
+            faceFlipBanner.show(.refusal(reason))
+        }
+    }
+
+    private func stopTurnForPendingFlip() {
+        guard let agentID = attachedAgentID, let supervisor = agentSource else { return }
+        Task { @MainActor in _ = await supervisor.accept(.stop, for: agentID) }
+    }
+
+    private func cancelPendingTerminalFlip() {
+        clearPendingTerminalFlip()
+    }
+
+    private func clearPendingTerminalFlip() {
+        pendingTerminalFlip = false
+        faceFlipBanner.dismiss(.pendingFlip)
+        refreshFaceSwitch()
+    }
+
+    /// The flip. Marks where the session file ends — everything the Array face
+    /// shows lies before that byte — then takes the session from the
+    /// supervisor (which stops its claude first) and only then starts the TUI.
+    private func enterTerminalFace() {
+        guard terminalFaceSession == nil, let environment = terminalFaceEnvironment,
+              let agentID = attachedAgentID, let supervisor = agentSource,
+              let launch = supervisor.beginTerminalFace(for: agentID) else { return }
+        let url = ClaudeTerminalFace.sessionFileURL(
+            claudeHome: environment.claudeHome, cwd: launch.cwd, sessionId: launch.sessionId)
+        let state = AgentTerminalFaceState(
+            sessionId: launch.sessionId, cwd: launch.cwd,
+            sessionFileOffset: ClaudeTerminalFace.sessionFileLength(url))
+        let watch = supervisor.watchTerminalFace(for: agentID, tileId: tile.id, state: state, environment: environment)
+        startTerminalFaceSurface(watch: watch, launch: launch)
+        persistTerminalFace(state)
+    }
+
+    /// A tile wired with its Terminal face persisted: a relaunch, a
+    /// workspace's return, a tile rebuilt for the agent. Returns whether the
+    /// face owns this tile's history — the tile is in its Terminal face, or
+    /// will be once tmux has answered, or the face's end is bringing the
+    /// turns in — so the host runs no restore of its own over it.
+    @discardableResult
+    func reattachTerminalFaceIfNeeded() -> Bool {
+        guard let state = tile.metadata.agentTerminalFace else { return false }
+        // A parked tile coming back: its surface never went (review #9).
+        if terminalFaceSession != nil { return true }
+        guard let environment = terminalFaceEnvironment, let agentID = attachedAgentID,
+              let supervisor = agentSource else { return false }
+        // It ended while the tile was away; its turns are in the transcript.
+        if supervisor.hasEndedTerminalFace(onTile: tile.id) {
+            persistTerminalFace(nil)
+            return false
+        }
+        // This launch watches it, and kept its surface: show it again.
+        let watched = supervisor.terminalFaceWatch(for: agentID)
+        if let watch = watched, let kept = watch.takeKeptSurface() {
+            host(watch: watch, surface: kept, start: false)
+            return true
+        }
+        // Otherwise tmux answers, off the main thread, whether claude is still
+        // there — a new client must never start a claude that just left.
+        let control = environment.tmuxPath.map { ProcessTmuxControl(tmuxPath: $0, defaults: environment.defaults) }
+        let tileId = tile.id
+        Task { @MainActor [weak self, weak supervisor] in
+            let alive = await AgentTerminalFaceWatch.tmuxSessionExists(tileId: tileId, control: control)
+            guard let self, let supervisor, self.attachedAgentID == agentID, self.terminalFaceSession == nil,
+                  self.tile.metadata.agentTerminalFace == state else { return }
+            if let watch = watched {
+                guard supervisor.terminalFaceWatch(for: agentID) === watch else { return }
+                if alive, !watch.launchArguments.isEmpty {
+                    self.host(watch: watch, surface: AgentTerminalFaceSession(watch: watch, arguments: watch.launchArguments))
+                } else {
+                    self.persistTerminalFace(nil)
+                    supervisor.finishTerminalFace(for: agentID)
+                }
+                return
+            }
+            if alive, let launch = supervisor.beginTerminalFace(for: agentID, reattaching: true) {
+                let watch = supervisor.watchTerminalFace(for: agentID, tileId: tileId, state: state, environment: environment)
+                self.startTerminalFaceSurface(watch: watch, launch: launch)
+            } else {
+                // Gone: what the terminal did comes home through the face's one
+                // end, and the record adopts the session and model claude ended
+                // on (review #10).
+                self.persistTerminalFace(nil)
+                supervisor.finishTerminalFace(for: agentID, persisted: state, tileId: tileId, claudeHome: environment.claudeHome)
+            }
+        }
+        return true
+    }
+
+    private func startTerminalFaceSurface(watch: AgentTerminalFaceWatch, launch: AgentSupervisor.TerminalFaceLaunch) {
+        let arguments = ClaudeTerminalFace.launchArguments(
+            claude: watch.environment.claudeCommand(),
+            sessionId: watch.state.sessionId,
+            conversationExists: launch.conversationExists,
+            model: launch.model,
+            effort: launch.effort,
+            processOwner: launch.processOwner,
+            path: PiAgentRunner.childEnvironment()["PATH"] ?? "/usr/bin:/bin",
+            forkSession: launch.forkSession)
+        watch.launchArguments = arguments
+        host(watch: watch, surface: AgentTerminalFaceSession(watch: watch, arguments: arguments))
+    }
+
+    /// Shows `surface` in this tile and reflects its face. What happens to the
+    /// agent is the watch's; this tile only follows it.
+    private func host(watch: AgentTerminalFaceWatch, surface: AgentTerminalFaceSession, start: Bool = true) {
+        watch.onHostClientDetached = { [weak self, weak watch] in
+            guard let self, let watch, self.terminalFaceSession?.watch === watch else { return }
+            self.terminalFaceSession?.detachSurface()
+            self.terminalFaceSession = nil
+            // A client that keeps dying is not worth chasing: end claude, and
+            // its exit ends the face with nothing left writing.
+            self.terminalFaceReattachments += 1
+            guard self.terminalFaceReattachments <= 3 else {
+                watch.endClaude(surface: nil)
+                return
+            }
+            self.host(watch: watch, surface: AgentTerminalFaceSession(watch: watch, arguments: watch.launchArguments))
+        }
+        watch.onHostSessionChange = { [weak self] state in self?.persistTerminalFace(state) }
+        watch.onHostEnded = { [weak self] turns in self?.showArrayFaceAfterTerminal(appendedTurns: turns) }
+        promoteBodyToNative()
+        terminalFaceSession = surface
+        setContentView(surface.hostView)
+        if start { surface.start() }
+        refreshFaceSwitch()
+        if window?.firstResponder === v2Composer?.textView || window?.firstResponder == nil {
+            surface.runtime.focus()
+        }
+    }
+
+    /// Switch to Array from the Terminal face. Claude has to go first — two
+    /// writers is the one thing the faces exist to prevent — so a busy claude
+    /// is asked about, and then its exit ends the face.
+    private func requestArrayFace() {
+        guard let session = terminalFaceSession else { return }
+        if session.isBusy, let environment = terminalFaceEnvironment,
+           !environment.confirm("Claude is working in this terminal.", "Stop and Switch") { return }
+        session.watch.endClaude(surface: session)
+    }
+
+    /// The face is over (`/exit`, a crash, Array ending it). Never closes the
+    /// tile: the Array face comes back, and the terminal's turns are already
+    /// in its transcript, appended by the supervisor.
+    private func showArrayFaceAfterTerminal(appendedTurns turns: Int) {
+        terminalFaceReattachments = 0
+        terminalFaceSession?.detachSurface()
+        terminalFaceSession = nil
+        setContentView(contentBackdrop)
+        persistTerminalFace(nil)
+        // Edge case 12: the picker shows what the terminal actually ran.
+        if let agentID = attachedAgentID, let selection = agentSource?.launchSelection(for: agentID) {
+            applyLaunchSelection(selection)
+        }
+        descriptor.status = .idle
+        descriptor.statusUpdatedAt = Date()
+        agentStatus = .idle
+        applyHeader(status: .idle)
+        refreshTranscriptThinkingIndicator()
+        synchronizeV2Transcript(final: true)
+        refreshFaceSwitch()
+        qaTerminalFaceAppendedTurns = turns
+    }
+
+    static let terminalBoundarySymbol = AgentSupervisor.outsideBoundarySymbol
+
+    /// Appends turns this agent's session took outside the tile under the
+    /// supervisor's boundary ("In Terminal · 2 turns"), through the restore's
+    /// own replay — the same steps the agent's transcript took.
+    func appendTurnsTakenOutside(_ appended: RehydratedTranscript, boundary: String) {
+        guard !appended.steps.isEmpty else { return }
+        model.appendSessionBoundary(
+            id: "outside-\(UUID().uuidString)", text: boundary, symbolName: Self.terminalBoundarySymbol)
+        replayRehydratedSteps(appended)
+    }
+
+    /// "In Terminal · 1 turn" — the divider over the turns the face took.
+    static func terminalBoundaryText(turns: Int, place: String = "Terminal") -> String {
+        AgentSupervisor.outsideBoundaryText(turns: turns, place: place)
+    }
+
+    private func persistTerminalFace(_ state: AgentTerminalFaceState?) {
+        guard tile.metadata.agentTerminalFace != state else { return }
+        var next = tile
+        next.metadata.agentTerminalFace = state
+        tile = next
+        canvas?.updateTile(next, recalculateZoneBounds: false)
+    }
+
+    /// × in the Terminal face closes the agent's tile as it always has, after
+    /// asking when claude is mid-turn (edge case 6). Claude ends with it: a
+    /// session nobody can see must not keep writing. Its turns reach the
+    /// agent's transcript through the face's one end, for the next tile.
+    override func handleCloseRequest() {
+        guard let session = terminalFaceSession else {
+            super.handleCloseRequest()
+            return
+        }
+        if session.isBusy, let environment = terminalFaceEnvironment,
+           !environment.confirm("Claude is working in this terminal.", "Stop and Close") { return }
+        let watch = session.watch
+        watch.onHostEnded = nil
+        watch.onHostClientDetached = nil
+        watch.onHostSessionChange = nil
+        terminalFaceSession = nil
+        if session.tmuxSessionName != nil {
+            // The client goes now; claude's session is killed off the main
+            // thread, and the watch sees it gone.
+            session.detachSurface()
+            watch.endClaude(surface: nil)
+        } else {
+            // Claude is this surface's child and ends with it.
+            session.detachSurface()
+            agentSource?.finishTerminalFace(for: watch.agentID)
+        }
+        persistTerminalFace(nil)
+        setContentView(contentBackdrop)
+        super.handleCloseRequest()
+    }
+
+    /// QA: how many turns the last flip back appended.
+    private(set) var qaTerminalFaceAppendedTurns = 0
+    var qaFaceFlipBannerVisible: Bool { !faceFlipBanner.isHidden }
+    var qaFaceFlipBanner: AgentFaceFlipBanner { faceFlipBanner }
+
+    // MARK: - A session another app holds (.plans/79-session-handoff, phase 2)
+    //
+    // Watching a session from another app, waiting to move it here, or paused
+    // because one of this agent's sessions was opened elsewhere. The host
+    // decides which (`AppDelegate.reconcileExternalSessions`); the tile shows
+    // it in place of the composer and keeps its transcript current by reading
+    // the CLI's own session file, a whole line at a time, from where it left
+    // off.
+
+    /// Pressed banner buttons, for the host.
+    var onSessionHandoffAction: ((AgentSessionHandoffAction) -> Void)?
+    private let sessionHandoffBanner = AgentSessionHandoffBanner(frame: .zero)
+    private(set) var sessionHandoffState: AgentSessionHandoffState?
+
+    func applySessionHandoff(_ state: AgentSessionHandoffState?, status: AgentStatus? = nil) {
+        sessionHandoffState = state
+        if let state { sessionHandoffBanner.apply(state) }
+        sessionHandoffBanner.isHidden = state == nil
+        composeBackdrop.isHidden = state != nil
+        switch state {
+        case let .watching(app, _, _), let .ended(app): setTitleBarWhereMarker("\(app) \u{00B7} read-only")
+        case .waitingToMove, .paused, nil: setTitleBarWhereMarker(nil)
+        }
+        agentStatusOverride = state == nil ? nil : status
+        applyAgentHeader(status: descriptor.status)
+    }
+
+    /// How often a followed session file is asked for its length. One stat
+    /// per interval while the tile is resident, and nothing per frame.
+    static var sessionFollowInterval: TimeInterval = 1.5
+    private struct SessionFollow {
+        var url: URL
+        var provider: ExternalSessionProvider
+        /// Just past the last whole line rendered.
+        var offset: UInt64
+        var reading: Bool
+        /// Stopping: one last read renders what is left, then nothing more.
+        var finishing = false
+    }
+    private var sessionFollow: SessionFollow?
+    private var sessionFollowTimer: Timer?
+
+    /// Renders a session from its file and follows it as the other app writes.
+    /// A second call for the same file only makes sure the follower runs.
+    func followSessionFile(_ url: URL, provider: ExternalSessionProvider, origin: String) {
+        if sessionFollow?.url == url {
+            startSessionFollowTimer()
+            return
+        }
+        sessionFollow = SessionFollow(url: url, provider: provider, offset: 0, reading: true)
+        let threadId = threadId
+        let maxBytes = RehydrationLimits().maxBytes
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let tail = SessionFileTail.tail(in: url, maxBytes: maxBytes)
+            let transcript = Self.parseSession(tail.lines, provider: provider, threadId: threadId, truncated: tail.truncated)
+            await MainActor.run {
+                guard let self, var follow = self.sessionFollow, follow.url == url else { return }
+                if !transcript.steps.isEmpty {
+                    // A tile made a moment ago may not have laid out yet, and a
+                    // transcript list given rows before its first layout leaves
+                    // the last of them off screen.
+                    self.layoutSubtreeIfNeeded()
+                    let count = transcript.restoredMessageCount
+                    let text = "From \(origin) \u{2014} \(count) \(count == 1 ? "message" : "messages")"
+                        + (transcript.omittedEarlier ? " \u{00B7} earlier history not shown" : "")
+                    self.renderRehydratedPreviousSession(transcript, boundaryText: text)
+                }
+                follow.offset = tail.end
+                follow.reading = false
+                self.sessionFollow = follow
+                if follow.finishing {
+                    self.readFollowedSessionFile()
+                } else {
+                    self.startSessionFollowTimer()
+                }
+            }
+        }
+    }
+
+    /// Stops following. `catchUp` first renders whatever was written since the
+    /// last read — the moment a session becomes this agent's, nothing the other
+    /// app wrote may be missing from the transcript. The read runs off the main
+    /// thread, after any read already in flight, from where that one ends.
+    func stopFollowingSessionFile(catchUp: Bool) {
+        sessionFollowTimer?.invalidate()
+        sessionFollowTimer = nil
+        guard var follow = sessionFollow else { return }
+        guard catchUp else {
+            sessionFollow = nil
+            return
+        }
+        follow.finishing = true
+        sessionFollow = follow
+        if !follow.reading { readFollowedSessionFile() }
+    }
+
+    /// What the followed file holds past the last read: read and parsed off
+    /// the main thread — bounded as a restore is — and replayed on it.
+    private func readFollowedSessionFile() {
+        guard var follow = sessionFollow, !follow.reading else { return }
+        follow.reading = true
+        sessionFollow = follow
+        let (url, offset, provider, threadId) = (follow.url, follow.offset, follow.provider, threadId)
+        let limits = RehydrationLimits()
+        Task.detached(priority: .utility) { [weak self] in
+            let chunk = SessionFileTail.lines(in: url, from: offset, maxBytes: limits.maxBytes)
+            let transcript = Self.parseSession(chunk.lines, provider: provider, threadId: threadId, truncated: chunk.truncated)
+            await MainActor.run {
+                guard let self, var follow = self.sessionFollow, follow.url == url, follow.offset == offset else { return }
+                if !transcript.steps.isEmpty { self.replayRehydratedSteps(transcript) }
+                follow.offset = chunk.end
+                follow.reading = false
+                self.sessionFollow = follow.finishing ? nil : follow
+            }
+        }
+    }
+
+    nonisolated private static func parseSession(
+        _ lines: [String], provider: ExternalSessionProvider, threadId: String, truncated: Bool = false,
+        limits: RehydrationLimits = RehydrationLimits()
+    ) -> RehydratedTranscript {
+        switch provider {
+        case .claude:
+            return ClaudeSessionTranscriptReader.parse(lines: lines, threadId: threadId, truncated: truncated, limits: limits)
+        case .codex:
+            return CodexSessionTranscriptReader.parse(lines: lines, threadId: threadId, truncated: truncated, limits: limits)
+        }
+    }
+
+    private func startSessionFollowTimer() {
+        guard sessionFollowTimer == nil, sessionFollow != nil else { return }
+        let timer = Timer(timeInterval: Self.sessionFollowInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pollSessionFile() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        sessionFollowTimer = timer
+    }
+
+    /// One stat; a read only when the file grew. The read and parse run off
+    /// the main thread, the replay on it.
+    func pollSessionFile() {
+        guard let follow = sessionFollow, !follow.reading, !follow.finishing,
+              SessionFileTail.length(follow.url) > follow.offset else { return }
+        readFollowedSessionFile()
+    }
+
+    /// QA: a follower still reading, or finishing its last read.
+    var qaSessionFollowBusy: Bool { sessionFollow != nil }
+
+    var qaSessionHandoffBanner: AgentSessionHandoffBanner? {
+        sessionHandoffBanner.isHidden ? nil : sessionHandoffBanner
+    }
+    var qaComposerHidden: Bool { composeBackdrop.isHidden }
+    var qaSessionFollowOffset: UInt64? { sessionFollow?.offset }
+    var qaSessionFollowReading: Bool { sessionFollow?.reading ?? false }
+    var qaSessionFollowTimerRunning: Bool { sessionFollowTimer?.isValid == true }
 
     // MARK: - Identity colour
 
@@ -1185,6 +1721,24 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// M1.4: a workspace switch is a removal, and a removal must detach. See
     /// `TileNSView.prepareForRemovalFromScene`.
     override func prepareForRemovalFromScene() {
+        if let session = terminalFaceSession {
+            terminalFaceSession = nil
+            let watch = session.watch
+            watch.onHostEnded = nil
+            watch.onHostClientDetached = nil
+            watch.onHostSessionChange = nil
+            if session.tmuxSessionName == nil, !watch.isEnded {
+                // tmux off: claude is this surface's child, and ending it here
+                // would stop a turn nobody was asked about (review #17). The
+                // surface keeps running with no tile; a tile rebuilt for the
+                // agent shows it again, and claude's exit still ends the face.
+                session.hostView.removeFromSuperview()
+                watch.keepSurfaceAlive(session)
+            } else {
+                // The client goes; claude stays in tmux, and the watch follows it.
+                session.detachSurface()
+            }
+        }
         detach()
     }
 
@@ -1201,6 +1755,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     func detach() {
         prepareStreamingMarkupForTeardown(final: true)
+        // A detached tile follows nothing: no session file is read for it.
+        sessionFollowTimer?.invalidate()
+        sessionFollowTimer = nil
         // Detach is an immediate visual/lifecycle boundary: a retained transcript
         // may remain visible, but its live Gyro tail must stop and leave the list
         // document before any later reuse.
@@ -1244,6 +1801,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         if let localNoticeObserverToken, let agentID = attachedAgentID {
             agentSource?.removeLocalNoticeObserver(localNoticeObserverToken, for: agentID)
             self.localNoticeObserverToken = nil
+        }
+        if let outsideHistoryObserverToken, let agentID = attachedAgentID {
+            agentSource?.removeOutsideHistoryObserver(outsideHistoryObserverToken, for: agentID)
+            self.outsideHistoryObserverToken = nil
         }
         // Before the flush: a closing or parked tile keeps no hypothesis, and
         // the draft it flushes is the one the user had before speaking.
@@ -1524,6 +2085,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// the WINDOW focused and the composer dead until the tile was selected once.
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
+        if let terminalFaceSession {
+            terminalFaceSession.runtime.focus()
+            return true
+        }
         // Before the composer is targeted, not after: while surfaced, that text view
         // is inside the parked body, and AppKit would focus it there.
         promoteForIncomingFocus()
@@ -1580,6 +2145,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // version can no longer be compared against it.
         lastForwardedDocumentVersion = nil
         hasRenderedRehydratedSession = false
+        // A followed session renders again from its file on the next wire.
+        stopFollowingSessionFile(catchUp: false)
         synchronizeV2Transcript(final: true)
     }
 
@@ -1703,14 +2270,29 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// notice rather than ingesting a synthetic event: restored bodies must not
     /// re-cross the companion sync boundary. Idempotent so a re-wire cannot stack
     /// the history.
-    func renderRehydratedPreviousSession(_ transcript: RehydratedTranscript) {
+    func renderRehydratedPreviousSession(_ transcript: RehydratedTranscript, boundaryText: String? = nil) {
         guard !hasRenderedRehydratedSession else { return }
         hasRenderedRehydratedSession = true
         cancelStreamingMarkupParseTimer()
-        model.appendNotice(
-            id: "notice-previous-session",
-            title: "previous session",
-            text: transcript.boundaryNoticeText)
+        if let boundaryText {
+            // A watched session's history ("From cmux — 12 messages"): the
+            // divider every session that came from outside the tile uses.
+            model.appendSessionBoundary(id: "previous-session", text: boundaryText, symbolName: "eye")
+        } else {
+            model.appendNotice(
+                id: "notice-previous-session",
+                title: "previous session",
+                text: transcript.boundaryNoticeText)
+        }
+        replayRehydratedSteps(transcript)
+    }
+
+    /// The replay half of a restore, callable again: flipping back from the
+    /// Terminal face appends the turns taken there through this same loop, so
+    /// they render exactly as a full restore of the session would render them
+    /// (`.plans/79`, "Flipping back is proven").
+    private func replayRehydratedSteps(_ transcript: RehydratedTranscript) {
+        cancelStreamingMarkupParseTimer()
         for (index, step) in transcript.steps.enumerated() {
             // A missing source instant must remain unknown. Replaying history
             // on the live clock makes hours of work look like milliseconds.
@@ -2500,6 +3082,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// last draft and the debounced sweep wrote over every surface. The projection
     /// derivation remains the compatibility path's, untouched.
     private func refreshV2TurnSnapshot() {
+        evaluatePendingTerminalFlip()
+        refreshFaceSwitch()
         if let agentID = attachedAgentID,
            let snapshot = agentSource?.turnSnapshot(for: agentID) {
             v2TurnSnapshot = snapshot
@@ -2668,7 +3252,13 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let pendingDock = PendingMessageDockView(rail: composer.pendingMessageRail)
         pendingDock.identifier = NSUserInterfaceItemIdentifier("agentTile.pendingMessages")
         v2PendingDock = pendingDock
-        let layout = NSStackView(views: [agentHeader, locationStatus, transcript, pendingDock, composeBackdrop])
+        faceFlipBanner.onStopNow = { [weak self] in self?.stopTurnForPendingFlip() }
+        faceFlipBanner.onCancel = { [weak self] in self?.cancelPendingTerminalFlip() }
+        sessionHandoffBanner.isHidden = true
+        sessionHandoffBanner.onAction = { [weak self] action in self?.onSessionHandoffAction?(action) }
+        let layout = NSStackView(views: [
+            agentHeader, locationStatus, transcript, pendingDock, faceFlipBanner, sessionHandoffBanner, composeBackdrop,
+        ])
         layout.orientation = .vertical
         layout.spacing = 0
         layout.translatesAutoresizingMaskIntoConstraints = false
@@ -2710,6 +3300,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             locationStatus.widthAnchor.constraint(equalTo: layout.widthAnchor),
             transcript.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeBackdrop.widthAnchor.constraint(equalTo: layout.widthAnchor),
+            faceFlipBanner.widthAnchor.constraint(equalTo: layout.widthAnchor),
+            sessionHandoffBanner.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeColumn.leadingAnchor.constraint(equalTo: composeBackdrop.leadingAnchor),
             composeColumn.trailingAnchor.constraint(equalTo: composeBackdrop.trailingAnchor),
             composeColumn.topAnchor.constraint(equalTo: composeBackdrop.topAnchor),
@@ -3069,6 +3661,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             pageZoom: pageZoom,
             imageResources: managedImageResourceProvider,
             agentStatus: agentReferenceStatusSource,
+            agentMessageSenders: agentMessageSenderSource,
             // TR-06 — read LIVE from the supervisor, exactly like
             // `updateV2ComposerPresentation` does, and never from the cached
             // `v2TurnSnapshot` alone: the cache is what latched a stale
@@ -3116,6 +3709,16 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 supervisor?.removeTurnCapabilitiesObserver(token)
             }
         )
+    }
+
+    /// Read from the supervisor's records when a card is drawn, so a sender's
+    /// colour is the one it has now and a deleted sender has no button.
+    private var agentMessageSenderSource: AgentMessageSenderSource {
+        guard let supervisor = agentSource else { return .unavailable }
+        return AgentMessageSenderSource(current: { [weak supervisor] rawAgentID in
+            guard let record = supervisor?.records[AgentID(rawValue: rawAgentID)] else { return nil }
+            return .init(identityColorName: record.identityColor, hasTile: record.tileId != nil)
+        })
     }
 
     private func cancelStreamingMarkupParseTimer() {
@@ -3270,6 +3873,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             return
         case let .revealAgent(_, agentID, parentAgentID):
             onRevealAgent?(AgentID(rawValue: agentID), AgentID(rawValue: parentAgentID))
+            return
+        case let .revealMessageSender(_, agentID):
+            onRevealMessageSender?(AgentID(rawValue: agentID))
             return
         case let .contextFullRecovery(blockID, recoveryAction):
             guard isContextFullErrorBlock(blockID) else { return }
@@ -3586,7 +4192,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     private func applyAgentHeader(status: AgentStatus) {
-        if let snapshot = v2TurnSnapshot {
+        if let shown = agentStatusOverride {
+            // Another app's session decides it (`.plans/79` phase 2).
+            agentHeader.apply(AgentTileStatePresenter.present(
+                name: headerAgentName ?? tile.title, status: shown, branchContext: branchContext, startedAt: startedAt))
+        } else if let snapshot = v2TurnSnapshot {
             agentHeader.apply(AgentTileStatePresenter.present(
                 name: headerAgentName ?? tile.title,
                 snapshot: snapshot,
@@ -3752,6 +4362,16 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         return true
     }
     var qaDocumentForChecks: AgentDocument { model.document }
+    /// The strip the newest turn shows ("Worked 3s", "You stopped after 2s").
+    var qaNewestWorkStripText: String? { transcriptCollectionFixture?.qaNewestWorkStripModelForChecks?.text }
+    /// Every session-boundary divider drawn now.
+    var qaSessionBoundaryViews: [CompactionBoundaryView] {
+        func walk(_ view: NSView) -> [CompactionBoundaryView] {
+            let own = view.identifier?.rawValue == "agent.sessionBoundary" ? [view as? CompactionBoundaryView].compactMap { $0 } : []
+            return own + view.subviews.flatMap(walk)
+        }
+        return transcriptCollectionFixture.map(walk) ?? []
+    }
     var qaStatusThinkingIndicatorVisible: Bool { compactStatusRow.qaThinkingSlotVisible }
     var qaCompactStatusPhase: AgentCompactActivityPhase? { compactStatusResolution.phase }
     var qaCompactStatusContextState: AgentRadialContextMeterState { compactStatusRow.qaContextState }

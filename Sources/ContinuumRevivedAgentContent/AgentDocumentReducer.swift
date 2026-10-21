@@ -412,16 +412,18 @@ public struct AgentDocumentReducer: Sendable {
         case .fileReferences: return block.kind == .fileReferences
         case .agentReference: return block.kind == .agentReference
         case .taskReference: return block.kind == .taskReference
+        case .agentMessage: return block.kind == .agentMessage
         case .error: return block.kind == .error
         case .notice: return block.kind == .notice
         case .compaction: return block.kind == .compaction
+        case .sessionBoundary: return block.kind == .sessionBoundary
         case .opaque: return block.kind == .unknown || !builtInKinds.contains(block.kind)
         }
     }
 
     private var builtInKinds: Set<AgentBlockKind> {
         [.paragraph, .heading, .list, .listItem, .quote, .thematicBreak, .table, .fencedCode, .toolCall,
-         .commandOutput, .plan, .diff, .approval, .question, .image, .imageGallery, .fileReferences, .agentReference, .taskReference, .error, .notice, .compaction, .unknown]
+         .commandOutput, .plan, .diff, .approval, .question, .image, .imageGallery, .fileReferences, .agentReference, .taskReference, .agentMessage, .error, .notice, .compaction, .sessionBoundary, .unknown]
     }
 
     private func normalizedNew(_ block: AgentBlock) -> AgentBlock {

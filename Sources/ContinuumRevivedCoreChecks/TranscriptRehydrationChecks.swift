@@ -22,7 +22,9 @@ func runTranscriptRehydrationChecks() {
     runCodexSessionTranscriptParseChecks()
     runCodexItemCompletedMessageChecks()
     runTranscriptRehydrationTimingChecks()
+    runAgentMessageTranscriptChecks()
     runTranscriptRehydrationBoundChecks()
+    runClaudeTerminalFaceWindowChecks()
     #if os(macOS)
     runTranscriptRehydrationDispatchChecks()
     #endif
@@ -651,4 +653,38 @@ private func runTranscriptRehydrationTimingChecks() {
     let compatibility = RehydratedTranscript(steps: [.userPrompt("legacy")], restoredMessageCount: 1, omittedEarlier: false)
     expect(compatibility.stepTimestamps.count == 1 && compatibility.stepTimestamps[0] == nil,
            "existing callers that provide no dates must retain unknown timestamps")
+}
+
+/// `.plans/79` review #13: the Terminal face reads byte windows of claude's
+/// session file — the history before its mark (bounded, so it can start
+/// anywhere) and the turns after it. A window that starts inside a multi-byte
+/// character must still yield every whole line after it, not nothing at all.
+private func runClaudeTerminalFaceWindowChecks() {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("terminal-face-window-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("session.jsonl")
+    func user(_ text: String) -> String {
+        #"{"type":"user","uuid":"\#(UUID().uuidString)","message":{"role":"user","content":"\#(text)"}}"#
+    }
+    let first = user(String(repeating: "é", count: 400))
+    let second = user("second prompt")
+    let third = user("third prompt")
+    let text = [first, second, third].joined(separator: "\n") + "\n"
+    try? Data(text.utf8).write(to: url)
+    let firstBytes = first.utf8.count + 1
+    let end = UInt64(text.utf8.count)
+    // A window of everything after the first line plus 101 bytes of it: the
+    // first line's "é"s are two bytes each, so the window opens mid-character.
+    let window = Int(end) - firstBytes + 101
+    let before = ClaudeTerminalFace.lines(in: url, before: end, maxBytes: window)
+    expect(before == [second, third],
+           "a window opening mid-character must keep the whole lines after it; got \(before.count) lines")
+    // A mark inside the first line (mid-character): the turns after it, whole.
+    let after = ClaudeTerminalFace.lines(in: url, after: 101)
+    expect(after == [second, third],
+           "a read from inside a line must skip to the next whole line; got \(after.count) lines")
+    expect(ClaudeTerminalFace.lines(in: url, after: UInt64(firstBytes)) == [second, third],
+           "a read from a line boundary keeps the line there")
 }

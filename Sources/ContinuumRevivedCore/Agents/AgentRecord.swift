@@ -429,6 +429,13 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// to `nil` the moment the forked id is captured and adopted into
     /// `providerSessionId`. `nil` ⇒ no rotation pending.
     public var pendingSessionForkFrom: String?
+    /// `.plans/79` phase 2: this agent's tile shows a session another app
+    /// holds — watching it, or waiting to continue it here. While set, no
+    /// runner of Array's starts for the agent and the session is not Array's:
+    /// the sidebar keeps its row as the other app's. Cleared when the session
+    /// becomes this agent's own (`providerSessionId` / `codexThreadId`), or
+    /// when the tile turns into a copy.
+    public var externalSession: AgentExternalSessionLink?
 
     // Ticket: docs/38-tickets/90-agent-ux/P4.1-lifecycle-state.md
     //
@@ -734,6 +741,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         providerSessionId: String? = nil,
         resolvedModelId: String? = nil,
         pendingSessionForkFrom: String? = nil,
+        externalSession: AgentExternalSessionLink? = nil,
         settledOverride: SettledOverride = .default,
         settledAt: Date? = nil,
         snoozedUntil: Date? = nil,
@@ -780,6 +788,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.providerSessionId = providerSessionId
         self.resolvedModelId = resolvedModelId
         self.pendingSessionForkFrom = pendingSessionForkFrom
+        self.externalSession = externalSession
         self.settledOverride = settledOverride
         self.settledAt = settledAt
         self.snoozedUntil = snoozedUntil
@@ -962,6 +971,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case resolvedModelId
         case providerContextWindows
         case pendingSessionForkFrom
+        case externalSession
         // P4.1. The three lifecycle dates take reference intervals for exactly
         // the reason above — a settled-at that drifts on reload reorders
         // history.
@@ -1069,6 +1079,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         providerContextWindows = (try? container.decodeIfPresent(
             [String: Int].self, forKey: .providerContextWindows)) ?? [:]
         pendingSessionForkFrom = try container.decodeIfPresent(String.self, forKey: .pendingSessionForkFrom)
+        // A link this build cannot read is dropped, never fatal: the record is
+        // still an agent, and the session is still the other app's.
+        externalSession = try? container.decodeIfPresent(AgentExternalSessionLink.self, forKey: .externalSession)
         // P4.1. Decoded through `SettledOverride(persistedRawValue:)` rather
         // than as the enum directly: a record written by a newer build with a
         // case this one has never heard of must read as `.neutral`, not throw
@@ -1149,6 +1162,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
             try container.encode(providerContextWindows, forKey: .providerContextWindows)
         }
         try container.encodeIfPresent(pendingSessionForkFrom, forKey: .pendingSessionForkFrom)
+        try container.encodeIfPresent(externalSession, forKey: .externalSession)
         // P4.1. `.neutral` is written as ABSENCE, the same way a headless
         // record omits `tileId`: the default is "nobody has said anything", and
         // a stored word saying so is noise that also makes every pre-P4.1

@@ -12,7 +12,7 @@ import Foundation
 /// Not thread-safe: one reader per queue.
 public final class ProcessTableReader {
     private struct Key: Hashable { let pid: Int32; let start: UInt64 }
-    private struct Identity { let path: String; let arguments: [String]; let ownerTag: String? }
+    private struct Identity { let path: String; let arguments: [String]; let ownerTag: String?; let ownerFace: String? }
     private var identities: [Key: Identity] = [:]
     private var keysByPid: [Int32: Key] = [:]
     private var retainedOwners: [Key: String] = [:]
@@ -42,7 +42,8 @@ public final class ProcessTableReader {
             } else {
                 let read = Self.argumentsAndOwner(pid)
                 identity = Identity(
-                    path: read?.path ?? "", arguments: read?.arguments ?? [], ownerTag: read?.ownerTag)
+                    path: read?.path ?? "", arguments: read?.arguments ?? [], ownerTag: read?.ownerTag,
+                    ownerFace: read?.ownerFace)
                 // A short-lived permission/exec race must not permanently
                 // hide the process's command or its own owner tag.
                 if read != nil { identities[key] = identity }
@@ -53,7 +54,8 @@ public final class ProcessTableReader {
                 startedAt: Date(timeIntervalSince1970: Double(info.pbi_start_tvsec) + Double(info.pbi_start_tvusec) / 1_000_000),
                 executablePath: identity.path,
                 arguments: identity.arguments,
-                ownerTag: identity.ownerTag))
+                ownerTag: identity.ownerTag,
+                ownerFace: identity.ownerFace))
         }
         identities = identities.filter { seen.contains($0.key) }
         retainedOwners = retainedOwners.filter { seen.contains($0.key) }
@@ -102,8 +104,8 @@ public final class ProcessTableReader {
     }
 
     /// `KERN_PROCARGS2`: argc, the exec path, then argv and envp as NUL-
-    /// separated strings. Only the owner tag is kept from the environment.
-    static func argumentsAndOwner(_ pid: Int32) -> (path: String, arguments: [String], ownerTag: String?)? {
+    /// separated strings. Only the owner tag and face are kept from the environment.
+    static func argumentsAndOwner(_ pid: Int32) -> (path: String, arguments: [String], ownerTag: String?, ownerFace: String?)? {
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
         var size = 0
         guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
@@ -118,7 +120,9 @@ public final class ProcessTableReader {
 
         var arguments: [String] = []
         var ownerTag: String?
+        var ownerFace: String?
         let prefix = Array((AgentProcessAttribution.ownerEnvironmentKey + "=").utf8)
+        let facePrefix = Array((AgentProcessAttribution.faceEnvironmentKey + "=").utf8)
         var start = index
         var strings = 0
         while index < size {
@@ -136,6 +140,9 @@ public final class ProcessTableReader {
                     let length = index - start
                     if length > prefix.count, buffer[start..<(start + prefix.count)].elementsEqual(prefix) {
                         ownerTag = String(decoding: buffer[(start + prefix.count)..<index], as: UTF8.self)
+                    } else if length > facePrefix.count,
+                              buffer[start..<(start + facePrefix.count)].elementsEqual(facePrefix) {
+                        ownerFace = String(decoding: buffer[(start + facePrefix.count)..<index], as: UTF8.self)
                     }
                     strings += 1
                 }
@@ -143,7 +150,7 @@ public final class ProcessTableReader {
             }
             index += 1
         }
-        return (path, arguments, ownerTag)
+        return (path, arguments, ownerTag, ownerFace)
     }
 }
 #endif

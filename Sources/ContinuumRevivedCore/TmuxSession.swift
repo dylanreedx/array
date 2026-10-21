@@ -39,6 +39,19 @@ public enum TmuxSession {
         "array-view-\(tileId.uuidString)"
     }
 
+    /// Whether `name` is one of the session names above (a tile's own, its
+    /// view, or a project's or workspace's shared base), and the tile it names
+    /// when it names one. A shared base names no tile.
+    public static func arraySession(named name: String) -> (isArray: Bool, tileId: UUID?) {
+        for prefix in ["array-proj-", "array-ws-"] where name.hasPrefix(prefix) {
+            return (UUID(uuidString: String(name.dropFirst(prefix.count))) != nil, nil)
+        }
+        for prefix in ["array-view-", "array-"] where name.hasPrefix(prefix) {
+            if let tileId = UUID(uuidString: String(name.dropFirst(prefix.count))) { return (true, tileId) }
+        }
+        return (false, nil)
+    }
+
     public static func wrap(
         profile: LaunchProfile,
         tileId: UUID,
@@ -73,6 +86,16 @@ public enum TmuxSession {
             cwd: profile.cwd,
             title: profile.title
         )
+    }
+
+    /// The pane a `groupedViewProfile` launch selects, read back from its argv:
+    /// which window of the shared base session a terminal tile shows. nil for
+    /// any other launch (a tile's own session, a remote reach's quoted argv).
+    public static func groupedViewPaneTarget(arguments: [String]) -> String? {
+        guard let select = arguments.lastIndex(of: "select-window"),
+              arguments.indices.contains(select + 2), arguments[select + 1] == "-t",
+              isValidPaneId(arguments[select + 2]) else { return nil }
+        return arguments[select + 2]
     }
 
     /// Builds the one production launch used by every tile whose window lives

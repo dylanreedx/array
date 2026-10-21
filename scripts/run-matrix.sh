@@ -298,7 +298,7 @@ run_app_check() {
   app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-matrix-appsupport.XXXXXX")
 
   case " $* " in
-    *" --terminal-tmux-"*|*" --terminal-theme-fidelity-check"*) ;;
+    *" --terminal-tmux-"*|*" --terminal-theme-fidelity-check"*|*" --shell-open-as-agent-check"*) ;;
     *) tmux_args=(-continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path "") ;;
   esac
 
@@ -441,6 +441,14 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-process-tracking-check
 # an earlier full-CoreChecks section is KNOWN-RED.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-transcript-projection-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --transcript-rehydration-check
+# .plans/79: which Claude and Codex sessions run on this Mac, where, and who
+# owns each. Synthetic session files, rollouts and process table; a stale pid,
+# Claude's background host and an unreadable format are all dropped.
+run_leg .build/debug/ContinuumRevivedCoreChecks --external-session-discovery-check
+# .plans/79: agents messaging each other — the envelope parser, every
+# provider's restore of an agent's message as a card, and the sender's
+# "Messaged …" row. Neither section it draws from is a leg of its own.
+run_leg .build/debug/ContinuumRevivedCoreChecks --agent-message-transcript-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
 # Film phase 1: the pairing page and the user-facing copy that must say Array.
@@ -804,6 +812,23 @@ run_app_check .build/debug/Array --provider-request-response-check
 # world frame, title bar, zone stamp and the canvas viewport stay byte-identical,
 # nothing reaches persistence, and two tiles hold different rungs at once.
 run_app_check .build/debug/Array --managed-agent-page-zoom-check
+# .plans/79 stream D: one agent tile, two faces. The band's ×, ⋯ and Array |
+# Terminal switch on a real agent tile in a real canvas, clicked with real
+# mouse events at widths 320/480/900 × canvas zoom 0.1/0.3/1/2 × page zoom
+# 80/150%: nothing overlaps, every control keeps its 22px floor, each click
+# fires its own action, and a switch the band has no room for is still in the
+# tile menu. Then the flip itself, with a stand-in claude on PATH in this
+# matrix's isolated tmux: the managed claude stops before the TUI starts, a
+# busy flip waits, /exit flips back and appends the terminal's turns once,
+# and a relaunch reattaches.
+run_app_check .build/debug/Array --agent-face-switch-check
+run_app_check .build/debug/Array --agent-face-flip-check
+# .plans/79 edge case 4: claude typed into a real shell tile (in this matrix's
+# isolated tmux, stand-in claude, fixture home), discovered and mapped to that
+# tile, offered in its band, and clicked: an agent tile beside it on the same
+# session with its history once; Array types /exit only into an idle claude,
+# a busy one is waited out; one sidebar row for the session throughout.
+run_app_check .build/debug/Array --shell-open-as-agent-check
 # The composer's paste/drop intake: image decoding, thumbnail cache, attachment
 # rail, cross-agent rebind isolation, and the shared mixed image/file-reference
 # route through the real managed attachment store. It shipped with 44fbe73 but
@@ -989,6 +1014,11 @@ run_app_check .build/debug/Array --workspace-api-board-check
 # a presentation failure repaired by agent.reveal, operation.get per step, and
 # cancellation reporting the child truthfully.
 run_app_check .build/debug/Array --workspace-api-delegation-check
+# .plans/79: a parent delegates and messages a child over the real API and pi
+# bridge. The child draws both as cards from the parent (name, colour, a reveal
+# that works), never as user prompts; the parent's row reads "Messaged …"; a
+# restore of the child's session file draws the identical cards.
+run_app_check .build/debug/Array --agent-message-card-check
 # Agent permissions (Settings ▸ Agents), Free within a project by default:
 # delegate and message any agent in the project without a prompt, while
 # cross-project reach asks or is refused, the per-agent switch revokes, an
@@ -999,6 +1029,21 @@ run_app_check .build/debug/Array --workspace-api-free-permissions-check
 # menu through the boot mount's tracker, a port opens in a browser beside the
 # agent in its own zone, and Stop All ends every process.
 run_app_check .build/debug/Array --agent-process-tracker-check
+# .plans/79: sessions from other apps are rows of the production sidebar, keyed
+# by session, marked where they live, scoped by "This Mac", never doubled; Copy
+# forks one into a managed Claude agent in its project.
+run_app_check .build/debug/Array --external-sessions-sidebar-check
+# .plans/79 phase 2: a session another app holds. Clicking its row watches it
+# read-only in its project — no runner, the file never written, appended lines
+# rendered once, the same tile on a second click, Ended then Continue here on
+# the same id. Move here waits while the session is open and goes live the
+# moment its process is gone (first turn `--resume`), Cancel and Copy instead.
+# An Array agent whose session opens in another app pauses (runner stopped,
+# sends refused) and resumes with what was written there; its own tagged
+# runner and Terminal face never pause it. Stand-in claude on PATH, no tmux.
+run_app_check .build/debug/Array --external-session-watch-check
+run_app_check .build/debug/Array --external-session-move-check
+run_app_check .build/debug/Array --agent-paused-elsewhere-check
 # CX-01: the bundled pi extensions through the REAL pi's own parser. Nothing else
 # in the repo ever asks pi to PARSE these files, which is how a merge-spliced
 # syntax error in continuum-workspace-tools.ts reached the branch with every leg

@@ -792,6 +792,10 @@ public struct ClaudeEventTranslator {
             if let op = string("op"), BoardApplyRequest.Op(rawValue: op) != nil { fields.append((key: "op", value: op)) }
             if let title = string("title") { fields.append((key: "title", value: title)) }
         }
+        // Array's own agent message: its text is what the row is about.
+        if let message = AgentToolDetailObservation.messageTextField(toolName: toolName, arguments: input) {
+            fields.append(message)
+        }
         // `relativePath`: Array's own `array_open_document` (CX-01) — the
         // basename only, like every other path key.
         if let path = string("file_path") ?? string("notebook_path") ?? string("path") ?? string("relativePath") {

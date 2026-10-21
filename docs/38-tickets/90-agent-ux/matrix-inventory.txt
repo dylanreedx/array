@@ -6,6 +6,8 @@ check --agent-compaction-ui-check
 check --agent-completion-semantic-check
 check --agent-context-live-compaction-check
 check --agent-display-name-check
+check --agent-face-flip-check
+check --agent-face-switch-check
 check --agent-fanout-check
 check --agent-first-paint-check
 check --agent-identity-color-check
@@ -15,7 +17,10 @@ check --agent-input-check
 check --agent-inventory-wiring-check
 check --agent-local-file-link-check
 check --agent-message-bus-check
+check --agent-message-card-check
+check --agent-message-transcript-check
 check --agent-observer-independence-check
+check --agent-paused-elsewhere-check
 check --agent-presence-check
 check --agent-process-tracker-check
 check --agent-process-tracking-check
@@ -95,6 +100,10 @@ check --editor-navigation-check
 check --editor-web-bridge-check
 check --empty-workspace-creation-check
 check --exact-rebase-performance-check
+check --external-session-discovery-check
+check --external-session-move-check
+check --external-session-watch-check
+check --external-sessions-sidebar-check
 check --file-card-check
 check --file-document-session-check
 check --file-markdown-perf-check
@@ -186,6 +195,7 @@ check --settings-panel-check
 check --settings-schema-check
 check --settings-search-check
 check --settle-closes-tile-check
+check --shell-open-as-agent-check
 check --shell-tool-row-check
 check --sidebar-lifecycle-check
 check --sidebar-production-corpus-check
@@ -312,6 +322,8 @@ leg run_app_check .build/debug/Array --agent-compaction-ui-check
 leg run_app_check .build/debug/Array --agent-completion-semantic-check
 leg run_app_check .build/debug/Array --agent-context-live-compaction-check
 leg run_app_check .build/debug/Array --agent-display-name-check
+leg run_app_check .build/debug/Array --agent-face-flip-check
+leg run_app_check .build/debug/Array --agent-face-switch-check
 leg run_app_check .build/debug/Array --agent-fanout-check
 leg run_app_check .build/debug/Array --agent-first-paint-check
 leg run_app_check .build/debug/Array --agent-identity-color-check
@@ -321,7 +333,9 @@ leg run_app_check .build/debug/Array --agent-input-check
 leg run_app_check .build/debug/Array --agent-inventory-wiring-check
 leg run_app_check .build/debug/Array --agent-local-file-link-check
 leg run_app_check .build/debug/Array --agent-message-bus-check
+leg run_app_check .build/debug/Array --agent-message-card-check
 leg run_app_check .build/debug/Array --agent-observer-independence-check
+leg run_app_check .build/debug/Array --agent-paused-elsewhere-check
 leg run_app_check .build/debug/Array --agent-presence-check
 leg run_app_check .build/debug/Array --agent-process-tracker-check
 leg run_app_check .build/debug/Array --agent-restore-check
@@ -387,6 +401,9 @@ leg run_app_check .build/debug/Array --drag-magnetize-check
 leg run_app_check .build/debug/Array --editor-navigation-check
 leg run_app_check .build/debug/Array --editor-web-bridge-check
 leg run_app_check .build/debug/Array --empty-workspace-creation-check
+leg run_app_check .build/debug/Array --external-session-move-check
+leg run_app_check .build/debug/Array --external-session-watch-check
+leg run_app_check .build/debug/Array --external-sessions-sidebar-check
 leg run_app_check .build/debug/Array --file-card-check
 leg run_app_check .build/debug/Array --file-markdown-perf-check
 leg run_app_check .build/debug/Array --file-markdown-preview-check
@@ -469,6 +486,7 @@ leg run_app_check .build/debug/Array --settings-modal-check
 leg run_app_check .build/debug/Array --settings-panel-check
 leg run_app_check .build/debug/Array --settings-search-check
 leg run_app_check .build/debug/Array --settle-closes-tile-check
+leg run_app_check .build/debug/Array --shell-open-as-agent-check
 leg run_app_check .build/debug/Array --shell-tool-row-check
 leg run_app_check .build/debug/Array --sidebar-production-corpus-check
 leg run_app_check .build/debug/Array --sidebar-screenshot-check
@@ -582,6 +600,7 @@ leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-message-transcript-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-process-tracking-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-transcript-projection-check
@@ -596,6 +615,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --context-meter-contract-che
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --dictation-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --external-session-discovery-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
@@ -641,7 +661,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 176
+count ContinuumRevivedCoreChecks 179
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

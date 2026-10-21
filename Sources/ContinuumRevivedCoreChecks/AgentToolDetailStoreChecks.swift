@@ -1263,7 +1263,9 @@ private func runAgentToolKindChecks() {
 /// then into the store exactly as the transcript records a start, then through
 /// the presenter that titles the row. Every row is collected before failing, so a
 /// red run lists the whole table.
-private func runArrayWorkspaceToolRowChecks() async {
+/// Internal, not private: `--agent-message-transcript-check` runs it too, so
+/// the matrix reports the message row (this arm's full run is not a leg).
+func runArrayWorkspaceToolRowChecks() async {
     final class Box: @unchecked Sendable {
         private let lock = NSLock()
         private var values: [AgentRuntimeObservation] = []
@@ -1537,6 +1539,64 @@ private func runArrayWorkspaceToolRowChecks() async {
         if row.title != item.title { failures.append("board \(item.label): row reads \"\(row.title)\", want \"\(item.title)\"") }
         for text in [row.title, row.detail ?? ""] where text.contains("SECRET-BODY") || text.contains("op:") {
             failures.append("board \(item.label): a card body or the raw op leaked into the row: \"\(text)\"")
+        }
+    }
+    // ── array_message_agent names who it messaged, and says what ────────────
+    // `.plans/79`: every message read "Messaged an agent" with nothing under
+    // it. The name comes from the reply (`AgentMessageResult.childName`); the
+    // text is the call's own argument, the one body that crosses for this tool
+    // because the row is about it. Every provider spelling carries it.
+    let messageName = "mcp__array_workspace__array_message_agent"
+    let childID = AgentID(rawValue: UUID())
+    let messageText = "Rerun the failing leg.\nThen report the diff."
+    let messageInput = #"{"agentId":"\#(childID.rawValue.uuidString)","text":"Rerun the failing leg.\nThen report the diff.","idempotencyKey":"m1"}"#
+    func messageReply(_ name: String?) -> String {
+        let result = AgentMessageResult(operationId: "op", delivery: .delivered, childAgentId: childID,
+                                        parentAgentId: AgentID(rawValue: UUID()), childName: name, childRunning: true)
+        let object = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(result)) as! [String: Any]
+        return PiHostToolResponse.ok(object).encodedValue(requestId: "req")
+    }
+    func codexAppServerMessage() -> AgentToolDetailObservation? {
+        let box = Box()
+        var translator = CodexAppServerEventTranslator()
+        translator.onRuntimeObservation = box.append
+        let arguments = try! JSONSerialization.data(withJSONObject: ["agentId": childID.rawValue.uuidString, "text": messageText])
+        _ = translator.translate(stream: [
+            #"{"method":"item/started","params":{"threadId":"t","turnId":"u","item":{"id":"codex-msg","type":"mcpToolCall","server":"array_workspace","tool":"array_message_agent","status":"inProgress","arguments":\#(String(decoding: arguments, as: UTF8.self))}}}"#,
+        ])
+        return box.startedDetails.first
+    }
+    let delivered = claudeCall(messageName, messageInput, result: messageReply("Scout"))
+    let messageCases: [(label: String, start: AgentToolDetailObservation?, end: AgentToolDetailObservation?, status: AgentItemStatus, title: String)] = [
+        ("claude, delivered", delivered.start, delivered.end, .completed, "Messaged Scout"),
+        ("claude, running", claudeCall(messageName, messageInput).start, nil, .inProgress, "Messaged an agent"),
+        ("claude, refused", claudeCall(messageName, messageInput,
+                                       result: PiHostToolResponse.error("permission_denied", "No.").encodedValue(requestId: "req")).start,
+         nil, .completed, "Messaged an agent"),
+        ("pi", pi("array_message_agent", messageInput), nil, .inProgress, "Messaged an agent"),
+        ("codex app-server", codexAppServerMessage(), nil, .inProgress, "Messaged an agent"),
+    ]
+    for item in messageCases {
+        guard let start = item.start, let name = start.toolName else {
+            failures.append("message \(item.label): no started tool detail"); continue
+        }
+        counter += 1
+        let key = testToolDetailKey(AgentToolDetailID("workspace-row-\(counter)")!)
+        _ = await store.recordStart(AgentToolDetailStart(
+            identity: key, toolName: name,
+            arguments: start.fields.map { AgentToolDetailField(key: $0.key, value: $0.value) }))
+        if let end = item.end {
+            _ = await store.recordEnd(AgentToolDetailEnd(identity: key, output: end.outputPreview, status: item.status))
+        }
+        guard let record = await store.detail(for: key) else { failures.append("message \(item.label): no record"); continue }
+        let title = AgentToolDetailPresenter.collapsed(record).actionLine
+        if title != item.title { failures.append("message \(item.label): row reads \"\(title)\", want \"\(item.title)\"") }
+        let disclosure = AgentToolDetailPresenter.observableDisclosureText(record)
+        if !disclosure.contains(messageText) {
+            failures.append("message \(item.label): the expanded row must carry the message verbatim, got \"\(disclosure)\"")
+        }
+        if disclosure.contains(childID.rawValue.uuidString) || disclosure.contains("idempotencyKey") || disclosure.contains("m1") {
+            failures.append("message \(item.label): an id or the key leaked into the row: \"\(disclosure)\"")
         }
     }
     expect(failures.isEmpty, "Array workspace tool rows:\n  " + failures.joined(separator: "\n  "))

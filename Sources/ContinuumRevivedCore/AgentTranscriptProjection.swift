@@ -473,6 +473,14 @@ public struct AgentTranscriptProjection: Sendable {
     ) throws -> [AgentDocumentPatch] {
         guard !document.entries.contains(where: { $0.id == id }) else { return [] }
 
+        // Another agent's words, or a host's note about its sessions, arrive by
+        // the same route as a prompt. Recognised here for the same reason as a
+        // board task below: the live send and every provider's rehydration
+        // meet at this seam, so both draw the same card.
+        let inbound = AgentMessageEnvelope.classify(prompt.text)
+        if case let .hostNote(note) = inbound {
+            return try appendNotice(id: id, title: "Side sessions", body: note)
+        }
         var patches = try applyReturningPatches(closeStreamingRun())
         // A consumed steer stays inside its runtime turn. A previous local
         // command with no provider turn must not contribute idle time instead.
@@ -489,7 +497,16 @@ public struct AgentTranscriptProjection: Sendable {
         // here, the one seam the live send and every provider's rehydration
         // share, so a relaunched transcript reads the same as the live one.
         var proseText = prompt.text
-        if let task = BoardTaskPromptEnvelope.parse(prompt.text) {
+        if case let .agentMessage(message) = inbound {
+            // The turn is the sender's, so the card replaces the prose: nothing
+            // of it may draw as something the user typed.
+            mutations.append(.upsertStructured(entryID: id, block: AgentBlock(
+                id: childID(of: id, key: "agent-message"),
+                kind: .agentMessage,
+                payload: .agentMessage(message)
+            )))
+            proseText = ""
+        } else if let task = BoardTaskPromptEnvelope.parse(prompt.text) {
             mutations.append(.upsertStructured(entryID: id, block: AgentBlock(
                 id: childID(of: id, key: "task"),
                 kind: .taskReference,
@@ -582,6 +599,31 @@ public struct AgentTranscriptProjection: Sendable {
         return patches
     }
 
+    /// Adds an idempotent session boundary (`.plans/79`): the turns that follow
+    /// were taken outside this tile — its Terminal face, or the shell the
+    /// session was opened from.
+    @discardableResult
+    public mutating func appendSessionBoundary(
+        id: AgentNodeID,
+        text: String,
+        symbolName: String?
+    ) throws -> [AgentDocumentPatch] {
+        guard !document.entries.contains(where: { $0.id == id }) else { return [] }
+
+        var patches = try applyReturningPatches(closeStreamingRun())
+        compatibilityIDs[id] = id.rawValue
+        patches += try applyReturningPatches([
+            .beginEntry(id: id, role: .system, provenance: .localNotice(reason: id.rawValue)),
+            .upsertStructured(entryID: id, block: AgentBlock(
+                id: childID(of: id, key: "boundary"),
+                kind: .sessionBoundary,
+                payload: .sessionBoundary(.init(text: text, symbolName: symbolName))
+            )),
+            .finishEntry(id: id)
+        ])
+        return patches
+    }
+
     // Compatibility APIs remain until the card projection is removed.
     public mutating func appendUserPrompt(_ text: String) {
         localSequence += 1
@@ -599,6 +641,16 @@ public struct AgentTranscriptProjection: Sendable {
         let entryID = makeID(scope: "notice", providerID: id)
         do {
             _ = try appendNotice(id: entryID, title: title, body: text)
+            compatibilityIDs[entryID] = id
+        } catch {
+            rejectedMutationCount += 1
+        }
+    }
+
+    public mutating func appendSessionBoundary(id: String, text: String, symbolName: String?) {
+        let entryID = makeID(scope: "session-boundary", providerID: id)
+        do {
+            _ = try appendSessionBoundary(id: entryID, text: text, symbolName: symbolName)
             compatibilityIDs[entryID] = id
         } catch {
             rejectedMutationCount += 1

@@ -76,6 +76,12 @@ enum TranscriptTurnCardChecks {
             ]),
         ]
         let expectedStart = Date(timeIntervalSince1970: 1_792_490_400)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("handoff-timing-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("support")),
+            makeRunner: { _ in ScriptedAgentRunner(script: []) },
+            transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts")))
         for (provider, lines) in fixtures {
             let tile = ManagedAgentTileNSView(tile: Tile(
                 id: UUID(), kind: .managedAgent, title: "restore-timing",
@@ -86,6 +92,23 @@ enum TranscriptTurnCardChecks {
             case "pi": PiSessionTranscriptReader.parse(lines: lines, threadId: tile.qaThreadIdForChecks)
             case "codex": CodexSessionTranscriptReader.parse(lines: lines, threadId: tile.qaThreadIdForChecks)
             default: ClaudeSessionTranscriptReader.parse(lines: lines, threadId: tile.qaThreadIdForChecks)
+            }
+            // The supervisor owns the snapshot a reopened tile installs. Its
+            // outside-turn replay must preserve the same clocks as a live tile.
+            for seeded in [false, true] {
+                let id = supervisor.spawn(role: nil, prompt: nil, cwd: root,
+                                          model: "anthropic/claude-haiku-4-5-20251001", thinking: "low")
+                if seeded { supervisor.seedRehydratedTranscript(restored, for: id) }
+                supervisor.appendOutsideTurns(restored, boundaryText: "In Terminal", symbolName: nil, for: id)
+                let snapshot = supervisor.transcriptAttachment(for: id, reboundTo: tile.qaThreadIdForChecks).snapshot
+                guard let prompt = snapshot?.document.entries.first(where: { $0.role == .user }) else {
+                    throw fail("\(provider): outside history must produce a reopenable snapshot")
+                }
+                try expect(prompt.createdAt == expectedStart,
+                           "\(provider): supervisor replay lost the original prompt time (seeded: \(seeded))")
+                let following = snapshot!.document.entries.drop(while: { $0.id != prompt.id }).dropFirst().prefix(while: { $0.role != .user })
+                try expect(following.compactMap(\.finishedAt).max() == expectedStart.addingTimeInterval(600),
+                           "\(provider): supervisor replay lost the ten-minute turn duration (seeded: \(seeded))")
             }
             tile.renderRehydratedPreviousSession(restored)
             let entries = tile.qaDocumentForChecks.entries

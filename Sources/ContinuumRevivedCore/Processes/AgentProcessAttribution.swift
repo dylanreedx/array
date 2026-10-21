@@ -12,11 +12,14 @@ public struct ProcessSample: Equatable, Sendable {
     /// zsh tool shell reads as untagged), which is why ancestry is the second
     /// rung.
     public var ownerTag: String?
+    /// `AgentProcessAttribution.faceEnvironmentKey` from the same environment:
+    /// `terminal` for a claude Array runs in an agent tile's Terminal face.
+    public var ownerFace: String?
     public var listeningPorts: [UInt16]
 
     public init(
         pid: Int32, parentPid: Int32, startedAt: Date, executablePath: String,
-        arguments: [String], ownerTag: String?, listeningPorts: [UInt16] = []
+        arguments: [String], ownerTag: String?, ownerFace: String? = nil, listeningPorts: [UInt16] = []
     ) {
         self.pid = pid
         self.parentPid = parentPid
@@ -24,6 +27,7 @@ public struct ProcessSample: Equatable, Sendable {
         self.executablePath = executablePath
         self.arguments = arguments
         self.ownerTag = ownerTag
+        self.ownerFace = ownerFace
         self.listeningPorts = listeningPorts
     }
 }
@@ -78,6 +82,10 @@ public struct AgentBackgroundJob: Equatable, Sendable, Identifiable {
 /// for a process that does not show it, its nearest tagged ancestor.
 public enum AgentProcessAttribution {
     public static let ownerEnvironmentKey = "ARRAY_AGENT_ID"
+    /// Which face of the agent's tile started the process. Set to `terminal`
+    /// beside the owner tag when the tile runs the real CLI in its Terminal
+    /// face; absent for the headless runners.
+    public static let faceEnvironmentKey = "ARRAY_AGENT_FACE"
 
     public static func ownerTag(for id: AgentID) -> String { id.rawValue.uuidString }
 

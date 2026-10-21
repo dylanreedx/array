@@ -114,8 +114,26 @@ if CommandLine.arguments.contains("--agent-process-tracking-check") {
     Foundation.exit(0)
 }
 
+// .plans/79: which Claude and Codex sessions run on this Mac, where, and who
+// owns each — synthetic session files, rollouts and process table only.
+if CommandLine.arguments.contains("--external-session-discovery-check") {
+    runExternalSessionDiscoveryChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-compaction-check") {
     runAgentCompactionChecks()
+    Foundation.exit(0)
+}
+
+// `.plans/79`: agents messaging each other — the envelope parser, every
+// provider's restore of an agent's message, and the sender's "Messaged …" row.
+// An arm of its own so the matrix reports it; neither section it draws from is
+// a leg. No tmux, no crash witnesses.
+if CommandLine.arguments.contains("--agent-message-transcript-check") {
+    runAgentMessageTranscriptChecks()
+    try runAsyncCheck { await runArrayWorkspaceToolRowChecks() }
+    print("AgentMessageTranscriptChecks passed")
     Foundation.exit(0)
 }
 

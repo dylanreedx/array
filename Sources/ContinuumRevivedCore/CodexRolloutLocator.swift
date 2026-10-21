@@ -8,6 +8,10 @@ struct CodexRolloutLocator {
         var id: String?
         var cwd: String
         var timestamp: Date
+        /// Who wrote the rollout: `Codex Desktop`, `codex_exec`, `array`, the CLI.
+        var originator: String? = nil
+        /// Set on a sub-agent's thread; nil on a thread a person started.
+        var parentThreadId: String? = nil
     }
 
     var sessionsRoot: URL
@@ -76,7 +80,10 @@ struct CodexRolloutLocator {
               let cwd = payload["cwd"] as? String,
               let timestampRaw = payload["timestamp"] as? String ?? object["timestamp"] as? String,
               let timestamp = Self.parseISO8601(timestampRaw) else { return nil }
-        return SessionMeta(id: payload["id"] as? String, cwd: cwd, timestamp: timestamp)
+        return SessionMeta(
+            id: payload["id"] as? String, cwd: cwd, timestamp: timestamp,
+            originator: payload["originator"] as? String,
+            parentThreadId: payload["parent_thread_id"] as? String)
     }
 
     /// The first newline-terminated line, read in ONE bounded chunk. A rollout's

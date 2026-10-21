@@ -204,6 +204,11 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         sendInput(Data("\n".utf8))
     }
 
+    /// The launch's argv: a shell tile's tmux view names the pane it shows.
+    var launchArguments: [String] { launchProfile.arguments }
+    /// The executable the tile runs: tmux, for a shell tile tmux keeps.
+    var launchCommand: String { launchProfile.command }
+
     func sendInsertedText(_ text: String) -> Bool {
         dispatchInsertedText(text)
     }

@@ -131,7 +131,8 @@ public enum PiSessionTranscriptReader {
                         fileChanges: PiEventTranslator.fileDetails(toolName: name, args: args),
                         absolutePath: (args["path"] as? String)
                             ?? (args["file"] as? String)
-                            ?? (args["file_path"] as? String)))
+                            ?? (args["file_path"] as? String),
+                        messageText: AgentToolDetailObservation.messageTextField(toolName: name, arguments: args)?.value))
                 }
             default:
                 // image and any other part type carry no replayable text.
