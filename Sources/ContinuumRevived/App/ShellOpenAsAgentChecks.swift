@@ -449,6 +449,37 @@ enum ShellOpenAsAgentChecks {
                    "one row, the live agent's")
         log.append("idle: Array typed /exit between turns, the shell's prompt came back, the agent went live")
 
+        // 4. Review finding 4: `claude --resume` of a session an Array agent
+        //    already owns — here the id it derives, which no record names as a
+        //    providerSessionId. The sidebar and the band ask one question, so
+        //    the band offers that agent, never a second agent on its session.
+        let owner = supervisor.spawn(
+            role: nil, prompt: nil, cwd: fixture.paRoot, harness: .claudeCode, model: claudeModel, thinking: "",
+            projectId: fixture.projectPa, projectRoot: fixture.paRoot, displayName: "Owns its session")
+        let ownedSid = AgentSupervisor.claudeSessionId(for: owner)
+        try expect(supervisor.records[owner]?.providerSessionId == nil, "precondition: the owner's session is its derived id")
+        try writeHistory(ownedSid, "PRIOR owned question", "PRIOR owned answer")
+        startClaude(ownedSid)
+        try expect(pump(until: { liveStatus(ownedSid) == "idle" }, timeout: 15), "the third claude never started")
+        try expect(pump(until: { shell.claudeSessionId == ownedSid && button() != nil }, timeout: 10),
+                   "the band must name the session running in the shell")
+        try expect(shell.qaSessionActionTitle == TerminalTileNSView.showAgentTitle,
+                   "a session an Array agent owns is that agent's: the band offers Show agent; it offers \(String(describing: shell.qaSessionActionTitle))")
+        try expect(shell.makeAdditionalTitleBarMenuItems().contains { $0.identifier?.rawValue == "terminalTile.showAgent" },
+                   "the tile menu offers Show Agent too")
+        let beforeOwned = Set(supervisor.records.keys)
+        guard let ownedPoint = button() else { throw Failure(description: "no button for the owned session") }
+        try AgentFaceChecks.click(ownedPoint, in: window)
+        try expect(Set(supervisor.records.keys) == beforeOwned,
+                   "Show agent must never make a second agent on a session an agent owns; made \(Set(supervisor.records.keys).subtracting(beforeOwned).count)")
+        try expect(supervisor.records[owner]?.tileId.flatMap { fixture.canvas.tileView(for: $0) } is ManagedAgentTileNSView,
+                   "Show agent brings up the owning agent's tile")
+        pump(0.6)
+        try expect(!typed(ownedSid).contains { $0.text == "/exit" }, "Show agent types nothing into the shell")
+        enter("/exit")
+        try expect(pump(until: { liveStatus(ownedSid) == nil }, timeout: 8), "the third claude must exit")
+        log.append("owned: the band offered Show agent for an agent's own session and made no second agent")
+
         let manifest: [String: Any] = ["log": log, "typedBusy": typed(busySid).map(\.text), "typedIdle": typed(idleSid).map(\.text)]
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
             .write(to: directory.appendingPathComponent("manifest.json"))

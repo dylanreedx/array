@@ -198,6 +198,8 @@ class TileNSView: NSView, TokenThemed {
     /// QA: how the band's budget placed the session action: labelled, button,
     /// icon, hidden.
     var qaSessionActionMode: String { titleBar?.sessionActionMode.rawValue ?? "hidden" }
+    /// QA: the session action's button text, nil when the band offers none.
+    var qaSessionActionTitle: String? { titleBar?.qaSessionActionTitle }
 
     /// Actions VoiceOver offers on the band's always-present controls (× and
     /// ⋯), so they stay reachable when the band has no room for a control of
@@ -1885,6 +1887,7 @@ private final class TitleBarView: NSView, TokenThemed {
     private var sessionActionControl: BandActionControl?
     private var sessionActionState: TileNSView.SessionActionState?
     private(set) var sessionActionMode: SessionActionMode = .hidden
+    var qaSessionActionTitle: String? { sessionActionState?.action }
     /// Where the quiet "✦ Claude Code" draws, when the budget left room for it.
     private var sessionLabelRect: NSRect?
     var onSessionActionPressed: (() -> Void)?

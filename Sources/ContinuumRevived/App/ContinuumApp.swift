@@ -11980,7 +11980,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         .filter { agentActivity.managedAgentIdentities.contains($0.id) }
         return withExternalSessions(
             unconfirmedFreeze.apply(rows: builtRows, unobserved: unobserved),
-            registry: registry, records: records, now: now)
+            registry: registry, now: now)
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
@@ -12909,7 +12909,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `Terminal` marker on agents whose tile shows the real CLI. A session an
     /// agent's record names is that agent's row, never a second one.
     private func withExternalSessions(
-        _ rows: [AgentInboxRow], registry: Registry, records: [AgentRecord], now: Date
+        _ rows: [AgentInboxRow], registry: Registry, now: Date
     ) -> [AgentInboxRow] {
         let snapshot = externalSessionMonitor.snapshot
         let faceTiles = terminalFaceTiles()
@@ -12931,12 +12931,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return row
         }
         guard !snapshot.sessions.isEmpty else { return marked }
-        var owned: Set<String> = []
-        for record in records {
-            owned.insert(AgentSupervisor.claudeSessionId(for: record.id))
-            if let id = record.providerSessionId { owned.insert(id) }
-            if let id = record.codexThreadId { owned.insert(id) }
-        }
+        let owned = Set(sessionOwners().keys)
         var shellTitles: [UUID: String] = [:]
         if snapshot.sessions.contains(where: { if case .arrayShellTile(.some) = $0.host { return true }; return false }) {
             for tile in canvasView?.allWorkspaceTiles() ?? [] where tile.kind == .terminal {
@@ -12953,6 +12948,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             currentWorkspaceProjectIds: Set(workspace?.projectIds ?? []),
             ownedSessionIds: owned, shellTileTitles: shellTitles)
         return marked + ExternalSessionRows.rows(from: snapshot, context: context, now: now)
+    }
+
+    /// Every session id an Array agent owns, and the agent: the id it derives,
+    /// the one claude reported since, its Codex thread. The ONE ownership
+    /// question — the sidebar never lists these as another app's, and a shell
+    /// tile running one offers its agent rather than a second agent on it.
+    func sessionOwners() -> [String: AgentID] {
+        var owners: [String: AgentID] = [:]
+        for record in agentSupervisor.records.values {
+            owners[AgentSupervisor.claudeSessionId(for: record.id)] = record.id
+            if let id = record.providerSessionId { owners[id] = record.id }
+            if let id = record.codexThreadId { owners[id] = record.id }
+        }
+        return owners
     }
 
     /// The monitor's push: the inbox rows alone, not the sidebar tree.
@@ -13093,18 +13102,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     /// Each shell tile's band offers the Claude session running in it, unless
-    /// an agent stands in for it or owns it already.
+    /// an agent stands in for it already; a session an agent owns offers that
+    /// agent instead (`sessionOwners`, the sidebar's own question).
     func refreshShellTileSessions() {
-        let owned = Set(agentSupervisor.records.values.compactMap(\.providerSessionId))
-        var running: [UUID: String] = [:]
+        let owners = sessionOwners()
+        var running: [UUID: (sessionId: String, owned: Bool)] = [:]
         for session in externalSessionMonitor.snapshot.sessions where session.provider == .claude {
-            guard case let .arrayShellTile(tileId?) = session.host, !owned.contains(session.sessionId),
+            guard case let .arrayShellTile(tileId?) = session.host,
                   agentLinked(toSessionKey: session.id) == nil else { continue }
-            running[tileId] = session.sessionId
+            running[tileId] = (session.sessionId, owners[session.sessionId] != nil)
         }
         for tile in canvasView?.allWorkspaceTiles() ?? [] where tile.kind == .terminal {
             guard let view = canvasView?.tileView(for: tile.id) as? TerminalTileNSView else { continue }
-            view.claudeSessionId = running[tile.id]
+            view.claudeSessionOwnedByAgent = running[tile.id]?.owned ?? false
+            view.claudeSessionId = running[tile.id]?.sessionId
             view.onOpenAsAgentTile = { [weak self] sessionId in
                 self?.openShellSessionAsAgentTile(sessionId: sessionId, shellTileId: tile.id)
             }
@@ -13118,6 +13129,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               }),
               let pid = session.pid,
               let shell = canvasView?.tileView(for: shellTileId) as? TerminalTileNSView else { return nil }
+        // An agent's own session: show that agent, never a second one on it.
+        if let owner = sessionOwners()[sessionId] {
+            _ = revealAgentFromInbox(owner.rawValue)
+            return owner
+        }
         if let existing = agentLinked(toSessionKey: session.id) {
             _ = revealAgentFromInbox(existing.rawValue)
             return existing
