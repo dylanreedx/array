@@ -23,6 +23,8 @@ enum AgentRenderAction {
     case saveImageAs(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID)
     case revealImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID)
     case revealAgent(blockID: AgentNodeID, agentID: UUID, parentAgentID: UUID)
+    /// An agent-message card's sender, an Array agent with a tile.
+    case revealMessageSender(blockID: AgentNodeID, agentID: UUID)
 }
 
 enum AgentLinkOpenTarget: Equatable, Sendable {
@@ -346,6 +348,9 @@ struct AgentRenderContext {
     /// C10: `AgentReferenceRenderer`'s seam for a live status, deliberately
     /// outside the semantic document (see `AgentReferenceStatusSource`).
     var agentStatus: AgentReferenceStatusSource = .unavailable
+    /// An agent-message card's sender as it is now: its identity colour and
+    /// whether its tile can be opened. Outside the document for the same reason.
+    var agentMessageSenders: AgentMessageSenderSource = .unavailable
     /// TR-06: whether the BOUND RUNNER can carry a response back to a provider
     /// request. Live capability, deliberately outside the semantic document for
     /// the same reason `agentStatus` is — the document records what the provider

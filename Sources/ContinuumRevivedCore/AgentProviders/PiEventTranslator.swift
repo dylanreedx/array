@@ -713,6 +713,10 @@ public struct PiEventTranslator {
             if let op = string("op"), BoardApplyRequest.Op(rawValue: op) != nil { fields.append((key: "op", value: op)) }
             if let title = string("title") { fields.append((key: "title", value: title)) }
         }
+        // Array's own agent message: its text is what the row is about.
+        if let message = AgentToolDetailObservation.messageTextField(toolName: toolName, arguments: args) {
+            fields.append(message)
+        }
         if let url = string("url") {
             fields.append((key: "url", value: url))
         }

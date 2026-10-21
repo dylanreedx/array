@@ -3453,12 +3453,32 @@ final class AgentSupervisor {
         send(AgentPrompt(prompt), to: id)
     }
 
+    /// Another agent's words for `id` (`agent.message`). Delivered through the
+    /// composer's own path, wrapped so the receiving model, its session file
+    /// and its transcript all know who wrote them, and shown at once in a tile
+    /// attached to `id`: no composer painted this prompt.
+    @discardableResult
+    func sendAgentMessage(_ text: String, from senderID: AgentID, to id: AgentID) -> Bool {
+        let prompt = AgentPrompt(agentMessageText(text, from: senderID))
+        guard send(prompt, to: id) else { return false }
+        echoPrompt(prompt, for: id)
+        return true
+    }
+
+    /// `text` as `senderID` hands it to another agent: `AgentMessageEnvelope`,
+    /// naming the sender as it is called now.
+    func agentMessageText(_ text: String, from senderID: AgentID) -> String {
+        AgentMessageEnvelope.wrap(
+            text, senderID: senderID.rawValue, senderName: records[senderID]?.humanDisplayName ?? "Agent")
+    }
+
     /// The first prompt as the titler reads it: bounded to the one-shot's
     /// limit, local paths removed, controls dropped and whitespace collapsed —
     /// and, unlike a stored label, not cut to the storage length. Only called
     /// once `visibleNamingText` has accepted the prompt as nameable.
     private nonisolated static func titlerMaterial(from prompt: AgentPrompt) -> String? {
-        let bounded = String(prompt.text.prefix(AgentNameOneShot.maximumPromptLength))
+        // An agent's message names the tile by what it says, not by its envelope.
+        let bounded = String(AgentMessageEnvelope.unwrappedText(prompt.text).prefix(AgentNameOneShot.maximumPromptLength))
         let visible = SecretRedactor.removeLocalPathReferences(bounded)
         let printable = String(String.UnicodeScalarView(visible.unicodeScalars.filter {
             !CharacterSet.controlCharacters.contains($0) || CharacterSet.whitespacesAndNewlines.contains($0)
@@ -3473,7 +3493,7 @@ final class AgentSupervisor {
         role: String?,
         id: UUID?
     ) -> String? {
-        let bounded = String(prompt.text.prefix(AgentNameOneShot.maximumPromptLength))
+        let bounded = String(AgentMessageEnvelope.unwrappedText(prompt.text).prefix(AgentNameOneShot.maximumPromptLength))
         // B7.0: a COMMAND INVOCATION IS NOT A NAME, and this is the only place
         // that can tell — the redaction below strips the leading `/compact` as
         // path-shaped text, so by the time the shared resolver sees the prompt
@@ -4314,7 +4334,10 @@ final class AgentSupervisor {
         do {
             let childID = try spawn(
                 role: request.role,
-                prompt: request.prompt,
+                // The child's task is the parent's words, so it reaches the
+                // child as a message from the parent, never as the user's prompt.
+                prompt: request.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? request.prompt : agentMessageText(request.prompt, from: parentId),
                 cwd: projectRoot,
                 harness: parentHarness,
                 model: resolvedRole.model,
@@ -13981,8 +14004,9 @@ private func checkAgentBlockRendererRegistry<Failure: Error>(
     // exact roster size, and that no kind is listed twice, which a bare count
     // cannot tell apart from a missing one.
     // 22: `.compaction` joined the roster — its renderer had been written and
-    // never registered. 23: board-task sends added `.taskReference`.
-    guard AgentBlockRendererRegistry.builtInKinds.count == 23,
+    // never registered. 23: board-task sends added `.taskReference`. 24: agent
+    // messages added `.agentMessage`.
+    guard AgentBlockRendererRegistry.builtInKinds.count == 24,
           Set(AgentBlockRendererRegistry.builtInKinds).count
             == AgentBlockRendererRegistry.builtInKinds.count else {
         throw fail("block renderer built-in fixture is incomplete or duplicated: \(AgentBlockRendererRegistry.builtInKinds.map(\.rawValue))")
@@ -17285,7 +17309,12 @@ private func checkSpawnFromToolCall(
     guard let childRunner = factory.runners[childId] else {
         throw fail("no runner was ever constructed for the child — it was recorded but never started")
     }
-    guard await waitUntil(timeout: 10, pollInterval: 0.02, { childRunner.prompts == [capturedPrompt] }) else {
+    // `.plans/79`: the task is the PARENT's words, so the child's model receives
+    // them as a message from the parent, never as its user's prompt.
+    let expectedChildPrompt = AgentMessageEnvelope.wrap(
+        capturedPrompt, senderID: parentId.rawValue,
+        senderName: supervisor.records[parentId]?.humanDisplayName ?? "Agent")
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { childRunner.prompts == [expectedChildPrompt] }) else {
         throw fail("the child never ran the requested task; prompts \(childRunner.prompts)")
     }
 

@@ -21,6 +21,7 @@ func runTranscriptRehydrationChecks() {
     runPiSessionTranscriptParseChecks()
     runCodexSessionTranscriptParseChecks()
     runCodexItemCompletedMessageChecks()
+    runAgentMessageTranscriptChecks()
     runTranscriptRehydrationBoundChecks()
     #if os(macOS)
     runTranscriptRehydrationDispatchChecks()

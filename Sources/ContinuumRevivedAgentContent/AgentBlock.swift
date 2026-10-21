@@ -65,6 +65,7 @@ public struct AgentBlockKind: RawRepresentable, Codable, Equatable, Hashable, Se
     public static let fileReferences = Self(rawValue: "file-references")!
     public static let agentReference = Self(rawValue: "agent-reference")!
     public static let taskReference = Self(rawValue: "task-reference")!
+    public static let agentMessage = Self(rawValue: "agent-message")!
     public static let error = Self(rawValue: "error")!
     public static let notice = Self(rawValue: "notice")!
     public static let unknown = Self(rawValue: "unknown")!
@@ -587,6 +588,43 @@ public struct AgentTaskReferencePayload: Codable, Equatable, Sendable {
     }
 }
 
+/// A turn another agent wrote: Array's `agent.message`, a delegated child's
+/// first task, or a message between Claude sessions. It started this agent's
+/// turn exactly as a user's prompt does, so it lives in a user entry, but it is
+/// drawn as FROM its sender and never as something the user typed.
+///
+/// The sender is identity only. Its colour and whether its tile can be opened
+/// are resolved by the host when the card is drawn, so a later rename or colour
+/// change never rewrites transcript history.
+public struct AgentMessagePayload: Codable, Equatable, Sendable {
+    public enum Origin: String, Codable, Equatable, Sendable {
+        /// Array's own envelope, `<array-agent-message>`: an Array agent.
+        case array
+        /// The Claude app's `<cross-session-message>` between its sessions.
+        case crossSession
+        /// Claude Code's peer message (`origin.kind: "peer"`).
+        case peer
+        /// The Claude app's "Background (from the session that started this
+        /// one)" note, which seeds a session it starts.
+        case background
+    }
+
+    public var origin: Origin
+    /// The sending Array agent, when `origin` is `.array`.
+    public var senderAgentID: UUID?
+    /// The sender's name as the message carried it.
+    public var senderName: String
+    /// What the sender wrote, verbatim.
+    public var text: String
+
+    public init(origin: Origin, senderAgentID: UUID? = nil, senderName: String, text: String) {
+        self.origin = origin
+        self.senderAgentID = senderAgentID
+        self.senderName = senderName
+        self.text = text
+    }
+}
+
 /// A durable, portable reference to an agent that participated in this
 /// conversation. Runtime status and controls are deliberately resolved by the
 /// host from `agentID`; keeping them out of the document prevents every status
@@ -719,6 +757,7 @@ public enum AgentBlockPayload: Codable, Equatable, Sendable {
     case fileReferences(AgentFileReferencePayload)
     case agentReference(AgentReferencePayload)
     case taskReference(AgentTaskReferencePayload)
+    case agentMessage(AgentMessagePayload)
     case error(AgentErrorPayload)
     case notice(AgentNoticePayload)
     case compaction(AgentCompactionPayload)

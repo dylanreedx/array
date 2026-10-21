@@ -113,6 +113,14 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         }
     }
 
+    /// `array_message_agent`'s row, naming who it messaged: `Messaged Scout`.
+    /// The request carries an id, so the name comes from the host's reply, and
+    /// a call still running (or refused) keeps the fixed sentence.
+    public static func messageLine(targetName: String?) -> String {
+        guard let targetName, !targetName.isEmpty else { return messageAgent.actionLine(fileBasename: nil) }
+        return "Messaged \(clipped(targetName))"
+    }
+
     /// A card title is free text; the row is one line with a status column.
     private static func clipped(_ name: String, limit: Int = 60) -> String {
         let single = name.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")

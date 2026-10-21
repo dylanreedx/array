@@ -350,6 +350,18 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
     public static let maxCommandCharacters = 4000
     public static let shellCommandKey = "command"
     public static let shellCwdKey = "cwd"
+    /// `array_message_agent`'s text, verbatim. Like a shell's command, the one
+    /// body that crosses, because the row is about it — and the receiving
+    /// agent's transcript already shows the same words as the message card.
+    public static let messageTextKey = "message"
+
+    /// The message an `array_message_agent` call sends, from its arguments.
+    public static func messageTextField(toolName: String, arguments: [String: Any]) -> (key: String, value: String)? {
+        guard ArrayWorkspaceTool(toolName: toolName) == .messageAgent,
+              let text = (arguments["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else { return nil }
+        return (key: messageTextKey, value: text)
+    }
     public static let maxOutputCharacters = 2000
     public static let maxFields = 6
 

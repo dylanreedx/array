@@ -326,6 +326,9 @@ public struct AgentMessageResult: Codable, Equatable, Sendable {
     public var delivery: AgentMessageDelivery
     public var childAgentId: AgentID
     public var parentAgentId: AgentID
+    /// What the target is called, so the caller's transcript row can say who
+    /// it messaged ("Messaged Scout") from the reply alone.
+    public var childName: String?
     /// nil = unknown (the host cannot tell).
     public var childRunning: Bool?
     /// Present only when the send path exposes a queue position for the child.
@@ -340,6 +343,7 @@ public struct AgentMessageResult: Codable, Equatable, Sendable {
         delivery: AgentMessageDelivery,
         childAgentId: AgentID,
         parentAgentId: AgentID,
+        childName: String? = nil,
         childRunning: Bool?,
         queuePosition: Int? = nil,
         refusalReason: String? = nil,
@@ -350,6 +354,7 @@ public struct AgentMessageResult: Codable, Equatable, Sendable {
         self.delivery = delivery
         self.childAgentId = childAgentId
         self.parentAgentId = parentAgentId
+        self.childName = childName
         self.childRunning = childRunning
         self.queuePosition = queuePosition
         self.refusalReason = refusalReason

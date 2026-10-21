@@ -363,6 +363,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// path. A tile never creates another agent; it asks the app to reveal or
     /// attach the existing identity.
     var onRevealAgent: ((_ agentID: AgentID, _ parentAgentID: AgentID) -> Void)?
+    /// An agent-message card's sender, revealed through the same app-owned path.
+    var onRevealMessageSender: ((AgentID) -> Void)?
     /// Fired after this tile ingests an event, so the app can mirror the stream
     /// onto the syncable activity timeline (88.4c) without owning the subscription.
     var onIngestedEvent: ((AgentRuntimeEvent) -> Void)?
@@ -785,6 +787,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             if case .providerRetry = observation { self?.refreshCompactStatus() }
         }
         hydrateManagedImagesFromDocument()
+        // The render context reads `agentSource` (a chip's live status, an agent
+        // message's sender), and the app binds the composer — the context's
+        // other refresh — BEFORE it attaches. Refreshed here, before the
+        // snapshot draws, so a freshly wired tile does not draw every row
+        // against a context that knows no supervisor.
+        try? transcriptCollectionFixture?.updateRenderContext(v2RenderContext)
         let attachment = supervisor.transcriptAttachment(for: agentID, reboundTo: threadId)
         if let snapshot = attachment.snapshot {
             installTranscriptSnapshot(snapshot)
@@ -3063,6 +3071,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             pageZoom: pageZoom,
             imageResources: managedImageResourceProvider,
             agentStatus: agentReferenceStatusSource,
+            agentMessageSenders: agentMessageSenderSource,
             // TR-06 — read LIVE from the supervisor, exactly like
             // `updateV2ComposerPresentation` does, and never from the cached
             // `v2TurnSnapshot` alone: the cache is what latched a stale
@@ -3110,6 +3119,16 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 supervisor?.removeTurnCapabilitiesObserver(token)
             }
         )
+    }
+
+    /// Read from the supervisor's records when a card is drawn, so a sender's
+    /// colour is the one it has now and a deleted sender has no button.
+    private var agentMessageSenderSource: AgentMessageSenderSource {
+        guard let supervisor = agentSource else { return .unavailable }
+        return AgentMessageSenderSource(current: { [weak supervisor] rawAgentID in
+            guard let record = supervisor?.records[AgentID(rawValue: rawAgentID)] else { return nil }
+            return .init(identityColorName: record.identityColor, hasTile: record.tileId != nil)
+        })
     }
 
     private func cancelStreamingMarkupParseTimer() {
@@ -3264,6 +3283,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             return
         case let .revealAgent(_, agentID, parentAgentID):
             onRevealAgent?(AgentID(rawValue: agentID), AgentID(rawValue: parentAgentID))
+            return
+        case let .revealMessageSender(_, agentID):
+            onRevealMessageSender?(AgentID(rawValue: agentID))
             return
         case let .contextFullRecovery(blockID, recoveryAction):
             guard isContextFullErrorBlock(blockID) else { return }
