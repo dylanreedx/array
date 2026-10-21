@@ -649,6 +649,7 @@ class TileNSView: NSView, TokenThemed {
     /// can assert the pill clears the dots. `nil` if the bar is gone.
     func qaStatusPillRect(for status: AgentStatus) -> NSRect? { titleBar?.qaStatusPillRect(for: status) }
     var qaDragHandleLeadingX: CGFloat? { titleBar?.qaDragHandleLeadingX }
+    var qaTitleBarLayoutPasses: Int { titleBar?.qaLayoutPasses ?? 0 }
     /// The rect the tile title is really drawn into. `agentStatus` has to be set on
     /// the bar first — the title's available width depends on the pill.
     var qaTitleRect: NSRect? { titleBar?.qaTitleRect() }
@@ -1421,6 +1422,30 @@ private final class TileCloseControl: NSControl {
     override func drawFocusRingMask() { NSBezierPath(ovalIn: bounds).fill() }
 }
 
+/// Widths of the band's few fixed labels — the switch's words, the status
+/// pill, a shell tile's session action — measured once per string and font and
+/// scaled, so `TitleBarView.layout()` measures nothing (performance.md: no
+/// measurement inside `layout()`; the band lays out on every zoom frame).
+/// Text advances scale linearly with point size, so a width measured at the
+/// unscaled size serves every chrome scale.
+@MainActor
+enum BandTextWidth {
+    private static var widths: [String: CGFloat] = [:]
+    /// QA: how many times a band label was actually measured.
+    private(set) static var qaMeasurements = 0
+
+    static func width(_ text: String, font: NSFont, scale: CGFloat = 1) -> CGFloat {
+        let key = "\(font.fontName)|\(font.pointSize)|\(text)"
+        if let width = widths[key] { return width * scale }
+        qaMeasurements += 1
+        // A handful of labels in practice; bounded in case one is not.
+        if widths.count > 256 { widths.removeAll() }
+        let width = (text as NSString).size(withAttributes: [.font: font]).width
+        widths[key] = width
+        return width * scale
+    }
+}
+
 /// One segment of an agent tile's `Array | Terminal` switch (`.plans/79`).
 ///
 /// Drawn rather than built from an `NSSegmentedControl`: the band is framed in
@@ -1482,7 +1507,7 @@ private final class FaceSegmentControl: NSControl {
         let glyph = Self.glyphSize(scale: scale) + 2
         guard labelled else { return max(minimum, ceil(glyph + 2 * pad)) }
         let widest = face == .array ? "Array" : "Terminal…"
-        let text = (widest as NSString).size(withAttributes: [.font: Self.font(scale: scale)]).width
+        let text = BandTextWidth.width(widest, font: Self.font(scale: 1), scale: scale)
         return max(minimum, ceil(glyph + CGFloat(Space.s) * scale + text + 2 * pad))
     }
 
@@ -1607,7 +1632,7 @@ private final class BandActionControl: NSControl {
         let pad = CGFloat(Space.m) * scale
         let glyph = Self.glyphSize(scale: scale) + 2
         guard labelled else { return max(minimum, ceil(glyph + 2 * pad)) }
-        let text = (title as NSString).size(withAttributes: [.font: Self.font(scale: scale)]).width
+        let text = BandTextWidth.width(title, font: Self.font(scale: 1), scale: scale)
         return max(minimum, ceil(glyph + CGFloat(Space.s) * scale + text + 2 * pad))
     }
 
@@ -1922,6 +1947,12 @@ private final class TitleBarView: NSView, TokenThemed {
     }
 
     private var sessionLabelGlyphSide: CGFloat { 10 * chromeScale }
+    /// The quiet label's line height, from its font's own metrics: no
+    /// measurement in `layout()`.
+    private var sessionLabelLineHeight: CGFloat {
+        let font = NSFont.systemFont(ofSize: 11 * chromeScale, weight: .medium)
+        return font.ascender - font.descender + font.leading
+    }
 
     private func layoutSessionAction(trailingEdge: CGFloat) {
         sessionLabelRect = nil
@@ -1933,7 +1964,9 @@ private final class TitleBarView: NSView, TokenThemed {
         let gap = CGFloat(Space.s) * scale
         let height = closeButtonWorldSize
         let titleFloor = titleLeadingX + Self.titleMinimumWidth * scale
-        let labelText = (state.label as NSString).size(withAttributes: sessionLabelAttributes(theme: effectiveTokenTheme))
+        let labelText = NSSize(
+            width: BandTextWidth.width(state.label, font: .systemFont(ofSize: 11, weight: .medium), scale: scale),
+            height: sessionLabelLineHeight)
         let labelWidth = ceil(sessionLabelGlyphSide + CGFloat(Space.xs) * scale + labelText.width)
         let full = control.preferredWidth(labelled: true, scale: scale, minimum: height)
         let icon = control.preferredWidth(labelled: false, scale: scale, minimum: height)
@@ -2087,8 +2120,12 @@ private final class TitleBarView: NSView, TokenThemed {
         }
     }
 
+    /// QA: how many times the band has laid out.
+    private(set) var qaLayoutPasses = 0
+
     override func layout() {
         super.layout()
+        qaLayoutPasses += 1
         // Right-align + vertically center the close button at its (zoom-floored)
         // world size. Manual framing so the size is exactly what we set.
         let size = closeButtonWorldSize
@@ -2485,9 +2522,8 @@ private final class TitleBarView: NSView, TokenThemed {
     }
 
     private func statusPillWidth(for status: AgentStatus) -> CGFloat {
-        let label = StatusChipPresenter.display(for: status).label as NSString
-        let textSize = label.size(withAttributes: statusPillTextAttributes(theme: effectiveTokenTheme))
-        return textSize.width + Self.statusPillDotDiameter + 3 * Self.statusPillPad
+        let width = BandTextWidth.width(StatusChipPresenter.display(for: status).label, font: .token(.caption))
+        return width + Self.statusPillDotDiameter + 3 * Self.statusPillPad
     }
 
     /// The switch's quiet track, under its two segments. The selected

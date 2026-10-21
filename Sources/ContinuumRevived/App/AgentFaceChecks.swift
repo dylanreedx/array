@@ -319,6 +319,29 @@ enum AgentFaceChecks {
                 }
             }
         }
+        // performance.md: no measurement inside `layout()`. The band lays out
+        // on every zoom frame; its labels' widths are measured once, ever.
+        do {
+            let view = fixture.makeTile(width: 900, environment: environment)
+            liveViews.append(view)
+            view.agentStatus = .working
+            fixture.canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+            fixture.window.contentView?.layoutSubtreeIfNeeded()
+            view.layoutSubtreeIfNeeded()
+            let measured = BandTextWidth.qaMeasurements
+            let passes = view.qaTitleBarLayoutPasses
+            for zoom in stride(from: 0.4, through: 1.9, by: 0.05) {
+                fixture.canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
+                fixture.window.contentView?.layoutSubtreeIfNeeded()
+                view.layoutSubtreeIfNeeded()
+            }
+            let laidOut = view.qaTitleBarLayoutPasses - passes
+            let remeasured = BandTextWidth.qaMeasurements - measured
+            try expect(view.qaFaceSwitchMode == "labels" && laidOut >= 5 && remeasured == 0,
+                       "a pinch must lay the band out without measuring its labels: \(laidOut) layouts measured \(remeasured) times (mode \(view.qaFaceSwitchMode))")
+            lines.append("band layout: \(laidOut) zoom-frame layouts, \(remeasured) label measurements")
+            fixture.canvas.removeTile(id: view.tile.id)
+        }
         // Codex and Pi have no Terminal face: no switch, no menu item.
         for (harness, model) in [(AgentHarness.codex, "openai-codex/gpt-5.6-sol"), (.pi, "openai-codex/gpt-5.6-sol")] {
             let other = fixture.supervisor.spawn(role: nil, prompt: nil, cwd: fixture.work, harness: harness, model: model, thinking: "low")
