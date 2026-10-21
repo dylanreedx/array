@@ -41,6 +41,9 @@ public final class PiAgentRunner: @unchecked Sendable {
         /// checks the real file's presence and resolves to `[]` if it isn't
         /// there (a `-e` pointed at a missing file is worse than no `-e`).
         public var extensionPaths: [String]
+        /// The agent id written into the child environment, so its background
+        /// jobs can be traced back to it. nil for runs that belong to no agent.
+        public var processOwner: String?
 
         /// `model`/`thinking` default from `AgentModelConfig` (Settings ▸ Agents),
         /// so changing the picker changes what the next prompt spawns.
@@ -50,7 +53,8 @@ public final class PiAgentRunner: @unchecked Sendable {
             cwd: URL,
             sessionId: String? = nil,
             extraArgs: [String] = [],
-            extensionPaths: [String] = PiAgentRunner.installedExtensionPaths()
+            extensionPaths: [String] = PiAgentRunner.installedExtensionPaths(),
+            processOwner: String? = nil
         ) {
             self.model = model
             self.thinking = thinking
@@ -58,6 +62,7 @@ public final class PiAgentRunner: @unchecked Sendable {
             self.sessionId = sessionId
             self.extraArgs = extraArgs
             self.extensionPaths = extensionPaths
+            self.processOwner = processOwner
         }
     }
 
@@ -235,15 +240,21 @@ public final class PiAgentRunner: @unchecked Sendable {
     /// carry this marker and retain the full crash-witness coverage.
     public static let arrayHostedEnvironmentKey = "CONTINUUM_ARRAY_MANAGED_AGENT"
 
+    /// `processOwner` names the agent every descendant belongs to
+    /// (`AgentProcessAttribution.ownerEnvironmentKey`). It survives what a
+    /// process group does not: a tool shell in its own group, `setsid`, and
+    /// adoption by launchd. It is an agent id, not a credential.
     public static func childEnvironment(
         base: [String: String] = ProcessInfo.processInfo.environment,
-        extraDirs: [String]? = nil
+        extraDirs: [String]? = nil,
+        processOwner: String? = nil
     ) -> [String: String] {
         var environment = base
         environment["PATH"] = augmentedPath(
             basePath: environment["PATH"] ?? "",
             extraDirs: extraDirs ?? liveExtraDirs())
         environment[arrayHostedEnvironmentKey] = "1"
+        environment[AgentProcessAttribution.ownerEnvironmentKey] = processOwner
         return environment
     }
 
@@ -292,7 +303,7 @@ public final class PiAgentRunner: @unchecked Sendable {
                 arguments: arguments,
                 // Augment PATH so the child finds both `pi` and the `node` its shebang
                 // re-invokes — a GUI launch inherits a thin PATH missing the nvm bin.
-                environment: Self.childEnvironment(),
+                environment: Self.childEnvironment(processOwner: config.processOwner),
                 currentDirectory: config.cwd,
                 // pi inherits the app's stdin, exactly as it did under `Process`.
                 standardInput: .inherit

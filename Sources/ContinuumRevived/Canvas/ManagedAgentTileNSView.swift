@@ -215,6 +215,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private var localNoticeObserverToken: UUID?
     private var runtimeObservationObserverToken: UUID?
     private var displayNameObserverToken: UUID?
+    /// 0.7.30 — the process tracker's change notification, while attached.
+    private var backgroundJobsObserver: NSObjectProtocol?
     private var identityColorObserverToken: UUID?
     /// The agent's identity colour NAME as the record holds it (a zone-palette
     /// name), nil for none. `identityColor` is its resolved, unmuted tint.
@@ -444,6 +446,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         compactStatusRow.onCompactContextRequested = { [weak self] in
             self?.onCompactContextRequested?()
         }
+        compactStatusRow.onBackgroundJobsMenuRequested = { [weak self] anchor in
+            self?.showBackgroundProcesses(from: anchor)
+        }
         v2Composer?.onDraftChange = { [weak self] _ in self?.updateV2ComposerPresentation() }
         v2Composer?.onDraftApplied = { [weak self] in self?.updateV2ComposerPresentation() }
         v2Composer?.onSubmitPrompt = { [weak self] prompt in self?.onSubmitPrompt?(prompt) }
@@ -658,6 +663,16 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // event, and without the tile ever reading a repository itself.
         agentSource = supervisor
         followsSupervisorPresence = true
+        backgroundJobsObserver = NotificationCenter.default.addObserver(
+            forName: .agentBackgroundJobsDidChange, object: nil, queue: .main
+        ) { [weak self] note in
+            let changed = note.userInfo?["agentIDs"] as? Set<AgentID>
+            MainActor.assumeIsolated {
+                guard let self, let id = self.attachedAgentID, changed?.contains(id) ?? true else { return }
+                self.refreshBackgroundJobs()
+            }
+        }
+        refreshBackgroundJobs()
         v2Composer?.bindCompletionContext(supervisor.completionContext(for: agentID))
         headerAgentName = supervisor.records[agentID]?.humanDisplayName
         displayNameObserverToken = supervisor.addDisplayNameObserver(for: agentID) { [weak self] name in
@@ -1004,7 +1019,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let locationItems = location?.items ?? []
         locationItems.forEach { location?.removeItem($0) }
         return locationItems + (locationItems.isEmpty ? [] : [.separator()]) + makePageZoomMenuItems() + [root]
-            + makeIdentityColorMenuItems() + makeWorkspaceToolsMenuItems()
+            + makeIdentityColorMenuItems() + makeWorkspaceToolsMenuItems() + makeBackgroundProcessesMenuItems()
     }
 
     // MARK: - Identity colour
@@ -1246,7 +1261,48 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         v2TurnSnapshot = nil
         attachedAgentID = nil
         agentSource = nil
+        if let backgroundJobsObserver { NotificationCenter.default.removeObserver(backgroundJobsObserver) }
+        backgroundJobsObserver = nil
+        compactStatusRow.applyBackgroundJobs(value: nil, detail: "", spoken: "")
         updateV2ComposerPresentation()
+    }
+
+    /// The chip reads the tracker; the tracker says when to.
+    private func refreshBackgroundJobs() {
+        guard let agentID = attachedAgentID, let tracker = agentSource?.processTracker else {
+            compactStatusRow.applyBackgroundJobs(value: nil, detail: "", spoken: "")
+            return
+        }
+        let jobs = tracker.jobs(for: agentID)
+        let now = Date()
+        compactStatusRow.applyBackgroundJobs(
+            value: AgentBackgroundJobText.chipValue(jobs),
+            detail: AgentBackgroundJobText.detail(jobs, now: now),
+            spoken: "Background processes: " + jobs.map { AgentBackgroundJobText.menuTitle($0, now: now) }
+                .joined(separator: ", ") + ".")
+    }
+
+    var qaBackgroundJobsChipValue: String? { compactStatusRow.qaBackgroundJobsValue }
+
+    /// This agent's processes, in the live panel, opened from the chip.
+    func showBackgroundProcesses(from anchor: NSView? = nil) {
+        guard let agentID = attachedAgentID, let tracker = agentSource?.processTracker else { return }
+        tracker.panel.toggle(from: anchor ?? compactStatusRow.backgroundJobsAnchor, scope: agentID)
+    }
+
+    private func makeBackgroundProcessesMenuItems() -> [NSMenuItem] {
+        guard let agentID = attachedAgentID, let tracker = agentSource?.processTracker,
+              !tracker.jobs(for: agentID).isEmpty else { return [] }
+        let item = NSMenuItem(title: "Show Background Processes", action: #selector(showBackgroundProcessesFromMenu(_:)), keyEquivalent: "")
+        item.target = self
+        item.identifier = NSUserInterfaceItemIdentifier("agentTile.backgroundProcesses")
+        return [item]
+    }
+
+    @objc private func showBackgroundProcessesFromMenu(_ sender: Any?) {
+        // After the menu closes, so the panel's outside-click watch does not
+        // see the menu's own dismissal.
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.showBackgroundProcesses() } }
     }
 
     /// Mirror of `NoteTileNSView.runNoteClickFocusSelfCheck` for the v2 agent

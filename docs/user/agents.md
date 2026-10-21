@@ -53,11 +53,19 @@ The transcript shows the conversation and tool events that Array receives. The s
 
 Provider rate limits, working-context usage, and local process state describe different things. A context meter does not tell you how much of your subscription remains.
 
+## See what an agent left running
+
+Agents often start things that outlive a single command: a dev server, a file watcher, a long test run. When an agent has something running, its status row shows a chip with the ports it is listening on (for example `:3000`), or a count when nothing is listening. Click the chip to open that agent's processes. Each row shows the full command, its ports, its process id and how long it has run, and it updates live while open. Click a port to open it in a browser tile beside the agent, use the row's buttons to copy its URL (or command) or stop it, and click the row itself to see the whole command line. **Stop** asks the process to quit and force-quits it after two seconds if it has not.
+
+While any agent has something running, a small activity icon appears in the top bar, left of search. It opens the same panel for every agent, each under its name with **Show Agent** to jump to its tile and **Stop All** when it has more than one. At the bottom, **Other ports on this Mac** opens to list anything else that is listening, one row per app, such as Postgres or a server you started yourself; macOS's own services are left out, and stopping one of these asks you to confirm. The panel is also in ⌘K (**Processes**) and **View ▸ Show Processes**, even when nothing is running.
+
+Array finds an agent's processes by a label each agent's CLI starts with, which every process it starts inherits. That includes one an agent detached from itself, which keeps running after you stop the agent or close its tile; the menu says so. Array does not stop background processes on its own. Hide the chip with **Settings ▸ Agents ▸ Background Processes**.
+
 ## Follow up, steer, or stop
 
 A follow-up after a completed turn continues the conversation. During active work, the harness may support steering or queueing; use the app’s current send state to see which action is available. An accepted message is not the same as a completed task.
 
-Stopping a turn does not reverse commands or file edits already performed. Review the repository and any running processes before resuming. Array’s UI is not a substitute for a Git diff.
+Stopping a turn does not reverse commands or file edits already performed. Review the repository and any running processes (the status row's process chip lists them) before resuming. Array’s UI is not a substitute for a Git diff.
 
 ## Work with other visible agents
 

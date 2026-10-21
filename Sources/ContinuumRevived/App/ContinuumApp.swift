@@ -805,6 +805,24 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        // The stand-in agent CLI and jobs `--agent-process-tracker-check` launches.
+        if let index = CommandLine.arguments.firstIndex(of: ProcessTrackingQAHelper.flag) {
+            ProcessTrackingQAHelper.run(Array(CommandLine.arguments[(index + 1)...]))
+        }
+        // 0.7.30: what an agent left running reaches its tile chip, opens beside
+        // it, and stops — through the boot mount's tracker and a real process.
+        if CommandLine.arguments.contains("--agent-process-tracker-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try AgentProcessTrackerChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if CommandLine.arguments.contains("--agent-awareness-check") {
             do {
                 _ = NSApplication.shared
@@ -4692,6 +4710,7 @@ enum ContinuumApp {
         let sidebarItem = NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "")
         sidebarItem.tag = registeredSidebarMenuTag
         viewMenu.addItem(sidebarItem)
+        viewMenu.addItem(NSMenuItem(title: "Show Processes", action: #selector(AppDelegate.showProcessesFromMenu(_:)), keyEquivalent: ""))
         if showsDeveloperMenus {
             viewMenu.addItem(NSMenuItem(title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: ""))
         }
@@ -5047,6 +5066,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return center
     }()
     private var workspaceTopBarView: WorkspaceTopBarView?
+    /// 0.7.30 — what agents left running. Started on a real launch only.
+    lazy var agentProcessTracker = AgentProcessTracker(
+        internalPathPrefixes: [Self.workspaceMCPExecutablePath()].compactMap { $0 })
+    private var agentProcessTrackerObserver: NSObjectProtocol?
     private var canvasShortcutRailView: CanvasShortcutRailView?
     private var canvasGettingStartedView: CanvasGettingStartedView?
     private var workspaceSplitView: NSSplitView?
@@ -5698,6 +5721,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 projectStore: projectStore,
                 canvasState: canvasState)
             refreshAgentSurfaces(notify: false)
+            agentProcessTracker.start()
 
             let window = makeWorkspaceWindow(
                 canvasView: canvasView,
@@ -11600,6 +11624,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func configureWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
         topBar.onOpenCommandCenter = { [weak self] in self?.openProfilePalette() }
+        topBar.onToggleProcesses = { [weak self, weak topBar] anchor in
+            self?.agentProcessTracker.panel.toggle(from: anchor, scope: nil) { topBar?.processesPanelDidClose() }
+        }
+        topBar.updateProcessesCount(agentProcessTracker.totalJobCount)
         topBar.updateCommandCenterShortcut(resolvedShortcutDisplay(commandID: "app.commandCenter"))
         topBar.updateSidebarShortcut(resolvedShortcutDisplay(commandID: "view.toggleWorkspaceSidebar"))
         topBar.onSwitchWorkspace = { [weak self] workspaceId in
@@ -12703,6 +12731,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     @objc func toggleWorkspaceSidebarFromMenu(_ sender: Any?) {
         toggleWorkspaceSidebar()
+    }
+
+    // MARK: - Background processes (0.7.30)
+
+    @objc func showProcessesFromMenu(_ sender: Any?) {
+        showProcessesMenu()
+    }
+
+    /// The processes panel, opened from ⌘K or the View menu under the top
+    /// bar's icon. It scans every second while open, so it is never stale.
+    private func showProcessesMenu() {
+        workspaceTopBarView?.openProcesses()
+    }
+
+    /// The tracker's links to the rest of the app. Called from the boot mount,
+    /// so every scene witness gets the production wiring; `start()` is separate
+    /// and happens only on a real launch.
+    func wireAgentProcessTracker() {
+        let tracker = agentProcessTracker
+        agentSupervisor.processTracker = tracker
+        tracker.knownAgents = { [weak self] in
+            guard let self else { return [] }
+            return Set(self.agentSupervisor.records.keys)
+        }
+        tracker.agentName = { [weak self] agent in
+            self?.agentSupervisor.records[agent]?.humanDisplayName ?? "Agent"
+        }
+        tracker.agentDetail = { [weak self] agent in
+            guard let record = self?.agentSupervisor.records[agent] else { return nil }
+            let folder = ((record.projectRoot ?? record.cwd) as NSString).lastPathComponent
+            return [record.harness?.rawValue, folder.isEmpty ? nil : folder, record.worktreeBranch]
+                .compactMap { $0 }.joined(separator: " · ")
+        }
+        tracker.openURL = { [weak self] url, agent in
+            self?.openBackgroundJobURL(url, besideAgent: agent)
+        }
+        tracker.revealAgent = { [weak self] agent in
+            _ = self?.revealAgentFromInbox(agent.rawValue)
+        }
+        if let observer = agentProcessTrackerObserver { NotificationCenter.default.removeObserver(observer) }
+        agentProcessTrackerObserver = NotificationCenter.default.addObserver(
+            forName: .agentBackgroundJobsDidChange, object: tracker, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.workspaceTopBarView?.updateProcessesCount(self.agentProcessTracker.totalJobCount)
+            }
+        }
+        workspaceTopBarView?.updateProcessesCount(tracker.totalJobCount)
+    }
+
+    /// A port opens in a browser tile beside the agent that serves it, in that
+    /// agent's zone; with no agent (another port on this Mac), where a new
+    /// browser would go.
+    @discardableResult
+    func openBackgroundJobURL(_ url: String, besideAgent agent: AgentID?) -> UUID? {
+        guard let agent, let tileId = agentSupervisor.records[agent]?.tileId,
+              let owner = controller(owningTile: tileId), let spawner = owner.tileSpawner else {
+            _ = spawnBrowserFromPalette(url: url)
+            return nil
+        }
+        switch spawner.spawnBrowser(url: url, beside: tileId) {
+        case let .spawned(runtime):
+            wireContentProcessTerminationHandler(runtime)
+            owner.browserRuntimes.append(runtime)
+            focusSpawnedTile(runtime.tileId)
+            workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+            workspaceRuntime?.enforceBrowserRuntimeBudget()
+            return runtime.tileId
+        case let .invalidURL(bad):
+            fputs("openBackgroundJobURL invalid URL: \(bad)\n", stderr)
+            return nil
+        case let .failure(error):
+            fputs("openBackgroundJobURL failed: \(error)\n", stderr)
+            return nil
+        }
     }
 
     private func toggleWorkspaceSidebar() {
@@ -16631,6 +16735,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case .toggleWorkspaceSidebar:
             toggleWorkspaceSidebar()
             return true
+        case .showProcesses:
+            showProcessesMenu()
+            return true
         case let .switchProject(projectId):
             switchProjectAndRelaunch(projectId: projectId)
             return false // Completion is asynchronous across a relaunch.
@@ -19076,6 +19183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.workspaceToolsPermission = { [weak self] in
             WorkspaceToolsConfig.permission(defaults: self?.settingsDefaults ?? .standard)
         }
+        wireAgentProcessTracker()
         // The sidebar dot is derived from the record on every row build, so a
         // colour picked on a tile only needs the rows rebuilt — the same re-push
         // a rename from the inbox does.

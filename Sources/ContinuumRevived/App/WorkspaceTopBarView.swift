@@ -59,6 +59,13 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     private let statusLabel: NSTextField
     private let managementMessageLabel: NSTextField
     private let commandCenterButton = ChromeIconButton(symbolName: "magnifyingglass", accessibilityLabel: "Command Center")
+    /// 0.7.30 — what agents left running, and every other listening port. On
+    /// screen only while an agent has something running; it opens the live
+    /// processes panel (`onToggleProcesses`, given the button as the anchor).
+    private let processesButton = ChromeIconButton(
+        symbolName: AgentProcessUI.symbolName, accessibilityLabel: "Background processes")
+    private var processesCount = 0
+    var onToggleProcesses: ((ChromeIconButton) -> Void)?
 
     private var currentWorkspaceId: UUID?
     private var workspaces: [WorkspaceEntry] = []
@@ -137,6 +144,12 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         commandCenterButton.target = self
         commandCenterButton.action = #selector(openCommandCenterClicked(_:))
 
+        processesButton.target = self
+        processesButton.action = #selector(processesClicked(_:))
+        processesButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarProcesses")
+        processesButton.translatesAutoresizingMaskIntoConstraints = false
+        processesButton.isHidden = true
+
         let identityStack = NSStackView(views: [sidebarButton, titleButton, saveDot, statusLabel])
         self.identityStack = identityStack
         identityStack.orientation = .horizontal
@@ -148,6 +161,7 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
 
         commandCenterButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(identityStack)
+        addSubview(processesButton)
         addSubview(commandCenterButton)
 
         let identityLeadingConstraint = identityStack.leadingAnchor.constraint(
@@ -161,7 +175,11 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
 
             identityLeadingConstraint,
             identityStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            identityStack.trailingAnchor.constraint(lessThanOrEqualTo: commandCenterButton.leadingAnchor, constant: -10),
+            identityStack.trailingAnchor.constraint(lessThanOrEqualTo: processesButton.leadingAnchor, constant: -10),
+            processesButton.trailingAnchor.constraint(equalTo: commandCenterButton.leadingAnchor, constant: -4),
+            processesButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            processesButton.widthAnchor.constraint(equalToConstant: ChromeIconButton.side),
+            processesButton.heightAnchor.constraint(equalToConstant: ChromeIconButton.side),
 
             sidebarButton.widthAnchor.constraint(equalToConstant: ChromeIconButton.side),
             sidebarButton.heightAnchor.constraint(equalToConstant: ChromeIconButton.side),
@@ -180,6 +198,61 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     required init?(coder: NSCoder) {
         nil
     }
+
+    func updateProcessesCount(_ count: Int) {
+        processesCount = count
+        setProcessesIconShown(count > 0 || processesButton.isActive)
+        let summary = AgentBackgroundJobText.summary(count)
+        processesButton.toolTip = summary
+        processesButton.setAccessibilityLabel(count == 0 ? "Background processes" : summary)
+    }
+
+    /// ⌘K and View ▸ Show Processes open the panel even when nothing runs,
+    /// from where the icon would be.
+    func openProcesses() {
+        setProcessesIconShown(true, animated: false)
+        processesClicked(processesButton)
+    }
+
+    /// Held while the panel is open; the icon leaves again once it closes if
+    /// nothing is running.
+    func processesPanelDidClose() {
+        processesButton.isActive = false
+        setProcessesIconShown(processesCount > 0)
+    }
+
+    /// The icon arrives and leaves with a fade on the panel's curve, never a
+    /// pop. `processesIconShown` is the state; the alpha only catches up.
+    private(set) var processesIconShown = false
+
+    private func setProcessesIconShown(_ shown: Bool, animated: Bool = true) {
+        guard shown != processesIconShown else { return }
+        processesIconShown = shown
+        let duration = animated ? ProcessesPanelController.duration(shown ? 0.2 : 0.24) : 0
+        if shown {
+            processesButton.isHidden = false
+            if duration == 0 { processesButton.alphaValue = 1; return }
+            processesButton.alphaValue = 0
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = duration
+            context.timingFunction = ProcessesPanelController.easing
+            processesButton.animator().alphaValue = shown ? 1 : 0
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.processesIconShown else { return }
+                self.processesButton.isHidden = true
+            }
+        })
+    }
+
+    @objc private func processesClicked(_ sender: Any?) {
+        processesButton.isActive = true
+        onToggleProcesses?(processesButton)
+    }
+
+    var qaProcessesVisible: Bool { processesIconShown }
+    var qaProcessesButton: ChromeIconButton { processesButton }
 
     /// P1.11: `SurfaceToken.panel`, the same token the sidebar uses — the two are
     /// one piece of chrome around the canvas and had no reason to be 92% and 96% of

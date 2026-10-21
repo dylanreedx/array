@@ -263,7 +263,7 @@ func runAgentAccountQuotaChecks() {
            "an explicit true must show a default-hidden element")
 
     let visible = AgentStatusElementConfig.visibleElements(defaults: defaults)
-    expect(visible == [.location, .activity, .contextMeter, .cost],
+    expect(visible == [.location, .activity, .processes, .contextMeter, .cost],
            "visible elements must come back in fixed presentation order, got \(visible)")
 
     // Every element owns a registered setting AND a field in the schema the
@@ -305,7 +305,8 @@ func runAgentAccountQuotaChecks() {
     expect(roomy == allOn, "a wide row drops nothing, got \(roomy)")
 
     // Squeeze it one element at a time and assert WHICH one goes, in order.
-    // cost → spend → 7d → 5h → context → activity, location last and never.
+    // cost → spend → 7d → 5h → processes → context → activity, location last
+    // and never.
     var previous = roomy
     var dropSequence: [AgentStatusElement] = []
     for width in stride(from: CGFloat(360), through: CGFloat(40), by: -40) {
@@ -321,7 +322,7 @@ func runAgentAccountQuotaChecks() {
         previous = kept
     }
     let expectedPrefix: [AgentStatusElement] = [
-        .cost, .quotaSpendLimit, .quotaSevenDay, .quotaFiveHour, .contextMeter, .activity,
+        .cost, .quotaSpendLimit, .quotaSevenDay, .quotaFiveHour, .processes, .contextMeter, .activity,
     ]
     expect(dropSequence == expectedPrefix,
            "elements must drop lowest-priority-first, got \(dropSequence)")

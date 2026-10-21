@@ -77,6 +77,11 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     /// so toggling one costs no view churn.
     private var quotaPills: [AgentStatusElement: AgentStatusPillView] = [:]
     private let quotaGroup: NSStackView
+    /// 0.7.30 — what the agent left running. Clickable: it opens the menu that
+    /// lists each job with its ports and a Stop.
+    private let processesPill = AgentStatusPillView()
+    private var backgroundJobs: (value: String, detail: String, spoken: String)?
+    var onBackgroundJobsMenuRequested: ((NSView) -> Void)?
     private let thinkingIndicator: (NSView & AgentThinkingIndicatorAnimating)?
     private let thinkingSlot = NSView()
     private let locationGroup: NSStackView
@@ -271,6 +276,13 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         rootStack.addArrangedSubview(locationGroup)
         rootStack.addArrangedSubview(activityGroup)
         rootStack.addArrangedSubview(flexibleSpacer)
+        processesPill.isHidden = true
+        processesPill.setAccessibilityElement(true)
+        processesPill.setAccessibilityRole(.button)
+        processesPill.setAccessibilityIdentifier("agentTile.backgroundProcesses")
+        processesPill.addGestureRecognizer(NSClickGestureRecognizer(
+            target: self, action: #selector(backgroundJobsClicked(_:))))
+        rootStack.addArrangedSubview(processesPill)
         rootStack.addArrangedSubview(contextGroup)
         rootStack.addArrangedSubview(quotaGroup)
         // The metrics read as a cluster on the right: the spacer above holds
@@ -388,7 +400,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         // dropped element is never unreachable — only unshown.
         toolTip = ([next.location.detailText, next.activity.detailText, next.context.detailText]
             + next.quotas.map(\.detailText)
-            + [next.cost?.detailText].compactMap { $0 })
+            + [next.cost?.detailText, backgroundJobs?.detail].compactMap { $0 })
             .joined(separator: "\n\n")
         // A silent activity contributes nothing to speech either — VoiceOver must
         // not announce a phase the row is deliberately not showing.
@@ -400,8 +412,9 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
             ? " \(next.context.accessibilityLabel)" : ""
         let spokenQuotas = next.quotas.map { " \($0.accessibilityLabel)" }.joined()
         let spokenCost = next.cost.map { " \($0.accessibilityLabel)" } ?? ""
+        let spokenJobs = backgroundJobs.map { " \($0.spoken)" } ?? ""
         setAccessibilityLabel(
-            "Agent compact status. \(next.location.accessibilityLabel)\(spokenActivity)\(spokenContext)\(spokenQuotas)\(spokenCost)")
+            "Agent compact status. \(next.location.accessibilityLabel)\(spokenActivity)\(spokenJobs)\(spokenContext)\(spokenQuotas)\(spokenCost)")
         setAccessibilityHelp(toolTip)
         // Parent owns the combined Home/Where/What/activity/context announcement;
         // only actionable controls are separately reachable.
@@ -443,6 +456,13 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
             pill.apply(quota)
             pill.isHidden = false
         }
+        if enabled.contains(.processes), let backgroundJobs {
+            processesPill.apply(symbolName: AgentProcessUI.symbolName, value: backgroundJobs.value, detail: backgroundJobs.detail)
+            processesPill.setAccessibilityLabel(backgroundJobs.spoken)
+            processesPill.isHidden = false
+        } else {
+            processesPill.isHidden = true
+        }
         // Whole groups follow their own toggles.
         locationGroup.isHidden = !enabled.contains(.location)
         contextGroup.isHidden = !enabled.contains(.contextMeter)
@@ -467,6 +487,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     /// width pass, because that pass can drop the ring and its action with it.
     private func updateActionAccessibilityChildren() {
         var accessibilityActions: [NSView] = [actionButton]
+        if !processesPill.isHidden { accessibilityActions.append(processesPill) }
         if !compactContextButton.isHidden { accessibilityActions.append(compactContextButton) }
         setAccessibilityChildren(accessibilityActions)
     }
@@ -492,6 +513,19 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
 
     private static func contextCanBeCompacted(_ state: AgentRadialContextMeterState) -> Bool {
         state == .warning || state == .critical
+    }
+
+    /// What the agent left running, or nil when nothing is. Kept apart from the
+    /// presentation: it changes on the process tracker's tick, not on a turn.
+    func applyBackgroundJobs(value: String?, detail: String, spoken: String) {
+        backgroundJobs = value.map { ($0, detail, spoken) }
+        guard let presentation else { return }
+        apply(presentation)
+    }
+
+    @objc private func backgroundJobsClicked(_ recognizer: NSClickGestureRecognizer) {
+        guard backgroundJobs != nil else { return }
+        onBackgroundJobsMenuRequested?(processesPill)
     }
 
     @objc private func compactContext(_ sender: NSButton) {
@@ -531,6 +565,8 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
                 widths[element] = presentation.activity.isSilent ? 0 : activityGroup.fittingSize.width
             case .contextMeter:
                 widths[element] = contextGroup.fittingSize.width
+            case .processes:
+                widths[element] = processesPill.isHidden ? 0 : processesPill.fittingSize.width
             case .quotaFiveHour, .quotaSevenDay, .quotaSpendLimit, .cost:
                 let pill = quotaPills[element]
                 widths[element] = (pill?.isHidden ?? true) ? 0 : (pill?.fittingSize.width ?? 0)
@@ -564,11 +600,17 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
             case .contextMeter:
                 contextGroup.isHidden = true
                 compactContextButton.isHidden = true
+            case .processes: processesPill.isHidden = true
             case .location: break  // never dropped; it truncates instead
             default: quotaPills[element]?.isHidden = true
             }
         }
     }
+
+    /// The chip's value as drawn, or nil when it is not on screen.
+    /// Where the processes panel opens from: the chip.
+    var backgroundJobsAnchor: NSView { processesPill }
+    var qaBackgroundJobsValue: String? { processesPill.isHidden ? nil : processesPill.qaValueText }
 
     /// Elements the width pass removed on the current bounds. Distinct from the
     /// disabled set, and reported to QA so a witness can assert the drop ORDER

@@ -15,6 +15,8 @@ import Foundation
 public enum AgentStatusElement: String, CaseIterable, Equatable, Hashable, Sendable {
     case location
     case activity
+    /// 0.7.30 — what the agent left running: dev servers, watchers, long runs.
+    case processes
     case contextMeter
     case quotaFiveHour
     case quotaSevenDay
@@ -28,7 +30,7 @@ public enum AgentStatusElement: String, CaseIterable, Equatable, Hashable, Senda
     public var isAccountScoped: Bool {
         switch self {
         case .quotaFiveHour, .quotaSevenDay, .quotaSpendLimit: return true
-        case .location, .activity, .contextMeter, .cost: return false
+        case .location, .activity, .processes, .contextMeter, .cost: return false
         }
     }
 
@@ -38,6 +40,7 @@ public enum AgentStatusElement: String, CaseIterable, Equatable, Hashable, Senda
         switch self {
         case .location: return "Home and Where"
         case .activity: return "Activity Phase"
+        case .processes: return "Background Processes"
         case .contextMeter: return "Context Meter"
         case .quotaFiveHour: return "Account 5-Hour Usage"
         case .quotaSevenDay: return "Account 7-Day Usage"
@@ -52,6 +55,8 @@ public enum AgentStatusElement: String, CaseIterable, Equatable, Hashable, Senda
             return "Show the agent's project root and current working directory."
         case .activity:
             return "Show the current activity phase and how long it has been running."
+        case .processes:
+            return "Show what this agent left running, such as a dev server, with its ports. Click it to open a port, copy it, or stop the process."
         case .contextMeter:
             return "Show how full this agent's context window is, as of its latest model request."
         case .quotaFiveHour:
@@ -72,14 +77,14 @@ public enum AgentStatusElement: String, CaseIterable, Equatable, Hashable, Senda
     /// are an estimate that is easy to misread as a bill.
     public var defaultVisible: Bool {
         switch self {
-        case .location, .activity, .contextMeter, .quotaFiveHour: return true
+        case .location, .activity, .processes, .contextMeter, .quotaFiveHour: return true
         case .quotaSevenDay, .quotaSpendLimit, .cost: return false
         }
     }
 
     /// Fixed presentation order, left to right.
     public static let presentationOrder: [AgentStatusElement] = [
-        .location, .activity, .contextMeter,
+        .location, .activity, .processes, .contextMeter,
         .quotaFiveHour, .quotaSevenDay, .quotaSpendLimit, .cost,
     ]
 
@@ -87,7 +92,7 @@ public enum AgentStatusElement: String, CaseIterable, Equatable, Hashable, Senda
     /// reverse of what a reader needs most. Location is last because it is the
     /// row's identity, and it truncates rather than vanishing.
     public static let overflowDropOrder: [AgentStatusElement] = [
-        .cost, .quotaSpendLimit, .quotaSevenDay, .quotaFiveHour, .contextMeter, .activity,
+        .cost, .quotaSpendLimit, .quotaSevenDay, .quotaFiveHour, .processes, .contextMeter, .activity,
     ]
 }
 

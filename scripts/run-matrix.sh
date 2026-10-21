@@ -433,6 +433,10 @@ run_leg scripts/capture-cli-fixtures.sh check
 # and a witness only counts if the gate reports IT rather than the first red
 # thing ahead of it.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
+# 0.7.30: which agent owns a running process (owner tag, then ancestry), its
+# listening ports, Stop, and that agents no longer inherit the app's
+# descriptors. Real processes: a setsid'd job and a scrubbed-environment job.
+run_leg .build/debug/ContinuumRevivedCoreChecks --agent-process-tracking-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
 # Film phase 1: the pairing page and the user-facing copy that must say Array.
@@ -987,6 +991,10 @@ run_app_check .build/debug/Array --workspace-api-delegation-check
 # agent-to-agent chain stops, leaving Free takes its grants back, Off mints
 # agents without workspace tools.
 run_app_check .build/debug/Array --workspace-api-free-permissions-check
+# 0.7.30: an agent's background jobs reach its tile chip and the top bar's
+# menu through the boot mount's tracker, a port opens in a browser beside the
+# agent in its own zone, and Stop All ends every process.
+run_app_check .build/debug/Array --agent-process-tracker-check
 # CX-01: the bundled pi extensions through the REAL pi's own parser. Nothing else
 # in the repo ever asks pi to PARSE these files, which is how a merge-spliced
 # syntax error in continuum-workspace-tools.ts reached the branch with every leg

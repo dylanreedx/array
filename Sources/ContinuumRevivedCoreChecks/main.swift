@@ -105,6 +105,15 @@ if CommandLine.arguments.contains("--claude-context-occupancy-check") {
     Foundation.exit(0)
 }
 
+if let index = CommandLine.arguments.firstIndex(of: ProcessTrackingQAHelper.flag) {
+    ProcessTrackingQAHelper.run(Array(CommandLine.arguments[(index + 1)...]))
+}
+// 0.7.30: which agent owns a running process, its ports, and Stop.
+if CommandLine.arguments.contains("--agent-process-tracking-check") {
+    runAgentProcessTrackingChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-compaction-check") {
     runAgentCompactionChecks()
     Foundation.exit(0)

@@ -180,13 +180,16 @@ public final class CodexAgentRunner: @unchecked Sendable {
         /// Extra args before the prompt.
         public var extraArgs: [String]
         public var workspaceMCP: WorkspaceMCPConfiguration?
+        /// The agent id every descendant carries — `PiAgentRunner.childEnvironment`.
+        public var processOwner: String?
         public init(
             model: String,
             effort: String? = nil,
             cwd: URL,
             threadId: String? = nil,
             extraArgs: [String] = [],
-            workspaceMCP: WorkspaceMCPConfiguration? = nil
+            workspaceMCP: WorkspaceMCPConfiguration? = nil,
+            processOwner: String? = nil
         ) {
             self.model = model
             self.effort = effort
@@ -194,6 +197,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
             self.threadId = threadId
             self.extraArgs = extraArgs
             self.workspaceMCP = workspaceMCP
+            self.processOwner = processOwner
         }
     }
 
@@ -1068,14 +1072,16 @@ public final class CodexAgentRunner: @unchecked Sendable {
     }
 
     private func childEnvironment() -> [String: String] {
-        Self.childEnvironment(workspaceMCP: config.workspaceMCP)
+        Self.childEnvironment(workspaceMCP: config.workspaceMCP, processOwner: config.processOwner)
     }
 
     /// The MCP server's endpoint and token reach it through its own config
     /// (`mcp_servers.array_workspace.env`), never through codex's environment,
     /// which every shell command codex runs inherits.
-    public static func childEnvironment(workspaceMCP: WorkspaceMCPConfiguration?) -> [String: String] {
-        PiAgentRunner.childEnvironment()
+    public static func childEnvironment(
+        workspaceMCP: WorkspaceMCPConfiguration?, processOwner: String? = nil
+    ) -> [String: String] {
+        PiAgentRunner.childEnvironment(processOwner: processOwner)
     }
 }
 

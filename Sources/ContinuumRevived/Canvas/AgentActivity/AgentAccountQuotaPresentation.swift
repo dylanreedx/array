@@ -206,7 +206,7 @@ enum AgentAccountQuotaPresenter {
         case .quotaFiveHour: return .fiveHour
         case .quotaSevenDay: return .sevenDay
         case .quotaSpendLimit: return .spendLimit
-        case .location, .activity, .contextMeter, .cost: return nil
+        case .location, .activity, .processes, .contextMeter, .cost: return nil
         }
     }
 

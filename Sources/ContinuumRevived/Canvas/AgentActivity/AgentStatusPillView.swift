@@ -135,6 +135,19 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
         applyTokens()
     }
 
+    /// A reading that is not a quota: the background-processes chip. Glyph and
+    /// value, like cost.
+    func apply(symbolName: String, value: String, detail: String) {
+        state = .known
+        hasReading = true
+        applySymbol(symbolName)
+        labelField.stringValue = ""
+        labelField.isHidden = true
+        valueField.stringValue = value
+        toolTip = detail
+        applyTokens()
+    }
+
     func applyTokens() {
         let theme = effectiveTokenTheme
         // A pill with no reading paints NOTHING — `nil`, never `.clear`. A

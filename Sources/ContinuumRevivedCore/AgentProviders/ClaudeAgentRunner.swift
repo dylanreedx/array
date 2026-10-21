@@ -221,6 +221,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         /// no retry.
         public var forkSession: Bool
         public var workspaceMCP: WorkspaceMCPConfiguration?
+        /// The agent id every descendant carries — `PiAgentRunner.childEnvironment`.
+        public var processOwner: String?
 
         public init(
             model: String,
@@ -230,7 +232,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             extraArgs: [String] = [],
             conversationMayExist: Bool = true,
             forkSession: Bool = false,
-            workspaceMCP: WorkspaceMCPConfiguration? = nil
+            workspaceMCP: WorkspaceMCPConfiguration? = nil,
+            processOwner: String? = nil
         ) {
             self.model = model
             self.effort = effort
@@ -240,6 +243,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             self.conversationMayExist = conversationMayExist
             self.forkSession = forkSession
             self.workspaceMCP = workspaceMCP
+            self.processOwner = processOwner
         }
     }
 
@@ -829,7 +833,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
                 // doesn't, but augmenting is harmless there.) HOME and
                 // CLAUDE_CONFIG_DIR stay untouched — overriding HOME relocates the
                 // keychain lookup and the CLI stops finding its own login.
-                environment: Self.childEnvironment(workspaceMCP: config.workspaceMCP),
+                environment: Self.childEnvironment(workspaceMCP: config.workspaceMCP, processOwner: config.processOwner),
                 currentDirectory: config.cwd,
                 standardInput: .pipe
             )
@@ -939,8 +943,10 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// (`WorkspaceMCPConfiguration.claudeMCPConfigJSON`), never through
     /// claude's environment: every Bash call claude makes inherits that, and
     /// `env` printed the capability token into a transcript.
-    public static func childEnvironment(workspaceMCP: WorkspaceMCPConfiguration?) -> [String: String] {
-        PiAgentRunner.childEnvironment()
+    public static func childEnvironment(
+        workspaceMCP: WorkspaceMCPConfiguration?, processOwner: String? = nil
+    ) -> [String: String] {
+        PiAgentRunner.childEnvironment(processOwner: processOwner)
     }
 
     // MARK: - queue-confined line handling

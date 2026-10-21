@@ -45,7 +45,7 @@ let builtInActionNames = [
     "New Agent…", "New Agent Without a Tile…", "Fan Out Selected Tickets…",
     "New Note", "New Board", "New Browser", "Open File...", "Open File Tree...", "New Diff Review",
     "Fit Canvas to All", "Tidy Canvas", "Focus Current Tile", "Back to Previous View",
-    "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar",
+    "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "Show Processes",
     "Replay Getting Started", "New Workspace…",
     // M1.11 (`.plans/46`): the only add route a workspace with no projects has.
     "Add Project…",

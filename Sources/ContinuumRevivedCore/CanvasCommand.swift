@@ -80,6 +80,7 @@ public enum CommandRegistry {
                 paletteAction: .toggleWorkspaceSidebar,
                 shortcuts: [globalShortcut("global.toggleWorkspaceSidebar", command: "view.toggleWorkspaceSidebar", keyCode: 1, modifiers: [.command, .shift])]
             ),
+            definition("view.showProcesses", .showProcesses, aliases: ["ports", "background processes", "dev server"]),
             definition("help.replayGettingStarted", .replayGettingStarted, aliases: ["onboarding", "learn Array"]),
             // The focused note's or file's backing file. Its ⌘K row is contextual
             // (`revealFocusedTileInFinder`), so no static row here.

@@ -24,6 +24,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case previousTile
     case previousZone
     case toggleWorkspaceSidebar
+    /// 0.7.30 — the top bar's process menu: what agents left running, and ports.
+    case showProcesses
     case openURL(String)
     case switchProject(UUID)
     case addProjectToCanvas(UUID)
@@ -88,6 +90,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Go to Previous Zone"
         case .toggleWorkspaceSidebar:
             return "Toggle Workspace Sidebar"
+        case .showProcesses:
+            return "Show Processes"
         case let .openURL(url):
             return "Open \"\(url)\"…"
         case .switchProject:
@@ -161,6 +165,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["go", "previous", "zone", "back"]
         case .toggleWorkspaceSidebar:
             return ["toggle", "show", "hide", "workspace", "sidebar", "view"]
+        case .showProcesses:
+            return ["processes", "ports", "running", "background", "jobs", "dev", "server", "localhost"]
         case .openURL:
             return ["open", "url", "browser", "web"]
         case .switchProject:
@@ -849,6 +855,7 @@ public enum LaunchPaletteModel {
         case .previousView: return item(row, .actions, "Previous view", "Return to the last canvas view", "arrow.uturn.backward", ["back"], false, true, "action:previous-view")
         case .previousTile: return item(row, .actions, "Previous tile", "Return to the last focused tile", "arrow.left.to.line", ["back", "jump"], false, true, "action:previous-tile")
         case .previousZone: return item(row, .actions, "Previous zone", "Return to the last focused zone", "arrow.left.to.line.compact", ["back", "jump"], false, true, "action:previous-zone")
+        case .showProcesses: return item(row, .actions, "Processes", "What agents left running, and every listening port", "square.stack.3d.up", ["ports", "localhost", "dev server", "background"], false, true, "action:show-processes")
         case .toggleWorkspaceSidebar: return item(row, .developer, "Activity dock", "Show or hide workspace navigation", "sidebar.left", ["toggle", "sidebar"], false, true, "action:activity-dock")
         case let .openURL(url): return item(row, .actions, "Open \(url)", "Browser", "globe", ["url", "web"], false, true, "url:\(url)")
         case let .switchProject(id): return item(row, .workspacesAndProjects, "Switch project", nil, "folder", [], false, true, "project-switch:\(id.uuidString)")

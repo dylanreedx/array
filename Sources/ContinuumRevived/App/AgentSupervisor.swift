@@ -1007,6 +1007,9 @@ private final class CompactionTerminalLatch: @unchecked Sendable {
 
 @MainActor
 final class AgentSupervisor {
+    /// 0.7.30 — what each agent left running. Owned by the app delegate; tiles
+    /// read it through the supervisor they attach to.
+    weak var processTracker: AgentProcessTracker?
     private struct RunnerGenerationToken: Equatable, Sendable {
         let rawValue = UUID()
     }
@@ -1732,7 +1735,8 @@ final class AgentSupervisor {
                 cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
                 sessionId: forkFrom,
                 forkSession: true,
-                workspaceMCP: workspaceMCP
+                workspaceMCP: workspaceMCP,
+                processOwner: AgentProcessAttribution.ownerTag(for: record.id)
             )
         }
         let location = claudeSessionLocation(for: record)
@@ -1746,7 +1750,8 @@ final class AgentSupervisor {
             // so. `latestTurnAt` is stamped on `.turnStarted` and persisted, which
             // makes it the durable answer across relaunches.
             conversationMayExist: record.latestTurnAt != nil,
-            workspaceMCP: workspaceMCP
+            workspaceMCP: workspaceMCP,
+            processOwner: AgentProcessAttribution.ownerTag(for: record.id)
         )
     }
 
@@ -1767,7 +1772,8 @@ final class AgentSupervisor {
             effort: CodexCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
             threadId: record.codexThreadId,
-            workspaceMCP: workspaceMCP
+            workspaceMCP: workspaceMCP,
+            processOwner: AgentProcessAttribution.ownerTag(for: record.id)
         )
     }
 
@@ -1817,7 +1823,8 @@ final class AgentSupervisor {
             extraArgs: record.role.map {
                 RoleRegistry(projectRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
                     .toolsArguments(roleId: $0, allowingSpawn: spawnDepth < Self.maxSpawnDepth)
-            } ?? []
+            } ?? [],
+            processOwner: AgentProcessAttribution.ownerTag(for: record.id)
         )
     }
 
