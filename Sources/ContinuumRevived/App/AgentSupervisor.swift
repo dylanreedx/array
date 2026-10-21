@@ -1192,7 +1192,9 @@ final class AgentSupervisor {
             guard !blocks.isEmpty else { return nil }
             let context = AgentTranscriptCopyController.plainText(for: blocks)
             let carry = "Continue this task in a new session. The previous session remains intact.\n"
-                + "Handoff summary — original request: " + (latestRecoverablePrompts[id]?.text ?? "See transcript below")
+                // Another agent's request carries Array's envelope: its words only.
+                + "Handoff summary — original request: "
+                + (latestRecoverablePrompts[id].map { AgentMessageEnvelope.unwrappedText($0.text) } ?? "See transcript below")
                 + "\nRecent transcript excerpt (bounded; check project files before assuming omitted details):\n\n"
                 + String(context.suffix(24_000))
             recoveredContextFailureTurns[id] = failedTurnID

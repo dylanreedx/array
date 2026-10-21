@@ -335,6 +335,38 @@ func runAgentCompactionUIChecks() async throws {
         }
     }
 
+    // `.plans/79`: an original request another agent sent arrived inside
+    // Array's envelope. The handoff summary carries its words, never the tags.
+    do {
+        let envelopeRoot = root.appendingPathComponent("recovery-envelope")
+        let envelopeRunner = CompactionScriptRunner(firstTurnContextFull: true)
+        let envelopeSupervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: envelopeRoot), makeRunner: { _ in envelopeRunner },
+            submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: envelopeRoot, debounceInterval: 0),
+            transcriptStore: AgentTranscriptStore(root: envelopeRoot.appendingPathComponent("transcripts")))
+        let configuration = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+        let sender = envelopeSupervisor.spawn(role: nil, prompt: nil, cwd: root, harness: .pi,
+            model: configuration.model, thinking: configuration.thinking, displayName: "Lead")
+        let receiver = envelopeSupervisor.spawn(role: nil, prompt: nil, cwd: root, harness: .pi,
+            model: configuration.model, thinking: configuration.thinking)
+        guard envelopeSupervisor.sendAgentMessage("audit the envelope parser", from: sender, to: receiver) else {
+            throw Failure(description: "the agent message that becomes the original request was refused")
+        }
+        try await expectEventually("the envelope request's context-full turn never settled") {
+            !envelopeSupervisor.isRunning(receiver) && envelopeSupervisor.isQueuePaused(for: receiver)
+        }
+        guard let continued = await envelopeSupervisor.recoverContextFull(.forkWithSummary, for: receiver) else {
+            throw Failure(description: "summary recovery of an agent-message request was refused")
+        }
+        try await expectEventually("the envelope summary session did not finish") { !envelopeSupervisor.isRunning(continued) }
+        let carried = envelopeRunner.snapshotOperations().last ?? ""
+        guard carried.contains("original request: audit the envelope parser"),
+              !carried.contains("<\(AgentMessageEnvelope.tag)") else {
+            throw Failure(description: "the handoff summary must carry the agent message's words, not its envelope: \(carried.prefix(240))")
+        }
+        envelopeSupervisor.stopAll()
+    }
+
     let runner = CompactionScriptRunner(blockFirstTurn: true, trailingReading: 20_500)
     let draftStore = AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0)
     let supervisor = AgentSupervisor(
