@@ -39,6 +39,10 @@ enum ExternalSessionHandoffChecks {
         let canvasWindow: NSWindow
         let sidebar: WorkspaceSidebarView
         let transcripts: URL
+        /// The stand-in claude's folder, first on PATH for the whole leg: a
+        /// send that should have been refused can never reach a real claude.
+        let bin: URL
+        let restorePath: () -> Void
         let unpin: () -> Void
         let pngDirectory: URL?
         var delegate: AppDelegate { fixture.delegate }
@@ -47,6 +51,7 @@ enum ExternalSessionHandoffChecks {
         var monitor: ExternalSessionMonitor { fixture.delegate.externalSessionMonitor }
 
         func tearDown() {
+            restorePath()
             unpin()
             window.orderOut(nil)
             canvasWindow.orderOut(nil)
@@ -154,8 +159,15 @@ enum ExternalSessionHandoffChecks {
         // The follower asks for the file's length every 1.5 s in production;
         // a check need not wait that long.
         ManagedAgentTileNSView.sessionFollowInterval = 0.1
+        let bin = fixture.tempRoot.appendingPathComponent("bin", isDirectory: true)
+        try AgentSteeringQAFakes.install(.claude, in: bin)
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+        setenv("PATH", "\(bin.path):\(originalPath)", 1)
+        try expect(ClaudeAgentRunner.liveResolvedCommand().executable.hasPrefix(bin.path),
+                   "the stand-in claude must be the one production resolves")
         return World(fixture: fixture, window: window, canvasWindow: canvasWindow, sidebar: sidebar,
-                     transcripts: transcripts, unpin: unpin, pngDirectory: png)
+                     transcripts: transcripts, bin: bin, restorePath: { setenv("PATH", originalPath, 1) },
+                     unpin: unpin, pngDirectory: png)
     }
 
     private static func userLine(_ uuid: String, _ text: String) -> String {
@@ -233,7 +245,8 @@ enum ExternalSessionHandoffChecks {
         try expect(!supervisor.send("write to it", to: agentId) && supervisor.sendRefusal(for: agentId) != nil,
                    "a watch refuses every send")
         try expect(supervisor.turnSnapshot(for: agentId)?.capabilities.canSend == false, "the composer cannot send")
-        try expect(!supervisor.isRunning(agentId), "the refused send started nothing")
+        try expect(!supervisor.isRunning(agentId) && AgentSteeringQAFakes.spawnCount(in: world.bin) == 0,
+                   "the refused send started nothing")
         let ids = world.inbox.rowIdsForQA
         try expect(ids.contains(rowId(cmux)) && !ids.contains(agentId.rawValue),
                    "the session keeps ONE row, the other app's; the watch agent has none of its own; got \(world.inbox.titlesForQA)")
@@ -302,11 +315,7 @@ enum ExternalSessionHandoffChecks {
         let world = try makeWorld(pngDirectory: pngDirectory)
         defer { world.tearDown() }
         let supervisor = world.supervisor
-        let bin = world.fixture.tempRoot.appendingPathComponent("bin", isDirectory: true)
-        try AgentSteeringQAFakes.install(.claude, in: bin)
-        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
-        setenv("PATH", "\(bin.path):\(originalPath)", 1)
-        defer { setenv("PATH", originalPath, 1) }
+        let bin = world.bin
 
         let sessionId = "0c5e2a71-6b3f-4b0e-8f4d-2a9c7e1b3d40"
         let file = try world.writeSession(sessionId, [
@@ -426,11 +435,7 @@ enum ExternalSessionHandoffChecks {
         defer { world.tearDown() }
         let supervisor = world.supervisor
         let delegate = world.delegate
-        let bin = world.fixture.tempRoot.appendingPathComponent("bin", isDirectory: true)
-        try AgentSteeringQAFakes.install(.claude, in: bin)
-        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
-        setenv("PATH", "\(bin.path):\(originalPath)", 1)
-        defer { setenv("PATH", originalPath, 1) }
+        let bin = world.bin
         var activated: [(Int32?, String)] = []
         delegate.activateExternalSessionHostForQA = { activated.append(($0, $1)) }
 
