@@ -139,8 +139,11 @@ public enum AgentProcessAttribution {
             cliPids.insert(sample.pid)
             for child in children[sample.pid] ?? [] where owners[child.pid] != nil {
                 let isHelper = internalPathPrefixes.contains { child.executablePath.hasPrefix($0) }
+                    || isCodexCodeModeHost(child, launchedBy: sample)
                 let isImmediate = child.startedAt.timeIntervalSince(sample.startedAt) < cliInternalWindow
                     && !isShell(child)
+                // Helpers can start lazily, long after the CLI. Their children
+                // are tool jobs, so do not recursively apply the startup window.
                 if isHelper { cliPids.insert(child.pid) } else if isImmediate { markInternal(child) }
             }
         }
@@ -188,6 +191,23 @@ public enum AgentProcessAttribution {
 
     static let shellNames: Set<String> = ["sh", "bash", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "-zsh", "-bash"]
     static let interpreterNames: Set<String> = ["node", "python", "python3", "ruby", "bun", "deno", "perl", "php"]
+
+    /// Match the helper shipped alongside the running Codex, not an arbitrary
+    /// project command that happens to have the same name. Both the npm CLI and
+    /// macOS desktop distribution are observed layouts of this runtime pair.
+    private static func isCodexCodeModeHost(_ sample: ProcessSample, launchedBy parent: ProcessSample) -> Bool {
+        let path = (sample.executablePath as NSString).standardizingPath
+        let parentPath = (parent.executablePath as NSString).standardizingPath
+        guard (path as NSString).lastPathComponent == "codex-code-mode-host",
+              (parentPath as NSString).lastPathComponent == "codex" else { return false }
+        if (path as NSString).deletingLastPathComponent == (parentPath as NSString).deletingLastPathComponent {
+            return true
+        }
+        let desktopSuffix = "/CodexCLI.app/Contents/MacOS/codex"
+        guard parentPath.hasSuffix(desktopSuffix) else { return false }
+        let distribution = String(parentPath.dropLast(desktopSuffix.count))
+        return path == distribution + "/bin/codex-code-mode-host"
+    }
 
     static func isShell(_ sample: ProcessSample) -> Bool {
         let name = (sample.arguments.first.map { ($0 as NSString).lastPathComponent }

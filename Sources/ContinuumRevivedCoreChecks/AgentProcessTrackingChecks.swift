@@ -13,6 +13,7 @@ import Foundation
 /// that reaches it). Each listens on a port the kernel picks.
 func runAgentProcessTrackingChecks() {
     checkAttributionShapes()
+    checkCodexRuntimeHelper()
     checkLabels()
     checkOtherListeningApps()
     checkLiveProcesses()
@@ -20,6 +21,47 @@ func runAgentProcessTrackingChecks() {
     checkProcessStopSafetyAndEscalation()
     checkDescriptorsAreNotInherited()
     print("agent process tracking checks passed")
+}
+
+/// The lazily launched code-mode host is Codex infrastructure. Its commands
+/// remain jobs even when they start immediately after the helper itself.
+private func checkCodexRuntimeHelper() {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let start = now.addingTimeInterval(-600)
+    let owner = "CCCCCCCC-0000-4000-8000-000000000003"
+    let layouts = [
+        ("/vendor/aarch64-apple-darwin/bin/codex", "/vendor/aarch64-apple-darwin/bin/codex-code-mode-host"),
+        ("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+         "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex-code-mode-host"),
+    ]
+    for (cli, helper) in layouts {
+        func sample(_ pid: Int32, _ parent: Int32, _ offset: TimeInterval, _ path: String, _ args: [String]? = nil) -> ProcessSample {
+            ProcessSample(pid: pid, parentPid: parent, startedAt: start.addingTimeInterval(offset),
+                          executablePath: path, arguments: args ?? [path], ownerTag: owner)
+        }
+        let runtime = [sample(200, 100, 0, cli), sample(201, 200, 90, helper)]
+        func jobs(_ samples: [ProcessSample]) -> [AgentBackgroundJob] {
+            AgentProcessAttribution.jobs(in: samples, hostPid: 100, internalPathPrefixes: [], now: now)[owner] ?? []
+        }
+        expect(jobs(runtime).isEmpty, "Codex's idle code-mode host must not claim background work: \(helper)")
+        let python = sample(202, 201, 90.1, "/usr/bin/python3", ["python3", "analysis.py"])
+        let shell = sample(203, 201, 120, "/bin/sh", ["sh", "-c", "sleep 60 & wait"])
+        let child = sample(204, 203, 120.1, "/bin/sleep", ["sleep", "60"])
+        let work = jobs(runtime + [python, shell, child])
+        expect(work.map(\.rootPid) == [202, 203],
+               "filter only the runtime helper; keep its Python and shell jobs, including an immediate child: \(work.map(\.rootPid))")
+        expect(work.first?.label == "python3 analysis.py" && work.last?.pids == [203, 204],
+               "helper children must retain readable commands and their own Stop subtrees")
+        expect(work.allSatisfy { !$0.pids.contains(201) && !$0.detached },
+               "stopping a helper's command must never include the runtime helper")
+        let lookalike = sample(205, 200, 150, "/repo/bin/codex-code-mode-host")
+        expect(jobs(runtime + [lookalike]).map(\.rootPid) == [205],
+               "a project command with the same basename must not be hidden as Codex infrastructure")
+        var survivor = python
+        survivor.parentPid = 1
+        expect(jobs([runtime[0], survivor]).first?.rootPid == 202,
+               "a command remains visible when the runtime helper exits")
+    }
 }
 
 private func checkAttributionShapes() {
