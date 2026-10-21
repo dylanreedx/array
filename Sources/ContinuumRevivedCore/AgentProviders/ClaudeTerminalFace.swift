@@ -96,7 +96,8 @@ public enum ClaudeTerminalFace {
     }
 
     /// The complete lines written after `offset`. A partial last line — claude
-    /// mid-write — is left for the next read.
+    /// mid-write — is left for the next read; an offset that is not at a line
+    /// start reads from the next one.
     public static func lines(in url: URL, after offset: UInt64) -> [String] {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? handle.close() }
@@ -104,12 +105,11 @@ public enum ClaudeTerminalFace {
         // A file shorter than the mark was rewritten; the mark no longer
         // means anything inside it, so read it whole.
         let start = offset <= size ? offset : 0
-        guard (try? handle.seek(toOffset: start)) != nil,
-              let data = try? handle.readToEnd(),
-              let text = String(data: data, encoding: .utf8) else { return [] }
-        var lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-        if !text.hasSuffix("\n"), !lines.isEmpty { lines.removeLast() }
-        return lines
+        // One byte early, to see whether `start` begins a line.
+        let lead: UInt64 = start > 0 ? 1 : 0
+        guard size > start, (try? handle.seek(toOffset: start - lead)) != nil,
+              let data = try? handle.readToEnd() else { return [] }
+        return wholeLines(data, opensMidLine: lead == 1 && data.first != UInt8(ascii: "\n"), skip: Int(lead))
     }
 
     /// The complete lines before `end` — what the Array face held at the flip —
@@ -120,12 +120,25 @@ public enum ClaudeTerminalFace {
         let size = (try? handle.seekToEnd()) ?? 0
         let stop = min(end, size)
         let start = stop > UInt64(maxBytes) ? stop - UInt64(maxBytes) : 0
-        guard stop > start, (try? handle.seek(toOffset: start)) != nil,
-              let data = try? handle.read(upToCount: Int(stop - start)),
-              let text = String(data: data, encoding: .utf8) else { return [] }
-        var lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-        if start > 0, !lines.isEmpty { lines.removeFirst() }
-        return lines
+        let lead: UInt64 = start > 0 ? 1 : 0
+        guard stop > start, (try? handle.seek(toOffset: start - lead)) != nil,
+              let data = try? handle.read(upToCount: Int(stop - start + lead)) else { return [] }
+        return wholeLines(data, opensMidLine: lead == 1 && data.first != UInt8(ascii: "\n"), skip: Int(lead))
+    }
+
+    /// The whole lines in a byte window, by bytes first: a window that opens
+    /// mid-line (possibly mid-character) starts after its first newline, and
+    /// a line not yet ended is left out. Decoded leniently, so one bad byte
+    /// costs a line, never the window (review #13).
+    private static func wholeLines(_ data: Data, opensMidLine: Bool, skip: Int) -> [String] {
+        var body = data.dropFirst(skip)
+        if opensMidLine {
+            guard let newline = body.firstIndex(of: UInt8(ascii: "\n")) else { return [] }
+            body = body[body.index(after: newline)...]
+        }
+        guard let last = body.lastIndex(of: UInt8(ascii: "\n")) else { return [] }
+        return String(decoding: body[body.startIndex...last], as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
     }
 
     /// The model the last assistant line ran on, as a catalogue id
