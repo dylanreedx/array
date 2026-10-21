@@ -21,6 +21,11 @@ final class ExternalSessionMonitor {
     private(set) var snapshot = ExternalSessionSnapshot.empty
     /// Called on the main thread after `snapshot` changed.
     var onChange: (() -> Void)?
+    /// True while something waits on a holder process to exit. Its exit can
+    /// end the wait with the snapshot unchanged (the session already missing
+    /// from a pass that read its status file mid-rewrite), so every pass is
+    /// reported then, not only a changed one.
+    var reportsEveryPass: () -> Bool = { false }
     /// tmux pane id → the shell tile showing it, read on the main thread before
     /// each pass: a project's shell tiles share one tmux session, so only the
     /// pane says which tile a claude was typed into.
@@ -50,7 +55,7 @@ final class ExternalSessionMonitor {
     func publish(_ next: ExternalSessionSnapshot) {
         let first = !hasDiscovered
         hasDiscovered = true
-        guard next != snapshot || first else { return }
+        guard next != snapshot || first || reportsEveryPass() else { return }
         snapshot = next
         onChange?()
     }

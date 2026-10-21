@@ -193,6 +193,23 @@ enum ExternalSessionHandoffChecks {
         ExternalSessionRows.rowId(forSessionKey: session.id)
     }
 
+    /// A real process standing in for another app's claude: alive until the
+    /// leg ends it, so "the holder is still running" is a fact, not a number.
+    private static func liveHolder() throws -> Process {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["300"]
+        try process.run()
+        return process
+    }
+
+    /// Ends a `liveHolder()` and waits until it is gone.
+    private static func end(_ holder: Process) {
+        guard holder.isRunning else { return }
+        holder.terminate()
+        holder.waitUntilExit()
+    }
+
     /// A pid that WAS a process and is not one now: a holder that has exited.
     /// Spawned after whatever the leg started before it, so it is higher.
     private static func exitedPid() throws -> Int32 {
@@ -250,7 +267,9 @@ enum ExternalSessionHandoffChecks {
             userLine("u1", "Why is the upload test flaky?"),
             assistantLine("a1", "The upload test races the temp-dir cleanup."),
         ])
-        let cmux = session(sessionId, pid: 41_001, cwd: world.fixture.pbRoot, title: "Fix flaky upload test",
+        let cmuxProcess = try liveHolder()
+        defer { end(cmuxProcess) }
+        let cmux = session(sessionId, pid: cmuxProcess.processIdentifier, cwd: world.fixture.pbRoot, title: "Fix flaky upload test",
                            host: .app("cmux"), transcript: file)
         world.publish([cmux])
         try expect(world.inbox.rowIdsForQA.contains(rowId(cmux)), "precondition: the cmux session is a row")
@@ -326,7 +345,14 @@ enum ExternalSessionHandoffChecks {
         try expect(linked.count == 1 && linked.first?.id == agentId && supervisor.records[agentId]?.tileId == tileId,
                    "clicking the row again shows the same watch tile; got \(linked.count) watch agents")
 
-        // 4. The session ends in cmux: Ended, then Continue here takes it.
+        // 4. Review finding 6: one pass without the session while its process
+        //    still runs (a status file caught mid-rewrite) is not an end.
+        world.publish([])
+        try expect(view.sessionHandoffState == .watching(app: "cmux", canCopy: true, canMove: true),
+                   "a pass that misses a session whose process still runs must not end the watch; got \(String(describing: view.sessionHandoffState))")
+        world.publish([cmux])
+        // The session ends in cmux: Ended, then Continue here takes it.
+        end(cmuxProcess)
         world.publish([])
         try expect(view.sessionHandoffState == .ended(app: "cmux"),
                    "a watched session that ends says so; got \(String(describing: view.sessionHandoffState))")
@@ -368,7 +394,9 @@ enum ExternalSessionHandoffChecks {
             userLine("u1", "Why is the upload test flaky?"),
             assistantLine("a1", "The upload test races the temp-dir cleanup."),
         ])
-        let cmux = session(sessionId, pid: 41_101, cwd: world.fixture.pbRoot, title: "Fix flaky upload test",
+        let cmuxProcess = try liveHolder()
+        defer { end(cmuxProcess) }
+        let cmux = session(sessionId, pid: cmuxProcess.processIdentifier, cwd: world.fixture.pbRoot, title: "Fix flaky upload test",
                            host: .app("cmux"), transcript: file)
         let desktopId = "9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a"
         let desktop = session(desktopId, pid: 41_102, cwd: world.fixture.pbRoot, title: "LinkedIn post",
@@ -400,8 +428,16 @@ enum ExternalSessionHandoffChecks {
         try expect(AgentSteeringQAFakes.spawnCount(in: bin) == 0, "no claude has run")
         world.snapshot(view, "waiting")
 
-        // 2. cmux writes its last turn and exits: the tile goes live at once.
+        // 2. Review finding 6: a pass that misses the session while cmux's
+        //    process still runs must not hand it over — that is two writers.
+        world.publish([desktop, copySource])
+        try expect(supervisor.records[agentId]?.externalSession?.mode == .movingHere && supervisor.isSessionHeld(agentId)
+                   && view.sessionHandoffState == .waitingToMove(app: "cmux", closesInApp: false, canCopy: true),
+                   "the session must stay cmux's while its process runs; link \(String(describing: supervisor.records[agentId]?.externalSession))")
+        world.publish([cmux, desktop, copySource])
+        // cmux writes its last turn and exits: the tile goes live at once.
         try world.append(userLine("u2", "One last thing in cmux.") + "\n" + assistantLine("a2", "Handled in cmux.") + "\n", to: file)
+        end(cmuxProcess)
         world.publish([desktop, copySource])
         guard let live = supervisor.records[agentId] else { throw Failure(message: "the agent went away") }
         try expect(live.externalSession == nil && live.providerSessionId == sessionId,
@@ -569,7 +605,10 @@ enum ExternalSessionHandoffChecks {
                    "the Ghostty holder gone, the pause ends")
 
         // 2. Someone resumes it in Ghostty: paused.
-        world.publish([holder(.app("Ghostty"), pid: 42_100)])
+        let ghosttyProcess = try liveHolder()
+        defer { end(ghosttyProcess) }
+        let ghostty = ghosttyProcess.processIdentifier
+        world.publish([holder(.app("Ghostty"), pid: ghostty)])
         try expect(delegate.externalSessionPauses[agentId]?.hostName == "Ghostty" && supervisor.externalHold(for: agentId) == "Ghostty",
                    "a session opened in Ghostty pauses the agent")
         try expect(view.sessionHandoffState == .paused(app: "Ghostty"), "the tile says so; got \(String(describing: view.sessionHandoffState))")
@@ -588,12 +627,19 @@ enum ExternalSessionHandoffChecks {
                    && world.inbox.row(forAgentId: agentId.rawValue)?.state.label == AgentStatusVocabulary.label(for: .needsAttention),
                    "the sidebar row says Needs attention; got \(String(describing: world.inbox.row(forAgentId: agentId.rawValue)?.state))")
         try world.press(.showApp, on: view)
-        try expect(activated.last.map { $0.0 == 42_100 && $0.1 == "Ghostty" } == true, "Show Ghostty brings Ghostty's process forward")
+        try expect(activated.last.map { $0.0 == ghostty && $0.1 == "Ghostty" } == true, "Show Ghostty brings Ghostty's process forward")
         world.snapshot(view, "paused")
 
         // 3. Ghostty writes a turn and exits: appended once, the agent resumes.
         try world.append(userLine("u2", "From Ghostty, rename the test.") + "\n" + assistantLine("a2", "Renamed it in Ghostty.") + "\n", to: file)
         let onScreen = world.texts(view)
+        // Review finding 6: one pass without it while Ghostty's process still
+        // runs (its status file mid-rewrite) is not the other app letting go.
+        world.publish([])
+        try expect(delegate.externalSessionPauses[agentId] != nil && supervisor.externalHold(for: agentId) == "Ghostty"
+                   && world.texts(view) == onScreen && supervisor.sendRefusal(for: agentId) != nil,
+                   "the pause must hold while the Ghostty process still runs, appending nothing")
+        end(ghosttyProcess)
         world.publish([])
         try expect(delegate.externalSessionPauses[agentId] == nil && supervisor.externalHold(for: agentId) == nil,
                    "the other process gone, the pause ends")

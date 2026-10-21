@@ -218,6 +218,21 @@ func runExternalSessionDiscoveryChecks() {
     expect(snapshot.sessions.filter { $0.provider == .codex }.count == 2,
            "codex app-server and the node wrapper are not sessions; got \(snapshot.sessions.filter { $0.provider == .codex }.map(\.sessionId))")
 
+    // `.plans/79` review 6: claude rewrites its `<pid>.json` in place, so one
+    // pass can catch it half-written. A file that fails to parse for a process
+    // still running keeps the record the last pass read — one bad read is not
+    // the holder letting go — and drops once that process is gone.
+    let cmuxFile = sessions.appendingPathComponent("1001.json")
+    let cmuxWhole = try! Data(contentsOf: cmuxFile)
+    try! Data(cmuxWhole.prefix(cmuxWhole.count / 2)).write(to: cmuxFile)
+    let midWrite = discovery.discover(inputs(home: home, processes: processes))
+    expect(midWrite.sessions.first { $0.sessionId == "s-cmux" }?.host == .app("cmux") && !midWrite.claudeUnreadable,
+           "a session file caught mid-rewrite keeps its last record while its process lives; got \(midWrite.sessions.map(\.sessionId))")
+    let exited = discovery.discover(inputs(home: home, processes: processes.filter { $0.pid != 1001 }))
+    expect(!exited.sessions.contains { $0.sessionId == "s-cmux" },
+           "a kept record goes with its process")
+    try! cmuxWhole.write(to: cmuxFile)
+
     // A schema change: files exist and none parse. No Claude rows, not wrong ones.
     let changedHome = root.appendingPathComponent("changed", isDirectory: true)
     let changedSessions = changedHome.appendingPathComponent(".claude/sessions", isDirectory: true)

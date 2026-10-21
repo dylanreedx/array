@@ -11676,6 +11676,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.performExternalSessionAction(action, rowId: rowId)
         }
         externalSessionMonitor.arrayShellPanes = { [weak self] in self?.shellTilePanes() ?? [:] }
+        externalSessionMonitor.reportsEveryPass = { [weak self] in
+            guard let self else { return false }
+            return !self.externalSessionPauses.isEmpty
+                || self.agentSupervisor.records.values.contains { $0.externalSession != nil }
+        }
         externalSessionMonitor.onChange = { [weak self] in
             self?.reconcileExternalSessions()
             self?.pushExternalSessionRows()
@@ -13023,7 +13028,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.linkExternalSession(agentId, AgentExternalSessionLink(
             mode: mode, provider: session.provider, sessionId: session.sessionId,
             hostName: externalHostName(of: session),
-            transcriptPath: transcriptURL.path, tracksProcess: session.pid != nil))
+            transcriptPath: transcriptURL.path, tracksProcess: session.pid != nil,
+            holderPid: session.pid, holderStartedAt: session.pid.flatMap(ExternalSessionHandoff.processStart)))
         // The production attach: the agent's own project's spawner and zone,
         // or beside the tile the session runs in. Its wiring renders the
         // session and starts following it.

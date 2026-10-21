@@ -25,6 +25,8 @@ import Darwin
 struct ExternalSessionPause: Equatable {
     var hostName: String
     var pid: Int32?
+    /// When `pid` started: the pause lifts only once that process is gone.
+    var startedAt: Date?
     var provider: ExternalSessionProvider
     var url: URL?
     var offset: UInt64
@@ -42,9 +44,11 @@ extension AppDelegate {
                 let holding = ExternalSessionHandoff.holding(link, in: snapshot, discovered: discovered)
                 if case let .heldElsewhere(session) = holding {
                     let name = externalHostName(of: session)
-                    if name != link.hostName {
+                    if name != link.hostName || session.pid != link.holderPid {
                         var renamed = link
                         renamed.hostName = name
+                        renamed.holderPid = session.pid
+                        renamed.holderStartedAt = session.pid.flatMap(ExternalSessionHandoff.processStart)
                         agentSupervisor.linkExternalSession(record.id, renamed)
                     }
                 } else if case .released = holding, link.mode == .movingHere {
@@ -227,6 +231,7 @@ extension AppDelegate {
                 if pause.hostName != name || pause.pid != holder.pid {
                     pause.hostName = name
                     pause.pid = holder.pid
+                    pause.startedAt = holder.pid.flatMap(ExternalSessionHandoff.processStart)
                     externalSessionPauses[id] = pause
                 }
                 return
@@ -239,12 +244,16 @@ extension AppDelegate {
             // the last whole line, so a line mid-write is appended whole later.
             let offset = url.map { SessionFileTail.tail(in: $0, maxBytes: 64 * 1024).end } ?? 0
             externalSessionPauses[id] = ExternalSessionPause(
-                hostName: name, pid: holder.pid, provider: provider, url: url, offset: offset)
+                hostName: name, pid: holder.pid, startedAt: holder.pid.flatMap(ExternalSessionHandoff.processStart),
+                provider: provider, url: url, offset: offset)
             agentSupervisor.beginExternalHold(for: id, hostName: name)
             return
         }
+        // Released only once the holding process is really gone: one pass that
+        // missed it (its status file mid-rewrite) is not the other app letting go.
         guard let pause = externalSessionPauses[id],
-              discovered, !(provider == .claude && snapshot.claudeUnreadable) else { return }
+              discovered, !(provider == .claude && snapshot.claudeUnreadable),
+              ExternalSessionHandoff.holderIsGone(pid: pause.pid, startedAt: pause.startedAt) else { return }
         // The other process let go: what it wrote comes into the transcript,
         // then the agent is Array's again.
         externalSessionPauses[id] = nil

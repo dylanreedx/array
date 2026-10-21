@@ -31,10 +31,15 @@ public struct AgentExternalSessionLink: Codable, Equatable, Sendable {
     /// A Codex app thread has none: the app runs every thread in one server,
     /// so Array cannot tell when one closes.
     public var tracksProcess: Bool
+    /// The process discovery last saw holding the session, and when it started:
+    /// the session is let go only once THAT process is gone, never because one
+    /// discovery pass missed it.
+    public var holderPid: Int32?
+    public var holderStartedAt: Date?
 
     public init(
         mode: Mode, provider: ExternalSessionProvider, sessionId: String, hostName: String,
-        transcriptPath: String?, tracksProcess: Bool
+        transcriptPath: String?, tracksProcess: Bool, holderPid: Int32? = nil, holderStartedAt: Date? = nil
     ) {
         self.mode = mode
         self.provider = provider
@@ -42,6 +47,8 @@ public struct AgentExternalSessionLink: Codable, Equatable, Sendable {
         self.hostName = hostName
         self.transcriptPath = transcriptPath
         self.tracksProcess = tracksProcess
+        self.holderPid = holderPid
+        self.holderStartedAt = holderStartedAt
     }
 
     /// `ExternalAgentSession.id`: the sidebar's row key for the session.
@@ -80,8 +87,30 @@ public enum ExternalSessionHandoff {
             return .heldElsewhere(held)
         }
         guard discovered, link.tracksProcess,
-              !(link.provider == .claude && snapshot.claudeUnreadable) else { return .unknown }
+              !(link.provider == .claude && snapshot.claudeUnreadable),
+              holderIsGone(pid: link.holderPid, startedAt: link.holderStartedAt)
+        else { return .unknown }
         return .released
+    }
+
+    /// When the process at `pid` started; nil when none has that pid.
+    public static func processStart(_ pid: Int32) -> Date? {
+        #if os(macOS)
+        ProcessFileProbe.startTime(pid)
+        #else
+        nil
+        #endif
+    }
+
+    /// Whether the process last seen holding a session has really gone: no
+    /// process has its pid now, or the one that has is a different process (a
+    /// reused pid). A session merely missing from one discovery pass — its
+    /// status file caught mid-rewrite — is not a release; acting on it would
+    /// put a second writer on a session the other app still has open.
+    public static func holderIsGone(pid: Int32?, startedAt: Date?) -> Bool {
+        guard let pid, let now = processStart(pid) else { return true }
+        guard let startedAt else { return true }
+        return abs(now.timeIntervalSince(startedAt)) > 1
     }
 
     /// Edge case 1: a process outside Array holding one of an Array agent's own

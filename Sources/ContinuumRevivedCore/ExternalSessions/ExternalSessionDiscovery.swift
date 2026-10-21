@@ -59,6 +59,11 @@ public final class ExternalSessionDiscovery {
     static let titleTailBytes = 64 * 1024
 
     private var claudeTitles: [String: (stamp: Date, title: String?)] = [:]
+    /// The last record each `<pid>.json` parsed to. Claude rewrites the file in
+    /// place, so a pass can read it half-written; that pass keeps this record
+    /// rather than reporting the session gone. `sessions` still drops it the
+    /// moment its process is not the one that wrote it.
+    private var claudeRecords: [Int32: ClaudeLiveSessions.Record] = [:]
     private var rolloutMetas: [String: CodexRolloutLocator.SessionMeta] = [:]
     private var codexIndex: (stamp: Date, names: [String: String])?
 
@@ -79,12 +84,15 @@ public final class ExternalSessionDiscovery {
             // `<pid>.json` only. The `.key` files beside them are never opened.
             .filter { $0.pathExtension == "json" }
         var records: [ClaudeLiveSessions.Record] = []
+        var kept: [Int32: ClaudeLiveSessions.Record] = [:]
         for file in files {
-            guard let pid = Int32(file.deletingPathExtension().lastPathComponent),
-                  let data = try? Data(contentsOf: file),
-                  let record = ClaudeLiveSessions.parse(data, filePid: pid) else { continue }
+            guard let pid = Int32(file.deletingPathExtension().lastPathComponent) else { continue }
+            let parsed = (try? Data(contentsOf: file)).flatMap { ClaudeLiveSessions.parse($0, filePid: pid) }
+            guard let record = parsed ?? claudeRecords[pid] else { continue }
             records.append(record)
+            kept[pid] = record
         }
+        claudeRecords = kept
         var seenTranscripts: Set<String> = []
         let result = ClaudeLiveSessions.sessions(
             records: records, fileCount: files.count, processes: inputs.processes,
@@ -171,6 +179,15 @@ public enum ProcessFileProbe {
             String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
         }
         return path.isEmpty ? nil : path
+    }
+
+    /// When the process at `pid` started, from the kernel; nil when no process
+    /// has that pid. A pid with a different start is a different process.
+    public static func startTime(_ pid: Int32) -> Date? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard pid > 0, proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return Date(timeIntervalSince1970: Double(info.pbi_start_tvsec) + Double(info.pbi_start_tvusec) / 1_000_000)
     }
 
     /// The paths of the files it holds open.
