@@ -15,13 +15,14 @@ import GhosttyKit
 /// user's. The app's own discovery monitor maps it to that tile; the band's
 /// button is clicked with real mouse events. Then:
 ///
-/// - busy: an agent tile beside the shell on the same session, its history
-///   replayed once, held — no `/exit` typed, sends refused, "Still open in …"
-///   up — until the person types `/exit`; then the shell's last turn follows
-///   an "In <shell> · 1 turn" boundary and the agent is live;
+/// - busy: a Move here agent tile beside the shell on the same session, its
+///   history once under a "From <shell>" boundary, held — no `/exit` typed,
+///   sends refused, "Still open in …" up — while the turn finishes in the
+///   tile, until the person types `/exit`; then the agent continues the session;
 /// - idle: Array types `/exit` itself, claude exits, the shell's prompt comes
 ///   back and the agent is live at once;
-/// - throughout, one sidebar row per session.
+/// - throughout, one sidebar row per session: the shell's while it holds the
+///   session, then the agent's.
 @MainActor
 enum ShellOpenAsAgentChecks {
     struct Failure: Error, CustomStringConvertible {
@@ -275,7 +276,8 @@ enum ShellOpenAsAgentChecks {
             inbox.layoutForQA()
             let external = ExternalSessionRows.rowId(forSessionKey: "claude:\(sid)")
             return inbox.rowIdsForQA.filter { id in
-                id == external || supervisor.records[AgentID(rawValue: id)]?.providerSessionId == sid
+                guard let record = supervisor.records[AgentID(rawValue: id)] else { return id == external }
+                return record.providerSessionId == sid || record.externalSession?.sessionId == sid
             }
         }
         func entries(_ tile: ManagedAgentTileNSView) -> String {
@@ -320,10 +322,9 @@ enum ShellOpenAsAgentChecks {
         guard created.count == 1, let busyAgent = created.first, let record = supervisor.records[busyAgent] else {
             throw Failure(description: "a click on Open as agent tile must create one agent; created \(created.count)")
         }
-        try expect(record.harness == .claudeCode && record.providerSessionId == busySid
-                   && AgentSupervisor.claudeRunnerConfig(for: record).sessionId == busySid
-                   && AgentSupervisor.claudeRunnerConfig(for: record).conversationMayExist,
-                   "the agent must be a Claude agent that resumes the shell's session; record \(String(describing: record.providerSessionId))")
+        try expect(record.harness == .claudeCode && record.externalSession?.mode == .movingHere
+                   && record.externalSession?.sessionId == busySid && record.externalSession?.hostName == place,
+                   "the agent must be a Claude agent waiting to move the shell's session here; link \(String(describing: record.externalSession))")
         // What the shell's claude actually received, as it arrived.
         pump(0.6)
         let typedWhileBusy = typed(busySid).filter { $0.text == "/exit" }
@@ -353,38 +354,46 @@ enum ShellOpenAsAgentChecks {
         log.append("agent tile \(sideBySide ? "right of" : "below") the shell: shell \(shellRect), agent \(agentRect)")
         try expect(pump(until: { occurrences("PRIOR busy question", in: entries(agentTile)) == 1 }, timeout: 5),
                    "the session's history must be replayed once; got \(entries(agentTile))")
-        try expect(supervisor.sendRefusal(for: busyAgent) != nil && supervisor.sessionHeldElsewhere(for: busyAgent) == place,
+        try expect(supervisor.sendRefusal(for: busyAgent) != nil && supervisor.isSessionHeld(busyAgent),
                    "while the shell's claude writes the session, the agent must not")
-        try expect(agentTile.qaFaceFlipBannerVisible
-                   && agentTile.qaFaceFlipBanner.content == .waiting(
-                       title: "Still open in \(place)", detail: "Type /exit there and it continues here."),
-                   "the agent tile must say where the session is still open; banner \(String(describing: agentTile.qaFaceFlipBanner.content))")
+        try expect(agentTile.sessionHandoffState == .waitingToMove(app: place, closesInApp: false, canCopy: true)
+                   && agentTile.qaSessionHandoffBanner != nil,
+                   "the agent tile must say the session is still open in '\(place)'; state \(String(describing: agentTile.sessionHandoffState))")
+        guard let firstEntry = agentTile.qaDocumentForChecks.entries.first else { throw Failure(description: "no history") }
+        try expect(firstEntry.blocks.map(\.kind) == [.sessionBoundary]
+                   && AgentTranscriptCopyController.plainText(for: firstEntry.blocks).hasPrefix("From \(place)"),
+                   "the history must follow a 'From \(place)' session boundary; got \(firstEntry.blocks.map(\.kind.rawValue))")
         try expect(pump(until: { shell.claudeSessionId == nil && button() == nil }, timeout: 3),
                    "once an agent owns the session the shell stops offering it")
+        let shellRow = ExternalSessionRows.rowId(forSessionKey: "claude:\(busySid)")
         let waitingRows = rowsFor(busySid)
-        try expect(waitingRows == [busyAgent.rawValue] && inbox.row(forAgentId: busyAgent.rawValue)?.whereMarker?.text == place,
-                   "one row for the session — the agent's, still marked '\(place)'; got \(waitingRows.count) rows, marker \(String(describing: inbox.row(forAgentId: busyAgent.rawValue)?.whereMarker))")
+        try expect(waitingRows == [shellRow] && inbox.row(forAgentId: shellRow)?.whereMarker?.text == place,
+                   "one row for the session — the shell's, marked '\(place)', while it holds it; got \(waitingRows.count) rows, marker \(String(describing: inbox.row(forAgentId: shellRow)?.whereMarker))")
         fixture.canvas.layoutSubtreeIfNeeded()
         AgentFaceChecks.saveWindowPNG(window, to: directory.appendingPathComponent("agent-beside-shell-waiting.png"))
         AgentFaceChecks.savePNG(of: agentTile, rect: agentTile.bounds,
                                 to: directory.appendingPathComponent("agent-tile-waiting.png"))
-        log.append("busy: agent tile beside the shell, history once, held as '\(place)', no /exit")
+        log.append("busy: agent tile beside the shell, history once, waiting as Move here, no /exit")
 
         // The turn ends; the agent still waits (decision 2: Array never ends a
         // claude it found busy), until the person types /exit themselves.
         try expect(pump(until: { liveStatus(busySid) == "idle" }, timeout: 10), "the slow turn never ended")
         pump(1.0)
-        try expect(!typed(busySid).contains { $0.text == "/exit" } && supervisor.sessionHeldElsewhere(for: busyAgent) != nil,
+        try expect(!typed(busySid).contains { $0.text == "/exit" } && supervisor.isSessionHeld(busyAgent),
                    "after the busy turn the agent keeps waiting and Array types nothing; typed \(typed(busySid).map(\.text))")
         try expect(rowsFor(busySid).count == 1, "still one row")
         enter("/exit")
-        try expect(pump(until: { supervisor.sessionHeldElsewhere(for: busyAgent) == nil }, timeout: 8),
+        try expect(pump(until: { !supervisor.isSessionHeld(busyAgent) }, timeout: 8),
                    "the agent must go live once the shell's claude exits")
         let afterExit = entries(agentTile)
-        try expect(occurrences("In \(place) · 1 turn", in: afterExit) == 1 && occurrences("fake: slow turn", in: afterExit) == 1
+        try expect(occurrences("fake: slow turn", in: afterExit) == 1 && occurrences("slow turn", in: afterExit) == 2
                    && occurrences("PRIOR busy question", in: afterExit) == 1,
-                   "the shell's last turn must follow an 'In \(place) · 1 turn' boundary, once; got \(afterExit)")
-        try expect(!agentTile.qaFaceFlipBannerVisible && supervisor.sendRefusal(for: busyAgent) == nil,
+                   "the shell's turn and the history each appear once; got \(afterExit)")
+        let adopted = supervisor.records[busyAgent]
+        try expect(adopted?.providerSessionId == busySid && adopted?.externalSession == nil
+                   && adopted.map { AgentSupervisor.claudeRunnerConfig(for: $0) }.map { $0.sessionId == busySid && $0.conversationMayExist } == true,
+                   "the agent now resumes the shell's session itself; record \(String(describing: adopted?.providerSessionId))")
+        try expect(agentTile.sessionHandoffState == nil && supervisor.sendRefusal(for: busyAgent) == nil,
                    "a live agent shows no waiting banner and can be sent to")
         let liveRows = rowsFor(busySid)
         try expect(liveRows == [busyAgent.rawValue] && inbox.row(forAgentId: busyAgent.rawValue)?.whereMarker == nil,
@@ -401,7 +410,7 @@ enum ShellOpenAsAgentChecks {
         AgentFaceChecks.saveWindowPNG(window, to: directory.appendingPathComponent("agent-live-after-shell-exit.png"))
         AgentFaceChecks.savePNG(of: agentTile, rect: agentTile.bounds,
                                 to: directory.appendingPathComponent("agent-tile-after-shell-exit.png"))
-        log.append("busy: went live on the person's /exit, shell's last turn under 'In \(place) · 1 turn'")
+        log.append("busy: went live on the person's /exit; the shell's last turn followed in the tile")
 
         // 3. Idle: Array types /exit itself, and the shell gets its prompt back.
         let idleSid = UUID().uuidString.lowercased()
@@ -423,7 +432,7 @@ enum ShellOpenAsAgentChecks {
         try expect(pump(until: { typed(idleSid).contains { $0.text == "/exit" } }, timeout: 5),
                    "the shell's claude must receive /exit; typed \(typed(idleSid).map(\.text))")
         try expect(typed(idleSid).allSatisfy { $0.status == "idle" }, "every line Array typed must arrive between turns; typed \(typed(idleSid))")
-        try expect(pump(until: { liveStatus(idleSid) == nil && supervisor.sessionHeldElsewhere(for: idleAgent) == nil }, timeout: 8),
+        try expect(pump(until: { liveStatus(idleSid) == nil && !supervisor.isSessionHeld(idleAgent) }, timeout: 8),
                    "claude must exit and the agent go live")
         let idleMark = Int.random(in: 1000...9999)
         enter("printf '%s-%s\\n' idle-back \(idleMark)")
@@ -434,8 +443,8 @@ enum ShellOpenAsAgentChecks {
             throw Failure(description: "the idle agent must have a tile")
         }
         try expect(pump(until: { occurrences("PRIOR idle question", in: entries(idleTile)) == 1 }, timeout: 5)
-                   && !entries(idleTile).contains("In \(place)"),
-                   "the idle session's history once, and no boundary: the shell took no turn after it; got \(entries(idleTile))")
+                   && supervisor.records[idleAgent]?.providerSessionId == idleSid,
+                   "the idle session's history once, and the agent continues it; got \(entries(idleTile))")
         try expect(rowsFor(idleSid) == [idleAgent.rawValue] && supervisor.sendRefusal(for: idleAgent) == nil,
                    "one row, the live agent's")
         log.append("idle: Array typed /exit between turns, the shell's prompt came back, the agent went live")

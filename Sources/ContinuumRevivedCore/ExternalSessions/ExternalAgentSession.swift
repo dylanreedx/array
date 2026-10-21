@@ -7,7 +7,7 @@ import Foundation
 // Array shell tile, or another app — and the sidebar keys its rows by session
 // id, so one session can never be two rows.
 
-public enum ExternalSessionProvider: String, Equatable, Hashable, Sendable {
+public enum ExternalSessionProvider: String, Codable, Equatable, Hashable, Sendable {
     case claude
     case codex
 }

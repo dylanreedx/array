@@ -113,11 +113,29 @@ class TileNSView: NSView, TokenThemed {
     }
 
     var agentStatus: AgentStatus? {
-        didSet {
-            titleBar?.agentStatus = agentStatus
-            canvas?.updateAttentionBorder(for: tile.id, status: agentStatus)
-        }
+        didSet { applyShownAgentStatus() }
     }
+
+    /// What the band says instead of `agentStatus` while something outside the
+    /// agent's own turns decides it: a watched session's status in another app,
+    /// or a paused agent waiting on one (`.plans/79` phase 2).
+    var agentStatusOverride: AgentStatus? {
+        didSet { if agentStatusOverride != oldValue { applyShownAgentStatus() } }
+    }
+
+    private func applyShownAgentStatus() {
+        let shown = agentStatusOverride ?? agentStatus
+        titleBar?.agentStatus = shown
+        canvas?.updateAttentionBorder(for: tile.id, status: shown)
+    }
+
+    /// A quiet "where" after the title — `cmux · read-only` — for a tile whose
+    /// session another app holds (`.plans/79` phase 2). nil draws none.
+    func setTitleBarWhereMarker(_ text: String?) {
+        titleBar?.whereMarker = text
+    }
+
+    var qaTitleBarWhereMarker: String? { titleBar?.whereMarker }
 
     /// Non-empty description of why the tile is in a failed/stale state (e.g. a
     /// lazy-resume recovery error). Surfaced as the tile's tooltip and carried
@@ -1717,6 +1735,10 @@ private final class TitleBarView: NSView, TokenThemed {
     private var closeActionTitle = "Close tile"
     private var stopActionTitle = "Stop run"
 
+    var whereMarker: String? {
+        didSet { if whereMarker != oldValue { invalidateChrome() } }
+    }
+
     private var displayedTitle: String {
         displayTitleOverride ?? "\(tile.kind.displayName) · \(tile.title)"
     }
@@ -2350,8 +2372,14 @@ private final class TitleBarView: NSView, TokenThemed {
         let scale = chromeScale
         let theme = effectiveTokenTheme
         let attrs = titleAttributes(theme: theme)
-        let title = displayedTitle as NSString
-        title.draw(in: titleRect(theme: theme), withAttributes: attrs)
+        let title = NSMutableAttributedString(string: displayedTitle, attributes: attrs)
+        if let whereMarker {
+            var quiet = attrs
+            quiet[.foregroundColor] = TextToken.textSecondary.color.nsColor(for: theme)
+            quiet[.font] = NSFont.systemFont(ofSize: titleFontWorldSize * 11 / 12, weight: .regular)
+            title.append(NSAttributedString(string: "  ·  \(whereMarker)", attributes: quiet))
+        }
+        title.draw(in: titleRect(theme: theme))
 
         if let agentStatus {
             drawAgentStatus(agentStatus)

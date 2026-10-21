@@ -1029,6 +1029,17 @@ run_app_check .build/debug/Array --agent-process-tracker-check
 # by session, marked where they live, scoped by "This Mac", never doubled; Copy
 # forks one into a managed Claude agent in its project.
 run_app_check .build/debug/Array --external-sessions-sidebar-check
+# .plans/79 phase 2: a session another app holds. Clicking its row watches it
+# read-only in its project — no runner, the file never written, appended lines
+# rendered once, the same tile on a second click, Ended then Continue here on
+# the same id. Move here waits while the session is open and goes live the
+# moment its process is gone (first turn `--resume`), Cancel and Copy instead.
+# An Array agent whose session opens in another app pauses (runner stopped,
+# sends refused) and resumes with what was written there; its own tagged
+# runner and Terminal face never pause it. Stand-in claude on PATH, no tmux.
+run_app_check .build/debug/Array --external-session-watch-check
+run_app_check .build/debug/Array --external-session-move-check
+run_app_check .build/debug/Array --agent-paused-elsewhere-check
 # CX-01: the bundled pi extensions through the REAL pi's own parser. Nothing else
 # in the repo ever asks pi to PARSE these files, which is how a merge-spliced
 # syntax error in continuum-workspace-tools.ts reached the branch with every leg

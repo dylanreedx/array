@@ -101,7 +101,9 @@ public enum ExternalSessionRows {
                     externalSession: InboxExternalSession(
                         sessionKey: session.id,
                         isProminent: session.status.isLive && inWorkspace,
-                        canMoveHere: true,
+                        // Move here waits for the holder to exit; a Codex app
+                        // thread has no process of its own to watch exit.
+                        canMoveHere: session.pid != nil,
                         // Claude forks with `--fork-session`; Codex has no fork Array drives yet.
                         canCopy: session.provider == .claude && session.transcriptURL != nil))
             }

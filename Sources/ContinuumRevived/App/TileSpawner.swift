@@ -1692,6 +1692,7 @@ final class TileSpawner {
         launchSelection: AgentLaunchSelection? = nil,
         providerSettings: AgentModelConfig.Resolution? = nil,
         mirrored: Bool = false,
+        announcesReady: Bool = true,
         creationScope explicitScope: CreationScope? = nil
     ) -> ManagedAgentOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
@@ -1753,12 +1754,13 @@ final class TileSpawner {
         view.ingest(.sessionStateChanged(.ready))
         // C5: an agent Array only MIRRORS cannot be prompted, so inviting a
         // prompt is the tile's first lie. Its own frames replace this line as
-        // soon as they arrive; until then it says what the tile is for.
-        view.ingest(.contentDelta(
+        // soon as they arrive; until then it says what the tile is for. A tile
+        // showing another app's session (`.plans/79`) says so in its banner.
+        if announcesReady || mirrored { view.ingest(.contentDelta(
             threadId: threadId, turnId: "bootstrap", streamKind: .assistant,
             delta: mirrored
                 ? "Watching this subagent. It runs inside its parent, so it takes no prompts here."
-                : "Ready. Type a prompt below to run \(spawnModelName) in this tile."))
+                : "Ready. Type a prompt below to run \(spawnModelName) in this tile.")) }
         let target = canvasView.installProjectTile(
             tileView: view, for: tile, targetZoneId: creationScope?.zoneId)
 
@@ -1928,6 +1930,7 @@ final class TileSpawner {
             at: worldPoint,
             launchSelection: supervisor.launchSelection(for: agentID),
             mirrored: supervisor.records[agentID]?.capabilities.locallyManaged == false,
+            announcesReady: supervisor.records[agentID]?.externalSession == nil,
             creationScope: creationScope)
     }
 

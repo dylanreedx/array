@@ -1178,7 +1178,7 @@ final class AgentSupervisor {
                   case .error(let error) = block.payload,
                   error.message == AgentContextFullRecovery.canonicalErrorMessage else { return nil }
         }
-        guard !terminalFaceAgents.contains(id), contextRecoveryInFlight.insert(id).inserted else { return nil }
+        guard !isSessionHeld(id), contextRecoveryInFlight.insert(id).inserted else { return nil }
         defer { contextRecoveryInFlight.remove(id) }
         guard let record = records[id], let harness = record.harness, runners[id] == nil,
               let terminal = history[id]?.last(where: { if case .turnCompleted = $0 { return true }; return false }),
@@ -2349,7 +2349,8 @@ final class AgentSupervisor {
             claudeCLIAvailable: false,
             homeURL: homeURL,
             codexThreadId: record.codexThreadId,
-            codexHomeURL: codexHomeURL)
+            codexHomeURL: codexHomeURL,
+            claudeSessionId: record.providerSessionId)
     }
 
     // MARK: - Lifecycle
@@ -3320,8 +3321,13 @@ final class AgentSupervisor {
         if terminalFaceAgents.contains(id) {
             return "This agent is open in its Terminal face. Switch the tile back to Array to send from here."
         }
-        if let place = sessionsHeldElsewhere[id] {
-            return "This session is still open in \(place). Type /exit there and it continues here."
+        if let link = record.externalSession {
+            return link.mode == .watching
+                ? "Read-only. The session stays in \(link.hostName); Move here to continue it in Array."
+                : "Still open in \(link.hostName). It continues here once it closes there."
+        }
+        if let host = externalHolds[id] {
+            return "Paused while this session is also open in \(host), so the two don't overwrite each other."
         }
         return Self.sendRefusal(record: record)
     }
@@ -3657,14 +3663,14 @@ final class AgentSupervisor {
         guard record.capabilities.locallyManaged else {
             return .unavailable("This agent is run by another agent, not by Array.")
         }
+        if record.externalSession != nil || externalHolds[id] != nil {
+            return .unavailable("Another app holds this session.")
+        }
         if let snapshot = turnSnapshot(for: id), case .needsAction = snapshot.state {
             return .unavailable("Answer the request first — it belongs to the Array face.")
         }
         if !queuedMessages(for: id).isEmpty {
             return .unavailable("Send or clear the queued messages first.")
-        }
-        if let place = sessionsHeldElsewhere[id] {
-            return .unavailable("This session is still open in \(place).")
         }
         if runners[id] != nil || heldForReadiness[id] != nil
             || activeCompactionOperations.contains(id) || compactingAgents.contains(id) {
@@ -3740,38 +3746,76 @@ final class AgentSupervisor {
         notifyTurnCapabilitiesChanged(id)
     }
 
-    // MARK: - Held elsewhere (.plans/79, edge case 4)
+    // MARK: - Sessions held by another app (.plans/79-session-handoff, phase 2)
 
-    /// Agents whose session another process still writes — the claude in the
-    /// shell tile it was opened from — by where that is ("Shell 2"). One
-    /// session, one writer, as for the Terminal face: no runner of Array's
-    /// starts for it, whoever asks, until that process has gone.
-    private var sessionsHeldElsewhere: [AgentID: String] = [:]
+    /// Agents paused because a process outside Array holds their session (edge
+    /// case 1), with where it is open. Not persisted: discovery says it again
+    /// after a relaunch, and the restore reads what the other app wrote.
+    private var externalHolds: [AgentID: String] = [:]
 
-    func sessionHeldElsewhere(for id: AgentID) -> String? { sessionsHeldElsewhere[id] }
+    /// Whether anything but this agent's own runner holds its session: the
+    /// Terminal face, another app, or — for a watch or Move here tile — the
+    /// app it was never taken from. One session, one writer.
+    func isSessionHeld(_ id: AgentID) -> Bool {
+        terminalFaceAgents.contains(id) || externalHolds[id] != nil || records[id]?.externalSession != nil
+    }
 
-    func holdSession(_ id: AgentID, elsewhere place: String) {
-        guard records[id] != nil, sessionsHeldElsewhere[id] != place else { return }
-        sessionsHeldElsewhere[id] = place
+    func externalHold(for id: AgentID) -> String? { externalHolds[id] }
+
+    /// Pauses an agent whose session another app opened. Its pooled process is
+    /// stopped as the Terminal face stops it; a turn already running cannot be
+    /// unwritten, so it finishes and its process is not kept for another.
+    @discardableResult
+    func beginExternalHold(for id: AgentID, hostName: String) -> Bool {
+        guard records[id] != nil, externalHolds[id] == nil else { return false }
+        externalHolds[id] = hostName
+        if let idle = idleSessionRunners.removeValue(forKey: id) {
+            idleReapTokens[id] = nil
+            idle.stop()
+            interruptWorkingClaudeMirroredChildren(of: id)
+            returnDeliveringSteers(for: id)
+        }
+        if runners[id] != nil { retireSessionAfterTurn.insert(id) }
+        notifyTurnCapabilitiesChanged(id)
+        return true
+    }
+
+    /// The other app let go. `tookTurns` says it wrote to the session, so the
+    /// next turn resumes rather than starting it.
+    func endExternalHold(for id: AgentID, tookTurns: Bool) {
+        guard externalHolds.removeValue(forKey: id) != nil else { return }
+        if tookTurns, var record = records[id] {
+            record.latestTurnAt = max(record.latestTurnAt ?? .distantPast, Date())
+            records[id] = record
+            persist(record)
+        }
         notifyTurnCapabilitiesChanged(id)
     }
 
-    func releaseSessionHold(_ id: AgentID) {
-        guard sessionsHeldElsewhere.removeValue(forKey: id) != nil else { return }
-        notifyTurnCapabilitiesChanged(id)
-    }
-
-    /// This Claude agent continues `sessionId`, a conversation another
-    /// process started: its first launch resumes it (`--resume`) in the
-    /// session's own folder.
-    func adoptExternalSession(_ id: AgentID, sessionId: String) {
-        guard var record = records[id], record.harness == .claudeCode else { return }
-        record.providerSessionId = sessionId
-        // The conversation exists; without a turn on record the runner would
-        // start it fresh with `--session-id` instead of resuming it.
-        record.latestTurnAt = record.latestTurnAt ?? Date()
+    /// Makes `id` a watch or Move here agent for a session another app holds.
+    func linkExternalSession(_ id: AgentID, _ link: AgentExternalSessionLink?) {
+        guard var record = records[id], record.externalSession != link else { return }
+        record.externalSession = link
         records[id] = record
         persist(record)
+        notifyTurnCapabilitiesChanged(id)
+    }
+
+    /// The session became this agent's own: the other app let go of it (Move
+    /// here, Continue here). The next turn resumes it — `--resume <id>` for
+    /// claude, the thread for codex.
+    func adoptExternalSession(_ id: AgentID) {
+        guard var record = records[id], let link = record.externalSession else { return }
+        switch link.provider {
+        case .claude: record.providerSessionId = link.sessionId
+        case .codex: record.codexThreadId = link.sessionId
+        }
+        record.externalSession = nil
+        // There is a conversation to resume: claude's resume-first gate.
+        record.latestTurnAt = max(record.latestTurnAt ?? .distantPast, Date())
+        records[id] = record
+        persist(record)
+        notifyTurnCapabilitiesChanged(id)
     }
 
     /// Agents whose Terminal face claude says it is mid-turn, from claude's own
@@ -3786,8 +3830,7 @@ final class AgentSupervisor {
         if changed { notifyTurnCapabilitiesChanged(id) }
     }
 
-    /// Turns taken outside Array — in the Terminal face, or in the shell a
-    /// session was opened from — written into the agent's saved transcript
+    /// Turns taken in the Terminal face, written into the agent's saved transcript
     /// after a boundary, exactly as the tile appended them. Without this they
     /// lived only in the tile that flipped back: a tile closed and reopened, or
     /// one opened later, showed the conversation with a hole in it.
@@ -6020,7 +6063,7 @@ final class AgentSupervisor {
             state: state,
             capabilities: AgentTurnCapabilities(
                 canSend: !mirrored && !occupied && heldForReadiness[id] == nil
-                    && !terminalFaceAgents.contains(id) && sessionsHeldElsewhere[id] == nil
+                    && !isSessionHeld(id)
                     && deferredForceSends[id] == nil && pendingForceSends[id] == nil
                     && !contextRecoveryInFlight.contains(id) && state.acceptsNewTurn,
                 // In flight = stoppable, full stop (P5.5 consolidation): `stop()`
@@ -6119,10 +6162,9 @@ final class AgentSupervisor {
     /// capability check hidden in the view.
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
         guard records[agentID] != nil else { return .refused(.unknownAgent) }
-        // The Terminal face owns the session: nothing of Array's may write it.
-        guard !terminalFaceAgents.contains(agentID), sessionsHeldElsewhere[agentID] == nil else {
-            return .refused(.turnNotReady)
-        }
+        // The Terminal face or another app owns the session: nothing of
+        // Array's may write it.
+        guard !isSessionHeld(agentID) else { return .refused(.turnNotReady) }
         guard let snapshot = turnSnapshot(for: agentID) else { return .refused(.unknownAgent) }
         switch intent {
         case .send(let draft):
@@ -7510,7 +7552,7 @@ final class AgentSupervisor {
     /// Admission is rechecked after every actor hop: Stop or a new force send
     /// can change it while the durable queue/attachment store is awaited.
     private func canDrainQueue(for id: AgentID) -> Bool {
-        runners[id] == nil && !pausedQueues.contains(id)
+        runners[id] == nil && !pausedQueues.contains(id) && !isSessionHeld(id)
             && pendingForceSends[id] == nil && deferredForceSends[id] == nil
             && !contextRecoveryInFlight.contains(id)
     }

@@ -821,7 +821,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         }
         refreshTranscriptThinkingIndicator()
         refreshFaceSwitch()
-        refreshSessionHoldBanner()
     }
 
     /// Install the supervisor-owned semantic truth before following its live tail.
@@ -1325,10 +1324,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     static let terminalBoundarySymbol = "apple.terminal"
 
-    /// Appends turns this agent's session took outside the tile — its Terminal
-    /// face, or the shell it was opened from — under a boundary ("In Shell 2 ·
-    /// 1 turn"), through the restore's own replay. Returns the boundary's text,
-    /// nil when there was nothing to append.
+    /// Appends turns this agent's session took outside the tile under a
+    /// boundary ("In Terminal · 2 turns"), through the restore's own replay.
+    /// Returns the boundary's text, nil when there was nothing to append.
     @discardableResult
     func appendTurnsTakenOutside(_ appended: RehydratedTranscript, place: String) -> String? {
         guard !appended.steps.isEmpty else { return nil }
@@ -1339,20 +1337,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         return boundary
     }
 
-    /// "Still open in Shell 2" while the session's other writer has not let go
-    /// (`AgentSupervisor.sessionHeldElsewhere`); gone the moment it has.
-    private func refreshSessionHoldBanner() {
-        guard let agentID = attachedAgentID else { return }
-        let waiting = agentSource?.sessionHeldElsewhere(for: agentID).map {
-            AgentFaceFlipBanner.Content.waiting(
-                title: "Still open in \($0)", detail: "Type /exit there and it continues here.")
-        }
-        guard waiting != shownHoldBanner else { return }
-        if let shownHoldBanner { faceFlipBanner.dismiss(shownHoldBanner) }
-        shownHoldBanner = waiting
-        if let waiting { faceFlipBanner.show(waiting) }
-    }
-    private var shownHoldBanner: AgentFaceFlipBanner.Content?
 
     /// "In Terminal · 1 turn" — the divider over the turns the face took.
     static func terminalBoundaryText(turns: Int, place: String = "Terminal") -> String {
@@ -1421,6 +1405,170 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private(set) var qaTerminalFaceAppendedTurns = 0
     var qaFaceFlipBannerVisible: Bool { !faceFlipBanner.isHidden }
     var qaFaceFlipBanner: AgentFaceFlipBanner { faceFlipBanner }
+
+    // MARK: - A session another app holds (.plans/79-session-handoff, phase 2)
+    //
+    // Watching a session from another app, waiting to move it here, or paused
+    // because one of this agent's sessions was opened elsewhere. The host
+    // decides which (`AppDelegate.reconcileExternalSessions`); the tile shows
+    // it in place of the composer and keeps its transcript current by reading
+    // the CLI's own session file, a whole line at a time, from where it left
+    // off.
+
+    /// Pressed banner buttons, for the host.
+    var onSessionHandoffAction: ((AgentSessionHandoffAction) -> Void)?
+    private let sessionHandoffBanner = AgentSessionHandoffBanner(frame: .zero)
+    private(set) var sessionHandoffState: AgentSessionHandoffState?
+
+    func applySessionHandoff(_ state: AgentSessionHandoffState?, status: AgentStatus? = nil) {
+        sessionHandoffState = state
+        if let state { sessionHandoffBanner.apply(state) }
+        sessionHandoffBanner.isHidden = state == nil
+        composeBackdrop.isHidden = state != nil
+        switch state {
+        case let .watching(app, _, _), let .ended(app): setTitleBarWhereMarker("\(app) \u{00B7} read-only")
+        case .waitingToMove, .paused, nil: setTitleBarWhereMarker(nil)
+        }
+        agentStatusOverride = state == nil ? nil : status
+        applyAgentHeader(status: descriptor.status)
+    }
+
+    /// How often a followed session file is asked for its length. One stat
+    /// per interval while the tile is resident, and nothing per frame.
+    static var sessionFollowInterval: TimeInterval = 1.5
+    private struct SessionFollow {
+        var url: URL
+        var provider: ExternalSessionProvider
+        /// Just past the last whole line rendered.
+        var offset: UInt64
+        var reading: Bool
+    }
+    private var sessionFollow: SessionFollow?
+    private var sessionFollowTimer: Timer?
+
+    /// Renders a session from its file and follows it as the other app writes.
+    /// A second call for the same file only makes sure the follower runs.
+    func followSessionFile(_ url: URL, provider: ExternalSessionProvider, origin: String) {
+        if sessionFollow?.url == url {
+            startSessionFollowTimer()
+            return
+        }
+        sessionFollow = SessionFollow(url: url, provider: provider, offset: 0, reading: true)
+        let threadId = threadId
+        let maxBytes = RehydrationLimits().maxBytes
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let tail = SessionFileTail.tail(in: url, maxBytes: maxBytes)
+            let transcript = Self.parseSession(tail.lines, provider: provider, threadId: threadId, truncated: tail.truncated)
+            await MainActor.run {
+                guard let self, var follow = self.sessionFollow, follow.url == url else { return }
+                if !transcript.steps.isEmpty {
+                    // A tile made a moment ago may not have laid out yet, and a
+                    // transcript list given rows before its first layout leaves
+                    // the last of them off screen.
+                    self.layoutSubtreeIfNeeded()
+                    let count = transcript.restoredMessageCount
+                    let text = "From \(origin) \u{2014} \(count) \(count == 1 ? "message" : "messages")"
+                        + (transcript.omittedEarlier ? " \u{00B7} earlier history not shown" : "")
+                    self.renderRehydratedPreviousSession(transcript, boundaryText: text)
+                }
+                follow.offset = tail.end
+                follow.reading = false
+                self.sessionFollow = follow
+                self.startSessionFollowTimer()
+            }
+        }
+    }
+
+    /// Stops following. `catchUp` first renders whatever was written since the
+    /// last read — the moment a session becomes this agent's, nothing the other
+    /// app wrote may be missing from the transcript.
+    @discardableResult
+    func stopFollowingSessionFile(catchUp: Bool) -> Int {
+        sessionFollowTimer?.invalidate()
+        sessionFollowTimer = nil
+        guard let follow = sessionFollow else { return 0 }
+        sessionFollow = nil
+        guard catchUp else { return 0 }
+        return appendSessionFile(follow.url, from: follow.offset, provider: follow.provider, notice: nil).turns
+    }
+
+    /// What a session file holds past `offset`, appended through the restore's
+    /// own replay loop. `notice` leads the appended turns (`In Ghostty · 2
+    /// turns`). Returns the turns appended and the offset after them.
+    @discardableResult
+    func appendSessionFile(
+        _ url: URL, from offset: UInt64, provider: ExternalSessionProvider, notice: String?
+    ) -> (turns: Int, end: UInt64) {
+        let chunk = SessionFileTail.lines(in: url, from: offset)
+        return (appendSessionLines(chunk.lines, provider: provider, notice: notice), chunk.end)
+    }
+
+    private func appendSessionLines(_ lines: [String], provider: ExternalSessionProvider, notice: String?) -> Int {
+        guard !lines.isEmpty else { return 0 }
+        let transcript = Self.parseSession(
+            lines, provider: provider, threadId: threadId,
+            limits: RehydrationLimits(maxMessages: Int.max, maxBytes: Int.max))
+        guard !transcript.steps.isEmpty else { return 0 }
+        let turns = transcript.steps.filter { if case .userPrompt = $0 { return true } else { return false } }.count
+        if let notice {
+            // The same quiet divider the Terminal face's turns follow.
+            model.appendSessionBoundary(
+                id: "session-elsewhere-\(UUID().uuidString)",
+                text: "\(notice) \u{00B7} \(turns) \(turns == 1 ? "turn" : "turns")",
+                symbolName: Self.terminalBoundarySymbol)
+        }
+        replayRehydratedSteps(transcript)
+        return turns
+    }
+
+    nonisolated private static func parseSession(
+        _ lines: [String], provider: ExternalSessionProvider, threadId: String, truncated: Bool = false,
+        limits: RehydrationLimits = RehydrationLimits()
+    ) -> RehydratedTranscript {
+        switch provider {
+        case .claude:
+            return ClaudeSessionTranscriptReader.parse(lines: lines, threadId: threadId, truncated: truncated, limits: limits)
+        case .codex:
+            return CodexSessionTranscriptReader.parse(lines: lines, threadId: threadId, truncated: truncated, limits: limits)
+        }
+    }
+
+    private func startSessionFollowTimer() {
+        guard sessionFollowTimer == nil, sessionFollow != nil else { return }
+        let timer = Timer(timeInterval: Self.sessionFollowInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pollSessionFile() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        sessionFollowTimer = timer
+    }
+
+    /// One stat; a read only when the file grew. The read and parse run off
+    /// the main thread, the replay on it.
+    func pollSessionFile() {
+        guard var follow = sessionFollow, !follow.reading,
+              SessionFileTail.length(follow.url) > follow.offset else { return }
+        follow.reading = true
+        sessionFollow = follow
+        let (url, offset, provider) = (follow.url, follow.offset, follow.provider)
+        Task.detached(priority: .utility) { [weak self] in
+            let chunk = SessionFileTail.lines(in: url, from: offset)
+            await MainActor.run {
+                guard let self, var follow = self.sessionFollow, follow.url == url, follow.offset == offset else { return }
+                _ = self.appendSessionLines(chunk.lines, provider: provider, notice: nil)
+                follow.offset = chunk.end
+                follow.reading = false
+                self.sessionFollow = follow
+            }
+        }
+    }
+
+    var qaSessionHandoffBanner: AgentSessionHandoffBanner? {
+        sessionHandoffBanner.isHidden ? nil : sessionHandoffBanner
+    }
+    var qaComposerHidden: Bool { composeBackdrop.isHidden }
+    var qaSessionFollowOffset: UInt64? { sessionFollow?.offset }
+    var qaSessionFollowReading: Bool { sessionFollow?.reading ?? false }
+    var qaSessionFollowTimerRunning: Bool { sessionFollowTimer?.isValid == true }
 
     // MARK: - Identity colour
 
@@ -1605,6 +1753,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     func detach() {
         prepareStreamingMarkupForTeardown(final: true)
+        // A detached tile follows nothing: no session file is read for it.
+        sessionFollowTimer?.invalidate()
+        sessionFollowTimer = nil
         // Detach is an immediate visual/lifecycle boundary: a retained transcript
         // may remain visible, but its live Gyro tail must stop and leave the list
         // document before any later reuse.
@@ -1988,6 +2139,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // version can no longer be compared against it.
         lastForwardedDocumentVersion = nil
         hasRenderedRehydratedSession = false
+        // A followed session renders again from its file on the next wire.
+        stopFollowingSessionFile(catchUp: false)
         synchronizeV2Transcript(final: true)
     }
 
@@ -2111,14 +2264,20 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// notice rather than ingesting a synthetic event: restored bodies must not
     /// re-cross the companion sync boundary. Idempotent so a re-wire cannot stack
     /// the history.
-    func renderRehydratedPreviousSession(_ transcript: RehydratedTranscript) {
+    func renderRehydratedPreviousSession(_ transcript: RehydratedTranscript, boundaryText: String? = nil) {
         guard !hasRenderedRehydratedSession else { return }
         hasRenderedRehydratedSession = true
         cancelStreamingMarkupParseTimer()
-        model.appendNotice(
-            id: "notice-previous-session",
-            title: "previous session",
-            text: transcript.boundaryNoticeText)
+        if let boundaryText {
+            // A watched session's history ("From cmux — 12 messages"): the
+            // divider every session that came from outside the tile uses.
+            model.appendSessionBoundary(id: "previous-session", text: boundaryText, symbolName: "eye")
+        } else {
+            model.appendNotice(
+                id: "notice-previous-session",
+                title: "previous session",
+                text: transcript.boundaryNoticeText)
+        }
         replayRehydratedSteps(transcript)
     }
 
@@ -2913,7 +3072,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private func refreshV2TurnSnapshot() {
         evaluatePendingTerminalFlip()
         refreshFaceSwitch()
-        refreshSessionHoldBanner()
         if let agentID = attachedAgentID,
            let snapshot = agentSource?.turnSnapshot(for: agentID) {
             v2TurnSnapshot = snapshot
@@ -3084,7 +3242,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         v2PendingDock = pendingDock
         faceFlipBanner.onStopNow = { [weak self] in self?.stopTurnForPendingFlip() }
         faceFlipBanner.onCancel = { [weak self] in self?.cancelPendingTerminalFlip() }
-        let layout = NSStackView(views: [agentHeader, locationStatus, transcript, pendingDock, faceFlipBanner, composeBackdrop])
+        sessionHandoffBanner.isHidden = true
+        sessionHandoffBanner.onAction = { [weak self] action in self?.onSessionHandoffAction?(action) }
+        let layout = NSStackView(views: [
+            agentHeader, locationStatus, transcript, pendingDock, faceFlipBanner, sessionHandoffBanner, composeBackdrop,
+        ])
         layout.orientation = .vertical
         layout.spacing = 0
         layout.translatesAutoresizingMaskIntoConstraints = false
@@ -3127,6 +3289,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             transcript.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeBackdrop.widthAnchor.constraint(equalTo: layout.widthAnchor),
             faceFlipBanner.widthAnchor.constraint(equalTo: layout.widthAnchor),
+            sessionHandoffBanner.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeColumn.leadingAnchor.constraint(equalTo: composeBackdrop.leadingAnchor),
             composeColumn.trailingAnchor.constraint(equalTo: composeBackdrop.trailingAnchor),
             composeColumn.topAnchor.constraint(equalTo: composeBackdrop.topAnchor),
@@ -4017,7 +4180,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     private func applyAgentHeader(status: AgentStatus) {
-        if let snapshot = v2TurnSnapshot {
+        if let shown = agentStatusOverride {
+            // Another app's session decides it (`.plans/79` phase 2).
+            agentHeader.apply(AgentTileStatePresenter.present(
+                name: headerAgentName ?? tile.title, status: shown, branchContext: branchContext, startedAt: startedAt))
+        } else if let snapshot = v2TurnSnapshot {
             agentHeader.apply(AgentTileStatePresenter.present(
                 name: headerAgentName ?? tile.title,
                 snapshot: snapshot,

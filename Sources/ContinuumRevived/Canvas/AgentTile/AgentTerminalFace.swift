@@ -219,9 +219,7 @@ final class AgentTerminalFaceSession {
 /// - "Switches to Terminal when this turn ends", while a flip waits (edge case
 ///   9), with Stop now and Cancel;
 /// - why a flip cannot happen now, for a few seconds — a refusal is news about
-///   a click, not part of the conversation, so it never enters the transcript;
-/// - "Still open in Shell 2", while the session's other writer has not let go
-///   (edge case 4; `mocks/3-moving-sessions.png`, top right).
+///   a click, not part of the conversation, so it never enters the transcript.
 /// Paints in `draw(_:)` from tokens, like the title band, so it adds no layer
 /// colour.
 @MainActor
@@ -229,14 +227,12 @@ final class AgentFaceFlipBanner: NSView {
     enum Content: Equatable {
         case pendingFlip
         case refusal(String)
-        case waiting(title: String, detail: String)
     }
 
     /// How long a refusal stays up.
     static let refusalDuration: TimeInterval = 4
 
     let label = NSTextField(labelWithString: "Switches to Terminal when this turn ends")
-    let detail = NSTextField(labelWithString: "")
     let stopButton = NSButton(title: "Stop now", target: nil, action: nil)
     let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let icon = NSImageView()
@@ -255,15 +251,6 @@ final class AgentFaceFlipBanner: NSView {
         label.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        detail.font = NSFont.systemFont(ofSize: 12)
-        detail.lineBreakMode = .byTruncatingTail
-        detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        detail.isHidden = true
-        let text = NSStackView(views: [label, detail])
-        text.orientation = .vertical
-        text.alignment = .leading
-        text.spacing = 1
-        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         for button in [stopButton, cancelButton] {
             button.bezelStyle = .rounded
             button.controlSize = .small
@@ -271,7 +258,7 @@ final class AgentFaceFlipBanner: NSView {
         }
         stopButton.action = #selector(stopNow)
         cancelButton.action = #selector(cancel)
-        let row = NSStackView(views: [icon, text, NSView(), stopButton, cancelButton])
+        let row = NSStackView(views: [icon, label, NSView(), stopButton, cancelButton])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = CGFloat(Space.m)
@@ -340,21 +327,14 @@ final class AgentFaceFlipBanner: NSView {
         case .pendingFlip:
             symbol = "clock"
             label.stringValue = "Switches to Terminal when this turn ends"
-            detail.stringValue = ""
         case .refusal(let reason):
             symbol = "exclamationmark.circle"
             label.stringValue = reason
-            detail.stringValue = ""
-        case let .waiting(title, text):
-            symbol = "arrow.down.right.square"
-            label.stringValue = title
-            detail.stringValue = text
         }
         icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        detail.isHidden = detail.stringValue.isEmpty
         stopButton.isHidden = content != .pendingFlip
         cancelButton.isHidden = content != .pendingFlip
-        setAccessibilityLabel(([label.stringValue] + (detail.isHidden ? [] : [detail.stringValue])).joined(separator: ". "))
+        setAccessibilityLabel(label.stringValue)
         needsDisplay = true
     }
 
@@ -366,7 +346,6 @@ final class AgentFaceFlipBanner: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let theme = effectiveTokenTheme
         label.textColor = TextToken.textPrimary.color.nsColor(for: theme)
-        detail.textColor = TextToken.textSecondary.color.nsColor(for: theme)
         let card = bounds.insetBy(dx: CGFloat(Space.m), dy: CGFloat(Space.s))
         let radius = CGFloat(Radius.card)
         SurfaceToken.cardMessage.color.nsColor(for: theme).setFill()

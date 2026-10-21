@@ -62,6 +62,7 @@ public enum WorkspaceAPIExposure {
         "agent.resolvedModelId": .internal,
         "agent.providerContextWindows": .internal,
         "agent.pendingSessionForkFrom": .internal,
+        "agent.externalSession": .internal,
         "agent.settledOverride": .notExposed("Settling agents is a user-owned lifecycle action."),
         "agent.settledAtReferenceInterval": .internal,
         "agent.snoozedUntilReferenceInterval": .notExposed("Snoozing agents is native UI only."),

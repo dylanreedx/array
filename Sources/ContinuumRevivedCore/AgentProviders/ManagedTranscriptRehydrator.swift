@@ -383,6 +383,10 @@ extension ManagedTranscriptRehydrator {
         public var codexThreadId: String?
         public var codexHomeURL: URL
         public var limits: RehydrationLimits
+        /// The claude session the agent adopted (`AgentRecord.providerSessionId`):
+        /// a session moved in from another app, a fork, a `/clear`. nil reads
+        /// the id Array derives from the agent.
+        public var claudeSessionId: String?
 
         public init(
             agentUUID: UUID,
@@ -393,7 +397,8 @@ extension ManagedTranscriptRehydrator {
             homeURL: URL,
             codexThreadId: String? = nil,
             codexHomeURL: URL? = nil,
-            limits: RehydrationLimits = RehydrationLimits()
+            limits: RehydrationLimits = RehydrationLimits(),
+            claudeSessionId: String? = nil
         ) {
             self.agentUUID = agentUUID
             self.cwd = cwd
@@ -405,6 +410,7 @@ extension ManagedTranscriptRehydrator {
             self.codexHomeURL = codexHomeURL
                 ?? homeURL.appendingPathComponent(".codex", isDirectory: true)
             self.limits = limits
+            self.claudeSessionId = claudeSessionId
         }
     }
 
@@ -420,7 +426,7 @@ extension ManagedTranscriptRehydrator {
         let claudeURL = ClaudeSessionTranscriptReader.sessionFileURL(
             homeURL: inputs.homeURL,
             cwd: inputs.cwd,
-            sessionId: claudeSessionId(forAgentUUID: inputs.agentUUID))
+            sessionId: inputs.claudeSessionId ?? claudeSessionId(forAgentUUID: inputs.agentUUID))
         let piURL = PiSessionTranscriptReader.locateSessionFile(
             homeURL: inputs.homeURL,
             cwd: inputs.cwd,

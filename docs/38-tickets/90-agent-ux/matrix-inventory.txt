@@ -20,6 +20,7 @@ check --agent-message-bus-check
 check --agent-message-card-check
 check --agent-message-transcript-check
 check --agent-observer-independence-check
+check --agent-paused-elsewhere-check
 check --agent-presence-check
 check --agent-process-tracker-check
 check --agent-process-tracking-check
@@ -99,6 +100,8 @@ check --editor-web-bridge-check
 check --empty-workspace-creation-check
 check --exact-rebase-performance-check
 check --external-session-discovery-check
+check --external-session-move-check
+check --external-session-watch-check
 check --external-sessions-sidebar-check
 check --file-card-check
 check --file-document-session-check
@@ -330,6 +333,7 @@ leg run_app_check .build/debug/Array --agent-local-file-link-check
 leg run_app_check .build/debug/Array --agent-message-bus-check
 leg run_app_check .build/debug/Array --agent-message-card-check
 leg run_app_check .build/debug/Array --agent-observer-independence-check
+leg run_app_check .build/debug/Array --agent-paused-elsewhere-check
 leg run_app_check .build/debug/Array --agent-presence-check
 leg run_app_check .build/debug/Array --agent-process-tracker-check
 leg run_app_check .build/debug/Array --agent-restore-check
@@ -395,6 +399,8 @@ leg run_app_check .build/debug/Array --drag-magnetize-check
 leg run_app_check .build/debug/Array --editor-navigation-check
 leg run_app_check .build/debug/Array --editor-web-bridge-check
 leg run_app_check .build/debug/Array --empty-workspace-creation-check
+leg run_app_check .build/debug/Array --external-session-move-check
+leg run_app_check .build/debug/Array --external-session-watch-check
 leg run_app_check .build/debug/Array --external-sessions-sidebar-check
 leg run_app_check .build/debug/Array --file-card-check
 leg run_app_check .build/debug/Array --file-markdown-perf-check
