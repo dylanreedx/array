@@ -302,6 +302,7 @@ final class ProcessesPanelContentView: NSView, TokenThemed {
         let width = bounds.width
         let pad: CGFloat = 16
         liveDot.frame = NSRect(x: width - pad - 7, y: Self.headerHeight / 2 - 3.5, width: 7, height: 7)
+        liveDot.layer?.applyCapsule()
         let summaryWidth = min(200, fitWidth(summaryLabel))
         let lineHeight = ceil(titleLabel.intrinsicContentSize.height)
         summaryLabel.frame = NSRect(x: liveDot.frame.minX - 8 - summaryWidth,
@@ -982,7 +983,7 @@ final class ProcessesOtherAppRow: ProcessesPanelRow {
 final class ProcessesPortButton: NSButton, TokenThemed {
     let port: UInt16
     var onClick: (() -> Void)?
-    private var isHovered = false { didSet { if isHovered != oldValue { applyTokens() } } }
+    var isHovered = false { didSet { if isHovered != oldValue { applyTokens() } } }
     private var tracking: NSTrackingArea?
 
     init(port: UInt16) {
@@ -1043,7 +1044,7 @@ final class ProcessesTextButton: NSButton, TokenThemed {
     var onClick: (() -> Void)?
     var isDestructive = false { didSet { applyTokens() } }
     private let symbol: String?
-    private var isHovered = false { didSet { if isHovered != oldValue { applyTokens() } } }
+    var isHovered = false { didSet { if isHovered != oldValue { applyTokens() } } }
     private var tracking: NSTrackingArea?
 
     var text: String { didSet { applyTokens(); invalidateIntrinsicContentSize() } }

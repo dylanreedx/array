@@ -558,6 +558,11 @@ enum UIProbeAppearance {
                 picker.frame = NSRect(x: 0, y: max(0, 200 - size.height), width: size.width, height: size.height)
                 root.addSubview(picker)
                 return root
+            }),
+            // 0.7.30's processes panel: the surface, its rows and its two
+            // private controls, with the pointer-only fills painted.
+            ("appearance.processesPanel", NSSize(width: 480, height: 280), {
+                Self.processesPanelFixture()
             })
         ]
         // Read out of the source, not typed here: every declared conformer must show
@@ -1025,7 +1030,19 @@ enum UIProbeAppearance {
         // The transcript's context-compaction boundary: two hairlines either
         // side of its label, a LINE role (`decorativeHairline`) painted as a
         // FILL on its own sublayers. The host paints nothing.
-        "CompactionBoundaryView"
+        "CompactionBoundaryView",
+        // 0.7.30's processes panel: the `SurfaceToken.overlay` surface with a
+        // hairline outline. Its rows and text buttons paint nothing at rest
+        // (nil, never `.clear`) and the row ladder under the pointer; a port
+        // is a `codeSubdued` capsule that lifts to `rowSelected`. The agent,
+        // empty and other-app rows never paint in the probed panel (the first
+        // two have no hover; the last needs a live port scan), so they are not
+        // listed, and the first surface that paints one is red until it is.
+        "ProcessesPanelContentView",
+        "ProcessesJobRow",
+        "ProcessesDisclosureRow",
+        "ProcessesPortButton",
+        "ProcessesTextButton"
     ]
 
     /// Still painting literals, each with the ticket that retires them.
@@ -1152,6 +1169,15 @@ enum UIProbeAppearance {
             // the `SurfaceToken` family `legalValues(for:)` already admits,
             // so it needs the same owner-scoped admission as the roles above.
             values.insert(hex(AgentSurfaceRole.artifact.color.cgColor(for: theme)))
+        case "ProcessesJobRow", "ProcessesDisclosureRow":
+            // Resting paints nothing; the pointer paints the row hover.
+            values.insert(hex(AgentSurfaceRole.rowHover.color.cgColor(for: theme)))
+        case "ProcessesTextButton":
+            values.insert(hex(AgentSurfaceRole.rowSelected.color.cgColor(for: theme)))
+        case "ProcessesPortButton":
+            for role in [AgentSurfaceRole.codeSubdued, .rowSelected] {
+                values.insert(hex(role.color.cgColor(for: theme)))
+            }
         case "InboxSettleNudgeButton":
             for role in SidebarControlRole.allCases {
                 values.insert(hex(role.color.cgColor(for: theme)))
@@ -1526,6 +1552,42 @@ enum UIProbeAppearance {
         return rail
     }
 
+    /// The panel only holds a weak reference to its tracker, so the fixture's
+    /// tracker lives here. It is never started: no process table is read.
+    private static let processesPanelTracker = AgentProcessTracker(internalPathPrefixes: [])
+
+    /// 0.7.30's processes panel from a published snapshot: one agent with two
+    /// jobs (ports on both, one detached) under its agent row, and the closed
+    /// "other ports" row. Hover is a live pointer state a static probe cannot
+    /// reach, so it is set on one of each control that paints only under the
+    /// pointer — a job row, the disclosure row, a port and Show Agent — or those
+    /// fills would never be painted for either half of the census to see.
+    private static func processesPanelFixture() -> ProcessesPanelContentView {
+        let tracker = processesPanelTracker
+        let agent = AgentID(rawValue: UUID(uuidString: "00000000-0000-0000-0000-0000000011C1")!)
+        tracker.knownAgents = { [agent] }
+        tracker.agentName = { _ in "Release notes" }
+        tracker.agentDetail = { _ in "Claude Code · continuum" }
+        let started = Date().addingTimeInterval(-754)
+        func job(_ pid: Int32, _ label: String, _ command: String, ports: [UInt16], detached: Bool) -> AgentBackgroundJob {
+            AgentBackgroundJob(
+                id: "\(pid)-probe", owner: agent.rawValue.uuidString, rootPid: pid, pids: [pid],
+                startTimes: [pid: started], label: label, commandLine: command, ports: ports,
+                startedAt: started, detached: detached)
+        }
+        tracker.publish([agent.rawValue.uuidString: [
+            job(41_201, "npm run dev", "node /qa/continuum/node_modules/.bin/vite --port 5173", ports: [5173], detached: false),
+            job(41_377, "python3 -m http.server", "python3 -m http.server 8080", ports: [8080, 8081], detached: true),
+        ]])
+        let view = ProcessesPanelContentView(tracker: tracker, scope: nil)
+        view.reload(animated: false)
+        view.qaJobRows.first?.isHovered = true
+        view.qaDisclosure?.isHovered = true
+        view.qaAgentRows.first?.showButton.isHovered = true
+        view.qaJobRows.last?.subviews.compactMap { $0 as? ProcessesPortButton }.first?.isHovered = true
+        return view
+    }
+
     struct AdoptedSurface {
         let id: String
         let size: NSSize
@@ -1746,6 +1808,11 @@ enum UIProbeAppearance {
                         ChoiceItem(id: "anthropic/claude-x", title: "claude-x"),
                     ],
                     selectedID: "anthropic/claude-x")
+            }),
+            // Same fixture as `appearance.processesPanel`, so both halves of the
+            // census see the same panel.
+            AdoptedSurface(id: "processesPanel", size: NSSize(width: 480, height: 280), make: {
+                Self.processesPanelFixture()
             }),
             AdoptedSurface(id: "canvas", size: NSSize(width: 700, height: 480), make: {
                 CanvasNSView(canvasState: CanvasState(
