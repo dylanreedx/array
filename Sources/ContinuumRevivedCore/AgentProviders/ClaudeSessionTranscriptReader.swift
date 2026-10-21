@@ -61,6 +61,18 @@ public enum ClaudeSessionTranscriptReader {
                     compactionTrigger: AgentCompactionTrigger(providerValue: metadata["trigger"] as? String),
                     compactionProvider: "claude"))
             case "user":
+                // Another Claude session's message, delivered by Claude Code's
+                // peer channel. It is logged `isMeta`, wrapped in a sentence and
+                // a reminder addressed to the model; the
+                // `<cross-session-message>` inside is what the sender wrote, and
+                // it restores as a message from that session. A peer line with
+                // no such element carries nothing readable and stays hidden.
+                if ((object["origin"] as? [String: Any])?["kind"] as? String) == "peer" {
+                    if let element = AgentMessageEnvelope.crossSessionElement(in: userText(object["message"])) {
+                        out.append(NormalizedTranscriptMessage(role: .userPrompt, text: element))
+                    }
+                    continue
+                }
                 // Claude's own bookkeeping, never something the user said: the
                 // hidden `isMeta` context (a local command's caveat, an expanded
                 // skill body) and the post-compaction summary it feeds the model.
@@ -82,6 +94,15 @@ public enum ClaudeSessionTranscriptReader {
             }
         }
         return out
+    }
+
+    /// A user record's text, whether its content is a String or text blocks.
+    private static func userText(_ message: Any?) -> String {
+        let content = (message as? [String: Any])?["content"]
+        if let text = content as? String { return text }
+        return (content as? [[String: Any]] ?? [])
+            .compactMap { ($0["type"] as? String) == "text" ? $0["text"] as? String : nil }
+            .joined()
     }
 
     private static func intValue(_ value: Any?) -> Int? {
@@ -130,6 +151,9 @@ public enum ClaudeSessionTranscriptReader {
     /// record already restores as the boundary row, exactly as the live
     /// compaction does. A `<system-reminder>` the Claude app puts in front of
     /// what you typed is context for the model, not part of the prompt.
+    /// Messages between sessions (`<cross-session-message>`, a background
+    /// note, `<side-sessions-event>`) pass through as written: the projection's
+    /// `AgentMessageEnvelope` draws them as from their sender.
     static func visiblePromptText(_ text: String) -> String? {
         let trimmed = text
             .replacingOccurrences(
