@@ -1103,6 +1103,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Space previews the focused row without changing the active canvas tile.
     /// The host owns what preview means; the list only supplies the on-screen id.
     var onPreviewRow: ((UUID) -> Void)?
+    // Plan: .plans/79-session-handoff/README.md
+    /// A session from another app: a click watches it, its hover buttons move or
+    /// copy it. The id is the row's.
+    var onExternalSessionAction: ((InboxExternalSessionAction, UUID) -> Void)?
+    /// The host lists sessions from other apps, so the scope menu offers
+    /// "This Mac" (`InboxScope.thisMac`).
+    var offersThisMacScope = false {
+        didSet { if offersThisMacScope != oldValue { updateScopeMenu() } }
+    }
     // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
     /// A bulk action was chosen for these agents, in the order they are on screen.
     ///
@@ -2098,7 +2107,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             currentWorkspaceId: currentWorkspaceId)
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
         let searched = query.isEmpty ? scoped : scoped.filter { row in
-            [row.title, row.projectName, row.workspaceName, row.model, row.branch]
+            [row.title, row.projectName, row.workspaceName, row.model, row.branch, row.whereMarker?.text]
                 .compactMap { $0?.localizedLowercase }
                 .contains { $0.localizedCaseInsensitiveContains(query) }
         }
@@ -2570,7 +2579,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let entries = InboxScope.entries(
             for: allRows, catalog: scopeCatalog, including: scope,
             currentWorkspace: currentWorkspaceName,
-            currentWorkspaceId: currentWorkspaceId)
+            currentWorkspaceId: currentWorkspaceId,
+            offersThisMac: offersThisMacScope)
         scopeEntries = entries
         var items = entries.map { ChoiceItem(id: $0.storageValue, title: $0.title) }
         managementItems.removeAll()
@@ -2846,8 +2856,21 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 self.performRowAction(kind)
             }
         }
+        if let external = model.externalSession {
+            func perform(_ kind: InboxExternalSessionAction) -> () -> Void {
+                { [weak self] in self?.onExternalSessionAction?(kind, id) }
+            }
+            if let card = cell as? AgentInbox96CellView {
+                card.configureHoverActions(snooze: nil, settle: nil)
+                card.configureExternalActions(
+                    moveHere: external.canMoveHere ? perform(.moveHere) : nil,
+                    copy: external.canCopy ? perform(.copy) : nil)
+            }
+            return
+        }
         if let card = cell as? AgentInbox96CellView {
             card.configureHoverActions(snooze: action(.snooze), settle: action(.settle))
+            card.configureExternalActions(moveHere: nil, copy: nil)
         } else if let slim = cell as? AgentInboxSlimCellView {
             if model.closingSince != nil {
                 slim.configureBackgroundActions(
@@ -2877,6 +2900,24 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             return (slim.qaHoverActionShown, slim.qaHoverActionTitles)
         }
         return nil
+    }
+
+    /// The where marker drawn on row `id`, read off its cell.
+    func whereMarkerForQA(id: UUID) -> (text: String, frame: NSRect, placementFrame: NSRect)? {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return nil }
+        card.layoutSubtreeIfNeeded()
+        return card.qaWhereMarker
+    }
+
+    /// Hover row `id` the way the pointer does, then press one of its external actions.
+    func clickExternalActionForQA(id: UUID, _ action: InboxExternalSessionAction) -> Bool {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return false }
+        card.layoutSubtreeIfNeeded()
+        return card.clickExternalActionForQA(action)
     }
 
     func clickHoverSettleForQA(id: UUID) -> Bool {
@@ -2998,6 +3039,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// is not sent and folding a group does not also jump the canvas.
     private func reveal(rowAt index: Int) {
         guard rows.indices.contains(index) else { return }
+        if rows[index].externalSession != nil {
+            onExternalSessionAction?(.watch, rows[index].id)
+            return
+        }
         onRevealRow?(rows[index].id)
     }
 
@@ -3030,7 +3075,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             reveal(rowAt: rows.firstIndex(where: { $0.id == id }) ?? -1)
             return true
         case 49: // Space
-            onPreviewRow?(id)
+            // A session from another app has no tile to frame.
+            if rows.first(where: { $0.id == id })?.externalSession == nil { onPreviewRow?(id) }
             return true
         default:
             return false
@@ -3187,6 +3233,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // current edit, not an implicit commit-and-switch. Returning here is what
         // lets the active field keep the text the human is typing.
         guard renameField == nil, renamingRowId == nil else { return false }
+        // Another app's session is named by that app.
+        guard rows.indices.contains(index), rows[index].externalSession == nil else { return false }
         guard let field = installRenameField(rowAt: index) else { return false }
         isOpeningRename = true
         defer { isOpeningRename = false }
@@ -3539,7 +3587,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// P3.15's capability gate. One function so the bar it draws and the action it
     /// performs cannot come apart.
     private func offeredBulkActions(for selected: [AgentInboxRow]) -> [InboxBulkAction] {
-        guard onBulkAction != nil else { return [] }
+        guard onBulkAction != nil, !selected.contains(where: { $0.externalSession != nil }) else { return [] }
         return InboxBulkAction.available(for: selected, rollups: rollupsByParent)
             .filter { wiredBulkActions.contains($0) }
     }
@@ -3586,6 +3634,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             tableView.selectRowIndexes(IndexSet(integer: tableRow), byExtendingSelection: false)
         }
         let targets = targetRows(forClickedRow: index)
+        // Another app's session has none of an agent's verbs; its own are on
+        // the row (click to watch) and its hover buttons.
+        guard !targets.contains(where: { $0.externalSession != nil }) else {
+            rowChoiceController.dismiss()
+            qaChoiceListForQA = nil
+            rowChoiceTargetIds.removeAll()
+            return false
+        }
         let actions = InboxRowAction.menuItems(
             for: targets,
             includeGeneratedName: wiredRowActions.contains(.generateName)

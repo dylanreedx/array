@@ -811,6 +811,21 @@ enum ContinuumApp {
         }
         // 0.7.30: what an agent left running reaches its tile chip, opens beside
         // it, and stops — through the boot mount's tracker and a real process.
+        // .plans/79: sessions from other apps are rows of the production
+        // sidebar; Copy forks one into a managed agent in its project.
+        if let index = CommandLine.arguments.firstIndex(of: "--external-sessions-sidebar-check") {
+            _ = NSApplication.shared
+            let next = CommandLine.arguments.dropFirst(index + 1).first
+            MainActor.assumeIsolated {
+                do {
+                    print(try ExternalSessionsSidebarChecks.run(pngPath: next.flatMap { $0.hasPrefix("--") ? nil : $0 }))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if CommandLine.arguments.contains("--agent-process-tracker-check") {
             _ = NSApplication.shared
             MainActor.assumeIsolated {
@@ -5070,6 +5085,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     lazy var agentProcessTracker = AgentProcessTracker(
         internalPathPrefixes: [Self.workspaceMCPExecutablePath()].compactMap { $0 })
     private var agentProcessTrackerObserver: NSObjectProtocol?
+    /// `.plans/79` — every Claude and Codex session on this Mac, for the sidebar.
+    /// Started on a real launch only.
+    lazy var externalSessionMonitor = ExternalSessionMonitor()
+    /// Which face an agent tile shows. Stream D's `Array | Terminal` switch
+    /// answers it; until then `agentFace(for:)` reads the monitor's evidence.
+    var agentFaceProvider: ((AgentID) -> AgentTileFace)?
+    /// QA: answers "this folder isn't a project" without an alert.
+    var externalSessionFolderChoiceForQA: ((ExternalAgentSession) -> Bool)?
+    /// QA: the Watch / Move here seams phase 2 builds, as they were reached.
+    private(set) var qaExternalSessionSeams: [(InboxExternalSessionAction, String)] = []
     private var canvasShortcutRailView: CanvasShortcutRailView?
     private var canvasGettingStartedView: CanvasGettingStartedView?
     private var workspaceSplitView: NSSplitView?
@@ -5722,6 +5747,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 canvasState: canvasState)
             refreshAgentSurfaces(notify: false)
             agentProcessTracker.start()
+            externalSessionMonitor.start()
 
             let window = makeWorkspaceWindow(
                 canvasView: canvasView,
@@ -11556,6 +11582,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.agentInbox.onPreviewRow = { [weak self] agentId in
             _ = self?.previewAgentFromInbox(agentId)
         }
+        // .plans/79: sessions from other apps are rows too, with "This Mac" to
+        // see the quiet ones; a click watches, the hover buttons move or copy.
+        sidebar.agentInbox.offersThisMacScope = true
+        sidebar.agentInbox.onExternalSessionAction = { [weak self] action, rowId in
+            self?.performExternalSessionAction(action, rowId: rowId)
+        }
+        externalSessionMonitor.onChange = { [weak self] in
+            self?.pushExternalSessionRows()
+        }
         sidebar.configureInboxRename { [weak self] agentId, name in
             self?.renameAgentFromInbox(agentId, to: name)
         }
@@ -11845,7 +11880,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             now: now
         )
         .filter { agentActivity.managedAgentIdentities.contains($0.id) }
-        return unconfirmedFreeze.apply(rows: builtRows, unobserved: unobserved)
+        return withExternalSessions(
+            unconfirmedFreeze.apply(rows: builtRows, unobserved: unobserved),
+            registry: registry, records: records, now: now)
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
@@ -12731,6 +12768,150 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     @objc func toggleWorkspaceSidebarFromMenu(_ sender: Any?) {
         toggleWorkspaceSidebar()
+    }
+
+    // MARK: - Sessions from other apps (.plans/79)
+
+    /// Which face `agentId`'s tile shows. Defaults to the monitor's evidence: a
+    /// claude carrying the agent's tag with `ARRAY_AGENT_FACE=terminal`.
+    func agentFace(for agentId: AgentID) -> AgentTileFace {
+        if let agentFaceProvider { return agentFaceProvider(agentId) }
+        let tag = AgentProcessAttribution.ownerTag(for: agentId)
+        return externalSessionMonitor.snapshot.sessions.contains { $0.host == .arrayTerminalFace(agentId: tag) }
+            ? .terminal : .array
+    }
+
+    /// The agent rows plus a row per session from another app, and the
+    /// `Terminal` marker on agents whose tile shows the real CLI. A session an
+    /// agent's record names is that agent's row, never a second one.
+    private func withExternalSessions(
+        _ rows: [AgentInboxRow], registry: Registry, records: [AgentRecord], now: Date
+    ) -> [AgentInboxRow] {
+        let marked = rows.map { row -> AgentInboxRow in
+            let agentId = AgentID(rawValue: row.id)
+            guard agentSupervisor.records[agentId] != nil, agentFace(for: agentId) == .terminal else { return row }
+            var row = row
+            row.whereMarker = ExternalSessionRows.terminalFaceMarker
+            return row
+        }
+        let snapshot = externalSessionMonitor.snapshot
+        guard !snapshot.sessions.isEmpty else { return marked }
+        var owned: Set<String> = []
+        for record in records {
+            owned.insert(AgentSupervisor.claudeSessionId(for: record.id))
+            if let id = record.providerSessionId { owned.insert(id) }
+            if let id = record.codexThreadId { owned.insert(id) }
+        }
+        var shellTitles: [UUID: String] = [:]
+        if snapshot.sessions.contains(where: { if case .arrayShellTile(.some) = $0.host { return true }; return false }) {
+            for tile in canvasView?.allWorkspaceTiles() ?? [] where tile.kind == .terminal {
+                shellTitles[tile.id] = tile.title
+            }
+        }
+        let onScreen = workspaceRuntime?.workspaceId ?? registry.lastActiveWorkspaceId
+        let workspace = registry.workspaces.first { $0.id == onScreen }
+        let context = ExternalSessionRows.Context(
+            projects: registry.projects.filter { !$0.missing }.map {
+                .init(id: $0.id, name: $0.name, rootPath: $0.rootPath, workspaceId: $0.workspaceId)
+            },
+            currentWorkspaceId: workspace?.id, currentWorkspaceName: workspace?.name,
+            currentWorkspaceProjectIds: Set(workspace?.projectIds ?? []),
+            ownedSessionIds: owned, shellTileTitles: shellTitles)
+        return marked + ExternalSessionRows.rows(from: snapshot, context: context, now: now)
+    }
+
+    /// The monitor's push: the inbox rows alone, not the sidebar tree.
+    private func pushExternalSessionRows() {
+        guard let sidebar = workspaceSidebarView, agentActivity.isReconciled else { return }
+        sidebar.applyInbox(rows: buildAgentInboxRows(), changed: .empty)
+    }
+
+    /// The one seam every external row's action goes through.
+    @discardableResult
+    func performExternalSessionAction(_ action: InboxExternalSessionAction, rowId: UUID) -> Bool {
+        guard let session = externalSessionMonitor.session(forRowId: rowId) else { return false }
+        switch action {
+        case .watch, .moveHere:
+            // Phase 2 (`.plans/79-session-handoff/BUILD.md`): Watch opens a
+            // read-only watch tile; Move here continues the session here once
+            // the other app lets go. The click already routes here.
+            qaExternalSessionSeams.append((action, session.id))
+            fputs("External session \(session.id): \(action.title) is not built yet (session handoff phase 2)\n", stderr)
+            return false
+        case .copy:
+            return copyExternalSession(session) != nil
+        }
+    }
+
+    /// Copy: a new Claude agent tile in the session's project whose first turn
+    /// forks the session (`--resume <id> --fork-session`) while the original
+    /// keeps running, showing the history it forked from.
+    ///
+    /// The fork must run in the session's own folder (claude finds a session by
+    /// it), so a folder that is not a project is offered as a new one instead of
+    /// being copied into another.
+    @discardableResult
+    func copyExternalSession(_ session: ExternalAgentSession) -> AgentID? {
+        guard session.provider == .claude, let transcriptURL = session.transcriptURL else { return nil }
+        var registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
+        func owningProject() -> ProjectEntry? {
+            let cwd = URL(fileURLWithPath: session.cwd).standardizedFileURL.resolvingSymlinksInPath().path
+            return registry.projects.filter { !$0.missing }.filter { project in
+                let root = URL(fileURLWithPath: project.rootPath).standardizedFileURL.resolvingSymlinksInPath().path
+                return cwd == root || cwd.hasPrefix(root.hasSuffix("/") ? root : root + "/")
+            }.max { $0.rootPath.count < $1.rootPath.count }
+        }
+        if owningProject() == nil {
+            guard confirmAddingFolderForCopy(session),
+                  registerProjectFolder(URL(fileURLWithPath: session.cwd, isDirectory: true)) != nil else { return nil }
+            registry = (try? registryStore?.loadOrEmpty()) ?? registry
+        }
+        guard let project = owningProject() else { return nil }
+        let providerModel = AgentModelConfig.resolvedFromDefaults(harness: .claudeCode).model
+        guard let selection = AgentModelConfig.launchSelection(harness: .claudeCode, model: providerModel),
+              AgentModelConfig.validates(selection) else {
+            presentSpawnRefusal("Claude Code is not ready. Open Environment Setup to install or sign in.")
+            return nil
+        }
+        // The project needs a zone here for the tile to land in it.
+        if workspaceRuntime?.document.zones.contains(where: { $0.projectId == project.id }) == false {
+            addProjectZone(projectId: project.id)
+        }
+        let agentId = agentSupervisor.spawn(
+            role: nil, prompt: nil, cwd: URL(fileURLWithPath: session.cwd, isDirectory: true),
+            harness: .claudeCode, model: selection.model, thinking: selection.thinking,
+            projectId: project.id, projectRoot: URL(fileURLWithPath: project.rootPath, isDirectory: true),
+            displayName: session.title)
+        agentSupervisor.markSessionFork(agentId, from: session.sessionId)
+        // The production attach: the agent's own project's spawner and zone.
+        guard let tileId = attachTileToAgentFromInbox(agentId) else { return agentId }
+        focusSpawnedTile(tileId)
+        // Show what it forked from, through the restore path. Read off the main
+        // thread; a prompt sent meanwhile makes it moot.
+        let threadId = "rehydrated-\(agentId.rawValue.uuidString)"
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let transcript = ClaudeSessionTranscriptReader.read(sessionFileURL: transcriptURL, threadId: threadId)
+            await MainActor.run {
+                guard let self, let transcript,
+                      !self.agentSupervisor.hasUserWorkOrSessionHistory(agentId),
+                      let view = self.canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
+                self.agentSupervisor.seedRehydratedTranscript(transcript, for: agentId)
+                view.renderRehydratedPreviousSession(transcript)
+            }
+        }
+        scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "external-session-copy", debounce: 0.2)
+        return agentId
+    }
+
+    /// Edge case 15: the session's folder is not an Array project.
+    private func confirmAddingFolderForCopy(_ session: ExternalAgentSession) -> Bool {
+        if let choice = externalSessionFolderChoiceForQA { return choice(session) }
+        let alert = NSAlert()
+        alert.messageText = "\u{201C}\((session.cwd as NSString).lastPathComponent)\u{201D} isn\u{2019}t a project"
+        alert.informativeText = "A copy continues the session in its own folder. Add the folder to this workspace as a project?"
+        alert.addButton(withTitle: "Add Folder")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     // MARK: - Background processes (0.7.30)
@@ -35290,8 +35471,10 @@ extension AppDelegate {
                "a scope must filter: 'Quiet' has no agent — got \(sidebar.inboxForQA.titlesForQA)")
     // The menu comes from the REGISTRY, not only from the rows: this run's project and
     // workspace are both offered while the list is showing one row.
-    try expect(sidebar.inboxForQA.scopeTitlesForQA == ["This workspace", "All agents", "Continuum", "Quiet", "Default"],
-               "the popup offers the registry's projects and its workspace, including 'Quiet', which has no agent in it, and NOT the missing 'Gone' — got \(sidebar.inboxForQA.scopeTitlesForQA)")
+    // .plans/79: the shipped sidebar lists sessions from other apps, so it also
+    // offers "This Mac" after "All agents".
+    try expect(sidebar.inboxForQA.scopeTitlesForQA == ["This workspace", "All agents", "This Mac", "Continuum", "Quiet", "Default"],
+               "the popup offers This Mac, the registry's projects and its workspace, including 'Quiet', which has no agent in it, and NOT the missing 'Gone' — got \(sidebar.inboxForQA.scopeTitlesForQA)")
     // Back to every agent for the assertions below, through the popup, and the pick
     // must have been written to defaults — that is the whole persistence loop.
     try expect(sidebar.inboxForQA.pickScopeForQA(.all), "All agents must be pickable")

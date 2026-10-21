@@ -94,6 +94,8 @@ check --editor-navigation-check
 check --editor-web-bridge-check
 check --empty-workspace-creation-check
 check --exact-rebase-performance-check
+check --external-session-discovery-check
+check --external-sessions-sidebar-check
 check --file-card-check
 check --file-document-session-check
 check --file-markdown-perf-check
@@ -385,6 +387,7 @@ leg run_app_check .build/debug/Array --drag-magnetize-check
 leg run_app_check .build/debug/Array --editor-navigation-check
 leg run_app_check .build/debug/Array --editor-web-bridge-check
 leg run_app_check .build/debug/Array --empty-workspace-creation-check
+leg run_app_check .build/debug/Array --external-sessions-sidebar-check
 leg run_app_check .build/debug/Array --file-card-check
 leg run_app_check .build/debug/Array --file-markdown-perf-check
 leg run_app_check .build/debug/Array --file-markdown-preview-check
@@ -593,6 +596,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --context-meter-contract-che
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --dictation-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --external-session-discovery-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
@@ -637,7 +641,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 176
+count ContinuumRevivedCoreChecks 177
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

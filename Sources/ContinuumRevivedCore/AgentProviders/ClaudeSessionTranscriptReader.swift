@@ -236,8 +236,8 @@ extension ClaudeSessionTranscriptReader {
             .appendingPathComponent("\(sessionId).jsonl", isDirectory: false)
     }
 
-    static func read(
-        sessionFileURL url: URL, threadId: String, limits: RehydrationLimits
+    public static func read(
+        sessionFileURL url: URL, threadId: String, limits: RehydrationLimits = RehydrationLimits()
     ) -> RehydratedTranscript? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let (lines, truncated) = ManagedTranscriptRehydrator.readTailLines(at: url, maxBytes: limits.maxBytes)

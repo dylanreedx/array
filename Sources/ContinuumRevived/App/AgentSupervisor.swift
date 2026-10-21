@@ -2321,6 +2321,17 @@ final class AgentSupervisor {
         rehydratedTranscripts[id]
     }
 
+    /// `.plans/79` Copy: this agent's first launch forks `sessionId`, a Claude
+    /// session running in another app, with `--resume <id> --fork-session`
+    /// (B7.2's rotation, aimed at someone else's session). The original keeps
+    /// running; the fork's own id is adopted when its `system/init` reports it.
+    func markSessionFork(_ id: AgentID, from sessionId: String) {
+        guard var record = records[id], record.harness == .claudeCode else { return }
+        record.pendingSessionForkFrom = sessionId
+        records[id] = record
+        persist(record)
+    }
+
     /// The inputs a rehydrate needs, resolved from the live record on the main
     /// thread so the caller can then read the (potentially large) session file
     /// OFF it. `nil` for an agent this supervisor does not know.
