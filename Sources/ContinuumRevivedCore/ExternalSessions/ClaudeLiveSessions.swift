@@ -1,5 +1,8 @@
 import Foundation
 
+// The process table and the CLIs' home folders are a Mac's; Core also builds for iOS.
+#if os(macOS)
+
 /// Live Claude sessions, from `~/.claude/sessions/<pid>.json`.
 ///
 /// The files are undocumented, so everything here is conservative. Proven on
@@ -140,3 +143,4 @@ public enum ClaudeLiveSessions {
         return title?.isEmpty == false ? title : nil
     }
 }
+#endif

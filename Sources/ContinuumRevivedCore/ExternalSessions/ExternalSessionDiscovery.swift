@@ -1,7 +1,8 @@
 import Foundation
+
+// The process table and the CLIs' home folders are a Mac's; Core also builds for iOS.
 #if os(macOS)
 import Darwin
-#endif
 
 /// One discovery pass: which Claude and Codex sessions run on this Mac, where,
 /// and who owns each.
@@ -153,7 +154,6 @@ public final class ExternalSessionDiscovery {
     }
 }
 
-#if os(macOS)
 /// What a process has open, straight from the kernel.
 public enum ProcessFileProbe {
     /// The process's current directory.

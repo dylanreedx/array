@@ -1,5 +1,8 @@
 import Foundation
 
+// The process table and the CLIs' home folders are a Mac's; Core also builds for iOS.
+#if os(macOS)
+
 /// Live Codex sessions. Modest on purpose ("we can wrinkle out codex later"):
 /// correct and conservative beats clever.
 ///
@@ -116,3 +119,4 @@ enum CodexLiveSessions {
         return names
     }
 }
+#endif
