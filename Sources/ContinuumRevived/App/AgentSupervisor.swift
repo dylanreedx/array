@@ -14123,8 +14123,8 @@ private func checkAgentBlockRendererRegistry<Failure: Error>(
     // cannot tell apart from a missing one.
     // 22: `.compaction` joined the roster — its renderer had been written and
     // never registered. 23: board-task sends added `.taskReference`. 24: agent
-    // messages added `.agentMessage`.
-    guard AgentBlockRendererRegistry.builtInKinds.count == 24,
+    // messages added `.agentMessage`. 25: the Terminal face's `.sessionBoundary`.
+    guard AgentBlockRendererRegistry.builtInKinds.count == 25,
           Set(AgentBlockRendererRegistry.builtInKinds).count
             == AgentBlockRendererRegistry.builtInKinds.count else {
         throw fail("block renderer built-in fixture is incomplete or duplicated: \(AgentBlockRendererRegistry.builtInKinds.map(\.rawValue))")

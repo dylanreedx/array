@@ -565,6 +565,31 @@ public struct AgentTranscriptProjection: Sendable {
         return patches
     }
 
+    /// Adds an idempotent session boundary (`.plans/79`): the turns that follow
+    /// were taken outside this tile — its Terminal face, or the shell the
+    /// session was opened from.
+    @discardableResult
+    public mutating func appendSessionBoundary(
+        id: AgentNodeID,
+        text: String,
+        symbolName: String?
+    ) throws -> [AgentDocumentPatch] {
+        guard !document.entries.contains(where: { $0.id == id }) else { return [] }
+
+        var patches = try applyReturningPatches(closeStreamingRun())
+        compatibilityIDs[id] = id.rawValue
+        patches += try applyReturningPatches([
+            .beginEntry(id: id, role: .system, provenance: .localNotice(reason: id.rawValue)),
+            .upsertStructured(entryID: id, block: AgentBlock(
+                id: childID(of: id, key: "boundary"),
+                kind: .sessionBoundary,
+                payload: .sessionBoundary(.init(text: text, symbolName: symbolName))
+            )),
+            .finishEntry(id: id)
+        ])
+        return patches
+    }
+
     // Compatibility APIs remain until the card projection is removed.
     public mutating func appendUserPrompt(_ text: String) {
         localSequence += 1
@@ -582,6 +607,16 @@ public struct AgentTranscriptProjection: Sendable {
         let entryID = makeID(scope: "notice", providerID: id)
         do {
             _ = try appendNotice(id: entryID, title: title, body: text)
+            compatibilityIDs[entryID] = id
+        } catch {
+            rejectedMutationCount += 1
+        }
+    }
+
+    public mutating func appendSessionBoundary(id: String, text: String, symbolName: String?) {
+        let entryID = makeID(scope: "session-boundary", providerID: id)
+        do {
+            _ = try appendSessionBoundary(id: entryID, text: text, symbolName: symbolName)
             compatibilityIDs[entryID] = id
         } catch {
             rejectedMutationCount += 1

@@ -209,6 +209,12 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         semanticProjection.appendNotice(id: id, title: title, text: text)
     }
 
+    /// "In Terminal · 2 turns" (`.plans/79`): what follows was taken outside
+    /// this tile.
+    public mutating func appendSessionBoundary(id: String, text: String, symbolName: String?) {
+        semanticProjection.appendSessionBoundary(id: id, text: text, symbolName: symbolName)
+    }
+
     /// Removes an optimistic prompt the supervisor refused; see
     /// `AgentTranscriptProjection.withdrawLocalPrompt`.
     public mutating func withdrawLocalPrompt(id: AgentNodeID) {

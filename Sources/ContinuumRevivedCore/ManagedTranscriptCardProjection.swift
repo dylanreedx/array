@@ -190,6 +190,7 @@ public enum ManagedTranscriptCardProjection {
         case .agentReference(let payload): own = payload.displayNameAtSpawn
         case .taskReference(let payload): own = payload.title
         case .agentMessage(let payload): own = payload.text
+        case .sessionBoundary(let payload): own = payload.text
         case .thematicBreak: own = "\n"
         // The legacy card is plain text, so a table projects as the Markdown
         // source it came from rather than as a flattened cell soup.

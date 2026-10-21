@@ -34,7 +34,7 @@ final class AgentBlockRendererRegistry {
         // `.compaction` was missing from this roster for six weeks, so the
         // `kind == .compaction` branch below never ran: every compaction boundary
         // on every harness rendered as "Unsupported content: compaction".
-        .compaction, .unknown
+        .compaction, .sessionBoundary, .unknown
     ]
 
     static let production: AgentBlockRendererRegistry = {
@@ -73,6 +73,8 @@ final class AgentBlockRendererRegistry {
                     try registry.register(AgentTaskReferenceRenderer(), for: kind)
                 } else if kind == .agentMessage {
                     try registry.register(AgentMessageRenderer(), for: kind)
+                } else if kind == .sessionBoundary {
+                    try registry.register(SessionBoundaryRenderer(), for: kind)
                 } else if kind == .table {
                     try registry.register(TableRenderer(), for: kind)
                 } else if kind == .thematicBreak {

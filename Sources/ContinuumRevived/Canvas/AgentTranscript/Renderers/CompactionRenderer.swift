@@ -68,9 +68,14 @@ final class CompactionRenderer: AgentBlockRendering {
 ///
 /// The host paints no fill (CLAUDE.md hazard 8); only the two rules carry a
 /// colour, re-applied from `applyTokens()`.
+///
+/// `.plans/79`'s session boundary ("In Terminal · 2 turns") is the same
+/// structure with a small glyph before the label (`SessionBoundaryRenderer`).
 @MainActor
 final class CompactionBoundaryView: NSView, TokenThemed {
     private let label = NSTextField(labelWithString: "")
+    private let glyph = NSImageView()
+    private var glyphSize: NSSize = .zero
     private let leadingRule = CALayer()
     private let trailingRule = CALayer()
     private var theme: TokenTheme = .dark
@@ -89,6 +94,10 @@ final class CompactionBoundaryView: NSView, TokenThemed {
         label.lineBreakMode = .byTruncatingTail
         label.alignment = .center
         addSubview(label)
+        glyph.isHidden = true
+        glyph.imageScaling = .scaleProportionallyUpOrDown
+        glyph.setAccessibilityElement(false)
+        addSubview(glyph)
         applyTokens()
     }
 
@@ -97,10 +106,23 @@ final class CompactionBoundaryView: NSView, TokenThemed {
 
     override var isFlipped: Bool { true }
 
-    func apply(text: String, phase: String?, context: AgentRenderContext) {
+    func apply(text: String, phase: String?, context: AgentRenderContext, symbolName: String? = nil) {
         theme = context.appearance
         label.stringValue = text
         label.font = .systemFont(ofSize: CGFloat(context.pageZoom.scaled(11)), weight: .medium)
+        let side = CGFloat(context.pageZoom.scaled(12))
+        if let symbolName,
+           let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+               .withSymbolConfiguration(.init(pointSize: side, weight: .medium)) {
+            glyph.image = image
+            glyph.isHidden = false
+            let scale = min(side / max(image.size.width, 1), side / max(image.size.height, 1))
+            glyphSize = NSSize(width: ceil(image.size.width * scale), height: ceil(image.size.height * scale))
+        } else {
+            glyph.image = nil
+            glyph.isHidden = true
+            glyphSize = .zero
+        }
         switch phase {
         case "failed":
             label.textColor = AccentToken.accentFailed.color.nsColor(for: context.appearance)
@@ -109,6 +131,7 @@ final class CompactionBoundaryView: NSView, TokenThemed {
         default:
             label.textColor = context.tokens.secondaryText.color.nsColor(for: context.appearance)
         }
+        glyph.contentTintColor = label.textColor
         // The cell's size, not `intrinsicContentSize`: the latter came back
         // 4-8pt short of what the cell draws (and varies with the order font
         // and string were set), which truncated "Context compacted manu…" in a
@@ -131,6 +154,7 @@ final class CompactionBoundaryView: NSView, TokenThemed {
     /// truncating. Deliberately NOT `intrinsicContentSize`, which reports a
     /// few points short (and differs with the order font/string were set).
     var qaLabelNeededWidth: CGFloat { ceil(label.cell?.cellSize.width ?? 0) }
+    var qaGlyphVisible: Bool { !glyph.isHidden }
 
     func applyTokens() {
         let colour = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
@@ -145,15 +169,23 @@ final class CompactionBoundaryView: NSView, TokenThemed {
 
     override func layout() {
         super.layout()
-        let labelWidth = min(ceil(labelSize.width), max(0, bounds.width - 2 * gap))
+        // The glyph and label are one centred group; the rules stop at it.
+        let glyphLead = glyph.isHidden ? 0 : glyphSize.width + CGFloat(Space.s)
+        let labelWidth = min(ceil(labelSize.width), max(0, bounds.width - 2 * gap - glyphLead))
+        let groupX = ((bounds.width - labelWidth - glyphLead) / 2).rounded()
         let labelFrame = NSRect(
-            x: ((bounds.width - labelWidth) / 2).rounded(),
+            x: groupX + glyphLead,
             y: ((bounds.height - labelSize.height) / 2).rounded(),
             width: labelWidth, height: labelSize.height)
         if label.frame != labelFrame { label.frame = labelFrame }
+        let glyphFrame = NSRect(
+            x: groupX, y: ((bounds.height - glyphSize.height) / 2).rounded(),
+            width: glyphSize.width, height: glyphSize.height)
+        if !glyph.isHidden, glyph.frame != glyphFrame { glyph.frame = glyphFrame }
+        let groupMinX = glyph.isHidden ? labelFrame.minX : glyphFrame.minX
         let height = max(CGFloat(LineWidth.hairline), 1.0 / (window?.backingScaleFactor ?? 2))
         let y = (bounds.height - height) / 2
-        let leading = NSRect(x: 0, y: y, width: max(0, labelFrame.minX - gap), height: height)
+        let leading = NSRect(x: 0, y: y, width: max(0, groupMinX - gap), height: height)
         let trailing = NSRect(
             x: labelFrame.maxX + gap, y: y,
             width: max(0, bounds.width - labelFrame.maxX - gap), height: height)

@@ -70,6 +70,7 @@ public struct AgentBlockKind: RawRepresentable, Codable, Equatable, Hashable, Se
     public static let notice = Self(rawValue: "notice")!
     public static let unknown = Self(rawValue: "unknown")!
     public static let compaction = Self(rawValue: "compaction")!
+    public static let sessionBoundary = Self(rawValue: "session-boundary")!
 }
 
 public struct AgentListPayload: Codable, Equatable, Sendable {
@@ -625,6 +626,22 @@ public struct AgentMessagePayload: Codable, Equatable, Sendable {
     }
 }
 
+/// Where the conversation went outside this tile and came back: the turns
+/// below were taken in the agent's Terminal face, or in the shell a session
+/// was opened from (`.plans/79-session-handoff`). Structure, not news, so it
+/// draws as a quiet rule with a centred label, like a compaction boundary.
+public struct AgentSessionBoundaryPayload: Codable, Equatable, Sendable {
+    /// "In Terminal · 2 turns".
+    public var text: String
+    /// An SF Symbol drawn before the label (`apple.terminal`).
+    public var symbolName: String?
+
+    public init(text: String, symbolName: String? = nil) {
+        self.text = text
+        self.symbolName = symbolName
+    }
+}
+
 /// A durable, portable reference to an agent that participated in this
 /// conversation. Runtime status and controls are deliberately resolved by the
 /// host from `agentID`; keeping them out of the document prevents every status
@@ -761,6 +778,7 @@ public enum AgentBlockPayload: Codable, Equatable, Sendable {
     case error(AgentErrorPayload)
     case notice(AgentNoticePayload)
     case compaction(AgentCompactionPayload)
+    case sessionBoundary(AgentSessionBoundaryPayload)
     case opaque(AgentOpaquePayload)
 }
 
