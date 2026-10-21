@@ -437,6 +437,10 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 # listening ports, Stop, and that agents no longer inherit the app's
 # descriptors. Real processes: a setsid'd job and a scrubbed-environment job.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-process-tracking-check
+# .plans/79: agents messaging each other — the envelope parser, every
+# provider's restore of an agent's message as a card, and the sender's
+# "Messaged …" row. Neither section it draws from is a leg of its own.
+run_leg .build/debug/ContinuumRevivedCoreChecks --agent-message-transcript-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
 # Film phase 1: the pairing page and the user-facing copy that must say Array.
@@ -985,6 +989,11 @@ run_app_check .build/debug/Array --workspace-api-board-check
 # a presentation failure repaired by agent.reveal, operation.get per step, and
 # cancellation reporting the child truthfully.
 run_app_check .build/debug/Array --workspace-api-delegation-check
+# .plans/79: a parent delegates and messages a child over the real API and pi
+# bridge. The child draws both as cards from the parent (name, colour, a reveal
+# that works), never as user prompts; the parent's row reads "Messaged …"; a
+# restore of the child's session file draws the identical cards.
+run_app_check .build/debug/Array --agent-message-card-check
 # Agent permissions (Settings ▸ Agents), Free within a project by default:
 # delegate and message any agent in the project without a prompt, while
 # cross-project reach asks or is refused, the per-agent switch revokes, an

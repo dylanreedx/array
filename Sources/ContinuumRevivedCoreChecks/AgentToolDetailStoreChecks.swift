@@ -1263,7 +1263,9 @@ private func runAgentToolKindChecks() {
 /// then into the store exactly as the transcript records a start, then through
 /// the presenter that titles the row. Every row is collected before failing, so a
 /// red run lists the whole table.
-private func runArrayWorkspaceToolRowChecks() async {
+/// Internal, not private: `--agent-message-transcript-check` runs it too, so
+/// the matrix reports the message row (this arm's full run is not a leg).
+func runArrayWorkspaceToolRowChecks() async {
     final class Box: @unchecked Sendable {
         private let lock = NSLock()
         private var values: [AgentRuntimeObservation] = []

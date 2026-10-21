@@ -119,6 +119,17 @@ if CommandLine.arguments.contains("--agent-compaction-check") {
     Foundation.exit(0)
 }
 
+// `.plans/79`: agents messaging each other — the envelope parser, every
+// provider's restore of an agent's message, and the sender's "Messaged …" row.
+// An arm of its own so the matrix reports it; neither section it draws from is
+// a leg. No tmux, no crash witnesses.
+if CommandLine.arguments.contains("--agent-message-transcript-check") {
+    runAgentMessageTranscriptChecks()
+    try runAsyncCheck { await runArrayWorkspaceToolRowChecks() }
+    print("AgentMessageTranscriptChecks passed")
+    Foundation.exit(0)
+}
+
 // The session-log readers alone (no tmux, no crash witnesses), for iterating on
 // relaunch hydration. The full run still includes this section.
 if CommandLine.arguments.contains("--transcript-rehydration-check") {

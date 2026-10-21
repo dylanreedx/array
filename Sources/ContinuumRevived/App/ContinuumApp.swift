@@ -1811,6 +1811,26 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // `.plans/79`: agents messaging each other through the production
+        // mount, API and bridge — the child draws the parent's task and message
+        // as cards from the parent (name, colour, reveal), never as user
+        // prompts; the parent's row reads "Messaged <child>"; a restore of the
+        // child's session file draws the identical cards.
+        if CommandLine.arguments.contains("--agent-message-card-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentMessageCardChecks()
+                    print("ContinuumRevivedAgentMessageCardChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         // CX-01 Phase 2b (`.plans/59`, §10): visible delegation with safe retry
         // through the production mount and dispatch — create-once under retry,
         // idempotency conflict, child tile in the parent's zone, presentation
@@ -16017,6 +16037,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if self?.revealAgentFromInbox(childID.rawValue) != true {
                 view?.showActionFailedNotice(
                     "Couldn't open that subagent — it may have been deleted.")
+            }
+        }
+        view.onRevealMessageSender = { [weak self, weak view] senderID in
+            if self?.revealAgentFromInbox(senderID.rawValue) != true {
+                view?.showActionFailedNotice(
+                    "Couldn't open the agent that sent this — it may have been deleted.")
             }
         }
         // TR-06 — the response transport for a request the provider is holding.

@@ -15,6 +15,8 @@ check --agent-input-check
 check --agent-inventory-wiring-check
 check --agent-local-file-link-check
 check --agent-message-bus-check
+check --agent-message-card-check
+check --agent-message-transcript-check
 check --agent-observer-independence-check
 check --agent-presence-check
 check --agent-process-tracker-check
@@ -319,6 +321,7 @@ leg run_app_check .build/debug/Array --agent-input-check
 leg run_app_check .build/debug/Array --agent-inventory-wiring-check
 leg run_app_check .build/debug/Array --agent-local-file-link-check
 leg run_app_check .build/debug/Array --agent-message-bus-check
+leg run_app_check .build/debug/Array --agent-message-card-check
 leg run_app_check .build/debug/Array --agent-observer-independence-check
 leg run_app_check .build/debug/Array --agent-presence-check
 leg run_app_check .build/debug/Array --agent-process-tracker-check
@@ -580,6 +583,7 @@ leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-message-transcript-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-process-tracking-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check
@@ -637,7 +641,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 176
+count ContinuumRevivedCoreChecks 178
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
