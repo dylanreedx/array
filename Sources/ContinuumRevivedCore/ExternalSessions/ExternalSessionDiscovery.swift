@@ -59,6 +59,11 @@ public final class ExternalSessionDiscovery {
     static let titleTailBytes = 64 * 1024
 
     private var claudeTitles: [String: (stamp: Date, title: String?)] = [:]
+    /// The last record each `<pid>.json` parsed to. Claude rewrites the file in
+    /// place, so a pass can read it half-written; that pass keeps this record
+    /// rather than reporting the session gone. `sessions` still drops it the
+    /// moment its process is not the one that wrote it.
+    private var claudeRecords: [Int32: ClaudeLiveSessions.Record] = [:]
     private var rolloutMetas: [String: CodexRolloutLocator.SessionMeta] = [:]
     private var codexIndex: (stamp: Date, names: [String: String])?
 
@@ -79,12 +84,15 @@ public final class ExternalSessionDiscovery {
             // `<pid>.json` only. The `.key` files beside them are never opened.
             .filter { $0.pathExtension == "json" }
         var records: [ClaudeLiveSessions.Record] = []
+        var kept: [Int32: ClaudeLiveSessions.Record] = [:]
         for file in files {
-            guard let pid = Int32(file.deletingPathExtension().lastPathComponent),
-                  let data = try? Data(contentsOf: file),
-                  let record = ClaudeLiveSessions.parse(data, filePid: pid) else { continue }
+            guard let pid = Int32(file.deletingPathExtension().lastPathComponent) else { continue }
+            let parsed = (try? Data(contentsOf: file)).flatMap { ClaudeLiveSessions.parse($0, filePid: pid) }
+            guard let record = parsed ?? claudeRecords[pid] else { continue }
             records.append(record)
+            kept[pid] = record
         }
+        claudeRecords = kept
         var seenTranscripts: Set<String> = []
         let result = ClaudeLiveSessions.sessions(
             records: records, fileCount: files.count, processes: inputs.processes,
@@ -171,6 +179,29 @@ public enum ProcessFileProbe {
             String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
         }
         return path.isEmpty ? nil : path
+    }
+
+    /// When the process at `pid` started, from the kernel; nil when no process
+    /// has that pid. A pid with a different start is a different process.
+    public static func startTime(_ pid: Int32) -> Date? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard pid > 0, proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return Date(timeIntervalSince1970: Double(info.pbi_start_tvsec) + Double(info.pbi_start_tvusec) / 1_000_000)
+    }
+
+    /// The terminal device `pid` runs in the FOREGROUND of; nil when it has no
+    /// terminal, or another process group holds that terminal's foreground
+    /// (a shell that got its prompt back, a job claude started).
+    public static func foregroundTerminal(_ pid: Int32) -> dev_t? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard pid > 0, sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0,
+              info.kp_proc.p_pid == pid else { return nil }
+        let device = info.kp_eproc.e_tdev
+        guard device != -1, info.kp_eproc.e_pgid == info.kp_eproc.e_tpgid else { return nil }
+        return device
     }
 
     /// The paths of the files it holds open.

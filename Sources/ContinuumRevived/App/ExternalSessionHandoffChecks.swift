@@ -123,8 +123,10 @@ enum ExternalSessionHandoffChecks {
         }
     }
 
-    private static func makeWorld(pngDirectory: String?) throws -> World {
-        let fixture = try WorkspaceAPIChecks.makeFixture()
+    private static func makeWorld(
+        pngDirectory: String?, beforeMount: ((AppDelegate, URL) throws -> Void)? = nil
+    ) throws -> World {
+        let fixture = try WorkspaceAPIChecks.makeFixture(beforeMount: beforeMount)
         let delegate = fixture.delegate
         AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
         guard let claudeModel = AgentCatalogQAFixture.claude.seedModel else { throw Failure(message: "no claude fixture model") }
@@ -193,6 +195,69 @@ enum ExternalSessionHandoffChecks {
         ExternalSessionRows.rowId(forSessionKey: session.id)
     }
 
+    /// A real process standing in for another app's claude: alive until the
+    /// leg ends it, so "the holder is still running" is a fact, not a number.
+    private static func liveHolder() throws -> Process {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["300"]
+        try process.run()
+        return process
+    }
+
+    /// Ends a `liveHolder()` and waits until it is gone.
+    private static func end(_ holder: Process) {
+        guard holder.isRunning else { return }
+        holder.terminate()
+        holder.waitUntilExit()
+    }
+
+    /// A pid that WAS a process and is not one now: a holder that has exited.
+    /// Spawned after whatever the leg started before it, so it is higher.
+    private static func exitedPid() throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try process.run()
+        process.waitUntilExit()
+        return process.processIdentifier
+    }
+
+    /// `ps -o lstart`'s shape, in UTC — what claude writes as `procStart`.
+    private static func procStart(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+        return formatter.string(from: date)
+    }
+
+    /// One pass of the production discovery over a made-up Mac: `claude`
+    /// session files under `home`, and the process table that goes with them.
+    /// Each holder is (pid, session id, entrypoint, ancestry, owner tag).
+    private static func discover(
+        home: URL, cwd: URL,
+        holders: [(pid: Int32, sessionId: String, entrypoint: String, parent: Int32, tag: String?)],
+        apps: [ProcessSample]
+    ) throws -> ExternalSessionSnapshot {
+        let folder = home.appendingPathComponent(".claude/sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let started = Date().addingTimeInterval(-120)
+        var processes = apps + [ProcessSample(pid: getpid(), parentPid: 1, startedAt: started,
+                                              executablePath: "/Applications/Array.app/Contents/MacOS/Array",
+                                              arguments: [], ownerTag: nil, ownerFace: nil)]
+        for holder in holders {
+            let object: [String: Any] = [
+                "pid": Int(holder.pid), "sessionId": holder.sessionId, "cwd": cwd.path, "status": "idle",
+                "kind": "interactive", "entrypoint": holder.entrypoint, "procStart": procStart(started),
+            ]
+            try JSONSerialization.data(withJSONObject: object).write(to: folder.appendingPathComponent("\(holder.pid).json"))
+            processes.append(ProcessSample(pid: holder.pid, parentPid: holder.parent, startedAt: started,
+                                           executablePath: "/Users/me/.local/bin/claude", arguments: ["claude"],
+                                           ownerTag: holder.tag, ownerFace: nil))
+        }
+        return ExternalSessionDiscovery().discover(.init(homeURL: home, processes: processes, hostPid: getpid(), now: Date()))
+    }
+
     // MARK: - --external-session-watch-check
 
     static func runWatch(pngDirectory: String?) throws -> String {
@@ -204,7 +269,9 @@ enum ExternalSessionHandoffChecks {
             userLine("u1", "Why is the upload test flaky?"),
             assistantLine("a1", "The upload test races the temp-dir cleanup."),
         ])
-        let cmux = session(sessionId, pid: 41_001, cwd: world.fixture.pbRoot, title: "Fix flaky upload test",
+        let cmuxProcess = try liveHolder()
+        defer { end(cmuxProcess) }
+        let cmux = session(sessionId, pid: cmuxProcess.processIdentifier, cwd: world.fixture.pbRoot, title: "Fix flaky upload test",
                            host: .app("cmux"), transcript: file)
         world.publish([cmux])
         try expect(world.inbox.rowIdsForQA.contains(rowId(cmux)), "precondition: the cmux session is a row")
@@ -280,7 +347,14 @@ enum ExternalSessionHandoffChecks {
         try expect(linked.count == 1 && linked.first?.id == agentId && supervisor.records[agentId]?.tileId == tileId,
                    "clicking the row again shows the same watch tile; got \(linked.count) watch agents")
 
-        // 4. The session ends in cmux: Ended, then Continue here takes it.
+        // 4. Review finding 6: one pass without the session while its process
+        //    still runs (a status file caught mid-rewrite) is not an end.
+        world.publish([])
+        try expect(view.sessionHandoffState == .watching(app: "cmux", canCopy: true, canMove: true),
+                   "a pass that misses a session whose process still runs must not end the watch; got \(String(describing: view.sessionHandoffState))")
+        world.publish([cmux])
+        // The session ends in cmux: Ended, then Continue here takes it.
+        end(cmuxProcess)
         world.publish([])
         try expect(view.sessionHandoffState == .ended(app: "cmux"),
                    "a watched session that ends says so; got \(String(describing: view.sessionHandoffState))")
@@ -322,7 +396,9 @@ enum ExternalSessionHandoffChecks {
             userLine("u1", "Why is the upload test flaky?"),
             assistantLine("a1", "The upload test races the temp-dir cleanup."),
         ])
-        let cmux = session(sessionId, pid: 41_101, cwd: world.fixture.pbRoot, title: "Fix flaky upload test",
+        let cmuxProcess = try liveHolder()
+        defer { end(cmuxProcess) }
+        let cmux = session(sessionId, pid: cmuxProcess.processIdentifier, cwd: world.fixture.pbRoot, title: "Fix flaky upload test",
                            host: .app("cmux"), transcript: file)
         let desktopId = "9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a"
         let desktop = session(desktopId, pid: 41_102, cwd: world.fixture.pbRoot, title: "LinkedIn post",
@@ -354,8 +430,16 @@ enum ExternalSessionHandoffChecks {
         try expect(AgentSteeringQAFakes.spawnCount(in: bin) == 0, "no claude has run")
         world.snapshot(view, "waiting")
 
-        // 2. cmux writes its last turn and exits: the tile goes live at once.
+        // 2. Review finding 6: a pass that misses the session while cmux's
+        //    process still runs must not hand it over — that is two writers.
+        world.publish([desktop, copySource])
+        try expect(supervisor.records[agentId]?.externalSession?.mode == .movingHere && supervisor.isSessionHeld(agentId)
+                   && view.sessionHandoffState == .waitingToMove(app: "cmux", closesInApp: false, canCopy: true),
+                   "the session must stay cmux's while its process runs; link \(String(describing: supervisor.records[agentId]?.externalSession))")
+        world.publish([cmux, desktop, copySource])
+        // cmux writes its last turn and exits: the tile goes live at once.
         try world.append(userLine("u2", "One last thing in cmux.") + "\n" + assistantLine("a2", "Handled in cmux.") + "\n", to: file)
+        end(cmuxProcess)
         let readsBeforeLive = QAMainThreadIO.fileReads
         world.publish([desktop, copySource])
         guard let live = supervisor.records[agentId] else { throw Failure(message: "the agent went away") }
@@ -437,13 +521,110 @@ enum ExternalSessionHandoffChecks {
     // MARK: - --agent-paused-elsewhere-check
 
     static func runPaused(pngDirectory: String?) throws -> String {
-        let world = try makeWorld(pngDirectory: pngDirectory)
+        // Review finding 3, as a relaunch leaves it: a Claude agent whose tile
+        // was saved in its Terminal face, in ANOTHER workspace's project, so no
+        // tile of it is built — and the claude that face runs is still alive in
+        // tmux. Nothing has been sent and discovery has not looked yet.
+        var faceAgent: AgentID?
+        let faceTile = UUID()
+        let world = try makeWorld(pngDirectory: pngDirectory) { delegate, tempRoot in
+            guard let model = AgentCatalogQAFixture.claude.seedModel else { throw Failure(message: "no claude fixture model") }
+            let pcRoot = tempRoot.appendingPathComponent("Pc", isDirectory: true)
+            let projects = try RegistryStore(applicationSupportDirectory: tempRoot.appendingPathComponent("AppSupport", isDirectory: true))
+                .loadOrEmpty().projects
+            guard let pc = projects.first(where: { $0.name == "Pc" }) else { throw Failure(message: "no project Pc") }
+            let id = delegate.qaAgentSupervisor.spawn(
+                role: nil, prompt: nil, cwd: pcRoot, harness: .claudeCode, model: model, thinking: "",
+                projectId: pc.id, projectRoot: pcRoot, tileId: faceTile, displayName: "Face in workspace B")
+            faceAgent = id
+            let store = ProjectStore(projectRoot: pcRoot)
+            var canvas = try store.loadCanvas()
+            var tile = Tile(id: faceTile, kind: .managedAgent, title: "Face in workspace B",
+                            frame: TileFrame(x: 300, y: 40, width: 560, height: 520),
+                            zPosition: .fromLegacyRank(2), runtimeRef: nil,
+                            metadata: TileMetadata(agentTerminalFace: AgentTerminalFaceState(
+                                sessionId: AgentSupervisor.claudeSessionId(for: id), cwd: pcRoot.path, sessionFileOffset: 0)))
+            tile.zoneId = canvas.tiles.first?.zoneId
+            canvas.tiles.append(tile)
+            try store.saveCanvas(canvas)
+        }
         defer { world.tearDown() }
         let supervisor = world.supervisor
         let delegate = world.delegate
         let bin = world.bin
         var activated: [(Int32?, String)] = []
         delegate.activateExternalSessionHostForQA = { activated.append(($0, $1)) }
+
+        guard let faceAgent else { throw Failure(message: "no Terminal-face agent") }
+        try expect(world.fixture.canvas.tileView(for: faceTile) == nil, "precondition: the face agent's tile is not built")
+        // The saved face holds the session from the moment the scene mounts:
+        // the production send path refuses, and no claude starts.
+        try expect(supervisor.isSessionHeld(faceAgent) && !supervisor.send("PLAIN from Array", to: faceAgent)
+                   && supervisor.sendRefusal(for: faceAgent)?.contains("Terminal face") == true,
+                   "an agent saved in its Terminal face must be held at boot, tile or no tile; refusal \(String(describing: supervisor.sendRefusal(for: faceAgent)))")
+        try expect(AgentSteeringQAFakes.spawnCount(in: bin) == 0, "no claude ran for the held face agent")
+
+        // Review finding 14: pauses are not saved, so for the moment between a
+        // launch and discovery's first pass Array cannot know that Ghostty has
+        // a Claude agent's session open. Sends wait for that pass (bounded)
+        // rather than resume a session someone else is writing.
+        let monitor = world.monitor
+        monitor.beginAwaitingFirstPass()   // what `start()` does at launch, without reading this Mac
+        guard let model = AgentCatalogQAFixture.claude.seedModel else { throw Failure(message: "no claude fixture model") }
+        let early = supervisor.spawn(
+            role: nil, prompt: nil, cwd: world.fixture.pbRoot, harness: .claudeCode, model: model, thinking: "",
+            projectId: world.fixture.projectPb, projectRoot: world.fixture.pbRoot, displayName: "Open in Ghostty at launch")
+        try expect(!supervisor.send("PLAIN before discovery", to: early)
+                   && supervisor.sendRefusal(for: early)?.contains("another app") == true,
+                   "before discovery's first pass a Claude agent's send must wait; refusal \(String(describing: supervisor.sendRefusal(for: early)))")
+        var acceptance: IntentAcceptance?
+        Task { @MainActor in acceptance = await supervisor.accept(.send("PLAIN from the composer"), for: early) }
+        try expect(world.pump(until: { acceptance != nil }) && acceptance == .accepted,
+                   "the composer's send is held for the pass, not refused; got \(String(describing: acceptance))")
+        try expect(AgentSteeringQAFakes.spawnCount(in: bin) == 0, "no claude may start before discovery has looked")
+        let earlyHolder = try liveHolder()
+        defer { end(earlyHolder) }
+        // Discovery finds its claude still running in the Terminal face: held.
+        let faceProcess = try liveHolder()
+        defer { end(faceProcess) }
+        let faceSession = session(AgentSupervisor.claudeSessionId(for: faceAgent), pid: faceProcess.processIdentifier,
+                                  cwd: world.fixture.pcRoot, title: "Face in workspace B", status: .idle,
+                                  host: .arrayTerminalFace(agentId: AgentProcessAttribution.ownerTag(for: faceAgent)),
+                                  transcript: nil)
+        let ghosttyAtLaunch = session(AgentSupervisor.claudeSessionId(for: early), pid: earlyHolder.processIdentifier,
+                                      cwd: world.fixture.pbRoot, title: "Open in Ghostty at launch", status: .idle,
+                                      host: .app("Ghostty"), transcript: nil)
+        world.publish([faceSession, ghosttyAtLaunch])
+        try expect(supervisor.externalHold(for: early) == "Ghostty", "the first pass pauses the agent Ghostty holds")
+        world.pump(0.3)
+        try expect(AgentSteeringQAFakes.spawnCount(in: bin) == 0 && !supervisor.isRunning(early),
+                   "the held send never ran beside Ghostty's claude")
+        let earlyNotices = supervisor.transcriptDocumentProjection(for: early)?.entries
+            .map { AgentTranscriptCopyController.plainText(for: $0.blocks) } ?? []
+        try expect(earlyNotices.contains { $0.contains("also open in Ghostty") },
+                   "the held send says why it was not sent; transcript \(earlyNotices)")
+        // The wait is bounded: a first pass that never reports stops holding sends.
+        let slow = ExternalSessionMonitor()
+        var settled = false
+        slow.onFirstPassSettled = { settled = true }
+        slow.beginAwaitingFirstPass()
+        try expect(slow.isAwaitingFirstPass, "a launch waits for its first pass")
+        try expect(world.pump(until: { settled && !slow.isAwaitingFirstPass }, timeout: ExternalSessionMonitor.firstPassWait + 1),
+                   "a first pass that takes longer than \(ExternalSessionMonitor.firstPassWait)s stops holding sends")
+        end(earlyHolder)
+        world.publish([faceSession])
+        try expect(supervisor.isSessionHeld(faceAgent) && !supervisor.send("PLAIN from Array", to: faceAgent),
+                   "a face claude discovery still sees keeps the agent held")
+        // One pass without it while it still runs is not its exit (finding 6).
+        world.publish([])
+        try expect(supervisor.isSessionHeld(faceAgent), "a pass that misses a running face claude must not release it")
+        // That claude exits: the agent is Array's again.
+        end(faceProcess)
+        world.publish([])
+        // The face's one end reads what it wrote off the main thread first.
+        try expect(world.pump(until: { !supervisor.isSessionHeld(faceAgent) }) && supervisor.sendRefusal(for: faceAgent) == nil,
+                   "once its face claude is gone the agent sends from Array again; refusal \(String(describing: supervisor.sendRefusal(for: faceAgent)))")
+        try expect(AgentSteeringQAFakes.spawnCount(in: bin) == 0, "no claude ran while the face held the session")
 
         // An Array Claude agent with a tile, its claude pooled after a turn.
         guard let model = AgentCatalogQAFixture.claude.seedModel else { throw Failure(message: "no claude fixture model") }
@@ -485,7 +666,8 @@ enum ExternalSessionHandoffChecks {
         //    an untagged runner from an older Array. None of them pauses it.
         world.publish([holder(.arrayManaged(agentId: tag), pid: pooledPid)])
         try assertNotPaused("its own tagged runner")
-        world.publish([holder(.arrayTerminalFace(agentId: tag), pid: 42_001)])
+        // A face claude that has exited (a running one holds the agent: finding 3).
+        world.publish([holder(.arrayTerminalFace(agentId: tag), pid: try exitedPid())])
         try assertNotPaused("its own Terminal face")
         world.publish([holder(.arrayManaged(agentId: nil), pid: 42_002)])
         try assertNotPaused("an untagged runner under Array")
@@ -512,11 +694,37 @@ enum ExternalSessionHandoffChecks {
         world.inbox.layoutForQA()
         try expect(world.inbox.row(forAgentId: agentId.rawValue)?.whereMarker == nil, "…and no marker in its Array face")
 
+        // 1b. Review finding 1, through the production discovery: the agent's
+        //     pooled runner holds the session with the LOWER pid, and a Ghostty
+        //     `claude --resume` of it the higher. One row per session must not
+        //     cost the foreign holder its report: the agent pauses.
+        let ghosttyPid = try exitedPid()
+        try expect(ghosttyPid > pooledPid, "the Ghostty stand-in must have the higher pid")
+        let ghosttyApp = ProcessSample(pid: 9_100_001, parentPid: 1, startedAt: Date().addingTimeInterval(-600),
+                                       executablePath: "/Applications/Ghostty.app/Contents/MacOS/ghostty",
+                                       arguments: [], ownerTag: nil, ownerFace: nil)
+        let discovered = try discover(
+            home: world.fixture.tempRoot.appendingPathComponent("discovery-home", isDirectory: true),
+            cwd: world.fixture.pbRoot,
+            holders: [(pooledPid, sessionId, "sdk-cli", getpid(), tag),
+                      (ghosttyPid, sessionId, "cli", ghosttyApp.pid, nil)],
+            apps: [ghosttyApp])
+        world.monitor.publish(discovered)
+        delegate.qaRefreshAgentSurfaces()
+        try expect(delegate.externalSessionPauses[agentId]?.hostName == "Ghostty" && supervisor.externalHold(for: agentId) == "Ghostty",
+                   "Array's pooled runner on the lower pid must not hide the Ghostty claude holding the same session; discovery reported \(discovered.sessions.map { "\($0.pid.map(String.init) ?? "-") \($0.host)" })")
+        world.publish([])
+        try expect(world.pump(until: { delegate.externalSessionPauses[agentId] == nil && supervisor.externalHold(for: agentId) == nil }),
+                   "the Ghostty holder gone, the pause ends")
+
         // 2. Someone resumes it in Ghostty: paused. Discovery looks every few
         //    seconds, so Ghostty's first prompt is in the file before Array
         //    knows (review #11).
         try world.append(userLine("u2", "From Ghostty, rename the test.") + "\n", to: file)
-        world.publish([holder(.app("Ghostty"), pid: 42_100)])
+        let ghosttyProcess = try liveHolder()
+        defer { end(ghosttyProcess) }
+        let ghostty = ghosttyProcess.processIdentifier
+        world.publish([holder(.app("Ghostty"), pid: ghostty)])
         try expect(delegate.externalSessionPauses[agentId]?.hostName == "Ghostty" && supervisor.externalHold(for: agentId) == "Ghostty",
                    "a session opened in Ghostty pauses the agent")
         try expect(view.sessionHandoffState == .paused(app: "Ghostty"), "the tile says so; got \(String(describing: view.sessionHandoffState))")
@@ -535,12 +743,19 @@ enum ExternalSessionHandoffChecks {
                    && world.inbox.row(forAgentId: agentId.rawValue)?.state.label == AgentStatusVocabulary.label(for: .needsAttention),
                    "the sidebar row says Needs attention; got \(String(describing: world.inbox.row(forAgentId: agentId.rawValue)?.state))")
         try world.press(.showApp, on: view)
-        try expect(activated.last.map { $0.0 == 42_100 && $0.1 == "Ghostty" } == true, "Show Ghostty brings Ghostty's process forward")
+        try expect(activated.last.map { $0.0 == ghostty && $0.1 == "Ghostty" } == true, "Show Ghostty brings Ghostty's process forward")
         world.snapshot(view, "paused")
 
         // 3. Ghostty finishes its turn and exits: appended once, the agent resumes.
         try world.append(assistantLine("a2", "Renamed it in Ghostty.") + "\n", to: file)
         let onScreen = world.texts(view)
+        // Review finding 6: one pass without it while Ghostty's process still
+        // runs (its status file mid-rewrite) is not the other app letting go.
+        world.publish([])
+        try expect(delegate.externalSessionPauses[agentId] != nil && supervisor.externalHold(for: agentId) == "Ghostty"
+                   && world.texts(view) == onScreen && supervisor.sendRefusal(for: agentId) != nil,
+                   "the pause must hold while the Ghostty process still runs, appending nothing")
+        end(ghosttyProcess)
         let readsBeforeResume = QAMainThreadIO.fileReads
         world.publish([])
         try expect(world.pump(until: { delegate.externalSessionPauses[agentId] == nil && supervisor.externalHold(for: agentId) == nil }),
@@ -575,7 +790,8 @@ enum ExternalSessionHandoffChecks {
 
         return "ExternalSessionHandoffChecks.paused: the agent's own runner, Terminal face and untagged runners never pause it; "
             + "its session opened in Ghostty stops its claude, refuses sends and says Needs attention; when Ghostty lets go "
-            + "its turn is appended once and the agent runs again; the row's Terminal marker reads the tile's real face"
+            + "its turn is appended once and the agent runs again; the row's Terminal marker reads the tile's real face; "
+            + "a Terminal face no tile shows holds its agent until its claude exits; a launch's sends wait for discovery's first pass"
             + (pngDirectory.map { " (png: \($0))" } ?? "")
     }
 }

@@ -3331,6 +3331,9 @@ final class AgentSupervisor {
         if let host = externalHolds[id] {
             return "Paused while this session is also open in \(host), so the two don't overwrite each other."
         }
+        if waitsForSessionDiscovery(record) {
+            return "Checking whether another app has this session open first."
+        }
         return Self.sendRefusal(record: record)
     }
 
@@ -3393,10 +3396,25 @@ final class AgentSupervisor {
         }
     }
 
-    /// The agent's CLI readiness probe is still out — the seconds after launch.
+    /// The agent's CLI readiness probe is still out — the seconds after launch —
+    /// or discovery has not yet said whether another app holds its session.
     private func isStillStarting(_ id: AgentID) -> Bool {
-        guard let harness = records[id]?.harness else { return false }
+        guard let record = records[id], let harness = record.harness else { return false }
         return AgentModelCatalog.shared.snapshot(for: harness).readiness == .checking
+            || waitsForSessionDiscovery(record)
+    }
+
+    /// `.plans/79` review 14: whether the app's session discovery is still on
+    /// its first pass since launch (bounded: `ExternalSessionMonitor
+    /// .firstPassWait`). Pauses are not saved, so until it has looked Array
+    /// cannot know that another app holds a Claude or Codex agent's session;
+    /// those agents' sends wait for it rather than resume a session someone
+    /// else may be writing.
+    var awaitsSessionDiscovery: () -> Bool = { false }
+
+    private func waitsForSessionDiscovery(_ record: AgentRecord) -> Bool {
+        (record.harness == .claudeCode || record.harness == .codex)
+            && record.capabilities.locallyManaged && awaitsSessionDiscovery()
     }
 
     /// S3 (T3's `sendQueuesBehindSetup`): a prompt sent while its CLI is still
@@ -3407,7 +3425,7 @@ final class AgentSupervisor {
     private func holdOrRefuseForReadiness(_ prepared: PreparedAgentPrompt, for id: AgentID) -> IntentAcceptance? {
         guard let refusal = sendRefusal(for: id) else { return nil }
         guard isStillStarting(id), heldForReadiness[id] == nil, runners[id] == nil,
-              let harness = records[id]?.harness else {
+              let record = records[id], let harness = record.harness else {
             warn("AgentSupervisor.accept: \(refusal)")
             pendingReturnStamps[id] = nil
             return .refused(.harnessNotReady)
@@ -3415,7 +3433,9 @@ final class AgentSupervisor {
         heldForReadiness[id] = prepared
         let returnedAt = pendingReturnStamps.removeValue(forKey: id)
         turnFacts[id, default: TurnFacts()].presence.arm(at: returnedAt ?? Date())
-        turnFacts[id]?.presence.noteStartupDetail("Waiting for \(harness.rawValue) to finish starting")
+        turnFacts[id]?.presence.noteStartupDetail(waitsForSessionDiscovery(record)
+            ? "Checking whether another app has this session open"
+            : "Waiting for \(harness.rawValue) to finish starting")
         installReadinessObserverIfNeeded()
         notifyTurnCapabilitiesChanged(id)
         return .accepted
@@ -3649,9 +3669,27 @@ final class AgentSupervisor {
         var effort: String?
         var conversationExists: Bool
         var processOwner: String
+        /// `sessionId` is a pending fork's source: the face forks it.
+        var forkSession: Bool
     }
 
     func isInTerminalFace(_ id: AgentID) -> Bool { terminalFaceAgents.contains(id) }
+
+    /// A Terminal face no tile is showing still owns its session: a tile saved
+    /// in that face whose view is not built (another workspace, below the live
+    /// tier, a relaunch before the reattach), or a face claude discovery still
+    /// sees. The app holds the agent here so no runner of Array's starts beside
+    /// that claude; `endTerminalFace` lets go, as it does for a shown face.
+    func holdForTerminalFace(_ id: AgentID) {
+        guard records[id]?.harness == .claudeCode, terminalFaceAgents.insert(id).inserted else { return }
+        if let idle = idleSessionRunners.removeValue(forKey: id) {
+            idleReapTokens[id] = nil
+            idle.stop()
+            interruptWorkingClaudeMirroredChildren(of: id)
+        }
+        if runners[id] != nil { retireSessionAfterTurn.insert(id) }
+        notifyTurnCapabilitiesChanged(id)
+    }
 
     /// Whether the Terminal face could take this agent now. Claude Code only:
     /// codex and pi have no per-process session file to say whether the TUI
@@ -3713,7 +3751,8 @@ final class AgentSupervisor {
             model: config.model,
             effort: config.effort,
             conversationExists: config.conversationMayExist,
-            processOwner: AgentProcessAttribution.ownerTag(for: id))
+            processOwner: AgentProcessAttribution.ownerTag(for: id),
+            forkSession: config.forkSession)
     }
 
     /// The Terminal face let go. What it learned comes back to the record: the
@@ -3729,7 +3768,17 @@ final class AgentSupervisor {
     private func adoptTerminalFaceOutcome(for id: AgentID, sessionId: String?, model: String?, tookTurns: Bool) {
         if var record = records[id] {
             var changed = false
-            if let sessionId, sessionId != Self.claudeSessionLocation(for: record).sessionId {
+            if let source = record.pendingSessionForkFrom {
+                // The face forked `source`, which another process may still be
+                // writing (Copy) or this agent left behind (`/clear`). Only the
+                // fork's own id is this agent's; the source never is, so a face
+                // that ended before claude reported its fork leaves it pending.
+                if let sessionId, sessionId != source {
+                    record.providerSessionId = sessionId
+                    record.pendingSessionForkFrom = nil
+                    changed = true
+                }
+            } else if let sessionId, sessionId != Self.claudeSessionLocation(for: record).sessionId {
                 record.providerSessionId = sessionId
                 changed = true
             }
@@ -3880,13 +3929,13 @@ final class AgentSupervisor {
     // launch's transcript exists and the restore reads the file whole, so no
     // turn is ever counted twice.
 
-    /// What a session file held up to: everything before `offset` is in the
-    /// agent's transcript.
-    struct SessionFileMark: Equatable {
-        var url: URL
-        var offset: UInt64
+    /// What each of an agent's session files held up to, by path: everything
+    /// before the offset is in the agent's transcript.
+    private var sessionFileMarks: [AgentID: [String: UInt64]] = [:]
+
+    private func setSessionFileMark(_ id: AgentID, url: URL, offset: UInt64) {
+        sessionFileMarks[id, default: [:]][url.standardizedFileURL.path] = offset
     }
-    private var sessionFileMarks: [AgentID: SessionFileMark] = [:]
 
     /// The home the CLIs keep their session files under (`.claude/`, `.pi/`,
     /// `.codex/`): the user's. Only checks move it.
@@ -3897,8 +3946,7 @@ final class AgentSupervisor {
     /// stopped. A pause begins from here, not from wherever the file had got
     /// to by the time discovery noticed (review #11).
     func sessionFileMark(for id: AgentID, url: URL) -> UInt64? {
-        guard let mark = sessionFileMarks[id], mark.url.standardizedFileURL == url.standardizedFileURL else { return nil }
-        return mark.offset
+        sessionFileMarks[id]?[url.standardizedFileURL.path]
     }
 
     /// Array's own claude just finished a turn: the file ends where its turn
@@ -3907,7 +3955,7 @@ final class AgentSupervisor {
         guard let record = records[id], record.harness == .claudeCode else { return }
         let location = Self.claudeSessionLocation(for: record)
         let url = ClaudeSessionTranscriptReader.sessionFileURL(homeURL: sessionFilesHome, cwd: location.cwd, sessionId: location.sessionId)
-        sessionFileMarks[id] = SessionFileMark(url: url, offset: SessionFileTail.length(url))
+        setSessionFileMark(id, url: url, offset: SessionFileTail.length(url))
     }
 
     /// This launch's transcript of `id`, made on its first write. An agent
@@ -3987,6 +4035,7 @@ final class AgentSupervisor {
 
     nonisolated static func readOutsideTurns(
         segments: [(url: URL, offset: UInt64)], prefixBefore: (url: URL, offset: UInt64)?,
+        droppingCopiesOf copied: (url: URL, offset: UInt64)? = nil,
         provider: ExternalSessionProvider, threadId: String
     ) -> OutsideRead {
         let limits = RehydrationLimits()
@@ -4006,6 +4055,10 @@ final class AgentSupervisor {
             lines += window.lines
             end = (segment.url, window.end)
         }
+        // A fork's file opens with a copy of what came before the mark.
+        if let copied {
+            lines = ClaudeTerminalFace.lines(lines, droppingUUIDsIn: ClaudeTerminalFace.lines(in: copied.url, before: copied.offset))
+        }
         let prefix = prefixBefore.map { before -> RehydratedTranscript in
             let window = ClaudeTerminalFace.lines(in: before.url, before: before.offset, maxBytes: limits.maxBytes)
             return parse(window, truncated: before.offset > UInt64(limits.maxBytes))
@@ -4021,7 +4074,7 @@ final class AgentSupervisor {
             seedRehydratedTranscript(prefix, for: id)
             outsideHistoryObservers[id]?.values.forEach { $0(.restored(prefix)) }
         }
-        if let end = read.end { sessionFileMarks[id] = SessionFileMark(url: end.url, offset: end.offset) }
+        if let end = read.end { setSessionFileMark(id, url: end.url, offset: end.offset) }
         guard !read.turns.steps.isEmpty else { return 0 }
         let turns = Self.promptCount(read.turns)
         let boundary = Self.outsideBoundaryText(turns: turns, place: place, omittedEarlier: read.turns.omittedEarlier)
@@ -4074,8 +4127,8 @@ final class AgentSupervisor {
         watch.onGone = { [weak self] in self?.finishTerminalFace(for: id) }
         terminalFaceWatches[id] = watch
         endedTerminalFaceTiles.remove(tileId)
-        sessionFileMarks[id] = SessionFileMark(
-            url: ClaudeTerminalFace.sessionFileURL(claudeHome: environment.claudeHome, cwd: state.cwd, sessionId: state.sessionId),
+        setSessionFileMark(
+            id, url: ClaudeTerminalFace.sessionFileURL(claudeHome: environment.claudeHome, cwd: state.cwd, sessionId: state.sessionId),
             offset: state.sessionFileOffset)
         watch.start()
         return watch
@@ -4091,6 +4144,8 @@ final class AgentSupervisor {
     /// ended on (review #10), and the session is Array's again.
     func finishTerminalFace(for id: AgentID, persisted: AgentTerminalFaceState? = nil, tileId: UUID? = nil, claudeHome home: URL? = nil) {
         let watch = terminalFaceWatches[id]
+        // A saved face that already ended this launch has brought its turns home.
+        if watch == nil, let tileId, endedTerminalFaceTiles.contains(tileId) { return }
         guard let state = watch?.state ?? persisted, endingTerminalFaces.insert(id).inserted else { return }
         watch?.stopPolling()
         let sessionIds = watch?.sessionIds ?? state.sessionIds
@@ -4103,7 +4158,10 @@ final class AgentSupervisor {
         let threadId = Self.threadId(for: id)
         let faceTile = watch?.tileId ?? tileId
         Task.detached(priority: .userInitiated) { [weak self] in
-            let read = Self.readOutsideTurns(segments: segments, prefixBefore: prefix, provider: .claude, threadId: threadId)
+            let read = Self.readOutsideTurns(
+                segments: segments, prefixBefore: prefix,
+                droppingCopiesOf: segments.count > 1 ? (url: segments[0].url, offset: state.sessionFileOffset) : nil,
+                provider: .claude, threadId: threadId)
             let model = ClaudeTerminalFace.lastModel(in: read.lines)
             await MainActor.run {
                 guard let self else { return }

@@ -17,10 +17,18 @@ import ContinuumRevivedCore
 final class ExternalSessionMonitor {
     static let activeInterval: TimeInterval = 3
     static let inactiveInterval: TimeInterval = 10
+    /// How long a launch's sends wait for the first pass (~150 ms on a real
+    /// Mac) before going ahead without it.
+    static let firstPassWait: TimeInterval = 2
 
     private(set) var snapshot = ExternalSessionSnapshot.empty
     /// Called on the main thread after `snapshot` changed.
     var onChange: (() -> Void)?
+    /// True while something waits on a holder process to exit. Its exit can
+    /// end the wait with the snapshot unchanged (the session already missing
+    /// from a pass that read its status file mid-rewrite), so every pass is
+    /// reported then, not only a changed one.
+    var reportsEveryPass: () -> Bool = { false }
     /// tmux pane id → the shell tile showing it, read on the main thread before
     /// each pass: a project's shell tiles share one tmux session, so only the
     /// pane says which tile a claude was typed into.
@@ -36,7 +44,33 @@ final class ExternalSessionMonitor {
     func start() {
         guard !isStarted else { return }
         isStarted = true
+        beginAwaitingFirstPass()
         tick()
+    }
+
+    /// Pauses are not saved: after a launch, until the first pass has looked,
+    /// Array cannot know that another app holds an agent's session. Claude and
+    /// Codex agents' sends wait while this is true (`AgentSupervisor
+    /// .awaitsSessionDiscovery`), for at most `firstPassWait`.
+    var isAwaitingFirstPass: Bool {
+        guard let awaitingSince, !hasDiscovered else { return false }
+        return Date().timeIntervalSince(awaitingSince) < Self.firstPassWait
+    }
+    private var awaitingSince: Date?
+    /// The wait above ended: the first pass published, or it took too long.
+    var onFirstPassSettled: (() -> Void)?
+
+    /// `start()`'s first step; a check calls it alone, without reading the Mac.
+    func beginAwaitingFirstPass() {
+        guard awaitingSince == nil, !hasDiscovered else { return }
+        awaitingSince = Date()
+        let timer = Timer(timeInterval: Self.firstPassWait, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.hasDiscovered else { return }
+                self.onFirstPassSettled?()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     func stop() {
@@ -50,9 +84,10 @@ final class ExternalSessionMonitor {
     func publish(_ next: ExternalSessionSnapshot) {
         let first = !hasDiscovered
         hasDiscovered = true
-        guard next != snapshot || first else { return }
+        guard next != snapshot || first || reportsEveryPass() else { return }
         snapshot = next
         onChange?()
+        if first, awaitingSince != nil { onFirstPassSettled?() }
     }
 
     /// Whether any pass has published yet. Until one has, an absent session

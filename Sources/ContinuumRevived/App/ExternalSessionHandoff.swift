@@ -20,11 +20,25 @@ import Darwin
 //   runner stops, sends are refused, and when the other process exits what it
 //   wrote is appended and the agent carries on.
 
+/// A Terminal face no tile shows: the claude discovery last saw running it,
+/// and the session it was on, which the agent continues once that claude exits.
+struct UnshownTerminalFace: Equatable {
+    var pid: Int32?
+    var startedAt: Date?
+    var sessionId: String?
+    /// The face as its tile saved it — the mark its turns are read from —
+    /// and the tile, when the hold came from a saved face.
+    var saved: AgentTerminalFaceState?
+    var tileId: UUID?
+}
+
 /// One paused agent: where its session is open, and the byte the file ended at
 /// when the pause began.
 struct ExternalSessionPause: Equatable {
     var hostName: String
     var pid: Int32?
+    /// When `pid` started: the pause lifts only once that process is gone.
+    var startedAt: Date?
     var provider: ExternalSessionProvider
     var url: URL?
     var offset: UInt64
@@ -37,14 +51,17 @@ extension AppDelegate {
         let snapshot = externalSessionMonitor.snapshot
         let discovered = externalSessionMonitor.hasDiscovered
         dropDetachedExternalSessionAgents()
+        reconcileTerminalFaceHolds()
         for record in Array(agentSupervisor.records.values) {
             if let link = record.externalSession {
                 let holding = ExternalSessionHandoff.holding(link, in: snapshot, discovered: discovered)
                 if case let .heldElsewhere(session) = holding {
                     let name = externalHostName(of: session)
-                    if name != link.hostName {
+                    if name != link.hostName || session.pid != link.holderPid {
                         var renamed = link
                         renamed.hostName = name
+                        renamed.holderPid = session.pid
+                        renamed.holderStartedAt = session.pid.flatMap(ExternalSessionHandoff.processStart)
                         agentSupervisor.linkExternalSession(record.id, renamed)
                     }
                 } else if case .released = holding, link.mode == .movingHere {
@@ -227,6 +244,7 @@ extension AppDelegate {
                 if pause.hostName != name || pause.pid != holder.pid {
                     pause.hostName = name
                     pause.pid = holder.pid
+                    pause.startedAt = holder.pid.flatMap(ExternalSessionHandoff.processStart)
                     externalSessionPauses[id] = pause
                 }
                 return
@@ -244,12 +262,16 @@ extension AppDelegate {
                 agentSupervisor.sessionFileMark(for: id, url: $0) ?? SessionFileTail.tail(in: $0, maxBytes: 64 * 1024).end
             } ?? 0
             externalSessionPauses[id] = ExternalSessionPause(
-                hostName: name, pid: holder.pid, provider: provider, url: url, offset: offset)
+                hostName: name, pid: holder.pid, startedAt: holder.pid.flatMap(ExternalSessionHandoff.processStart),
+                provider: provider, url: url, offset: offset)
             agentSupervisor.beginExternalHold(for: id, hostName: name)
             return
         }
+        // Released only once the holding process is really gone: one pass that
+        // missed it (its status file mid-rewrite) is not the other app letting go.
         guard let pause = externalSessionPauses[id],
-              discovered, !(provider == .claude && snapshot.claudeUnreadable) else { return }
+              discovered, !(provider == .claude && snapshot.claudeUnreadable),
+              ExternalSessionHandoff.holderIsGone(pid: pause.pid, startedAt: pause.startedAt) else { return }
         // The other process let go: what it wrote comes into the agent's
         // transcript — once, read off the main thread, for every tile of the
         // agent now and later (review #7) — then the agent is Array's again.
@@ -264,6 +286,67 @@ extension AppDelegate {
             // Opened elsewhere again while the read ran: that pause holds it.
             guard let self, self.externalSessionPauses[id] == nil else { return }
             self.agentSupervisor.endExternalHold(for: id, tookTurns: wroteLines > 0)
+        }
+    }
+
+    // MARK: - Terminal faces no tile shows (review finding 3)
+
+    /// Holds every Claude agent whose Terminal face runs, or may run, without a
+    /// tile showing it, and lets go once its claude has exited. The evidence:
+    /// discovery's claude carrying the agent's tag in its Terminal face; and,
+    /// until discovery's first pass, a tile saved in that face. A face this
+    /// launch watches (`AgentSupervisor.terminalFaceWatch`: a tile showed it,
+    /// parked or not) is the watch's, and is left to it. Either way the face
+    /// ends through `AgentSupervisor.finishTerminalFace`, the one end, which
+    /// brings its turns home and adopts what claude ended on.
+    func reconcileTerminalFaceHolds() {
+        let monitor = externalSessionMonitor
+        var running: [String: ExternalAgentSession] = [:]
+        for session in monitor.snapshot.sessions {
+            // Alive now: a pass from before a face's claude exited still lists it.
+            guard case let .arrayTerminalFace(tag) = session.host,
+                  let pid = session.pid, ExternalSessionHandoff.processStart(pid) != nil else { continue }
+            running[tag] = session
+        }
+        let saved = monitor.hasDiscovered ? [:] : savedTerminalFaces()
+        for record in agentSupervisor.records.values where record.harness == .claudeCode {
+            let id = record.id
+            if agentSupervisor.terminalFaceWatch(for: id) != nil {
+                unshownTerminalFaces[id] = nil
+                continue
+            }
+            if let live = running[AgentProcessAttribution.ownerTag(for: id)] {
+                var face = unshownTerminalFaces[id] ?? UnshownTerminalFace()
+                if face.pid != live.pid {
+                    face.pid = live.pid
+                    face.startedAt = live.pid.flatMap(ExternalSessionHandoff.processStart)
+                }
+                face.sessionId = live.sessionId
+                unshownTerminalFaces[id] = face
+                agentSupervisor.holdForTerminalFace(id)
+            } else if let tileId = record.tileId, let state = saved[tileId],
+                      !agentSupervisor.hasEndedTerminalFace(onTile: tileId) {
+                if unshownTerminalFaces[id] == nil {
+                    unshownTerminalFaces[id] = UnshownTerminalFace(
+                        sessionId: state.sessionIds.last, saved: state, tileId: tileId)
+                }
+                agentSupervisor.holdForTerminalFace(id)
+            } else if let face = unshownTerminalFaces[id], monitor.hasDiscovered,
+                      !monitor.snapshot.claudeUnreadable,
+                      ExternalSessionHandoff.holderIsGone(pid: face.pid, startedAt: face.startedAt) {
+                unshownTerminalFaces[id] = nil
+                if var state = face.saved {
+                    // Discovery saw claude move session (`/clear`) after the save.
+                    if let latest = face.sessionId, latest != state.sessionIds.last { state.latestSessionId = latest }
+                    agentSupervisor.finishTerminalFace(for: id, persisted: state, tileId: face.tileId)
+                } else {
+                    // No mark to read from: the record's half only.
+                    agentSupervisor.endTerminalFace(for: id, sessionId: face.sessionId, model: nil, tookTurns: false)
+                }
+            }
+        }
+        for id in unshownTerminalFaces.keys where agentSupervisor.records[id] == nil {
+            unshownTerminalFaces[id] = nil
         }
     }
 

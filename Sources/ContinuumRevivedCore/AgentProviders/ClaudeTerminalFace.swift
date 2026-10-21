@@ -67,7 +67,8 @@ public enum ClaudeTerminalFace {
         model: String,
         effort: String?,
         processOwner: String,
-        path: String
+        path: String,
+        forkSession: Bool = false
     ) -> [String] {
         let environment = [
             "\(AgentProcessAttribution.ownerEnvironmentKey)=\(processOwner)",
@@ -77,7 +78,11 @@ public enum ClaudeTerminalFace {
         ]
         // An agent that has never had a turn has no conversation to resume yet:
         // `--resume` would exit at once with "No conversation found".
-        let session = conversationExists ? ["--resume", sessionId] : ["--session-id", sessionId]
+        // A pending fork (Copy before its first turn, a `/clear` rotation) names
+        // a session another process may still write: claude forks it into a
+        // new one rather than continuing it.
+        let session = forkSession ? ["--resume", sessionId, "--fork-session"]
+            : conversationExists ? ["--resume", sessionId] : ["--session-id", sessionId]
         return ["/usr/bin/env"] + environment + [claude.executable] + claude.prefixArgs
             + session + ["--model", model] + (effort.map { ["--effort", $0] } ?? [])
     }
@@ -143,6 +148,18 @@ public enum ClaudeTerminalFace {
             .split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
     }
 
+    /// `lines` without any whose `uuid` is in `known`. A fork's file starts as a
+    /// copy of the session it forked, so what it shares with that session's
+    /// part already on screen is not the Terminal face's to append again.
+    public static func lines(_ lines: [String], droppingUUIDsIn known: [String]) -> [String] {
+        let uuids = Set(known.compactMap { ManagedTranscriptRehydrator.jsonObject($0)?["uuid"] as? String })
+        guard !uuids.isEmpty else { return lines }
+        return lines.filter { line in
+            guard let uuid = ManagedTranscriptRehydrator.jsonObject(line)?["uuid"] as? String else { return true }
+            return !uuids.contains(uuid)
+        }
+    }
+
     /// The model the last assistant line ran on, as a catalogue id
     /// (`anthropic/<model>` — `ClaudeCLIBackend.parseInitializeModels`' form).
     /// Verbatim from claude's own file. nil when no assistant line names a
@@ -157,6 +174,26 @@ public enum ClaudeTerminalFace {
             return "anthropic/\(model)"
         }
         return nil
+    }
+
+    // MARK: - The input box
+
+    /// Whether claude's input box on `screen` (a pane's text, top to bottom) is
+    /// visibly empty: its prompt line is exactly `❯` between two rules of `─`.
+    /// Anything else — a draft, a multi-line draft, a placeholder, a dialog,
+    /// a screen this cannot read — is not empty: typing a command there would
+    /// submit what is already in it as a turn.
+    public static func inputBoxIsEmpty(screen lines: [String]) -> Bool {
+        func trimmed(_ line: String) -> String { line.trimmingCharacters(in: .whitespaces) }
+        func isRule(_ line: String) -> Bool {
+            let text = trimmed(line)
+            return !text.isEmpty && text.allSatisfy { $0 == "\u{2500}" }
+        }
+        // The box claude draws now is the bottom one.
+        guard let prompt = lines.lastIndex(where: { trimmed($0).hasPrefix("\u{276F}") }) else { return false }
+        return trimmed(lines[prompt]) == "\u{276F}"
+            && prompt > 0 && isRule(lines[prompt - 1])
+            && prompt + 1 < lines.count && isRule(lines[prompt + 1])
     }
 
     // MARK: - The live process

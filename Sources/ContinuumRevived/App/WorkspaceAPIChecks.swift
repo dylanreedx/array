@@ -88,7 +88,8 @@ enum WorkspaceAPIChecks {
     static func makeFixture(
         settings: QAIsolatedDefaults? = nil,
         ghostty: GhosttyRuntimeContext? = nil,
-        configureRuntime: ((WorkspaceRuntime) -> Void)? = nil
+        configureRuntime: ((WorkspaceRuntime) -> Void)? = nil,
+        beforeMount: ((_ delegate: AppDelegate, _ tempRoot: URL) throws -> Void)? = nil
     ) throws -> Fixture {
         let fileManager = FileManager.default
         let now = Date(timeIntervalSince1970: 1_900_000_000)
@@ -262,6 +263,8 @@ enum WorkspaceAPIChecks {
             role: nil, prompt: nil, cwd: pbRoot, harness: .pi,
             model: "openai-codex/gpt-5.6-sol", thinking: "high",
             projectId: projectPb, projectRoot: pbRoot, tileId: agentTileB)
+        // What else the last launch left on disk, for a leg that needs more.
+        try beforeMount?(delegate, tempRoot)
 
         // === The production seam. NOT `install(into:)`. ===
         try delegate.mountWorkspaceSceneAtBoot(

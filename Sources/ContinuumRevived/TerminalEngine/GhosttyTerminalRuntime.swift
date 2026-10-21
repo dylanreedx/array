@@ -204,37 +204,10 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         sendInput(Data("\n".utf8))
     }
 
-    /// Types `text` and Return as key presses, the way a person at the
-    /// keyboard does. `sendInput` goes in as committed text, which a TUI that
-    /// turned on bracketed paste reads as a paste — and a pasted newline does
-    /// not submit. Letters, digits, `/` and `-` only: the US layout's key codes.
-    @discardableResult
-    func typeLine(_ text: String) -> Bool {
-        guard terminalView?.window != nil else { return false }
-        for character in text {
-            guard let keyCode = Self.usKeyCodes[character] else { return false }
-            dispatchKeyDown(keyCode: keyCode, characters: String(character))
-        }
-        dispatchKeyDown(keyCode: 0x24, characters: "\r")
-        return true
-    }
-
-    private static let usKeyCodes: [Character: UInt16] = {
-        var codes: [Character: UInt16] = ["/": 0x2C, "-": 0x1B, " ": 0x31]
-        let letters: [(Character, UInt16)] = [
-            ("a", 0x00), ("s", 0x01), ("d", 0x02), ("f", 0x03), ("h", 0x04), ("g", 0x05), ("z", 0x06),
-            ("x", 0x07), ("c", 0x08), ("v", 0x09), ("b", 0x0B), ("q", 0x0C), ("w", 0x0D), ("e", 0x0E),
-            ("r", 0x0F), ("y", 0x10), ("t", 0x11), ("o", 0x1F), ("u", 0x20), ("i", 0x22), ("p", 0x23),
-            ("l", 0x25), ("j", 0x26), ("k", 0x28), ("n", 0x2D), ("m", 0x2E),
-            ("1", 0x12), ("2", 0x13), ("3", 0x14), ("4", 0x15), ("6", 0x16), ("5", 0x17), ("9", 0x19),
-            ("7", 0x1A), ("8", 0x1C), ("0", 0x1D),
-        ]
-        for (character, code) in letters { codes[character] = code }
-        return codes
-    }()
-
     /// The launch's argv: a shell tile's tmux view names the pane it shows.
     var launchArguments: [String] { launchProfile.arguments }
+    /// The executable the tile runs: tmux, for a shell tile tmux keeps.
+    var launchCommand: String { launchProfile.command }
 
     func sendInsertedText(_ text: String) -> Bool {
         dispatchInsertedText(text)

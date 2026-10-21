@@ -426,6 +426,17 @@ extension AgentFaceChecks {
     def append(obj):
         with open(os.path.join(session_dir, sid + ".jsonl"), "a") as f:
             f.write(json.dumps(obj) + "\n")
+    if "--fork-session" in argv:
+        # A fork: a new session, starting as a copy of the one it resumed. The
+        # source file is never written.
+        source = os.path.join(session_dir, sid + ".jsonl")
+        sid = str(uuid.uuid4())
+        if os.path.exists(source):
+            for line in open(source):
+                if line.strip():
+                    obj = json.loads(line)
+                    obj["sessionId"] = sid
+                    append(obj)
     status("idle")
     print("FAKE CLAUDE resumed %s on %s" % (sid, model), flush=True)
     while True:
@@ -916,6 +927,58 @@ extension AgentFaceChecks {
         try expect(onceInOrder(entriesText(reopenedAfterRelaunch), relaunchedTurns),
                    "a tile opened after that must show the same, once each, in order; got \(entriesText(reopenedAfterRelaunch))")
         log.append("relaunch: claude gone; the record adopted \(afterClear) and claude-opus-5-5; turns once, in order")
+
+        // 11. Review finding 2: a pending fork (Copy before its first turn, or a
+        //    `/clear` rotation) is a session another process may still be
+        //    writing. The Terminal face forks it too, never resumes it as is,
+        //    and the agent adopts only the fork's own id.
+        let sourceId = UUID().uuidString.lowercased()
+        let sourceURL = ClaudeTerminalFace.sessionFileURL(
+            claudeHome: fixture.claudeHome, cwd: record.lastObservedWhere, sessionId: sourceId)
+        try ([
+            #"{"type":"user","isSidechain":false,"uuid":"src-u1","message":{"role":"user","content":"SOURCE question"}}"#,
+            #"{"type":"assistant","isSidechain":false,"uuid":"src-a1","message":{"role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"SOURCE answer"}]}}"#,
+        ].joined(separator: "\n") + "\n").write(to: sourceURL, atomically: true, encoding: .utf8)
+        let sourceBytes = try Data(contentsOf: sourceURL)
+        supervisor.markSessionFork(agentID, from: sourceId)
+        let sessionBeforeFork = supervisor.records[agentID]?.providerSessionId
+        // A face that ends before claude reports the fork's id hands back the
+        // source's: that is never adopted, and the fork stays pending.
+        try expect(supervisor.beginTerminalFace(for: agentID) != nil, "the supervisor must hand a ready agent to the Terminal face")
+        supervisor.endTerminalFace(for: agentID, sessionId: sourceId, model: nil, tookTurns: false)
+        try expect(supervisor.records[agentID]?.providerSessionId == sessionBeforeFork
+                   && supervisor.records[agentID]?.pendingSessionForkFrom == sourceId,
+                   "a face that never reported its fork must not adopt the session it forked from; record has \(String(describing: supervisor.records[agentID]?.providerSessionId)), pending \(String(describing: supervisor.records[agentID]?.pendingSessionForkFrom))")
+        let launchesBeforeFork = launches().count
+        // The tile's own switch, through ⌃⌘T's path (the band click is
+        // witnessed above).
+        try expect(reopened.toggleFace(), "the reopened tile must take the switch")
+        try expect(fixture.pump(until: { reopened.face == .terminal && launches().count == launchesBeforeFork + 1 }, timeout: 10),
+                   "the fork's Terminal face must start claude; face \(reopened.face), pending \(reopened.pendingTerminalFlip), banner \(String(describing: reopened.qaFaceFlipBanner.content)), readiness \(supervisor.terminalFaceReadiness(for: agentID)), launches \(launches().count - launchesBeforeFork)")
+        let forkArgv = launches().last?["argv"] as? [String] ?? []
+        try expect(forkArgv.starts(with: ["--resume", sourceId, "--fork-session"]),
+                   "a pending fork must run `claude --resume <source> --fork-session`, never resume the source itself; argv \(forkArgv)")
+        guard let forking = reopened.terminalFaceSession else { throw Failure(description: "no fork terminal session") }
+        try expect(fixture.pump(until: { forking.sessionIds.count == 2 }, timeout: 8),
+                   "the face must follow the fork's own id from claude's live file; ids \(forking.sessionIds)")
+        let forkId = forking.currentSessionId
+        let beforeForkFlip = entriesText(reopened)
+        _ = forking.runtime.dispatchInsertedText("forked turn")
+        forking.runtime.sendReturn()
+        try expect(fixture.pump(until: { forking.isBusy }, timeout: 6) && fixture.pump(until: { !forking.isBusy }, timeout: 8),
+                   "the forked turn must run in the terminal")
+        _ = forking.runtime.dispatchInsertedText("/exit")
+        forking.runtime.sendReturn()
+        try expect(fixture.pump(until: { reopened.face == .array }, timeout: 10), "/exit must flip the fork back")
+        let sourceAfter = try Data(contentsOf: sourceURL)
+        try expect(sourceAfter == sourceBytes, "the forked-from session file must never be written")
+        try expect(supervisor.records[agentID]?.providerSessionId == forkId && supervisor.records[agentID]?.pendingSessionForkFrom == nil,
+                   "the agent must continue the fork, not its source; record has \(String(describing: supervisor.records[agentID]?.providerSessionId)), want \(forkId)")
+        let forkAdded = Array(entriesText(reopened).dropFirst(beforeForkFlip.count)).joined(separator: "\n")
+        try expect(forkAdded.contains("In Terminal · 1 turn") && forkAdded.components(separatedBy: "terminal: forked turn").count == 2
+                   && !forkAdded.contains("SOURCE question"),
+                   "the flip back appends the fork's own turn once, never the history it copied; got \(forkAdded)")
+        log.append("fork: --resume \(sourceId) --fork-session, adopted \(forkId), source untouched")
 
         let manifest: [String: Any] = ["log": log, "launches": launches().map { $0.mapValues { "\($0)" } }]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

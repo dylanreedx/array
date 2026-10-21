@@ -818,7 +818,8 @@ enum ContinuumApp {
             let next = CommandLine.arguments.dropFirst(index + 1).first
             MainActor.assumeIsolated {
                 do {
-                    print(try ExternalSessionsSidebarChecks.run(pngPath: next.flatMap { $0.hasPrefix("--") ? nil : $0 }))
+                    // A PNG folder, never the matrix's `-continuum.…` defaults that follow.
+                    print(try ExternalSessionsSidebarChecks.run(pngPath: next.flatMap { $0.hasPrefix("-") ? nil : $0 }))
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
@@ -838,7 +839,7 @@ enum ContinuumApp {
             let next = CommandLine.arguments.dropFirst(index + 1).first
             MainActor.assumeIsolated {
                 do {
-                    print(try leg(next.flatMap { $0.hasPrefix("--") ? nil : $0 }))
+                    print(try leg(next.flatMap { $0.hasPrefix("-") ? nil : $0 }))
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
@@ -5174,6 +5175,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `.plans/79` phase 2: Array agents paused because another app opened
     /// their session (edge case 1), with where to append from when it closes.
     var externalSessionPauses: [AgentID: ExternalSessionPause] = [:]
+    /// Review finding 3: agents held for a Terminal face no tile shows, with
+    /// the claude discovery last saw running it.
+    var unshownTerminalFaces: [AgentID: UnshownTerminalFace] = [:]
     /// QA: stands in for bringing another app forward ("Show Ghostty").
     var activateExternalSessionHostForQA: ((_ pid: Int32?, _ hostName: String) -> Void)?
     private var canvasShortcutRailView: CanvasShortcutRailView?
@@ -11676,6 +11680,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.performExternalSessionAction(action, rowId: rowId)
         }
         externalSessionMonitor.arrayShellPanes = { [weak self] in self?.shellTilePanes() ?? [:] }
+        externalSessionMonitor.reportsEveryPass = { [weak self] in
+            guard let self else { return false }
+            return !self.externalSessionPauses.isEmpty || !self.unshownTerminalFaces.isEmpty
+                || self.agentSupervisor.records.values.contains { $0.externalSession != nil }
+        }
         externalSessionMonitor.onChange = { [weak self] in
             self?.reconcileExternalSessions()
             self?.pushExternalSessionRows()
@@ -11972,7 +11981,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         .filter { agentActivity.managedAgentIdentities.contains($0.id) }
         return withExternalSessions(
             unconfirmedFreeze.apply(rows: builtRows, unobserved: unobserved),
-            registry: registry, records: records, now: now)
+            registry: registry, now: now)
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
@@ -12880,6 +12889,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ? .terminal : .array
     }
 
+    /// Every tile saved in its Terminal face, in every project's canvas —
+    /// whether or not its zone is hydrated or its workspace is on screen.
+    func savedTerminalFaces() -> [UUID: AgentTerminalFaceState] {
+        var faces: [UUID: AgentTerminalFaceState] = [:]
+        for canvas in currentSidebarModelInputs().projectCanvases.values {
+            for tile in canvas.tiles {
+                if let face = tile.metadata.agentTerminalFace { faces[tile.id] = face }
+            }
+        }
+        return faces
+    }
+
     /// Agent tiles persisted in their Terminal face, resident or not.
     private func terminalFaceTiles() -> Set<UUID> {
         Set((canvasView?.allWorkspaceTiles() ?? []).filter { $0.metadata.agentTerminalFace != nil }.map(\.id))
@@ -12889,7 +12910,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `Terminal` marker on agents whose tile shows the real CLI. A session an
     /// agent's record names is that agent's row, never a second one.
     private func withExternalSessions(
-        _ rows: [AgentInboxRow], registry: Registry, records: [AgentRecord], now: Date
+        _ rows: [AgentInboxRow], registry: Registry, now: Date
     ) -> [AgentInboxRow] {
         let snapshot = externalSessionMonitor.snapshot
         let faceTiles = terminalFaceTiles()
@@ -12911,12 +12932,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return row
         }
         guard !snapshot.sessions.isEmpty else { return marked }
-        var owned: Set<String> = []
-        for record in records {
-            owned.insert(AgentSupervisor.claudeSessionId(for: record.id))
-            if let id = record.providerSessionId { owned.insert(id) }
-            if let id = record.codexThreadId { owned.insert(id) }
-        }
+        let owned = Set(sessionOwners().keys)
         var shellTitles: [UUID: String] = [:]
         if snapshot.sessions.contains(where: { if case .arrayShellTile(.some) = $0.host { return true }; return false }) {
             for tile in canvasView?.allWorkspaceTiles() ?? [] where tile.kind == .terminal {
@@ -12933,6 +12949,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             currentWorkspaceProjectIds: Set(workspace?.projectIds ?? []),
             ownedSessionIds: owned, shellTileTitles: shellTitles)
         return marked + ExternalSessionRows.rows(from: snapshot, context: context, now: now)
+    }
+
+    /// Every session id an Array agent owns, and the agent: the id it derives,
+    /// the one claude reported since, its Codex thread. The ONE ownership
+    /// question — the sidebar never lists these as another app's, and a shell
+    /// tile running one offers its agent rather than a second agent on it.
+    func sessionOwners() -> [String: AgentID] {
+        var owners: [String: AgentID] = [:]
+        for record in agentSupervisor.records.values {
+            owners[AgentSupervisor.claudeSessionId(for: record.id)] = record.id
+            if let id = record.providerSessionId { owners[id] = record.id }
+            if let id = record.codexThreadId { owners[id] = record.id }
+        }
+        return owners
     }
 
     /// The monitor's push: the inbox rows alone, not the sidebar tree.
@@ -13023,7 +13053,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.linkExternalSession(agentId, AgentExternalSessionLink(
             mode: mode, provider: session.provider, sessionId: session.sessionId,
             hostName: externalHostName(of: session),
-            transcriptPath: transcriptURL.path, tracksProcess: session.pid != nil))
+            transcriptPath: transcriptURL.path, tracksProcess: session.pid != nil,
+            holderPid: session.pid, holderStartedAt: session.pid.flatMap(ExternalSessionHandoff.processStart)))
         // The production attach: the agent's own project's spawner and zone,
         // or beside the tile the session runs in. Its wiring renders the
         // session and starts following it.
@@ -13050,9 +13081,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     // row. "Open as agent tile" is Move here, aimed at a terminal Array owns:
     // a waiting agent tile beside the shell on that session (the same link,
     // banner, follow and hand-over as Move here). Because Array owns the
-    // terminal, it types `/exit` there itself when that claude is idle
-    // (BUILD.md decision 2) and the shell gets its prompt back; a busy claude
-    // is never interrupted, and the tile waits for it like Move here.
+    // terminal, it types `/exit` there itself when that claude is idle with
+    // an empty input box (BUILD.md decision 2) and the shell gets its prompt
+    // back; a busy claude, or one with a draft, is never typed into, and the
+    // tile waits for it like Move here.
 
     /// QA: what the last Open as agent tile did with the shell's claude.
     private(set) var qaShellHandoffTypedExit: Bool?
@@ -13072,18 +13104,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     /// Each shell tile's band offers the Claude session running in it, unless
-    /// an agent stands in for it or owns it already.
+    /// an agent stands in for it already; a session an agent owns offers that
+    /// agent instead (`sessionOwners`, the sidebar's own question).
     func refreshShellTileSessions() {
-        let owned = Set(agentSupervisor.records.values.compactMap(\.providerSessionId))
-        var running: [UUID: String] = [:]
+        let owners = sessionOwners()
+        var running: [UUID: (sessionId: String, owned: Bool)] = [:]
         for session in externalSessionMonitor.snapshot.sessions where session.provider == .claude {
-            guard case let .arrayShellTile(tileId?) = session.host, !owned.contains(session.sessionId),
+            guard case let .arrayShellTile(tileId?) = session.host,
                   agentLinked(toSessionKey: session.id) == nil else { continue }
-            running[tileId] = session.sessionId
+            running[tileId] = (session.sessionId, owners[session.sessionId] != nil)
         }
         for tile in canvasView?.allWorkspaceTiles() ?? [] where tile.kind == .terminal {
             guard let view = canvasView?.tileView(for: tile.id) as? TerminalTileNSView else { continue }
-            view.claudeSessionId = running[tile.id]
+            view.claudeSessionOwnedByAgent = running[tile.id]?.owned ?? false
+            view.claudeSessionId = running[tile.id]?.sessionId
             view.onOpenAsAgentTile = { [weak self] sessionId in
                 self?.openShellSessionAsAgentTile(sessionId: sessionId, shellTileId: tile.id)
             }
@@ -13097,19 +13131,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               }),
               let pid = session.pid,
               let shell = canvasView?.tileView(for: shellTileId) as? TerminalTileNSView else { return nil }
+        // An agent's own session: show that agent, never a second one on it.
+        if let owner = sessionOwners()[sessionId] {
+            _ = revealAgentFromInbox(owner.rawValue)
+            return owner
+        }
         if let existing = agentLinked(toSessionKey: session.id) {
             _ = revealAgentFromInbox(existing.rawValue)
             return existing
         }
-        // Between turns or not, read now rather than from the last pass.
-        let live = ClaudeTerminalFace.liveSession(pid: pid, claudeHome: shellHandoffClaudeHome)
-        let idle = live?.sessionId == sessionId && live?.status == "idle"
         guard let agentId = openExternalSessionTile(session, mode: .movingHere, besideTile: shellTileId) else { return nil }
-        qaShellHandoffTypedExit = idle ? shell.runtime.typeLine("/exit") : false
+        // Only after the tile — and any "isn't a project" alert it asked — is
+        // what claude says about itself current. Off the main thread: a few
+        // tmux calls. Typed or not, the tile is a Move here that waits for
+        // claude to exit; nothing typed leaves "Type /exit there" up.
+        qaShellHandoffTypedExit = nil
+        let tmuxPath = shell.runtime.launchCommand
+        let claudeHome = shellHandoffClaudeHome
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let typed = Self.typeExitIntoShellClaude(
+                pid: pid, sessionId: sessionId, tmuxPath: tmuxPath, claudeHome: claudeHome)
+            await MainActor.run { self?.qaShellHandoffTypedExit = typed }
+        }
         reconcileExternalSessions()
         refreshShellTileSessions()
         pushExternalSessionRows()
         return agentId
+    }
+
+    /// Types `/exit` into the shell's claude, and only when nothing can go
+    /// wrong: claude says it is idle on this session, it is the foreground of
+    /// the tmux pane it runs in, and that pane shows its input box empty. The
+    /// keys go to that exact pane through tmux (`send-keys -l`), so neither the
+    /// keyboard layout, an input method nor which pane is active can change
+    /// what claude receives. Returns whether it typed.
+    nonisolated static func typeExitIntoShellClaude(
+        pid: Int32, sessionId: String, tmuxPath: String, claudeHome: URL
+    ) -> Bool {
+        func idle() -> Bool {
+            let live = ClaudeTerminalFace.liveSession(pid: pid, claudeHome: claudeHome)
+            return live?.sessionId == sessionId && live?.status == "idle"
+        }
+        guard (tmuxPath as NSString).lastPathComponent.hasPrefix("tmux"), idle(),
+              let device = ProcessFileProbe.foregroundTerminal(pid) else { return false }
+        let tmux = ProcessTmuxControl(tmuxPath: tmuxPath)
+        guard let panes = try? tmux.run(["list-panes", "-a", "-F", "#{pane_id} #{pane_tty}"]) else { return false }
+        // A window of a shared project session is listed once per session
+        // that shows it: one pane, several lines.
+        let pane = Set(panes.split(separator: "\n").compactMap { line -> String? in
+            let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+            var info = stat()
+            guard parts.count == 2, stat(parts[1], &info) == 0, info.st_rdev == device else { return nil }
+            return parts[0]
+        })
+        guard pane.count == 1, let target = pane.first,
+              let screen = try? tmux.run(["capture-pane", "-p", "-t", target]),
+              ClaudeTerminalFace.inputBoxIsEmpty(screen: screen.components(separatedBy: "\n")),
+              idle(), ProcessFileProbe.foregroundTerminal(pid) == device else { return false }
+        return (try? tmux.run(["send-keys", "-t", target, "-l", "/exit"])) != nil
+            && (try? tmux.run(["send-keys", "-t", target, "Enter"])) != nil
     }
 
     /// A tile for `agentId` beside `tileId`, tops aligned, through the same
@@ -19696,6 +19776,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             WorkspaceToolsConfig.permission(defaults: self?.settingsDefaults ?? .standard)
         }
         wireAgentProcessTracker()
+        // `.plans/79` review 14: a launch's sends wait for discovery's first pass,
+        // and the prompts that waited go once it has looked.
+        agentSupervisor.awaitsSessionDiscovery = { [weak self] in
+            self?.externalSessionMonitor.isAwaitingFirstPass ?? false
+        }
+        externalSessionMonitor.onFirstPassSettled = { [weak self] in
+            self?.agentSupervisor.releaseHeldPrompts()
+        }
         // The sidebar dot is derived from the record on every row build, so a
         // colour picked on a tile only needs the rows rebuilt — the same re-push
         // a rename from the inbox does.
@@ -19759,6 +19847,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if !agentRestore.restored.isEmpty || !agentRestore.stale.isEmpty {
             fputs("AgentSupervisor: restored \(agentRestore.restored.count) agent(s) idle from the previous launch, skipped \(agentRestore.stale.count) whose project root is gone\n", stderr)
         }
+        // `.plans/79` review 3: an agent saved in its Terminal face is held from
+        // here, before anything can send — its tile may never be built this
+        // launch, and its claude may still be running in tmux.
+        reconcileTerminalFaceHolds()
 
         // Persisted workspaces use one installer on both cold launch and switching.
         // The old launch-only flat scene loaded just the remembered project's
