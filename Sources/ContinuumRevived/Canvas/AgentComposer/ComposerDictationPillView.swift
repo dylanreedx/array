@@ -46,6 +46,7 @@ final class ComposerDictationPillView: NSView, TokenThemed, AgentPageZoomScalabl
     }
     private var listeningSince: CFTimeInterval?
     private var shownSeconds = -1
+    private var timeTimer: Timer?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -83,10 +84,19 @@ final class ComposerDictationPillView: NSView, TokenThemed, AgentPageZoomScalabl
             statusLabel.isHidden = false
             waveform.isHidden = true
             listeningSince = nil
+            stopTimeUpdates()
         case .listening:
             statusLabel.isHidden = true
             waveform.isHidden = false
             if listeningSince == nil { listeningSince = CACurrentMediaTime() }
+            if timeTimer == nil {
+                let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.updateTime() }
+                }
+                timer.tolerance = 0.1
+                RunLoop.main.add(timer, forMode: .common)
+                timeTimer = timer
+            }
         case .finalizing:
             statusLabel.isHidden = true
             waveform.isHidden = false
@@ -96,19 +106,26 @@ final class ComposerDictationPillView: NSView, TokenThemed, AgentPageZoomScalabl
     }
 
     func reset() {
+        stopTimeUpdates()
         waveform.reset()
         listeningSince = nil
         shownSeconds = -1
         timeLabel.stringValue = "0:00"
     }
 
-    /// Driven by the tile's motion tick and by the waveform's own cadence; it
-    /// only touches the label when the shown second changes.
+    private func stopTimeUpdates() {
+        timeTimer?.invalidate()
+        timeTimer = nil
+    }
+
+    /// The session clock keeps running after the spring settles and with
+    /// reduced motion; it only touches the label when the shown second changes.
     func updateTime(now: CFTimeInterval = CACurrentMediaTime()) {
         let seconds = listeningSince.map { Int(now - $0) } ?? 0
         guard seconds != shownSeconds else { return }
         shownSeconds = seconds
         timeLabel.stringValue = String(format: "%d:%02d", seconds / 60, seconds % 60)
+        needsLayout = true
     }
 
     override func layout() {
@@ -179,7 +196,6 @@ final class ComposerDictationPillView: NSView, TokenThemed, AgentPageZoomScalabl
     /// One integration step; also driven directly by checks.
     func advanceMotion(by dt: CGFloat) {
         Self.spring.advance(&width, velocity: &velocity, toward: target, dt: dt)
-        updateTime()
         if abs(width - target) < 0.5, abs(velocity) < 4 {
             width = target
             velocity = 0
@@ -213,6 +229,7 @@ final class ComposerDictationPillView: NSView, TokenThemed, AgentPageZoomScalabl
 
     isolated deinit {
         motionLink?.invalidate()
+        timeTimer?.invalidate()
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -261,6 +278,7 @@ final class ComposerDictationPillView: NSView, TokenThemed, AgentPageZoomScalabl
     }
 
     var qaTimeText: String { timeLabel.stringValue }
+    var qaTimeUpdatesRunning: Bool { timeTimer != nil }
     var qaStatusText: String? { statusLabel.isHidden ? nil : statusLabel.stringValue }
     var qaStopGlyphFrame: NSRect { stopGlyph.frame }
 }
