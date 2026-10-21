@@ -190,6 +190,20 @@ public enum ProcessFileProbe {
         return Date(timeIntervalSince1970: Double(info.pbi_start_tvsec) + Double(info.pbi_start_tvusec) / 1_000_000)
     }
 
+    /// The terminal device `pid` runs in the FOREGROUND of; nil when it has no
+    /// terminal, or another process group holds that terminal's foreground
+    /// (a shell that got its prompt back, a job claude started).
+    public static func foregroundTerminal(_ pid: Int32) -> dev_t? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard pid > 0, sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0,
+              info.kp_proc.p_pid == pid else { return nil }
+        let device = info.kp_eproc.e_tdev
+        guard device != -1, info.kp_eproc.e_pgid == info.kp_eproc.e_tpgid else { return nil }
+        return device
+    }
+
     /// The paths of the files it holds open.
     public static func openVnodePaths(_ pid: Int32) -> [String] {
         let size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)

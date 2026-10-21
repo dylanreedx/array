@@ -161,6 +161,26 @@ public enum ClaudeTerminalFace {
         return nil
     }
 
+    // MARK: - The input box
+
+    /// Whether claude's input box on `screen` (a pane's text, top to bottom) is
+    /// visibly empty: its prompt line is exactly `❯` between two rules of `─`.
+    /// Anything else — a draft, a multi-line draft, a placeholder, a dialog,
+    /// a screen this cannot read — is not empty: typing a command there would
+    /// submit what is already in it as a turn.
+    public static func inputBoxIsEmpty(screen lines: [String]) -> Bool {
+        func trimmed(_ line: String) -> String { line.trimmingCharacters(in: .whitespaces) }
+        func isRule(_ line: String) -> Bool {
+            let text = trimmed(line)
+            return !text.isEmpty && text.allSatisfy { $0 == "\u{2500}" }
+        }
+        // The box claude draws now is the bottom one.
+        guard let prompt = lines.lastIndex(where: { trimmed($0).hasPrefix("\u{276F}") }) else { return false }
+        return trimmed(lines[prompt]) == "\u{276F}"
+            && prompt > 0 && isRule(lines[prompt - 1])
+            && prompt + 1 < lines.count && isRule(lines[prompt + 1])
+    }
+
     // MARK: - The live process
 
     /// What claude itself says about one of its running processes, from

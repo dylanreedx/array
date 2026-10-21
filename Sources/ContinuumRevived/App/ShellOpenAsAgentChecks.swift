@@ -19,8 +19,12 @@ import GhosttyKit
 ///   history once under a "From <shell>" boundary, held — no `/exit` typed,
 ///   sends refused, "Still open in …" up — while the turn finishes in the
 ///   tile, until the person types `/exit`; then the agent continues the session;
-/// - idle: Array types `/exit` itself, claude exits, the shell's prompt comes
-///   back and the agent is live at once;
+/// - a draft in claude's input box: nothing typed, the tile waits;
+/// - idle with an empty box, its window split and another pane active: Array
+///   types `/exit` into claude's own pane, claude exits, the shell's prompt
+///   comes back and the agent is live at once;
+/// - claude on a session an Array agent already owns: the band offers Show
+///   agent, never a second agent;
 /// - throughout, one sidebar row per session: the shell's while it holds the
 ///   session, then the agent's.
 @MainActor
@@ -35,10 +39,12 @@ enum ShellOpenAsAgentChecks {
 
     /// The stand-in for an interactive claude in a shell. It records every line
     /// typed at it the moment it arrives, with its status then — a reader
-    /// thread, so a line typed mid-turn is logged as typed mid-turn.
+    /// thread, so a line typed mid-turn is logged as typed mid-turn. Like the
+    /// real TUI it reads keys raw and draws its input box at the bottom: the
+    /// draft after `❯ `, between two rules of `─`.
     static let fakeClaude = #"""
     #!/usr/bin/env python3
-    import json, os, queue, subprocess, sys, threading, time
+    import json, os, queue, subprocess, sys, termios, threading, time, tty
     HERE = os.path.dirname(os.path.abspath(__file__))
     argv = sys.argv[1:]
     sid = argv[argv.index("--session-id") + 1]
@@ -74,31 +80,57 @@ enum ShellOpenAsAgentChecks {
     def append(obj):
         with open(transcript, "a") as f:
             f.write(json.dumps(obj) + "\n")
+    rule = "\u2500" * 40
+    out = ["FAKE CLAUDE on %s" % sid]
+    draft = [""]
+    drawing = threading.Lock()
+    def draw():
+        with drawing:
+            sys.stdout.write("\x1b[H\x1b[2J" + "\r\n".join(out[-6:]) + "\r\n" + rule + "\r\n\u276f " + draft[0]
+                             + "\r\n" + rule + "\r\n")
+            sys.stdout.flush()
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    tty.setraw(fd)
     lines = queue.Queue()
     def read():
-        for line in sys.stdin:
-            text = line.strip()
-            if not text:
-                continue
-            with open(log, "a") as f:
-                f.write(json.dumps({"text": text, "status": state["status"]}) + "\n")
-            lines.put(text)
+        while True:
+            chunk = os.read(fd, 1024)
+            if not chunk:
+                break
+            for ch in chunk.decode("utf-8", "replace"):
+                if ch in "\r\n":
+                    text = draft[0].strip()
+                    draft[0] = ""
+                    if text:
+                        with open(log, "a") as f:
+                            f.write(json.dumps({"text": text, "status": state["status"]}) + "\n")
+                        lines.put(text)
+                elif ch in "\x7f\x08":
+                    draft[0] = draft[0][:-1]
+                elif ch >= " ":
+                    draft[0] += ch
+            draw()
         lines.put(None)
     status("idle")
+    draw()
     threading.Thread(target=read, daemon=True).start()
-    print("FAKE CLAUDE on %s" % sid, flush=True)
-    while True:
-        text = lines.get()
-        if text is None or text == "/exit":
-            break
-        status("busy")
-        append({"type": "user", "isSidechain": False, "sessionId": sid, "message": {"role": "user", "content": text}})
-        time.sleep(4 if "slow" in text else 0.4)
-        append({"type": "assistant", "isSidechain": False, "sessionId": sid,
-                "message": {"role": "assistant", "model": "claude-haiku-4-5-20251001",
-                            "content": [{"type": "text", "text": "fake: " + text}]}})
-        status("idle")
-        print("done: %s" % text, flush=True)
+    try:
+        while True:
+            text = lines.get()
+            if text is None or text == "/exit":
+                break
+            status("busy")
+            append({"type": "user", "isSidechain": False, "sessionId": sid, "message": {"role": "user", "content": text}})
+            time.sleep(4 if "slow" in text else 0.4)
+            append({"type": "assistant", "isSidechain": False, "sessionId": sid,
+                    "message": {"role": "assistant", "model": "claude-haiku-4-5-20251001",
+                                "content": [{"type": "text", "text": "fake: " + text}]}})
+            status("idle")
+            out.append("done: %s" % text)
+            draw()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
     os.remove(me)
     print("FAKE CLAUDE EXITED", flush=True)
     """#
@@ -328,7 +360,8 @@ enum ShellOpenAsAgentChecks {
         // What the shell's claude actually received, as it arrived.
         pump(0.6)
         let typedWhileBusy = typed(busySid).filter { $0.text == "/exit" }
-        try expect(typedWhileBusy.isEmpty && delegate.qaShellHandoffTypedExit == false,
+        try expect(pump(until: { delegate.qaShellHandoffTypedExit != nil }, timeout: 3)
+                   && typedWhileBusy.isEmpty && delegate.qaShellHandoffTypedExit == false,
                    "a busy claude must never be sent /exit; it received \(typedWhileBusy.map { "\($0.text) while \($0.status)" })")
         guard let agentTileId = supervisor.records[busyAgent]?.tileId,
               let agentTile = fixture.canvas.tileView(for: agentTileId) as? ManagedAgentTileNSView else {
@@ -412,6 +445,43 @@ enum ShellOpenAsAgentChecks {
                                 to: directory.appendingPathComponent("agent-tile-after-shell-exit.png"))
         log.append("busy: went live on the person's /exit; the shell's last turn followed in the tile")
 
+        // 3a. Review finding 5: idle is not empty. A draft in claude's input box
+        //     would be submitted with "/exit" on the end, as a turn, so Array
+        //     types nothing and the tile waits as for a busy claude.
+        let draftSid = UUID().uuidString.lowercased()
+        try writeHistory(draftSid, "PRIOR draft question", "PRIOR draft answer")
+        startClaude(draftSid)
+        try expect(pump(until: { liveStatus(draftSid) == "idle" }, timeout: 15), "the draft claude never started")
+        shellRuntime.sendInput(Data("fix the bu".utf8))
+        try expect(pump(until: { shellRuntime.visibleText().contains("\u{276F} fix the bu") }, timeout: 5),
+                   "the stand-in must draw the draft in its input box; screen \(shellRuntime.visibleText().suffix(300))")
+        try expect(pump(until: { shell.claudeSessionId == draftSid && button() != nil }, timeout: 10),
+                   "the band must offer the draft's session")
+        let beforeDraft = Set(supervisor.records.keys)
+        guard let draftPoint = button() else { throw Failure(description: "no button for the draft session") }
+        try AgentFaceChecks.click(draftPoint, in: window)
+        guard let draftAgent = Set(supervisor.records.keys).subtracting(beforeDraft).first else {
+            throw Failure(description: "the draft click created no agent")
+        }
+        try expect(pump(until: { delegate.qaShellHandoffTypedExit != nil }, timeout: 3) && delegate.qaShellHandoffTypedExit == false,
+                   "a claude with a draft in its input box must never be sent /exit")
+        pump(0.6)
+        try expect(!typed(draftSid).contains { $0.text.contains("/exit") } && supervisor.isSessionHeld(draftAgent),
+                   "nothing may be typed over a draft; claude received \(typed(draftSid).map(\.text))")
+        guard let draftTile = supervisor.records[draftAgent]?.tileId.flatMap({ fixture.canvas.tileView(for: $0) as? ManagedAgentTileNSView })
+        else { throw Failure(description: "the draft agent must have a tile") }
+        try expect(draftTile.qaSessionHandoffBanner?.titleLabel.stringValue == "Still open in \(place)"
+                   && draftTile.qaSessionHandoffBanner?.detailLabel.stringValue == "Type /exit there and it continues here.",
+                   "the tile waits, saying where to type /exit")
+        // The person clears the draft and leaves claude themselves.
+        for _ in 0..<10 { shellRuntime.dispatchKeyDown(keyCode: 0x33, characters: "\u{7F}") }
+        try expect(pump(until: { shellRuntime.visibleText().contains("\u{276F} \n") || !shellRuntime.visibleText().contains("fix the bu") }, timeout: 5),
+                   "the person's Delete presses must clear the draft; screen \(shellRuntime.visibleText().suffix(300))")
+        enter("/exit")
+        try expect(pump(until: { liveStatus(draftSid) == nil && !supervisor.isSessionHeld(draftAgent) }, timeout: 8),
+                   "after the person's /exit the agent goes live")
+        log.append("draft: Array typed nothing over 'fix the bu'; the tile waited for the person's /exit")
+
         // 3. Idle: Array types /exit itself, and the shell gets its prompt back.
         let idleSid = UUID().uuidString.lowercased()
         try writeHistory(idleSid, "PRIOR idle question", "PRIOR idle answer")
@@ -422,18 +492,29 @@ enum ShellOpenAsAgentChecks {
                    "the second claude names the project's shared session and the shell's pane; got \(groupTarget)")
         try expect(pump(until: { shell.claudeSessionId == idleSid && button() != nil }, timeout: 10),
                    "the band must offer the new session")
+        // The window split, and the new pane (a plain shell) active: keys sent to
+        // "the terminal" would land there. /exit must reach claude's own pane.
+        let control = ProcessTmuxControl(tmuxPath: tmuxPath, defaults: tmuxDefaults)
+        let splitPane = try control.run(["split-window", "-d", "-P", "-F", "#{pane_id}", "-t", pane ?? ""])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = try control.run(["select-pane", "-t", splitPane])
+        let claudePaneActive = try control.run(["display-message", "-p", "-t", pane ?? "", "#{pane_active}"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try expect(claudePaneActive == "0", "precondition: another pane of claude's window is the active one; got \(claudePaneActive)")
         let beforeIdle = Set(supervisor.records.keys)
         guard let idlePoint = button() else { throw Failure(description: "no button for the idle session") }
         try AgentFaceChecks.click(idlePoint, in: window)
         guard let idleAgent = Set(supervisor.records.keys).subtracting(beforeIdle).first else {
             throw Failure(description: "the idle click created no agent")
         }
-        try expect(delegate.qaShellHandoffTypedExit == true, "an idle claude must be sent /exit")
+        try expect(pump(until: { delegate.qaShellHandoffTypedExit != nil }, timeout: 3) && delegate.qaShellHandoffTypedExit == true,
+                   "an idle claude with an empty input box must be sent /exit")
         try expect(pump(until: { typed(idleSid).contains { $0.text == "/exit" } }, timeout: 5),
                    "the shell's claude must receive /exit; typed \(typed(idleSid).map(\.text))")
         try expect(typed(idleSid).allSatisfy { $0.status == "idle" }, "every line Array typed must arrive between turns; typed \(typed(idleSid))")
         try expect(pump(until: { liveStatus(idleSid) == nil && !supervisor.isSessionHeld(idleAgent) }, timeout: 8),
                    "claude must exit and the agent go live")
+        _ = try control.run(["kill-pane", "-t", splitPane])
         let idleMark = Int.random(in: 1000...9999)
         enter("printf '%s-%s\\n' idle-back \(idleMark)")
         try expect(pump(until: { shellRuntime.visibleText().contains("idle-back-\(idleMark)") }, timeout: 8),

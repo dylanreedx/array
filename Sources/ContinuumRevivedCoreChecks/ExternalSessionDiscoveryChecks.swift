@@ -280,6 +280,18 @@ func runExternalSessionDiscoveryChecks() {
     expect(ExternalSessionRows.rowId(forSessionKey: "claude:s-cmux") == ExternalSessionRows.rowId(forSessionKey: "claude:s-cmux")
            && ExternalSessionRows.rowId(forSessionKey: "claude:s-cmux") != ExternalSessionRows.rowId(forSessionKey: "codex:s-cmux"),
            "a row id is stable for its session and distinct per provider")
+    // `.plans/79` review 5: Array types `/exit` into a shell's claude only when
+    // its input box is visibly empty; anything it cannot read is not empty.
+    let rule = String(repeating: "\u{2500}", count: 30)
+    expect(ClaudeTerminalFace.inputBoxIsEmpty(screen: ["done: hi", rule, "\u{276F} ", rule, "  ? for shortcuts", ""]),
+           "an empty prompt between two rules is an empty input box")
+    expect(!ClaudeTerminalFace.inputBoxIsEmpty(screen: [rule, "\u{276F} fix the bu", rule]), "a draft is not empty")
+    expect(!ClaudeTerminalFace.inputBoxIsEmpty(screen: [rule, "\u{276F} first line", "  second line", rule]),
+           "a multi-line draft is not empty")
+    expect(!ClaudeTerminalFace.inputBoxIsEmpty(screen: [rule, "\u{276F} ", rule, "Do you trust this folder?", "\u{276F} 1. Yes"]),
+           "the bottom prompt is the one that counts: a dialog's choice is not an empty box")
+    expect(!ClaudeTerminalFace.inputBoxIsEmpty(screen: ["$ ", ""]) && !ClaudeTerminalFace.inputBoxIsEmpty(screen: ["\u{276F} "]),
+           "a screen with no box, or a prompt without its rules, cannot be read and is not empty")
     print("external session discovery checks passed")
 }
 

@@ -13080,9 +13080,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     // row. "Open as agent tile" is Move here, aimed at a terminal Array owns:
     // a waiting agent tile beside the shell on that session (the same link,
     // banner, follow and hand-over as Move here). Because Array owns the
-    // terminal, it types `/exit` there itself when that claude is idle
-    // (BUILD.md decision 2) and the shell gets its prompt back; a busy claude
-    // is never interrupted, and the tile waits for it like Move here.
+    // terminal, it types `/exit` there itself when that claude is idle with
+    // an empty input box (BUILD.md decision 2) and the shell gets its prompt
+    // back; a busy claude, or one with a draft, is never typed into, and the
+    // tile waits for it like Move here.
 
     /// QA: what the last Open as agent tile did with the shell's claude.
     private(set) var qaShellHandoffTypedExit: Bool?
@@ -13138,15 +13139,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             _ = revealAgentFromInbox(existing.rawValue)
             return existing
         }
-        // Between turns or not, read now rather than from the last pass.
-        let live = ClaudeTerminalFace.liveSession(pid: pid, claudeHome: shellHandoffClaudeHome)
-        let idle = live?.sessionId == sessionId && live?.status == "idle"
         guard let agentId = openExternalSessionTile(session, mode: .movingHere, besideTile: shellTileId) else { return nil }
-        qaShellHandoffTypedExit = idle ? shell.runtime.typeLine("/exit") : false
+        // Only after the tile — and any "isn't a project" alert it asked — is
+        // what claude says about itself current. Off the main thread: a few
+        // tmux calls. Typed or not, the tile is a Move here that waits for
+        // claude to exit; nothing typed leaves "Type /exit there" up.
+        qaShellHandoffTypedExit = nil
+        let tmuxPath = shell.runtime.launchCommand
+        let claudeHome = shellHandoffClaudeHome
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let typed = Self.typeExitIntoShellClaude(
+                pid: pid, sessionId: sessionId, tmuxPath: tmuxPath, claudeHome: claudeHome)
+            await MainActor.run { self?.qaShellHandoffTypedExit = typed }
+        }
         reconcileExternalSessions()
         refreshShellTileSessions()
         pushExternalSessionRows()
         return agentId
+    }
+
+    /// Types `/exit` into the shell's claude, and only when nothing can go
+    /// wrong: claude says it is idle on this session, it is the foreground of
+    /// the tmux pane it runs in, and that pane shows its input box empty. The
+    /// keys go to that exact pane through tmux (`send-keys -l`), so neither the
+    /// keyboard layout, an input method nor which pane is active can change
+    /// what claude receives. Returns whether it typed.
+    nonisolated static func typeExitIntoShellClaude(
+        pid: Int32, sessionId: String, tmuxPath: String, claudeHome: URL
+    ) -> Bool {
+        func idle() -> Bool {
+            let live = ClaudeTerminalFace.liveSession(pid: pid, claudeHome: claudeHome)
+            return live?.sessionId == sessionId && live?.status == "idle"
+        }
+        guard (tmuxPath as NSString).lastPathComponent.hasPrefix("tmux"), idle(),
+              let device = ProcessFileProbe.foregroundTerminal(pid) else { return false }
+        let tmux = ProcessTmuxControl(tmuxPath: tmuxPath)
+        guard let panes = try? tmux.run(["list-panes", "-a", "-F", "#{pane_id} #{pane_tty}"]) else { return false }
+        // A window of a shared project session is listed once per session
+        // that shows it: one pane, several lines.
+        let pane = Set(panes.split(separator: "\n").compactMap { line -> String? in
+            let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+            var info = stat()
+            guard parts.count == 2, stat(parts[1], &info) == 0, info.st_rdev == device else { return nil }
+            return parts[0]
+        })
+        guard pane.count == 1, let target = pane.first,
+              let screen = try? tmux.run(["capture-pane", "-p", "-t", target]),
+              ClaudeTerminalFace.inputBoxIsEmpty(screen: screen.components(separatedBy: "\n")),
+              idle(), ProcessFileProbe.foregroundTerminal(pid) == device else { return false }
+        return (try? tmux.run(["send-keys", "-t", target, "-l", "/exit"])) != nil
+            && (try? tmux.run(["send-keys", "-t", target, "Enter"])) != nil
     }
 
     /// A tile for `agentId` beside `tileId`, tops aligned, through the same
