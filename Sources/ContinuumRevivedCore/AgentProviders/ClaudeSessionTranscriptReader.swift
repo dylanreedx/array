@@ -68,6 +68,9 @@ public enum ClaudeSessionTranscriptReader {
                 if (object["isMeta"] as? Bool) == true
                     || (object["isCompactSummary"] as? Bool) == true
                     || (object["isVisibleInTranscriptOnly"] as? Bool) == true { continue }
+                // A background job's completion notice is logged as a user
+                // message too, without `isMeta`; `origin` says who sent it.
+                if ((object["origin"] as? [String: Any])?["kind"] as? String) == "task-notification" { continue }
                 guard let message = object["message"] as? [String: Any] else { continue }
                 appendUserMessage(message["content"], into: &out)
             case "assistant":
@@ -125,11 +128,15 @@ public enum ClaudeSessionTranscriptReader {
     /// The command reads back as the user typed it (`/x args`); its output is
     /// not a prompt. `/compact` is dropped outright: its `compact_boundary`
     /// record already restores as the boundary row, exactly as the live
-    /// compaction does.
+    /// compaction does. A `<system-reminder>` the Claude app puts in front of
+    /// what you typed is context for the model, not part of the prompt.
     static func visiblePromptText(_ text: String) -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = text
+            .replacingOccurrences(
+                of: "<system-reminder>[\\s\\S]*?</system-reminder>", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        if trimmed.hasPrefix("<local-command-") { return nil }
+        if trimmed.hasPrefix("<local-command-") || trimmed.hasPrefix("<task-notification>") { return nil }
         guard trimmed.hasPrefix("<command-name>") || trimmed.hasPrefix("<command-message>") else {
             return trimmed
         }

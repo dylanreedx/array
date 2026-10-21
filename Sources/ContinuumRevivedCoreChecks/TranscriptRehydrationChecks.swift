@@ -17,6 +17,7 @@ import Foundation
 func runTranscriptRehydrationChecks() {
     runTranscriptRehydrationSessionIdChecks()
     runClaudeSessionTranscriptParseChecks()
+    runClaudeSessionBookkeepingPromptChecks()
     runPiSessionTranscriptParseChecks()
     runCodexSessionTranscriptParseChecks()
     runTranscriptRehydrationBoundChecks()
@@ -134,6 +135,46 @@ private func runClaudeSessionTranscriptParseChecks() {
     // The boundary card the tile leads with.
     expect(transcript.boundaryNoticeText == "Previous session — 5 messages restored",
            "ClaudeSessionTranscriptReader: boundary notice drifted: \(transcript.boundaryNoticeText)")
+}
+
+// Two kinds of `user` line that nobody typed, captured from real session files
+// (claude 2.1.30x, 2026-10-20) with their text replaced by markers. Neither is
+// `isMeta`, so both restored as raw XML bubbles:
+// - a background job's completion notice, which claude logs as a user message
+//   with `origin.kind = "task-notification"`;
+// - a `<system-reminder>` the Claude app prepends to what you typed, either as
+//   its own text block or at the front of a string prompt.
+private func runClaudeSessionBookkeepingPromptChecks() {
+    let threadId = "t-claude-bookkeeping"
+    let lines = [
+        #"{"type":"user","isSidechain":false,"message":{"role":"user","content":"TYPED_ONE"}}"#,
+        #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"ANSWER_ONE"}]}}"#,
+        #"{"type":"user","isSidechain":false,"promptSource":"system","origin":{"kind":"task-notification","producer":"session-task","runId":"r1"},"message":{"role":"user","content":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command \"NOTICE_SECRET\" completed (exit code 0)</summary>\n</task-notification>"}}"#,
+        #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"ANSWER_TWO"}]}}"#,
+        #"{"type":"user","isSidechain":false,"promptSource":"sdk","origin":{"kind":"human"},"message":{"role":"user","content":[{"type":"text","text":"<system-reminder>\nREMINDER_SECRET\n</system-reminder>"},{"type":"text","text":"TYPED_TWO"}]}}"#,
+        #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"ANSWER_THREE"}]}}"#,
+        #"{"type":"user","isSidechain":false,"promptSource":"sdk","message":{"role":"user","content":"<system-reminder>\nREMINDER_SECRET_TWO\n</system-reminder>\nTYPED_THREE"}}"#,
+        #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"ANSWER_FOUR"}]}}"#,
+    ]
+    let transcript = ClaudeSessionTranscriptReader.parse(lines: lines, threadId: threadId)
+    let prompts = transcript.steps.compactMap { step -> String? in
+        if case .userPrompt(let text) = step { return text }
+        return nil
+    }
+    expect(prompts == ["TYPED_ONE", "TYPED_TWO", "TYPED_THREE"],
+           "ClaudeSessionTranscriptReader: prompts nobody typed restored as bubbles: \(prompts)")
+    let serialized = stepsDescription(transcript)
+    for secret in ["NOTICE_SECRET", "REMINDER_SECRET", "task-notification", "system-reminder"] {
+        expect(!serialized.contains(secret),
+               "ClaudeSessionTranscriptReader: \(secret) crossed into the transcript")
+    }
+    // The answer to a notice is still the agent's own words and stays.
+    let answers = transcript.steps.compactMap { step -> String? in
+        if case .event(.contentDelta(_, _, .assistant, let delta)) = step { return delta }
+        return nil
+    }
+    expect(answers.contains("ANSWER_TWO"),
+           "ClaudeSessionTranscriptReader: the reply to a task notice was dropped with it: \(answers)")
 }
 
 private func runPiSessionTranscriptParseChecks() {
