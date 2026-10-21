@@ -157,7 +157,13 @@ public final class ProcessGroupChild: @unchecked Sendable {
         defer { posix_spawnattr_destroy(&attributes) }
         // THE point of this whole type. Requested at spawn time because a
         // `setpgid` after the fact races the child's exec and returns EACCES.
-        guard posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP)) == 0,
+        //
+        // CLOEXEC_DEFAULT: the child gets stdio and nothing else. Without it every
+        // descriptor the app had not marked close-on-exec leaked into the agent
+        // and everything it started — including the workspace host's listening
+        // socket, which a detached dev server then held open after Array quit and
+        // which any process in the agent's tree could `accept()` on.
+        guard posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)) == 0,
               posix_spawnattr_setpgroup(&attributes, 0) == 0 else {
             throw SpawnError.attributesUnavailable
         }

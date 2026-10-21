@@ -84,6 +84,8 @@ private final class WorkspaceMCPHTTPListener: @unchecked Sendable {
         self.handler = handler
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(.init(rawValue: errno)!) }
+        // Never inherited by a process the app launches (terminals included).
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
         var yes: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
         var address = sockaddr_in()
@@ -112,6 +114,7 @@ private final class WorkspaceMCPHTTPListener: @unchecked Sendable {
         var address = sockaddr_storage(); var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
         let client = withUnsafeMutablePointer(to: &address) { pointer in pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.accept(socketFD, $0, &length) } }
         guard client >= 0 else { return }
+        _ = fcntl(client, F_SETFD, FD_CLOEXEC)
         DispatchQueue.global(qos: .userInitiated).async { [handler] in
             let body = Self.readBody(client)
             let response = handler(body)
