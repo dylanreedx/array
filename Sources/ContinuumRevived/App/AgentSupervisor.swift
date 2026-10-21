@@ -1178,7 +1178,7 @@ final class AgentSupervisor {
                   case .error(let error) = block.payload,
                   error.message == AgentContextFullRecovery.canonicalErrorMessage else { return nil }
         }
-        guard contextRecoveryInFlight.insert(id).inserted else { return nil }
+        guard !terminalFaceAgents.contains(id), contextRecoveryInFlight.insert(id).inserted else { return nil }
         defer { contextRecoveryInFlight.remove(id) }
         guard let record = records[id], let harness = record.harness, runners[id] == nil,
               let terminal = history[id]?.last(where: { if case .turnCompleted = $0 { return true }; return false }),
@@ -3317,6 +3317,9 @@ final class AgentSupervisor {
     /// every harness. Silence there reads as a broken app.
     func sendRefusal(for id: AgentID) -> String? {
         guard let record = records[id] else { return nil }
+        if terminalFaceAgents.contains(id) {
+            return "This agent is open in its Terminal face. Switch the tile back to Array to send from here."
+        }
         return Self.sendRefusal(record: record)
     }
 
@@ -3610,6 +3613,118 @@ final class AgentSupervisor {
         // liveness sweep or a relaunch) would otherwise survive `stopAll` with a
         // live watcher and timer outliving the session that started it.
         for parent in Array(observedRunWatchers.keys) { stopObservedRuns(for: parent) }
+    }
+
+    // MARK: - Terminal face (.plans/79-session-handoff)
+
+    /// Agents whose conversation the Terminal face owns right now. One session,
+    /// one writer: while an agent is in here no runner of Array's starts for
+    /// it, whoever asks — the composer, the queue, the workspace API.
+    private var terminalFaceAgents: Set<AgentID> = []
+
+    enum TerminalFaceReadiness: Equatable {
+        case ready
+        /// A turn is running. The flip waits for it to end.
+        case busy
+        /// Something only the Array face can settle comes first; says what.
+        case unavailable(String)
+    }
+
+    /// What the Terminal face resumes, and with what.
+    struct TerminalFaceLaunch: Equatable {
+        var sessionId: String
+        var cwd: String
+        var model: String
+        var effort: String?
+        var conversationExists: Bool
+        var processOwner: String
+    }
+
+    func isInTerminalFace(_ id: AgentID) -> Bool { terminalFaceAgents.contains(id) }
+
+    /// Whether the Terminal face could take this agent now. Claude Code only:
+    /// codex and pi have no per-process session file to say whether the TUI
+    /// is busy or which session it moved to, and the flip-back reader is
+    /// claude's (`.plans/79` BUILD decision 4).
+    func terminalFaceReadiness(for id: AgentID) -> TerminalFaceReadiness {
+        guard let record = records[id] else { return .unavailable("This agent is not available here.") }
+        guard record.harness == .claudeCode else {
+            return .unavailable("Only Claude Code agents have a Terminal face.")
+        }
+        guard record.capabilities.locallyManaged else {
+            return .unavailable("This agent is run by another agent, not by Array.")
+        }
+        if let snapshot = turnSnapshot(for: id), case .needsAction = snapshot.state {
+            return .unavailable("Answer the request first — it belongs to the Array face.")
+        }
+        if !queuedMessages(for: id).isEmpty {
+            return .unavailable("Send or clear the queued messages first.")
+        }
+        if runners[id] != nil || heldForReadiness[id] != nil
+            || activeCompactionOperations.contains(id) || compactingAgents.contains(id) {
+            return .busy
+        }
+        return .ready
+    }
+
+    /// Hands the conversation to the Terminal face. The agent's pooled claude
+    /// is stopped first, and `ClaudeAgentRunner.stop` returns only once its
+    /// process group is gone, so the TUI never resumes a session another
+    /// process is still writing. `reattaching` is the relaunch case: no runner
+    /// can exist yet, and the queue and requests belonged to the last launch.
+    func beginTerminalFace(for id: AgentID, reattaching: Bool = false) -> TerminalFaceLaunch? {
+        guard let record = records[id], record.harness == .claudeCode else { return nil }
+        if reattaching {
+            guard runners[id] == nil else { return nil }
+        } else {
+            guard terminalFaceReadiness(for: id) == .ready else { return nil }
+        }
+        if let idle = idleSessionRunners.removeValue(forKey: id) {
+            idleReapTokens[id] = nil
+            idle.stop()
+            interruptWorkingClaudeMirroredChildren(of: id)
+        }
+        terminalFaceAgents.insert(id)
+        notifyTurnCapabilitiesChanged(id)
+        let config = Self.claudeRunnerConfig(for: record)
+        return TerminalFaceLaunch(
+            sessionId: config.sessionId,
+            cwd: config.cwd.path,
+            model: config.model,
+            effort: config.effort,
+            conversationExists: config.conversationMayExist,
+            processOwner: AgentProcessAttribution.ownerTag(for: id))
+    }
+
+    /// The Terminal face let go. What it learned comes back to the record: the
+    /// session claude moved to (`/clear`, `/resume`) and the model it last ran
+    /// (`/model`), both read from claude's own files, so the Array face resumes
+    /// exactly where the terminal stopped.
+    func endTerminalFace(for id: AgentID, sessionId: String?, model: String?, tookTurns: Bool) {
+        guard terminalFaceAgents.remove(id) != nil else { return }
+        if var record = records[id] {
+            var changed = false
+            if let sessionId, sessionId != Self.claudeSessionLocation(for: record).sessionId {
+                record.providerSessionId = sessionId
+                changed = true
+            }
+            // Verbatim from claude's session file; a model claude ran is one
+            // claude owns, whether or not today's catalogue lists it.
+            if let model, model != record.model,
+               AgentHarnessConfig.isProviderCompatible(model: model, harness: .claudeCode) {
+                record.model = model
+                changed = true
+            }
+            if tookTurns {
+                record.latestTurnAt = max(record.latestTurnAt ?? .distantPast, Date())
+                changed = true
+            }
+            if changed {
+                records[id] = record
+                persist(record)
+            }
+        }
+        notifyTurnCapabilitiesChanged(id)
     }
 
     // MARK: - Agent CLI updates
@@ -5815,6 +5930,7 @@ final class AgentSupervisor {
             state: state,
             capabilities: AgentTurnCapabilities(
                 canSend: !mirrored && !occupied && heldForReadiness[id] == nil
+                    && !terminalFaceAgents.contains(id)
                     && deferredForceSends[id] == nil && pendingForceSends[id] == nil
                     && !contextRecoveryInFlight.contains(id) && state.acceptsNewTurn,
                 // In flight = stoppable, full stop (P5.5 consolidation): `stop()`
@@ -5913,6 +6029,8 @@ final class AgentSupervisor {
     /// capability check hidden in the view.
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
         guard records[agentID] != nil else { return .refused(.unknownAgent) }
+        // The Terminal face owns the session: nothing of Array's may write it.
+        guard !terminalFaceAgents.contains(agentID) else { return .refused(.turnNotReady) }
         guard let snapshot = turnSnapshot(for: agentID) else { return .refused(.unknownAgent) }
         switch intent {
         case .send(let draft):

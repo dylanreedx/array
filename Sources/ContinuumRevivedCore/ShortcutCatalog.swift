@@ -290,6 +290,7 @@ public enum ShortcutCatalog {
         case .browserBack: return "browserBack"
         case .browserForward: return "browserForward"
         case .noteExport: return "noteExport"
+        case .agentToggleFace: return "agentToggleFace"
         }
     }
 
@@ -308,6 +309,7 @@ public enum ShortcutCatalog {
         case .browserBack: return "Back"
         case .browserForward: return "Forward"
         case .noteExport: return "Export note"
+        case .agentToggleFace: return "Switch Array / Terminal"
         }
     }
 }

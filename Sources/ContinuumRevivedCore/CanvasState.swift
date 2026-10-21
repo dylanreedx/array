@@ -294,6 +294,9 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     public var filesystemWherePath: String?
     public var worktreeId: String?
     public var agentSoundOverrides: AgentSoundOverrides?
+    /// Present while an agent tile shows its Terminal face (`.plans/79`), so a
+    /// relaunch reattaches to the claude running in tmux. Absent is the Array face.
+    public var agentTerminalFace: AgentTerminalFaceState?
     /// Optional for backwards-compatible decoding of existing canvases.
     public var markdownDocumentMode: MarkdownDocumentMode?
     /// Optional so canvases written before the rich editor remain decodable.
@@ -325,6 +328,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         filesystemWherePath: String? = nil,
         worktreeId: String? = nil,
         agentSoundOverrides: AgentSoundOverrides? = nil,
+        agentTerminalFace: AgentTerminalFaceState? = nil,
         markdownDocumentMode: MarkdownDocumentMode? = nil,
         fileEditorViewState: FileEditorViewState? = nil,
         boardId: UUID? = nil
@@ -349,6 +353,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.filesystemWherePath = filesystemWherePath
         self.worktreeId = worktreeId
         self.agentSoundOverrides = agentSoundOverrides
+        self.agentTerminalFace = agentTerminalFace
         self.markdownDocumentMode = markdownDocumentMode
         self.fileEditorViewState = fileEditorViewState
         self.boardId = boardId
@@ -375,6 +380,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case filesystemWherePath
         case worktreeId
         case agentSoundOverrides
+        case agentTerminalFace
         case markdownDocumentMode
         case fileEditorViewState
         case boardId
@@ -402,6 +408,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(filesystemWherePath, forKey: .filesystemWherePath)
         try container.encodeIfPresent(worktreeId, forKey: .worktreeId)
         try container.encodeIfPresent(agentSoundOverrides, forKey: .agentSoundOverrides)
+        try container.encodeIfPresent(agentTerminalFace, forKey: .agentTerminalFace)
         try container.encodeIfPresent(markdownDocumentMode, forKey: .markdownDocumentMode)
         try container.encodeIfPresent(fileEditorViewState, forKey: .fileEditorViewState)
         try container.encodeIfPresent(boardId, forKey: .boardId)

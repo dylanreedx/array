@@ -4107,6 +4107,30 @@ enum ContinuumApp {
             Foundation.exit(1)
         }
 
+        // `.plans/79`: the Array | Terminal switch, clicked for real at every
+        // width, canvas zoom and page zoom; and the flip itself. Both mount real
+        // Ghostty surfaces, so they need the global bootstrap above.
+        if CommandLine.arguments.contains("--agent-face-flip-check") {
+            _ = NSApplication.shared
+            do {
+                print(try AgentFaceChecks.runFlip())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--agent-face-switch-check") {
+            _ = NSApplication.shared
+            do {
+                print(try AgentFaceChecks.runSwitch())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         // The Settings witnesses mount the production window around a real Ghostty
         // terminal tile, so they need the global bootstrap above.
         if CommandLine.arguments.contains("--settings-modal-check") {
@@ -9796,7 +9820,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     static func isPassthroughTileAction(_ action: TileAction) -> Bool {
         switch action {
         case .resizeToPreset,
-             .browserFind, .browserFocusURL, .browserReload, .browserBack, .browserForward, .noteExport:
+             .browserFind, .browserFocusURL, .browserReload, .browserBack, .browserForward, .noteExport,
+             .agentToggleFace:
             return false
         }
     }
@@ -9837,6 +9862,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let note = focusedTileView() as? NoteTileNSView else { return false }
             note.exportToFile()
             return true
+        case .agentToggleFace:
+            guard let agent = focusedTileView() as? ManagedAgentTileNSView else { return false }
+            return agent.toggleFace()
         }
     }
 
@@ -16277,11 +16305,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
             projectName = registry.projects.first(where: { $0.id == recordProjectId })?.name
         }
+        // `.plans/79`: the Terminal face, on the same Ghostty context and tmux
+        // as a terminal tile, so claude survives a quit like a shell does.
+        if let ghostty {
+            let defaults = UserDefaults.standard
+            view.terminalFaceEnvironment = AgentTerminalFaceEnvironment(
+                ghostty: ghostty,
+                tmuxPath: TmuxPersistenceConfig.enabled(defaults: defaults) ? TmuxLocator.resolve(defaults: defaults) : nil,
+                defaults: defaults,
+                reservedShortcutHandler: { [weak self] event in self?.handleReservedShortcut(event) ?? false })
+        }
         view.attach(
             agentID: agentId,
             supervisor: supervisor,
             projectName: projectName)
         view.applyAwarenessSignal(agentSignalCenter.currentByTile[tileId])
+        // A tile persisted in its Terminal face reattaches to claude in tmux.
+        // Its history is restored at the flip back, split at the mark, so it
+        // is not restored here as well.
+        if view.reattachTerminalFaceIfNeeded() { return }
 
         // P2A.7: an agent restored from the previous launch has a real conversation
         // and an empty desktop transcript (that transcript lives only in the view,

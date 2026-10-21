@@ -6,6 +6,8 @@ check --agent-compaction-ui-check
 check --agent-completion-semantic-check
 check --agent-context-live-compaction-check
 check --agent-display-name-check
+check --agent-face-flip-check
+check --agent-face-switch-check
 check --agent-fanout-check
 check --agent-first-paint-check
 check --agent-identity-color-check
@@ -314,6 +316,8 @@ leg run_app_check .build/debug/Array --agent-compaction-ui-check
 leg run_app_check .build/debug/Array --agent-completion-semantic-check
 leg run_app_check .build/debug/Array --agent-context-live-compaction-check
 leg run_app_check .build/debug/Array --agent-display-name-check
+leg run_app_check .build/debug/Array --agent-face-flip-check
+leg run_app_check .build/debug/Array --agent-face-switch-check
 leg run_app_check .build/debug/Array --agent-fanout-check
 leg run_app_check .build/debug/Array --agent-first-paint-check
 leg run_app_check .build/debug/Array --agent-identity-color-check

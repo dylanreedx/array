@@ -539,7 +539,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// `contentBackdrop` and not `contentView`: once surfaced, `contentView` IS the
     /// surface host, and returning that would let a tile bake a picture of a
     /// picture.
-    override var surfaceableBody: NSView? { contentBackdrop }
+    override var surfaceableBody: NSView? { terminalFaceSession == nil ? contentBackdrop : nil }
 
     /// **A fingerprint of everything this body renders, not just its transcript.**
     ///
@@ -820,6 +820,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             renderRehydratedPreviousSession(rehydrated)
         }
         refreshTranscriptThinkingIndicator()
+        refreshFaceSwitch()
     }
 
     /// Install the supervisor-owned semantic truth before following its live tail.
@@ -1026,9 +1027,347 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let location = projectedAgentID.flatMap { locationMenuProvider?($0) }
         let locationItems = location?.items ?? []
         locationItems.forEach { location?.removeItem($0) }
-        return locationItems + (locationItems.isEmpty ? [] : [.separator()]) + makePageZoomMenuItems() + [root]
+        return makeFaceMenuItems() + locationItems + (locationItems.isEmpty ? [] : [.separator()]) + makePageZoomMenuItems() + [root]
             + makeIdentityColorMenuItems() + makeWorkspaceToolsMenuItems() + makeBackgroundProcessesMenuItems()
     }
+
+    // MARK: - Terminal face (.plans/79-session-handoff)
+    //
+    // One tile, two faces. The Array face is this tile's own transcript and
+    // composer; the Terminal face is the real `claude` TUI on the same
+    // conversation, in a Ghostty surface in the same frame, under the same name,
+    // colour and sidebar row. Exactly one of them owns the session at a time:
+    // the supervisor refuses every send while the Terminal face holds it.
+
+    /// Set by the host. nil (checks that never flip, an unwired tile) means no
+    /// switch at all.
+    var terminalFaceEnvironment: AgentTerminalFaceEnvironment? {
+        didSet { refreshFaceSwitch() }
+    }
+    private(set) var terminalFaceSession: AgentTerminalFaceSession?
+    var face: AgentTileFace { terminalFaceSession == nil ? .array : .terminal }
+    /// The flip to Terminal is waiting for the turn to end (edge case 9).
+    private(set) var pendingTerminalFlip = false
+    private let faceFlipBanner = AgentFaceFlipBanner(frame: .zero)
+    private var terminalFaceReattachments = 0
+    /// A relaunch reattached in the Terminal face before the Array face showed
+    /// any history; the flip back restores the history before the mark too.
+    private var terminalFaceRestoresPrefix = false
+
+    /// The Terminal face is Claude Code's alone. Codex is hidden on purpose:
+    /// `codex resume <thread>` exists, but codex writes no per-process session
+    /// file, so Array could not tell when that TUI is busy or follow it to a
+    /// new thread, and the flip-back reader is claude's. Pi has no TUI resume.
+    private var supportsTerminalFace: Bool {
+        guard terminalFaceEnvironment != nil, let agentID = attachedAgentID ?? projectedAgentID else { return false }
+        return agentSource?.records[agentID]?.harness == .claudeCode
+    }
+
+    private func refreshFaceSwitch() {
+        guard supportsTerminalFace || terminalFaceSession != nil else {
+            setTitleBarFaceSwitch(nil)
+            refreshFaceAccessibilityActions()
+            return
+        }
+        var reason: String?
+        if terminalFaceSession == nil, let agentID = attachedAgentID,
+           case .unavailable(let why)? = agentSource?.terminalFaceReadiness(for: agentID) {
+            reason = why
+        }
+        setTitleBarFaceSwitch(FaceSwitchState(
+            selected: face, pendingTerminal: pendingTerminalFlip, unavailableReason: reason))
+        refreshFaceAccessibilityActions()
+    }
+
+    override func faceSwitchRequested(_ requested: AgentTileFace) {
+        switch requested {
+        case .terminal where face == .array: requestTerminalFace()
+        case .array where face == .terminal: requestArrayFace()
+        case .array where pendingTerminalFlip: cancelPendingTerminalFlip()
+        default: break
+        }
+    }
+
+    /// ⌃⌘T, the ⋯ menu and the accessibility action. Returns whether the tile
+    /// took it.
+    @discardableResult
+    func toggleFace() -> Bool {
+        guard supportsTerminalFace || terminalFaceSession != nil else { return false }
+        faceSwitchRequested(face == .array && !pendingTerminalFlip ? .terminal : .array)
+        return true
+    }
+
+    private func makeFaceMenuItems() -> [NSMenuItem] {
+        guard supportsTerminalFace || terminalFaceSession != nil else { return [] }
+        let title = face == .array ? "Switch to Terminal" : "Switch to Array"
+        let item = NSMenuItem(title: title, action: #selector(toggleFaceFromMenu(_:)), keyEquivalent: "t")
+        item.keyEquivalentModifierMask = [.command, .control]
+        item.target = self
+        item.identifier = NSUserInterfaceItemIdentifier("agentTile.switchFace")
+        return [item, .separator()]
+    }
+
+    @objc private func toggleFaceFromMenu(_ sender: Any?) { toggleFace() }
+
+    private func refreshFaceAccessibilityActions() {
+        guard supportsTerminalFace || terminalFaceSession != nil else {
+            setTitleBarAccessibilityActions(nil)
+            return
+        }
+        let name = face == .array ? "Switch to Terminal" : "Switch to Array"
+        setTitleBarAccessibilityActions([NSAccessibilityCustomAction(name: name) { [weak self] in
+            self?.toggleFace() ?? false
+        }])
+    }
+
+    private func requestTerminalFace() {
+        guard let agentID = attachedAgentID, let supervisor = agentSource else { return }
+        switch supervisor.terminalFaceReadiness(for: agentID) {
+        case .ready:
+            enterTerminalFace()
+        case .busy:
+            pendingTerminalFlip = true
+            faceFlipBanner.isHidden = false
+            refreshFaceSwitch()
+        case .unavailable(let reason):
+            showActionFailedNotice(reason)
+            refreshFaceSwitch()
+        }
+    }
+
+    /// The turn moved; a waiting flip goes now, or learns why it cannot.
+    private func evaluatePendingTerminalFlip() {
+        guard pendingTerminalFlip, let agentID = attachedAgentID, let supervisor = agentSource else { return }
+        switch supervisor.terminalFaceReadiness(for: agentID) {
+        case .busy:
+            return
+        case .ready:
+            clearPendingTerminalFlip()
+            enterTerminalFace()
+        case .unavailable(let reason):
+            clearPendingTerminalFlip()
+            showActionFailedNotice(reason)
+        }
+    }
+
+    private func stopTurnForPendingFlip() {
+        guard let agentID = attachedAgentID, let supervisor = agentSource else { return }
+        Task { @MainActor in _ = await supervisor.accept(.stop, for: agentID) }
+    }
+
+    private func cancelPendingTerminalFlip() {
+        clearPendingTerminalFlip()
+    }
+
+    private func clearPendingTerminalFlip() {
+        pendingTerminalFlip = false
+        faceFlipBanner.isHidden = true
+        refreshFaceSwitch()
+    }
+
+    /// The flip. Marks where the session file ends — everything the Array face
+    /// shows lies before that byte — then takes the session from the
+    /// supervisor (which stops its claude first) and only then starts the TUI.
+    private func enterTerminalFace() {
+        guard terminalFaceSession == nil, let environment = terminalFaceEnvironment,
+              let agentID = attachedAgentID, let supervisor = agentSource,
+              let launch = supervisor.beginTerminalFace(for: agentID) else { return }
+        let url = ClaudeTerminalFace.sessionFileURL(
+            claudeHome: environment.claudeHome, cwd: launch.cwd, sessionId: launch.sessionId)
+        let state = AgentTerminalFaceState(
+            sessionId: launch.sessionId, cwd: launch.cwd,
+            sessionFileOffset: ClaudeTerminalFace.sessionFileLength(url))
+        startTerminalFaceSession(state: state, launch: launch, environment: environment)
+        persistTerminalFace(state)
+    }
+
+    /// A relaunch (or a workspace's return) with the tile in its Terminal face.
+    /// Reattaches to the claude tmux kept; when that session is gone the tile
+    /// comes back in the Array face, keeping whatever the terminal learned.
+    /// Returns whether the tile is in its Terminal face now.
+    @discardableResult
+    func reattachTerminalFaceIfNeeded() -> Bool {
+        guard terminalFaceSession == nil, let state = tile.metadata.agentTerminalFace else { return false }
+        guard let environment = terminalFaceEnvironment, let agentID = attachedAgentID,
+              let supervisor = agentSource,
+              AgentTerminalFaceSession.tmuxSessionExists(tileId: tile.id, environment: environment),
+              let launch = supervisor.beginTerminalFace(for: agentID, reattaching: true) else {
+            // The Array face's restore reads the session file, so the turns
+            // are on screen already; what comes back is the record's half.
+            if let agentID = attachedAgentID, let supervisor = agentSource {
+                let added = terminalFaceLines(state, sessionIds: state.sessionIds)
+                supervisor.endTerminalFace(
+                    for: agentID, sessionId: state.sessionIds.last,
+                    model: ClaudeTerminalFace.lastModel(in: added), tookTurns: !added.isEmpty)
+            }
+            persistTerminalFace(nil)
+            return false
+        }
+        terminalFaceRestoresPrefix = !hasRenderedRehydratedSession && model.document.entries.isEmpty
+        startTerminalFaceSession(state: state, launch: launch, environment: environment)
+        return true
+    }
+
+    private func startTerminalFaceSession(
+        state: AgentTerminalFaceState, launch: AgentSupervisor.TerminalFaceLaunch,
+        environment: AgentTerminalFaceEnvironment
+    ) {
+        let arguments = ClaudeTerminalFace.launchArguments(
+            claude: environment.claudeCommand(),
+            sessionId: state.sessionId,
+            conversationExists: launch.conversationExists,
+            model: launch.model,
+            effort: launch.effort,
+            processOwner: launch.processOwner,
+            path: PiAgentRunner.childEnvironment()["PATH"] ?? "/usr/bin:/bin")
+        let session = AgentTerminalFaceSession(
+            tileId: tile.id, arguments: arguments, cwd: state.cwd,
+            sessionIds: state.sessionIds, environment: environment)
+        session.onExit = { [weak self, weak session] in
+            guard let self, let session, self.terminalFaceSession === session else { return }
+            self.flipBackToArrayFace(from: session)
+        }
+        session.onClientDetached = { [weak self, weak session] in
+            guard let self, let session, self.terminalFaceSession === session,
+                  let state = self.tile.metadata.agentTerminalFace else { return }
+            self.terminalFaceSession = nil
+            session.detachSurface()
+            // A client that keeps dying is not worth chasing: end claude, and
+            // the next exit flips the tile back with nothing left writing.
+            self.terminalFaceReattachments += 1
+            guard self.terminalFaceReattachments <= 3 else {
+                session.endClaude()
+                self.flipBackToArrayFace(from: session)
+                return
+            }
+            self.startTerminalFaceSession(state: state, launch: launch, environment: environment)
+        }
+        session.onSessionChange = { [weak self] sessionId in
+            guard let self, var state = self.tile.metadata.agentTerminalFace else { return }
+            // Persisted, so a relaunch that finds tmux gone still adopts it.
+            state.latestSessionId = sessionId
+            self.persistTerminalFace(state)
+        }
+        promoteBodyToNative()
+        terminalFaceSession = session
+        setContentView(session.hostView)
+        session.start()
+        refreshFaceSwitch()
+        if window?.firstResponder === v2Composer?.textView || window?.firstResponder == nil {
+            session.runtime.focus()
+        }
+    }
+
+    /// Switch to Array from the Terminal face. Claude has to go first — two
+    /// writers is the one thing the faces exist to prevent — so a busy claude
+    /// is asked about, and then the exit path does the flip.
+    private func requestArrayFace() {
+        guard let session = terminalFaceSession else { return }
+        if session.isBusy, let environment = terminalFaceEnvironment,
+           !environment.confirm("Claude is working in this terminal.", "Stop and Switch") { return }
+        session.endClaude()
+    }
+
+    /// claude left (`/exit`, a crash, or Array ended it). Never closes the
+    /// tile: the Array face comes back with the terminal's turns appended.
+    private func flipBackToArrayFace(from session: AgentTerminalFaceSession) {
+        terminalFaceReattachments = 0
+        let state = tile.metadata.agentTerminalFace
+        // Every session the process passed through: the first from the mark,
+        // any `/clear` or `/resume` moved it to from their start.
+        let added = state.map { terminalFaceLines($0, sessionIds: session.sessionIds) } ?? []
+        terminalFaceSession = nil
+        session.detachSurface()
+        setContentView(contentBackdrop)
+        persistTerminalFace(nil)
+
+        if terminalFaceRestoresPrefix, let state {
+            terminalFaceRestoresPrefix = false
+            let url = ClaudeTerminalFace.sessionFileURL(
+                claudeHome: terminalFaceClaudeHome, cwd: state.cwd, sessionId: state.sessionId)
+            let prefix = ClaudeTerminalFace.lines(in: url, before: state.sessionFileOffset)
+            if !prefix.isEmpty {
+                renderRehydratedPreviousSession(ClaudeSessionTranscriptReader.parse(lines: prefix, threadId: threadId))
+            }
+        }
+        let appended = ClaudeSessionTranscriptReader.parse(
+            lines: added, threadId: threadId,
+            limits: RehydrationLimits(maxMessages: Int.max, maxBytes: Int.max))
+        let turns = appended.steps.filter { if case .userPrompt = $0 { return true } else { return false } }.count
+        if !appended.steps.isEmpty {
+            model.appendNotice(
+                id: "notice-terminal-face-\(UUID().uuidString)",
+                title: "in terminal",
+                text: "In Terminal · \(turns) \(turns == 1 ? "turn" : "turns")")
+            replayRehydratedSteps(appended)
+        }
+        if let agentID = attachedAgentID, let supervisor = agentSource {
+            supervisor.endTerminalFace(
+                for: agentID, sessionId: session.currentSessionId,
+                model: ClaudeTerminalFace.lastModel(in: added), tookTurns: turns > 0)
+            // Edge case 12: the picker shows what the terminal actually ran.
+            if let selection = supervisor.launchSelection(for: agentID) { applyLaunchSelection(selection) }
+        }
+        descriptor.status = .idle
+        descriptor.statusUpdatedAt = Date()
+        agentStatus = .idle
+        applyHeader(status: .idle)
+        refreshTranscriptThinkingIndicator()
+        synchronizeV2Transcript(final: true)
+        refreshFaceSwitch()
+        qaTerminalFaceAppendedTurns = turns
+    }
+
+    private var terminalFaceClaudeHome: URL {
+        terminalFaceEnvironment?.claudeHome ?? FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    /// What the Terminal face wrote: the mark is a byte offset into the first
+    /// session's file only; any later session's file is all the face's.
+    private func terminalFaceLines(_ state: AgentTerminalFaceState, sessionIds: [String]) -> [String] {
+        sessionIds.flatMap { sessionId in
+            ClaudeTerminalFace.lines(
+                in: ClaudeTerminalFace.sessionFileURL(claudeHome: terminalFaceClaudeHome, cwd: state.cwd, sessionId: sessionId),
+                after: sessionId == state.sessionId ? state.sessionFileOffset : 0)
+        }
+    }
+
+    private func persistTerminalFace(_ state: AgentTerminalFaceState?) {
+        guard tile.metadata.agentTerminalFace != state else { return }
+        var next = tile
+        next.metadata.agentTerminalFace = state
+        tile = next
+        canvas?.updateTile(next, recalculateZoneBounds: false)
+    }
+
+    /// × in the Terminal face closes the agent's tile as it always has, after
+    /// asking when claude is mid-turn (edge case 6). Claude ends with it: a
+    /// session nobody can see must not keep writing.
+    override func handleCloseRequest() {
+        guard let session = terminalFaceSession else {
+            super.handleCloseRequest()
+            return
+        }
+        if session.isBusy, let environment = terminalFaceEnvironment,
+           !environment.confirm("Claude is working in this terminal.", "Stop and Close") { return }
+        terminalFaceSession = nil
+        session.detachSurface()
+        session.endClaude()
+        if let agentID = attachedAgentID, let supervisor = agentSource, let state = tile.metadata.agentTerminalFace {
+            let added = terminalFaceLines(state, sessionIds: session.sessionIds)
+            supervisor.endTerminalFace(
+                for: agentID, sessionId: session.currentSessionId,
+                model: ClaudeTerminalFace.lastModel(in: added), tookTurns: !added.isEmpty)
+        }
+        persistTerminalFace(nil)
+        setContentView(contentBackdrop)
+        super.handleCloseRequest()
+    }
+
+    /// QA: how many turns the last flip back appended.
+    private(set) var qaTerminalFaceAppendedTurns = 0
+    var qaFaceFlipBannerVisible: Bool { !faceFlipBanner.isHidden }
+    var qaFaceFlipBanner: AgentFaceFlipBanner { faceFlipBanner }
 
     // MARK: - Identity colour
 
@@ -1193,6 +1532,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// M1.4: a workspace switch is a removal, and a removal must detach. See
     /// `TileNSView.prepareForRemovalFromScene`.
     override func prepareForRemovalFromScene() {
+        // The surface goes; claude stays in tmux, and the rebuilt tile
+        // reattaches to it from the persisted face.
+        terminalFaceSession?.detachSurface()
+        terminalFaceSession = nil
         detach()
     }
 
@@ -1532,6 +1875,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// the WINDOW focused and the composer dead until the tile was selected once.
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
+        if let terminalFaceSession {
+            terminalFaceSession.runtime.focus()
+            return true
+        }
         // Before the composer is targeted, not after: while surfaced, that text view
         // is inside the parked body, and AppKit would focus it there.
         promoteForIncomingFocus()
@@ -1719,6 +2066,15 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             id: "notice-previous-session",
             title: "previous session",
             text: transcript.boundaryNoticeText)
+        replayRehydratedSteps(transcript)
+    }
+
+    /// The replay half of a restore, callable again: flipping back from the
+    /// Terminal face appends the turns taken there through this same loop, so
+    /// they render exactly as a full restore of the session would render them
+    /// (`.plans/79`, "Flipping back is proven").
+    private func replayRehydratedSteps(_ transcript: RehydratedTranscript) {
+        cancelStreamingMarkupParseTimer()
         for step in transcript.steps {
             switch step {
             case .userPrompt(let text):
@@ -2502,6 +2858,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// last draft and the debounced sweep wrote over every surface. The projection
     /// derivation remains the compatibility path's, untouched.
     private func refreshV2TurnSnapshot() {
+        evaluatePendingTerminalFlip()
+        refreshFaceSwitch()
         if let agentID = attachedAgentID,
            let snapshot = agentSource?.turnSnapshot(for: agentID) {
             v2TurnSnapshot = snapshot
@@ -2670,7 +3028,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let pendingDock = PendingMessageDockView(rail: composer.pendingMessageRail)
         pendingDock.identifier = NSUserInterfaceItemIdentifier("agentTile.pendingMessages")
         v2PendingDock = pendingDock
-        let layout = NSStackView(views: [agentHeader, locationStatus, transcript, pendingDock, composeBackdrop])
+        faceFlipBanner.isHidden = true
+        faceFlipBanner.onStopNow = { [weak self] in self?.stopTurnForPendingFlip() }
+        faceFlipBanner.onCancel = { [weak self] in self?.cancelPendingTerminalFlip() }
+        let layout = NSStackView(views: [agentHeader, locationStatus, transcript, pendingDock, faceFlipBanner, composeBackdrop])
         layout.orientation = .vertical
         layout.spacing = 0
         layout.translatesAutoresizingMaskIntoConstraints = false
@@ -2712,6 +3073,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             locationStatus.widthAnchor.constraint(equalTo: layout.widthAnchor),
             transcript.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeBackdrop.widthAnchor.constraint(equalTo: layout.widthAnchor),
+            faceFlipBanner.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeColumn.leadingAnchor.constraint(equalTo: composeBackdrop.leadingAnchor),
             composeColumn.trailingAnchor.constraint(equalTo: composeBackdrop.trailingAnchor),
             composeColumn.topAnchor.constraint(equalTo: composeBackdrop.topAnchor),
