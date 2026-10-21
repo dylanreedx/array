@@ -26,12 +26,17 @@ public final class ExternalSessionDiscovery {
         public var calendar: Calendar
         public var processCwd: (Int32) -> String?
         public var openFiles: (Int32) -> [String]
+        /// tmux pane id (`%12`) → the Array shell tile whose window it is. A
+        /// project's shell tiles share one tmux session, so only the pane
+        /// says which tile a claude was typed into.
+        public var arrayShellPanes: [String: UUID]
 
         public init(
             homeURL: URL, codexHomeURL: URL? = nil, processes: [ProcessSample], hostPid: Int32,
             now: Date, calendar: Calendar = .current,
             processCwd: @escaping (Int32) -> String? = { _ in nil },
-            openFiles: @escaping (Int32) -> [String] = { _ in [] }
+            openFiles: @escaping (Int32) -> [String] = { _ in [] },
+            arrayShellPanes: [String: UUID] = [:]
         ) {
             self.homeURL = homeURL
             self.codexHomeURL = codexHomeURL ?? homeURL.appendingPathComponent(".codex", isDirectory: true)
@@ -41,6 +46,7 @@ public final class ExternalSessionDiscovery {
             self.calendar = calendar
             self.processCwd = processCwd
             self.openFiles = openFiles
+            self.arrayShellPanes = arrayShellPanes
         }
     }
 
@@ -82,7 +88,7 @@ public final class ExternalSessionDiscovery {
         var seenTranscripts: Set<String> = []
         let result = ClaudeLiveSessions.sessions(
             records: records, fileCount: files.count, processes: inputs.processes,
-            hostPid: inputs.hostPid, homeURL: inputs.homeURL
+            hostPid: inputs.hostPid, homeURL: inputs.homeURL, arrayShellPanes: inputs.arrayShellPanes
         ) { [self] _, transcript in
             seenTranscripts.insert(transcript.path)
             return claudeTitle(transcript)
@@ -191,13 +197,16 @@ public enum ProcessFileProbe {
 
 extension ExternalSessionDiscovery.Inputs {
     /// This Mac, now: the real process table and the user's real folders.
-    public static func live(reader: ProcessTableReader, now: Date = Date()) -> Self {
+    public static func live(
+        reader: ProcessTableReader, now: Date = Date(), arrayShellPanes: [String: UUID] = [:]
+    ) -> Self {
         let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
         let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
             .flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
         return Self(
             homeURL: home, codexHomeURL: codexHome, processes: reader.sample(), hostPid: getpid(), now: now,
-            processCwd: ProcessFileProbe.currentDirectory, openFiles: ProcessFileProbe.openVnodePaths)
+            processCwd: ProcessFileProbe.currentDirectory, openFiles: ProcessFileProbe.openVnodePaths,
+            arrayShellPanes: arrayShellPanes)
     }
 }
 #endif

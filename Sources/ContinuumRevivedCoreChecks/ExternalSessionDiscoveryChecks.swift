@@ -34,6 +34,9 @@ func runExternalSessionDiscoveryChecks() {
     let agentTag = "AAAAAAAA-0000-4000-8000-0000000000A1"
     let faceTag = "AAAAAAAA-0000-4000-8000-0000000000A2"
     let shellTile = UUID(uuidString: "BBBBBBBB-0000-4000-8000-0000000000B1")!
+    // A shell tile whose window lives in its project's shared base session.
+    let sharedShellTile = UUID(uuidString: "BBBBBBBB-0000-4000-8000-0000000000B2")!
+    let projectSession = TmuxSession.projectSessionName(projectId: UUID(uuidString: "CCCCCCCC-0000-4000-8000-0000000000C1")!)
     let project = root.appendingPathComponent("proj", isDirectory: true)
     let scratch = root.appendingPathComponent("scratch", isDirectory: true)
     for dir in [project, scratch] { try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true) }
@@ -59,6 +62,8 @@ func runExternalSessionDiscoveryChecks() {
         p(1007, host, claudeCLI, tag: agentTag),                     // Array's managed runner
         p(1008, 1050, claudeCLI, tag: faceTag, face: "terminal"),    // an Array tile's Terminal face
         p(1009, host, claudeCLI),                                    // an older Array's untagged runner
+        p(1010, 1050, claudeCLI),                                    // a shell tile in the project's shared session
+        p(1011, 1050, claudeCLI),                                    // ...in a pane no tile claims
     ]
     func writeSession(pid: Int32, _ fields: [String: Any]) {
         var object: [String: Any] = ["pid": Int(pid), "kind": "interactive", "entrypoint": "cli",
@@ -79,6 +84,8 @@ func runExternalSessionDiscoveryChecks() {
     writeSession(pid: 1005, ["sessionId": "s-shell", "cwd": project.path,
                              "tmux": "\(TmuxSession.viewSessionName(tileId: shellTile)):@3.%4"])
     writeSession(pid: 1006, ["sessionId": "s-tmux", "cwd": scratch.path, "tmux": "work:@1.%1"])
+    writeSession(pid: 1010, ["sessionId": "s-shared", "cwd": project.path, "tmux": "\(projectSession):@5.%9"])
+    writeSession(pid: 1011, ["sessionId": "s-unclaimed", "cwd": project.path, "tmux": "\(projectSession):@6.%11"])
     writeSession(pid: 1007, ["sessionId": "s-managed", "cwd": project.path, "entrypoint": "sdk-cli"])
     writeSession(pid: 1008, ["sessionId": "s-face", "cwd": project.path])
     writeSession(pid: 1009, ["sessionId": "s-old-runner", "cwd": project.path, "entrypoint": "sdk-cli"])
@@ -140,7 +147,10 @@ func runExternalSessionDiscoveryChecks() {
         ExternalSessionDiscovery.Inputs(
             homeURL: home, processes: processes, hostPid: host, now: now, calendar: utc,
             processCwd: { pid in pid == 3003 ? scratch.path : nil },
-            openFiles: { pid in pid == 3003 ? ["/dev/ttys004", cliRollout.path] : [] })
+            openFiles: { pid in pid == 3003 ? ["/dev/ttys004", cliRollout.path] : [] },
+            // `%1` is the same id as someone else's pane on another session:
+            // only an Array session name lets a pane id name a tile.
+            arrayShellPanes: ["%9": sharedShellTile, "%1": sharedShellTile])
     }
     let snapshot = discovery.discover(inputs(home: home, processes: processes))
     func session(_ id: String) -> ExternalAgentSession? { snapshot.sessions.first { $0.sessionId == id } }
@@ -164,6 +174,15 @@ func runExternalSessionDiscoveryChecks() {
     expect(session("s-shell")?.host == .arrayShellTile(tileId: shellTile),
            "claude in an Array shell tile's tmux session names that tile; got \(String(describing: session("s-shell")?.host))")
     expect(session("s-tmux")?.host == .tmux, "anyone else's tmux is just tmux")
+    expect(session("s-shared")?.host == .arrayShellTile(tileId: sharedShellTile),
+           "claude in a project's shared tmux session names the shell tile whose pane it runs in; got \(String(describing: session("s-shared")?.host))")
+    expect(session("s-unclaimed")?.host == .arrayShellTile(tileId: nil),
+           "a shared-session pane no tile claims is still an Array shell, but names no tile; got \(String(describing: session("s-unclaimed")?.host))")
+    expect(TmuxSession.groupedViewPaneTarget(arguments: try! TmuxSession.groupedViewProfile(
+               profile: LaunchProfile(command: "/bin/zsh", arguments: [], cwd: "/", title: "Shell"),
+               tileId: sharedShellTile, baseSessionName: projectSession, windowTarget: "%9", tmuxPath: "/usr/bin/tmux",
+               defaults: UserDefaults(suiteName: "array.qa.discovery.\(UUID().uuidString)")!).arguments) == "%9",
+           "a shell tile's grouped-view launch names the pane it shows")
     expect(session("s-managed")?.host == .arrayManaged(agentId: agentTag),
            "a claude carrying ARRAY_AGENT_ID is Array's managed runner")
     expect(session("s-face")?.host == .arrayTerminalFace(agentId: faceTag),

@@ -33,7 +33,7 @@ public enum ExternalSessionHost: Equatable, Hashable, Sendable {
     /// Someone else's tmux. The terminal showing it is not in the process chain.
     case tmux
     /// `claude` typed into an Array shell tile. nil when the tile cannot be told
-    /// (a shell outside tmux, or a project's shared base session).
+    /// (a shell outside tmux, or a shared base session's pane no tile claims).
     case arrayShellTile(tileId: UUID?)
     /// An Array agent tile in its Terminal face (`ARRAY_AGENT_FACE=terminal`).
     case arrayTerminalFace(agentId: String)
@@ -135,7 +135,8 @@ enum ExternalSessionHostClassifier {
         byPid: [Int32: ProcessSample],
         hostPid: Int32,
         tmuxTarget: String?,
-        isSDKRunner: Bool
+        isSDKRunner: Bool,
+        arrayShellPanes: [String: UUID] = [:]
     ) -> ExternalSessionHost {
         // 1. Array's own tag, on the process or its nearest tagged ancestor —
         //    the rule `AgentProcessAttribution.owners` uses, stopping at this app.
@@ -154,7 +155,7 @@ enum ExternalSessionHostClassifier {
         var parent = byPid[pid]?.parentPid ?? 0
         for _ in 0..<64 {
             guard parent > 1, let sample = byPid[parent] else { break }
-            if isTmux(sample) { return tmuxHost(tmuxTarget) }
+            if isTmux(sample) { return tmuxHost(tmuxTarget, arrayShellPanes: arrayShellPanes) }
             if let app = OtherListeningApps.appName(sample.executablePath) {
                 if ExternalSessionHost.arrayAppNames.contains(app) {
                     // Under Array with no tag: an untagged runner from an older
@@ -166,7 +167,7 @@ enum ExternalSessionHostClassifier {
             guard sample.parentPid != parent else { break }
             parent = sample.parentPid
         }
-        if tmuxTarget != nil { return tmuxHost(tmuxTarget) }
+        if tmuxTarget != nil { return tmuxHost(tmuxTarget, arrayShellPanes: arrayShellPanes) }
         return .unknown
     }
 
@@ -176,10 +177,18 @@ enum ExternalSessionHostClassifier {
     }
 
     /// `Array:@64.%67` is `session:@window.%pane`. Array's own session names say
-    /// which tile they are; anyone else's is just tmux.
-    static func tmuxHost(_ target: String?) -> ExternalSessionHost {
+    /// which tile they are; anyone else's is just tmux. A project's shared base
+    /// session (`array-proj-…`) holds every shell tile of that project, one
+    /// window each, so its name says no tile: the pane does, through
+    /// `arrayShellPanes` (pane id → the shell tile whose window it is). Pane ids
+    /// are only unique within one server, so they are trusted only under an
+    /// Array session name.
+    static func tmuxHost(_ target: String?, arrayShellPanes: [String: UUID] = [:]) -> ExternalSessionHost {
         guard let target, let session = target.split(separator: ":", maxSplits: 1).first else { return .tmux }
         let named = TmuxSession.arraySession(named: String(session))
-        return named.isArray ? .arrayShellTile(tileId: named.tileId) : .tmux
+        guard named.isArray else { return .tmux }
+        if let tileId = named.tileId { return .arrayShellTile(tileId: tileId) }
+        let pane = target.split(separator: ".").last.map(String.init)
+        return .arrayShellTile(tileId: pane.flatMap { arrayShellPanes[$0] })
     }
 }

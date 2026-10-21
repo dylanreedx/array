@@ -88,6 +88,16 @@ public enum TmuxSession {
         )
     }
 
+    /// The pane a `groupedViewProfile` launch selects, read back from its argv:
+    /// which window of the shared base session a terminal tile shows. nil for
+    /// any other launch (a tile's own session, a remote reach's quoted argv).
+    public static func groupedViewPaneTarget(arguments: [String]) -> String? {
+        guard let select = arguments.lastIndex(of: "select-window"),
+              arguments.indices.contains(select + 2), arguments[select + 1] == "-t",
+              isValidPaneId(arguments[select + 2]) else { return nil }
+        return arguments[select + 2]
+    }
+
     /// Builds the one production launch used by every tile whose window lives
     /// in a shared project/workspace session. The view owns selected-window
     /// state; the base session continues to own the actual windows.

@@ -84,6 +84,7 @@ public enum ClaudeLiveSessions {
     /// - Parameters:
     ///   - fileCount: how many `.json` files there were. Files that exist and
     ///     none of which parse mean the format changed: `unreadable`, no rows.
+    ///   - arrayShellPanes: tmux pane id → the Array shell tile it belongs to.
     ///   - title: Claude's own title for a session (from its transcript), else nil.
     public static func sessions(
         records: [Record],
@@ -91,6 +92,7 @@ public enum ClaudeLiveSessions {
         processes: [ProcessSample],
         hostPid: Int32,
         homeURL: URL,
+        arrayShellPanes: [String: UUID] = [:],
         title: (Record, URL) -> String? = { _, _ in nil }
     ) -> (sessions: [ExternalAgentSession], unreadable: Bool) {
         if fileCount > 0 && records.isEmpty { return ([], true) }
@@ -108,7 +110,8 @@ public enum ClaudeLiveSessions {
             } else {
                 host = ExternalSessionHostClassifier.host(
                     forPid: record.pid, byPid: byPid, hostPid: hostPid,
-                    tmuxTarget: record.tmux, isSDKRunner: record.entrypoint == "sdk-cli")
+                    tmuxTarget: record.tmux, isSDKRunner: record.entrypoint == "sdk-cli",
+                    arrayShellPanes: arrayShellPanes)
             }
             let transcript = ClaudeSessionTranscriptReader.sessionFileURL(
                 homeURL: homeURL, cwd: record.cwd, sessionId: record.sessionId)
