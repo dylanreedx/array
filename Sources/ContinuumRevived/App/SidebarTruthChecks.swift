@@ -489,13 +489,16 @@ enum SidebarTruthChecks {
                    && world.supervisor.records[busyAgent]?.closeRequestedAt == nil
                    && world.supervisor.isRunning(busyAgent),
                    "W2: restoring must re-create the canvas tile, clear closeRequestedAt, and keep the turn running")
-        let liveRestoredTile = world.canvas.tilesInWorldFrames(forProjectId: world.projectA)
-            .first { $0.id == restoredBusyTile }
-        let persistedRestoredTile = try ProjectStore(projectRoot: world.rootA)
-            .loadCanvas().tiles.first { $0.id == restoredBusyTile }
-        try expect(restoreLayoutCommitAccepted > 0 && restoreLayoutCommitFailures == 0
-                   && liveRestoredTile?.frame == persistedRestoredTile?.frame,
-                   "W2: Bring back must persist its auto-layout transaction after saving the new tile — attempts \(restoreLayoutCommitCount), accepted \(restoreLayoutCommitAccepted), rejected \(restoreLayoutCommitFailures), live \(String(describing: liveRestoredTile?.frame)), saved \(String(describing: persistedRestoredTile?.frame))")
+        let liveRestoredTiles = world.canvas.tilesInWorldFrames(forProjectId: world.projectA)
+        let persistedRestoredTiles = try ProjectStore(projectRoot: world.rootA).loadCanvas().tiles
+        let liveGeometry = Dictionary(uniqueKeysWithValues: liveRestoredTiles.map { ($0.id, $0.frame) })
+        let persistedGeometry = Dictionary(uniqueKeysWithValues: persistedRestoredTiles.map { ($0.id, $0.frame) })
+        // Contained placement can already be settled, so no layout transaction is
+        // needed. The observable contract is that EVERY post-layout tile frame,
+        // including the restored tile, matches the durable project canvas.
+        try expect(restoreLayoutCommitFailures == 0 && liveGeometry[restoredBusyTile] != nil
+                   && liveGeometry == persistedGeometry,
+                   "W2: Bring back must persist every post-layout tile frame — attempts \(restoreLayoutCommitCount), accepted \(restoreLayoutCommitAccepted), rejected \(restoreLayoutCommitFailures), live \(liveGeometry), saved \(persistedGeometry)")
         world.canvas.onTileCloseRequested?(restoredBusyTile)
         try expect(world.canvas.tileRecord(for: restoredBusyTile) == nil
                    && world.supervisor.records[busyAgent]?.closeRequestedAt != nil
