@@ -64,6 +64,7 @@ func runExternalSessionDiscoveryChecks() {
         p(1009, host, claudeCLI),                                    // an older Array's untagged runner
         p(1010, 1050, claudeCLI),                                    // a shell tile in the project's shared session
         p(1011, 1050, claudeCLI),                                    // ...in a pane no tile claims
+        p(1012, host, claudeCLI, tag: agentTag),                     // Array's idle pooled runner on s-dup
     ]
     func writeSession(pid: Int32, _ fields: [String: Any]) {
         var object: [String: Any] = ["pid": Int(pid), "kind": "interactive", "entrypoint": "cli",
@@ -89,6 +90,10 @@ func runExternalSessionDiscoveryChecks() {
     writeSession(pid: 1007, ["sessionId": "s-managed", "cwd": project.path, "entrypoint": "sdk-cli"])
     writeSession(pid: 1008, ["sessionId": "s-face", "cwd": project.path])
     writeSession(pid: 1009, ["sessionId": "s-old-runner", "cwd": project.path, "entrypoint": "sdk-cli"])
+    // One session, two holders: Array's pooled runner (the LOWER pid) and a
+    // `claude --resume` of the same session in Ghostty (the higher one).
+    writeSession(pid: 1012, ["sessionId": "s-dup", "cwd": project.path, "entrypoint": "sdk-cli"])
+    writeSession(pid: 3010, ["sessionId": "s-dup", "cwd": project.path])
     // A `.key` file beside them is never opened, even one holding a session.
     let keyed = try! JSONSerialization.data(withJSONObject: [
         "pid": 1001, "sessionId": "s-key", "cwd": project.path, "procStart": procStart(t1)])
@@ -138,6 +143,7 @@ func runExternalSessionDiscoveryChecks() {
         p(3001, 3000, "/bin/zsh", args: ["-zsh"]),
         p(3002, 3001, "/opt/homebrew/bin/node", args: ["node", "/opt/homebrew/bin/codex"]),
         p(3003, 3002, "/opt/homebrew/lib/node_modules/@openai/codex/vendor/codex", args: ["codex"]),
+        p(3010, 3001, claudeCLI),                                    // Ghostty, resuming s-dup
         p(3100, 1, "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
           args: ["codex", "app-server"]),
     ]
@@ -189,6 +195,15 @@ func runExternalSessionDiscoveryChecks() {
            "ARRAY_AGENT_ID with ARRAY_AGENT_FACE=terminal is that tile's Terminal face")
     expect(session("s-old-runner")?.host == .arrayManaged(agentId: nil),
            "an untagged sdk-cli claude directly under Array is an older Array runner, never an elsewhere row")
+    // `.plans/79` review 1: one session id, one row — but never at the price of
+    // hiding a foreign holder behind Array's own process. Array's pooled runner
+    // has the lower pid; the Ghostty claude must still be the one reported, or
+    // the agent is never paused and two processes write the session.
+    let dups = snapshot.sessions.filter { $0.sessionId == "s-dup" }
+    expect(dups.count == 1 && dups.first?.pid == 3010 && dups.first?.host == .app("Ghostty"),
+           "a session held by Array's runner AND a foreign claude reports the foreign holder; got \(dups.map { "\($0.pid.map(String.init) ?? "-") \($0.host)" })")
+    expect(ExternalSessionHandoff.pausingHolder(provider: .claude, sessionIds: ["s-dup"], in: snapshot)?.pid == 3010,
+           "the foreign holder of an Array agent's session is the one that pauses it")
 
     // Codex.
     expect(session("t-app")?.host == .app("Codex app") && session("t-app")?.status == .unknown

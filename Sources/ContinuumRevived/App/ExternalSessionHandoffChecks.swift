@@ -193,6 +193,52 @@ enum ExternalSessionHandoffChecks {
         ExternalSessionRows.rowId(forSessionKey: session.id)
     }
 
+    /// A pid that WAS a process and is not one now: a holder that has exited.
+    /// Spawned after whatever the leg started before it, so it is higher.
+    private static func exitedPid() throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try process.run()
+        process.waitUntilExit()
+        return process.processIdentifier
+    }
+
+    /// `ps -o lstart`'s shape, in UTC — what claude writes as `procStart`.
+    private static func procStart(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+        return formatter.string(from: date)
+    }
+
+    /// One pass of the production discovery over a made-up Mac: `claude`
+    /// session files under `home`, and the process table that goes with them.
+    /// Each holder is (pid, session id, entrypoint, ancestry, owner tag).
+    private static func discover(
+        home: URL, cwd: URL,
+        holders: [(pid: Int32, sessionId: String, entrypoint: String, parent: Int32, tag: String?)],
+        apps: [ProcessSample]
+    ) throws -> ExternalSessionSnapshot {
+        let folder = home.appendingPathComponent(".claude/sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let started = Date().addingTimeInterval(-120)
+        var processes = apps + [ProcessSample(pid: getpid(), parentPid: 1, startedAt: started,
+                                              executablePath: "/Applications/Array.app/Contents/MacOS/Array",
+                                              arguments: [], ownerTag: nil, ownerFace: nil)]
+        for holder in holders {
+            let object: [String: Any] = [
+                "pid": Int(holder.pid), "sessionId": holder.sessionId, "cwd": cwd.path, "status": "idle",
+                "kind": "interactive", "entrypoint": holder.entrypoint, "procStart": procStart(started),
+            ]
+            try JSONSerialization.data(withJSONObject: object).write(to: folder.appendingPathComponent("\(holder.pid).json"))
+            processes.append(ProcessSample(pid: holder.pid, parentPid: holder.parent, startedAt: started,
+                                           executablePath: "/Users/me/.local/bin/claude", arguments: ["claude"],
+                                           ownerTag: holder.tag, ownerFace: nil))
+        }
+        return ExternalSessionDiscovery().discover(.init(homeURL: home, processes: processes, hostPid: getpid(), now: Date()))
+    }
+
     // MARK: - --external-session-watch-check
 
     static func runWatch(pngDirectory: String?) throws -> String {
@@ -498,6 +544,29 @@ enum ExternalSessionHandoffChecks {
         world.delegate.qaRefreshAgentSurfaces()
         world.inbox.layoutForQA()
         try expect(world.inbox.row(forAgentId: agentId.rawValue)?.whereMarker == nil, "…and no marker in its Array face")
+
+        // 1b. Review finding 1, through the production discovery: the agent's
+        //     pooled runner holds the session with the LOWER pid, and a Ghostty
+        //     `claude --resume` of it the higher. One row per session must not
+        //     cost the foreign holder its report: the agent pauses.
+        let ghosttyPid = try exitedPid()
+        try expect(ghosttyPid > pooledPid, "the Ghostty stand-in must have the higher pid")
+        let ghosttyApp = ProcessSample(pid: 9_100_001, parentPid: 1, startedAt: Date().addingTimeInterval(-600),
+                                       executablePath: "/Applications/Ghostty.app/Contents/MacOS/ghostty",
+                                       arguments: [], ownerTag: nil, ownerFace: nil)
+        let discovered = try discover(
+            home: world.fixture.tempRoot.appendingPathComponent("discovery-home", isDirectory: true),
+            cwd: world.fixture.pbRoot,
+            holders: [(pooledPid, sessionId, "sdk-cli", getpid(), tag),
+                      (ghosttyPid, sessionId, "cli", ghosttyApp.pid, nil)],
+            apps: [ghosttyApp])
+        world.monitor.publish(discovered)
+        delegate.qaRefreshAgentSurfaces()
+        try expect(delegate.externalSessionPauses[agentId]?.hostName == "Ghostty" && supervisor.externalHold(for: agentId) == "Ghostty",
+                   "Array's pooled runner on the lower pid must not hide the Ghostty claude holding the same session; discovery reported \(discovered.sessions.map { "\($0.pid.map(String.init) ?? "-") \($0.host)" })")
+        world.publish([])
+        try expect(delegate.externalSessionPauses[agentId] == nil && supervisor.externalHold(for: agentId) == nil,
+                   "the Ghostty holder gone, the pause ends")
 
         // 2. Someone resumes it in Ghostty: paused.
         world.publish([holder(.app("Ghostty"), pid: 42_100)])

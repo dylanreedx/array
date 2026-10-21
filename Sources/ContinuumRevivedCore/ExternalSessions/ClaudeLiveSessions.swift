@@ -97,13 +97,11 @@ public enum ClaudeLiveSessions {
     ) -> (sessions: [ExternalAgentSession], unreadable: Bool) {
         if fileCount > 0 && records.isEmpty { return ([], true) }
         let byPid = Dictionary(processes.map { ($0.pid, $0) }, uniquingKeysWith: { first, _ in first })
-        var sessions: [ExternalAgentSession] = []
-        var seen: Set<String> = []
+        var live: [(record: Record, host: ExternalSessionHost)] = []
         for record in records.sorted(by: { $0.pid < $1.pid }) {
             guard record.kind != "bg",
                   let process = byPid[record.pid],
-                  abs(process.startedAt.timeIntervalSince(record.procStart)) < startTolerance,
-                  seen.insert(record.sessionId).inserted else { continue }
+                  abs(process.startedAt.timeIntervalSince(record.procStart)) < startTolerance else { continue }
             let host: ExternalSessionHost
             if record.entrypoint == "claude-desktop" {
                 host = .app("Claude app")
@@ -113,6 +111,19 @@ public enum ClaudeLiveSessions {
                     tmuxTarget: record.tmux, isSDKRunner: record.entrypoint == "sdk-cli",
                     arrayShellPanes: arrayShellPanes)
             }
+            live.append((record, host))
+        }
+        // One row per session id. When several processes hold one session, a
+        // holder that is NOT Array's own wins over Array's (its pooled runner
+        // lives up to ten minutes after a turn): hiding the foreign one would
+        // leave the agent unpaused with two writers on its session.
+        var holder: [String: Int32] = [:]
+        for (record, host) in live where holder[record.sessionId] == nil && !host.isArrayAgent {
+            holder[record.sessionId] = record.pid
+        }
+        for (record, _) in live where holder[record.sessionId] == nil { holder[record.sessionId] = record.pid }
+        var sessions: [ExternalAgentSession] = []
+        for (record, host) in live where holder[record.sessionId] == record.pid {
             let transcript = ClaudeSessionTranscriptReader.sessionFileURL(
                 homeURL: homeURL, cwd: record.cwd, sessionId: record.sessionId)
             let status = status(record.status)
