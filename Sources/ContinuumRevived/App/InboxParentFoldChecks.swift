@@ -76,6 +76,7 @@ enum InboxParentFoldChecks {
         var windows: [NSWindow] = []
         defer { windows.forEach { $0.orderOut(nil) } }
         var lines: [String] = []
+        lines.append(try checkFoldMotion(windows: &windows))
         for appearance in [NSAppearance.Name.darkAqua, .aqua] {
             lines.append(try checkDefaultsAndDecoration(appearance: appearance, windows: &windows))
         }
@@ -87,6 +88,101 @@ enum InboxParentFoldChecks {
     }
 
     // MARK: - Default fold and the tucked cards
+
+    static func checkFoldMotion(windows: inout [NSWindow]) throws -> String {
+        let inbox = makeInbox(rows(), appearance: .darkAqua, windows: &windows)
+        inbox.prefersReducedMotion = { false }
+        func capture(_ name: String) throws {
+            guard let path = ProcessInfo.processInfo.environment["CONTINUUM_QA_CAPTURE"] else { return }
+            let directory = URL(fileURLWithPath: path, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let height = min(inbox.bounds.height, 760)
+            let rect = NSRect(x: 0, y: inbox.isFlipped ? 0 : inbox.bounds.maxY - height,
+                              width: inbox.bounds.width, height: height)
+            guard let image = InboxFoldMotion.image(of: inbox, in: rect),
+                  let tiff = image.tiffRepresentation,
+                  let bitmap = NSBitmapImageRep(data: tiff),
+                  let png = bitmap.representation(using: .png, properties: [:]) else {
+                throw Failure(description: "motion: could not render \(name)")
+            }
+            try png.write(to: directory.appendingPathComponent("sidebar-fold-\(name).png"))
+        }
+        try capture("closed")
+        try expect(inbox.clickDisclosureForQA(id: threeChildParent), "motion: parent disclosure was unavailable")
+        let motion = inbox.foldMotionForQA
+        try expect(motion.isAnimating, "motion: opening a parent must unfold its children instead of only fading their final positions")
+        try expect(motion.duration == 0.26, "motion: expanding must take exactly 260 ms")
+        let parentKey = "agent:\(threeChildParent.uuidString)"
+        let childKey = "agent:\(threeChildren[0].uuidString)"
+        let followingKey = "agent:\(askingParent.uuidString)"
+        guard let parent = motion.poses[parentKey], let child = motion.poses[childKey] else {
+            throw Failure(description: "motion: the visible parent and child must both participate")
+        }
+        let following = motion.poses[followingKey]?.frame
+        let coveredViews = motion.coveredViewsForQA
+        try expect(!coveredViews.isEmpty && motion.overlayPassesHitTestingForQA,
+                   "motion: presentation must cover the live rows without taking their clicks")
+        let builds = inbox.cellBuildCountForQA
+        motion.advance(by: 0.04)
+        try capture("unfold-40ms")
+        guard let movingChild = motion.poses[childKey] else {
+            throw Failure(description: "motion: the child disappeared before the transition finished")
+        }
+        try expect(movingChild.frame.minY > child.frame.minY && movingChild.opacity > child.opacity,
+                   "motion: the child must travel out of its stack while its text appears")
+        try expect(motion.poses[parentKey]?.frame == parent.frame, "motion: the clicked parent must stay anchored")
+        try expect((motion.poses[followingKey]?.frame.minY ?? 0) > (following?.minY ?? .greatestFiniteMagnitude),
+                   "motion: following chats must move down with the unfolding cards")
+        try expect(inbox.cellBuildCountForQA == builds, "motion: a frame tick must not rebuild the native table cells")
+        var streamed = rows()
+        let changedIndex = streamed.firstIndex { $0.id == threeChildren[0] }!
+        let previousChild = streamed[changedIndex]
+        streamed[changedIndex] = AgentInboxRow(
+            id: previousChild.id, title: "Updated while unfolding", state: previousChild.state,
+            lastActiveAt: previousChild.lastActiveAt, depth: previousChild.depth,
+            createdAt: previousChild.createdAt, parentId: previousChild.parentId)
+        inbox.apply(rows: streamed, changed: AgentsBoardChangeSet(added: [], updated: [threeChildren[0]], removed: []))
+        try expect(motion.isAnimating && motion.poses[childKey]?.frame == movingChild.frame && motion.elapsed == 0.04,
+                   "motion: streamed content must neither interrupt nor restart an unfold")
+        try expect(inbox.titlesForQA.contains("Updated while unfolding"),
+                   "motion: streamed content must still update the native list immediately")
+        try expect(inbox.clickDisclosureForQA(id: threeChildParent), "motion: the moving group could not be reversed")
+        try expect(motion.duration == 0.21, "motion: collapsing must take exactly 210 ms")
+        try expect(motion.poses[childKey]?.frame == movingChild.frame,
+                   "motion: a reversal must begin at the current position, without a jump")
+        try expect(!inbox.rowIdsForQA.contains(threeChildren[0]), "motion: folded children must leave the semantic list immediately")
+        motion.advance(by: 0.21)
+        try expect(!motion.isAnimating && motion.poses.isEmpty, "motion: the overlay must retire at the duration boundary")
+        try expect(coveredViews.allSatisfy { ($0.layer?.opacity ?? 0) > 0 },
+                   "motion: completion must restore the native rows' visibility")
+        let peak = (0...200).map { InboxFoldMotion.progress(at: CGFloat($0) / 200) }.max() ?? 0
+        try expect(peak > 1.001 && peak < 1.008, "motion: the softened spring should have barely perceptible overshoot (\(peak))")
+        let earlyProgress = InboxFoldMotion.progress(at: 0.25)
+        try expect(earlyProgress > 0.60 && earlyProgress < 0.75,
+                   "motion: the unfold must spread its travel out instead of snapping almost to the end (\(earlyProgress))")
+        try expect(InboxFoldMotion.progress(at: 0) == 0 && InboxFoldMotion.progress(at: 1) == 1,
+                   "motion: the spring must start and land exactly")
+        inbox.prefersReducedMotion = { true }
+        _ = inbox.clickDisclosureForQA(id: threeChildParent)
+        try expect(!motion.isAnimating && inbox.qaLastRowMotion.entering.isEmpty,
+                   "motion: Reduce Motion must bypass both unfolding and the generic row fade")
+        try expect(threeChildren.allSatisfy(inbox.rowIdsForQA.contains), "motion: Reduce Motion must still reveal every child")
+        try capture("open")
+        inbox.prefersReducedMotion = { false }
+        _ = inbox.clickDisclosureForQA(id: threeChildParent)
+        try expect(motion.isAnimating, "motion: the group must animate again when motion is enabled")
+        inbox.prefersReducedMotion = { true }
+        inbox.reapplyDisplayPreferencesForQA()
+        try expect(!motion.isAnimating, "motion: changing Reduce Motion mid-flight must settle immediately")
+        inbox.prefersReducedMotion = { false }
+        _ = inbox.clickDisclosureForQA(id: threeChildParent)
+        inbox.reload(rows: rows())
+        try expect(!motion.isAnimating, "motion: a new native list must retire stale presentation")
+        _ = inbox.clickDisclosureForQA(id: threeChildParent)
+        inbox.removeFromSuperview()
+        try expect(!motion.isAnimating, "motion: detaching the sidebar must stop its display link and restore its rows")
+        return "motion: 260/210 ms soft unfold, softened toolbar spring peak \(peak), anchored parent, continuous reversal, uninterrupted stream updates, no per-frame cell builds, reduced motion and cleanup"
+    }
 
     static func checkDefaultsAndDecoration(appearance: NSAppearance.Name, windows: inout [NSWindow]) throws -> String {
         let label = "\(appearance.rawValue)"
