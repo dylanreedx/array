@@ -53,4 +53,38 @@ final class TerminalTileNSView: TileNSView {
     override func releaseFocus(reason: FocusRequest) {
         runtime.blur()
     }
+
+    // MARK: - A claude typed into this shell (.plans/79, edge case 4)
+
+    /// The Claude session session discovery found running in this terminal,
+    /// offered in the band as "Open as agent tile". Set by the app from each
+    /// discovery pass; nil when none runs here, or an agent owns it already.
+    var claudeSessionId: String? {
+        didSet {
+            guard claudeSessionId != oldValue else { return }
+            setTitleBarSessionAction(claudeSessionId == nil ? nil : .init(
+                label: "Claude Code", action: Self.openAsAgentTileTitle))
+        }
+    }
+    /// The app's move: an agent tile beside this one on the same session.
+    var onOpenAsAgentTile: ((String) -> Void)?
+
+    static let openAsAgentTileTitle = "Open as agent tile"
+
+    override func sessionActionRequested() {
+        guard let claudeSessionId else { return }
+        onOpenAsAgentTile?(claudeSessionId)
+    }
+
+    /// Always in the tile menu, so a band too narrow for the button still
+    /// offers it.
+    override func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] {
+        guard claudeSessionId != nil else { return [] }
+        let item = NSMenuItem(title: "Open as Agent Tile", action: #selector(openAsAgentTileFromMenu(_:)), keyEquivalent: "")
+        item.target = self
+        item.identifier = NSUserInterfaceItemIdentifier("terminalTile.openAsAgentTile")
+        return [item]
+    }
+
+    @objc private func openAsAgentTileFromMenu(_ sender: Any?) { sessionActionRequested() }
 }

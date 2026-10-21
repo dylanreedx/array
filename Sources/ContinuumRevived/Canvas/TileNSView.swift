@@ -159,6 +159,28 @@ class TileNSView: NSView, TokenThemed {
         titleBar?.setFaceSwitch(state)
     }
 
+    /// A session the tile's terminal is running, offered as a move
+    /// (`.plans/79`, edge case 4): a quiet "✦ Claude Code" and an "Open as
+    /// agent tile" button in the band (`mocks/3-moving-sessions.png`, bottom
+    /// right). nil removes both.
+    struct SessionActionState: Equatable {
+        /// What runs in the terminal: "Claude Code".
+        var label: String
+        /// The button: "Open as agent tile".
+        var action: String
+    }
+
+    func setTitleBarSessionAction(_ state: SessionActionState?) {
+        titleBar?.setSessionAction(state)
+    }
+
+    /// The band's session action was pressed. Terminal tiles route it.
+    func sessionActionRequested() {}
+
+    /// QA: how the band's budget placed the session action: labelled, button,
+    /// icon, hidden.
+    var qaSessionActionMode: String { titleBar?.sessionActionMode.rawValue ?? "hidden" }
+
     /// Actions VoiceOver offers on the band's always-present controls (× and
     /// ⋯), so they stay reachable when the band has no room for a control of
     /// their own. The tile view itself is not an accessibility element.
@@ -560,6 +582,7 @@ class TileNSView: NSView, TokenThemed {
         bar.autoresizingMask = []
         bar.onCloseRequested = { [weak self] in self?.handleCloseRequest() }
         bar.onFaceSegmentPressed = { [weak self] face in self?.faceSwitchRequested(face) }
+        bar.onSessionActionPressed = { [weak self] in self?.sessionActionRequested() }
         bar.onStopRunRequested = { [weak self] in self?.onStopRun?() }
         bar.additionalMenuItemsProvider = { [weak self] in self?.makeAdditionalTitleBarMenuItems() ?? [] }
         addSubview(bar)
@@ -1522,6 +1545,122 @@ private final class FaceSegmentControl: NSControl {
     }
 }
 
+/// The band's "Open as agent tile" button (`.plans/79`, edge case 4). Drawn and
+/// tracked by hand for the reason `FaceSegmentControl` is: the band is framed in
+/// world units under the canvas zoom, and the band's own `hitTest` routes to it
+/// ahead of the tile drag. Activation is release-inside, like ×.
+@MainActor
+private final class BandActionControl: NSControl {
+    private var title = ""
+    private let symbolName = "square.grid.2x2"
+    private var labelled = true
+    private var chromeScale: CGFloat = 1
+    private var isPressed = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = true
+        autoresizingMask = []
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        focusRingType = .exterior
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    func apply(title: String) {
+        guard title != self.title else { return }
+        self.title = title
+        toolTip = title
+        setAccessibilityLabel(title)
+        needsDisplay = true
+    }
+
+    func configure(labelled: Bool, chromeScale: CGFloat) {
+        guard labelled != self.labelled || chromeScale != self.chromeScale else { return }
+        self.labelled = labelled
+        self.chromeScale = chromeScale
+        needsDisplay = true
+    }
+
+    private static func font(scale: CGFloat) -> NSFont { .systemFont(ofSize: 11 * scale, weight: .semibold) }
+    private static func glyphSize(scale: CGFloat) -> CGFloat { 11 * scale }
+
+    func preferredWidth(labelled: Bool, scale: CGFloat, minimum: CGFloat) -> CGFloat {
+        let pad = CGFloat(Space.m) * scale
+        let glyph = Self.glyphSize(scale: scale) + 2
+        guard labelled else { return max(minimum, ceil(glyph + 2 * pad)) }
+        let text = (title as NSString).size(withAttributes: [.font: Self.font(scale: scale)]).width
+        return max(minimum, ceil(glyph + CGFloat(Space.s) * scale + text + 2 * pad))
+    }
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let theme = effectiveTokenTheme
+        let radius = CornerStyle.current == .sharp ? 0 : bounds.height / 2
+        (isPressed ? AgentSurfaceRole.rowSelected : AgentSurfaceRole.rowHover).color.nsColor(for: theme).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+        let ink = TextToken.textPrimary.color.nsColor(for: theme)
+        let attributes: [NSAttributedString.Key: Any] = [.font: Self.font(scale: chromeScale), .foregroundColor: ink]
+        let text = labelled ? (title as NSString) : nil
+        let textSize = text?.size(withAttributes: attributes) ?? .zero
+        let side = Self.glyphSize(scale: chromeScale)
+        let glyph = CanvasSymbolImage.image(named: symbolName, pointSize: side)
+        let glyphSize = glyph.map { image -> NSSize in
+            let fit = min((side + 2) / max(image.size.width, 1), (side + 2) / max(image.size.height, 1))
+            return NSSize(width: image.size.width * fit, height: image.size.height * fit)
+        } ?? .zero
+        let spacing = text == nil ? 0 : CGFloat(Space.s) * chromeScale
+        var x = (bounds.width - glyphSize.width - spacing - textSize.width) / 2
+        if let glyph, let context = NSGraphicsContext.current?.cgContext {
+            let rect = NSRect(x: x, y: (bounds.height - glyphSize.height) / 2,
+                              width: glyphSize.width, height: glyphSize.height)
+            // Tinted in place, inside a layer so the fill reaches only the glyph.
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+            glyph.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            ink.setFill()
+            rect.fill(using: .sourceAtop)
+            context.endTransparencyLayer()
+            x = rect.maxX + spacing
+        }
+        text?.draw(at: NSPoint(x: x, y: (bounds.height - textSize.height) / 2), withAttributes: attributes)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        defer { isPressed = false; needsDisplay = true }
+        isPressed = true
+        needsDisplay = true
+        while let next = window.nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
+            let inside = bounds.contains(convert(next.locationInWindow, from: nil))
+            if isPressed != inside { isPressed = inside; needsDisplay = true }
+            if next.type == .leftMouseUp {
+                if inside { _ = sendAction(action, to: target) }
+                return
+            }
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 49 {
+            _ = sendAction(action, to: target)
+        } else { super.keyDown(with: event) }
+    }
+
+    override func accessibilityPerformPress() -> Bool { sendAction(action, to: target) }
+    override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() {
+        let radius = CornerStyle.current == .sharp ? 0 : bounds.height / 2
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+    }
+}
+
 /// Lightweight chrome view drawing the tile title, a drag-handle indicator,
 /// and a close button. Claims its own clicks (`hitTest` returns self for
 /// non-button areas) and forwards mouse events to its parent `TileNSView`,
@@ -1713,6 +1852,110 @@ private final class TitleBarView: NSView, TokenThemed {
         }
     }
 
+    // MARK: - Session action (.plans/79, edge case 4)
+    //
+    // "✦ Claude Code  [⊞ Open as agent tile]" on a shell tile whose terminal
+    // runs claude. Framed by hand with the face switch's 22px floor and its own
+    // `hitTest` branch; as the band narrows the quiet label goes first, then
+    // the button's words, then the button — and the tile menu offers it always.
+
+    enum SessionActionMode: String { case labelled, button, icon, hidden }
+    private var sessionActionControl: BandActionControl?
+    private var sessionActionState: TileNSView.SessionActionState?
+    private(set) var sessionActionMode: SessionActionMode = .hidden
+    /// Where the quiet "✦ Claude Code" draws, when the budget left room for it.
+    private var sessionLabelRect: NSRect?
+    var onSessionActionPressed: (() -> Void)?
+
+    func setSessionAction(_ state: TileNSView.SessionActionState?) {
+        guard state != sessionActionState else { return }
+        sessionActionState = state
+        if let state {
+            let control = sessionActionControl ?? {
+                let control = BandActionControl(frame: .zero)
+                control.target = self
+                control.action = #selector(handleSessionAction(_:))
+                addSubview(control)
+                sessionActionControl = control
+                return control
+            }()
+            control.apply(title: state.action)
+        } else {
+            sessionActionControl?.removeFromSuperview()
+            sessionActionControl = nil
+            sessionActionMode = .hidden
+            sessionLabelRect = nil
+        }
+        needsLayout = true
+        invalidateChrome()
+    }
+
+    @objc private func handleSessionAction(_ sender: BandActionControl) {
+        onSessionActionPressed?()
+    }
+
+    private func sessionLabelAttributes(theme: TokenTheme) -> [NSAttributedString.Key: Any] {
+        [.font: NSFont.systemFont(ofSize: 11 * chromeScale, weight: .medium),
+         .foregroundColor: TextToken.textSecondary.color.nsColor(for: theme)]
+    }
+
+    private var sessionLabelGlyphSide: CGFloat { 10 * chromeScale }
+
+    private func layoutSessionAction(trailingEdge: CGFloat) {
+        sessionLabelRect = nil
+        guard let state = sessionActionState, let control = sessionActionControl else {
+            sessionActionMode = .hidden
+            return
+        }
+        let scale = chromeScale
+        let gap = CGFloat(Space.s) * scale
+        let height = closeButtonWorldSize
+        let titleFloor = titleLeadingX + Self.titleMinimumWidth * scale
+        let labelText = (state.label as NSString).size(withAttributes: sessionLabelAttributes(theme: effectiveTokenTheme))
+        let labelWidth = ceil(sessionLabelGlyphSide + CGFloat(Space.xs) * scale + labelText.width)
+        let full = control.preferredWidth(labelled: true, scale: scale, minimum: height)
+        let icon = control.preferredWidth(labelled: false, scale: scale, minimum: height)
+        func fits(_ used: CGFloat) -> Bool { trailingEdge - gap - used - gap >= titleFloor }
+        let mode: SessionActionMode
+        if fits(full + gap + labelWidth) {
+            mode = .labelled
+        } else if fits(full) {
+            mode = .button
+        } else if fits(icon) {
+            mode = .icon
+        } else {
+            mode = .hidden
+        }
+        sessionActionMode = mode
+        control.isHidden = mode == .hidden
+        guard mode != .hidden else { return }
+        let width = mode == .icon ? icon : full
+        control.configure(labelled: mode != .icon, chromeScale: scale)
+        control.frame = NSRect(x: trailingEdge - gap - width, y: (bounds.height - height) / 2, width: width, height: height)
+        if mode == .labelled {
+            sessionLabelRect = NSRect(
+                x: control.frame.minX - gap - labelWidth, y: (bounds.height - labelText.height) / 2,
+                width: labelWidth, height: labelText.height)
+        }
+    }
+
+    private func drawSessionLabel(theme: TokenTheme) {
+        guard let rect = sessionLabelRect, let state = sessionActionState else { return }
+        let attributes = sessionLabelAttributes(theme: theme)
+        let side = sessionLabelGlyphSide
+        if let glyph = CanvasSymbolImage.image(named: "sparkle", pointSize: side),
+           let context = NSGraphicsContext.current?.cgContext {
+            let glyphRect = NSRect(x: rect.minX, y: rect.midY - side / 2, width: side, height: side)
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+            glyph.draw(in: glyphRect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            TextToken.textSecondary.color.nsColor(for: theme).setFill()
+            glyphRect.fill(using: .sourceAtop)
+            context.endTransparencyLayer()
+        }
+        (state.label as NSString).draw(
+            at: NSPoint(x: rect.minX + side + CGFloat(Space.xs) * chromeScale, y: rect.minY), withAttributes: attributes)
+    }
+
     /// Where the title starts: past the provider mark when there is one.
     private var titleLeadingX: CGFloat {
         let scale = chromeScale
@@ -1723,7 +1966,7 @@ private final class TitleBarView: NSView, TokenThemed {
 
     /// The leftmost band control on screen — what the pill and title stop at.
     private var leadingBandControlX: CGFloat {
-        qaVisibleControls.map(\.frame.minX).min() ?? bounds.width
+        (qaVisibleControls.map(\.frame.minX) + [sessionLabelRect?.minX].compactMap { $0 }).min() ?? bounds.width
     }
 
     /// QA: the band's controls that are on screen, by name.
@@ -1732,6 +1975,9 @@ private final class TitleBarView: NSView, TokenThemed {
         if let actionsButton, !actionsButton.isHidden { controls.append(("actions", actionsButton.frame)) }
         for segment in faceSegments where !segment.isHidden {
             controls.append(("face.\(segment.face.rawValue)", segment.frame))
+        }
+        if let sessionActionControl, !sessionActionControl.isHidden {
+            controls.append(("sessionAction", sessionActionControl.frame))
         }
         return controls
     }
@@ -1851,6 +2097,11 @@ private final class TitleBarView: NSView, TokenThemed {
             actionsButton.applyTokens()
         }
         layoutFaceSwitch(trailingEdge: trailingEdge)
+        // Left of the switch when there is one; without ⋯, left of the drag
+        // dots, which are the band's grab affordance.
+        let switchEdge = faceSegments.filter { !$0.isHidden }.map(\.frame.minX).min()
+        layoutSessionAction(trailingEdge: switchEdge
+            ?? (actionsButton == nil ? min(trailingEdge, qaDragHandleLeadingX) : trailingEdge))
     }
 
     /// QA: the close button's laid-out frame (world units) so the parent's
@@ -1960,6 +2211,10 @@ private final class TitleBarView: NSView, TokenThemed {
         // branch a press on a segment starts a tile drag.
         if let segment = faceSegments.first(where: { !$0.isHidden && $0.frame.contains(point) }) {
             return segment
+        }
+        // "Open as agent tile", for the same reason.
+        if let sessionActionControl, !sessionActionControl.isHidden, sessionActionControl.frame.contains(point) {
+            return sessionActionControl
         }
         if let accessoryView, accessoryView.frame.contains(point) {
             // NSStackView reports itself for this hierarchy. Return its native
@@ -2102,6 +2357,7 @@ private final class TitleBarView: NSView, TokenThemed {
             drawAgentStatus(agentStatus)
         }
         drawFaceSwitchTrack(theme: theme)
+        drawSessionLabel(theme: theme)
 
         // Three-dot drag handle indicator, left of the × close button. Sizes +
         // gap scale with the chrome; positioned relative to the floored button.
