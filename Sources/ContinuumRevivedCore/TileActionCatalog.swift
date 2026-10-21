@@ -46,7 +46,10 @@ public enum TileActionCatalog {
             map["browserForward"] = (TileChord(keyCode: 30, modifiers: .command), .browserForward)
         case .note:
             map["noteExport"] = (TileChord(keyCode: 14, modifiers: .command), .noteExport)
-        case .terminal, .browserInspector, .file, .fileTree, .ticketQueue, .conductorQueue, .diffReview, .runArtifacts, .managedAgent, .kanban:
+        case .managedAgent:
+            // ⌘⌃T, beside the ⌘⌃1–4 size chords: ⌘T alone is New Terminal.
+            map["agentToggleFace"] = (TileChord(keyCode: 17, modifiers: [.command, .control]), .agentToggleFace)
+        case .terminal, .browserInspector, .file, .fileTree, .ticketQueue, .conductorQueue, .diffReview, .runArtifacts, .kanban:
             break
         }
         return map

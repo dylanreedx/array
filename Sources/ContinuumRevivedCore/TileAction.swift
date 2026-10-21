@@ -24,4 +24,6 @@ public enum TileAction: Equatable, Sendable {
     case browserForward
     // Note.
     case noteExport
+    // Managed agent: flip between the Array and Terminal faces (`.plans/79`).
+    case agentToggleFace
 }
