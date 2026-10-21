@@ -234,7 +234,84 @@ enum AgentProcessTrackerChecks {
         let alive = pids.filter { kill($0, 0) == 0 }
         try expect(alive.isEmpty, "every stopped pid must be gone; still alive \(alive)")
 
+        // 8. The same UI must expose a portless tool script after its reply
+        // and CLI have both finished, keeping the shell's original clock.
+        let scriptDirectory = fixture.tempRoot.appendingPathComponent("portless", isDirectory: true)
+        try FileManager.default.createDirectory(at: scriptDirectory, withIntermediateDirectories: true)
+        let scriptCLI = try ProcessGroupChild.spawn(
+            executable: me,
+            arguments: [ProcessTrackingQAHelper.flag, "portless-agent", scriptDirectory.path],
+            environment: PiAgentRunner.childEnvironment(processOwner: tag),
+            currentDirectory: nil, standardInput: .nullDevice)
+        defer { scriptCLI.terminateGroup(graceSeconds: 0.2) }
+        let thread = AgentSupervisor.threadId(for: fixture.agentId)
+        supervisor.qaDeliver(.sessionStateChanged(.running), to: fixture.agentId)
+        supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: "portless-tool"), to: fixture.agentId)
+        try expect(supervisor.turnSnapshot(for: fixture.agentId)?.state == .working,
+                   "the script witness must begin in a real working turn")
+        pump(until: { tracker.jobs(for: fixture.agentId).contains { $0.ports.isEmpty && $0.pids.count == 2 } }, seconds: 15)
+        guard let script = tracker.jobs(for: fixture.agentId).first(where: { $0.ports.isEmpty && $0.pids.count == 2 }) else {
+            throw Failure(message: "a shell script with no port must appear while the agent works")
+        }
+        defer { _ = AgentProcessControl.terminate(script, grace: 0.2) }
+        try expect(!script.detached && script.commandLine.contains("sleep 60"),
+                   "the portless job must show the shell's running command; got \(script)")
+        tile.layoutSubtreeIfNeeded()
+        try expect(tile.qaBackgroundJobsChipValue == "1 running", "a portless script must show 1 running on the tile")
+        supervisor.qaDeliver(.turnCompleted(threadId: thread, turnId: "portless-tool", outcome: .completed, errorMessage: nil), to: fixture.agentId)
+        supervisor.qaDeliver(.sessionStateChanged(.ready), to: fixture.agentId)
+        _ = wait(until: { tile.qaTailStatusText.hasPrefix("Worked for") }, seconds: 3)
+        let completedTail = tile.qaTailStatusText
+        try expect(completedTail.hasPrefix("Worked for") && supervisor.turnPresence(for: fixture.agentId)?.phase.isTerminal == true,
+                   "the reply must be completed while its script is still running; got \(completedTail)")
+        try Data().write(to: scriptDirectory.appendingPathComponent("finish-agent"))
+        try expect(scriptCLI.wait() == 0, "the completed reply's CLI must exit normally while its script keeps running")
+        pump(until: { tracker.jobs(for: fixture.agentId).contains { $0.id == script.id && $0.detached } }, seconds: 8)
+        guard let orphan = tracker.jobs(for: fixture.agentId).first(where: { $0.id == script.id && $0.detached }) else {
+            throw Failure(message: "after reply and CLI completion the shell job must retain its identity and remain visible")
+        }
+        try expect(orphan.startedAt == script.startedAt && orphan.pids == script.pids,
+                   "CLI completion must keep the shell, child and original elapsed-time origin")
+        try expect(tile.qaBackgroundJobsChipValue == "1 running" && topBar.qaProcessesVisible,
+                   "the completed agent's remaining script must stay visible on its tile and top bar")
+        tile.showBackgroundProcesses(from: topBar.qaProcessesButton)
+        guard let scriptPanel = tracker.panel.content, let scriptRow = scriptPanel.qaJobRows.first,
+              scriptPanel.qaJobRows.count == 1, scriptRow.job.id == script.id else {
+            throw Failure(message: "the completed agent's chip must expose its portless script in the details panel")
+        }
+        func rowMetadata() -> String? {
+            scriptRow.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue.hasPrefix("pid ") }?.stringValue
+        }
+        guard let initialMetadata = rowMetadata() else { throw Failure(message: "the script row must display its PID and elapsed time") }
+        try expect(initialMetadata.contains("pid \(script.rootPid)") && initialMetadata.contains("outlives the agent"),
+                   "details must expose the script's PID and detached lifetime; got \(initialMetadata)")
+        _ = wait(until: { rowMetadata() != initialMetadata }, seconds: 3)
+        try expect(rowMetadata() != initialMetadata && scriptRow.job.startedAt == script.startedAt,
+                   "the open panel's elapsed time must advance after the reply ends; stayed at \(initialMetadata)")
+        try expect(tile.qaTailStatusText == completedTail,
+                   "a background script's growing uptime must not rewrite the finished reply's work duration")
+        guard let expandClick = NSEvent.mouseEvent(
+            with: .leftMouseUp, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: scriptRow.window?.windowNumber ?? 0, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 0) else {
+            throw Failure(message: "could not create the script row's expansion click")
+        }
+        scriptRow.mouseUp(with: expandClick)
+        scriptRow.layoutSubtreeIfNeeded()
+        try expect(scriptRow.isExpanded && scriptRow.subviews.compactMap { $0 as? NSTextField }.contains {
+            $0.stringValue == script.commandLine && !$0.isHidden && $0.isSelectable
+        }, "expanding a portless script must reveal its selectable command")
+        scriptRow.stopButton.performClick(nil)
+        _ = wait(until: { tracker.jobs(for: fixture.agentId).isEmpty && scriptPanel.qaJobRows.isEmpty }, seconds: 10)
+        try expect(tracker.jobs(for: fixture.agentId).isEmpty && script.pids.allSatisfy {
+            guard let start = script.startTimes[$0] else { return false }
+            return !AgentProcessControl.isSameProcess($0, startedAt: start)
+        }, "Stop must end the completed agent's shell script and its child")
+        try expect(tile.qaBackgroundJobsChipValue == nil && !topBar.qaProcessesVisible,
+                   "stopping the last portless script must clear the tile and top-bar indicators")
+        tracker.panel.dismiss(animated: false)
+
         tile.detach()
-        return "agent process tracker check passed: listed \(String(format: "%.2f", arrivalLag))s after eligible, dropped a killed job in \(String(format: "%.2f", exitLag))s, 3 jobs on ports \(ports), panel live, opened :\(port) beside the agent, Stop and Stop All ended \(pids.count) processes"
+        return "agent process tracker check passed: listed \(String(format: "%.2f", arrivalLag))s after eligible, dropped a killed job in \(String(format: "%.2f", exitLag))s, 3 jobs on ports \(ports), panel live, opened :\(port) beside the agent, Stop and Stop All ended \(pids.count) processes; portless shell survived reply and CLI completion, retained its clock, exposed command/PID/advancing uptime, and Stop ended shell and child"
     }
 }

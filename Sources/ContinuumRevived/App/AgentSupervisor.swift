@@ -3905,17 +3905,7 @@ final class AgentSupervisor {
         var projection = transcriptProjection(for: id)
         projection.appendSessionBoundary(
             id: "outside-\(UUID().uuidString)", text: boundaryText, symbolName: symbolName)
-        for step in transcript.steps {
-            switch step {
-            case .userPrompt(let text):
-                guard let promptID = AgentNodeID(rawValue: "outside-prompt-\(UUID().uuidString)") else { continue }
-                projection.appendUserPrompt(id: promptID, prompt: AgentPrompt(text))
-            case .event(let event):
-                projection.ingest(event.withThreadId(threadId))
-            case .observation:
-                break
-            }
-        }
+        Self.replay(transcript, into: &projection, threadId: threadId)
         transcriptProjections[id] = projection
         scheduleTranscriptPersist(for: id, final: true)
     }
@@ -4001,15 +3991,19 @@ final class AgentSupervisor {
     }
 
     private static func replay(_ transcript: RehydratedTranscript, into projection: inout ManagedAgentTranscriptModel, threadId: String) {
-        for step in transcript.steps {
-            switch step {
-            case .userPrompt(let text):
-                guard let promptID = AgentNodeID(rawValue: "outside-prompt-\(UUID().uuidString)") else { continue }
-                projection.appendUserPrompt(id: promptID, prompt: AgentPrompt(text))
-            case .event(let event):
-                projection.ingest(event.withThreadId(threadId))
-            case .observation:
-                break
+        for (index, step) in transcript.steps.enumerated() {
+            let timestamp = transcript.stepTimestamps.indices.contains(index)
+                ? transcript.stepTimestamps[index] : nil
+            AgentTranscriptClock.withWallClock(timestamp) {
+                switch step {
+                case .userPrompt(let text):
+                    guard let promptID = AgentNodeID(rawValue: "outside-prompt-\(UUID().uuidString)") else { return }
+                    projection.appendUserPrompt(id: promptID, prompt: AgentPrompt(text))
+                case .event(let event):
+                    projection.ingest(event.withThreadId(threadId))
+                case .observation:
+                    break
+                }
             }
         }
     }

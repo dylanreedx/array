@@ -45,6 +45,12 @@ public enum ClaudeSessionTranscriptReader {
             // Sub-agent frames are skipped everywhere.
             if (object["isSidechain"] as? Bool) == true { continue }
 
+            let firstOutput = out.count
+            let timestamp = ManagedTranscriptRehydrator.timestamp(object["timestamp"])
+            defer {
+                for index in firstOutput..<out.count { out[index].timestamp = timestamp }
+            }
+
             switch type {
             case "system" where (object["subtype"] as? String) == "compact_boundary":
                 // The live stream says `compact_metadata.pre_tokens`; the session

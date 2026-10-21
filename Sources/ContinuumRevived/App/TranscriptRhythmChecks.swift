@@ -66,6 +66,7 @@ enum TranscriptRhythmChecks {
         try checkTurnFolding()
         try checkARowSaysEachThingOnce()
         try checkAFoldedTurnReportsASpanNotASum()
+        try checkATurnKeepsItsCompletionTime()
         try checkADisplayCycleCostsNothingPerRow()
         try checkAThoughtIsNotShoutedAtTheReader()
         try checkGlyphsDistinguishRowKinds()
@@ -2603,6 +2604,82 @@ extension TranscriptRhythmChecks {
                 + "paragraph against \(CompletedReasoningDisclosureView.bodyBlockSpacing)pt "
                 + "between paragraphs — the body reads as glued to its own title"
             )
+        }
+    }
+
+    /// The reply/last tool can close before the terminal callback. History
+    /// must keep Return → terminal, including tools, gaps and final cleanup.
+    private static func checkATurnKeepsItsCompletionTime() throws {
+        final class Clock: @unchecked Sendable {
+            var seconds: TimeInterval = 0
+            let base = Date(timeIntervalSince1970: 1_700_000_000)
+            func now() -> Date { base.addingTimeInterval(seconds) }
+        }
+        let clock = Clock()
+        let thread = "duration-lifetime"
+        var projection = AgentTranscriptProjection(
+            threadId: thread, monotonicNow: { 0 }, wallClockNow: { clock.now() })
+        var presence = AgentTurnPresence()
+        presence.arm(at: clock.now())
+        projection.appendUserPrompt("Run the long tests and explain the result.")
+        func event(_ event: AgentRuntimeEvent, at seconds: TimeInterval) {
+            clock.seconds = seconds
+            presence.reduce(event, at: clock.now())
+            projection.ingest(event)
+        }
+        event(.turnStarted(threadId: thread, turnId: "duration-turn"), at: 5)
+        for (index, start) in [30.0, 60, 120, 150].enumerated() {
+            event(.itemStarted(threadId: thread, itemId: "tool-\(index)", kind: .commandExecution, title: "test step"), at: start)
+            event(.itemCompleted(threadId: thread, itemId: "tool-\(index)", kind: .commandExecution, status: .completed), at: start + 20)
+        }
+        event(.contentDelta(threadId: thread, turnId: "duration-turn", streamKind: .assistant, delta: "Tests passed."), at: 180)
+        event(.sessionStateChanged(.ready), at: 190)
+        event(.turnCompleted(threadId: thread, turnId: "duration-turn", outcome: .completed, errorMessage: nil), at: 600)
+        guard presence.settledDuration == 600 else { throw fail("live duration must include the entire ten-minute request") }
+        let settled = ManagedAgentTileNSView.settledTailText(for: presence)
+        // Waiting an hour before the next prompt must not inflate prior work.
+        clock.seconds = 4_200
+        projection.appendUserPrompt("Now review it.")
+        let persisted = try JSONDecoder().decode(AgentDocument.self, from: JSONEncoder().encode(projection.document))
+        let document = AgentDocument(version: 1, entries: persisted.entries)
+        let list = AgentTranscriptListView()
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 640, height: 720))
+        host.addSubview(list)
+        list.frame = host.bounds
+        try list.apply(document: document, patch: AgentDocumentPatch(
+            fromVersion: 0, toVersion: document.version,
+            inserted: document.entries.flatMap(\.blocks).map(\.id)))
+        list.layoutSubtreeIfNeeded()
+        list.collectionView.layout()
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let summaries = descendants(list).compactMap { ($0 as? AgentToolClusterHeaderView)?.summaryLabel.stringValue }
+        guard summaries.contains(where: { $0.contains("Worked for 10m 0s") }) else {
+            throw fail("completion clock: live tail \(settled ?? "nil") became historical \(summaries); expected 10m 0s including tools and terminal cleanup")
+        }
+        guard projection.rejectedMutationCount == 0 else { throw fail("valid timing events rejected document mutations") }
+
+        // Partial source history must not turn its known tool times into a
+        // plausible, shorter total. This also exercises the timestamp cache's
+        // incremental path after a correct duration was already displayed.
+        guard let timedIndex = document.entries.firstIndex(where: { $0.turnTiming != nil }) else {
+            throw fail("the terminal event did not persist the full request interval")
+        }
+        for (index, missingStart) in [false, true].enumerated() {
+            var partial = document
+            partial.version = UInt64(index + 2)
+            partial.entries[timedIndex].revision += UInt64(index + 1)
+            partial.entries[timedIndex].turnTiming = AgentTurnTiming(
+                startedAt: missingStart ? nil : clock.base,
+                completedAt: missingStart ? clock.base.addingTimeInterval(600) : nil)
+            try list.apply(document: partial, patch: AgentDocumentPatch(
+                fromVersion: UInt64(index + 1), toVersion: partial.version,
+                updated: [partial.entries[timedIndex].id]))
+            list.layoutSubtreeIfNeeded()
+            let partialSummaries = descendants(list).compactMap { ($0 as? AgentToolClusterHeaderView)?.summaryLabel.stringValue }
+            guard partialSummaries.contains(where: { $0.hasPrefix("Worked") }),
+                  !partialSummaries.contains(where: { $0.hasPrefix("Worked for") }) else {
+                throw fail("an unknown request endpoint invented a partial duration: \(partialSummaries)")
+            }
         }
     }
 

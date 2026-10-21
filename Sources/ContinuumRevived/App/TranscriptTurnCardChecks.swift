@@ -42,11 +42,90 @@ enum TranscriptTurnCardChecks {
         defer { AgentTranscriptPresentationStyle.current = previousStyle }
         if wants("card") { summary.append(try await checkTheTileReadsAsTurnCards(artifacts: artifacts)) }
         if wants("honesty") { summary.append(try await checkTheStripIsNeverSilent()) }
+        if wants("restore-timing") { summary.append(try checkRestoredProviderTimes()) }
         print("TranscriptTurnCardChecks passed: " + summary.joined(separator: "; ")
               + " (artifacts: \(artifacts.path))")
     }
 
     // MARK: - Fixture
+
+    /// Replay speed and the idle time before the next prompt are neither part
+    /// of a completed turn. Exercise the real session reader and tile renderer.
+    private static func checkRestoredProviderTimes() throws -> String {
+        let fixtures: [(String, [String])] = [
+            ("claude", [
+                #"{"timestamp":"2026-10-20T10:00:00.000Z","type":"user","message":{"content":"Run the slow check"}}"#,
+                #"{"timestamp":"2026-10-20T10:01:00.000Z","type":"assistant","message":{"content":[{"type":"tool_use","id":"slow","name":"Bash","input":{"command":"python slow.py"}}]}}"#,
+                #"{"timestamp":"2026-10-20T10:09:00.000Z","type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"slow","content":"done"}]}}"#,
+                #"{"timestamp":"2026-10-20T10:10:00.000Z","type":"assistant","message":{"content":[{"type":"text","text":"Finished"}]}}"#,
+                #"{"timestamp":"2026-10-20T11:00:00.000Z","type":"user","message":{"content":"Next task"}}"#,
+            ]),
+            ("pi", [
+                #"{"timestamp":"2026-10-20T10:00:00.000Z","type":"message","message":{"role":"user","content":"Run the slow check"}}"#,
+                #"{"timestamp":"2026-10-20T10:01:00.000Z","type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"slow","name":"bash","arguments":{"command":"python slow.py"}}]}}"#,
+                #"{"timestamp":"2026-10-20T10:09:00.000Z","type":"message","message":{"role":"toolResult","toolCallId":"slow","content":[{"type":"text","text":"done"}]}}"#,
+                #"{"timestamp":"2026-10-20T10:10:00.000Z","type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Finished"}]}}"#,
+                #"{"timestamp":"2026-10-20T11:00:00.000Z","type":"message","message":{"role":"user","content":"Next task"}}"#,
+            ]),
+            ("codex", [
+                #"{"timestamp":"2026-10-20T10:00:00.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"text":"Run the slow check"}]}}}"#,
+                #"{"timestamp":"2026-10-20T10:01:00.000Z","type":"response_item","payload":{"type":"function_call","call_id":"slow","name":"exec_command","arguments":"{}"}}"#,
+                #"{"timestamp":"2026-10-20T10:09:00.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"slow","output":"done"}}"#,
+                #"{"timestamp":"2026-10-20T10:10:00.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"text":"Finished"}]}}}"#,
+                #"{"timestamp":"2026-10-20T11:00:00.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"text":"Next task"}]}}}"#,
+            ]),
+        ]
+        let expectedStart = Date(timeIntervalSince1970: 1_792_490_400)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("handoff-timing-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("support")),
+            makeRunner: { _ in ScriptedAgentRunner(script: []) },
+            transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts")))
+        for (provider, lines) in fixtures {
+            let tile = ManagedAgentTileNSView(tile: Tile(
+                id: UUID(), kind: .managedAgent, title: "restore-timing",
+                frame: TileFrame(x: 0, y: 0, width: 640, height: 520),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil,
+                metadata: TileMetadata(launchProfileId: "managed")))
+            let restored: RehydratedTranscript = switch provider {
+            case "pi": PiSessionTranscriptReader.parse(lines: lines, threadId: tile.qaThreadIdForChecks)
+            case "codex": CodexSessionTranscriptReader.parse(lines: lines, threadId: tile.qaThreadIdForChecks)
+            default: ClaudeSessionTranscriptReader.parse(lines: lines, threadId: tile.qaThreadIdForChecks)
+            }
+            // The supervisor owns the snapshot a reopened tile installs. Its
+            // outside-turn replay must preserve the same clocks as a live tile.
+            for seeded in [false, true] {
+                let id = supervisor.spawn(role: nil, prompt: nil, cwd: root,
+                                          model: "anthropic/claude-haiku-4-5-20251001", thinking: "low")
+                if seeded { supervisor.seedRehydratedTranscript(restored, for: id) }
+                supervisor.appendOutsideTurns(restored, boundaryText: "In Terminal", symbolName: nil, for: id)
+                let snapshot = supervisor.transcriptAttachment(for: id, reboundTo: tile.qaThreadIdForChecks).snapshot
+                guard let prompt = snapshot?.document.entries.first(where: { $0.role == .user }) else {
+                    throw fail("\(provider): outside history must produce a reopenable snapshot")
+                }
+                try expect(prompt.createdAt == expectedStart,
+                           "\(provider): supervisor replay lost the original prompt time (seeded: \(seeded))")
+                let following = snapshot!.document.entries.drop(while: { $0.id != prompt.id }).dropFirst().prefix(while: { $0.role != .user })
+                try expect(following.compactMap(\.finishedAt).max() == expectedStart.addingTimeInterval(600),
+                           "\(provider): supervisor replay lost the ten-minute turn duration (seeded: \(seeded))")
+            }
+            tile.renderRehydratedPreviousSession(restored)
+            let entries = tile.qaDocumentForChecks.entries
+            guard let prompt = entries.first(where: { $0.role == .user }) else { throw fail("\(provider): missing restored prompt") }
+            try expect(prompt.createdAt == expectedStart,
+                       "\(provider): restored prompt uses replay time \(String(describing: prompt.createdAt)) instead of its original time")
+            let beforeNextPrompt = Array(entries.drop(while: { $0.id != prompt.id }).dropFirst().prefix(while: { $0.role != .user }))
+            let end = beforeNextPrompt.compactMap(\.finishedAt).max()
+            try expect(end == expectedStart.addingTimeInterval(600),
+                       "\(provider): restored ten-minute turn ended at \(String(describing: end)); replay speed and the next prompt's hour of idle time must not change its span")
+            settle(tile)
+            let summaries = tile.qaTranscriptForChecks?.qaTurnCardFoldedModelsForChecks.map(\.outcomeText) ?? []
+            try expect(summaries.contains(where: { $0.contains("10m") }),
+                       "\(provider): the restored work summary must show ten minutes, got \(summaries)")
+        }
+        return "restored provider timestamps preserve a ten-minute shell turn and exclude the following idle gap"
+    }
 
     private static func artifactDirectory() -> URL {
         let formatter = DateFormatter()

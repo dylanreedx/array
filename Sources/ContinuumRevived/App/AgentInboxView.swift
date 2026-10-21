@@ -742,6 +742,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Ids are kept even when their agent leaves the list (a scope change, a settle)
     /// so that coming back re-folds the group the way you left it.
     private var foldChoices: [UUID: Bool] = [:]
+    private let foldMotion = InboxFoldMotion()
+    var foldMotionForQA: InboxFoldMotion { foldMotion }
     /// Reports a fold or unfold by the person, with every choice made so far, so
     /// the host can remember them across launches. Not called by `restoreParentFolds`.
     var onParentFoldChange: (([UUID: Bool]) -> Void)?
@@ -1559,6 +1561,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// `AgentInboxCellView.viewDidChangeEffectiveAppearance` for the words, each
     /// on the view that owns the colour.
     func applyTokens() {
+        foldMotion.cancel()
         layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
         emptyLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         searchField.textColor = TextToken.textPrimary.color.nsColor(in: self)
@@ -1767,6 +1770,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The workspace notification calls this in production; QA uses the same seam
     /// after replacing either preference closure.
     private func reapplyDisplayPreferences() {
+        foldMotion.cancel()
         let increasedContrast = prefersIncreasedContrast()
         for cell in cellsByRow.values { cell.setIncreasedContrast(increasedContrast) }
     }
@@ -1797,6 +1801,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let viewportWidth = qaViewportWidthOverride ?? scrollView.contentView.bounds.width
         if viewportWidth > 0,
            tableView.frame.width != viewportWidth || column.width != viewportWidth {
+            foldMotion.cancel()
             var frame = tableView.frame
             frame.size.width = viewportWidth
             tableView.frame = frame
@@ -1940,13 +1945,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// is why it is private: `reload(rows:)` is the entry point for a fresh push and
     /// takes the unfiltered set, and handing it an already-filtered list would make
     /// the scope narrow itself with every call.
-    private func render(_ visible: [InboxListItem]) {
+    private func render(_ visible: [InboxListItem], animateRows: Bool = true) {
+        foldMotion.cancel()
         // Row motion (confidence pass): rows that leave fade out from where they
         // were, rows that arrive fade in — 150ms, skipped above 40 rows and under
         // Reduce Motion. A closed tile's row visibly leaving IS the confirmation.
         let previousIds = Set(rows.map(\.id))
         let nextIds = Set(visible.compactMap { $0.agentRow?.id })
-        let animatesRows = !previousIds.isEmpty && previousIds != nextIds
+        let animatesRows = animateRows && !previousIds.isEmpty && previousIds != nextIds
             && visible.count <= Self.rowMotionRowLimit && !prefersReducedMotion()
         let exitGhosts = animatesRows ? liftExitGhosts(leaving: previousIds.subtracting(nextIds)) : []
         defer {
@@ -2006,6 +2012,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// `Equatable` makes exact rather than a guess. (Found in cross-review; the
     /// change-set-only version showed a stale project name after a rename.)
     func apply(rows newRows: [AgentInboxRow], changed: AgentsBoardChangeSet) {
+        if foldMotion.isAnimating {
+            let byId = newRows.reduce(into: [UUID: AgentInboxRow]()) { $0[$1.id] = $1 }
+            let sameGeometry = rows.allSatisfy { previous in
+                guard let next = byId[previous.id] else { return false }
+                if previous == next { return true }
+                guard previous.variant == .card, next.variant == .card,
+                      let style = cardStyleOverride else { return false }
+                return style.cardHeight(previous) == style.cardHeight(next)
+            }
+            if !sameGeometry || prefersReducedMotion() { foldMotion.cancel() }
+        }
         defer { syncElapsedTickTimer() }
         // P6.6: compare/prune before the incremental/full list branch. Cell
         // materialization is a rendering detail and must not decide whether a
@@ -2026,6 +2043,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // P2D.4's disclosure-moved rows would go unredrawn.
         let lifted = liftCrossfadeGhosts(from: rows, to: newRows)
         applyRows(newRows, changed: changed)
+        if foldMotion.isAnimating {
+            let keys = Set(foldMotion.poses.keys)
+            foldMotion.cover(items.indices.compactMap { index in
+                guard keys.contains(items[index].identity) else { return nil }
+                return tableView.view(atColumn: 0, row: index, makeIfNecessary: false)
+            })
+        }
         startCrossfades(lifted)
         completePendingAdvance(selectionOnEntry: selectionOnEntry)
     }
@@ -2419,6 +2443,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// `setScope` drops them — their indexes belong to the list that just went away,
     /// and a bulk action (P3.11) must never reach a row you cannot see.
     func toggleCollapse(parentId: UUID) {
+        let animates = window != nil && !prefersReducedMotion()
+        let presentation = animates ? foldMotion.takePresentation() : [:]
+        foldMotion.cancel()
+        // A fold owns the cards and following rows together. Retire any generic
+        // stream fade instead of laying a second 150 ms fade over the unfold.
+        for ghost in exitGhostViews { ghost.removeFromSuperview() }
+        exitGhostViews.removeAll()
+        qaLastRowMotion = ([], [])
+        let previous = animates ? captureFoldRows().snapshots.merging(presentation) { _, drawn in drawn } : [:]
+        let expanded = collapsedParents.contains(parentId)
+        let anchor = tableRow(forAgentId: parentId).map {
+            (id: parentId, viewportMinY: tableView.rect(ofRow: $0).minY - tableView.visibleRect.minY)
+        }
         foldChoices[parentId] = collapsedParents.contains(parentId)
         onParentFoldChange?(foldChoices)
         tableView.deselectAll(nil)
@@ -2430,7 +2467,48 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // cannot un-light the row it still is over either.
         hoveredAgentId = nil
         keyboardFocusIntent = nil
-        render(display(from: allRows))
+        render(display(from: allRows), animateRows: false)
+        layoutSubtreeIfNeeded()
+        tableView.layoutSubtreeIfNeeded()
+        layoutSubtreeIfNeeded()
+        restoreScrollAnchor(anchor)
+        guard animates else { return }
+        let next = captureFoldRows()
+        foldMotion.start(from: previous, to: next.snapshots,
+                         parentKey: "agent:\(parentId.uuidString)", expanded: expanded,
+                         container: scrollView.contentView, covering: next.views)
+    }
+
+    /// Native geometry for every row, pixels only for the visible materialized
+    /// ones. Geometry-only entries let a following row travel out of the viewport
+    /// rather than being mistaken for a child being tucked into the parent.
+    private func captureFoldRows() -> (snapshots: [String: InboxFoldMotion.Snapshot], views: [NSView]) {
+        let clip = scrollView.contentView
+        var snapshots: [String: InboxFoldMotion.Snapshot] = [:]
+        var views: [NSView] = []
+        for index in items.indices {
+            if case .shelfSpacer = items[index] { continue }
+            let cell = tableView.view(atColumn: 0, row: index, makeIfNecessary: false)
+            var rect = tableView.rect(ofRow: index)
+            var local = cell?.bounds ?? NSRect(origin: .zero, size: rect.size)
+            if items[index].agentRow?.variant == .card, cardStyleOverride != nil {
+                // Keep the painted card height constant. A group's final row has
+                // extra space below it; stretching that gap would squash its text.
+                local.size.height -= CGFloat(AgentInbox96CellView.trailingGap(for: nesting(atTableRow: index)))
+                local.size.height += CGFloat(Self.rowSpacing)
+                rect.size.height = local.height
+            }
+            var frame = cell.map { clip.convert(local, from: $0) } ?? clip.convert(rect, from: tableView)
+            frame.origin.x -= clip.bounds.minX
+            frame.origin.y -= clip.bounds.minY
+            let visible = frame.intersects(NSRect(origin: .zero, size: clip.bounds.size))
+            let image = visible && views.count < InboxFoldMotion.snapshotLimit
+                ? cell.flatMap { InboxFoldMotion.image(of: $0, in: local) } : nil
+            snapshots[items[index].identity] = InboxFoldMotion.Snapshot(
+                key: items[index].identity, frame: frame, image: image, order: index)
+            if image != nil, let cell { views.append(cell) }
+        }
+        return (snapshots, views)
     }
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
@@ -4036,6 +4114,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func redraw(tableRows indexes: [Int]) {
         let touched = IndexSet(indexes.filter { items.indices.contains($0) })
         guard !touched.isEmpty else { return }
+        foldMotion.cancel()
         tableView.reloadData(forRowIndexes: touched, columnIndexes: IndexSet(integer: 0))
     }
 
@@ -4286,6 +4365,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// last hovered row stays lit behind an app you switched away from.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        foldMotion.cancel()
         // The card is a child of the WINDOW, not of this view, so it does not
         // travel when the list is reparented or torn down — it would simply be
         // left behind, floating over a canvas describing a row that is gone.
@@ -4320,6 +4400,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                self.foldMotion.cancel()
                 self.refreshHoverFromPointer()
                 self.syncElapsedTickTimer()
                 self.window?.invalidateCursorRects(for: self.tableView)

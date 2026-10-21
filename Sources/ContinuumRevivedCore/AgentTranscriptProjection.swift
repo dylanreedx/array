@@ -38,6 +38,9 @@ public struct AgentTranscriptProjection: Sendable {
     private var requestEntries: [String: AgentNodeID] = [:]
     private var requestBlocks: [String: AgentNodeID] = [:]
     private var referencedAgentIDs = Set<UUID>()
+    private var turnEntryStart: Int?
+    private var turnSubmittedAt: Date?
+    private var turnHasStarted = false
     private var localSequence = 0
     private var runtimeErrorSequence = 0
     /// The runtime error this turn already rendered. A runner that throws
@@ -46,12 +49,13 @@ public struct AgentTranscriptProjection: Sendable {
     private var renderedRuntimeErrorMessage: String?
     private let markupParser = MarkdownAgentMarkupParser()
     private let monotonicNow: @Sendable () -> TimeInterval
+    private let wallClockNow: @Sendable () -> Date?
 
     public init(threadId: String) {
         self.init(
             threadId: threadId,
             monotonicNow: { AgentTranscriptClock.monotonic() },
-            wallClockNow: { AgentTranscriptClock.wall() }
+            wallClockNow: { AgentTranscriptClock.entryDate() }
         )
     }
 
@@ -69,6 +73,7 @@ public struct AgentTranscriptProjection: Sendable {
         self.threadId = threadId
         self.reducer = AgentDocumentReducer(createdAtProvider: wallClockNow)
         self.monotonicNow = monotonicNow
+        self.wallClockNow = wallClockNow
     }
 
     public var document: AgentDocument { reducer.document }
@@ -134,10 +139,16 @@ public struct AgentTranscriptProjection: Sendable {
             return closeStreamingRun()
 
         case .turnStarted(let tid, _) where tid == threadId:
+            if turnEntryStart == nil {
+                turnEntryStart = document.entries.count
+                turnSubmittedAt = wallClockNow()
+            }
+            turnHasStarted = true
             renderedRuntimeErrorMessage = nil
             return closeStreamingRun()
 
         case .contentDelta(let tid, let turnID, let kind, let delta) where tid == threadId:
+            if turnEntryStart != nil { turnHasStarted = true }
             switch kind {
             case .assistant, .reasoning:
                 return markupMutations(turnID: turnID, kind: kind, delta: delta)
@@ -159,6 +170,7 @@ public struct AgentTranscriptProjection: Sendable {
             }
 
         case .itemStarted(let tid, let itemID, let kind, let title) where tid == threadId:
+            if turnEntryStart != nil, !Self.isCompactionKind(kind) { turnHasStarted = true }
             var result = closeStreamingRun()
             guard itemEntries[itemID] == nil else { return result }
             let entryID = makeID(scope: "item", providerID: itemID)
@@ -239,6 +251,18 @@ public struct AgentTranscriptProjection: Sendable {
             if let errorMessage, !errorMessage.isEmpty, errorMessage != renderedRuntimeErrorMessage {
                 result += errorMutations(message: errorMessage, provenanceID: turnID, suffix: "turn-error")
             }
+            // Item closure is not request completion. Preserve the terminal
+            // instant even when all items/streaming entries are already closed.
+            let newlyCreated = result.compactMap { mutation -> AgentNodeID? in
+                if case let .beginEntry(id, _, _) = mutation { return id }
+                return nil
+            }.last
+            if let entryID = newlyCreated ?? (turnEntryStart.map { document.entries.count > $0 } == true ? document.entries.last?.id : nil) {
+                result.append(.completeTurn(entryID: entryID, startedAt: turnSubmittedAt))
+            }
+            turnEntryStart = nil
+            turnSubmittedAt = nil
+            turnHasStarted = false
             renderedRuntimeErrorMessage = nil
             return result
 
@@ -458,6 +482,12 @@ public struct AgentTranscriptProjection: Sendable {
             return try appendNotice(id: id, title: "Side sessions", body: note)
         }
         var patches = try applyReturningPatches(closeStreamingRun())
+        // A consumed steer stays inside its runtime turn. A previous local
+        // command with no provider turn must not contribute idle time instead.
+        if !turnHasStarted || turnEntryStart == nil {
+            turnEntryStart = document.entries.count
+            turnSubmittedAt = wallClockNow()
+        }
         compatibilityIDs[id] = id.rawValue
         var mutations: [AgentDocumentMutation] = [
             .beginEntry(id: id, role: .user, provenance: .localPrompt(promptID: id.rawValue))
@@ -529,6 +559,10 @@ public struct AgentTranscriptProjection: Sendable {
     public mutating func withdrawLocalPrompt(id: AgentNodeID) throws -> [AgentDocumentPatch] {
         guard let entry = document.entries.first(where: { $0.id == id }),
               case .localPrompt = entry.provenance else { return [] }
+        if let start = turnEntryStart, document.entries.indices.contains(start), document.entries[start].id == id {
+            turnEntryStart = nil
+            turnSubmittedAt = nil
+        }
         compatibilityIDs[id] = nil
         return try applyReturningPatches([.removeEntry(id: id)])
     }
@@ -689,7 +723,8 @@ public struct AgentTranscriptProjection: Sendable {
     }
 
     private mutating func scheduledMarkupMutationsForOpenStream() -> [AgentDocumentMutation] {
-        guard openStream?.scheduler.shouldParse(now: monotonicNow()) == true else { return [] }
+        let now = monotonicNow()
+        guard openStream?.scheduler.shouldParse(now: now) == true else { return [] }
         return parsedMarkupMutationsForOpenStream()
     }
 
@@ -1003,6 +1038,28 @@ private extension Array where Element == AgentDocumentMutation {
 /// renders frames slower than real time and substitutes its film clock, so a tool
 /// that ran for three seconds of footage does not read "15s".
 public enum AgentTranscriptClock {
+    private static let replayClockKey = "Array.transcript.replayClock"
+
+    /// Historical writes are synchronous and scoped to the current thread;
+    /// another agent's live projection never observes a replay's clock.
+    public static func withWallClock<T>(_ timestamp: Date?, _ body: () throws -> T) rethrows -> T {
+        let dictionary = Thread.current.threadDictionary
+        let prior = dictionary[replayClockKey]
+        dictionary[replayClockKey] = timestamp.map { $0 as Any } ?? NSNull()
+        defer {
+            if let prior { dictionary[replayClockKey] = prior }
+            else { dictionary.removeObject(forKey: replayClockKey) }
+        }
+        return try body()
+    }
+
+    public static func entryDate() -> Date? {
+        if let replay = Thread.current.threadDictionary[replayClockKey] {
+            return replay as? Date
+        }
+        return wall()
+    }
+
     #if ARRAY_FILM
     nonisolated(unsafe) public static var monotonic: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     nonisolated(unsafe) public static var wall: @Sendable () -> Date = { Date() }

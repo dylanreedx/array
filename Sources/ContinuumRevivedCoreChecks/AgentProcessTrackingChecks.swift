@@ -13,11 +13,55 @@ import Foundation
 /// that reaches it). Each listens on a port the kernel picks.
 func runAgentProcessTrackingChecks() {
     checkAttributionShapes()
+    checkCodexRuntimeHelper()
     checkLabels()
     checkOtherListeningApps()
     checkLiveProcesses()
+    checkPortlessProcessLifetime()
+    checkProcessStopSafetyAndEscalation()
     checkDescriptorsAreNotInherited()
     print("agent process tracking checks passed")
+}
+
+/// The lazily launched code-mode host is Codex infrastructure. Its commands
+/// remain jobs even when they start immediately after the helper itself.
+private func checkCodexRuntimeHelper() {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let start = now.addingTimeInterval(-600)
+    let owner = "CCCCCCCC-0000-4000-8000-000000000003"
+    let layouts = [
+        ("/vendor/aarch64-apple-darwin/bin/codex", "/vendor/aarch64-apple-darwin/bin/codex-code-mode-host"),
+        ("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+         "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex-code-mode-host"),
+    ]
+    for (cli, helper) in layouts {
+        func sample(_ pid: Int32, _ parent: Int32, _ offset: TimeInterval, _ path: String, _ args: [String]? = nil) -> ProcessSample {
+            ProcessSample(pid: pid, parentPid: parent, startedAt: start.addingTimeInterval(offset),
+                          executablePath: path, arguments: args ?? [path], ownerTag: owner)
+        }
+        let runtime = [sample(200, 100, 0, cli), sample(201, 200, 90, helper)]
+        func jobs(_ samples: [ProcessSample]) -> [AgentBackgroundJob] {
+            AgentProcessAttribution.jobs(in: samples, hostPid: 100, internalPathPrefixes: [], now: now)[owner] ?? []
+        }
+        expect(jobs(runtime).isEmpty, "Codex's idle code-mode host must not claim background work: \(helper)")
+        let python = sample(202, 201, 90.1, "/usr/bin/python3", ["python3", "analysis.py"])
+        let shell = sample(203, 201, 120, "/bin/sh", ["sh", "-c", "sleep 60 & wait"])
+        let child = sample(204, 203, 120.1, "/bin/sleep", ["sleep", "60"])
+        let work = jobs(runtime + [python, shell, child])
+        expect(work.map(\.rootPid) == [202, 203],
+               "filter only the runtime helper; keep its Python and shell jobs, including an immediate child: \(work.map(\.rootPid))")
+        expect(work.first?.label == "python3 analysis.py" && work.last?.pids == [203, 204],
+               "helper children must retain readable commands and their own Stop subtrees")
+        expect(work.allSatisfy { !$0.pids.contains(201) && !$0.detached },
+               "stopping a helper's command must never include the runtime helper")
+        let lookalike = sample(205, 200, 150, "/repo/bin/codex-code-mode-host")
+        expect(jobs(runtime + [lookalike]).map(\.rootPid) == [205],
+               "a project command with the same basename must not be hidden as Codex infrastructure")
+        var survivor = python
+        survivor.parentPid = 1
+        expect(jobs([runtime[0], survivor]).first?.rootPid == 202,
+               "a command remains visible when the runtime helper exits")
+    }
 }
 
 private func checkAttributionShapes() {
@@ -84,7 +128,7 @@ private func checkLabels() {
            "label: a relative script path reads as the script too")
     expect(label(["/bin/zsh", "-c", "source x.sh && eval 'bun run dev --port 4000' \\< /dev/null && pwd -P"]) == "bun run dev --port 4000",
            "label: Claude's eval wrapper reads as the command inside it; got \(label(["/bin/zsh", "-c", "source x.sh && eval 'bun run dev --port 4000' \\< /dev/null && pwd -P"]))")
-    expect(label(["/bin/bash", "-lc", "cargo watch -x run"]) == "bash -lc cargo watch -x run" || true, "label: unparsed shells keep their words")
+    expect(label(["/bin/bash", "-lc", "cargo watch -x run"]) == "bash -lc cargo watch -x run", "label: unparsed shells keep their words")
     expect(label(["/usr/local/bin/redis-server", "*:6379"]) == "redis-server *:6379", "label: a binary reads as its name")
 }
 
@@ -166,6 +210,57 @@ private func checkLiveProcesses() {
     expect(after.isEmpty, "live: no job survives Stop; got \(after.map(\.label))")
 }
 
+/// A shell tool can outlive the CLI without ever listening on a port. Its
+/// identity and clock must survive adoption, and Stop must reach its child.
+private func checkPortlessProcessLifetime() {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("array-portless-\(UUID().uuidString)", isDirectory: true)
+    try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let helper = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path
+    let tag = AgentProcessAttribution.ownerTag(for: AgentID(rawValue: UUID()))
+    let cli = try! ProcessGroupChild.spawn(
+        executable: helper, arguments: [ProcessTrackingQAHelper.flag, "portless-agent", directory.path],
+        environment: PiAgentRunner.childEnvironment(processOwner: tag), currentDirectory: nil, standardInput: .nullDevice)
+    defer { cli.terminateGroup(graceSeconds: 0.2) }
+    let reader = ProcessTableReader()
+    func waitForJob(_ predicate: (AgentBackgroundJob) -> Bool) -> AgentBackgroundJob? {
+        let deadline = Date().addingTimeInterval(12)
+        while Date() < deadline {
+            if let job = reader.agentJobs(internalPathPrefixes: [])[tag]?.first(where: predicate) { return job }
+            usleep(100_000)
+        }
+        return nil
+    }
+    guard let attached = waitForJob({ $0.ports.isEmpty && $0.pids.count == 2 && !$0.detached }) else {
+        expect(false, "portless: a real shell and sleep child must be listed without a listening port")
+        return
+    }
+    defer { _ = AgentProcessControl.terminate(attached, grace: 0.2) }
+    let pid = (try? String(contentsOf: directory.appendingPathComponent("script.pid"), encoding: .utf8)).flatMap(Int32.init)
+    expect(attached.rootPid == pid, "portless: the script shell must root the job; got \(attached.rootPid), wanted \(String(describing: pid))")
+    expect(attached.commandLine.contains("sleep 60"), "portless: show the script's running command; got \(attached.commandLine)")
+    expect(AgentBackgroundJobText.chipValue([attached]) == "1 running", "portless: a script without ports must still have a chip")
+    try! Data().write(to: directory.appendingPathComponent("finish-agent"))
+    expect(cli.wait() == 0, "portless: the stand-in CLI must exit normally before its script")
+    guard let detached = waitForJob({ $0.id == attached.id && $0.detached }) else {
+        expect(false, "portless: the script must retain its root, ownership and elapsed-time origin after its CLI exits")
+        return
+    }
+    expect(detached.startedAt == attached.startedAt && detached.pids == attached.pids,
+           "portless: CLI exit must preserve the whole job and its start time")
+    let uptimeBefore = Date().timeIntervalSince(attached.startedAt)
+    usleep(1_100_000)
+    let now = Date()
+    expect(now.timeIntervalSince(detached.startedAt) >= uptimeBefore + 1,
+           "portless: elapsed time must keep increasing after CLI exit")
+    expect(AgentBackgroundJobText.menuDetail(detached, now: now) == AgentBackgroundJobText.uptime(since: attached.startedAt, now: now),
+           "portless: details must show elapsed time without requiring a port")
+    expect(AgentProcessControl.terminate(detached, grace: 1).isEmpty, "portless: Stop must end the shell and its child")
+    expect(reader.agentJobs(internalPathPrefixes: [])[tag]?.isEmpty != false,
+           "portless: the completed script must leave the job list")
+}
+
 /// The workspace host's socket leaked into every agent because the spawn did
 /// not close what the app had left open.
 private func checkDescriptorsAreNotInherited() {
@@ -187,4 +282,57 @@ private func checkDescriptorsAreNotInherited() {
     expect(!open.isEmpty, "fds: the helper must report its descriptors")
     expect(!open.contains(leaked),
            "fds: a descriptor the app left open (\(leaked)) must not reach an agent's process; child had \(open)")
+}
+
+/// Stop must never signal a reused PID, and must escalate when a script and
+/// its child deliberately ignore SIGTERM. Both use real kernel identities.
+private func checkProcessStopSafetyAndEscalation() {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("array-stop-control-\(UUID().uuidString)", isDirectory: true)
+    try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let ready = directory.appendingPathComponent("child.pid")
+    let shell = try! ProcessGroupChild.spawn(
+        executable: "/bin/sh",
+        arguments: ["-c", "trap '' TERM; /bin/sleep 60 & printf '%s' \"$!\" > \"$1\"; wait", "array-stop-control", ready.path],
+        environment: ["PATH": "/usr/bin:/bin"], currentDirectory: nil, standardInput: .nullDevice)
+    defer { shell.terminateGroup(graceSeconds: 0.1) }
+    let reader = ProcessTableReader()
+    var observed: [ProcessSample] = []
+    let deadline = Date().addingTimeInterval(5)
+    while Date() < deadline {
+        if let text = try? String(contentsOf: ready, encoding: .utf8), let childPID = Int32(text) {
+            observed = reader.sample().filter { $0.pid == shell.pid || $0.pid == childPID }
+            if observed.count == 2 { break }
+        }
+        usleep(20_000)
+    }
+    guard observed.count == 2, let root = observed.first(where: { $0.pid == shell.pid }),
+          observed.contains(where: { $0.parentPid == shell.pid }) else {
+        expect(false, "stop safety: the TERM-resistant shell must report its real child before signalling")
+        return
+    }
+    let pids = [root.pid] + observed.filter { $0.pid != root.pid }.map(\.pid)
+    let job = AgentBackgroundJob(
+        id: "stop-safety", owner: UUID().uuidString, rootPid: root.pid,
+        pids: pids, startTimes: Dictionary(uniqueKeysWithValues: observed.map { ($0.pid, $0.startedAt) }),
+        label: "TERM-resistant shell", commandLine: "trap '' TERM; sleep 60 & wait",
+        ports: [], startedAt: root.startedAt, detached: false)
+    var stale = job
+    stale.startTimes = job.startTimes.mapValues { $0.addingTimeInterval(-60) }
+    expect(AgentProcessControl.terminate(stale, grace: 0.1).isEmpty,
+           "stop safety: a stale PID identity must be treated as already gone")
+    expect(observed.allSatisfy { AgentProcessControl.isSameProcess($0.pid, startedAt: $0.startedAt) },
+           "stop safety: stale start times must not signal the live shell or its child")
+
+    let started = Date()
+    let survivors = AgentProcessControl.terminate(job, grace: 0.25)
+    let elapsed = Date().timeIntervalSince(started)
+    let status = shell.wait()
+    expect(survivors.isEmpty && observed.allSatisfy { !AgentProcessControl.isSameProcess($0.pid, startedAt: $0.startedAt) },
+           "stop escalation: SIGKILL must finish both TERM-resistant processes; survived \(survivors)")
+    expect(elapsed >= 0.25 && elapsed < 2,
+           "stop escalation: wait out the TERM grace, then finish promptly; took \(elapsed)s")
+    expect(status & 0x7f == SIGKILL,
+           "stop escalation: the resistant shell must end by SIGKILL, raw wait status \(status)")
 }

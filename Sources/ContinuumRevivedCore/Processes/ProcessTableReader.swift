@@ -7,11 +7,15 @@ import Foundation
 ///
 /// Argument and environment reads are cached by pid + start time, so a steady
 /// process table costs one `proc_pidinfo` per process per sample; only a new
-/// process pays for `KERN_PROCARGS2`. Not thread-safe: one reader per queue.
+/// process pays for `KERN_PROCARGS2` (failed reads are retried). Ownership
+/// learned through ancestry survives reparenting for that exact process.
+/// Not thread-safe: one reader per queue.
 public final class ProcessTableReader {
     private struct Key: Hashable { let pid: Int32; let start: UInt64 }
     private struct Identity { let path: String; let arguments: [String]; let ownerTag: String?; let ownerFace: String? }
     private var identities: [Key: Identity] = [:]
+    private var keysByPid: [Int32: Key] = [:]
+    private var retainedOwners: [Key: String] = [:]
     private let uid = getuid()
 
     public init() {}
@@ -19,6 +23,7 @@ public final class ProcessTableReader {
     /// Every process this user owns, without ports.
     public func sample() -> [ProcessSample] {
         var seen: Set<Key> = []
+        var sampledKeys: [Int32: Key] = [:]
         var samples: [ProcessSample] = []
         for pid in Self.allPids() where pid > 0 {
             var info = proc_bsdinfo()
@@ -30,6 +35,7 @@ public final class ProcessTableReader {
             let start = info.pbi_start_tvsec &* 1_000_000 &+ info.pbi_start_tvusec
             let key = Key(pid: pid, start: start)
             seen.insert(key)
+            sampledKeys[pid] = key
             let identity: Identity
             if let cached = identities[key] {
                 identity = cached
@@ -38,7 +44,9 @@ public final class ProcessTableReader {
                 identity = Identity(
                     path: read?.path ?? "", arguments: read?.arguments ?? [], ownerTag: read?.ownerTag,
                     ownerFace: read?.ownerFace)
-                identities[key] = identity
+                // A short-lived permission/exec race must not permanently
+                // hide the process's command or its own owner tag.
+                if read != nil { identities[key] = identity }
             }
             samples.append(ProcessSample(
                 pid: pid,
@@ -50,6 +58,8 @@ public final class ProcessTableReader {
                 ownerFace: identity.ownerFace))
         }
         identities = identities.filter { seen.contains($0.key) }
+        retainedOwners = retainedOwners.filter { seen.contains($0.key) }
+        keysByPid = sampledKeys
         return samples
     }
 
@@ -160,7 +170,23 @@ extension ProcessTableReader {
         minimumAge: TimeInterval = AgentProcessAttribution.minimumJobAge
     ) -> [String: [AgentBackgroundJob]] {
         var samples = sample()
+        let currentOwners = AgentProcessAttribution.owners(in: samples, hostPid: hostPid)
+        for index in samples.indices {
+            let pid = samples[index].pid
+            // Prefer what the current table proves. An untagged shell can
+            // lose its tagged parent when the reply/CLI finishes; its last
+            // established owner remains valid until this exact process exits.
+            if let owner = currentOwners[pid] {
+                samples[index].ownerTag = owner
+            } else if let key = keysByPid[pid], let owner = retainedOwners[key] {
+                samples[index].ownerTag = owner
+            }
+        }
+        // Newly spawned descendants can inherit a retained owner's tag too.
         let owners = AgentProcessAttribution.owners(in: samples, hostPid: hostPid)
+        for (pid, owner) in owners {
+            if let key = keysByPid[pid] { retainedOwners[key] = owner }
+        }
         let hostPorts = Set(Self.listeningPorts(hostPid))
         for index in samples.indices where owners[samples[index].pid] != nil {
             samples[index].listeningPorts = Self.listeningPorts(samples[index].pid)

@@ -389,6 +389,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// `AgentEntry.finishedAt`, the other endpoint of a turn. Kept beside
     /// `entryDatesByID` and rebuilt with it so the two can never disagree.
     private var entryEndDatesByID: [AgentNodeID: Date?] = [:]
+    private var entryTurnTimingsByID: [AgentNodeID: AgentTurnTiming] = [:]
     private var nextEntryDateByEntryID: [AgentNodeID: Date] = [:]
     private var hoveredTurnEntryID: AgentNodeID?
     private var transcriptTrackingArea: NSTrackingArea?
@@ -1992,7 +1993,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                       // entry in the changed set — so this is exactly where a turn
                       // gaining its end must invalidate the cache. Omitting it
                       // leaves every turn reading time-to-first-token forever.
-                      document.entries[index].finishedAt == (entryEndDatesByID[id] ?? nil)
+                      document.entries[index].durationEnd == (entryEndDatesByID[id] ?? nil),
+                      document.entries[index].turnTiming == entryTurnTimingsByID[id]
                 else { stale = true; break }
             }
             if !stale { return }
@@ -2000,7 +2002,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         entryDatesByID = Dictionary(
             uniqueKeysWithValues: document.entries.map { ($0.id, $0.createdAt) })
         entryEndDatesByID = Dictionary(
-            uniqueKeysWithValues: document.entries.map { ($0.id, $0.finishedAt) })
+            uniqueKeysWithValues: document.entries.map { ($0.id, $0.durationEnd) })
+        entryTurnTimingsByID = Dictionary(uniqueKeysWithValues: document.entries.compactMap { entry in
+            entry.turnTiming.map { (entry.id, $0) }
+        })
         // `.plans/45` S6 — a reasoning span ends when the NEXT entry begins.
         // Derived from the document alone; an entry with no dated successor
         // gets nil, never a fabricated duration.
@@ -2944,8 +2949,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             guard let range = header.turnRange else { return nil }
             var first: Date?
             var last: Date?
+            var timing: AgentTurnTiming?
             for index in range where rows.indices.contains(index) {
                 let entryID = rows[index].entryID
+                if let recorded = entryTurnTimingsByID[entryID] { timing = recorded }
                 if let date = entryDatesByID[entryID] ?? nil {
                     if first == nil || date < first! { first = date }
                     if last == nil || date > last! { last = date }
@@ -2958,6 +2965,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     if last == nil || end > last! { last = end }
                 }
             }
+            if let timing { return timing.duration }
             guard let first, let last else { return nil }
             let span = last.timeIntervalSince(first)
             return span > 0 ? span : nil
@@ -2971,7 +2979,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         if header.scope == .turn {
             let toolCount = nounCounts.values.reduce(0, +)
             var summary = "Worked"
-            if let span = turnSpan ?? clusterSpan {
+            let hasExplicitTiming = header.turnRange?.contains { index in
+                rows.indices.contains(index) && entryTurnTimingsByID[rows[index].entryID] != nil
+            } ?? false
+            if let span = hasExplicitTiming ? turnSpan : (turnSpan ?? clusterSpan) {
                 summary += " for \(Self.formatWorkedDuration(span))"
             }
             if toolCount > 0 { summary += " · \(toolCount) tool\(toolCount == 1 ? "" : "s")" }
@@ -3793,8 +3804,10 @@ extension AgentTranscriptListView {
         var firstLead: String?
         var first: Date?
         var last: Date?
+        var timing: AgentTurnTiming?
         for index in range where rows.indices.contains(index) {
             let row = rows[index]
+            if let recorded = entryTurnTimingsByID[row.entryID] { timing = recorded }
             if let date = entryDatesByID[row.entryID] ?? nil {
                 if first == nil || date < first! { first = date }
                 if last == nil || date > last! { last = date }
@@ -3860,7 +3873,8 @@ extension AgentTranscriptListView {
            let date = entryDatesByID[rows[range.lowerBound].entryID] ?? nil {
             stats.timeText = Self.hoverTimeFormatter.string(from: date)
         }
-        if let first, let last, last.timeIntervalSince(first) > 0 { stats.span = last.timeIntervalSince(first) }
+        if let timing { stats.span = timing.duration }
+        else if let first, let last, last.timeIntervalSince(first) > 0 { stats.span = last.timeIntervalSince(first) }
         stats.answerLead = (leadAfterLastStep ?? firstLead).map(Self.firstSentence)
         turnCardStatsCache[key] = stats
         return stats

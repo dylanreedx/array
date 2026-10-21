@@ -188,6 +188,11 @@ extension AppDelegate {
         }
         try expect(tileView.qaProviderFooterAlpha == 0, "the provider controls must fade out under the grown pill")
         try expect(pill.qaTimeText == "0:00", "the pill must show elapsed time, got \(pill.qaTimeText)")
+        let timerDeadline = Date().addingTimeInterval(3)
+        while pill.qaTimeText == "0:00", Date() < timerDeadline { spin() }
+        try expect(!pill.qaIsAnimating && pill.qaTimeText != "0:00",
+                   "elapsed time must advance after the opening spring settles, including with reduced motion; got \(pill.qaTimeText)")
+        try expect(pill.qaTimeUpdatesRunning, "the session clock must keep running after the spring settles")
         let strip = pill.waveform
         try expect(strip.mode == .listening, "the waveform must say it is listening")
         if !reducedMotion {
@@ -236,12 +241,16 @@ extension AppDelegate {
         try expect(pill.isHidden && !pill.isExpanded, "the pill must fold back into the mic when the session ends")
         try expect(tileView.qaProviderFooterAlpha == 1, "the provider controls must come back when the pill folds")
         try expect(!strip.qaDisplayLinkRunning, "the waveform must stop animating when hidden")
+        try expect(!pill.qaTimeUpdatesRunning && pill.qaTimeText == "0:00",
+                   "the session clock must stop and reset when the pill folds")
         try expect(composer.qaKeyHint == nil, "the dictation hint must leave with the session")
         let afterFinish = publishes
 
         // 6. Esc takes back exactly this session's words.
         try chord()
         spin()
+        try expect(pill.qaTimeUpdatesRunning && pill.qaTimeText == "0:00",
+                   "a new session must restart the clock at zero")
         // Results arrive asynchronously in the app, each in its own run-loop
         // pass, so each settled phrase is its own undo step. Deliver them so.
         try engine.emitFinal("delete everything")

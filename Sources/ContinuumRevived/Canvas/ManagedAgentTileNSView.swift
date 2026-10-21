@@ -2293,41 +2293,47 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// (`.plans/79`, "Flipping back is proven").
     private func replayRehydratedSteps(_ transcript: RehydratedTranscript) {
         cancelStreamingMarkupParseTimer()
-        for step in transcript.steps {
-            switch step {
-            case .userPrompt(let text):
-                model.appendUserPrompt(text)
-            case .event(let event):
-                // The model filters on this tile's thread id; rebind exactly as
-                // the live subscription does, but ingest DIRECTLY (never via the
-                // event stream) so activity mirroring stays untriggered.
-                let bound = event.withThreadId(threadId)
-                // TR-01 — the host-local capture seam runs here too. It used to
-                // live only on the live path (`ingest(_:originalEvent:)`), so a
-                // restored file change reached the document with no detail
-                // identity and no store record, and its card could only report
-                // that it knew nothing. This is the same three-step dance the
-                // live path performs: capture, ingest, bind the entry the event
-                // just created.
-                let priorEntryIDs = Set(model.document.entries.map(\.id))
-                let capturedIdentity = transcriptCollectionFixture?.captureRuntimeEvent(bound)
-                model.ingest(bound)
-                if let identity = capturedIdentity,
-                   case let .itemStarted(_, itemID, _, _) = bound {
-                    let candidates = model.document.entries.filter { entry in
-                        guard !priorEntryIDs.contains(entry.id),
-                              case let .providerItem(provider, providerItemID) = entry.provenance
-                        else { return false }
-                        return provider == identity.scope.provider && providerItemID == itemID
+        for (index, step) in transcript.steps.enumerated() {
+            // A missing source instant must remain unknown. Replaying history
+            // on the live clock makes hours of work look like milliseconds.
+            let timestamp = transcript.stepTimestamps.indices.contains(index)
+                ? transcript.stepTimestamps[index] : nil
+            AgentTranscriptClock.withWallClock(timestamp) {
+                switch step {
+                case .userPrompt(let text):
+                    model.appendUserPrompt(text)
+                case .event(let event):
+                    // The model filters on this tile's thread id; rebind exactly as
+                    // the live subscription does, but ingest DIRECTLY (never via the
+                    // event stream) so activity mirroring stays untriggered.
+                    let bound = event.withThreadId(threadId)
+                    // TR-01 — the host-local capture seam runs here too. It used to
+                    // live only on the live path (`ingest(_:originalEvent:)`), so a
+                    // restored file change reached the document with no detail
+                    // identity and no store record, and its card could only report
+                    // that it knew nothing. This is the same three-step dance the
+                    // live path performs: capture, ingest, bind the entry the event
+                    // just created.
+                    let priorEntryIDs = Set(model.document.entries.map(\.id))
+                    let capturedIdentity = transcriptCollectionFixture?.captureRuntimeEvent(bound)
+                    model.ingest(bound)
+                    if let identity = capturedIdentity,
+                       case let .itemStarted(_, itemID, _, _) = bound {
+                        let candidates = model.document.entries.filter { entry in
+                            guard !priorEntryIDs.contains(entry.id),
+                                  case let .providerItem(provider, providerItemID) = entry.provenance
+                            else { return false }
+                            return provider == identity.scope.provider && providerItemID == itemID
+                        }
+                        if candidates.count == 1 {
+                            _ = transcriptCollectionFixture?.bindToolDetailIdentity(identity, to: candidates[0].id)
+                        }
                     }
-                    if candidates.count == 1 {
-                        _ = transcriptCollectionFixture?.bindToolDetailIdentity(identity, to: candidates[0].id)
-                    }
+                case .observation(let observation):
+                    // Parked by the view until the matching item starts, exactly as
+                    // a live provider observation that arrives on the same frame is.
+                    transcriptCollectionFixture?.captureRuntimeObservation(observation)
                 }
-            case .observation(let observation):
-                // Parked by the view until the matching item starts, exactly as
-                // a live provider observation that arrives on the same frame is.
-                transcriptCollectionFixture?.captureRuntimeObservation(observation)
             }
         }
         // A restored agent is idle until prompted — set directly, the way
