@@ -62,6 +62,21 @@ public enum AgentMessageEnvelope {
         return text
     }
 
+    /// Text a person typed, made safe to send. Only Array's own wrap may
+    /// read back as another agent's words (`.plans/79`): a typed prompt that
+    /// is word for word an envelope — Array's, or one of the Claude app's —
+    /// gets a zero-width space just inside its opening tag (before the
+    /// background note's heading), so it draws and restores as the user's
+    /// prompt, and the model is not handed a tag that names a sender who
+    /// never wrote it. The text looks the same; anything else is untouched.
+    public static func neutralizedUserText(_ text: String) -> String {
+        guard classify(text) != .prompt,
+              let first = text.firstIndex(where: { !$0.isWhitespace && !$0.isNewline }) else { return text }
+        var out = text
+        out.insert("\u{200B}", at: text[first] == "<" ? text.index(after: first) : first)
+        return out
+    }
+
     public static func classify(_ text: String) -> Inbound {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if let element = element(trimmed, tag: tag) {
@@ -205,5 +220,27 @@ public enum AgentMessageEnvelope {
         guard !sentence.isEmpty else { return nil }
         if let last = sentence.last, !".!?".contains(last) { sentence += "." }
         return sentence.count > 200 ? String(sentence.prefix(199)) + "…" : sentence
+    }
+}
+
+extension AgentComposerIntent {
+    /// The same intent with what the person typed passed through
+    /// `AgentMessageEnvelope.neutralizedUserText`. The composer and the
+    /// supervisor's action sink both apply it, so the echo, the send and the
+    /// session file all carry the same, user-owned text.
+    public var neutralizingTypedEnvelopes: AgentComposerIntent {
+        func typed(_ prompt: AgentPrompt) -> AgentPrompt {
+            var prompt = prompt
+            prompt.text = AgentMessageEnvelope.neutralizedUserText(prompt.text)
+            return prompt
+        }
+        switch self {
+        case .send(let text): return .send(AgentMessageEnvelope.neutralizedUserText(text))
+        case .sendPrompt(let prompt): return .sendPrompt(typed(prompt))
+        case .steer(let prompt): return .steer(typed(prompt))
+        case .queue(let prompt): return .queue(typed(prompt))
+        case .forceSend(let prompt): return .forceSend(typed(prompt))
+        case .stop, .command, .providerCommand, .compact: return self
+        }
     }
 }

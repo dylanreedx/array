@@ -6163,6 +6163,9 @@ final class AgentSupervisor {
     /// same main-actor turn, so an accepted send/stop cannot be refused by a second
     /// capability check hidden in the view.
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
+        // What a person typed is never Array's envelope (`sendAgentMessage`
+        // does not come through here).
+        let intent = intent.neutralizingTypedEnvelopes
         guard records[agentID] != nil else { return .refused(.unknownAgent) }
         // The Terminal face or another app owns the session: nothing of
         // Array's may write it.
