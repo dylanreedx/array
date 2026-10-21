@@ -982,7 +982,7 @@ final class ProcessesOtherAppRow: ProcessesPanelRow {
 final class ProcessesPortButton: NSButton, TokenThemed {
     let port: UInt16
     var onClick: (() -> Void)?
-    private var isHovered = false { didSet { if isHovered != oldValue { applyTokens() } } }
+    var isHovered = false { didSet { if isHovered != oldValue { applyTokens() } } }
     private var tracking: NSTrackingArea?
 
     init(port: UInt16) {
@@ -1043,7 +1043,7 @@ final class ProcessesTextButton: NSButton, TokenThemed {
     var onClick: (() -> Void)?
     var isDestructive = false { didSet { applyTokens() } }
     private let symbol: String?
-    private var isHovered = false { didSet { if isHovered != oldValue { applyTokens() } } }
+    var isHovered = false { didSet { if isHovered != oldValue { applyTokens() } } }
     private var tracking: NSTrackingArea?
 
     var text: String { didSet { applyTokens(); invalidateIntrinsicContentSize() } }
