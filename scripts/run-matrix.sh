@@ -800,6 +800,17 @@ run_app_check .build/debug/Array --provider-request-response-check
 # world frame, title bar, zone stamp and the canvas viewport stay byte-identical,
 # nothing reaches persistence, and two tiles hold different rungs at once.
 run_app_check .build/debug/Array --managed-agent-page-zoom-check
+# .plans/79 stream D: one agent tile, two faces. The band's ×, ⋯ and Array |
+# Terminal switch on a real agent tile in a real canvas, clicked with real
+# mouse events at widths 320/480/900 × canvas zoom 0.1/0.3/1/2 × page zoom
+# 80/150%: nothing overlaps, every control keeps its 22px floor, each click
+# fires its own action, and a switch the band has no room for is still in the
+# tile menu. Then the flip itself, with a stand-in claude on PATH in this
+# matrix's isolated tmux: the managed claude stops before the TUI starts, a
+# busy flip waits, /exit flips back and appends the terminal's turns once,
+# and a relaunch reattaches.
+run_app_check .build/debug/Array --agent-face-switch-check
+run_app_check .build/debug/Array --agent-face-flip-check
 # The composer's paste/drop intake: image decoding, thumbnail cache, attachment
 # rail, cross-agent rebind isolation, and the shared mixed image/file-reference
 # route through the real managed attachment store. It shipped with 44fbe73 but
