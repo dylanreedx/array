@@ -144,7 +144,8 @@ private func runClaudeSessionTranscriptParseChecks() {
 // - a background job's completion notice, which claude logs as a user message
 //   with `origin.kind = "task-notification"`;
 // - a `<system-reminder>` the Claude app prepends to what you typed, either as
-//   its own text block or at the front of a string prompt.
+//   its own text block or at the front of a string prompt;
+// - a `! cmd` shell-mode command and its output.
 private func runClaudeSessionBookkeepingPromptChecks() {
     let threadId = "t-claude-bookkeeping"
     let lines = [
@@ -156,16 +157,20 @@ private func runClaudeSessionBookkeepingPromptChecks() {
         #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"ANSWER_THREE"}]}}"#,
         #"{"type":"user","isSidechain":false,"promptSource":"sdk","message":{"role":"user","content":"<system-reminder>\nREMINDER_SECRET_TWO\n</system-reminder>\nTYPED_THREE"}}"#,
         #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"ANSWER_FOUR"}]}}"#,
+        // `! cmd` in the TUI (captured 2026-10-20 from a real run): the
+        // command and its output are both plain user messages.
+        #"{"type":"user","isSidechain":false,"message":{"role":"user","content":"<bash-input>echo SHELL_TYPED</bash-input>"}}"#,
+        #"{"type":"user","isSidechain":false,"message":{"role":"user","content":"<bash-stdout>SHELL_OUTPUT</bash-stdout><bash-stderr></bash-stderr>"}}"#,
     ]
     let transcript = ClaudeSessionTranscriptReader.parse(lines: lines, threadId: threadId)
     let prompts = transcript.steps.compactMap { step -> String? in
         if case .userPrompt(let text) = step { return text }
         return nil
     }
-    expect(prompts == ["TYPED_ONE", "TYPED_TWO", "TYPED_THREE"],
+    expect(prompts == ["TYPED_ONE", "TYPED_TWO", "TYPED_THREE", "! echo SHELL_TYPED"],
            "ClaudeSessionTranscriptReader: prompts nobody typed restored as bubbles: \(prompts)")
     let serialized = stepsDescription(transcript)
-    for secret in ["NOTICE_SECRET", "REMINDER_SECRET", "task-notification", "system-reminder"] {
+    for secret in ["NOTICE_SECRET", "REMINDER_SECRET", "task-notification", "system-reminder", "SHELL_OUTPUT", "bash-"] {
         expect(!serialized.contains(secret),
                "ClaudeSessionTranscriptReader: \(secret) crossed into the transcript")
     }

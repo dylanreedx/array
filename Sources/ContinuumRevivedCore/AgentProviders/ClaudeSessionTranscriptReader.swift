@@ -137,6 +137,15 @@ public enum ClaudeSessionTranscriptReader {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if trimmed.hasPrefix("<local-command-") || trimmed.hasPrefix("<task-notification>") { return nil }
+        // `! cmd` in the TUI logs the command and its output as user messages.
+        // Like a slash command, the command reads back as typed and the
+        // output is not a prompt.
+        if trimmed.hasPrefix("<bash-stdout>") || trimmed.hasPrefix("<bash-stderr>") { return nil }
+        if trimmed.hasPrefix("<bash-input>"), let close = trimmed.range(of: "</bash-input>") {
+            let command = trimmed[trimmed.index(trimmed.startIndex, offsetBy: "<bash-input>".count)..<close.lowerBound]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return command.isEmpty ? nil : "! \(command)"
+        }
         guard trimmed.hasPrefix("<command-name>") || trimmed.hasPrefix("<command-message>") else {
             return trimmed
         }
