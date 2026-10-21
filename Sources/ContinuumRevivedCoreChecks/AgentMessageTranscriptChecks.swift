@@ -187,5 +187,35 @@ func runAgentMessageTranscriptChecks() {
     expect(noteDocument.entries.last?.blocks.map(\.kind) == [.agentMessage],
            "agent message (claude host notes): a background note must draw as a message card")
 
+    // 7. The SENDER's restored row: its `array_message_agent` call replays the
+    //    message text on the host-local channel, the one argument its live row
+    //    carries, so the restored row says what was sent ("Messaged an agent" —
+    //    the target's name came from the host's reply, which no session file
+    //    keeps). Claude and pi session files carry the call's arguments.
+    let sent = "Rerun the failing leg.\nThen report the diff."
+    let callArguments: [String: Any] = ["agentId": senderID.uuidString, "text": sent, "idempotencyKey": "m1"]
+    let senderSessions: [(String, RehydratedTranscript)] = [
+        ("claude", ClaudeSessionTranscriptReader.parse(lines: [
+            jsonLine(["type": "user", "isSidechain": false, "message": ["role": "user", "content": "message the child"]]),
+            jsonLine(["type": "assistant", "isSidechain": false, "message": ["role": "assistant", "content": [
+                ["type": "tool_use", "id": "toolu-msg", "name": "mcp__array_workspace__array_message_agent", "input": callArguments]]]]),
+        ], threadId: "am-sender-claude")),
+        ("pi", PiSessionTranscriptReader.parse(lines: [
+            jsonLine(["type": "message", "message": ["role": "user", "content": [["type": "text", "text": "message the child"]]]]),
+            jsonLine(["type": "message", "message": ["role": "assistant", "content": [
+                ["type": "toolCall", "id": "pi-msg", "name": "array_message_agent", "arguments": callArguments]]]]),
+        ], threadId: "am-sender-pi")),
+    ]
+    for (route, transcript) in senderSessions {
+        let fields = transcript.steps.flatMap { step -> [(key: String, value: String)] in
+            guard case let .observation(.toolDetail(_, detail)) = step, detail.phase == .started else { return [] }
+            return detail.fields
+        }
+        expect(fields.contains { $0.key == AgentToolDetailObservation.messageTextKey && $0.value == sent },
+               "agent message (\(route) sender restore): the restored call must carry the message text, got \(fields)")
+        expect(!fields.contains { $0.value.contains("m1") || $0.value == senderID.uuidString },
+               "agent message (\(route) sender restore): the key or the target id crossed with the text: \(fields)")
+    }
+
     print("Agent message transcript checks passed: envelope escaping round-trips, plain and look-alike prompts stay verbatim, six malformed envelopes fall back with nothing lost, the Claude app's cross-session/peer/background messages map to their sender and its side-sessions note to a quiet notice; live and claude/codex/pi rehydrated turns project one agent-message card and no user prose")
 }

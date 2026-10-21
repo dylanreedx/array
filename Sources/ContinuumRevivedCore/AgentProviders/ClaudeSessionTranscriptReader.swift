@@ -219,7 +219,8 @@ public enum ClaudeSessionTranscriptReader {
                             toolName: name, input: input ?? [:]),
                         absolutePath: (input?["file_path"] as? String)
                             ?? (input?["notebook_path"] as? String)
-                            ?? (input?["path"] as? String)))
+                            ?? (input?["path"] as? String),
+                        messageText: AgentToolDetailObservation.messageTextField(toolName: name, arguments: input ?? [:])?.value))
                 }
             default:
                 continue

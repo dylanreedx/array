@@ -112,6 +112,10 @@ struct NormalizedTranscriptMessage: Equatable {
         /// boundary, so the card would otherwise lose the directory it needs to
         /// tell two `index.ts` apart.
         var absolutePath: String? = nil
+        /// `array_message_agent`'s text, the one argument its live row carries
+        /// (`AgentToolDetailObservation.messageTextKey`), so a restored row says
+        /// what was sent too.
+        var messageText: String? = nil
     }
 
     var role: Role
@@ -273,6 +277,15 @@ public enum ManagedTranscriptRehydrator {
                                 phase: .started,
                                 toolName: call.name,
                                 fileChanges: call.fileChanges,
+                                observedAt: now()))))
+                    }
+                    if let messageText = call.messageText {
+                        steps.append(.observation(.toolDetail(
+                            itemId: call.id,
+                            detail: AgentToolDetailObservation(
+                                phase: .started,
+                                toolName: call.name,
+                                fields: [(key: AgentToolDetailObservation.messageTextKey, value: messageText)],
                                 observedAt: now()))))
                     }
                     steps.append(.event(.itemStarted(
