@@ -21,6 +21,12 @@ final class ExternalSessionMonitor {
     private(set) var snapshot = ExternalSessionSnapshot.empty
     /// Called on the main thread after `snapshot` changed.
     var onChange: (() -> Void)?
+    /// tmux pane id → the shell tile showing it, read on the main thread before
+    /// each pass: a project's shell tiles share one tmux session, so only the
+    /// pane says which tile a claude was typed into.
+    var arrayShellPanes: () -> [String: UUID] = { [:] }
+    /// Checks only: discovery reads these folders instead of the user's.
+    var homeOverride: (home: URL, codexHome: URL)?
 
     private let worker = Worker()
     private var timer: Timer?
@@ -55,8 +61,15 @@ final class ExternalSessionMonitor {
         guard isStarted, !tickInFlight else { return }
         tickInFlight = true
         let worker = worker
+        let panes = arrayShellPanes()
+        let home = homeOverride
         worker.queue.async {
-            let next = worker.discovery.discover(.live(reader: worker.reader))
+            var inputs = ExternalSessionDiscovery.Inputs.live(reader: worker.reader, arrayShellPanes: panes)
+            if let home {
+                inputs.homeURL = home.home
+                inputs.codexHomeURL = home.codexHome
+            }
+            let next = worker.discovery.discover(inputs)
             DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self else { return }
@@ -69,8 +82,11 @@ final class ExternalSessionMonitor {
         }
     }
 
+    /// Checks only: one interval whether or not the app is frontmost.
+    var qaInterval: TimeInterval?
+
     private func scheduleNext() {
-        let interval = NSApp?.isActive == true ? Self.activeInterval : Self.inactiveInterval
+        let interval = qaInterval ?? (NSApp?.isActive == true ? Self.activeInterval : Self.inactiveInterval)
         let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }

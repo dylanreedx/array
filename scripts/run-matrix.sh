@@ -819,6 +819,12 @@ run_app_check .build/debug/Array --managed-agent-page-zoom-check
 # and a relaunch reattaches.
 run_app_check .build/debug/Array --agent-face-switch-check
 run_app_check .build/debug/Array --agent-face-flip-check
+# .plans/79 edge case 4: claude typed into a real shell tile (in this matrix's
+# isolated tmux, stand-in claude, fixture home), discovered and mapped to that
+# tile, offered in its band, and clicked: an agent tile beside it on the same
+# session with its history once; Array types /exit only into an idle claude,
+# a busy one is waited out; one sidebar row for the session throughout.
+run_app_check .build/debug/Array --shell-open-as-agent-check
 # The composer's paste/drop intake: image decoding, thumbnail cache, attachment
 # rail, cross-agent rebind isolation, and the shared mixed image/file-reference
 # route through the real managed attachment store. It shipped with 44fbe73 but

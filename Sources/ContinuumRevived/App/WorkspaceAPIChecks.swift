@@ -82,7 +82,14 @@ enum WorkspaceAPIChecks {
     /// gated request asks. The user's own setting never decides a check.
     /// A suite instead goes through the production wiring: the mount points the
     /// supervisor at `qaSettingsDefaults`, which is that suite.
-    static func makeFixture(settings: QAIsolatedDefaults? = nil) throws -> Fixture {
+    /// `ghostty` and `configureRuntime` are for legs that spawn real terminals
+    /// (`--shell-open-as-agent-check`): the runtime's spawners are built at the
+    /// mount, so their tmux and Ghostty context are set before it.
+    static func makeFixture(
+        settings: QAIsolatedDefaults? = nil,
+        ghostty: GhosttyRuntimeContext? = nil,
+        configureRuntime: ((WorkspaceRuntime) -> Void)? = nil
+    ) throws -> Fixture {
         let fileManager = FileManager.default
         let now = Date(timeIntervalSince1970: 1_900_000_000)
         let workspaceWA = UUID(uuidString: "00000000-0000-0000-0000-0000000CA101")!
@@ -244,9 +251,10 @@ enum WorkspaceAPIChecks {
             boot: try zoneRegistry.acquire(projectId: projectPa),
             workspaceId: workspaceWA, document: docA, registry: zoneRegistry,
             focusBroker: delegate.qaFocusBroker, registryStore: registryStore,
-            ghostty: nil, browserEngine: browserEngine)
+            ghostty: ghostty, browserEngine: browserEngine)
+        configureRuntime?(runtime)
         delegate.qaPrepareForBootMountCheck(canvas: canvas, browserEngine: browserEngine, runtime: runtime, registryStore: registryStore)
-        let spawner = TileSpawner(canvasView: canvas, ghostty: nil, browserEngine: browserEngine, projectStore: storePa, project: projectPaObj)
+        let spawner = TileSpawner(canvasView: canvas, ghostty: ghostty, browserEngine: browserEngine, projectStore: storePa, project: projectPaObj)
 
         // The SOURCE agent: a real pi record whose checkout is Pb, bound to a tile in
         // the unarmed zone. Created before the mount, as after a relaunch.

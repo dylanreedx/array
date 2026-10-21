@@ -821,6 +821,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         }
         refreshTranscriptThinkingIndicator()
         refreshFaceSwitch()
+        refreshSessionHoldBanner()
     }
 
     /// Install the supervisor-owned semantic truth before following its live tail.
@@ -1301,15 +1302,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             lines: added, threadId: threadId,
             limits: RehydrationLimits(maxMessages: Int.max, maxBytes: Int.max))
         let turns = Self.promptCount(appended)
-        if !appended.steps.isEmpty {
-            let boundary = Self.terminalBoundaryText(turns: turns)
-            model.appendSessionBoundary(
-                id: "terminal-face-\(UUID().uuidString)", text: boundary, symbolName: Self.terminalBoundarySymbol)
-            replayRehydratedSteps(appended)
-            if let agentID = attachedAgentID {
-                agentSource?.appendOutsideTurns(
-                    appended, boundaryText: boundary, symbolName: Self.terminalBoundarySymbol, for: agentID)
-            }
+        if let boundary = appendTurnsTakenOutside(appended, place: "Terminal"), let agentID = attachedAgentID {
+            agentSource?.appendOutsideTurns(
+                appended, boundaryText: boundary, symbolName: Self.terminalBoundarySymbol, for: agentID)
         }
         if let agentID = attachedAgentID, let supervisor = agentSource {
             supervisor.endTerminalFace(
@@ -1329,6 +1324,35 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     static let terminalBoundarySymbol = "apple.terminal"
+
+    /// Appends turns this agent's session took outside the tile — its Terminal
+    /// face, or the shell it was opened from — under a boundary ("In Shell 2 ·
+    /// 1 turn"), through the restore's own replay. Returns the boundary's text,
+    /// nil when there was nothing to append.
+    @discardableResult
+    func appendTurnsTakenOutside(_ appended: RehydratedTranscript, place: String) -> String? {
+        guard !appended.steps.isEmpty else { return nil }
+        let boundary = Self.terminalBoundaryText(turns: Self.promptCount(appended), place: place)
+        model.appendSessionBoundary(
+            id: "outside-\(UUID().uuidString)", text: boundary, symbolName: Self.terminalBoundarySymbol)
+        replayRehydratedSteps(appended)
+        return boundary
+    }
+
+    /// "Still open in Shell 2" while the session's other writer has not let go
+    /// (`AgentSupervisor.sessionHeldElsewhere`); gone the moment it has.
+    private func refreshSessionHoldBanner() {
+        guard let agentID = attachedAgentID else { return }
+        let waiting = agentSource?.sessionHeldElsewhere(for: agentID).map {
+            AgentFaceFlipBanner.Content.waiting(
+                title: "Still open in \($0)", detail: "Type /exit there and it continues here.")
+        }
+        guard waiting != shownHoldBanner else { return }
+        if let shownHoldBanner { faceFlipBanner.dismiss(shownHoldBanner) }
+        shownHoldBanner = waiting
+        if let waiting { faceFlipBanner.show(waiting) }
+    }
+    private var shownHoldBanner: AgentFaceFlipBanner.Content?
 
     /// "In Terminal · 1 turn" — the divider over the turns the face took.
     static func terminalBoundaryText(turns: Int, place: String = "Terminal") -> String {
@@ -2889,6 +2913,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private func refreshV2TurnSnapshot() {
         evaluatePendingTerminalFlip()
         refreshFaceSwitch()
+        refreshSessionHoldBanner()
         if let agentID = attachedAgentID,
            let snapshot = agentSource?.turnSnapshot(for: agentID) {
             v2TurnSnapshot = snapshot

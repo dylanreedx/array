@@ -128,6 +128,39 @@ public enum ClaudeTerminalFace {
         return lines
     }
 
+    /// Where the turn in flight began: the byte offset of the last line before
+    /// `end` that is a prompt someone typed (a `user` line carrying text, not a
+    /// tool result). A session taken over mid-turn is split there, so the whole
+    /// turn reads after the boundary rather than its prompt above and its
+    /// reply below. nil when no prompt lies in the last `maxBytes`.
+    public static func lastPromptOffset(
+        in url: URL, before end: UInt64, maxBytes: Int = RehydrationLimits().maxBytes
+    ) -> UInt64? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let stop = min(end, size)
+        let start = stop > UInt64(maxBytes) ? stop - UInt64(maxBytes) : 0
+        guard stop > start, (try? handle.seek(toOffset: start)) != nil,
+              let data = try? handle.read(upToCount: Int(stop - start)) else { return nil }
+        var found: UInt64?
+        var lineStart = 0
+        let bytes = [UInt8](data)
+        for index in bytes.indices where bytes[index] == UInt8(ascii: "\n") {
+            defer { lineStart = index + 1 }
+            // A window that starts mid-line has no whole first line.
+            guard start == 0 || lineStart > 0 else { continue }
+            guard let object = ManagedTranscriptRehydrator.jsonObject(
+                    String(decoding: bytes[lineStart..<index], as: UTF8.self)),
+                  object["type"] as? String == "user", (object["isMeta"] as? Bool) != true,
+                  let content = (object["message"] as? [String: Any])?["content"] else { continue }
+            let typed = content is String
+                || ((content as? [[String: Any]])?.contains { $0["type"] as? String == "text" } ?? false)
+            if typed { found = start + UInt64(lineStart) }
+        }
+        return found
+    }
+
     /// The model the last assistant line ran on, as a catalogue id
     /// (`anthropic/<model>` — `ClaudeCLIBackend.parseInitializeModels`' form).
     /// Verbatim from claude's own file. nil when no assistant line names a

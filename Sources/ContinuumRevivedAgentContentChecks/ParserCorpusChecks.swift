@@ -33,6 +33,7 @@ func parserPlainText(_ blocks: [AgentBlock]) -> String {
         case let .agentReference(reference): own = reference.displayNameAtSpawn
         case let .taskReference(task): own = [task.title, task.summary].compactMap { $0 }.joined(separator: "\n")
         case let .agentMessage(message): own = message.text
+        case let .sessionBoundary(boundary): own = boundary.text
         case let .error(error): own = error.message
         case let .notice(notice): own = corpusInlineText(notice.message)
         // A compaction boundary carries counts, not prose. It projects to nothing

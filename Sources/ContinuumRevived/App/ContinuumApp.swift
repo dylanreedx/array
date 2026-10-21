@@ -4120,6 +4120,18 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // `.plans/79` edge case 4: claude typed into a shell tile, opened as
+        // an agent tile beside it. A real Ghostty shell in an isolated tmux.
+        if CommandLine.arguments.contains("--shell-open-as-agent-check") {
+            _ = NSApplication.shared
+            do {
+                print(try ShellOpenAsAgentChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--agent-face-switch-check") {
             _ = NSApplication.shared
             do {
@@ -11636,8 +11648,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.agentInbox.onExternalSessionAction = { [weak self] action, rowId in
             self?.performExternalSessionAction(action, rowId: rowId)
         }
+        externalSessionMonitor.arrayShellPanes = { [weak self] in self?.shellTilePanes() ?? [:] }
         externalSessionMonitor.onChange = { [weak self] in
             self?.pushExternalSessionRows()
+            self?.refreshShellTileSessions()
         }
         sidebar.configureInboxRename { [weak self] agentId, name in
             self?.renameAgentFromInbox(agentId, to: name)
@@ -12837,6 +12851,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     ) -> [AgentInboxRow] {
         let marked = rows.map { row -> AgentInboxRow in
             let agentId = AgentID(rawValue: row.id)
+            // Opened from a shell and waiting for its claude to exit: the
+            // shell's row became this agent's, so it still says where it is.
+            if let handoff = shellHandoffs[agentId] {
+                var row = row
+                row.whereMarker = InboxWhereMarker(symbol: "terminal", text: handoff.place)
+                return row
+            }
             guard agentSupervisor.records[agentId] != nil, agentFace(for: agentId) == .terminal else { return row }
             var row = row
             row.whereMarker = ExternalSessionRows.terminalFaceMarker
@@ -12949,6 +12970,190 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "external-session-copy", debounce: 0.2)
         return agentId
+    }
+
+    // MARK: - Open as agent tile (.plans/79, edge case 4)
+    //
+    // `claude` typed into an Array shell tile is one session, so one sidebar
+    // row. "Open as agent tile" puts a managed agent tile beside the shell on
+    // that session, with its history; Array owns that terminal, so when its
+    // claude is idle Array types `/exit` there itself (BUILD.md decision 2) and
+    // the shell gets its prompt back. A busy claude is never interrupted: the
+    // agent tile waits, as Move here does, until that claude has gone.
+
+    /// A session moving from a shell tile into an agent tile.
+    private struct ShellHandoff {
+        let shellTileId: UUID
+        let pid: Int32
+        let sessionId: String
+        /// The shell tile's title: "Shell 2".
+        let place: String
+        let transcriptURL: URL
+        /// The session file's length when its history was read; the turns the
+        /// shell takes after it are appended when it lets go. nil until read.
+        var mark: UInt64?
+    }
+    private var shellHandoffs: [AgentID: ShellHandoff] = [:]
+    private var shellHandoffTimer: Timer?
+    /// Where claude keeps `.claude/` — the user's home. Only checks move it.
+    var shellHandoffClaudeHome: URL = FileManager.default.homeDirectoryForCurrentUser
+    static let shellHandoffPollInterval: TimeInterval = 0.5
+
+    /// QA: what the last Open as agent tile did with the shell's claude.
+    private(set) var qaShellHandoffTypedExit: Bool?
+    func qaShellHandoffIsWaiting(_ agentId: AgentID) -> Bool { shellHandoffs[agentId] != nil }
+
+    /// Pane id → shell tile, for discovery: a project's shell tiles are windows
+    /// of one shared tmux session.
+    private func shellTilePanes() -> [String: UUID] {
+        var panes: [String: UUID] = [:]
+        for tile in canvasView?.allWorkspaceTiles() ?? [] where tile.kind == .terminal {
+            guard let view = canvasView?.tileView(for: tile.id) as? TerminalTileNSView,
+                  let pane = TmuxSession.groupedViewPaneTarget(arguments: view.runtime.launchArguments) else { continue }
+            panes[pane] = tile.id
+        }
+        return panes
+    }
+
+    /// Each shell tile's band offers the Claude session running in it, unless
+    /// an agent owns that session already.
+    func refreshShellTileSessions() {
+        let owned = Set(agentSupervisor.records.values.compactMap(\.providerSessionId))
+        var running: [UUID: String] = [:]
+        for session in externalSessionMonitor.snapshot.sessions where session.provider == .claude {
+            guard case let .arrayShellTile(tileId?) = session.host, !owned.contains(session.sessionId) else { continue }
+            running[tileId] = session.sessionId
+        }
+        for tile in canvasView?.allWorkspaceTiles() ?? [] where tile.kind == .terminal {
+            guard let view = canvasView?.tileView(for: tile.id) as? TerminalTileNSView else { continue }
+            view.claudeSessionId = running[tile.id]
+            view.onOpenAsAgentTile = { [weak self] sessionId in
+                self?.openShellSessionAsAgentTile(sessionId: sessionId, shellTileId: tile.id)
+            }
+        }
+    }
+
+    @discardableResult
+    func openShellSessionAsAgentTile(sessionId: String, shellTileId: UUID) -> AgentID? {
+        guard let session = externalSessionMonitor.snapshot.sessions.first(where: {
+                  $0.provider == .claude && $0.sessionId == sessionId && $0.host == .arrayShellTile(tileId: shellTileId)
+              }),
+              let pid = session.pid, let transcriptURL = session.transcriptURL,
+              let shell = canvasView?.tileView(for: shellTileId) as? TerminalTileNSView,
+              let shellFrame = canvasView?.allTilesInWorldFrames().first(where: { $0.id == shellTileId })?.frame,
+              let (spawner, scope) = spawnerAndScope(forTile: shellTileId) else { return nil }
+        let providerModel = AgentModelConfig.resolvedFromDefaults(harness: .claudeCode).model
+        guard let selection = AgentModelConfig.launchSelection(harness: .claudeCode, model: providerModel),
+              AgentModelConfig.validates(selection) else {
+            presentSpawnRefusal("Claude Code is not ready. Open Environment Setup to install or sign in.")
+            return nil
+        }
+        let place = shell.tile.title
+        let agentId = agentSupervisor.spawn(
+            role: nil, prompt: nil, cwd: URL(fileURLWithPath: session.cwd, isDirectory: true),
+            harness: .claudeCode, model: selection.model, thinking: selection.thinking,
+            projectId: scope.projectId,
+            projectRoot: URL(fileURLWithPath: scope.projectRoot, isDirectory: true),
+            displayName: session.title)
+        agentSupervisor.adoptExternalSession(agentId, sessionId: sessionId)
+        // Held from the first instant: the shell's claude is the writer until
+        // it has gone, whatever happens to the `/exit` below.
+        agentSupervisor.holdSession(agentId, elsewhere: place)
+        shellHandoffs[agentId] = ShellHandoff(
+            shellTileId: shellTileId, pid: pid, sessionId: sessionId, place: place, transcriptURL: transcriptURL)
+        // Beside the shell, tops aligned.
+        let size = CanvasEngine.defaultFrame(for: .managedAgent)
+        let besideShell = CGPoint(
+            x: shellFrame.x + shellFrame.width + TileGapResolver.resolvedGap() + size.width / 2,
+            y: shellFrame.y + size.height / 2)
+        switch spawner.spawnManagedAgentForExistingAgent(
+            agentId, supervisor: agentSupervisor, at: besideShell, creationScope: scope) {
+        case let .spawned(tileId):
+            wireManagedAgentTile(tileId, agentID: agentId)
+            focusSpawnedTile(tileId)
+        case let .failure(error):
+            fputs("Open as agent tile: could not place a tile for \(agentId.rawValue.uuidString): \(error)\n", stderr)
+        }
+        // Array owns this terminal, so it can hand the prompt back itself —
+        // but only between turns. Read now, not from the last discovery pass.
+        let live = ClaudeTerminalFace.liveSession(pid: pid, claudeHome: shellHandoffClaudeHome)
+        let idle = live?.sessionId == sessionId && live?.status == "idle"
+        // The history, read off the main thread, up to a mark the shell's
+        // later turns are appended from. Mid-turn, the mark goes back to the
+        // turn's prompt, so the turn reads whole below the boundary.
+        let threadId = "rehydrated-\(agentId.rawValue.uuidString)"
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let length = ClaudeTerminalFace.sessionFileLength(transcriptURL)
+            let mark = idle ? length : (ClaudeTerminalFace.lastPromptOffset(in: transcriptURL, before: length) ?? length)
+            let history = ClaudeSessionTranscriptReader.parse(
+                lines: ClaudeTerminalFace.lines(in: transcriptURL, before: mark), threadId: threadId)
+            await MainActor.run {
+                guard let self, self.shellHandoffs[agentId] != nil else { return }
+                self.shellHandoffs[agentId]?.mark = mark
+                self.agentSupervisor.seedRehydratedTranscript(history, for: agentId)
+                (self.agentTileView(for: agentId))?.renderRehydratedPreviousSession(history)
+                self.pollShellHandoffs()
+            }
+        }
+        if idle {
+            qaShellHandoffTypedExit = shell.runtime.typeLine("/exit")
+        } else {
+            qaShellHandoffTypedExit = false
+        }
+        startShellHandoffWatch()
+        refreshShellTileSessions()
+        pushExternalSessionRows()
+        scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "shell-open-as-agent", debounce: 0.2)
+        return agentId
+    }
+
+    private func agentTileView(for agentId: AgentID) -> ManagedAgentTileNSView? {
+        agentSupervisor.records[agentId]?.tileId.flatMap { canvasView?.tileView(for: $0) as? ManagedAgentTileNSView }
+    }
+
+    private func startShellHandoffWatch() {
+        guard shellHandoffTimer == nil, !shellHandoffs.isEmpty else { return }
+        let timer = Timer(timeInterval: Self.shellHandoffPollInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pollShellHandoffs() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        shellHandoffTimer = timer
+    }
+
+    /// The shell's claude has let go when its status file no longer names the
+    /// session (`/exit` removes the file, `/clear` moves it to another
+    /// session) or its process is gone (a crash leaves the file behind).
+    private func pollShellHandoffs() {
+        for (agentId, handoff) in shellHandoffs where handoff.mark != nil {
+            let live = ClaudeTerminalFace.liveSession(pid: handoff.pid, claudeHome: shellHandoffClaudeHome)
+            guard live?.sessionId != handoff.sessionId || kill(handoff.pid, 0) != 0 else { continue }
+            finishShellHandoff(agentId)
+        }
+        if shellHandoffs.isEmpty {
+            shellHandoffTimer?.invalidate()
+            shellHandoffTimer = nil
+        }
+    }
+
+    /// The shell let go: what it said since the history was read follows a
+    /// boundary, the session is the agent's, and its row loses the marker.
+    private func finishShellHandoff(_ agentId: AgentID) {
+        guard let handoff = shellHandoffs.removeValue(forKey: agentId), let mark = handoff.mark else { return }
+        let threadId = "rehydrated-\(agentId.rawValue.uuidString)"
+        let appended = ClaudeSessionTranscriptReader.parse(
+            lines: ClaudeTerminalFace.lines(in: handoff.transcriptURL, after: mark), threadId: threadId,
+            limits: RehydrationLimits(maxMessages: Int.max, maxBytes: Int.max))
+        agentTileView(for: agentId)?.appendTurnsTakenOutside(appended, place: handoff.place)
+        if !appended.steps.isEmpty {
+            // A tile opened later restores the whole session, the shell's last
+            // turns included.
+            let whole = ClaudeSessionTranscriptReader.parse(
+                lines: ClaudeTerminalFace.lines(in: handoff.transcriptURL, before: UInt64.max), threadId: threadId)
+            agentSupervisor.seedRehydratedTranscript(whole, for: agentId)
+        }
+        agentSupervisor.releaseSessionHold(agentId)
+        refreshShellTileSessions()
+        pushExternalSessionRows()
     }
 
     /// Edge case 15: the session's folder is not an Array project.
