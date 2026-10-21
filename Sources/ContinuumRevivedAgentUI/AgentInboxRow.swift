@@ -764,6 +764,54 @@ public enum AgentProviderGlyph {
     }
 }
 
+// Plan: .plans/79-session-handoff/README.md
+/// Where a row's session lives, drawn after the project name: `cmux`, `Claude
+/// app`, `Terminal` (an Array tile in its Terminal face), `Shell 2`. No marker
+/// means an Array tile. `symbol` is an SF Symbol name.
+public struct InboxWhereMarker: Equatable, Sendable {
+    public let symbol: String
+    public let text: String
+
+    public init(symbol: String, text: String) {
+        self.symbol = symbol
+        self.text = text
+    }
+}
+
+/// What makes a row a session from another app rather than an Array agent.
+public struct InboxExternalSession: Equatable, Sendable {
+    /// `ExternalAgentSession.id`: the provider-qualified session id the host
+    /// resolves every action against.
+    public let sessionKey: String
+    /// Live or waiting on you, in this workspace's projects. Only these show
+    /// outside the "This Mac" scope.
+    public let isProminent: Bool
+    public let canMoveHere: Bool
+    public let canCopy: Bool
+
+    public init(sessionKey: String, isProminent: Bool, canMoveHere: Bool, canCopy: Bool) {
+        self.sessionKey = sessionKey
+        self.isProminent = isProminent
+        self.canMoveHere = canMoveHere
+        self.canCopy = canCopy
+    }
+}
+
+/// The three things an external row does. Clicking it watches.
+public enum InboxExternalSessionAction: String, CaseIterable, Equatable, Sendable {
+    case watch
+    case moveHere
+    case copy
+
+    public var title: String {
+        switch self {
+        case .watch: return "Watch"
+        case .moveHere: return "Move here"
+        case .copy: return "Copy"
+        }
+    }
+}
+
 public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// AGGREGATE agent identity — the same `UUID` keyspace as
     /// `AgentsBoardRow.id`, `ActivityLogSnapshot.byAgent`, `AgentContextIndex`
@@ -924,6 +972,12 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// no AppKit, and the host resolves names exactly as it does a zone's. nil —
     /// the default — draws nothing and moves nothing.
     public let identityColor: String?
+    /// Where the session lives when it is not an Array tile's Array face. nil —
+    /// the default — draws nothing.
+    public var whereMarker: InboxWhereMarker?
+    /// Set on a row that is a session from another app. Such a row offers Watch,
+    /// Move here and Copy, and none of an Array agent's verbs.
+    public var externalSession: InboxExternalSession?
     /// Whether the card's upper metadata band has something to draw. These
     /// predicates intentionally inspect only the content slots, never a row's
     /// semantic importance or lifecycle. The AppKit cell uses the same facts to
@@ -1038,7 +1092,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         terminalIsUnread: Bool = false,
         closingSince: Date? = nil,
         hasLiveRunner: Bool = false,
-        identityColor: String? = nil
+        identityColor: String? = nil,
+        whereMarker: InboxWhereMarker? = nil,
+        externalSession: InboxExternalSession? = nil
     ) {
         self.id = id
         self.title = title
@@ -1076,6 +1132,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.closingSince = closingSince
         self.hasLiveRunner = hasLiveRunner
         self.identityColor = identityColor
+        self.whereMarker = whereMarker
+        self.externalSession = externalSession
     }
 
     /// The same row, placed where its PARENT is: a subagent travels with the agent
@@ -1101,7 +1159,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             harness: harness, checkedOutBranch: checkedOutBranch,
             terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
             closingSince: closingSince, hasLiveRunner: hasLiveRunner,
-            identityColor: identityColor)
+            identityColor: identityColor, whereMarker: whereMarker,
+            externalSession: externalSession)
     }
 
     /// The agent's branch and the checkout's disagree. `checkedOutBranch` is nil

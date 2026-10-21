@@ -26,6 +26,10 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     /// stable workspace ID across switches. A legacy name is used only when the
     /// host has no ID; with neither fact available, it filters nothing.
     case currentWorkspace
+    // Plan: .plans/79-session-handoff/README.md
+    /// Everything, plus the sessions from other apps that every other scope
+    /// leaves out: quiet ones, and ones in folders that are not projects.
+    case thisMac
 
     /// The word on the popup entry. A project or workspace shows its own NAME and
     /// nothing else — no "Project: " prefix — because the two kinds never collide
@@ -34,12 +38,14 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         switch self {
         case .all: return InboxScope.allTitle
         case .currentWorkspace: return InboxScope.currentWorkspaceTitle
+        case .thisMac: return InboxScope.thisMacTitle
         case .project(let name), .workspace(let name), .workspaceID(_, let name): return name
         }
     }
 
     public static let allTitle = "All agents"
     public static let currentWorkspaceTitle = "This workspace"
+    public static let thisMacTitle = "This Mac"
 
     /// What `UserDefaults` stores. TAGGED, so a project called "all" and a
     /// workspace and a project that share a name are three different scopes, and
@@ -49,6 +55,7 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         switch self {
         case .all: return "all"
         case .currentWorkspace: return "current"
+        case .thisMac: return "mac"
         case .project(let name): return "project:\(name)"
         case .workspace(let name): return "workspace:\(name)"
         case .workspaceID(let id, _): return "workspace-id:\(id.uuidString.lowercased())"
@@ -66,6 +73,10 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         }
         if storageValue == "current" {
             self = .currentWorkspace
+            return
+        }
+        if storageValue == "mac" {
+            self = .thisMac
             return
         }
         guard let separator = storageValue.firstIndex(of: ":") else { return nil }
@@ -90,7 +101,7 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     /// silently kept it would be claiming otherwise. `.all` is where it is found.
     public func matches(_ row: AgentInboxRow) -> Bool {
         switch self {
-        case .all, .currentWorkspace: return true
+        case .all, .currentWorkspace, .thisMac: return true
         case .project(let name): return row.projectName == name
         case .workspace(let name): return row.workspaceName == name
         case .workspaceID(let id, _): return row.workspaceId == id
@@ -124,12 +135,16 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     ///
     /// Workspace scopes use stable IDs whenever available. Legacy rows/scopes
     /// without IDs retain their name-based behavior for compatibility.
+    ///
+    /// `offersThisMac` adds `This Mac` after `All agents`, for a host that lists
+    /// sessions from other apps; without one the entry would only repeat `All`.
     public static func entries(
         for rows: [AgentInboxRow],
         catalog: [InboxScope] = [],
         including selected: InboxScope = .all,
         currentWorkspace: String? = nil,
-        currentWorkspaceId: UUID? = nil
+        currentWorkspaceId: UUID? = nil,
+        offersThisMac: Bool = false
     ) -> [InboxScope] {
         var projectNames = rows.compactMap(\.projectName)
         var workspaceNames = rows.filter { $0.workspaceId == nil }.compactMap(\.workspaceName)
@@ -144,7 +159,7 @@ public enum InboxScope: Equatable, Hashable, Sendable {
             case .project(let name): projectNames.append(name)
             case .workspace(let name): workspaceNames.append(name)
             case .workspaceID(let id, let name): workspacesById[id] = name
-            case .all, .currentWorkspace: break
+            case .all, .currentWorkspace, .thisMac: break
             }
         }
         // "This workspace" leads when the host knows which one is on screen.
@@ -160,6 +175,7 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         var entries: [InboxScope] =
             (currentWorkspace == nil && currentWorkspaceId == nil ? [] : [.currentWorkspace])
             + [.all]
+            + (offersThisMac ? [.thisMac] : [])
             + names(projectNames).map(InboxScope.project)
             + sortedIDWorkspaceEntries
             + names(workspaceNames).map(InboxScope.workspace)
@@ -188,6 +204,10 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         currentWorkspace: String? = nil,
         currentWorkspaceId: UUID? = nil
     ) -> [AgentInboxRow] {
+        // A session from another app shows outside "This Mac" only while it is
+        // live or waiting on you, in one of this workspace's projects.
+        guard scope != .thisMac else { return rows }
+        let rows = rows.filter { $0.externalSession?.isProminent ?? true }
         let resolved: InboxScope
         if scope == .currentWorkspace {
             if let currentWorkspaceId {

@@ -114,6 +114,13 @@ if CommandLine.arguments.contains("--agent-process-tracking-check") {
     Foundation.exit(0)
 }
 
+// .plans/79: which Claude and Codex sessions run on this Mac, where, and who
+// owns each — synthetic session files, rollouts and process table only.
+if CommandLine.arguments.contains("--external-session-discovery-check") {
+    runExternalSessionDiscoveryChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-compaction-check") {
     runAgentCompactionChecks()
     Foundation.exit(0)
