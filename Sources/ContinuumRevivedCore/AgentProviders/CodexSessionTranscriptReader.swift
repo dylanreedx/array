@@ -48,6 +48,19 @@ public enum CodexSessionTranscriptReader {
                 if let text = cleanText(payload["message"] ?? payload["text"]) {
                     out.append(.init(role: .assistant, text: text))
                 }
+            // Codex 0.159+ writes what was said as completed items instead of
+            // user_message/agent_message; a rollout never carries both.
+            case ("event_msg", "item_completed"):
+                guard let item = payload["item"] as? [String: Any],
+                      let role: NormalizedTranscriptMessage.Role = switch item["type"] as? String {
+                          case "UserMessage": .userPrompt
+                          case "AgentMessage": .assistant
+                          default: nil
+                      } else { continue }
+                let blocks = item["content"] as? [[String: Any]] ?? []
+                if let text = cleanText(blocks.compactMap { $0["text"] as? String }.joined(separator: "\n")) {
+                    out.append(.init(role: role, text: text))
+                }
             case ("response_item", "reasoning"):
                 if let summary = reasoningSummary(payload["summary"]) {
                     out.append(.init(role: .assistant, reasoning: summary, countsAsMessage: false))

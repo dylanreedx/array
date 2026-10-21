@@ -20,6 +20,7 @@ func runTranscriptRehydrationChecks() {
     runClaudeSessionBookkeepingPromptChecks()
     runPiSessionTranscriptParseChecks()
     runCodexSessionTranscriptParseChecks()
+    runCodexItemCompletedMessageChecks()
     runTranscriptRehydrationBoundChecks()
     #if os(macOS)
     runTranscriptRehydrationDispatchChecks()
@@ -273,6 +274,42 @@ private func runPiSessionTranscriptParseChecks() {
     // The `compaction` summary prose is never replayed as transcript content.
     expect(!stepsDescription(transcript).contains("old history"),
            "PiSessionTranscriptReader: a compaction summary leaked into the transcript")
+}
+
+// Codex 0.159 and later (captured from real rollouts, 2026-10-20) no longer
+// write `event_msg` `user_message`/`agent_message`. What was said is an
+// `event_msg` `item_completed` whose `item.type` is `UserMessage` or
+// `AgentMessage`, next to the `response_item` `message` mirrors the reader
+// ignores on purpose. Every Codex desktop thread, `codex exec` run and Array
+// Codex agent on those versions restored its commands with no words at all.
+private func runCodexItemCompletedMessageChecks() {
+    let threadId = "01a14638-f702-7a70-bb9f-1c885a1341ab"
+    let lines = [
+        #"{"type":"session_meta","payload":{"id":"01a14638-f702-7a70-bb9f-1c885a1341ab","cwd":"/x","originator":"array","cli_version":"0.163.0-alpha.10.2"}}"#,
+        #"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"MIRROR_CONTEXT"},{"type":"input_text","text":"CODEX_NEW_PROMPT"}]}}"#,
+        #"{"type":"event_msg","payload":{"type":"item_completed","thread_id":"01a14638-f702-7a70-bb9f-1c885a1341ab","turn_id":"turn-1","item":{"type":"UserMessage","id":"item-1","content":[{"type":"text","text":"CODEX_NEW_PROMPT","text_elements":[]}]}}}"#,
+        #"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls\"}","call_id":"call_1"}}"#,
+        #"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"ok"}}"#,
+        #"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"CODEX_NEW_ANSWER"}]}}"#,
+        #"{"type":"event_msg","payload":{"type":"item_completed","thread_id":"01a14638-f702-7a70-bb9f-1c885a1341ab","turn_id":"turn-1","item":{"type":"AgentMessage","id":"item-2","content":[{"type":"text","text":"CODEX_NEW_ANSWER"}],"phase":"final"}}}"#,
+    ]
+    let transcript = CodexSessionTranscriptReader.parse(lines: lines, threadId: threadId)
+    let prompts = transcript.steps.compactMap { step -> String? in
+        if case .userPrompt(let text) = step { return text }
+        return nil
+    }
+    let answers = transcript.steps.compactMap { step -> String? in
+        if case .event(.contentDelta(_, _, .assistant, let delta)) = step { return delta }
+        return nil
+    }
+    expect(prompts == ["CODEX_NEW_PROMPT"],
+           "CodexSessionTranscriptReader: new-format prompt not restored once: \(prompts)")
+    expect(answers == ["CODEX_NEW_ANSWER"],
+           "CodexSessionTranscriptReader: new-format answer not restored once: \(answers)")
+    expect(!stepsDescription(transcript).contains("MIRROR_CONTEXT"),
+           "CodexSessionTranscriptReader: the response_item mirror crossed into the transcript")
+    expect(transcript.restoredMessageCount == 2,
+           "CodexSessionTranscriptReader: expected 2 restored messages, got \(transcript.restoredMessageCount)")
 }
 
 private func runCodexSessionTranscriptParseChecks() {
