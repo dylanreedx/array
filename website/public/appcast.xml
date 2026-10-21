@@ -3,6 +3,16 @@
     <channel>
         <title>Array</title>
         <item>
+            <title>0.7.30</title>
+            <pubDate>Wed, 21 Oct 2026 17:00:16 -0400</pubDate>
+            <link>https://arrayapp.dev</link>
+            <sparkle:version>81</sparkle:version>
+            <sparkle:shortVersionString>0.7.30</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/dylanreedx/array-releases/releases/download/v0.7.30/Array-0.7.30.dmg" length="50120491" type="application/octet-stream" sparkle:edSignature="IaR6QLm7blUGh4DEl8tGVjEtR3aibjoa7PGHrpXxG4JEf61eALwpx/lKKp7tg2QZogbyJPbtxIjMYCLfJgGWBA==" />
+        <sparkle:releaseNotesLink>https://github.com/dylanreedx/array-releases/releases/tag/v0.7.30</sparkle:releaseNotesLink></item>
+        <item>
             <title>0.7.29</title>
             <pubDate>Mon, 19 Oct 2026 16:57:37 -0400</pubDate>
             <link>https://arrayapp.dev</link>

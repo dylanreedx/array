@@ -382,3 +382,130 @@ Artifacts: `qa-runs/session-age/red/`, `green/results.jsonl`,
 `chooser-light.png`, `chooser-dark.png`, and `preview.log`. All targeted
 checks used verified private disposable tmux sockets, with inherited
 TMUX/TMUX_PANE unset.
+
+## Release 0.7.30 (81) — 2026-10-21
+
+Dylan explicitly requested committing this work and releasing 0.7.30 with the
+completed app changes from the last two days. Committed the onboarding/sidebar/
+chooser follow-ups as `947e1cfe`, merged integration on `release/0.7.30`, and
+audited the recent branches. Six completed app fixes from October 19 were still
+outside integration: parent-zone subagent placement, zone containment,
+fractional-width choice labels, wrapping subagent columns, docking from a narrow
+gap, and the gyro's layer clock. Cherry-picked them with their witnesses;
+resolved adjacent check-registration conflicts by retaining both checks.
+The first signed draft used `221e20ad`. Final source `48fc4574` also includes
+the witnessed film setup correction `933bc0ba` and the sidebar persistence
+diagnostic correction described below. Uncommitted film/demo work and older unrelated
+local docs were not swept into the app release.
+
+First signed draft checks (superseded by the final rebuild below):
+
+- Release-optimized build; Developer ID signing; deep strict signature checks;
+  Apple notarization and stapling of both app and DMG; Gatekeeper checks all
+  passed. Bundle version is 0.7.30, build 81.
+- The production `check-app-bundle.sh` audit passed: eight packaged self-checks,
+  supplied signature preserved and verified, LaunchServices sentinel, Sparkle
+  embedding/feed/key, and no persistent preferences or app-support pollution.
+- Both draft GitHub assets, `Array.dmg` and `Array-0.7.30.dmg`, have SHA-256
+  `84dddcc379558f32c47e58e2984099af993f9c62748c91913929d0fe1d4e2047`
+  and size 50,117,790 bytes, matching the local notarized DMG.
+- Generated the new signed Sparkle item and preserved all 79 prior items
+  byte-for-byte, including the pre-archive 0.2.0 item.
+
+An initial pipeline/matrix attempt was stopped during compilation when the branch
+audit found the six additional app fixes; the final runs use the complete source
+above. The first bundle audit's eight self-checks and signature check passed, but
+its QA-only proof helper retriggered after its temporary directory was removed.
+tmux fell back to the default socket and created `codex-isolation-proof`; the
+socket-path assertion stopped the audit before cleanup. Corrected the helper
+with an explicit private socket path, an existing-directory guard and a one-shot
+guard; the repeated complete audit passed. Dylan explicitly authorized removing
+only that accidental proof session, and the exact-target kill on its explicit
+socket exited 0; an authorized exact-target `has-session` check subsequently
+confirmed it absent. No other default-server sessions were inspected or changed.
+Production Array remained PID 41344.
+
+### Matrix and follow-up outcomes
+
+`scripts/run-matrix.sh --fast` completed **334 legs: 318 passed, 12 documented
+KNOWN-RED, four other failures**, exit 1. All 282 app legs ran. macOS and generic
+iOS Simulator builds passed. The debug bundle leg was skipped by `--fast`; the
+separate signed production bundle audit covers packaging. The original result
+is preserved in `qa-runs/release-0.7.30/matrix.log`.
+
+- **Films:** ten of twelve scenes passed in the matrix. `v2-smoke.json` reported
+  presentation unavailable; it passed alone on the identical binary (55.5 s),
+  matching the earlier baseline's intermittent reveal failure. `full-day-v2`
+  reproduced its failure alone (355.7 s): the Storefront centre click now hits
+  the completed hero after contained placement, correctly marking it read at
+  the click's frame + 5. Changed only that zone-arming target to the header,
+  leaving every Done assertion intact. The same binary with the corrected
+  scene passed (348.4 s, 14 agents, 14,826 frames). Committed as `933bc0ba`.
+- **Sidebar truth:** the old witness required a layout transaction even when
+  contained placement was already settled and live/saved frames matched.
+  Reproduced with auto-layout explicitly enabled. Updated the witness to require
+  the restored tile and compare every live project tile frame with the saved
+  canvas, still rejecting failed transactions. Its shared production-entry
+  self-check passed after rebuilding the film binary (7.3 s); committed as
+  `48fc4574`. This diagnostic is compiled into the app, so a final optimized
+  build/sign/notarize cycle was started to include the exact final source.
+- **Outline:** the release candidate and an isolated repeat measured the same
+  0.59 edge-strength ratio against the unchanged 0.60 floor. The archived
+  0.7.29 executable reproduced the identical four edge strengths and ratio.
+  Its bundled run could not capture its window; running the copied executable
+  in the bare matrix layout required a local ad-hoc signature (the first bare
+  attempt was rejected with signal 9). Verified its instruction section is
+  byte-identical to the archived original: 48,494,792 bytes, SHA-256
+  `1185a58034b3146511bed18c2ab1953322706053b87594828c48cc64320aea2d`.
+  Only the QA copy was re-signed. No threshold, baseline or allowlist changed.
+- **Installed CLI captures:** the same recorded host drift remains: no committed
+  context-meter captures for Claude 2.1.306, Codex 0.163.0, or Pi 1.3.0. No real
+  model calls or fabricated fixtures were used to hide this.
+- The bare CoreChecks leg is already KNOWN-RED. This run reports the stale
+  dependency-resource guard. Both its exact guard and `Package.swift` are
+  unchanged from shipped source `2c4a41fb`; executing that archived guard against
+  its archived package reproduces the failure. The known-red classification
+  was not altered.
+
+Release feature paths passed in the matrix, including onboarding, choice
+geometry, idle external sidebar sessions, face switch/flip, shell handoff,
+watch/Move here/pause ownership, process tracking, work timing/transcript
+restoration, Codex compaction runner, dictation, parent folding, subagent
+placement, zone containment, and ui-probe. Existing optional real-model
+compaction and provisioned CloudKit coverage were not enabled. No new
+allowlist entries or baseline updates were made.
+
+The initial draft's new feed item also passed `sign_update --verify`, and an
+independent CryptoKit check verified the exact DMG bytes against the appcast
+signature using the app's embedded `SUPublicEDKey`. These artifact checks will
+be repeated on the final rebuild before publication.
+
+### Final release artifact
+
+Rebuilt the optimized app from `48fc4574` after the sidebar diagnostic fix.
+The final Developer ID signing, app and DMG notarization/stapling, both
+Gatekeeper checks, and signed production bundle audit all passed. The bundle
+audit preserved the supplied signature, passed its eight self-checks and
+LaunchServices sentinel, and reported no defaults or app-support pollution.
+
+All **13 selected checks passed on the exact final optimized production
+executable**: sidebar-truth, onboarding-panel, external-sessions-sidebar,
+agent-face-switch, agent-face-flip, agent-process-tracker, inbox-parent-fold,
+composer-dictation, choice-geometry, subagent-tile-zone, zone-spawn-containment,
+throbber-timeline, and transcript-rhythm. These are recorded separately in
+`optimized-feature-checks/results.jsonl`; the original matrix's four failures
+are not relabelled. The normal debug build also passed after the correction.
+
+Final DMG: **50,120,491 bytes**, SHA-256
+`945f815833ec23c14f0840abdf76f3516ee99a95dcaae41d94bf9662e6692473`.
+Both asset names contain these same bytes. The regenerated feed adds exactly
+one build-81 item and keeps all 79 previous items byte-for-byte. `sign_update
+--verify` and the independent CryptoKit verification both passed on the final
+bytes; the embedded public key also matches the archived 0.7.29 key.
+
+Final proof files are under `qa-runs/release-0.7.30/`: `pipeline.log`,
+`release/release.log`, `final-bundle-audit/manifest.json`,
+`optimized-feature-checks/results.jsonl`, `dmg-sha256.txt`,
+`sparkle-signature-check.log`, `embedded-key-check.log`, and
+`public-update-proof.json`. Superseded draft artifacts/logs are retained with
+the `initial-` prefix and were never publicly published.
