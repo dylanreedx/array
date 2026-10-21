@@ -1172,6 +1172,13 @@ public enum AgentToolDetailPresenter {
             }
         } else if ArrayWorkspaceTool(toolName: safeToolName(detail.toolName)) == .boardApply {
             argumentKeysSaid.insert("op")
+        } else if ArrayWorkspaceTool(toolName: safeToolName(detail.toolName)) == .messageAgent {
+            // What it said, as it said it: the row is about the message.
+            argumentKeysSaid.insert(AgentToolDetailObservation.messageTextKey)
+            if let message = detail.arguments.first(where: { $0.key == AgentToolDetailObservation.messageTextKey }),
+               !message.sensitiveKeyFiltered, !message.value.text.isEmpty {
+                lines.append(message.value.text)
+            }
         }
         let kind = AgentToolKind.resolve(toolName: safeToolName(detail.toolName))
         let fileLabel = kind.fileLineLabel
@@ -1334,6 +1341,7 @@ public enum AgentToolDetailPresenter {
         // `relativePath` basename the provider whitelists forward as `file`.
         if let tool = ArrayWorkspaceTool(toolName: safeToolName(detail.toolName)) {
             if tool == .boardApply { return boardChangeLine(detail) }
+            if tool == .messageAgent { return messageLine(detail) }
             return tool.actionLine(fileBasename: safeBasenameArgument(detail, keys: ["file", "relativepath"]))
         }
         // Someone else's MCP server: "Atlassian · Search Jira issues using JQL".
@@ -1478,17 +1486,7 @@ public enum AgentToolDetailPresenter {
     /// carries. The reply is read only when it arrived whole: a clipped or
     /// redacted reply is not half-parsed into a name.
     private static func boardChangeLine(_ detail: AgentToolDetailRecord) -> String {
-        var result: [String: Any]?
-        if let output = detail.output, !output.truncatedByBytes, !output.truncatedByLines, !output.redacted,
-           let object = (try? JSONSerialization.jsonObject(with: Data(output.text.utf8))) as? [String: Any],
-           object["status"] as? String == "ok" {
-            result = object["result"] as? [String: Any]
-        }
-        func name(_ value: Any?) -> String? {
-            guard let text = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !text.isEmpty, !text.contains("[REDACTED]") else { return nil }
-            return text
-        }
+        let result = wholeOkResult(detail)
         let op = name(result?["op"]) ?? safeArgument(detail, keys: ["op"])
         let card = result?["card"] as? [String: Any]
         let inputTitle = (op == "create" || op == "edit") ? safeArgument(detail, keys: ["title"]) : nil
@@ -1497,6 +1495,27 @@ public enum AgentToolDetailPresenter {
             cardTitle: name(result?["cardTitle"]) ?? name(card?["title"]) ?? inputTitle,
             columnName: name(result?["columnName"]),
             assigneeName: name(result?["assigneeName"]))
+    }
+
+    /// `array_message_agent`'s sentence, naming the agent from the host's reply
+    /// (`AgentMessageResult.childName`) — the request carries only its id.
+    private static func messageLine(_ detail: AgentToolDetailRecord) -> String {
+        ArrayWorkspaceTool.messageLine(targetName: name(wholeOkResult(detail)?["childName"]))
+    }
+
+    /// The `result` of a workspace tool's reply, only when the reply arrived
+    /// whole and ok: a clipped or redacted reply is not half-parsed into a name.
+    private static func wholeOkResult(_ detail: AgentToolDetailRecord) -> [String: Any]? {
+        guard let output = detail.output, !output.truncatedByBytes, !output.truncatedByLines, !output.redacted,
+              let object = (try? JSONSerialization.jsonObject(with: Data(output.text.utf8))) as? [String: Any],
+              object["status"] as? String == "ok" else { return nil }
+        return object["result"] as? [String: Any]
+    }
+
+    private static func name(_ value: Any?) -> String? {
+        guard let text = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty, !text.contains("[REDACTED]") else { return nil }
+        return text
     }
 
     private static func capitalizedPhrase(_ raw: String) -> String {

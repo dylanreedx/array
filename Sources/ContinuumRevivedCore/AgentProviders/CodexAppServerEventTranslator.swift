@@ -338,10 +338,18 @@ public struct CodexAppServerEventTranslator {
             let title = (item["tool"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "MCP tool"
             if let onRuntimeObservation {
                 let server = (item["server"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                var fields = server.map { [(key: "server", value: $0)] } ?? []
+                // Array's own agent message is the one exception to opaque
+                // arguments: its text is what the row is about.
+                if server == "array_workspace",
+                   let message = AgentToolDetailObservation.messageTextField(
+                       toolName: title, arguments: item["arguments"] as? [String: Any] ?? [:]) {
+                    fields.append(message)
+                }
                 onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
                     phase: .started,
                     toolName: title,
-                    fields: server.map { [(key: "server", value: $0)] } ?? [],
+                    fields: fields,
                     observedAt: now()
                 )))
             }
