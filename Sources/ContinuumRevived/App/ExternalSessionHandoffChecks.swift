@@ -356,12 +356,18 @@ enum ExternalSessionHandoffChecks {
 
         // 2. cmux writes its last turn and exits: the tile goes live at once.
         try world.append(userLine("u2", "One last thing in cmux.") + "\n" + assistantLine("a2", "Handled in cmux.") + "\n", to: file)
+        let readsBeforeLive = QAMainThreadIO.fileReads
         world.publish([desktop, copySource])
         guard let live = supervisor.records[agentId] else { throw Failure(message: "the agent went away") }
         try expect(live.externalSession == nil && live.providerSessionId == sessionId,
                    "the process gone, the tile is the session's: providerSessionId == \(sessionId); got \(String(describing: live.providerSessionId))")
         try expect(view.sessionHandoffState == nil && !view.qaComposerHidden, "the banner goes and the composer comes back")
-        for needle in ["Why is the upload test flaky?", "The upload test races", "One last thing in cmux.", "Handled in cmux."] {
+        // The last read runs off the main thread (review #12).
+        let lastRead = ["Why is the upload test flaky?", "The upload test races", "One last thing in cmux.", "Handled in cmux."]
+        _ = world.pump(until: { !view.qaSessionFollowBusy && lastRead.allSatisfy { world.count($0, in: view) == 1 } })
+        try expect(QAMainThreadIO.fileReads == readsBeforeLive,
+                   "going live must read what cmux wrote last off the main thread; \(QAMainThreadIO.fileReads - readsBeforeLive) reads on main")
+        for needle in lastRead {
             try expect(world.count(needle, in: view) == 1,
                        "'\(needle)' is in the transcript exactly once; got \(world.count(needle, in: view)) in \(world.texts(view))")
         }

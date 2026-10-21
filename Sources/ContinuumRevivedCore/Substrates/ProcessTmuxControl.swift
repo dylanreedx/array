@@ -139,7 +139,8 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
     }
 
     public func run(_ arguments: [String]) throws -> String {
-        try runProcess(arguments).stdout
+        QAMainThreadIO.noteTmuxRun()
+        return try runProcess(arguments).stdout
     }
 
     public func resolvedInvocation(arguments: [String]) throws -> TmuxSession.Invocation {

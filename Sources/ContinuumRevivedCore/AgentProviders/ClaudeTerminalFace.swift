@@ -99,6 +99,7 @@ public enum ClaudeTerminalFace {
     /// mid-write — is left for the next read; an offset that is not at a line
     /// start reads from the next one.
     public static func lines(in url: URL, after offset: UInt64) -> [String] {
+        QAMainThreadIO.noteFileRead()
         guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
@@ -115,6 +116,7 @@ public enum ClaudeTerminalFace {
     /// The complete lines before `end` — what the Array face held at the flip —
     /// bounded to the last `maxBytes`, as a restore is.
     public static func lines(in url: URL, before end: UInt64, maxBytes: Int = RehydrationLimits().maxBytes) -> [String] {
+        QAMainThreadIO.noteFileRead()
         guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0

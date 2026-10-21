@@ -121,6 +121,7 @@ public enum SessionFileTail {
     /// The complete lines from `offset` to the last newline, and the offset just
     /// past it. A file shorter than `offset` was rewritten, so it is read whole.
     public static func lines(in url: URL, from offset: UInt64) -> (lines: [String], end: UInt64) {
+        QAMainThreadIO.noteFileRead()
         guard let handle = try? FileHandle(forReadingFrom: url) else { return ([], offset) }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
@@ -130,9 +131,24 @@ public enum SessionFileTail {
         return complete(data, from: start)
     }
 
+    /// `lines(in:from:)`, bounded: when more than `maxBytes` lie past
+    /// `offset`, only the last `maxBytes` are read, from the first whole line
+    /// in them, and `truncated` says so. A catch-up is never the whole file.
+    public static func lines(in url: URL, from offset: UInt64, maxBytes: Int) -> (lines: [String], truncated: Bool, end: UInt64) {
+        let size = length(url)
+        let start = offset <= size ? offset : 0
+        guard size > start, size - start > UInt64(maxBytes) else {
+            let chunk = lines(in: url, from: offset)
+            return (chunk.lines, false, chunk.end)
+        }
+        let window = tail(in: url, maxBytes: maxBytes)
+        return (window.lines, true, window.end)
+    }
+
     /// The last `maxBytes` of the file, up to its last newline: the opening
     /// read of a follower. `truncated` says earlier history was left out.
     public static func tail(in url: URL, maxBytes: Int) -> (lines: [String], truncated: Bool, end: UInt64) {
+        QAMainThreadIO.noteFileRead()
         guard let handle = try? FileHandle(forReadingFrom: url) else { return ([], false, 0) }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0

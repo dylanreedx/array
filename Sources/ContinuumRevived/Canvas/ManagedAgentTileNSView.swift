@@ -1442,6 +1442,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         /// Just past the last whole line rendered.
         var offset: UInt64
         var reading: Bool
+        /// Stopping: one last read renders what is left, then nothing more.
+        var finishing = false
     }
     private var sessionFollow: SessionFollow?
     private var sessionFollowTimer: Timer?
@@ -1474,22 +1476,51 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 follow.offset = tail.end
                 follow.reading = false
                 self.sessionFollow = follow
-                self.startSessionFollowTimer()
+                if follow.finishing {
+                    self.readFollowedSessionFile()
+                } else {
+                    self.startSessionFollowTimer()
+                }
             }
         }
     }
 
     /// Stops following. `catchUp` first renders whatever was written since the
     /// last read — the moment a session becomes this agent's, nothing the other
-    /// app wrote may be missing from the transcript.
-    @discardableResult
-    func stopFollowingSessionFile(catchUp: Bool) -> Int {
+    /// app wrote may be missing from the transcript. The read runs off the main
+    /// thread, after any read already in flight, from where that one ends.
+    func stopFollowingSessionFile(catchUp: Bool) {
         sessionFollowTimer?.invalidate()
         sessionFollowTimer = nil
-        guard let follow = sessionFollow else { return 0 }
-        sessionFollow = nil
-        guard catchUp else { return 0 }
-        return appendSessionFile(follow.url, from: follow.offset, provider: follow.provider, notice: nil).turns
+        guard var follow = sessionFollow else { return }
+        guard catchUp else {
+            sessionFollow = nil
+            return
+        }
+        follow.finishing = true
+        sessionFollow = follow
+        if !follow.reading { readFollowedSessionFile() }
+    }
+
+    /// What the followed file holds past the last read: read and parsed off
+    /// the main thread — bounded as a restore is — and replayed on it.
+    private func readFollowedSessionFile() {
+        guard var follow = sessionFollow, !follow.reading else { return }
+        follow.reading = true
+        sessionFollow = follow
+        let (url, offset, provider, threadId) = (follow.url, follow.offset, follow.provider, threadId)
+        let limits = RehydrationLimits()
+        Task.detached(priority: .utility) { [weak self] in
+            let chunk = SessionFileTail.lines(in: url, from: offset, maxBytes: limits.maxBytes)
+            let transcript = Self.parseSession(chunk.lines, provider: provider, threadId: threadId, truncated: chunk.truncated)
+            await MainActor.run {
+                guard let self, var follow = self.sessionFollow, follow.url == url, follow.offset == offset else { return }
+                if !transcript.steps.isEmpty { self.replayRehydratedSteps(transcript) }
+                follow.offset = chunk.end
+                follow.reading = false
+                self.sessionFollow = follow.finishing ? nil : follow
+            }
+        }
     }
 
     /// What a session file holds past `offset`, appended through the restore's
@@ -1545,22 +1576,13 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// One stat; a read only when the file grew. The read and parse run off
     /// the main thread, the replay on it.
     func pollSessionFile() {
-        guard var follow = sessionFollow, !follow.reading,
+        guard let follow = sessionFollow, !follow.reading, !follow.finishing,
               SessionFileTail.length(follow.url) > follow.offset else { return }
-        follow.reading = true
-        sessionFollow = follow
-        let (url, offset, provider) = (follow.url, follow.offset, follow.provider)
-        Task.detached(priority: .utility) { [weak self] in
-            let chunk = SessionFileTail.lines(in: url, from: offset)
-            await MainActor.run {
-                guard let self, var follow = self.sessionFollow, follow.url == url, follow.offset == offset else { return }
-                _ = self.appendSessionLines(chunk.lines, provider: provider, notice: nil)
-                follow.offset = chunk.end
-                follow.reading = false
-                self.sessionFollow = follow
-            }
-        }
+        readFollowedSessionFile()
     }
+
+    /// QA: a follower still reading, or finishing its last read.
+    var qaSessionFollowBusy: Bool { sessionFollow != nil }
 
     var qaSessionHandoffBanner: AgentSessionHandoffBanner? {
         sessionHandoffBanner.isHidden ? nil : sessionHandoffBanner
