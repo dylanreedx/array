@@ -19717,6 +19717,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             WorkspaceToolsConfig.permission(defaults: self?.settingsDefaults ?? .standard)
         }
         wireAgentProcessTracker()
+        // `.plans/79` review 14: a launch's sends wait for discovery's first pass,
+        // and the prompts that waited go once it has looked.
+        agentSupervisor.awaitsSessionDiscovery = { [weak self] in
+            self?.externalSessionMonitor.isAwaitingFirstPass ?? false
+        }
+        externalSessionMonitor.onFirstPassSettled = { [weak self] in
+            self?.agentSupervisor.releaseHeldPrompts()
+        }
         // The sidebar dot is derived from the record on every row build, so a
         // colour picked on a tile only needs the rows rebuilt — the same re-push
         // a rename from the inbox does.

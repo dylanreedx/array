@@ -3329,6 +3329,9 @@ final class AgentSupervisor {
         if let host = externalHolds[id] {
             return "Paused while this session is also open in \(host), so the two don't overwrite each other."
         }
+        if waitsForSessionDiscovery(record) {
+            return "Checking whether another app has this session open first."
+        }
         return Self.sendRefusal(record: record)
     }
 
@@ -3391,10 +3394,25 @@ final class AgentSupervisor {
         }
     }
 
-    /// The agent's CLI readiness probe is still out — the seconds after launch.
+    /// The agent's CLI readiness probe is still out — the seconds after launch —
+    /// or discovery has not yet said whether another app holds its session.
     private func isStillStarting(_ id: AgentID) -> Bool {
-        guard let harness = records[id]?.harness else { return false }
+        guard let record = records[id], let harness = record.harness else { return false }
         return AgentModelCatalog.shared.snapshot(for: harness).readiness == .checking
+            || waitsForSessionDiscovery(record)
+    }
+
+    /// `.plans/79` review 14: whether the app's session discovery is still on
+    /// its first pass since launch (bounded: `ExternalSessionMonitor
+    /// .firstPassWait`). Pauses are not saved, so until it has looked Array
+    /// cannot know that another app holds a Claude or Codex agent's session;
+    /// those agents' sends wait for it rather than resume a session someone
+    /// else may be writing.
+    var awaitsSessionDiscovery: () -> Bool = { false }
+
+    private func waitsForSessionDiscovery(_ record: AgentRecord) -> Bool {
+        (record.harness == .claudeCode || record.harness == .codex)
+            && record.capabilities.locallyManaged && awaitsSessionDiscovery()
     }
 
     /// S3 (T3's `sendQueuesBehindSetup`): a prompt sent while its CLI is still
@@ -3405,7 +3423,7 @@ final class AgentSupervisor {
     private func holdOrRefuseForReadiness(_ prepared: PreparedAgentPrompt, for id: AgentID) -> IntentAcceptance? {
         guard let refusal = sendRefusal(for: id) else { return nil }
         guard isStillStarting(id), heldForReadiness[id] == nil, runners[id] == nil,
-              let harness = records[id]?.harness else {
+              let record = records[id], let harness = record.harness else {
             warn("AgentSupervisor.accept: \(refusal)")
             pendingReturnStamps[id] = nil
             return .refused(.harnessNotReady)
@@ -3413,7 +3431,9 @@ final class AgentSupervisor {
         heldForReadiness[id] = prepared
         let returnedAt = pendingReturnStamps.removeValue(forKey: id)
         turnFacts[id, default: TurnFacts()].presence.arm(at: returnedAt ?? Date())
-        turnFacts[id]?.presence.noteStartupDetail("Waiting for \(harness.rawValue) to finish starting")
+        turnFacts[id]?.presence.noteStartupDetail(waitsForSessionDiscovery(record)
+            ? "Checking whether another app has this session open"
+            : "Waiting for \(harness.rawValue) to finish starting")
         installReadinessObserverIfNeeded()
         notifyTurnCapabilitiesChanged(id)
         return .accepted

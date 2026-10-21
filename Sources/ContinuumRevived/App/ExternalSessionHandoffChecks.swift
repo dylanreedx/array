@@ -557,6 +557,27 @@ enum ExternalSessionHandoffChecks {
                    && supervisor.sendRefusal(for: faceAgent)?.contains("Terminal face") == true,
                    "an agent saved in its Terminal face must be held at boot, tile or no tile; refusal \(String(describing: supervisor.sendRefusal(for: faceAgent)))")
         try expect(AgentSteeringQAFakes.spawnCount(in: bin) == 0, "no claude ran for the held face agent")
+
+        // Review finding 14: pauses are not saved, so for the moment between a
+        // launch and discovery's first pass Array cannot know that Ghostty has
+        // a Claude agent's session open. Sends wait for that pass (bounded)
+        // rather than resume a session someone else is writing.
+        let monitor = world.monitor
+        monitor.beginAwaitingFirstPass()   // what `start()` does at launch, without reading this Mac
+        guard let model = AgentCatalogQAFixture.claude.seedModel else { throw Failure(message: "no claude fixture model") }
+        let early = supervisor.spawn(
+            role: nil, prompt: nil, cwd: world.fixture.pbRoot, harness: .claudeCode, model: model, thinking: "",
+            projectId: world.fixture.projectPb, projectRoot: world.fixture.pbRoot, displayName: "Open in Ghostty at launch")
+        try expect(!supervisor.send("PLAIN before discovery", to: early)
+                   && supervisor.sendRefusal(for: early)?.contains("another app") == true,
+                   "before discovery's first pass a Claude agent's send must wait; refusal \(String(describing: supervisor.sendRefusal(for: early)))")
+        var acceptance: IntentAcceptance?
+        Task { @MainActor in acceptance = await supervisor.accept(.send("PLAIN from the composer"), for: early) }
+        try expect(world.pump(until: { acceptance != nil }) && acceptance == .accepted,
+                   "the composer's send is held for the pass, not refused; got \(String(describing: acceptance))")
+        try expect(AgentSteeringQAFakes.spawnCount(in: bin) == 0, "no claude may start before discovery has looked")
+        let earlyHolder = try liveHolder()
+        defer { end(earlyHolder) }
         // Discovery finds its claude still running in the Terminal face: held.
         let faceProcess = try liveHolder()
         defer { end(faceProcess) }
@@ -564,6 +585,27 @@ enum ExternalSessionHandoffChecks {
                                   cwd: world.fixture.pcRoot, title: "Face in workspace B", status: .idle,
                                   host: .arrayTerminalFace(agentId: AgentProcessAttribution.ownerTag(for: faceAgent)),
                                   transcript: nil)
+        let ghosttyAtLaunch = session(AgentSupervisor.claudeSessionId(for: early), pid: earlyHolder.processIdentifier,
+                                      cwd: world.fixture.pbRoot, title: "Open in Ghostty at launch", status: .idle,
+                                      host: .app("Ghostty"), transcript: nil)
+        world.publish([faceSession, ghosttyAtLaunch])
+        try expect(supervisor.externalHold(for: early) == "Ghostty", "the first pass pauses the agent Ghostty holds")
+        world.pump(0.3)
+        try expect(AgentSteeringQAFakes.spawnCount(in: bin) == 0 && !supervisor.isRunning(early),
+                   "the held send never ran beside Ghostty's claude")
+        let earlyNotices = supervisor.transcriptDocumentProjection(for: early)?.entries
+            .map { AgentTranscriptCopyController.plainText(for: $0.blocks) } ?? []
+        try expect(earlyNotices.contains { $0.contains("also open in Ghostty") },
+                   "the held send says why it was not sent; transcript \(earlyNotices)")
+        // The wait is bounded: a first pass that never reports stops holding sends.
+        let slow = ExternalSessionMonitor()
+        var settled = false
+        slow.onFirstPassSettled = { settled = true }
+        slow.beginAwaitingFirstPass()
+        try expect(slow.isAwaitingFirstPass, "a launch waits for its first pass")
+        try expect(world.pump(until: { settled && !slow.isAwaitingFirstPass }, timeout: ExternalSessionMonitor.firstPassWait + 1),
+                   "a first pass that takes longer than \(ExternalSessionMonitor.firstPassWait)s stops holding sends")
+        end(earlyHolder)
         world.publish([faceSession])
         try expect(supervisor.isSessionHeld(faceAgent) && !supervisor.send("PLAIN from Array", to: faceAgent),
                    "a face claude discovery still sees keeps the agent held")
@@ -715,7 +757,8 @@ enum ExternalSessionHandoffChecks {
 
         return "ExternalSessionHandoffChecks.paused: the agent's own runner, Terminal face and untagged runners never pause it; "
             + "its session opened in Ghostty stops its claude, refuses sends and says Needs attention; when Ghostty lets go "
-            + "its turn is appended once and the agent runs again; the row's Terminal marker reads the tile's real face"
+            + "its turn is appended once and the agent runs again; the row's Terminal marker reads the tile's real face; "
+            + "a Terminal face no tile shows holds its agent until its claude exits; a launch's sends wait for discovery's first pass"
             + (pngDirectory.map { " (png: \($0))" } ?? "")
     }
 }
