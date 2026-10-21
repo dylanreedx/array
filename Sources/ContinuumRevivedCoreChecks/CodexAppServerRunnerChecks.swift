@@ -48,6 +48,8 @@ private enum FakeAppServerStep {
     case expectNotification
     /// Emit one notification, unprompted, after `delayMs`.
     case emit(method: String, params: [String: Any], delayMs: Int = 0)
+    /// Enough diagnostics to fill an undrained stderr pipe.
+    case stderr(byteCount: Int)
     /// A request the fake deliberately never answers, to exercise a timeout.
     case hang
 
@@ -61,6 +63,8 @@ private enum FakeAppServerStep {
             return ["kind": "expect_notification"]
         case let .emit(method, params, delayMs):
             return ["kind": "emit", "notification": ["method": method, "params": params], "delay_ms": delayMs]
+        case let .stderr(byteCount):
+            return ["kind": "stderr", "byte_count": byteCount]
         case .hang:
             return ["kind": "hang"]
         }
@@ -128,6 +132,9 @@ for action in scenario:
     elif kind == "emit":
         time.sleep(action.get("delay_ms", 0) / 1000.0)
         send(action["notification"])
+    elif kind == "stderr":
+        sys.stderr.write("diagnostic line\n" * (action["byte_count"] // 16 + 1))
+        sys.stderr.flush()
     elif kind == "hang":
         time.sleep(30)
 
@@ -632,7 +639,10 @@ private func runCodexAgentRunnerAppServerChecks() {
     // closed. Claude's `compact()` forwards only the compaction lifecycle, its
     // items and meter readings; Codex must match it. The witness replays what
     // `compact()` forwarded through the same presence reducer the tile reads.
-    do {
+    // Also complete AFTER the former 120s deadline: elapsed time alone must
+    // neither fail the operation nor kill the provider before its boundary.
+    for completionDelayMs in [100, 121_000] {
+        print("Codex compaction: waiting for provider boundary (\(completionDelayMs)ms fixture)")
         let thread = "01a13824-f3a1-7281-adf7-2982d6882465"
         let turn = "01a13825-12be-7782-9fce-96d10cb8ba2f"
         let item = "01a13825-12d5-7fd0-89d6-b3e61266c758"
@@ -661,7 +671,7 @@ private func runCodexAgentRunnerAppServerChecks() {
                                 "last": ["totalTokens": 6072, "inputTokens": 0, "cachedInputTokens": 0,
                                          "cacheWriteInputTokens": 0, "outputTokens": 0, "reasoningOutputTokens": 0],
                                 "modelContextWindow": 475000]],
-                      delayMs: 100),
+                      delayMs: completionDelayMs),
                 .emit(method: "item/completed",
                       params: ["item": ["type": "contextCompaction", "id": item],
                                "threadId": thread, "turnId": turn, "completedAtMs": 1791943325128]),
@@ -766,6 +776,96 @@ private func runCodexAgentRunnerAppServerChecks() {
                    "runner (compact failed, app-server): the provider's failure text must reach the error; got \(String(describing: caught!))")
             expect(!presence.isLive,
                    "runner (compact failed, app-server): a failed compaction must not leave presence live; phase \(presence.phase)")
+        }
+        try? FileManager.default.removeItem(at: fakeRoot)
+    }
+
+    // 2h. Draining diagnostics is part of making an unbounded provider wait
+    // safe. More than a pipe's capacity must not prevent the terminal frame.
+    do {
+        let thread = "fixture-compact-stderr-thread"
+        let (script, fakeRoot) = try! makeFakeAppServer(
+            scenario: [
+                .expectRequest(), .expectNotification, .expectRequest(),
+                .expectRequest(), .expectRequest(),
+                .stderr(byteCount: 262_144),
+                .emit(method: "item/completed", params: [
+                    "threadId": thread, "turnId": "fixture-compact-stderr-turn",
+                    "item": ["type": "contextCompaction", "id": "fixture-compact-stderr-item"],
+                ]),
+                .hang, // completion must release the caller while the CLI is alive
+            ], asExecutableNamed: "codex")
+        withEnvironmentOverride([
+            "CONTINUUM_CODEX_TRANSPORT": "app-server",
+            "PATH": "\(script.deletingLastPathComponent().path):\(ProcessInfo.processInfo.environment["PATH"] ?? "")",
+        ]) {
+            let runner = CodexAgentRunner(config: .init(model: "gpt-6.1-sol", cwd: cwd, threadId: thread))
+            let events = EventCollector()
+            let started = Date()
+            var caught: Error?
+            do { try runner.compact(AgentCompactionRequest()) { events.append($0) } }
+            catch { caught = error }
+            expect(caught == nil && Date().timeIntervalSince(started) < 10,
+                   "runner (compact stderr): diagnostics must drain so the provider can complete; got \(String(describing: caught))")
+            expect(events.snapshot().contains {
+                if case .compactionChanged(_, let lifecycle) = $0 { return lifecycle.phase == .succeeded }
+                return false
+            }, "runner (compact stderr): the provider's success must reach the caller")
+        }
+        try? FileManager.default.removeItem(at: fakeRoot)
+    }
+
+    // 2i. Both Stop and an unexpected exit must release the provider wait
+    // without inventing a successful compaction boundary.
+    for stop in [false, true] {
+        let thread = "fixture-compact-exit-thread"
+        var scenario: [FakeAppServerStep] = [
+            .expectRequest(), .expectNotification, .expectRequest(),
+            .expectRequest(), .expectRequest(),
+            .emit(method: "item/started", params: [
+                "threadId": thread, "turnId": "fixture-compact-exit-turn",
+                "item": ["type": "contextCompaction", "id": "fixture-compact-exit-item"],
+            ]),
+        ]
+        if stop { scenario.append(.hang) }
+        let (script, fakeRoot) = try! makeFakeAppServer(scenario: scenario, asExecutableNamed: "codex")
+        withEnvironmentOverride([
+            "CONTINUUM_CODEX_TRANSPORT": "app-server",
+            "PATH": "\(script.deletingLastPathComponent().path):\(ProcessInfo.processInfo.environment["PATH"] ?? "")",
+        ]) {
+            let runner = CodexAgentRunner(config: .init(model: "gpt-6.1-sol", cwd: cwd, threadId: thread))
+            let events = EventCollector()
+            let running = DispatchSemaphore(value: 0)
+            let stopped = DispatchSemaphore(value: 0)
+            if stop {
+                Thread {
+                    _ = running.wait(timeout: .now() + 10)
+                    runner.stop()
+                    stopped.signal()
+                }.start()
+            }
+            let started = Date()
+            var caught: Error?
+            do {
+                try runner.compact(AgentCompactionRequest()) { event in
+                    events.append(event)
+                    if case .compactionChanged(_, let lifecycle) = event, lifecycle.phase == .running {
+                        running.signal()
+                    }
+                }
+            } catch { caught = error }
+            if stop {
+                expect(stopped.wait(timeout: .now() + 5) == .success,
+                       "runner (compact stop): Stop must finish")
+            }
+            expect(caught != nil && Date().timeIntervalSince(started) < 10,
+                   "runner (compact exit): Stop or process exit must release compact() promptly; got \(String(describing: caught))")
+            expect((caught is AgentRunStopped) == stop,
+                   "runner (compact exit): only a user Stop should report cancellation")
+            expect(!events.snapshot().contains {
+                if case .compactionChanged(_, let lifecycle) = $0 { return lifecycle.phase == .succeeded }
+                return false
+            }, "runner (compact exit): losing the process must not invent success")
         }
         try? FileManager.default.removeItem(at: fakeRoot)
     }

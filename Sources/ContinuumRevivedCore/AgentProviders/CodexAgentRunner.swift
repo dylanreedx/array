@@ -421,6 +421,14 @@ public final class CodexAgentRunner: @unchecked Sendable {
             appServerTranslator.onRuntimeObservation = runtimeObservationHandler
         }
 
+        // Match the normal app-server turn path: an unread stderr pipe can
+        // fill and block Codex before it writes the compaction boundary.
+        let stderrTail = AgentStderrTail()
+        spawned.standardError.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty { handle.readabilityHandler = nil } else { stderrTail.append(chunk) }
+        }
+
         let completion = DispatchSemaphore(value: 0)
         var terminal: AgentCompactionLifecycleEvent?
         var compactionTurnFailure: String?
@@ -468,6 +476,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
         defer {
             transport.shutdown()
             spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.harness)
+            spawned.standardError.readabilityHandler = nil
             queue.sync { child = nil; appServerTransport = nil }
         }
 
@@ -505,12 +514,16 @@ public final class CodexAgentRunner: @unchecked Sendable {
             completion.signal()
         }
         exitWatcher.start()
-        guard completion.wait(timeout: .now() + 120) == .success else {
-            throw RunError.appServerFailed("timed out waiting for contextCompaction completion")
-        }
+        // Compaction is provider work, just like a normal turn: a large
+        // context or provider retry can legitimately take over two minutes.
+        // Wait for its terminal event; process exit (including Stop's group
+        // termination) also signals completion so cancellation cannot hang.
+        completion.wait()
         try throwStoppedIfRequested(stderr: "")
-        guard let terminal else {
-            throw RunError.appServerFailed(compactionTurnFailure ?? "contextCompaction completion not observed")
+        let outcome = queue.sync { (terminal: terminal, failure: compactionTurnFailure) }
+        guard let terminal = outcome.terminal else {
+            if let failure = outcome.failure { throw RunError.appServerFailed(failure) }
+            throw RunError.exitedMidTurn(stderr: stderrTail.text)
         }
         if terminal.phase == .failed {
             throw RunError.appServerFailed(terminal.errorMessage ?? "compaction failed")
