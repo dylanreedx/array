@@ -87,11 +87,3 @@ final class ExternalSessionMonitor {
         let discovery = ExternalSessionDiscovery()
     }
 }
-
-/// Which face an agent tile is showing. Stream D's `Array | Terminal` switch
-/// owns the real answer; until it is wired the monitor's own evidence is used
-/// (a claude carrying the agent's tag with `ARRAY_AGENT_FACE=terminal`).
-enum AgentTileFace: Equatable {
-    case array
-    case terminal
-}
