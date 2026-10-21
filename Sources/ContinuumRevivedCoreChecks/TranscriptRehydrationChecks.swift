@@ -21,6 +21,7 @@ func runTranscriptRehydrationChecks() {
     runPiSessionTranscriptParseChecks()
     runCodexSessionTranscriptParseChecks()
     runCodexItemCompletedMessageChecks()
+    runTranscriptRehydrationTimingChecks()
     runTranscriptRehydrationBoundChecks()
     #if os(macOS)
     runTranscriptRehydrationDispatchChecks()
@@ -595,3 +596,59 @@ private func runTranscriptRehydrationDispatchChecks() {
     }
 }
 #endif
+
+private func runTranscriptRehydrationTimingChecks() {
+    let base = Date(timeIntervalSince1970: 1_792_490_400)
+    let fixtures: [(String, RehydratedTranscript)] = [
+        ("claude", ClaudeSessionTranscriptReader.parse(lines: [
+            #"{"timestamp":"2026-10-20T10:00:00Z","type":"user","message":{"content":"prompt"}}"#,
+            #"{"timestamp":"2026-10-20T10:10:00.000Z","type":"assistant","message":{"content":[{"type":"text","text":"answer"}]}}"#,
+            #"{"timestamp":"2026-10-20T11:00:00Z","type":"user","message":{"content":"next"}}"#,
+        ], threadId: "claude-time")),
+        ("pi", PiSessionTranscriptReader.parse(lines: [
+            #"{"type":"message","message":{"timestamp":1792490400000,"role":"user","content":"prompt"}}"#,
+            #"{"type":"message","message":{"timestamp":1792491000000,"role":"assistant","content":[{"type":"text","text":"answer"}]}}"#,
+            #"{"type":"message","message":{"timestamp":1792494000000,"role":"user","content":"next"}}"#,
+        ], threadId: "pi-time")),
+        ("codex", CodexSessionTranscriptReader.parse(lines: [
+            #"{"timestamp":"2026-10-20T10:00:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"prompt"}}"#,
+            #"{"timestamp":"2026-10-20T10:10:00.000Z","type":"event_msg","payload":{"type":"agent_message","message":"answer"}}"#,
+            #"{"timestamp":"2026-10-20T11:00:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"next"}}"#,
+        ], threadId: "codex-time")),
+    ]
+    for (name, transcript) in fixtures {
+        expect(transcript.steps.count == transcript.stepTimestamps.count,
+               "\(name): every restored step must retain its own optional timestamp")
+        let promptIndex = transcript.steps.firstIndex { if case .userPrompt("prompt") = $0 { return true }; return false }!
+        let completedIndex = transcript.steps.firstIndex { if case .event(.turnCompleted) = $0 { return true }; return false }!
+        expect(transcript.stepTimestamps[promptIndex] == base,
+               "\(name): original prompt instant was lost")
+        expect(transcript.stepTimestamps[completedIndex] == base.addingTimeInterval(600),
+               "\(name): closing a turn must use its last source record, excluding the next prompt's idle gap")
+    }
+    let unknown = ClaudeSessionTranscriptReader.parse(lines: [
+        #"{"timestamp":"invalid","type":"user","message":{"content":"prompt"}}"#,
+        #"{"type":"assistant","message":{"content":[{"type":"text","text":"answer"}]}}"#,
+    ], threadId: "unknown-time")
+    expect(!unknown.steps.isEmpty && unknown.stepTimestamps.allSatisfy { $0 == nil },
+           "missing or malformed source dates must remain unknown instead of using replay time")
+    let clipped = ClaudeSessionTranscriptReader.parse(lines: [
+        #"{"timestamp":"2026-10-20T10:00:00Z","type":"user","message":{"content":"prompt"}}"#,
+        #"{"timestamp":"2026-10-20T10:10:00Z","type":"assistant","message":{"content":[{"type":"text","text":"answer"}]}}"#,
+    ], threadId: "clipped-time", limits: RehydrationLimits(maxMessages: 1))
+    var clippedProjection = AgentTranscriptProjection(threadId: "clipped-time")
+    for (index, step) in clipped.steps.enumerated() {
+        AgentTranscriptClock.withWallClock(clipped.stepTimestamps[index]) {
+            switch step {
+            case .userPrompt(let text): clippedProjection.appendUserPrompt(text)
+            case .event(let event): clippedProjection.ingest(event)
+            case .observation: break
+            }
+        }
+    }
+    expect(clipped.omittedEarlier && clippedProjection.document.entries.last?.turnTiming?.duration == nil,
+           "truncated history without its prompt must not invent a shorter total from its first retained answer")
+    let compatibility = RehydratedTranscript(steps: [.userPrompt("legacy")], restoredMessageCount: 1, omittedEarlier: false)
+    expect(compatibility.stepTimestamps.count == 1 && compatibility.stepTimestamps[0] == nil,
+           "existing callers that provide no dates must retain unknown timestamps")
+}

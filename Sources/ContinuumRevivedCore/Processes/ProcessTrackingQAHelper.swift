@@ -20,6 +20,23 @@ public enum ProcessTrackingQAHelper {
         guard let mode = arguments.first, arguments.count >= 2 else { Foundation.exit(64) }
         let output = arguments[1]
         switch mode {
+        case "portless-agent":
+            // A real tool shell with a long-running child, and no socket. The
+            // witness decides when the CLI returns, after observing the job.
+            usleep(2_500_000)
+            let shell = Process()
+            shell.executableURL = URL(fileURLWithPath: "/bin/sh")
+            // Deliberately scrub the owner tag: attribution must first use
+            // ancestry, then retain that established ownership after adoption.
+            shell.environment = ["PATH": "/usr/bin:/bin"]
+            shell.arguments = ["-c", "printf '%s' \"$$\" > \"$1\"; /bin/sleep 60 & wait",
+                               "array-portless-script", output + "/script.pid"]
+            do { try shell.run() } catch { Foundation.exit(70) }
+            let deadline = Date().addingTimeInterval(45)
+            while !FileManager.default.fileExists(atPath: output + "/finish-agent"), Date() < deadline {
+                usleep(20_000)
+            }
+            Foundation.exit(0)
         case "list-fds":
             let open = (0..<1024).filter { fcntl(Int32($0), F_GETFD) != -1 }
             try? open.map(String.init).joined(separator: " ").write(toFile: output, atomically: true, encoding: .utf8)

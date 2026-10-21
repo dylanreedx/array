@@ -154,7 +154,7 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
     public init(
         threadId: String,
         monotonicNow: @escaping @Sendable () -> TimeInterval,
-        wallClockNow: @escaping @Sendable () -> Date? = { Date() }
+        wallClockNow: @escaping @Sendable () -> Date? = { AgentTranscriptClock.entryDate() }
     ) {
         semanticProjection = AgentTranscriptProjection(
             threadId: threadId, monotonicNow: monotonicNow, wallClockNow: wallClockNow)

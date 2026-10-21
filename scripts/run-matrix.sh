@@ -437,6 +437,10 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 # listening ports, Stop, and that agents no longer inherit the app's
 # descriptors. Real processes: a setsid'd job and a scrubbed-environment job.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-process-tracking-check
+# Complete request clocks and original restore timestamps must run even when
+# an earlier full-CoreChecks section is KNOWN-RED.
+run_leg .build/debug/ContinuumRevivedCoreChecks --agent-transcript-projection-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --transcript-rehydration-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
 # Film phase 1: the pairing page and the user-facing copy that must say Array.

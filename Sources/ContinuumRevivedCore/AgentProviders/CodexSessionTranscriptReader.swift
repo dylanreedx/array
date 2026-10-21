@@ -28,6 +28,12 @@ public enum CodexSessionTranscriptReader {
                   let payload = object["payload"] as? [String: Any],
                   let type = payload["type"] as? String else { continue }
 
+            let firstOutput = out.count
+            let timestamp = ManagedTranscriptRehydrator.timestamp(object["timestamp"])
+            defer {
+                for index in firstOutput..<out.count { out[index].timestamp = timestamp }
+            }
+
             switch (envelope, type) {
             case ("response_item", "context_compaction"),
                  ("response_item", "compaction"):

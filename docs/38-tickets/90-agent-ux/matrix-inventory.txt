@@ -28,6 +28,7 @@ check --agent-supervisor-check
 check --agent-tile-binding-check
 check --agent-tile-click-focus-check
 check --agent-tile-file-mention-check
+check --agent-transcript-projection-check
 check --ambient-tile-frame-space-check
 check --app-support-channel-check
 check --attention-notification-check
@@ -228,6 +229,7 @@ check --top-bar-icons-check
 check --topology-migration-check
 check --transcript-delta-index-oracle-check
 check --transcript-provider-parity-check
+check --transcript-rehydration-check
 check --transcript-rhythm-check
 check --transcript-turn-cards-check
 check --ui-baseline-check
@@ -582,6 +584,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-process-tracking-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-transcript-projection-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --board-task-transcript-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --canvas-background-model-check
@@ -604,6 +607,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-c
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --registry-ownership-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-lifecycle-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --transcript-rehydration-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --unreadable-canvas-store-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check

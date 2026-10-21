@@ -24,6 +24,7 @@ private final class DeterministicProjectionClock: @unchecked Sendable {
 }
 
 func runAgentTranscriptProjectionChecks() {
+    checkSteeringPreservesRequestTiming()
     let thread = "projection-thread"
     var projection = AgentTranscriptProjection(threadId: thread)
 
@@ -207,7 +208,8 @@ func runAgentTranscriptProjectionChecks() {
     expect(finalBlock.id == firstBlockID,
            "production projection must reconcile replaceMarkup blocks by stable identity across paced parses")
     expect(finalBlock.revision <= UInt64(coalesced.streamingMarkupParseCount + 1) &&
-           coalesced.document.version <= UInt64(coalesced.streamingMarkupParseCount + 2),
+           // One begin, one entry finish and one request timing record.
+           coalesced.document.version <= UInt64(coalesced.streamingMarkupParseCount + 3),
            "projection/reducer revisions must be bounded by parsed presentations, not 5,000 raw deltas; block revision \(finalBlock.revision), document version \(coalesced.document.version), parses \(coalesced.streamingMarkupParseCount)")
     expect(coalescedEntry.blocks.map(resetRevisions) == coalescedOneShot,
            "coalesced 5,000-delta assistant Markdown with Unicode must converge with one-shot parsing")
@@ -390,4 +392,55 @@ func runAgentReferenceProjectionChecks() {
     let roundTrip = try! JSONDecoder().decode(AgentRuntimeEvent.self, from: JSONEncoder().encode(event))
     expect(roundTrip == event, "safe child lifecycle events must round-trip for encrypted transcript sync")
     print("Agent reference projection checks passed: stable identity, source correlation, Codable, and replay deduplication")
+}
+
+/// A consumed steer is another prompt inside the same live request, not a
+/// fresh clock. Repeated start and terminal frames must not shorten it either.
+private func checkSteeringPreservesRequestTiming() {
+    let clock = DeterministicProjectionClock()
+    let thread = "steering-timing"
+    var projection = AgentTranscriptProjection(
+        threadId: thread, monotonicNow: clock.now,
+        wallClockNow: { Date(timeIntervalSince1970: clock.now()) })
+    projection.appendUserPrompt("Run the long tests")
+    projection.ingest(.turnStarted(threadId: thread, turnId: "work"))
+    clock.advance(500)
+    projection.appendUserPrompt("Also check their exit codes")
+    projection.ingest(.turnStarted(threadId: thread, turnId: "work"))
+    clock.advance(100)
+    projection.ingest(.turnCompleted(threadId: thread, turnId: "work", outcome: .completed, errorMessage: nil))
+    let timing = projection.document.entries.last?.turnTiming
+    expect(timing?.duration == 600,
+           "steering must preserve the entire request clock, not just time since the latest prompt; got \(String(describing: timing?.duration))")
+    clock.advance(100)
+    projection.ingest(.turnCompleted(threadId: thread, turnId: "work", outcome: .completed, errorMessage: nil))
+    expect(projection.document.entries.last?.turnTiming == timing,
+           "a duplicate terminal must not extend settled work time")
+    projection.appendUserPrompt("A separate request")
+    clock.advance(20)
+    projection.ingest(.turnCompleted(threadId: thread, turnId: "next", outcome: .completed, errorMessage: nil))
+    expect(projection.document.entries.last?.turnTiming?.duration == 20,
+           "a new request after completion must start its own clock")
+
+    var commands = AgentTranscriptProjection(
+        threadId: thread, monotonicNow: clock.now,
+        wallClockNow: { Date(timeIntervalSince1970: clock.now()) })
+    commands.appendUserPrompt("/rename Checks") // Accepted locally: no runtime turn.
+    clock.advance(3_600)
+    commands.appendUserPrompt("Run the next check")
+    commands.ingest(.turnStarted(threadId: thread, turnId: "after-command"))
+    clock.advance(20)
+    commands.ingest(.turnCompleted(threadId: thread, turnId: "after-command", outcome: .completed, errorMessage: nil))
+    expect(commands.document.entries.last?.turnTiming?.duration == 20,
+           "an accepted local command must not add its following idle gap to the next request")
+    commands.appendUserPrompt("/compact")
+    commands.ingest(.itemStarted(threadId: thread, itemId: "compact", kind: .compaction, title: "Compacted"))
+    commands.ingest(.itemCompleted(threadId: thread, itemId: "compact", kind: .compaction, status: .completed))
+    clock.advance(3_600)
+    commands.appendUserPrompt("Work after compaction")
+    commands.ingest(.turnStarted(threadId: thread, turnId: "after-compact"))
+    clock.advance(20)
+    commands.ingest(.turnCompleted(threadId: thread, turnId: "after-compact", outcome: .completed, errorMessage: nil))
+    expect(commands.document.entries.last?.turnTiming?.duration == 20,
+           "idle compaction must not turn the following idle gap into request time")
 }

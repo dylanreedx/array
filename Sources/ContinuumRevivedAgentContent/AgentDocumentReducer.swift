@@ -246,6 +246,13 @@ public struct AgentDocumentReducer: Sendable {
             document.entries[entryIndex].finishedAt = createdAtProvider()
             updated = [id]
 
+        case let .completeTurn(entryID, startedAt):
+            let entryIndex = try requireEntry(entryID, .completeTurn)
+            guard document.entries[entryIndex].turnTiming == nil else { break }
+            document.entries[entryIndex].revision = try nextRevision(document.entries[entryIndex].revision, id: entryID)
+            document.entries[entryIndex].turnTiming = AgentTurnTiming(startedAt: startedAt, completedAt: createdAtProvider())
+            updated = [entryID]
+
         case let .removeEntry(id):
             let entryIndex = try requireEntry(id, .removeEntry)
             let entry = document.entries.remove(at: entryIndex)

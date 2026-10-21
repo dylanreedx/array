@@ -58,6 +58,23 @@ public enum AgentEntryLifecycle: Codable, Equatable, Sendable {
     case finished
 }
 
+/// The request's full wall-clock interval. A missing source endpoint remains
+/// unknown; it must not be replaced by the span of whichever items were dated.
+public struct AgentTurnTiming: Codable, Equatable, Sendable {
+    public var startedAt: Date?
+    public var completedAt: Date?
+
+    public init(startedAt: Date?, completedAt: Date?) {
+        self.startedAt = startedAt
+        self.completedAt = completedAt
+    }
+
+    public var duration: TimeInterval? {
+        guard let startedAt, let completedAt else { return nil }
+        return max(0, completedAt.timeIntervalSince(startedAt))
+    }
+}
+
 /// One provider/local item in transcript order.
 public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
     public let id: AgentNodeID
@@ -90,6 +107,16 @@ public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
     /// rather than pretend the turn ended now.
     public var finishedAt: Date?
 
+    /// The enclosing request's terminal event, which may arrive after its last
+    /// item finished. Kept separately so entry duration and turn duration agree
+    /// with their respective lifetimes, including after saving and restoring.
+    public var turnTiming: AgentTurnTiming?
+
+    public var durationEnd: Date? {
+        if let turnTiming { return turnTiming.completedAt }
+        return finishedAt
+    }
+
     public init(
         id: AgentNodeID,
         revision: UInt64 = 0,
@@ -98,7 +125,8 @@ public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
         lifecycle: AgentEntryLifecycle = .open(markupBlockID: nil),
         blocks: [AgentBlock] = [],
         createdAt: Date? = nil,
-        finishedAt: Date? = nil
+        finishedAt: Date? = nil,
+        turnTiming: AgentTurnTiming? = nil
     ) {
         self.id = id
         self.revision = revision
@@ -108,10 +136,11 @@ public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
         self.blocks = blocks
         self.createdAt = createdAt
         self.finishedAt = finishedAt
+        self.turnTiming = turnTiming
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, revision, role, provenance, lifecycle, blocks, createdAt, finishedAt
+        case id, revision, role, provenance, lifecycle, blocks, createdAt, finishedAt, turnTiming
     }
 
     public init(from decoder: Decoder) throws {
@@ -125,6 +154,7 @@ public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
         blocks = try container.decode([AgentBlock].self, forKey: .blocks)
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt)
         finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt)
+        turnTiming = try container.decodeIfPresent(AgentTurnTiming.self, forKey: .turnTiming)
     }
 }
 

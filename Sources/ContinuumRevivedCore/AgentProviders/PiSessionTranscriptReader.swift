@@ -51,6 +51,13 @@ public enum PiSessionTranscriptReader {
             guard let object = ManagedTranscriptRehydrator.jsonObject(line),
                   let type = object["type"] as? String else { continue }
 
+            let firstOutput = out.count
+            let timestamp = ManagedTranscriptRehydrator.timestamp(object["timestamp"])
+                ?? ManagedTranscriptRehydrator.timestamp((object["message"] as? [String: Any])?["timestamp"])
+            defer {
+                for index in firstOutput..<out.count { out[index].timestamp = timestamp }
+            }
+
             // B6.3 — pi never rewrites or truncates the session file at
             // compaction (verified against `dist/core/session-manager.js`'s
             // `appendCompaction`/`_appendEntry`: strictly append-only). The

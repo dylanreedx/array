@@ -54,11 +54,17 @@ public enum RehydratedTranscriptStep: Equatable, Sendable {
 /// so nothing is silently lost (AGENTS.md "no silent caps").
 public struct RehydratedTranscript: Equatable, Sendable {
     public var steps: [RehydratedTranscriptStep]
+    /// Source instants aligned with `steps`; nil means the log did not say.
+    public var stepTimestamps: [Date?]
     public var restoredMessageCount: Int
     public var omittedEarlier: Bool
 
-    public init(steps: [RehydratedTranscriptStep], restoredMessageCount: Int, omittedEarlier: Bool) {
+    public init(
+        steps: [RehydratedTranscriptStep], restoredMessageCount: Int, omittedEarlier: Bool,
+        stepTimestamps: [Date?] = []
+    ) {
         self.steps = steps
+        self.stepTimestamps = steps.indices.map { stepTimestamps.indices.contains($0) ? stepTimestamps[$0] : nil }
         self.restoredMessageCount = restoredMessageCount
         self.omittedEarlier = omittedEarlier
     }
@@ -137,6 +143,8 @@ struct NormalizedTranscriptMessage: Equatable {
     var compactionBoundaryID: String?
     var compactionTrigger: AgentCompactionTrigger = .unknown("")
     var compactionProvider: String?
+    /// The source record instant, never the time the transcript was replayed.
+    var timestamp: Date? = nil
 }
 
 public enum ManagedTranscriptRehydrator {
@@ -197,6 +205,13 @@ public enum ManagedTranscriptRehydrator {
         }
 
         var steps: [RehydratedTranscriptStep] = []
+        var stepTimestamps: [Date?] = []
+        var currentTimestamp: Date?
+        var lastTurnTimestamp: Date?
+        func append(_ step: RehydratedTranscriptStep) {
+            steps.append(step)
+            stepTimestamps.append(currentTimestamp)
+        }
         var turnCounter = 0
         var openTurnId: String?
         var itemKinds: [String: ItemKind] = [:]
@@ -205,7 +220,10 @@ public enum ManagedTranscriptRehydrator {
 
         func closeTurn() {
             guard let turnId = openTurnId else { return }
-            steps.append(.event(.turnCompleted(
+            let nextTimestamp = currentTimestamp
+            currentTimestamp = lastTurnTimestamp
+            defer { currentTimestamp = nextTimestamp }
+            append(.event(.turnCompleted(
                 threadId: threadId, turnId: turnId, outcome: .completed, errorMessage: nil)))
             openTurnId = nil
         }
@@ -213,25 +231,33 @@ public enum ManagedTranscriptRehydrator {
             if let turnId = openTurnId { return turnId }
             turnCounter += 1
             let turnId = "rehydrated-t\(turnCounter)"
-            steps.append(.event(.turnStarted(threadId: threadId, turnId: turnId)))
+            // This boundary is synthesized from an answer/tool record, not an
+            // observed request start. A retained prompt already owns its clock;
+            // if a cap dropped it, the original start must remain unknown.
+            let recordTimestamp = currentTimestamp
+            currentTimestamp = nil
+            append(.event(.turnStarted(threadId: threadId, turnId: turnId)))
+            currentTimestamp = recordTimestamp
             openTurnId = turnId
             return turnId
         }
 
         for message in kept {
+            currentTimestamp = message.timestamp
             switch message.role {
             case .userPrompt:
                 closeTurn()
-                steps.append(.userPrompt(message.text))
+                append(.userPrompt(message.text))
                 if message.countsAsMessage { messageCount += 1 }
             case .assistant:
+                lastTurnTimestamp = message.timestamp
                 let turnId = ensureTurn()
                 if !message.reasoning.isEmpty {
-                    steps.append(.event(.contentDelta(
+                    append(.event(.contentDelta(
                         threadId: threadId, turnId: turnId, streamKind: .reasoning, delta: message.reasoning)))
                 }
                 if !message.text.isEmpty {
-                    steps.append(.event(.contentDelta(
+                    append(.event(.contentDelta(
                         threadId: threadId, turnId: turnId, streamKind: .assistant, delta: message.text)))
                 }
                 for call in message.toolCalls {
@@ -257,7 +283,7 @@ public enum ManagedTranscriptRehydrator {
                     // to have edited it.
                     if !call.fileChanges.isEmpty,
                        let path = call.absolutePath, (path as NSString).isAbsolutePath {
-                        steps.append(.observation(.toolActivity(
+                        append(.observation(.toolActivity(
                             itemId: call.id,
                             activity: AgentObservedActivity(
                                 operation: .editing,
@@ -267,7 +293,7 @@ public enum ManagedTranscriptRehydrator {
                                 evidenceSource: .toolEvent))))
                     }
                     if !call.fileChanges.isEmpty {
-                        steps.append(.observation(.toolDetail(
+                        append(.observation(.toolDetail(
                             itemId: call.id,
                             detail: AgentToolDetailObservation(
                                 phase: .started,
@@ -275,14 +301,15 @@ public enum ManagedTranscriptRehydrator {
                                 fileChanges: call.fileChanges,
                                 observedAt: now()))))
                     }
-                    steps.append(.event(.itemStarted(
+                    append(.event(.itemStarted(
                         threadId: threadId, itemId: call.id, kind: kind, title: title)))
                 }
                 if message.countsAsMessage { messageCount += 1 }
             case .toolResult:
+                lastTurnTimestamp = message.timestamp
                 _ = ensureTurn()
                 let kind = itemKinds[message.toolCallId] ?? .commandExecution
-                steps.append(.event(.itemCompleted(
+                append(.event(.itemCompleted(
                     threadId: threadId,
                     itemId: message.toolCallId,
                     kind: kind,
@@ -295,7 +322,7 @@ public enum ManagedTranscriptRehydrator {
                 // is a system-level boundary, not part of a turn's own work.
                 compactionCounter += 1
                 let itemID = message.compactionBoundaryID ?? "rehydrated-compaction-\(compactionCounter)"
-                steps.append(.event(.compactionChanged(
+                append(.event(.compactionChanged(
                     threadId: threadId,
                     event: AgentCompactionLifecycleEvent(
                         boundaryID: itemID,
@@ -333,19 +360,35 @@ public enum ManagedTranscriptRehydrator {
                     postTokensEstimated: message.compactionTokensAfter == nil
                         ? nil : (message.compactionAfterEstimated ? true : nil))
                 let compactionKind = ItemKind.compaction
-                steps.append(.event(.itemStarted(
+                append(.event(.itemStarted(
                     threadId: threadId, itemId: itemID, kind: compactionKind, title: title)))
-                steps.append(.event(.itemCompleted(
+                append(.event(.itemCompleted(
                     threadId: threadId, itemId: itemID, kind: compactionKind, status: .completed)))
             }
         }
         closeTurn()
 
         return RehydratedTranscript(
-            steps: steps, restoredMessageCount: messageCount, omittedEarlier: omitted)
+            steps: steps, restoredMessageCount: messageCount, omittedEarlier: omitted,
+            stepTimestamps: stepTimestamps)
     }
 
     // MARK: - JSON helper (cross-platform)
+
+    /// Provider session envelopes use ISO 8601; Pi also retains epoch
+    /// milliseconds on its message. Malformed/missing values stay unknown.
+    static func timestamp(_ value: Any?) -> Date? {
+        if let number = value as? NSNumber {
+            let milliseconds = number.doubleValue
+            return milliseconds.isFinite ? Date(timeIntervalSince1970: milliseconds / 1_000) : nil
+        }
+        guard let text = value as? String else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: text) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: text)
+    }
 
     static func jsonObject(_ line: String) -> [String: Any]? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)

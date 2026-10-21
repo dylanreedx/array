@@ -15,6 +15,7 @@ public enum AgentDocumentMutation: Codable, Equatable, Sendable {
     case upsertStructured(entryID: AgentNodeID, block: AgentBlock)
     case completeBlock(id: AgentNodeID, status: AgentItemStatus)
     case finishEntry(id: AgentNodeID)
+    case completeTurn(entryID: AgentNodeID, startedAt: Date?)
     case removeEntry(id: AgentNodeID)
 }
 
@@ -27,6 +28,7 @@ public enum AgentDocumentMutationOperation: String, Codable, Equatable, Sendable
     case upsertStructured
     case completeBlock
     case finishEntry
+    case completeTurn
     case removeEntry
 }
 
