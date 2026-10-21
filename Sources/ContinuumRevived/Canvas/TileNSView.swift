@@ -159,6 +159,13 @@ class TileNSView: NSView, TokenThemed {
         titleBar?.setFaceSwitch(state)
     }
 
+    /// Actions VoiceOver offers on the band's always-present controls (× and
+    /// ⋯), so they stay reachable when the band has no room for a control of
+    /// their own. The tile view itself is not an accessibility element.
+    func setTitleBarAccessibilityActions(_ actions: [NSAccessibilityCustomAction]?) {
+        titleBar?.setBandAccessibilityActions(actions)
+    }
+
     /// A switch segment was pressed. Agent tiles route this to their flip.
     func faceSwitchRequested(_ face: AgentTileFace) {}
 
@@ -1651,6 +1658,11 @@ private final class TitleBarView: NSView, TokenThemed {
         }
         needsLayout = true
         invalidateChrome()
+    }
+
+    func setBandAccessibilityActions(_ actions: [NSAccessibilityCustomAction]?) {
+        closeButton.setAccessibilityCustomActions(actions)
+        actionsButton?.setAccessibilityCustomActions(actions)
     }
 
     @objc private func handleFaceSegment(_ sender: FaceSegmentControl) {

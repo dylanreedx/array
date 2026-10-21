@@ -1041,6 +1041,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// The flip to Terminal is waiting for the turn to end (edge case 9).
     private(set) var pendingTerminalFlip = false
     private let faceFlipBanner = AgentFaceFlipBanner(frame: .zero)
+    private var terminalFaceReattachments = 0
     /// A relaunch reattached in the Terminal face before the Array face showed
     /// any history; the flip back restores the history before the mark too.
     private var terminalFaceRestoresPrefix = false
@@ -1102,11 +1103,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     private func refreshFaceAccessibilityActions() {
         guard supportsTerminalFace || terminalFaceSession != nil else {
-            setAccessibilityCustomActions(nil)
+            setTitleBarAccessibilityActions(nil)
             return
         }
         let name = face == .array ? "Switch to Terminal" : "Switch to Array"
-        setAccessibilityCustomActions([NSAccessibilityCustomAction(name: name) { [weak self] in
+        setTitleBarAccessibilityActions([NSAccessibilityCustomAction(name: name) { [weak self] in
             self?.toggleFace() ?? false
         }])
     }
@@ -1218,6 +1219,21 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             guard let self, let session, self.terminalFaceSession === session else { return }
             self.flipBackToArrayFace(from: session)
         }
+        session.onClientDetached = { [weak self, weak session] in
+            guard let self, let session, self.terminalFaceSession === session,
+                  let state = self.tile.metadata.agentTerminalFace else { return }
+            self.terminalFaceSession = nil
+            session.detachSurface()
+            // A client that keeps dying is not worth chasing: end claude, and
+            // the next exit flips the tile back with nothing left writing.
+            self.terminalFaceReattachments += 1
+            guard self.terminalFaceReattachments <= 3 else {
+                session.endClaude()
+                self.flipBackToArrayFace(from: session)
+                return
+            }
+            self.startTerminalFaceSession(state: state, launch: launch, environment: environment)
+        }
         session.onSessionChange = { [weak self] sessionId in
             guard let self, var state = self.tile.metadata.agentTerminalFace else { return }
             // Persisted, so a relaunch that finds tmux gone still adopts it.
@@ -1247,6 +1263,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// claude left (`/exit`, a crash, or Array ended it). Never closes the
     /// tile: the Array face comes back with the terminal's turns appended.
     private func flipBackToArrayFace(from session: AgentTerminalFaceSession) {
+        terminalFaceReattachments = 0
         let state = tile.metadata.agentTerminalFace
         // Every session the process passed through: the first from the mark,
         // any `/clear` or `/resume` moved it to from their start.

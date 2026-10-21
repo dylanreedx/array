@@ -316,6 +316,23 @@ enum AgentFaceChecks {
                 }
             }
         }
+        // Codex and Pi have no Terminal face: no switch, no menu item.
+        for (harness, model) in [(AgentHarness.codex, "openai-codex/gpt-5.6-sol"), (.pi, "openai-codex/gpt-5.6-sol")] {
+            let other = fixture.supervisor.spawn(role: nil, prompt: nil, cwd: fixture.work, harness: harness, model: model, thinking: "low")
+            let tile = Tile(id: UUID(), kind: .managedAgent, title: "other", frame: TileFrame(x: 40, y: 40, width: 900, height: 520),
+                            zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed"))
+            let view = ManagedAgentTileNSView(tile: tile)
+            fixture.canvas.install(tileView: view, for: tile)
+            view.terminalFaceEnvironment = environment
+            view.attach(agentID: other, supervisor: fixture.supervisor)
+            fixture.canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+            view.layoutSubtreeIfNeeded()
+            try expect(view.qaBandControlFrames.allSatisfy { !$0.name.hasPrefix("face.") } && !view.toggleFace()
+                       && !view.titleBarContextMenuForQA().items.contains { $0.identifier?.rawValue == "agentTile.switchFace" },
+                       "a \(harness.rawValue) agent must show no Terminal face switch")
+            lines.append("\(harness.rawValue): no switch")
+            fixture.canvas.removeTile(id: tile.id)
+        }
         // The design's own widths, at zoom 1: labels and pill at 900, labels at
         // 480, icons at the 320 floor.
         func modeAt(_ width: Double) -> String? {
@@ -612,6 +629,16 @@ extension AgentFaceChecks {
         try expect(fixture.pump(until: { view.face == .terminal && launches().count == 2 }, timeout: 10),
                    "the second flip must start claude again")
         try expect(fixture.pump(until: { tmuxSessionAlive(view.tile.id) }, timeout: 5), "claude must run in tmux")
+        // A detached tmux client is not claude leaving: the face attaches again.
+        let firstSurface = view.terminalFaceSession
+        _ = try? ProcessTmuxControl(tmuxPath: tmuxPath, defaults: fixture.defaults)
+            .run(["detach-client", "-s", TmuxSession.sessionName(tileId: view.tile.id)])
+        try expect(fixture.pump(until: { view.terminalFaceSession != nil && view.terminalFaceSession !== firstSurface }, timeout: 8),
+                   "a detached client must be replaced by a new one")
+        fixture.pump(0.5)
+        try expect(view.face == .terminal && launches().count == 2 && tmuxSessionAlive(view.tile.id),
+                   "after a client detach the same claude must still run in the Terminal face")
+        log.append("detached client: reattached to the same claude")
         let persisted = try fixture.canvas.tileRecord(for: view.tile.id).unwrap("the tile record")
         try expect(persisted.metadata.agentTerminalFace != nil, "the Terminal face must be persisted")
         view.prepareForRemovalFromScene()

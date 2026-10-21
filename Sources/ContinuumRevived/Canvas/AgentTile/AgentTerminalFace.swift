@@ -55,6 +55,9 @@ final class AgentTerminalFaceSession {
     var onExit: (() -> Void)?
     /// Called when claude reports a different session id than the last one.
     var onSessionChange: ((String) -> Void)?
+    /// The surface ended but claude did not (tmux still holds it — its client
+    /// was detached, or the app is going away). The tile attaches again.
+    var onClientDetached: (() -> Void)?
     /// Array is tearing the surface down on purpose (a workspace switch, a
     /// close): the exit that follows is not claude leaving.
     private var detaching = false
@@ -189,11 +192,11 @@ final class AgentTerminalFaceSession {
         pollTimer?.invalidate()
         pollTimer = nil
         guard !detaching else { return }
-        // The tmux CLIENT ended. If claude is still running behind it (the
-        // tmux prefix and `d`), it is ended too: flipping back while it runs
-        // would put a second writer on the session.
+        // The tmux CLIENT ended. Only a gone session means claude left;
+        // flipping back while it still runs would put a second writer on it.
         if tmuxSessionName != nil, Self.tmuxSessionExists(tileId: tileId, environment: environment) {
-            endClaude()
+            onClientDetached?()
+            return
         }
         onExit?()
     }
