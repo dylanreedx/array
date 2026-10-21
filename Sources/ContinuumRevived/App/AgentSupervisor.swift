@@ -3331,6 +3331,9 @@ final class AgentSupervisor {
         if let host = externalHolds[id] {
             return "Paused while this session is also open in \(host), so the two don't overwrite each other."
         }
+        if adoptingSessionHistory.contains(id) {
+            return "Loading this session's history before continuing here."
+        }
         if waitsForSessionDiscovery(record) {
             return "Checking whether another app has this session open first."
         }
@@ -3706,6 +3709,9 @@ final class AgentSupervisor {
         if record.externalSession != nil || externalHolds[id] != nil {
             return .unavailable("Another app holds this session.")
         }
+        if adoptingSessionHistory.contains(id) {
+            return .unavailable("Loading this session's history before continuing here.")
+        }
         if let snapshot = turnSnapshot(for: id), case .needsAction = snapshot.state {
             return .unavailable("Answer the request first — it belongs to the Array face.")
         }
@@ -3813,6 +3819,7 @@ final class AgentSupervisor {
     /// app it was never taken from. One session, one writer.
     func isSessionHeld(_ id: AgentID) -> Bool {
         terminalFaceAgents.contains(id) || externalHolds[id] != nil || records[id]?.externalSession != nil
+            || adoptingSessionHistory.contains(id)
     }
 
     func externalHold(for id: AgentID) -> String? { externalHolds[id] }
@@ -3911,6 +3918,26 @@ final class AgentSupervisor {
         }
         transcriptProjections[id] = projection
         scheduleTranscriptPersist(for: id, final: true)
+    }
+
+    /// Adoption reads history before the agent may make its first projection.
+    /// A tile opened during the read receives the same restore as later tiles.
+    private var adoptingSessionHistory: Set<AgentID> = []
+
+    func beginAdoptingSessionHistory(for id: AgentID) {
+        adoptingSessionHistory.insert(id)
+        notifyTurnCapabilitiesChanged(id)
+    }
+
+    func finishAdoptingSessionHistory(_ transcript: RehydratedTranscript, for id: AgentID, url: URL, offset: UInt64) {
+        guard adoptingSessionHistory.remove(id) != nil else { return }
+        defer { notifyTurnCapabilitiesChanged(id) }
+        guard records[id] != nil else { return }
+        setSessionFileMark(id, url: url, offset: offset)
+        if rehydratedTranscripts[id] == nil, !transcript.steps.isEmpty {
+            seedRehydratedTranscript(transcript, for: id)
+            outsideHistoryObservers[id]?.values.forEach { $0(.restored(transcript)) }
+        }
     }
 
     // MARK: - Turns Array did not run: one rule for history (.plans/79 review)
@@ -4106,6 +4133,8 @@ final class AgentSupervisor {
     // MARK: Terminal face lifecycle, by agent (review #9)
 
     private var terminalFaceWatches: [AgentID: AgentTerminalFaceWatch] = [:]
+    /// Clear the saved face even when its tile was evicted before claude left.
+    var onTerminalFaceEnded: ((AgentID, UUID) -> Void)?
     /// Tiles whose face ended this launch; the face their canvas still
     /// remembers is over, and its turns are in the transcript already.
     private var endedTerminalFaceTiles: Set<UUID> = []
@@ -4169,12 +4198,15 @@ final class AgentSupervisor {
                 if let watch, self.terminalFaceWatches[id] === watch { self.terminalFaceWatches[id] = nil }
                 if let faceTile { self.endedTerminalFaceTiles.insert(faceTile) }
                 let turns = self.applyOutsideRead(read, for: id, place: "Terminal")
-                self.terminalFaceAgents.remove(id)
-                self.terminalFaceBusyAgents.remove(id)
                 self.adoptTerminalFaceOutcome(
                     for: id, sessionId: sessionIds.last, model: model, tookTurns: !read.lines.isEmpty)
-                self.notifyTurnCapabilitiesChanged(id)
                 watch?.end(appendedTurns: turns)
+                if let faceTile { self.onTerminalFaceEnded?(id, faceTile) }
+                // Release only after the old face is cleared: a capability
+                // observer can start another face synchronously.
+                self.terminalFaceAgents.remove(id)
+                self.terminalFaceBusyAgents.remove(id)
+                self.notifyTurnCapabilitiesChanged(id)
             }
         }
     }

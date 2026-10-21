@@ -163,9 +163,9 @@ extension AppDelegate {
         guard let record = agentSupervisor.records[agentId], let link = record.externalSession else { return }
         let view = record.tileId.flatMap { canvasView?.tileView(for: $0) as? ManagedAgentTileNSView }
         view?.stopFollowingSessionFile(catchUp: true)
+        seedAdoptedTranscript(agentId, link: link)
         agentSupervisor.adoptExternalSession(agentId)
         view?.applySessionHandoff(nil)
-        seedAdoptedTranscript(agentId, link: link)
         pushExternalSessionRows()
     }
 
@@ -177,10 +177,10 @@ extension AppDelegate {
               link.provider == .claude else { return }
         let view = record.tileId.flatMap { canvasView?.tileView(for: $0) as? ManagedAgentTileNSView }
         view?.stopFollowingSessionFile(catchUp: true)
+        seedAdoptedTranscript(agentId, link: link)
         agentSupervisor.linkExternalSession(agentId, nil)
         agentSupervisor.markSessionFork(agentId, from: link.sessionId)
         view?.applySessionHandoff(nil)
-        seedAdoptedTranscript(agentId, link: link)
     }
 
     /// Cancel on a waiting tile: it goes, and so does the agent it was — it
@@ -207,15 +207,14 @@ extension AppDelegate {
         let url = URL(fileURLWithPath: path)
         let threadId = "rehydrated-\(agentId.rawValue.uuidString)"
         let provider = link.provider
+        agentSupervisor.beginAdoptingSessionHistory(for: agentId)
         Task.detached(priority: .utility) { [weak self] in
             let tail = SessionFileTail.tail(in: url, maxBytes: RehydrationLimits().maxBytes)
             let transcript = provider == .claude
                 ? ClaudeSessionTranscriptReader.parse(lines: tail.lines, threadId: threadId, truncated: tail.truncated)
                 : CodexSessionTranscriptReader.parse(lines: tail.lines, threadId: threadId, truncated: tail.truncated)
             await MainActor.run {
-                guard let self, !transcript.steps.isEmpty,
-                      self.agentSupervisor.rehydratedTranscript(for: agentId) == nil else { return }
-                self.agentSupervisor.seedRehydratedTranscript(transcript, for: agentId)
+                self?.agentSupervisor.finishAdoptingSessionHistory(transcript, for: agentId, url: url, offset: tail.end)
             }
         }
     }

@@ -1,8 +1,9 @@
 # 79 — Session handoff: every agent session on the Mac, one tile with two faces
 
-Written 2026-10-20, before a compaction. Nothing in this plan is built yet,
-except the three reader fixes listed under "Landed". Read this file first,
-then look at `mocks/`.
+Design recorded 2026-10-20. Implementation is collected locally on
+`array/session-handoff`; the design and its original proof notes below are
+historical. See [verification and remaining scope](VERIFICATION.md) for the
+2026-10-21 review, fixes and check results. The feature has not been released.
 
 ## Why
 
@@ -39,8 +40,9 @@ terminal, without the tile ever going away.
   session here once the other one closes, and **Copy**, which forks it with
   Claude's `--fork-session` while the original keeps running. Clicking an
   "elsewhere" row first opens it read-only in a watch tile.
-- **One tile, two faces.** An `Array | Terminal` switch in the tile's title
-  band.
+- **One tile, two faces.** A compact Terminal icon toggle in the tile's title
+  band. Chat is the default. Settings → Agents can hide the icon; the menu
+  and ⌃⌘T remain available, and Terminal retains a visible return toggle.
   - The Terminal face runs `claude --resume <id>` in a Ghostty surface inside
     the same tile, with the same name, colour and sidebar row.
   - The tile never disappears.
@@ -231,18 +233,18 @@ before the fix and green after. Run it with `.build/debug/ContinuumRevivedCoreCh
   on-screen floor, and its own branch in `TitleBarView.hitTest` ahead of the
   drag fallback. **Not** the accessory slot.
 - **Width budget.** The ×, ⋯ and switch are placed first and never overlap.
-  As the band narrows, things give way in this order:
-  1. the title truncates;
-  2. the status pill goes (the in-body header still shows the status);
-  3. the switch drops its labels and shows icons only;
-  4. the switch leaves the band.
+  The switch uses one square icon slot, never labels or paired segments.
+  As the band narrows, the title truncates, the status pill goes (the in-body
+  header still shows the status), then the toggle leaves the band. Its 22px
+  screen-space hit floor and the title's grab area are preserved.
 
-  See `mocks/5-switch-at-every-width.png`.
+  The earlier mock `mocks/5-switch-at-every-width.png` shows the superseded
+  segmented version.
 - **Always reachable.** "Switch to Terminal / Array" is also in the ⋯ menu, on
   a keyboard shortcut, and an accessibility action.
 - **Fix the ⋯/× overlap in the same budget.**
-- **Selected segment** uses the app's neutral selected fill, not the system
-  blue.
+- **Active toggle** uses the app's neutral selected fill. Clicking it again
+  returns to chat; while waiting for a turn to end, it cancels the pending flip.
 - **Witness.** A real agent tile in a real canvas, at widths 320, 480 and 900,
   canvas zoom 0.1, 0.3, 1 and 2, and page zoom 80% and 150%. The check must:
   - send a real mouse down/up to the centre of every visible control and

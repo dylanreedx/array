@@ -446,6 +446,15 @@ enum ExternalSessionHandoffChecks {
         try expect(live.externalSession == nil && live.providerSessionId == sessionId,
                    "the process gone, the tile is the session's: providerSessionId == \(sessionId); got \(String(describing: live.providerSessionId))")
         try expect(view.sessionHandoffState == nil && !view.qaComposerHidden, "the banner goes and the composer comes back")
+        // The agent cannot start writing while its adopted history is still
+        // loading: that would create a projection without the earlier turns.
+        try expect(supervisor.sendRefusal(for: agentId) != nil,
+                   "Move here must hold sends until the adopted history has loaded")
+        let duringAdoption = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "During adoption", frame: TileFrame(x: 0, y: 0, width: 560, height: 620),
+            zPosition: .first, runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed-agent")))
+        duringAdoption.attach(agentID: agentId, supervisor: supervisor)
+        defer { duringAdoption.detach() }
         // The last read runs off the main thread (review #12).
         let lastRead = ["Why is the upload test flaky?", "The upload test races", "One last thing in cmux.", "Handled in cmux."]
         _ = world.pump(until: { !view.qaSessionFollowBusy && lastRead.allSatisfy { world.count($0, in: view) == 1 } })
@@ -454,6 +463,11 @@ enum ExternalSessionHandoffChecks {
         for needle in lastRead {
             try expect(world.count(needle, in: view) == 1,
                        "'\(needle)' is in the transcript exactly once; got \(world.count(needle, in: view)) in \(world.texts(view))")
+        }
+        try expect(world.pump(until: { supervisor.sendRefusal(for: agentId) == nil }), "adoption must release sends after loading history")
+        for needle in lastRead {
+            try expect(world.count(needle, in: duringAdoption) == 1,
+                       "a tile opened during adoption receives its history once; got \(world.texts(duringAdoption))")
         }
         let sizeAtLive = SessionFileTail.length(file)
         world.pump(0.4)
@@ -464,6 +478,16 @@ enum ExternalSessionHandoffChecks {
         try expect(supervisor.send("PLAIN carry on", to: agentId), "the moved session sends from Array now")
         try expect(world.pump(until: { AgentSteeringQAFakes.spawnCount(in: bin) == 1 && !supervisor.isRunning(agentId) }, timeout: 15),
                    "the first own turn runs and ends")
+        let reopenedAfterSend = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "After adoption", frame: TileFrame(x: 0, y: 0, width: 560, height: 620),
+            zPosition: .first, runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed-agent")))
+        reopenedAfterSend.attach(agentID: agentId, supervisor: supervisor)
+        defer { reopenedAfterSend.detach() }
+        let restoredOrder = (lastRead + ["PLAIN carry on"]).map { needle in
+            world.texts(reopenedAfterSend).indices.filter { world.texts(reopenedAfterSend)[$0].contains(needle) }
+        }
+        try expect(restoredOrder.allSatisfy { $0.count == 1 } && restoredOrder.map { $0[0] } == restoredOrder.map { $0[0] }.sorted(),
+                   "after the first send a reopened tile keeps adopted history before its own turn; got \(world.texts(reopenedAfterSend))")
         let argv = AgentSteeringQAFakes.argv(in: bin)
         if let flag = argv.firstIndex(of: "--resume") {
             try expect(argv.indices.contains(flag + 1) && argv[flag + 1] == sessionId, "the turn resumes \(sessionId); argv \(argv)")
@@ -625,6 +649,10 @@ enum ExternalSessionHandoffChecks {
         try expect(world.pump(until: { !supervisor.isSessionHeld(faceAgent) }) && supervisor.sendRefusal(for: faceAgent) == nil,
                    "once its face claude is gone the agent sends from Array again; refusal \(String(describing: supervisor.sendRefusal(for: faceAgent)))")
         try expect(AgentSteeringQAFakes.spawnCount(in: bin) == 0, "no claude ran while the face held the session")
+        let savedAfterEnd = try ProjectStore(projectRoot: world.fixture.pcRoot).loadCanvas()
+        try expect(savedAfterEnd.tiles.first { $0.id == faceTile }?.metadata.agentTerminalFace == nil,
+                   "a face ended without a resident tile must clear its saved metadata before relaunch")
+
 
         // An Array Claude agent with a tile, its claude pooled after a turn.
         guard let model = AgentCatalogQAFixture.claude.seedModel else { throw Failure(message: "no claude fixture model") }

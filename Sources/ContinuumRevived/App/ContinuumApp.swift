@@ -12889,6 +12889,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ? .terminal : .array
     }
 
+    /// The face's end is durable even without a resident view. Update each
+    /// in-memory owner and the project's saved tile, draining pending canvas
+    /// writes first so an older queued save cannot put the face back.
+    func clearFinishedTerminalFace(agentId: AgentID, tileId: UUID) {
+        guard let record = agentSupervisor.records[agentId],
+              let projectId = record.projectId, let root = record.projectRoot else { return }
+        let controller = workspaceRuntime?.controller(for: projectId)
+        let lock = controller == nil ? ProjectLock(root: URL(fileURLWithPath: root, isDirectory: true)) : nil
+        defer { lock?.release() }
+        do {
+            try lock?.acquire()
+            if var tile = canvasView?.tileRecord(for: tileId) {
+                tile.metadata.agentTerminalFace = nil
+                canvasView?.updateTile(tile, recalculateZoneBounds: false)
+            }
+            workspaceRuntime?.clearParkedTerminalFace(for: tileId, projectId: projectId)
+            try controller?.flushCanvasSave()
+            let store = ProjectStore(projectRoot: URL(fileURLWithPath: root, isDirectory: true))
+            var saved = try store.loadCanvas()
+            guard let index = saved.tiles.firstIndex(where: { $0.id == tileId }),
+                  saved.tiles[index].metadata.agentTerminalFace != nil else { return }
+            saved.tiles[index].metadata.agentTerminalFace = nil
+            try store.saveCanvas(saved)
+        } catch {
+            fputs("Could not save the ended Terminal face for tile \(tileId): \(error)\n", stderr)
+        }
+    }
+
     /// Every tile saved in its Terminal face, in every project's canvas —
     /// whether or not its zone is hydrated or its workspace is on screen.
     func savedTerminalFaces() -> [UUID: AgentTerminalFaceState] {
@@ -19778,6 +19806,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         wireAgentProcessTracker()
         // `.plans/79` review 14: a launch's sends wait for discovery's first pass,
         // and the prompts that waited go once it has looked.
+        agentSupervisor.onTerminalFaceEnded = { [weak self] id, tileId in
+            self?.clearFinishedTerminalFace(agentId: id, tileId: tileId)
+        }
         agentSupervisor.awaitsSessionDiscovery = { [weak self] in
             self?.externalSessionMonitor.isAwaitingFirstPass ?? false
         }

@@ -428,6 +428,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             self, selector: #selector(identityStyleSettingChanged(_:)),
             name: SettingChangeEvent.name(for: SettingID(rawValue: AgentIdentityColorConfig.styleKey)),
             object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(terminalToggleSettingChanged(_:)),
+            name: SettingChangeEvent.name(for: SettingID(rawValue: AgentTerminalFaceConfig.showToggleKey)),
+            object: nil)
         agentHeader.installStatusBadge(awarenessBadge)
         enableTitleBarActions()
         compactStatusRow.hideLocationActions()
@@ -1079,6 +1083,14 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             refreshFaceAccessibilityActions()
             return
         }
+        // Keep the return/cancel affordance while Terminal is active or pending,
+        // even for people who hide the entry toggle from their chat headers.
+        if face == .array, !pendingTerminalFlip,
+           !AgentTerminalFaceConfig.showsToggle(defaults: terminalFaceEnvironment?.defaults ?? .standard) {
+            setTitleBarFaceSwitch(nil)
+            refreshFaceAccessibilityActions()
+            return
+        }
         var reason: String?
         if terminalFaceSession == nil, let agentID = attachedAgentID,
            case .unavailable(let why)? = agentSource?.terminalFaceReadiness(for: agentID) {
@@ -1087,6 +1099,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         setTitleBarFaceSwitch(FaceSwitchState(
             selected: face, pendingTerminal: pendingTerminalFlip, unavailableReason: reason))
         refreshFaceAccessibilityActions()
+    }
+
+    @objc private func terminalToggleSettingChanged(_ notification: Notification) {
+        refreshFaceSwitch()
     }
 
     override func faceSwitchRequested(_ requested: AgentTileFace) {

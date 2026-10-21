@@ -202,12 +202,11 @@ final class AgentTerminalFaceWatch {
         let control = tmuxControl
         let name = tmuxSessionName
         let home = environment.claudeHome
-        let lastSession = currentSessionId
-        let cwd = state.cwd
+        let processOwner = AgentProcessAttribution.ownerTag(for: agentID)
         Task { @MainActor [weak self] in
             let (pid, live, tmuxGone) = await Self.readProcess(
                 known: known, control: control, sessionName: name,
-                lastSession: lastSession, cwd: cwd, claudeHome: home)
+                processOwner: processOwner, claudeHome: home)
             guard let self else { return }
             self.pollInFlight = false
             guard !self.isEnded else { return }
@@ -234,7 +233,7 @@ final class AgentTerminalFaceWatch {
     /// Off the main actor: a tmux query and two small file reads.
     nonisolated private static func readProcess(
         known: Int32?, control: ProcessTmuxControl?, sessionName: String?,
-        lastSession: String, cwd: String, claudeHome: URL
+        processOwner: String, claudeHome: URL
     ) async -> (Int32?, ClaudeTerminalFace.LiveSession?, tmuxGone: Bool) {
         if let control, let sessionName, (try? control.run(["has-session", "-t", sessionName])) == nil {
             return (known, nil, true)
@@ -246,23 +245,20 @@ final class AgentTerminalFaceWatch {
             pid = out.flatMap { Int32($0.split(separator: "\n").first.map(String.init) ?? "") }
         }
         if pid == nil {
-            pid = pidFromSessionFiles(sessionId: lastSession, cwd: cwd, claudeHome: claudeHome)
+            pid = pidFromSessionFiles(processOwner: processOwner, claudeHome: claudeHome)
         }
         return (pid, pid.flatMap { ClaudeTerminalFace.liveSession(pid: $0, claudeHome: claudeHome) }, false)
     }
 
-    /// Without tmux there is no pane to ask; claude's own file for our session
-    /// names the process.
-    nonisolated private static func pidFromSessionFiles(sessionId: String, cwd: String, claudeHome: URL) -> Int32? {
-        let directory = claudeHome.appendingPathComponent(".claude/sessions", isDirectory: true)
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return nil }
-        for name in names where name.hasSuffix(".json") {
-            guard let pid = Int32(name.dropLast(5)),
-                  let live = ClaudeTerminalFace.liveSession(pid: pid, claudeHome: claudeHome),
-                  live.sessionId == sessionId, kill(pid, 0) == 0 else { continue }
-            return pid
+    /// A direct face can fork or /clear before its first poll, so its initial
+    /// session id need not appear in any live file. Match the process's own
+    /// agent/face tags instead; never mistake the source's other writer for it.
+    nonisolated private static func pidFromSessionFiles(processOwner: String, claudeHome: URL) -> Int32? {
+        let candidates = ProcessTableReader().sample().filter {
+            $0.ownerTag == processOwner && $0.ownerFace == "terminal"
+                && ClaudeTerminalFace.liveSession(pid: $0.pid, claudeHome: claudeHome) != nil
         }
-        return nil
+        return candidates.count == 1 ? candidates[0].pid : nil
     }
 }
 

@@ -13,6 +13,17 @@ public enum AgentTileFace: String, Codable, Equatable, Sendable {
     case terminal
 }
 
+/// User-wide visibility of the optional Terminal toggle, independent of the
+/// tile's current face. Menus and shortcuts remain available when hidden.
+public enum AgentTerminalFaceConfig {
+    public static let showToggleKey = "array.agent.terminalFace.showToggle"
+    public static let defaultShowToggle = true
+
+    public static func showsToggle(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: showToggleKey) == nil ? defaultShowToggle : defaults.bool(forKey: showToggleKey)
+    }
+}
+
 /// A tile in its Terminal face, persisted on the tile so a relaunch reattaches.
 ///
 /// Present only while the tile shows the Terminal face. `sessionFileOffset` is
@@ -52,6 +63,7 @@ public enum ClaudeTerminalFace {
     public static let faceEnvironmentKey = "ARRAY_AGENT_FACE"
     public static let faceEnvironmentValue = "terminal"
 
+    #if os(macOS)
     /// The interactive claude the Terminal face runs, as one argv.
     ///
     /// The executable is the one the managed runner resolves
@@ -87,12 +99,16 @@ public enum ClaudeTerminalFace {
             + session + ["--model", model] + (effort.map { ["--effort", $0] } ?? [])
     }
 
+    #endif
+
     // MARK: - The session file
 
+    #if os(macOS)
     /// `<home>/.claude/projects/<encoded cwd>/<sessionId>.jsonl`.
     public static func sessionFileURL(claudeHome: URL, cwd: String, sessionId: String) -> URL {
         ClaudeSessionTranscriptReader.sessionFileURL(homeURL: claudeHome, cwd: cwd, sessionId: sessionId)
     }
+    #endif
 
     /// The session file's byte length now, 0 when it does not exist yet.
     public static func sessionFileLength(_ url: URL) -> UInt64 {

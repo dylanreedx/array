@@ -217,6 +217,38 @@ enum AgentFaceChecks {
             // Every surface detached before the Ghostty context is freed.
             for view in liveViews where view.face == .terminal { view.prepareForRemovalFromScene() }
         }
+        guard let toggleField = SettingsSchema.sections().first(where: { $0.id == "agents" })?.fields.first(where: {
+            $0.key == AgentTerminalFaceConfig.showToggleKey
+        }) else { throw Failure(description: "Agents settings must offer a way to hide the Terminal toggle") }
+        let settings = SettingsModel(defaults: fixture.defaults, navKeymap: .default)
+        do {
+            let view = fixture.makeTile(width: 900, environment: environment)
+            liveViews.append(view)
+            try expect(view.face == .array, "a new tile must start in chat")
+            try expect(settings.value(of: toggleField) == .bool(true), "the compact toggle is discoverable by default")
+            settings.write(.bool(false), to: toggleField)
+            view.layoutSubtreeIfNeeded()
+            try expect(view.qaFaceSwitchMode == "hidden" && view.face == .array,
+                       "hiding the toggle must update an existing tile without switching faces")
+            let reopened = fixture.makeTile(width: 900, environment: environment)
+            liveViews.append(reopened)
+            reopened.layoutSubtreeIfNeeded()
+            try expect(reopened.qaFaceSwitchMode == "hidden", "new tiles must honor the saved hide preference")
+            fixture.canvas.removeTile(id: reopened.tile.id)
+            // The same action used by the keyboard shortcut remains available.
+            try expect(view.toggleFace() && view.face == .terminal, "hiding the icon must preserve the face action")
+            view.layoutSubtreeIfNeeded()
+            try expect(view.qaFaceSwitchMode == "icon", "the active Terminal view must retain its return toggle")
+            try expect(view.toggleFace() && fixture.pump(until: { view.face == .array }, timeout: 3),
+                       "the hidden-toggle preference must still allow returning to chat")
+            view.layoutSubtreeIfNeeded()
+            try expect(view.qaFaceSwitchMode == "hidden", "returning to chat must restore the hidden preference")
+            settings.reset(toggleField)
+            view.layoutSubtreeIfNeeded()
+            try expect(view.qaFaceSwitchMode == "icon", "resetting the preference must restore the icon immediately")
+            fixture.canvas.removeTile(id: view.tile.id)
+            lines.append("toggle preference: live hide, saved hide, action still available, active return, reset")
+        }
         for width in [320.0, 480.0, 900.0] {
             for zoom in [0.1, 0.3, 1.0, 2.0] {
                 for page in [80, 150] {
@@ -246,6 +278,14 @@ enum AgentFaceChecks {
                                    "\(label): \(a.name) is \(a.frame.size) world = \(a.frame.width * zoom)×\(a.frame.height * zoom)px on screen, under the 22px floor")
                     }
                     let mode = view.qaFaceSwitchMode
+                    try expect(mode != "labels", "\(label): the face switch must never reserve room for text labels")
+                    let faceControls = controls.filter { $0.name.hasPrefix("face.") }
+                    try expect(faceControls.count <= 1, "\(label): switching faces must use a single icon toggle, got \(faceControls.map(\.name))")
+                    if let toggle = faceControls.first {
+                        try expect(abs(toggle.frame.width - toggle.frame.height) < 0.5,
+                                   "\(label): the face toggle must take one square button slot")
+                    }
+                    try expect(view.face == .array, "\(label): new tiles must start in chat")
                     var outcome: [String: String] = [:]
 
                     // × closes.
@@ -293,18 +333,17 @@ enum AgentFaceChecks {
                                    "\(label): Switch to Array from the menu did not flip back")
                         outcome["switch"] = "menu only"
                     } else {
-                        let terminal = controls.first { $0.name == "face.terminal" }!.frame
-                        let array = controls.first { $0.name == "face.array" }!.frame
-                        try click(windowPoint(of: terminal, in: view), in: fixture.window)
-                        try expect(view.face == .terminal, "\(label): a click on the Terminal segment did not flip the tile (mode \(mode))")
+                        let toggle = controls.first { $0.name == "face.toggle" }!.frame
+                        try click(windowPoint(of: toggle, in: view), in: fixture.window)
+                        try expect(view.face == .terminal, "\(label): a click on the Terminal toggle did not flip the tile (mode \(mode))")
                         fixture.pump(0.05)
                         let terminalControls = view.qaBandControlFrames
                         try expect(terminalControls.map(\.name) == names,
                                    "\(label): the band changed shape in the Terminal face: \(terminalControls.map(\.name))")
-                        try click(windowPoint(of: array, in: view), in: fixture.window)
+                        try click(windowPoint(of: toggle, in: view), in: fixture.window)
                         try expect(fixture.pump(until: { view.face == .array }, timeout: 3),
-                                   "\(label): a click on the Array segment did not flip back")
-                        outcome["switch"] = "clicked both"
+                                   "\(label): a click on the chat toggle did not flip back")
+                        outcome["switch"] = "toggled in and out"
                     }
                     if zoom == 1, page == 80 {
                         let band = NSRect(x: 0, y: 0, width: width, height: 28)
@@ -337,7 +376,7 @@ enum AgentFaceChecks {
             }
             let laidOut = view.qaTitleBarLayoutPasses - passes
             let remeasured = BandTextWidth.qaMeasurements - measured
-            try expect(view.qaFaceSwitchMode == "labels" && laidOut >= 5 && remeasured == 0,
+            try expect(view.qaFaceSwitchMode == "icon" && laidOut >= 5 && remeasured == 0,
                        "a pinch must lay the band out without measuring its labels: \(laidOut) layouts measured \(remeasured) times (mode \(view.qaFaceSwitchMode))")
             lines.append("band layout: \(laidOut) zoom-frame layouts, \(remeasured) label measurements")
             fixture.canvas.removeTile(id: view.tile.id)
@@ -359,13 +398,43 @@ enum AgentFaceChecks {
             lines.append("\(harness.rawValue): no switch")
             fixture.canvas.removeTile(id: tile.id)
         }
-        // The design's own widths, at zoom 1: labels and pill at 900, labels at
-        // 480, icons at the 320 floor.
+        // Every supported width uses the same compact icon at normal zoom.
         func modeAt(_ width: Double) -> String? {
             rows.first { ($0["width"] as? Double) == width && ($0["zoom"] as? Double) == 1 }?["mode"] as? String
         }
-        try expect(modeAt(900) == "labels" && modeAt(480) == "labels" && modeAt(320) == "icons",
-                   "at zoom 1 the switch must show labels at 900 and 480 and icons at 320; got \(modeAt(900) ?? "-"), \(modeAt(480) ?? "-"), \(modeAt(320) ?? "-")")
+        try expect([900.0, 480.0, 320.0].allSatisfy { modeAt($0) == "icon" },
+                   "at zoom 1 every supported width must show one icon; got \(modeAt(900) ?? "-"), \(modeAt(480) ?? "-"), \(modeAt(320) ?? "-")")
+        // Live status labels can wrap a delegation onto several lines. Native
+        // hitTest points are in the receiver's SUPERview coordinates, including
+        // a nonzero row origin and each wrapped capsule's origin.
+        let chipRoot = NSView(frame: fixture.canvas.bounds)
+        fixture.window.contentView = chipRoot
+        defer { fixture.window.contentView = fixture.canvas }
+        let chipRow = AgentReferenceChipRowView(frame: NSRect(x: 130, y: 180, width: 220, height: 120))
+        chipRoot.addSubview(chipRow)
+        let parentID = UUID()
+        let chipIDs = (0..<3).map { _ in UUID() }
+        var revealed: [UUID] = []
+        let chipContext = AgentRenderContext(actions: AgentRenderActions { action in
+            if case let .revealAgent(_, id, _) = action { revealed.append(id) }
+        }, tokens: .transcript, appearance: .dark)
+        let references = chipIDs.enumerated().map { index, id in
+            AgentReferenceChipRowView.Reference(blockID: AgentNodeID(rawValue: "wrapped-chip-\(index)")!,
+                payload: AgentReferencePayload(agentID: id, parentAgentID: parentID,
+                    displayNameAtSpawn: "Working helper number \(index)", spawnedAt: Date(), provider: "Claude Code"))
+        }
+        chipRow.apply(leaderID: references[0].blockID, references: references, context: chipContext)
+        chipRow.layoutSubtreeIfNeeded()
+        try expect(Set(chipRow.chips.map { $0.frame.minY }).count == 3, "the fixture must wrap its chips onto three lines")
+        for chip in chipRow.chips {
+            let point = chip.convert(NSPoint(x: chip.bounds.midX, y: chip.bounds.midY), to: nil)
+            let rootPoint = chipRoot.convert(point, from: nil)
+            try expect(chipRoot.hitTest(rootPoint) === chip, "a wrapped chip's centre must hit that chip")
+            try click(point, in: fixture.window)
+        }
+        try expect(revealed == chipIDs, "each wrapped chip must reveal its own child exactly once; got \(revealed)")
+        lines.append("wrapped child chips: three native clicks revealed the matching children")
+
         let data = try JSONSerialization.data(withJSONObject: ["rows": rows], options: [.prettyPrinted, .sortedKeys])
         try data.write(to: directory.appendingPathComponent("manifest.json"))
         return (lines + ["agent face switch: \(rows.count) configurations clicked, artifacts \(directory.path)"])
@@ -533,6 +602,8 @@ extension AgentFaceChecks {
         }
         /// A real click on a band control, at the band's current layout.
         func clickSegment(_ name: String, of tile: ManagedAgentTileNSView) throws {
+            // Several fixture tiles share the same frame; click the intended one.
+            fixture.canvas.bringToFront(tileId: tile.tile.id)
             fixture.window.contentView?.layoutSubtreeIfNeeded()
             tile.layoutSubtreeIfNeeded()
             try click(try segment(name, of: tile), in: fixture.window)
@@ -565,7 +636,7 @@ extension AgentFaceChecks {
         var queued: IntentAcceptance?
         Task { @MainActor in queued = await supervisor.accept(.queue(AgentPrompt("queued one")), for: agentID) }
         try expect(fixture.pump(until: { queued != nil }, timeout: 3) && queued == .accepted, "queueing failed: \(String(describing: queued))")
-        try click(try segment("face.terminal", of: view), in: fixture.window)
+        try click(try segment("face.toggle", of: view), in: fixture.window)
         try expect(view.face == .array && !view.pendingTerminalFlip,
                    "a queued message must block the flip, not wait on it")
         // The refusal is news about the click: the banner slot, for a few
@@ -582,9 +653,14 @@ extension AgentFaceChecks {
                    "the refusal must go by itself")
         log.append("refusal: banner for a few seconds, never in the transcript")
         supervisor.clearQueuedMessages(for: agentID)
-        try click(try segment("face.terminal", of: view), in: fixture.window)
+        try click(try segment("face.toggle", of: view), in: fixture.window)
         try expect(view.pendingTerminalFlip && view.qaFaceFlipBannerVisible && view.face == .array,
                    "a flip mid-turn must wait, with the banner up")
+        try click(try segment("face.toggle", of: view), in: fixture.window)
+        try expect(!view.pendingTerminalFlip && !view.qaFaceFlipBannerVisible,
+                   "clicking the pending toggle again must cancel the switch")
+        try click(try segment("face.toggle", of: view), in: fixture.window)
+        try expect(view.pendingTerminalFlip, "the toggle must request Terminal again after cancellation")
         fixture.window.contentView?.layoutSubtreeIfNeeded()
         saveWindowPNG(fixture.window, to: directory.appendingPathComponent("face-array-flip-waiting.png"))
         fixture.pump(1.0)
@@ -593,7 +669,7 @@ extension AgentFaceChecks {
         let banner = view.qaFaceFlipBanner
         try click(windowPoint(of: banner.cancelButton.bounds, in: banner.cancelButton), in: fixture.window)
         try expect(!view.pendingTerminalFlip && !view.qaFaceFlipBannerVisible, "Cancel must drop the waiting flip")
-        try click(try segment("face.terminal", of: view), in: fixture.window)
+        try click(try segment("face.toggle", of: view), in: fixture.window)
         try expect(view.pendingTerminalFlip, "the flip must wait again")
         try click(windowPoint(of: banner.stopButton.bounds, in: banner.stopButton), in: fixture.window)
         try expect(fixture.pump(until: { view.face == .terminal }, timeout: 15),
@@ -709,7 +785,7 @@ extension AgentFaceChecks {
         log.append("flip back: 2 turns appended under the divider; record adopted \(clearedId) and claude-sonnet-5-5")
 
         // 6. Relaunch: the face persists and reattaches to claude in tmux...
-        try click(try segment("face.terminal", of: view), in: fixture.window)
+        try click(try segment("face.toggle", of: view), in: fixture.window)
         try expect(fixture.pump(until: { view.face == .terminal && launches().count == 2 }, timeout: 10),
                    "the second flip must start claude again")
         try expect(fixture.pump(until: { tmuxSessionAlive(view.tile.id) }, timeout: 5), "claude must run in tmux")
@@ -758,7 +834,7 @@ extension AgentFaceChecks {
         }
         try expect(showsTerminalTurns(orphaned, ["terminal: slow third", "terminal: fourth"]),
                    "a tile opened later must show the terminal's turns once each; got \(entriesText(orphaned))")
-        try clickSegment("face.terminal", of: orphaned)
+        try clickSegment("face.toggle", of: orphaned)
         guard fixture.pump(until: { orphaned.face == .terminal && orphaned.terminalFaceSession?.claudePid != nil }, timeout: 10),
               let closing = orphaned.terminalFaceSession else {
             throw Failure(description: "the reopened tile must flip to its Terminal face; face \(orphaned.face), banner \(String(describing: orphaned.qaFaceFlipBanner.content)), held \(supervisor.isInTerminalFace(agentID)), launches \(launches().count), pid \(String(describing: orphaned.terminalFaceSession?.claudePid))")
@@ -797,7 +873,7 @@ extension AgentFaceChecks {
         //    kept), the tile comes back still in its face, so no restore runs
         //    over it; parked again, claude leaves while nobody shows it, and
         //    the face still ends, releases the session and brings the turn home.
-        try clickSegment("face.terminal", of: reopened)
+        try clickSegment("face.toggle", of: reopened)
         guard fixture.pump(until: { reopened.face == .terminal && reopened.terminalFaceSession?.claudePid != nil }, timeout: 10),
               let parkedSurface = reopened.terminalFaceSession else {
             throw Failure(description: "step 8: the reopened tile must flip to its Terminal face; face \(reopened.face), banner \(String(describing: reopened.qaFaceFlipBanner.content)), held \(supervisor.isInTerminalFace(agentID)), launches \(launches().count)")
@@ -831,10 +907,10 @@ extension AgentFaceChecks {
         plain.tmuxPath = nil
         let keepView = fixture.makeTile(width: 760, height: 560, environment: plain)
         liveViews.append(keepView)
-        try clickSegment("face.terminal", of: keepView)
+        try clickSegment("face.toggle", of: keepView)
         guard fixture.pump(until: { keepView.face == .terminal && keepView.terminalFaceSession?.claudePid != nil }, timeout: 10),
               let keptSurface = keepView.terminalFaceSession, let keptPid = keptSurface.claudePid else {
-            throw Failure(description: "the tmux-less tile must flip to its Terminal face")
+            throw Failure(description: "the tmux-less tile must flip to its Terminal face; face \(keepView.face), readiness \(supervisor.terminalFaceReadiness(for: agentID)), watch tile \(String(describing: supervisor.terminalFaceWatch(for: agentID)?.tileId)), expected \(keepView.tile.id), launches \(launches().count)")
         }
         _ = keptSurface.runtime.dispatchInsertedText("slow eighth")
         keptSurface.runtime.sendReturn()
@@ -932,53 +1008,56 @@ extension AgentFaceChecks {
         //    `/clear` rotation) is a session another process may still be
         //    writing. The Terminal face forks it too, never resumes it as is,
         //    and the agent adopts only the fork's own id.
-        let sourceId = UUID().uuidString.lowercased()
-        let sourceURL = ClaudeTerminalFace.sessionFileURL(
-            claudeHome: fixture.claudeHome, cwd: record.lastObservedWhere, sessionId: sourceId)
-        try ([
-            #"{"type":"user","isSidechain":false,"uuid":"src-u1","message":{"role":"user","content":"SOURCE question"}}"#,
-            #"{"type":"assistant","isSidechain":false,"uuid":"src-a1","message":{"role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"SOURCE answer"}]}}"#,
-        ].joined(separator: "\n") + "\n").write(to: sourceURL, atomically: true, encoding: .utf8)
-        let sourceBytes = try Data(contentsOf: sourceURL)
-        supervisor.markSessionFork(agentID, from: sourceId)
-        let sessionBeforeFork = supervisor.records[agentID]?.providerSessionId
-        // A face that ends before claude reports the fork's id hands back the
-        // source's: that is never adopted, and the fork stays pending.
-        try expect(supervisor.beginTerminalFace(for: agentID) != nil, "the supervisor must hand a ready agent to the Terminal face")
-        supervisor.endTerminalFace(for: agentID, sessionId: sourceId, model: nil, tookTurns: false)
-        try expect(supervisor.records[agentID]?.providerSessionId == sessionBeforeFork
-                   && supervisor.records[agentID]?.pendingSessionForkFrom == sourceId,
-                   "a face that never reported its fork must not adopt the session it forked from; record has \(String(describing: supervisor.records[agentID]?.providerSessionId)), pending \(String(describing: supervisor.records[agentID]?.pendingSessionForkFrom))")
-        let launchesBeforeFork = launches().count
-        // The tile's own switch, through ⌃⌘T's path (the band click is
-        // witnessed above).
-        try expect(reopened.toggleFace(), "the reopened tile must take the switch")
-        try expect(fixture.pump(until: { reopened.face == .terminal && launches().count == launchesBeforeFork + 1 }, timeout: 10),
-                   "the fork's Terminal face must start claude; face \(reopened.face), pending \(reopened.pendingTerminalFlip), banner \(String(describing: reopened.qaFaceFlipBanner.content)), readiness \(supervisor.terminalFaceReadiness(for: agentID)), launches \(launches().count - launchesBeforeFork)")
-        let forkArgv = launches().last?["argv"] as? [String] ?? []
-        try expect(forkArgv.starts(with: ["--resume", sourceId, "--fork-session"]),
-                   "a pending fork must run `claude --resume <source> --fork-session`, never resume the source itself; argv \(forkArgv)")
-        guard let forking = reopened.terminalFaceSession else { throw Failure(description: "no fork terminal session") }
-        try expect(fixture.pump(until: { forking.sessionIds.count == 2 }, timeout: 8),
-                   "the face must follow the fork's own id from claude's live file; ids \(forking.sessionIds)")
-        let forkId = forking.currentSessionId
-        let beforeForkFlip = entriesText(reopened)
-        _ = forking.runtime.dispatchInsertedText("forked turn")
-        forking.runtime.sendReturn()
-        try expect(fixture.pump(until: { forking.isBusy }, timeout: 6) && fixture.pump(until: { !forking.isBusy }, timeout: 8),
-                   "the forked turn must run in the terminal")
-        _ = forking.runtime.dispatchInsertedText("/exit")
-        forking.runtime.sendReturn()
-        try expect(fixture.pump(until: { reopened.face == .array }, timeout: 10), "/exit must flip the fork back")
-        let sourceAfter = try Data(contentsOf: sourceURL)
-        try expect(sourceAfter == sourceBytes, "the forked-from session file must never be written")
-        try expect(supervisor.records[agentID]?.providerSessionId == forkId && supervisor.records[agentID]?.pendingSessionForkFrom == nil,
-                   "the agent must continue the fork, not its source; record has \(String(describing: supervisor.records[agentID]?.providerSessionId)), want \(forkId)")
-        let forkAdded = Array(entriesText(reopened).dropFirst(beforeForkFlip.count)).joined(separator: "\n")
-        try expect(forkAdded.contains("In Terminal · 1 turn") && forkAdded.components(separatedBy: "terminal: forked turn").count == 2
-                   && !forkAdded.contains("SOURCE question"),
-                   "the flip back appends the fork's own turn once, never the history it copied; got \(forkAdded)")
-        log.append("fork: --resume \(sourceId) --fork-session, adopted \(forkId), source untouched")
+        for forkEnvironment in [environment, plain] {
+            reopened.terminalFaceEnvironment = forkEnvironment
+            let sourceId = UUID().uuidString.lowercased()
+            let sourceURL = ClaudeTerminalFace.sessionFileURL(
+                claudeHome: fixture.claudeHome, cwd: record.lastObservedWhere, sessionId: sourceId)
+            try ([
+                #"{"type":"user","isSidechain":false,"uuid":"src-u1","message":{"role":"user","content":"SOURCE question"}}"#,
+                #"{"type":"assistant","isSidechain":false,"uuid":"src-a1","message":{"role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"SOURCE answer"}]}}"#,
+            ].joined(separator: "\n") + "\n").write(to: sourceURL, atomically: true, encoding: .utf8)
+            let sourceBytes = try Data(contentsOf: sourceURL)
+            supervisor.markSessionFork(agentID, from: sourceId)
+            let sessionBeforeFork = supervisor.records[agentID]?.providerSessionId
+            // A face that ends before claude reports the fork's id hands back the
+            // source's: that is never adopted, and the fork stays pending.
+            try expect(supervisor.beginTerminalFace(for: agentID) != nil, "the supervisor must hand a ready agent to the Terminal face")
+            supervisor.endTerminalFace(for: agentID, sessionId: sourceId, model: nil, tookTurns: false)
+            try expect(supervisor.records[agentID]?.providerSessionId == sessionBeforeFork
+                       && supervisor.records[agentID]?.pendingSessionForkFrom == sourceId,
+                       "a face that never reported its fork must not adopt the session it forked from; record has \(String(describing: supervisor.records[agentID]?.providerSessionId)), pending \(String(describing: supervisor.records[agentID]?.pendingSessionForkFrom))")
+            let launchesBeforeFork = launches().count
+            // The tile's own switch, through ⌃⌘T's path (the band click is
+            // witnessed above).
+            try expect(reopened.toggleFace(), "the reopened tile must take the switch")
+            try expect(fixture.pump(until: { reopened.face == .terminal && launches().count == launchesBeforeFork + 1 }, timeout: 10),
+                       "the fork's Terminal face must start claude; face \(reopened.face), pending \(reopened.pendingTerminalFlip), banner \(String(describing: reopened.qaFaceFlipBanner.content)), readiness \(supervisor.terminalFaceReadiness(for: agentID)), launches \(launches().count - launchesBeforeFork)")
+            let forkArgv = launches().last?["argv"] as? [String] ?? []
+            try expect(forkArgv.starts(with: ["--resume", sourceId, "--fork-session"]),
+                       "a pending fork must run `claude --resume <source> --fork-session`, never resume the source itself; argv \(forkArgv)")
+            guard let forking = reopened.terminalFaceSession else { throw Failure(description: "no fork terminal session") }
+            try expect(fixture.pump(until: { forking.sessionIds.count == 2 }, timeout: 8),
+                       "the face must follow the fork's own id from claude's live file; ids \(forking.sessionIds)")
+            let forkId = forking.currentSessionId
+            let beforeForkFlip = entriesText(reopened)
+            _ = forking.runtime.dispatchInsertedText("forked turn")
+            forking.runtime.sendReturn()
+            try expect(fixture.pump(until: { forking.isBusy }, timeout: 6) && fixture.pump(until: { !forking.isBusy }, timeout: 8),
+                       "the forked turn must run in the terminal")
+            _ = forking.runtime.dispatchInsertedText("/exit")
+            forking.runtime.sendReturn()
+            try expect(fixture.pump(until: { reopened.face == .array }, timeout: 10), "/exit must flip the fork back")
+            let sourceAfter = try Data(contentsOf: sourceURL)
+            try expect(sourceAfter == sourceBytes, "the forked-from session file must never be written")
+            try expect(supervisor.records[agentID]?.providerSessionId == forkId && supervisor.records[agentID]?.pendingSessionForkFrom == nil,
+                       "the agent must continue the fork, not its source; record has \(String(describing: supervisor.records[agentID]?.providerSessionId)), want \(forkId)")
+            let forkAdded = Array(entriesText(reopened).dropFirst(beforeForkFlip.count)).joined(separator: "\n")
+            try expect(forkAdded.contains("In Terminal · 1 turn") && forkAdded.components(separatedBy: "terminal: forked turn").count == 2
+                       && !forkAdded.contains("SOURCE question"),
+                       "the flip back appends the fork's own turn once, never the history it copied; got \(forkAdded)")
+            log.append("fork: --resume \(sourceId) --fork-session, adopted \(forkId), source untouched, tmux \(forkEnvironment.tmuxPath != nil)")
+        }
 
         let manifest: [String: Any] = ["log": log, "launches": launches().map { $0.mapValues { "\($0)" } }]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
