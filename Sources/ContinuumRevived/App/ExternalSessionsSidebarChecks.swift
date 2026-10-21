@@ -78,9 +78,9 @@ enum ExternalSessionsSidebarChecks {
         let agentTag = AgentProcessAttribution.ownerTag(for: fixture.agentId)
         func session(_ id: String, _ provider: ExternalSessionProvider = .claude, cwd: URL, title: String,
                      status: ExternalSessionStatus, host: ExternalSessionHost, ago: TimeInterval = 600,
-                     transcript: URL? = nil) -> ExternalAgentSession {
+                     transcript: URL? = nil, pid: Int32? = 4242) -> ExternalAgentSession {
             ExternalAgentSession(
-                provider: provider, sessionId: id, pid: nil, cwd: cwd.path, title: title, status: status,
+                provider: provider, sessionId: id, pid: pid, cwd: cwd.path, title: title, status: status,
                 startedAt: now.addingTimeInterval(-ago), statusSince: now.addingTimeInterval(-312),
                 lastActivity: now.addingTimeInterval(-240), host: host,
                 transcriptURL: transcript ?? transcripts.appendingPathComponent("\(id).jsonl"))
@@ -92,7 +92,7 @@ enum ExternalSessionsSidebarChecks {
         let desktop = session("s-desktop", cwd: fixture.paRoot, title: "LinkedIn post for launch day", status: .idle,
                               host: .app("Claude app"), ago: 700)
         let codexApp = session("t-app", .codex, cwd: fixture.paRoot, title: "Polish which-tab transition",
-                               status: .unknown, host: .app("Codex app"), ago: 600)
+                               status: .unknown, host: .app("Codex app"), ago: 600, pid: nil)
         let ghostty = session("s-scratch", cwd: scratch, title: "Port scanner spike", status: .idle,
                               host: .app("Ghostty"), ago: 500)
         let otherWorkspace = session("s-pc", cwd: fixture.pcRoot, title: "Bannockburn invoice export", status: .busy,
@@ -153,16 +153,24 @@ enum ExternalSessionsSidebarChecks {
             try writePNG(of: sidebar, to: URL(fileURLWithPath: pngPath))
         }
         try expect(inbox.hoverRowForQA(id: rowId(codexApp)), "the Codex row must be hoverable")
-        try expect(inbox.hoverActionsForQA(id: rowId(codexApp))?.titles == ["Move here"],
-                   "a Codex session offers no Copy; got \(String(describing: inbox.hoverActionsForQA(id: rowId(codexApp))))")
+        // Nor Move here: the Codex app runs every thread in one server, so a
+        // thread's close cannot be seen, and Move here waits for exactly that.
+        try expect(inbox.hoverActionsForQA(id: rowId(codexApp))?.titles.isEmpty ?? true,
+                   "a Codex app thread offers neither Copy nor Move here; got \(String(describing: inbox.hoverActionsForQA(id: rowId(codexApp))))")
         try expect(inbox.hoverRowForQA(id: fixture.agentId.rawValue)
                    && !(inbox.hoverActionsForQA(id: fixture.agentId.rawValue)?.titles.contains("Copy") ?? false),
                    "an Array agent's row never offers an external session's buttons")
 
-        // A click is Watch, through the one seam phase 2 fills in.
+        // A click is Watch, through the one seam (`--external-session-watch-check`
+        // witnesses the tile). Ghostty's folder is not a project, so Watch asks
+        // first (edge case 15), and Cancel opens nothing.
+        delegate.externalSessionFolderChoiceForQA = { _ in false }
+        let beforeWatch = supervisor.records.count
         try expect(inbox.clickRowForQA(id: rowId(ghostty)), "the Ghostty row must be clickable")
         try expect(delegate.qaExternalSessionSeams.last.map { $0.0 == .watch && $0.1 == ghostty.id } == true,
                    "clicking an external row reaches the Watch seam; got \(delegate.qaExternalSessionSeams)")
+        try expect(supervisor.records.count == beforeWatch, "watching a folder that is not a project asks, and Cancel opens nothing")
+        delegate.externalSessionFolderChoiceForQA = nil
 
         // Copy, through its real button.
         let before = Set(supervisor.records.keys)

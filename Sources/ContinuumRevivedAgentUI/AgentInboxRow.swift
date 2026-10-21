@@ -848,7 +848,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     public let workspaceName: String?
     /// Stable workspace identity used for exact inbox filtering.
     public let workspaceId: UUID?
-    public let state: InboxState
+    /// `var` for one host override: an agent paused because another app opened
+    /// its session needs you, whatever its turn says (`.plans/79` edge case 1).
+    public var state: InboxState
     public let attention: InboxAttention
     public let lifecycle: InboxLifecycle
     public let model: String?

@@ -42,10 +42,17 @@ final class ExternalSessionMonitor {
     /// Replace the snapshot. The production path's last step, and the one a
     /// check drives with sessions it made up.
     func publish(_ next: ExternalSessionSnapshot) {
-        guard next != snapshot else { return }
+        let first = !hasDiscovered
+        hasDiscovered = true
+        guard next != snapshot || first else { return }
         snapshot = next
         onChange?()
     }
+
+    /// Whether any pass has published yet. Until one has, an absent session
+    /// means nothing — after a relaunch a Move here tile must not take a
+    /// session merely because nobody has looked.
+    private(set) var hasDiscovered = false
 
     func session(forRowId id: UUID) -> ExternalAgentSession? {
         snapshot.sessions.first { ExternalSessionRows.rowId(forSessionKey: $0.id) == id }
