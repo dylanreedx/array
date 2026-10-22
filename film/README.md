@@ -66,6 +66,8 @@ on the PATH (Python helpers pin their own packages).
 
 ```sh
 scripts/new-video first-agent --purpose educational             # fresh: brief, empty composition, notes
+scripts/new-video one-place --purpose social-clip --outputs vertical # standalone 9:16 film
+scripts/new-video find-it --purpose general-promo --outputs both    # separate landscape + vertical compositions
 scripts/import-take which-tab ~/array-scratch/film/takes/which-tab/pullback --as pullback
 scripts/render which-tab --stills 0,2.3,6.9,f444,s4             # just those frames, in seconds
 scripts/render which-tab --proxy                                # 960x540, every other frame, with sound
@@ -73,12 +75,26 @@ scripts/render which-tab --range 6-9                            # one beat only
 scripts/render which-tab                                        # 1080p review cut, with sound
 scripts/render which-tab --4k                                   # the master
 scripts/render which-tab --sequence --range 8.8-11              # lossless PNG frames, for the probes
+scripts/render find-it --format both --proxy                     # both authored versions, one review round
+scripts/render one-place --format vertical                       # 1080x1920 review cut
 scripts/studio                                                  # live scrub at http://localhost:3480
 ```
 
 `--round 5.3` writes into an existing or chosen round, and otherwise each render starts the next round.
 `--blur` adds real motion blur by accumulation, which is slow and for masters only. `--silent` drops
-the sound. `--format square|portrait` renders other shapes, if the video lists them.
+the sound. `--format landscape|vertical|both` selects delivery shapes; `portrait` is an alias for vertical.
+Square and the other kit shapes still work if the video lists them. With no flag, render landscape if
+authored, otherwise the video's first shape. `--outputs` in new-video selects delivery shapes;
+its older `--format` option still selects the story structure from formats/.
+
+Declaring portrait alone does not adapt an existing film. Author its framing, type and crops in
+`portrait.tsx`, then add `portrait` to `formats` and `versions: { portrait: { Component: Portrait } }`.
+An optional `build` in that version gives it a different timeline/caption/cue sheet. The registry,
+contact sheets, sound and blur all resolve the selected version. Read [MOBILE.md](MOBILE.md) for the
+mobile framing and brand direction. Existing films stay landscape until their vertical edit is authored.
+
+`--blur` requires a full review or 4K cut; it rejects proxy/range combinations. `--port <n>` lets a
+separate render process avoid the default 3482 when another agent is rendering.
 
 Times on this Mac, which-tab (16.5 s, 991 frames), with a warm webpack cache:
 
@@ -99,6 +115,10 @@ Everything has the same shape, and no name ever carries a date or time. Dates go
 - Rounds: `renders/<video>/r<N>/` holds `preview.mp4`, `stills/`, `contact-sheet.png` (every half second,
   or the stills), `notes.md` (the round's notes, PROCESS.md), `cues.json`, `soundtrack.wav` and `render.log`
   (the command and the time of each step).
+- Landscape retains those established paths. Vertical writes its own `portrait/preview.mp4`, `stills/`,
+  `contact-sheet.png`, `notes.md`, `cues.json` and soundtrack inside the same round. Other shapes use
+  their own named subfolder too. A paired render bundles once and renders both versions in sequence;
+  the round's `render.log` records both. A vertical-only run creates no landscape cut.
 - A delivery to Dylan copies the round folder to the program's `.plans/` folder, so it outlives the bench.
 
 ## The kit
@@ -116,6 +136,7 @@ in kit/ hard-codes ink, lime or a font.
 | Lockup | `kit/lockup.tsx` | The end card in beats: line, then mark and wordmark, then URL, proportioned in H |
 | Determinism | `kit/determinism.ts`, `kit/base.css` | No wall-clock motion; the page every film draws on |
 | Formats | `kit/formats.ts` | Output shapes; 4K and proxy are scales of the same layout |
+| Framing | `kit/framing.ts` | Bound a subject crop to captured pixels at the output aspect; editorial mobile safe area |
 | Soundtrack | `kit/soundtrack.py` | Score and sound design synthesised from the cue sheet, plus Array's own sounds |
 | Fonts, sheet | `kit/fonts.ts`, `kit/sheet.ts`, `kit/clock.ts`, `kit/anim.ts`, `kit/ContactSheet.tsx` | Loading faces, the cue sheet, the musical clock, easing |
 
@@ -126,3 +147,13 @@ in kit/ hard-codes ink, lime or a font.
 - Never use Claude artifacts for film work, even for sketches. Prototype here, with stills and proxies.
 - The recorder's real captures need Dylan's session unlocked and awake. When it's locked, WebKit tiles
   come out blank and the take still passes.
+
+## Output verification
+
+`node_modules/.bin/tsc --noEmit` checks the film types. Run
+`node_modules/.bin/tsx scripts/check-formats.ts` for output/scaffold/crop behaviour, or add `--render`
+to exercise the real registry, paired sequences and contact sheets, proxy muxing, vertical-only default,
+and vertical accumulation blur. It uses disposable synthetic films under a temporary directory on
+port 3492, never edits the registered films, and checks actual pixels, dimensions and frame counts.
+It verifies the harness; each film still needs its own phone-size creative review.
+The same render witness is registered as `pnpm run check:formats`.

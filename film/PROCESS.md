@@ -9,8 +9,11 @@ the feedback and suggestions really well". Follow it for every video.
 1. Brief. `scripts/new-video <name> --purpose <p>` writes brief.md from the purpose's questions. Answer
    them, show Dylan, and get a yes before building anything. Brainstorm first when he asks for that: "dont
    change yet just brainstorming" means report back and stop.
+   Choose delivery shapes up front with `--outputs landscape|vertical|both`. For both, plan each beat's
+   subject and framing in both shapes; for vertical alone, no landscape edit is required. See MOBILE.md.
 2. Styleframes. A few stills that decide the look (type specimens, the key frames of each beat). Make them
    in the harness (`scripts/render --stills`), never as Claude artifacts. He picks or vetoes.
+   Review every requested shape, including vertical at phone size and with the intended feed's overlays.
 3. Takes. Write the scene for the recorder, capture, and import with `scripts/import-take`. Check a still of
    any WebKit tile (browser, editor) before trusting a take, because a locked screen blanks them while the
    take still passes.
@@ -20,6 +23,7 @@ the feedback and suggestions really well". Follow it for every video.
    in the round's notes.md (below). Open the folder in Finder for him ("no open finder with the video pls").
 6. His notes come back. Go to "Taking notes".
 7. Last. `scripts/render <video> --4k` for the master, plus any other formats, once he says it's done.
+   `--format both` renders the two authored versions together; `--format vertical` renders only vertical.
 
 ## Taking notes
 

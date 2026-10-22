@@ -27,14 +27,33 @@ export interface CueSheet {
   music?: string;
 }
 
+export interface VideoProps {
+  sheet: CueSheet;
+  /** viewport overrides the composition size (contact-sheet cells render the film small) */
+  viewport?: { width: number; height: number };
+  format?: FormatId;
+}
+
+export interface VideoVersion {
+  Component?: React.FC<VideoProps>;
+  /** Optional separate edit: its own duration, captions, cues and soundtrack timing. */
+  build?: (clock: Clock) => CueSheet;
+}
+
 export interface VideoDefinition {
   slug: string;
   title: string;
   bpm: number;
   formats: readonly FormatId[];
   build: (clock: Clock) => CueSheet;
-  /** viewport overrides the composition size (contact-sheet cells render the film small) */
-  Component: React.FC<{ sheet: CueSheet; viewport?: { width: number; height: number }; format?: FormatId }>;
+  Component: React.FC<VideoProps>;
+  /** Shared story/look by default; override the framing or the edit per output when needed. */
+  versions?: Partial<Record<FormatId, VideoVersion>>;
 }
 
 export const defineVideo = (v: VideoDefinition) => v;
+
+export const versionOf = (v: VideoDefinition, format: FormatId) => ({
+  Component: v.versions?.[format]?.Component ?? v.Component,
+  build: v.versions?.[format]?.build ?? v.build,
+});

@@ -8,13 +8,13 @@ import { subframes } from '../kit/blur';
 import { makeClock } from '../kit/clock';
 import { ContactSheet, makeSheetMetadata, type SheetProps } from '../kit/ContactSheet';
 import { FORMATS, type FormatId } from '../kit/formats';
-import type { VideoDefinition } from '../kit/sheet';
+import { versionOf, type VideoDefinition } from '../kit/sheet';
 import { VIDEOS } from '../videos';
 
 type Props = { slug: string; format: FormatId };
 
 const bySlug = (slug: string) => VIDEOS.find((v) => v.slug === slug) as VideoDefinition;
-const sheetOf = (v: VideoDefinition, format: FormatId) => v.build(makeClock({ fps: FORMATS[format].fps, bpm: v.bpm }));
+const sheetOf = (v: VideoDefinition, format: FormatId) => versionOf(v, format).build(makeClock({ fps: FORMATS[format].fps, bpm: v.bpm }));
 
 const metadata: CalculateMetadataFunction<Props> = ({ props }) => {
   const f = FORMATS[props.format];
@@ -24,19 +24,23 @@ const metadata: CalculateMetadataFunction<Props> = ({ props }) => {
 const Render: React.FC<Props> = ({ slug, format }) => {
   const v = bySlug(slug);
   const sheet = useMemo(() => sheetOf(v, format), [v, format]);
-  return <v.Component sheet={sheet} format={format} />;
+  const { Component } = versionOf(v, format);
+  return <Component sheet={sheet} format={format} />;
 };
 
-// The landscape master as a stream of motion-blur sub-frames (scripts/render --blur).
-type SubProps = { slug: string; groups: number[] };
-const subMetadata: CalculateMetadataFunction<SubProps> = ({ props }) => ({ durationInFrames: Math.max(1, subframes(sheetOf(bySlug(props.slug), 'landscape'), props.groups).length) });
-const Sub: React.FC<SubProps> = ({ slug, groups }) => {
+// Motion-blur sub-frames use exactly the same version and dimensions as the sharp render.
+type SubProps = Props & { groups: number[] };
+const subMetadata: CalculateMetadataFunction<SubProps> = ({ props }) => ({
+  ...FORMATS[props.format], durationInFrames: Math.max(1, subframes(sheetOf(bySlug(props.slug), props.format), props.groups).length),
+});
+const Sub: React.FC<SubProps> = ({ slug, format, groups }) => {
   const j = useCurrentFrame();
   const v = bySlug(slug);
-  const sheet = useMemo(() => sheetOf(v, 'landscape'), [v]);
+  const sheet = useMemo(() => sheetOf(v, format), [v, format]);
   const subs = useMemo(() => subframes(sheet, groups), [sheet, groups]);
   const s = subs[Math.min(j, subs.length - 1)];
-  return <Freeze frame={s.t}><v.Component sheet={sheet} /></Freeze>;
+  const { Component } = versionOf(v, format);
+  return <Freeze frame={s.t}><Component sheet={sheet} format={format} /></Freeze>;
 };
 
 export const RemotionRoot: React.FC = () => (
@@ -47,7 +51,7 @@ export const RemotionRoot: React.FC = () => (
           <Composition key={format} id={`${v.slug}--${format}`} component={Render} defaultProps={{ slug: v.slug, format } as Props} calculateMetadata={metadata}
             durationInFrames={1} fps={FORMATS[format].fps} width={FORMATS[format].width} height={FORMATS[format].height} />
         ))}
-        <Composition id={`${v.slug}--sub`} component={Sub} defaultProps={{ slug: v.slug, groups: [] as number[] }} calculateMetadata={subMetadata} durationInFrames={1} fps={FORMATS.landscape.fps} width={FORMATS.landscape.width} height={FORMATS.landscape.height} />
+        <Composition id={`${v.slug}--sub`} component={Sub} defaultProps={{ slug: v.slug, format: v.formats[0], groups: [] as number[] }} calculateMetadata={subMetadata} durationInFrames={1} fps={FORMATS[v.formats[0]].fps} width={FORMATS[v.formats[0]].width} height={FORMATS[v.formats[0]].height} />
         {/* full-length, not a <Still>, so the OG card can be any frame */}
         <Composition id={`${v.slug}--og`} component={Render} defaultProps={{ slug: v.slug, format: 'og' } as Props} calculateMetadata={metadata} durationInFrames={1} fps={FORMATS.og.fps} width={FORMATS.og.width} height={FORMATS.og.height} />
       </Folder>

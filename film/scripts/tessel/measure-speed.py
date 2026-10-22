@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifted verbatim from the Tessel launch film (github.com/Leonxlnx/claude-launchvideo, scripts/measure-speed.py).
+# Adapted from the Tessel launch film (github.com/Leonxlnx/claude-launchvideo, scripts/measure-speed.py).
 # Copyright (c) 2026 Leonxlnx. MIT License: see film/THIRD_PARTY_NOTICES.md.
 """Decides how many motion-blur samples each frame needs, from how fast things move on screen.
 
@@ -8,7 +8,7 @@ Optical flow on the sharp render gives, per frame, the speed of the fastest movi
 neighbouring samples are at most STEP px apart: fast moves smear instead of stamping copies, and
 still frames render once.
 
-Usage: python3 scripts/measure-speed.py <sharp.mp4> <out/samples.json>
+Usage: python3 scripts/measure-speed.py <sharp.mp4> <out/samples.json> [width height]
 """
 import json
 import math
@@ -22,7 +22,9 @@ SHUTTER = 240 / 360  # fraction of a frame the shutter is open (must match src/b
 STEP = 3.0  # max px between neighbouring samples at 1080p
 N_MIN, N_MAX = 4, 48
 STILL = 2.0  # px/frame below which a frame renders once
-W, H = 960, 540  # analysis resolution (half of 1080p)
+width, height = map(int, sys.argv[3:5]) if len(sys.argv) >= 5 else (1920, 1080)
+analysis_scale = min(1.0, 960 / max(width, height))
+W, H = round(width * analysis_scale), round(height * analysis_scale)
 
 src, out = sys.argv[1:3]
 dec = subprocess.Popen(
@@ -36,6 +38,8 @@ while True:
         break
     frames.append(np.frombuffer(b, np.uint8).reshape(H, W))
 dec.wait()
+if dec.returncode or not frames:
+    raise SystemExit('ffmpeg could not decode the sharp render')
 
 # v[i] = speed of the move from frame i-1 to frame i (px per frame at 1080p)
 v = [0.0]
@@ -57,7 +61,7 @@ for a, b in zip(frames, frames[1:]):
         ok = (st1[:, 0] == 1) & (st2[:, 0] == 1) & (np.linalg.norm((back - pts)[:, 0], axis=1) < 1.0)
         if ok.sum() >= 3:
             sparse = float(np.percentile(np.linalg.norm((fwd - pts)[ok, 0], axis=1), 98))
-    v.append(max(dense, sparse) * (1920 / W))
+    v.append(max(dense, sparse) * (width / W))
 
 speed = [max(v[i], v[i + 1] if i + 1 < len(v) else 0.0) for i in range(len(v))]
 groups = []

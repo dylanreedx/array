@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Start a new video. Fresh by default: its own format and its own look, decided in its brief.
 
-Usage: scripts/new-video <name> --purpose <purpose> [--format <format>] [--look <look>] [--title "<title>"]
+Usage: scripts/new-video <name> --purpose <purpose> [--outputs landscape|vertical|both] [--format <format>] [--look <look>] [--title "<title>"]
 
   <name>      kebab-case, says what the video is (which-tab, first-agent). Never a date.
   --purpose   one of purposes/*.md. Its brief questions become brief.md.
+  --outputs   delivery shapes: landscape (default), vertical (9:16 only), or both.
   --format    ONLY when Dylan asked to reuse one: formats/<format>.md becomes the starting beat sheet.
   --look      ONLY when Dylan asked to reuse one: looks/<look>/ becomes the video's look.
 
@@ -28,6 +29,8 @@ if not args or args[0] in ('-h', '--help'):
     sys.exit(0 if args else 2)
 name = args[0]
 opt = dict(zip(args[1::2], args[2::2]))
+if len(args[1:]) % 2 or any(k not in ('--purpose', '--outputs', '--format', '--look', '--title') for k in args[1::2]):
+    die('options need a value; see scripts/new-video --help')
 choices = lambda d, ext: sorted(f[: -len(ext)] if ext else f for f in os.listdir(os.path.join(FILM, d)) if (f.endswith(ext) if ext else os.path.isdir(os.path.join(FILM, d, f))))
 
 if not re.fullmatch(r'[a-z][a-z0-9]*(-[a-z0-9]+)*', name):
@@ -41,6 +44,10 @@ purpose = opt.get('--purpose') or die(f'--purpose is required: {", ".join(choice
 if purpose not in choices('purposes', '.md'):
     die(f'no purpose "{purpose}": {", ".join(choices("purposes", ".md"))}')
 fmt, look = opt.get('--format'), opt.get('--look')
+outputs = opt.get('--outputs', 'landscape')
+if outputs not in ('landscape', 'vertical', 'portrait', 'both'):
+    die('--outputs must be landscape, vertical, or both')
+aspects = ['landscape', 'portrait'] if outputs == 'both' else ['portrait' if outputs in ('vertical', 'portrait') else 'landscape']
 if fmt and fmt not in choices('formats', '.md'):
     die(f'no format "{fmt}": {", ".join(choices("formats", ".md"))}')
 if look and look not in choices('looks', ''):
@@ -76,6 +83,15 @@ Answer each question before the first render. Dylan's answers win.
 
 {look_section}
 
+## Outputs and framing
+
+Requested: {outputs}. Delivery shapes: {', '.join(aspects)}.
+Each shape is authored separately; resolution/proxy scaling never changes the framing.
+For vertical, read [MOBILE.md](../../MOBILE.md). Decide each beat's subject, crop, caption placement,
+and readable hold at phone size. Use portrait.tsx for its composition and crop keys. Both versions may
+share timeline.ts; override versions.portrait.build when the vertical edit needs different beats.
+Review stills and a proxy in every requested shape. A declared shape is not proof it is ready.
+
 ## Truth
 
 - Real app only: footage from the recorder, never a mock, never an invented state.
@@ -98,6 +114,7 @@ renders/{name}/r<N>/notes.md (gitignored); copy the decisions that should outliv
 - Purpose: {purpose}
 - Format: {fmt or 'new'}
 - Look: {look or 'new'}
+- Outputs: {outputs}
 - Takes: none yet
 """
 
@@ -121,13 +138,13 @@ look_import = f"import LOOK from '../../looks/{look}/look';" if look else "impor
 index = f"""// {title}: an empty composition. See brief.md for what it is for.
 import {{ AbsoluteFill }} from 'remotion';
 import {{ loadFonts }} from '../../kit/fonts';
-import {{ defineVideo, type CueSheet }} from '../../kit/sheet';
+import {{ defineVideo, type VideoProps }} from '../../kit/sheet';
 {look_import}
 import {{ BPM, timeline }} from './timeline';
 
 loadFonts(LOOK.fonts);
 
-const Video: React.FC<{{ sheet: CueSheet; viewport?: {{ width: number; height: number }} }}> = () => (
+const Video: React.FC<VideoProps> = () => (
   <AbsoluteFill style={{{{ background: LOOK.color.ground }}}} />
 );
 
@@ -135,11 +152,34 @@ export default defineVideo({{
   slug: '{name}',
   title: {title!r},
   bpm: BPM,
-  formats: ['landscape'],
+  formats: {aspects!r},
   build: timeline,
   Component: Video,
 }});
 """
+
+portrait = f"""// {title}: vertical framing is authored here, independently of the landscape composition.
+// Start with one readable subject per beat; crop real takes with kit/framing.ts and Footage keys.
+// Keep important text/actions within the editorial safe area; check the target feed's actual overlay.
+import {{ AbsoluteFill }} from 'remotion';
+import type {{ VideoProps }} from '../../kit/sheet';
+{look_import}
+
+const Portrait: React.FC<VideoProps> = () => (
+  <AbsoluteFill style={{{{ background: LOOK.color.ground }}}} />
+);
+
+export default Portrait;
+"""
+if 'portrait' in aspects:
+    index = index.replace("loadFonts(LOOK.fonts);", "import Portrait from './portrait';\n\nloadFonts(LOOK.fonts);")
+    if outputs == 'both':
+        index = index.replace('  Component: Video,', '  Component: Video,\n  versions: { portrait: { Component: Portrait } },')
+    else:
+        start = index.index('const Video:')
+        end = index.index('export default defineVideo', start)
+        index = index[:start] + index[end:]
+        index = index.replace("import { AbsoluteFill } from 'remotion';\n", '').replace('  Component: Video,', '  Component: Portrait,')
 
 fresh_look = f"""// {title}'s look: NOT DECIDED YET. These are neutral placeholders so the composition renders, not a
 // look. Decide palette, type and motion in styleframes (PROCESS.md, step 2) and replace every value.
@@ -160,6 +200,8 @@ export default LOOK;
 
 os.makedirs(vdir)
 files = {'brief.md': brief, 'notes.md': notes, 'timeline.ts': timeline, 'index.tsx': index}
+if 'portrait' in aspects:
+    files['portrait.tsx'] = portrait
 if not look:
     files['look.ts'] = fresh_look
 for f, body in files.items():
@@ -171,5 +213,5 @@ s = re.sub(r"(import type \{ VideoDefinition \} from '../kit/sheet';\n)", rf"\1i
 s = re.sub(r'(export const VIDEOS: readonly VideoDefinition\[\] = \[)([^\]]*)\]', lambda m: f"{m.group(1)}{m.group(2)}, {ident}]", s, count=1)
 open(reg, 'w').write(s)
 
-print(f'videos/{name}/: {", ".join(files)}  (purpose {purpose}, format {fmt or "new"}, look {look or "new"})')
-print(f'registered in videos/index.ts. Next: answer brief.md, then scripts/render {name} --stills 0,5')
+print(f'videos/{name}/: {", ".join(files)}  (purpose {purpose}, format {fmt or "new"}, look {look or "new"}, outputs {outputs})')
+print(f'registered in videos/index.ts. Next: answer brief.md, then scripts/render {name} --format {"both" if outputs == "both" else aspects[0]} --stills 0,5')
