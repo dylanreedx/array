@@ -205,6 +205,9 @@ final class AssistantProseView: NSView {
 
     override func layout() {
         super.layout()
+        // Hydration precedes the first real tile width. Wait rather than shape
+        // every row and assign native text frames at a fabricated one-point width.
+        guard bounds.width > 0 else { return }
         let zoom = renderContext.pageZoom
         let readingInset = Self.horizontalReadingInset(zoom: zoom)
         let availableWidth = max(1, bounds.width - readingInset * 2)

@@ -41,6 +41,7 @@ final class CodeTextView: NSTextView {
     /// view is recycled, so the container inset and the mono font are re-derived
     /// on every apply rather than frozen at construction.
     private var pageZoom: AgentPageZoom = .default
+    private var cachedUnwrappedCodeSize: NSSize?
 
     private(set) var appliedSpans: [HighlightSpan] = []
 
@@ -118,6 +119,9 @@ final class CodeTextView: NSTextView {
             )
         }
         textStorage?.setAttributedString(attributed)
+        // Source, font, and zoom are replaced together by apply. Invalidate on
+        // every replacement, including byte-distinct but equivalent Unicode.
+        cachedUnwrappedCodeSize = nil
         textColor = tokens.primaryText.color.nsColor(for: theme)
 
         let location = min(selection.location, fullRange.length)
@@ -140,11 +144,21 @@ final class CodeTextView: NSTextView {
     /// Keeps the document at least viewport-sized while allowing either axis to
     /// exceed it and activate the enclosing scroller.
     func sizeDocument(toFit viewport: NSSize) {
-        let measured = Self.measuredCodeSize(string, zoom: pageZoom)
-        frame.size = NSSize(
+        let measured = measuredCodeSize()
+        let size = NSSize(
             width: max(viewport.width, measured.width),
             height: max(viewport.height, measured.height)
         )
+        if frame.size != size { frame.size = size }
+    }
+
+    /// Unwrapped dimensions depend on the applied source and font, not the
+    /// viewport or theme. Retain only this view's current measurement.
+    func measuredCodeSize() -> NSSize {
+        if let cachedUnwrappedCodeSize { return cachedUnwrappedCodeSize }
+        let measured = Self.measuredCodeSize(string, zoom: pageZoom)
+        cachedUnwrappedCodeSize = measured
+        return measured
     }
 
     /// The text-container inset a code surface uses at `zoom`. Shared by the
@@ -154,7 +168,12 @@ final class CodeTextView: NSTextView {
         NSSize(width: CGFloat(zoom.scaled(Space.l)), height: CGFloat(zoom.scaled(Space.m)))
     }
 
+    /// Counts actual unwrapped text measurements, including renderer measurement.
+    /// Keep this in the uncached primitive so a cache hit never increments it.
+    static private(set) var qaUnwrappedMeasurementCount = 0
+
     static func measuredCodeSize(_ code: String, zoom: AgentPageZoom = .default) -> NSSize {
+        qaUnwrappedMeasurementCount += 1
         let font = NSFont.token(.bodyMono, zoom: zoom)
         let sample = code.isEmpty ? " " : code
         let rect = (sample as NSString).boundingRect(

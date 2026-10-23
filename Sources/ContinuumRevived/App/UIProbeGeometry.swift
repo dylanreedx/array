@@ -339,6 +339,8 @@ enum UIProbeGeometry {
         try checkManagedAgentStreamingTeardown()
         try checkThinkingTailProductionSeams()
         let transcriptLiveHosts = try checkTranscriptCollectionList()
+        try checkNativeTranscriptStructuralUpdates()
+        try checkNativeRetainedClusterDisclosure()
         let toolCompositionAssertions = try checkHostLocalToolDisclosureComposition()
         let streamingApplies = try checkIncrementalTranscriptBehavior()
         let proseRows = try checkAssistantProseRenderer()
@@ -7245,6 +7247,578 @@ enum UIProbeGeometry {
             throw fail("incremental transcript updates retained \(list.qaLiveHostCount) live hosts")
         }
         return live
+    }
+
+    static func runNativeTranscriptStructuralChecks() throws {
+        try checkNativeTranscriptStructuralUpdates()
+        try checkNativeRetainedClusterDisclosure()
+    }
+
+    /// A diff preserves the header ID when its members open or close. Exercise
+    /// the real button on a native visible item: a projection-only check misses
+    /// stale chevrons and accessibility state on that retained header.
+    private static func checkNativeRetainedClusterDisclosure() throws {
+        func fail(_ message: String) -> GeometryError {
+            GeometryError(message: "native retained cluster: \(message)")
+        }
+        func id(_ suffix: String) -> AgentNodeID {
+            AgentNodeID(rawValue: "native-retained-cluster-\(suffix)")!
+        }
+        func host(in view: NSView) -> AgentBlockHostView? {
+            if let host = view as? AgentBlockHostView { return host }
+            for child in view.subviews {
+                if let found = host(in: child) { return found }
+            }
+            return nil
+        }
+        func host(for item: NSCollectionViewItem) -> AgentBlockHostView? { host(in: item.view) }
+        let code = AgentBlock(
+            id: id("code"), revision: 1, kind: .fencedCode,
+            payload: .fencedCode(.init(language: "swift", code: "let retained = true", isComplete: true))
+        )
+        let tools = (0..<3).map { index in
+            AgentBlock(id: id("tool-\(index)"), revision: 1, kind: .toolCall,
+                       payload: .toolCall(.init(name: "Read file", summary: "done", status: .completed)))
+        }
+        let answer = AgentBlock(id: id("answer"), revision: 1, kind: .paragraph,
+                                payload: .paragraph([.text("All three reads are complete.")]))
+        let blocks = [code] + tools + [answer]
+        let entry = AgentEntry(id: id("entry"), revision: 1, role: .assistant,
+                               provenance: .localNotice(reason: "retained cluster witness"),
+                               lifecycle: .finished, blocks: blocks)
+        let list = AgentTranscriptListView(registry: .production, presentationStyle: .rows)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 720),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 720))
+        window.contentView = content
+        list.frame = content.bounds
+        list.autoresizingMask = [.width, .height]
+        content.addSubview(list)
+        window.orderFront(nil)
+        defer { window.orderOut(nil); window.close() }
+        content.layoutSubtreeIfNeeded()
+        try list.apply(document: AgentDocument(version: 1, entries: [entry]),
+                       patch: AgentDocumentPatch(fromVersion: 0, toVersion: 1,
+                                                 inserted: blocks.map(\.id)))
+        content.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        let headerItems = list.collectionView.visibleItems().compactMap { $0 as? AgentToolClusterHeaderItem }
+        guard list.qaClusterHeaderCountForChecks == 1, headerItems.count == 1,
+              let headerItem = headerItems.first, let header = headerItem.headerView,
+              let headerID = header.clusterID,
+              list.qaClusterHeaderIDsForChecks == [headerID],
+              let codeItem = list.collectionView.visibleItems().first(where: { host(for: $0)?.representedID == code.id }),
+              let codeHost = host(for: codeItem), let codeView = codeHost.rendererView as? CodeBlockView else {
+            throw fail("fixture did not mount one clustered header and a production code renderer")
+        }
+        // Keep strong references: address reuse cannot masquerade as retained
+        // native item, host, header, or renderer identity.
+        let button = header.disclosureButton
+        let summary = header.summaryLabel.stringValue
+        let memberIDs = Set(tools.map(\.id))
+        guard summary.hasPrefix("3 steps"), !summary.isEmpty else {
+            throw fail("fixture produced unexpected summary '\(summary)'")
+        }
+        func verify(_ phase: String, expanded: Bool) throws {
+            let visible = list.collectionView.visibleItems()
+            let currentHeader = visible.compactMap { $0 as? AgentToolClusterHeaderItem }
+                .first { $0.headerView?.clusterID == headerID }
+            let currentCode = visible.first { host(for: $0)?.representedID == code.id }
+            let renderedMembers = Set(visible.compactMap { host(for: $0) }
+                .filter { $0.rendererView is ToolCallView }.compactMap(\.representedID))
+            let displayedMembers = Set(list.qaDisplayedRowIDsForChecks).intersection(memberIDs)
+            let expectedMembers: Set<AgentNodeID> = expanded ? memberIDs : []
+            let expectedGlyph = expanded ? "▾" : "▸"
+            let expectedState = expanded ? "Expanded" : "Collapsed"
+            let expectedLabel = "\(expanded ? "Collapse" : "Expand") \(summary)"
+            let expectedHeaderLabel = "\(summary), \(expanded ? "expanded" : "collapsed")"
+            let diagnostic = "\(phase): expanded=\(header.isExpanded), glyph=\(button.title), "
+                + "buttonAX=\(String(describing: button.accessibilityValue())), "
+                + "headerAX=\(header.accessibilityLabel() ?? "nil"), "
+                + "snapshot=\(list.qaSnapshotItemCountForChecks), members=\(renderedMembers.count), "
+                + "pending=\(list.qaStructuralSnapshotPendingCount)"
+            print(diagnostic)
+            guard currentHeader === headerItem, currentHeader?.headerView === header,
+                  header.disclosureButton === button, header.window === window,
+                  currentCode === codeItem, currentCode.flatMap { host(for: $0) } === codeHost,
+                  codeHost.rendererView === codeView,
+                  codeView.codeTextView.string == "let retained = true" else {
+                throw fail("\(phase): unchanged native header/code item, host, or renderer was replaced")
+            }
+            guard header.summaryLabel.stringValue == summary,
+                  header.isExpanded == expanded, button.title == expectedGlyph,
+                  !button.isHidden, button.frame.width > 0, button.frame.height > 0,
+                  button.accessibilityValue() as? String == expectedState,
+                  button.accessibilityLabel() == expectedLabel,
+                  header.accessibilityLabel() == expectedHeaderLabel else {
+                throw fail("retained disclosure chrome or accessibility did not match its members: \(diagnostic)")
+            }
+            guard list.qaSemanticRowCount == blocks.count,
+                  list.qaSnapshotItemCountForChecks == (expanded ? 6 : 3),
+                  displayedMembers == expectedMembers, renderedMembers == expectedMembers,
+                  list.qaClusterProjectionMismatch() == nil, list.qaRenderingErrorDescription == nil else {
+                throw fail("semantic, snapshot, or actual native member rows diverged: \(diagnostic)")
+            }
+        }
+        try verify("initial collapsed", expanded: false)
+        for expanded in [true, false] {
+            button.performClick(nil)
+            content.layoutSubtreeIfNeeded()
+            list.collectionView.layoutSubtreeIfNeeded()
+            try verify("immediately after \(expanded ? "expand" : "collapse")", expanded: expanded)
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+            try verify("after \(expanded ? "expand" : "collapse") callbacks", expanded: expanded)
+            guard list.qaStructuralSnapshotPendingCount == 0 else {
+                throw fail("cluster toggle left snapshot completions pending")
+            }
+        }
+
+        // Streaming removes this settled cluster's header while preserving all
+        // three row IDs and revisions. The retained native rows must immediately
+        // lose their group indentation, then regain it when the turn settles.
+        button.performClick(nil)
+        content.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+        try verify("expanded before membership transitions", expanded: true)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        struct RetainedTool {
+            let item: NSCollectionViewItem
+            let host: AgentBlockHostView
+            let renderer: ToolCallView
+            let clusteredTitleX: CGFloat
+            let title: String
+        }
+        var retainedTools: [AgentNodeID: RetainedTool] = [:]
+        for item in list.collectionView.visibleItems() {
+            guard let toolHost = host(for: item), let toolID = toolHost.representedID,
+                  memberIDs.contains(toolID), let toolView = toolHost.rendererView as? ToolCallView else { continue }
+            retainedTools[toolID] = RetainedTool(item: item, host: toolHost, renderer: toolView,
+                                                clusteredTitleX: toolView.titleLabel.frame.minX,
+                                                title: toolView.titleLabel.stringValue)
+        }
+        guard Set(retainedTools.keys) == memberIDs,
+              retainedTools.values.allSatisfy({
+                  abs($0.clusteredTitleX - ToolCallView.detailIndent - ToolCallView.clusterIndent) <= 0.5
+              }) else {
+            throw fail("membership fixture did not mount three visibly indented tool rows")
+        }
+        func verifyMembership(_ phase: String, clustered: Bool,
+                              survivingIDs: Set<AgentNodeID>, semanticCount: Int) throws {
+            let visible = list.collectionView.visibleItems()
+            let currentIDs = Set(visible.compactMap { host(for: $0) }
+                .filter { $0.rendererView is ToolCallView }.compactMap(\.representedID))
+            let currentCode = visible.first { host(for: $0)?.representedID == code.id }
+            guard currentIDs == survivingIDs,
+                  Set(list.qaDisplayedRowIDsForChecks).intersection(memberIDs) == survivingIDs,
+                  list.qaSemanticRowCount == semanticCount,
+                  list.qaClusterHeaderCountForChecks == (clustered ? 1 : 0),
+                  list.qaSnapshotItemCountForChecks == semanticCount + (clustered ? 1 : 0),
+                  list.qaClusterProjectionMismatch() == nil, list.qaRenderingErrorDescription == nil,
+                  currentCode === codeItem, currentCode.flatMap({ host(for: $0) }) === codeHost,
+                  codeHost.rendererView === codeView else {
+                throw fail("\(phase): native membership, semantic rows, or unaffected code identity diverged")
+            }
+            for toolID in survivingIDs {
+                guard let prior = retainedTools[toolID],
+                      let current = visible.first(where: { host(for: $0)?.representedID == toolID }),
+                      current === prior.item, let currentHost = host(for: current), currentHost === prior.host,
+                      currentHost.rendererView === prior.renderer,
+                      currentHost.representedRevision == 1,
+                      prior.renderer.titleLabel.stringValue == prior.title else {
+                    throw fail("\(phase): unchanged tool item/host/renderer/content replaced for \(toolID.rawValue)")
+                }
+                let expectedX = prior.clusteredTitleX - (clustered ? 0 : ToolCallView.clusterIndent)
+                let actualX = prior.renderer.titleLabel.frame.minX
+                print("\(phase): \(toolID.rawValue) titleX=\(actualX), expected=\(expectedX), clustered=\(clustered)")
+                guard abs(actualX - expectedX) <= 0.5 else {
+                    throw fail("\(phase): retained tool \(toolID.rawValue) kept stale cluster indentation: \(actualX), expected \(expectedX)")
+                }
+            }
+        }
+        try verifyMembership("before in-flight transition", clustered: true,
+                             survivingIDs: memberIDs, semanticCount: blocks.count)
+        for inFlight in [true, false] {
+            list.setTurnInFlight(inFlight)
+            content.layoutSubtreeIfNeeded()
+            list.collectionView.layoutSubtreeIfNeeded()
+            try verifyMembership("immediately inFlight=\(inFlight)", clustered: !inFlight,
+                                 survivingIDs: memberIDs, semanticCount: blocks.count)
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+            try verifyMembership("after inFlight=\(inFlight) callbacks", clustered: !inFlight,
+                                 survivingIDs: memberIDs, semanticCount: blocks.count)
+            guard list.qaStructuralSnapshotPendingCount == 0 else {
+                throw fail("membership transition left snapshot completions pending")
+            }
+        }
+
+        // A removal-only delta dissolves a two-or-more-member cluster without
+        // updating its surviving block. This is the ordinary document-apply
+        // path, distinct from the turn-status snapshot path above.
+        let survivingBlocks = [code, tools[0], answer]
+        let reducedEntry = AgentEntry(id: entry.id, revision: 2, role: .assistant,
+                                      provenance: entry.provenance, lifecycle: .finished,
+                                      blocks: survivingBlocks)
+        try list.apply(document: AgentDocument(version: 2, entries: [reducedEntry]),
+                       patch: AgentDocumentPatch(fromVersion: 1, toVersion: 2,
+                                                 removed: tools.dropFirst().map(\.id)))
+        content.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+        try verifyMembership("immediately after member removal", clustered: false,
+                             survivingIDs: [tools[0].id], semanticCount: survivingBlocks.count)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        try verifyMembership("after member removal callbacks", clustered: false,
+                             survivingIDs: [tools[0].id], semanticCount: survivingBlocks.count)
+        guard list.qaStructuralSnapshotPendingCount == 0 else {
+            throw fail("member removal left snapshot completions pending")
+        }
+        print("Native retained cluster checks: production header/code/tool identities, chevron/AX, unchanged summary, actual members, and title indentation held through expand/collapse, in-flight transitions, removal-only dissolve, and callbacks")
+    }
+
+    /// A real window is required: a retained synthetic offscreen host cannot
+    /// detect AppKit discarding the actual visible items on snapshot application.
+    /// RED witness: the old apply(... animatingDifferences: false) rebuilds these
+    /// native renderers after an append that changes no visible block or identity.
+    private static func checkNativeTranscriptStructuralUpdates() throws {
+        @MainActor final class CountingRenderer: AgentBlockRendering {
+            let base: any AgentBlockRendering
+            private(set) var creations = 0
+            var kind: AgentBlockKind { base.kind }
+            init(_ base: any AgentBlockRendering) { self.base = base }
+            func makeView() -> NSView { creations += 1; return base.makeView() }
+            func update(view: NSView, block: AgentBlock, context: AgentRenderContext) {
+                base.update(view: view, block: block, context: context)
+            }
+            func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
+                base.measure(block: block, width: width, context: context)
+            }
+            func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
+                base.updateAccessibility(view: view, block: block, context: context)
+            }
+        }
+        struct NativeItem {
+            // Strong references prevent an allocator reusing an address from making
+            // ObjectIdentifier equality falsely report a preserved renderer.
+            let item: NSCollectionViewItem
+            let host: AgentBlockHostView
+            let renderer: NSView
+            let textViews: [NSTextView]
+        }
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func code(_ index: Int, revision: UInt64 = 1) -> AgentBlock {
+            AgentBlock(id: id("native-structure-\(index)"), revision: revision, kind: .fencedCode,
+                       payload: .fencedCode(.init(language: "swift", code: "let value\(index) = \(revision)", isComplete: true)))
+        }
+        func prose(_ index: Int) -> AgentBlock {
+            AgentBlock(id: id("native-structure-\(index)"), revision: 1, kind: .paragraph,
+                       payload: .paragraph([.text("Unchanged prose row \(index)")]))
+        }
+        func descendants(_ view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+        func bottomState(_ phase: String, in target: AgentTranscriptListView) -> String {
+            let clip = target.qaScrollViewForChecks.contentView.bounds
+            let height = target.qaScrollViewForChecks.documentView?.frame.height ?? 0
+            return "\(phase): y=\(clip.minY), clipH=\(clip.height), docH=\(height), "
+                + "collectionH=\(target.collectionView.frame.height), bottomGap=\(max(0, height - clip.height) - clip.minY), "
+                + "nearBottom=\(target.qaIsNearBottom), jump=\(target.qaShowsJumpToLatest), "
+                + "pending=\(target.qaStructuralSnapshotPendingCount), "
+                + "completed=\(target.qaStructuralSnapshotCompletionCount)/\(target.qaStructuralSnapshotApplyCount), "
+                + "completedBeforeReturn=\(target.qaStructuralSnapshotCompletedBeforeReturnCount), "
+                + "projection=\(target.qaClusterProjectionMismatch() ?? "nil"), "
+                + "selections=\(descendants(target.collectionView).compactMap { ($0 as? NSTextView)?.selectedRange() }.filter { $0.length > 0 })"
+        }
+        func verifyBottom(_ phase: String, in target: AgentTranscriptListView, settled: Bool) throws {
+            // AppKit promises the snapshot completion, not when it runs: wait for
+            // the callback itself (bounded), then assert the geometry it left.
+            let deadline = Date(timeIntervalSinceNow: 2)
+            while settled, target.qaStructuralSnapshotPendingCount > 0, Date() < deadline {
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+            }
+            let diagnostic = bottomState(phase, in: target)
+            print(diagnostic)
+            guard target.qaIsNearBottom, !target.qaShowsJumpToLatest,
+                  !settled || target.qaStructuralSnapshotPendingCount == 0,
+                  target.qaClusterProjectionMismatch() == nil else {
+                throw fail("native bottom-follow failed: \(diagnostic)")
+            }
+        }
+        let codeRenderer = CountingRenderer(CodeBlockRenderer())
+        let proseRenderer = CountingRenderer(AssistantProseRenderer(kind: .paragraph))
+        let registry = AgentBlockRendererRegistry()
+        try registry.register(codeRenderer, for: .fencedCode)
+        try registry.register(proseRenderer, for: .paragraph)
+        try registry.setFallback(AgentUnknownBlockRenderer())
+        try registry.freeze()
+        // This independent control runs BEFORE the identity RED witness, so the
+        // legacy false-animation path can reach the same bottom-follow transition.
+        func checkBottomControl() throws {
+            let control = AgentTranscriptListView(registry: registry, presentationStyle: .rows)
+            let controlWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 420),
+                                         styleMask: [.borderless], backing: .buffered, defer: false)
+            controlWindow.isReleasedWhenClosed = false
+            let controlContent = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 420))
+            controlWindow.contentView = controlContent
+            control.frame = controlContent.bounds
+            control.autoresizingMask = [.width, .height]
+            controlContent.addSubview(control)
+            controlWindow.orderFront(nil)
+            defer { controlWindow.orderOut(nil); controlWindow.close() }
+            var controlBlocks = (0..<40).map { $0.isMultiple(of: 2) ? code($0) : prose($0) }
+            let controlEntryID = id("native-bottom-control")
+            func controlApply(_ version: UInt64, inserted: [AgentNodeID]) throws {
+                let entry = AgentEntry(id: controlEntryID, revision: version, role: .assistant,
+                                       provenance: .localNotice(reason: "bottom control"), blocks: controlBlocks)
+                try control.apply(document: AgentDocument(version: version, entries: [entry]),
+                                  patch: AgentDocumentPatch(fromVersion: version - 1, toVersion: version,
+                                                            inserted: inserted))
+                controlContent.layoutSubtreeIfNeeded()
+                control.collectionView.layoutSubtreeIfNeeded()
+            }
+            try controlApply(1, inserted: controlBlocks.map(\.id))
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+            control.jumpToLatest()
+            control.collectionView.layoutSubtreeIfNeeded()
+            try verifyBottom("bottom control before append", in: control, settled: true)
+            let appended = code(10000)
+            controlBlocks.append(appended)
+            try controlApply(2, inserted: [appended.id])
+            try verifyBottom("bottom control immediately after append", in: control, settled: false)
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+            try verifyBottom("bottom control after runloop", in: control, settled: true)
+        }
+        try checkBottomControl()
+        let list = AgentTranscriptListView(registry: registry, presentationStyle: .rows)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 420),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 420))
+        window.contentView = content
+        list.frame = content.bounds
+        list.autoresizingMask = [.width, .height]
+        content.addSubview(list)
+        window.orderFront(nil)
+        defer { window.orderOut(nil); window.close() }
+        var blocks = (0..<40).map { $0.isMultiple(of: 2) ? code($0) : prose($0) }
+        let entryID = id("native-structure-entry")
+        var version: UInt64 = 0
+        func apply(inserted: [AgentNodeID] = [], removed: [AgentNodeID] = [],
+                   updated: [AgentNodeID] = [], moved: [AgentNodeID] = []) throws {
+            let prior = version
+            version += 1
+            let entry = AgentEntry(id: entryID, revision: version, role: .assistant,
+                                   provenance: .localNotice(reason: "native structure witness"), blocks: blocks)
+            try list.apply(document: AgentDocument(version: version, entries: [entry]),
+                           patch: AgentDocumentPatch(fromVersion: prior, toVersion: version,
+                                                     inserted: inserted, updated: updated,
+                                                     removed: removed, moved: moved))
+            content.layoutSubtreeIfNeeded()
+            list.collectionView.layoutSubtreeIfNeeded()
+            guard list.qaAppliedVersion == version, list.qaSemanticRowCount == blocks.count,
+                  list.qaClusterProjectionMismatch() == nil,
+                  list.qaRenderingErrorDescription == nil else {
+                throw fail("native structural update did not synchronously commit version \(version)")
+            }
+        }
+        func nativeItems() -> [AgentNodeID: NativeItem] {
+            var result: [AgentNodeID: NativeItem] = [:]
+            for item in list.collectionView.visibleItems() {
+                guard let host = descendants(item.view).compactMap({ $0 as? AgentBlockHostView }).first,
+                      let id = host.representedID, let renderer = host.rendererView else { continue }
+                result[id] = NativeItem(item: item, host: host, renderer: renderer,
+                                        textViews: descendants(renderer).compactMap { $0 as? NSTextView })
+            }
+            return result
+        }
+        func verifyNativeContent() throws {
+            let expected = Dictionary(uniqueKeysWithValues: blocks.map { ($0.id, $0) })
+            for (id, item) in nativeItems() {
+                guard let block = expected[id], item.host.representedRevision == block.revision else {
+                    throw fail("native structural update left a stale visible host")
+                }
+                if case let .fencedCode(payload) = block.payload {
+                    guard (item.renderer as? CodeBlockView)?.codeTextView.string == payload.code else {
+                        throw fail("native structural update painted code for the wrong ID/revision")
+                    }
+                } else if case let .paragraph(runs) = block.payload {
+                    guard (item.renderer as? AssistantProseView)?.textFields.first?.string == runs.compactMap({
+                        if case let .text(text) = $0 { return text }; return nil
+                    }).joined() else { throw fail("native structural update painted prose for the wrong ID") }
+                }
+            }
+            // The existing arrival fade is intentional. Geometry animations are
+            // not: duration=0 must not leave positions/bounds moving after return.
+            for view in descendants(list.collectionView) {
+                guard let layer = view.layer else { continue }
+                for key in layer.animationKeys() ?? [] {
+                    guard let animation = layer.animation(forKey: key) as? CABasicAnimation,
+                          let keyPath = animation.keyPath, animation.duration > 0 else { continue }
+                    if ["position", "bounds", "transform"].contains(where: { keyPath.hasPrefix($0) }) {
+                        throw fail("zero-duration diff left an active geometry animation: \(keyPath)")
+                    }
+                }
+            }
+            for index in 0..<list.collectionView.numberOfItems(inSection: 0) {
+                guard let attributes = list.collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0)),
+                      attributes.frame.width > 0, attributes.frame.height > 0 else {
+                    throw fail("native structural update exposed stale/missing layout at \(index)")
+                }
+            }
+        }
+        try apply(inserted: blocks.map(\.id))
+        let scroll = list.qaScrollViewForChecks
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
+        list.collectionView.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        let before = nativeItems()
+        guard before.count >= 3, let selected = before[blocks[0].id]?.textViews.first,
+              before.values.contains(where: { $0.renderer is AssistantProseView }),
+              window.makeFirstResponder(selected) else {
+            throw fail("native structure fixture did not mount selectable code and prose in a real window")
+        }
+        let selection = NSRange(location: 4, length: 5)
+        selected.setSelectedRange(selection)
+        let stationaryY = scroll.contentView.bounds.minY
+        let creationBaseline = codeRenderer.creations + proseRenderer.creations
+        func verifyPreserved(_ phase: String) throws {
+            let after = nativeItems()
+            for (id, prior) in before {
+                guard let current = after[id], current.item === prior.item, current.host === prior.host,
+                      current.renderer === prior.renderer,
+                      current.textViews.map(ObjectIdentifier.init) == prior.textViews.map(ObjectIdentifier.init) else {
+                    throw fail("\(phase): native item/host/renderer/text identity replaced for unchanged \(id.rawValue)")
+                }
+            }
+            guard codeRenderer.creations + proseRenderer.creations == creationBaseline,
+                  selected.window === window, selected.selectedRange() == selection,
+                  window.firstResponder === selected,
+                  abs(scroll.contentView.bounds.minY - stationaryY) <= 0.5 else {
+                throw fail("\(phase): unchanged visible rows created \(codeRenderer.creations + proseRenderer.creations - creationBaseline) renderers or lost selection/focus/scroll")
+            }
+            try verifyNativeContent()
+        }
+        // No runloop yield between updates: an asynchronous diff cannot rely on
+        // our mutable row dictionaries remaining unchanged until its completion.
+        for index in 40..<52 {
+            let appended = code(index)
+            blocks.append(appended)
+            try apply(inserted: [appended.id])
+            try verifyPreserved("append \(index)")
+        }
+        blocks[blocks.count - 1] = code(51, revision: 2)
+        try apply(updated: [blocks.last!.id, entryID])
+        try verifyPreserved("content after append")
+        let removed = Array(blocks.suffix(4).map(\.id))
+        blocks.removeLast(4)
+        blocks.swapAt(blocks.count - 1, blocks.count - 2)
+        try apply(removed: removed, moved: Array(blocks.suffix(2).map(\.id)))
+        try verifyPreserved("remove and reorder after append")
+        list.setThinkingIndicatorVisible(true)
+        try verifyPreserved("tail inserted")
+        list.setThinkingIndicatorVisible(false)
+        try verifyPreserved("tail removed")
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        try verifyPreserved("after completions and runloop")
+        guard list.qaStructuralSnapshotPendingCount == 0,
+              list.qaStructuralSnapshotCompletionCount == list.qaStructuralSnapshotApplyCount else {
+            throw fail("native structural updates left snapshot completions pending")
+        }
+        selected.setSelectedRange(NSRange(location: 0, length: 0))
+        window.makeFirstResponder(nil)
+        func activeSelections() -> [NSRange] {
+            descendants(list.collectionView).compactMap { ($0 as? NSTextView)?.selectedRange() }
+                .filter { $0.length > 0 }
+        }
+        func frame(for blockID: AgentNodeID) -> NSRect? {
+            guard let index = blocks.firstIndex(where: { $0.id == blockID }) else { return nil }
+            return list.collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame
+        }
+        func anchorState(_ phase: String, tracking blockID: AgentNodeID) -> String {
+            let trackedScreenY = frame(for: blockID).map { $0.minY - scroll.contentView.bounds.minY }
+            return "\(phase): y=\(scroll.contentView.bounds.minY), clipH=\(scroll.contentView.bounds.height), "
+                + "docH=\(scroll.documentView?.frame.height ?? -1), nearBottom=\(list.qaIsNearBottom), "
+                + "jump=\(list.qaShowsJumpToLatest), topID=\(list.qaTopSemanticID?.rawValue ?? "nil"), "
+                + "offset=\(String(describing: list.qaTopSemanticOffset)), trackedID=\(blockID.rawValue), "
+                + "trackedScreenY=\(String(describing: trackedScreenY)), selections=\(activeSelections()), "
+                + "pending=\(list.qaStructuralSnapshotPendingCount)"
+        }
+        // At the document top the original first row is 12pt below the clip top.
+        // Preserving that position after insertion can expose the preceding row:
+        // the inter-row gap is only 8pt. Assert the ORIGINAL row's screen position,
+        // not that it remains the first row touched by the viewport.
+        let edgeAnchorID = blocks[0].id
+        guard !list.qaIsNearBottom, activeSelections().isEmpty,
+              let edgeFrame = frame(for: edgeAnchorID) else {
+            throw fail("document-top anchor fixture was not reading: \(anchorState("before", tracking: edgeAnchorID))")
+        }
+        let edgeScreenY = edgeFrame.minY - scroll.contentView.bounds.minY
+        print(anchorState("document-top before insert", tracking: edgeAnchorID))
+        let insertedAbove = prose(1000)
+        blocks.insert(insertedAbove, at: 0)
+        try apply(inserted: [insertedAbove.id])
+        print(anchorState("document-top immediately after insert", tracking: edgeAnchorID))
+        guard let edgeAfter = frame(for: edgeAnchorID),
+              abs(edgeAfter.minY - scroll.contentView.bounds.minY - edgeScreenY) <= 0.5 else {
+            throw fail("zero-duration diff moved the original document-top anchor: \(anchorState("after", tracking: edgeAnchorID))")
+        }
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        print(anchorState("document-top after runloop", tracking: edgeAnchorID))
+        guard let edgeSettled = frame(for: edgeAnchorID),
+              abs(edgeSettled.minY - scroll.contentView.bounds.minY - edgeScreenY) <= 0.5 else {
+            throw fail("zero-duration diff moved the document-top anchor after completion: \(anchorState("settled", tracking: edgeAnchorID))")
+        }
+
+        // Seed an unambiguous reader anchor INSIDE a middle row. The controller
+        // derives intent from geometry each apply; it has no persistent follow mode.
+        let anchorID = blocks[20].id
+        guard let anchorFrame = frame(for: anchorID) else {
+            throw fail("middle-row anchor fixture has no native layout attributes")
+        }
+        let requestedAnchorOffset: CGFloat = 3
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: anchorFrame.minY + requestedAnchorOffset))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        list.collectionView.layoutSubtreeIfNeeded()
+        // Native collection layout can adjust the requested scroll position.
+        // Preserve the actual settled reader position, not the setup request.
+        guard !list.qaIsNearBottom, activeSelections().isEmpty,
+              list.qaTopSemanticID == anchorID,
+              let anchorOffset = list.qaTopSemanticOffset, anchorOffset.isFinite,
+              let settledAnchorFrame = frame(for: anchorID),
+              anchorOffset >= 0, anchorOffset < settledAnchorFrame.height,
+              abs(scroll.contentView.bounds.minY - settledAnchorFrame.minY - anchorOffset) <= 0.5 else {
+            throw fail("middle-row fixture did not establish reader intent: \(anchorState("before", tracking: anchorID))")
+        }
+        print(anchorState("middle-row before insert", tracking: anchorID))
+        let middleInsertedAbove = prose(1002)
+        blocks.insert(middleInsertedAbove, at: 0)
+        try apply(inserted: [middleInsertedAbove.id])
+        func verifyMiddleAnchor(_ phase: String) throws {
+            let diagnostic = anchorState(phase, tracking: anchorID)
+            print(diagnostic)
+            guard !list.qaIsNearBottom, activeSelections().isEmpty,
+                  list.qaTopSemanticID == anchorID, list.qaShowsJumpToLatest,
+                  let anchoredFrame = frame(for: anchorID),
+                  abs(scroll.contentView.bounds.minY - anchoredFrame.minY - anchorOffset) <= 0.5,
+                  abs((list.qaTopSemanticOffset ?? 1_000) - anchorOffset) <= 0.5 else {
+                throw fail("zero-duration diff moved the middle-row reader anchor: \(diagnostic)")
+            }
+        }
+        try verifyMiddleAnchor("middle-row immediately after insert")
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        try verifyMiddleAnchor("middle-row after runloop")
+        list.jumpToLatest()
+        print(bottomState("main bottom before append", in: list))
+        let appended = code(1001)
+        blocks.append(appended)
+        try apply(inserted: [appended.id])
+        try verifyBottom("main bottom immediately after append", in: list, settled: false)
+        try verifyNativeContent()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        try verifyBottom("main bottom after runloop", in: list, settled: true)
+        try verifyNativeContent()
+        print("Native transcript structural checks: 12 offscreen appends + content/remove/reorder/tail burst; zero replacement renderers, selection/focus/anchor/follow preserved; snapshots \(list.qaStructuralSnapshotApplyCount), completed-before-return \(list.qaStructuralSnapshotCompletedBeforeReturnCount), max pending \(list.qaStructuralSnapshotMaximumPendingCount)")
     }
 
     /// The Gyro must be a virtual collection tail, not a viewport overlay. This

@@ -83,12 +83,10 @@ final class AgentToolClusterHeaderView: NSView {
         zoom: AgentPageZoom = .default
     ) {
         self.clusterID = clusterID
-        isExpanded = expanded
         pageZoom = zoom
         // Re-derived per apply: this view is list-owned and reused.
         summaryLabel.font = NSFont.token(.body, zoom: zoom)
-        setSummaryText(summary)
-        disclosureButton.apply(expanded: expanded, title: summary, zoom: zoom)
+        updatePresentation(summary: summary, expanded: expanded, force: true)
         disclosureButton.contentTintColor = tokens.secondaryText.color.nsColor(for: theme)
         iconView.contentTintColor = tokens.secondaryText.color.nsColor(for: theme)
         summaryLabel.textColor = tokens.secondaryText.color.nsColor(for: theme)
@@ -97,12 +95,15 @@ final class AgentToolClusterHeaderView: NSView {
         needsLayout = true
     }
 
-    /// Direct text re-drive (the `setThinkingStatusText` move): a member
-    /// completing updates the visible header without a snapshot reload.
-    func setSummaryText(_ text: String) {
-        guard summaryLabel.stringValue != text else { return }
-        summaryLabel.stringValue = text
-        setAccessibilityLabel("\(text), \(isExpanded ? "expanded" : "collapsed")")
+    /// Stable snapshot IDs retain this header while its summary or disclosure
+    /// changes. Refresh both together; unchanged text can still change AX state.
+    func updatePresentation(summary: String, expanded: Bool, force: Bool = false) {
+        let summaryChanged = summaryLabel.stringValue != summary
+        guard force || summaryChanged || isExpanded != expanded else { return }
+        isExpanded = expanded
+        if summaryChanged { summaryLabel.stringValue = summary }
+        disclosureButton.apply(expanded: expanded, title: summary, zoom: pageZoom)
+        setAccessibilityLabel("\(summary), \(expanded ? "expanded" : "collapsed")")
     }
 
     @objc private func toggle(_ sender: Any?) {

@@ -141,27 +141,31 @@ final class CodeBlockView: NSView {
         let headerHeight = Self.headerHeight(zoom: zoom)
         let side = CGFloat(zoom.scaled(Space.l))
         let copyWidth = copyButton.intrinsicContentSize.width
-        copyButton.frame = NSRect(
+        let copyFrame = NSRect(
             x: max(side, bounds.maxX - side - copyWidth), y: CGFloat(zoom.scaled(Space.s)),
             width: copyWidth, height: headerHeight - CGFloat(zoom.scaled(Space.m))
         )
+        if copyButton.frame != copyFrame { copyButton.frame = copyFrame }
         let streamingWidth = streamingLabel.isHidden ? 0 : streamingLabel.intrinsicContentSize.width
-        streamingLabel.frame = NSRect(
+        let streamingFrame = NSRect(
             x: max(side, copyButton.frame.minX - CGFloat(zoom.scaled(Space.m)) - streamingWidth),
             y: CGFloat(zoom.scaled(Space.m)), width: streamingWidth,
             height: streamingLabel.intrinsicContentSize.height
         )
-        languageLabel.frame = NSRect(
+        if streamingLabel.frame != streamingFrame { streamingLabel.frame = streamingFrame }
+        let languageFrame = NSRect(
             x: side, y: CGFloat(zoom.scaled(Space.m)),
             width: max(1, streamingLabel.frame.minX - side - CGFloat(zoom.scaled(Space.m))),
             height: languageLabel.intrinsicContentSize.height
         )
-        scrollView.frame = NSRect(
+        if languageLabel.frame != languageFrame { languageLabel.frame = languageFrame }
+        let scrollFrame = NSRect(
             x: 0, y: headerHeight, width: bounds.width,
             height: max(0, bounds.height - headerHeight)
         )
+        if scrollView.frame != scrollFrame { scrollView.frame = scrollFrame }
         scrollView.layoutSubtreeIfNeeded()
-        let measuredCodeSize = CodeTextView.measuredCodeSize(codeTextView.string, zoom: zoom)
+        let measuredCodeSize = codeTextView.measuredCodeSize()
         let needsVerticalScroll = measuredCodeSize.height > scrollView.contentSize.height + 0.5
         if scrollView.hasVerticalScroller != needsVerticalScroll {
             scrollView.hasVerticalScroller = needsVerticalScroll

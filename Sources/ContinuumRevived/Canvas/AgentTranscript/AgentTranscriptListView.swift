@@ -1015,6 +1015,39 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         }
     }
 
+    // Diagnostic counters for the native structural-update witness. In particular,
+    // a deferred completion is reported rather than assumed safe for our synchronous
+    // scroll policy. The experimental zero-duration path must pass the overlap gate.
+    private(set) var qaStructuralSnapshotApplyCount = 0
+    private(set) var qaStructuralSnapshotCompletionCount = 0
+    private(set) var qaStructuralSnapshotPendingCount = 0
+    private(set) var qaStructuralSnapshotMaximumPendingCount = 0
+    private(set) var qaStructuralSnapshotCompletedBeforeReturnCount = 0
+
+    private func applyStructuralSnapshot(_ snapshot: NSDiffableDataSourceSnapshot<Int, AgentNodeID>) {
+        qaStructuralSnapshotApplyCount += 1
+        qaStructuralSnapshotPendingCount += 1
+        qaStructuralSnapshotMaximumPendingCount = max(
+            qaStructuralSnapshotMaximumPendingCount, qaStructuralSnapshotPendingCount)
+        var completed = false
+        // AppKit's false flag reloads the collection, even for unchanged IDs.
+        // Retain the diff while suppressing its visual transition. No view pooling
+        // or relaxation of the host's clean-reuse boundary is involved.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            dataSource.apply(snapshot, animatingDifferences: true) { [weak self] in
+                completed = true
+                self?.qaStructuralSnapshotCompletionCount += 1
+                self?.qaStructuralSnapshotPendingCount -= 1
+            }
+        }
+        if completed { qaStructuralSnapshotCompletedBeforeReturnCount += 1 }
+        // The diff preserves existing cells without dirtying their parent. Our
+        // layout owns the document height: size it before the caller restores
+        // the reader's anchor or bottom position, not on a later display pass.
+        needsLayout = true
+    }
+
     /// Applies one reducer result. Diffable snapshots preserve item identity for
     /// unchanged IDs; reconfiguration is limited to rows touched by the patch.
     /// There is intentionally no reloadData path after (or before) initial load.
@@ -1293,7 +1326,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             if tailRowIsPresented {
                 snapshot.appendItems([tailThinkingIndicatorID], toSection: 0)
             }
-            dataSource.apply(snapshot, animatingDifferences: false)
+            applyStructuralSnapshot(snapshot)
             recordAppliedDisplayIdentity()
         }
         // AppKit's snapshot reloadItems replaces NSCollectionViewItem instances.
@@ -1531,14 +1564,14 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 if tailRowIsPresented {
                     snapshot.appendItems([tailThinkingIndicatorID], toSection: 0)
                 }
-                dataSource.apply(snapshot, animatingDifferences: false)
+                applyStructuralSnapshot(snapshot)
                 recordAppliedDisplayIdentity()
                 transcriptLayout.invalidateForStructureChange()
                 layoutSubtreeIfNeeded()
             }
         )
         jumpToLatestButton.isHidden = !scrollController.showsJumpToLatest
-        refreshVisibleTurnCards()
+        refreshVisibleClusterHeaders()
     }
 
     var qaThinkingIndicatorVisible: Bool { tailThinkingIndicatorIsVisible && !tailThinkingIndicator.isHidden }
@@ -1633,6 +1666,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         let topLevelIDs = topLevelIDsByNodeID[id] ?? []
         let affectedIDs = Set(topLevelIDs.filter { rowsByID[$0] != nil })
         guard !affectedIDs.isEmpty else { return }
+        // The host clears its cached height only after this callback returns.
+        for affectedID in affectedIDs { measurementCache.invalidate(id: affectedID) }
         scrollController.applyPreservingReaderAnchor(
             in: scrollView,
             idAtY: { [weak self] y in self?.transcriptID(at: y) },
@@ -1640,6 +1675,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             update: { [weak self] in
                 guard let self else { return }
                 transcriptLayout.invalidate(changedIDs: affectedIDs)
+                // A retained cell takes its new frame from our layout pass.
+                needsLayout = true
                 layoutSubtreeIfNeeded()
             }
         )
@@ -3060,24 +3097,30 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 if tailRowIsPresented {
                     snapshot.appendItems([tailThinkingIndicatorID], toSection: 0)
                 }
-                dataSource.apply(snapshot, animatingDifferences: false)
+                applyStructuralSnapshot(snapshot)
                 recordAppliedDisplayIdentity()
                 transcriptLayout.invalidateForStructureChange()
                 layoutSubtreeIfNeeded()
             }
         )
         refreshTurnChrome()
-        // An Ask unclamping or a strip opening keeps its id, so the snapshot
-        // does not reload its item: re-drive the visible cards' models.
-        refreshVisibleTurnCards()
+        // Headers and cards keep their IDs across a disclosure change, so the
+        // snapshot retains their views. Re-drive the current presentation in place.
+        refreshVisibleClusterHeaders()
     }
 
-    /// The `setThinkingStatusText` move for cluster headers: durations and
-    /// statuses arrive after the fold; the visible header's text updates
-    /// directly, never via snapshot reload.
+    /// Re-drive retained cluster presentation from the current projection.
+    /// Membership and expansion can change without a semantic row revision.
     private func refreshVisibleClusterHeaders() {
-        for case let item as AgentToolClusterHeaderItem in collectionView.visibleItems() {
-            guard let view = item.headerView,
+        for item in collectionView.visibleItems() {
+            if let row = item as? AgentTranscriptCollectionItem,
+               let host = row.hostView, let id = host.representedID,
+               let tool = host.rendererView as? ToolCallView {
+                tool.updateClusterMembership(clusterMemberIDs.contains(id))
+                continue
+            }
+            guard let item = item as? AgentToolClusterHeaderItem,
+                  let view = item.headerView,
                   let clusterID = view.clusterID,
                   let header = clusterHeadersByID[clusterID] else { continue }
             let summary: String
@@ -3089,7 +3132,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 // of the turn in flight — so it is recomputed rather than cached.
                 if !header.isLive { clusterSummaryCache[clusterID] = summary }
             }
-            view.setSummaryText(summary)
+            view.updatePresentation(summary: summary, expanded: header.isExpanded)
         }
         refreshVisibleTurnCards()
     }

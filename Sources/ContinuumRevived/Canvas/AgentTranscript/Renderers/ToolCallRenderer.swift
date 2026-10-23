@@ -384,6 +384,17 @@ final class ToolCallView: NSView, CornerStyled {
         setAccessibilityChildren(children)
     }
 
+    /// Clustering is display state: a structural diff can retain this row while
+    /// adding or removing its group. Preserve its content and disclosure state.
+    func updateClusterMembership(_ member: Bool) {
+        guard isClusterMember != member else { return }
+        isClusterMember = member
+        clusterRail.backgroundColor = member
+            ? AgentLineRole.decorativeHairline.color.cgColor(for: effectiveTokenTheme)
+            : nil
+        needsLayout = true
+    }
+
     /// `.plans/45` T10 (`performance.md` traps 2 and 3, together, on every display
     /// cycle). This used to assign all five frames unconditionally and read
     /// `intrinsicContentSize` four times per pass. An unchanged frame on an
