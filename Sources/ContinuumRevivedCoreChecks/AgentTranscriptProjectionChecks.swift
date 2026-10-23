@@ -23,8 +23,59 @@ private final class DeterministicProjectionClock: @unchecked Sendable {
     }
 }
 
+/// The timer and parser deliberately do no work during these deltas. The
+/// operation count therefore catches the eager separator-source join without
+/// depending on machine load or conflating it with a scheduled Markdown parse.
+private func checkAssistantDeltasSkipSeparatorSourceReads() {
+    let thread = "separator-source-thread"
+    for initialBytes in [1_024, 20_480, 102_400] {
+        var projection = AgentTranscriptProjection(threadId: thread, monotonicNow: { 0 })
+        let seed = String(repeating: "x", count: initialBytes)
+        projection.ingest(.contentDelta(
+            threadId: thread, turnId: "answer", streamKind: .assistant, delta: seed))
+        let seededVersion = projection.document.version
+        for _ in 0..<200 {
+            projection.ingest(.contentDelta(
+                threadId: thread, turnId: "answer", streamKind: .assistant, delta: "é🙂"))
+        }
+        expect(projection.streamingMarkupParseCount == 1 && projection.document.version == seededVersion,
+               "frozen-clock separator witness must leave the 200 deltas pending for one later parse")
+        expect(projection.streamingSeparatorSourceReadCount == 0,
+               "200 assistant deltas after \(initialBytes) source bytes must perform zero reasoning-separator source reads; got \(projection.streamingSeparatorSourceReadCount)")
+        let expectedSource = seed + String(repeating: "é🙂", count: 200)
+        projection.ingest(.turnCompleted(
+            threadId: thread, turnId: "answer", outcome: .completed, errorMessage: nil))
+        guard let entry = projection.document.entries.first else {
+            expect(false, "separator witness lost its assistant entry")
+            return
+        }
+        expect(projection.streamingMarkupParseCount == 2 && projection.document.entries.count == 1,
+               "the assistant boundary must parse every pending delta once and preserve the entry")
+        expect(projection.compatibilityMarkupSourcesByEntryID[entry.id] == expectedSource,
+               "skipping reasoning separation must preserve the complete assistant source byte-for-byte")
+        expect(entry.blocks.count == 1 && entry.blocks.first?.payload == .paragraph([.text(expectedSource)]),
+               "the final semantic assistant paragraph must contain every pending Unicode delta")
+    }
+
+    var reasoning = AgentTranscriptProjection(threadId: thread, monotonicNow: { 0 })
+    let thoughts = ["**Planning**", "**Checking**", "# Summary"]
+    for thought in thoughts {
+        reasoning.ingest(.contentDelta(
+            threadId: thread, turnId: "reasoning", streamKind: .reasoning, delta: thought))
+    }
+    _ = reasoning.flushPendingStreamingMarkup()
+    expect(reasoning.streamingSeparatorSourceReadCount == thoughts.count - 1,
+           "whole reasoning chunks must continue through the counted separator path")
+    expect(reasoning.compatibilityMarkupSourcesByEntryID.values.first == thoughts.joined(separator: "\n\n"),
+           "whole reasoning emphasis and heading chunks must retain their paragraph boundaries")
+    expect(reasoning.document.entries.first?.blocks.count == thoughts.count,
+           "separated reasoning chunks must render as distinct semantic blocks")
+    print("Assistant separator work checks passed: 1/20/100 KiB answers, 200 Unicode deltas each, zero separator source reads; whole reasoning chunks preserved")
+}
+
 func runAgentTranscriptProjectionChecks() {
     checkSteeringPreservesRequestTiming()
+    checkAssistantDeltasSkipSeparatorSourceReads()
     let thread = "projection-thread"
     var projection = AgentTranscriptProjection(threadId: thread)
 
@@ -175,6 +226,8 @@ func runAgentTranscriptProjectionChecks() {
         coalescedClock.advance(0.001)
     }
     let pacedParsesBeforeCompletion = coalesced.streamingMarkupParseCount
+    expect(coalesced.streamingSeparatorSourceReadCount == 0,
+           "5,000 assistant deltas must never materialize their accumulated source for reasoning separation")
     expect((120...180).contains(pacedParsesBeforeCompletion),
            "5,000 paced assistant Markdown deltas over advancing monotonic time must parse near the 30Hz cadence, not once per token or only 1+flush; got \(pacedParsesBeforeCompletion)")
     expect(coalesced.finalizedCompatibilityMarkupSourceCount == 0,
@@ -220,6 +273,8 @@ func runAgentTranscriptProjectionChecks() {
     reasoning.ingest(.contentDelta(threadId: thread, turnId: "turn-reasoning", streamKind: .reasoning, delta: "son`"))
     expect(reasoning.streamingMarkupParseCount == 1,
            "reasoning Markdown deltas must use the same coalesced parser path as assistant streams")
+    expect(reasoning.streamingSeparatorSourceReadCount == 1,
+           "reasoning continuation must still inspect its source for chunk separation")
     reasoning.ingest(.runtimeError(threadId: thread, message: "runtime disconnected"))
     guard let reasoningEntry = reasoning.document.entries.first else {
         expect(false, "reasoning stream must create one reasoning entry before runtime-error boundary")

@@ -16,6 +16,10 @@ public struct AgentTranscriptProjection: Sendable {
     /// Source deltas are still appended losslessly; this count advances only when
     /// the accumulated source is reparsed for presentation.
     public private(set) var streamingMarkupParseCount = 0
+    /// Counts source materializations for reasoning-chunk separation, separately
+    /// from parsing. Assistant deltas must keep this at zero even when a long
+    /// answer is waiting for the next coalesced parse.
+    public private(set) var streamingSeparatorSourceReadCount = 0
 
     private struct OpenStream: Equatable, Sendable {
         var turnID: String
@@ -692,8 +696,13 @@ public struct AgentTranscriptProjection: Sendable {
             // "...Aug 21****Clarifying...": four literal asterisks and one
             // run-together line. A block boundary between two emphasis runs is
             // the honest reading of two separate thoughts.
-            openStream!.buffer.append(
-                Self.separatorBeforeDelta(delta, tail: openStream!.buffer.source, kind: kind))
+            // Arguments are eager: the helper's own kind guard cannot prevent
+            // buffer.source from joining the entire answer on an assistant token.
+            if kind == .reasoning {
+                streamingSeparatorSourceReadCount += 1
+                openStream!.buffer.append(
+                    Self.separatorBeforeDelta(delta, tail: openStream!.buffer.source, kind: kind))
+            }
             openStream!.buffer.append(delta)
             openStream!.scheduler.requestParse()
             return scheduledMarkupMutationsForOpenStream()
