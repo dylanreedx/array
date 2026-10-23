@@ -140,6 +140,8 @@ enum CanvasCameraDriverChecks {
         try expect(abs(canvas.viewport.y - expectedY) < 0.001,
                    "final viewport must equal the composition of all 6 deltas: expected y \(expectedY), got \(canvas.viewport.y)")
 
+        try runSlowApplyCoalesce()
+
         // Frame-recorder accounting: keep the whole active window, including a
         // long final delivery caused by a camera commit, but trim the smooth
         // settle callbacks after it. This is a pure seam over the production
@@ -179,6 +181,72 @@ enum CanvasCameraDriverChecks {
         }
 
         print("canvas camera coalesce — control \(controlApplies) applies for 6 direct calls; driven \(drivenApplies) applies for 6 events in one interval, final viewport preserved; frame stats retained final delivery and trimmed settle tail")
+    }
+
+    /// A stalled main thread delivers queued input immediately after a costly
+    /// camera apply. Advancing the injected clock INSIDE the apply reproduces
+    /// that delivery shape; freezing it between cheap applies cannot expose a
+    /// pacing timestamp that was already stale when the apply returned.
+    @MainActor
+    private static func runSlowApplyCoalesce() throws {
+        enum Input {
+            case pan(CGFloat, CGFloat)
+            case zoom(Double)
+        }
+        let cases: [(name: String, inputs: [Input])] = [
+            ("pan", [.pan(3, 5), .pan(-2, 7), .pan(6, -4), .pan(8, 2), .pan(-1, 3), .pan(4, -6)]),
+            ("zoom", [.zoom(1), .zoom(2), .zoom(3), .zoom(1), .zoom(2), .zoom(1)]),
+            // All pans precede zooms, so the sequential control and the driver's
+            // pan-then-zoom composition have the same independent endpoint.
+            ("pan then zoom", [.pan(3, 5), .pan(-2, 7), .pan(6, -4), .zoom(1), .zoom(2), .zoom(3)])
+        ]
+        let anchor = CGPoint(x: 260, y: 190)
+        let tuning = CanvasCameraDriver.Tuning()
+        for testCase in cases {
+            var now: TimeInterval = 2_000
+            var viewport = CanvasViewport(x: 125, y: -75, zoom: 0.8)
+            var expected = viewport
+            var applies = 0
+            let driver = CanvasCameraDriver(
+                tuning: tuning,
+                currentViewport: { viewport },
+                applyViewport: { next in
+                    viewport = next
+                    applies += 1
+                    now += 0.020  // More than one 120 Hz interval, no real sleep.
+                },
+                makeDisplayLink: { _, _ in nil }
+            )
+            driver.nowProvider = { now }
+
+            for input in testCase.inputs {
+                switch input {
+                case let .pan(dx, dy):
+                    expected.x -= Double(dx) / expected.zoom
+                    expected.y -= Double(dy) / expected.zoom
+                    driver.noteScrollPan(dx: dx, dy: dy, location: anchor)
+                case let .zoom(delta):
+                    expected = CanvasEngine.zoom(expected, by: exp(delta * tuning.scrollZoomGain), anchorScreen: anchor)
+                    driver.noteScrollZoom(deltaY: delta, location: anchor)
+                }
+                // The next queued event arrives as soon as this one returns.
+                // Only applyViewport advances the clock while draining backlog.
+            }
+            let appliesBeforeFlush = applies
+            now += tuning.minCommitInterval
+            driver.qaFlushPending()
+
+            try expect(appliesBeforeFlush == 1 && applies == 2,
+                       "slow \(testCase.name): 6 queued inputs with a 20 ms apply must cost one leading-edge apply plus one flush; got \(appliesBeforeFlush) before flush and \(applies) total")
+            try expect(!driver.qaHasPendingInput,
+                       "slow \(testCase.name): the flush must preserve every queued input without stranding a remainder")
+            try expect(abs(viewport.x - expected.x) < 1e-6
+                           && abs(viewport.y - expected.y) < 1e-6
+                           && abs(viewport.zoom - expected.zoom) < 1e-9,
+                       "slow \(testCase.name): the final viewport must preserve all 6 inputs and their anchor; expected \(expected), got \(viewport)")
+            try expect(driver.anchor == anchor,
+                       "slow \(testCase.name): the queued gesture must retain its pointer anchor")
+        }
     }
 
     // MARK: - Leg 2: glide mechanics

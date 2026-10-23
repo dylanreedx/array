@@ -261,7 +261,11 @@ final class CanvasCameraDriver: NSObject {
         isApplying = true
         applyViewport(viewport)
         isApplying = false
-        lastCommitTime = now
+        // AppKit can spend longer than a display interval propagating a zoom.
+        // Pace queued input from completion: a timestamp from before that work
+        // is already expired and would replay every obsolete intermediate state.
+        // Display-link and backstop flushes still commit accumulated input.
+        lastCommitTime = nowProvider()
         // At the zoom clamp the glide has nothing left to push against: stop it
         // rather than tick a pinned camera until the velocity floor.
         if glideActive, zoomRequested, abs(currentViewport().zoom - zoomBefore) < 1e-9 {
