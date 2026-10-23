@@ -280,7 +280,280 @@ enum FileOpenChecks {
     /// fresh attributed string per row, and a fenced block (which is where a GFM
     /// table lands) measures its entire source at unbounded width. Re-measuring
     /// every block on every pass froze the app on a real repo document.
+    /// Exercise the owner's replaceDraft + previewBody sequence, not just a
+    /// document relayout. Stable input must preserve the native text systems.
+    private static func runUnchangedMarkdownSurfaceCheck() throws {
+        let source = (0..<100).map { "Surface item \($0): **unchanged** draft content." }
+            .joined(separator: "\n\n")
+        let text = NSTextView()
+        text.string = source
+        let scroll = NSScrollView()
+        scroll.documentView = text
+        var theme: TokenTheme = .dark
+        let surface = MarkdownDocumentSurface(
+            textView: text, sourceScrollView: scroll, initialDraft: source,
+            mode: .preview, theme: { theme }
+        )
+        // Loading before first mounting must still render the initial draft.
+        surface.replaceDraft(source)
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 620, height: 460))
+        let body = surface.previewBody()
+        body.frame = host.bounds
+        host.addSubview(body)
+        guard let preview = surface.previewView else {
+            throw Failure(message: "Markdown surface failed to create its preview")
+        }
+        func settle() {
+            host.layoutSubtreeIfNeeded()
+            preview.layoutSubtreeIfNeeded()
+            preview.qaRelayout()
+        }
+        settle()
+        try expect(preview.qaBlockViews.count == 100 && preview.qaVisibleText().contains("Surface item 99"),
+                   "initial Markdown surface did not render the complete draft")
+        let blocks = preview.qaBlockViews
+        let measurements = preview.qaMeasurementCount
+        let start = ProcessInfo.processInfo.systemUptime
+        surface.replaceDraft(source)
+        _ = surface.previewBody()
+        surface.flushPreview()
+        settle()
+        let added = preview.qaMeasurementCount - measurements
+        print("markdown unchanged surface: 100 blocks, measurements=\(added), duration=\(ProcessInfo.processInfo.systemUptime - start)s")
+        try expect(added == 0, "unchanged owner refresh measured \(added) blocks; expected zero")
+        try expect(preview.qaBlockViews.count == blocks.count
+                   && zip(blocks, preview.qaBlockViews).allSatisfy { $0 === $1 },
+                   "unchanged owner refresh replaced native block views")
+
+        let changed = source + "\n\nChanged draft sentinel."
+        surface.replaceDraft(changed)
+        settle()
+        try expect(preview.qaVisibleText().contains("Changed draft sentinel.")
+                   && preview.qaMeasurementCount > measurements,
+                   "changed Markdown draft was hidden by the refresh cache")
+        for nextTheme in [TokenTheme.light, .dark] {
+            let before = preview.qaMeasurementCount
+            theme = nextTheme
+            // A changed theme supplied by the owner must invalidate the cache.
+            _ = surface.previewBody()
+            settle()
+            try expect(preview.qaMeasurementCount > before,
+                       "changed theme did not invalidate Markdown measurements")
+            let renderedColor = preview.qaInlineTextViews().first?.textStorage?
+                .attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+            let expectedColor = AgentRenderTokens.transcript.primaryText.color.nsColor(for: nextTheme)
+            try expect(renderedColor?.usingColorSpace(.sRGB) == expectedColor.usingColorSpace(.sRGB),
+                       "Markdown refresh did not paint the requested theme")
+            let themedBlocks = preview.qaBlockViews
+            surface.applyTheme()
+            settle()
+            let afterTheme = preview.qaMeasurementCount
+            _ = surface.previewBody()
+            settle()
+            try expect(preview.qaMeasurementCount == afterTheme
+                       && zip(themedBlocks, preview.qaBlockViews).allSatisfy { $0 === $1 },
+                       "owner theme application caused a duplicate preview rebuild")
+            try expect(preview.qaVisibleText().contains("Changed draft sentinel."),
+                       "theme update lost the current Markdown draft")
+        }
+        // A changed theme applied explicitly must also become the cached theme.
+        theme = .light
+        let themeBlocks = preview.qaBlockViews
+        surface.applyTheme()
+        settle()
+        let themedMeasurements = preview.qaMeasurementCount
+        _ = surface.previewBody()
+        settle()
+        let explicitColor = preview.qaInlineTextViews().first?.textStorage?
+            .attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        try expect(explicitColor?.usingColorSpace(.sRGB)
+                   == AgentRenderTokens.transcript.primaryText.color.nsColor(for: .light).usingColorSpace(.sRGB)
+                   && preview.qaMeasurementCount == themedMeasurements
+                   && zip(themeBlocks, preview.qaBlockViews).allSatisfy { $0 === $1 },
+                   "explicit theme update was lost or followed by a duplicate preview rebuild")
+        // Source-only edits must catch up on the first Preview mount.
+        surface.setMode(.edit)
+        let edited = changed + "\n\nEdited while source-only."
+        surface.replaceDraft(edited)
+        surface.setMode(.preview, sourceDraft: edited)
+        _ = surface.previewBody()
+        settle()
+        try expect(preview.qaVisibleText().contains("Edited while source-only."),
+                   "returning from Edit reused a stale preview")
+
+        // Canonically equivalent Unicode can spell different link destinations.
+        // A render key must preserve their literal bytes, not String == equality.
+        let destinations = ["https://example.com/Cafe\u{301}", "https://example.com/Caf\u{e9}"]
+        try expect(destinations[0] == destinations[1]
+                   && !destinations[0].utf8.elementsEqual(destinations[1].utf8),
+                   "Unicode render-key fixture must be canonically equal but byte-distinct")
+        for destination in destinations {
+            surface.replaceDraft("[open](\(destination))")
+            surface.flushPreview()
+            settle()
+            let actual = preview.qaInlineTextViews().flatMap(\.linkRanges).first?.destination
+            try expect(actual.map { $0.utf8.elementsEqual(destination.utf8) } == true,
+                       "Markdown refresh retained stale Unicode link destination bytes")
+        }
+    }
+
+    /// A real code block stays native while selected or streaming. A camera
+    /// backing/layout pass must not reshape its unchanged, nonwrapping source.
+    private static func runUnchangedCodeBlockLayoutCheck() throws {
+        guard let blockID = AgentNodeID(rawValue: "code-layout-measurement") else {
+            throw Failure(message: "could not create code-layout fixture identity")
+        }
+        let source = (0..<64).map {
+            "\($0):\tlet value = \"\(String(repeating: "wide", count: 48))\" // Cafe\u{301}"
+        }.joined(separator: "\n")
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 620, height: 320))
+        let block = CodeBlockView(highlighter: PlainCodeHighlighter())
+        block.frame = host.bounds
+        host.addSubview(block)
+        var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+
+        func layoutBlock() {
+            block.needsLayout = true
+            block.layoutSubtreeIfNeeded()
+        }
+        func apply(_ code: String) {
+            block.apply(blockID: blockID,
+                        payload: AgentCodePayload(language: "swift", code: code, isComplete: true),
+                        context: context)
+            layoutBlock()
+        }
+        @MainActor func expectCurrentContentAndGeometry(_ code: String) throws {
+            // The uncached primitive is an oracle for stale cache entries.
+            // Its intentional measurement is outside every work-count interval.
+            let measured = CodeTextView.measuredCodeSize(code, zoom: context.pageZoom)
+            let viewport = block.scrollView.contentSize
+            let expected = NSSize(width: max(viewport.width, measured.width),
+                                  height: max(viewport.height, measured.height))
+            let actual = block.codeTextView.frame.size
+            try expect(abs(actual.width - expected.width) < 0.5
+                       && abs(actual.height - expected.height) < 0.5,
+                       "code document geometry used stale content or font metrics: \(actual) vs \(expected)")
+            try expect(block.scrollView.hasVerticalScroller == (measured.height > viewport.height + 0.5),
+                       "code block vertical scrolling does not match its current content")
+            let font = block.codeTextView.textStorage?
+                .attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+            let expectedFontSize = NSFont.token(.bodyMono, zoom: context.pageZoom).pointSize
+            try expect(font?.pointSize == expectedFontSize,
+                       "code text did not paint the current page-zoom font")
+            block.copyEntireBlock(to: pasteboard)
+            try expect(pasteboard.string(forType: .string).map { $0.utf8.elementsEqual(code.utf8) } == true,
+                       "code layout truncated or changed copied source bytes")
+        }
+
+        apply(source)
+        try expectCurrentContentAndGeometry(source)
+        try expect(block.scrollView.hasVerticalScroller
+                   && block.codeTextView.frame.width > block.scrollView.contentSize.width,
+                   "code fixture must overflow both axes")
+        let selection = NSRange(location: 5, length: 8)
+        block.codeTextView.setSelectedRange(selection)
+        block.scrollView.contentView.scroll(to: NSPoint(x: 23, y: 120))
+        block.scrollView.reflectScrolledClipView(block.scrollView.contentView)
+        let scrollOrigin = block.scrollView.contentView.bounds.origin
+        let beforeStable = CodeTextView.qaUnwrappedMeasurementCount
+        for _ in 0..<10 { layoutBlock() }
+        let stableMeasurements = CodeTextView.qaUnwrappedMeasurementCount - beforeStable
+        try expect(block.codeTextView.selectedRange() == selection
+                   && block.scrollView.contentView.bounds.origin == scrollOrigin,
+                   "unchanged code layout moved selection or scroll position")
+        try expectCurrentContentAndGeometry(source)
+
+        // Shrinking source must discard its old wide/tall geometry and scroller.
+        let replacement = "let tiny = 1"
+        let beforeContentChange = CodeTextView.qaUnwrappedMeasurementCount
+        apply(replacement)
+        let contentMeasurements = CodeTextView.qaUnwrappedMeasurementCount - beforeContentChange
+        try expect(contentMeasurements > 0, "changed code content never refreshed its dimensions")
+        try expectCurrentContentAndGeometry(replacement)
+        try expect(!block.scrollView.hasVerticalScroller,
+                   "shrinking code retained a stale vertical scroller")
+
+        // Page zoom changes the real font and insets without changing the source.
+        apply(source)
+        var zoomMeasurements: [Int] = []
+        for percent in [150, 80] {
+            context.pageZoom = AgentPageZoom(percent: percent)
+            let beforeZoom = CodeTextView.qaUnwrappedMeasurementCount
+            apply(source)
+            let changed = CodeTextView.qaUnwrappedMeasurementCount - beforeZoom
+            zoomMeasurements.append(changed)
+            try expect(changed > 0, "page zoom \(percent)% never refreshed code dimensions")
+            try expectCurrentContentAndGeometry(source)
+        }
+        print("code block layout: 10 unchanged passes measured \(stableMeasurements); content change \(contentMeasurements); page zoom \(zoomMeasurements)")
+        try expect(stableMeasurements == 0,
+                   "10 unchanged code-block layouts must perform zero unwrapped measurements; performed \(stableMeasurements)")
+    }
+
+    /// Hydration creates prose before the tile supplies its first real width.
+    /// Unsized layout must leave native text geometry alone, then render normally
+    /// when mounted. A small paragraph witnesses the work without a stress load.
+    private static func runUnsizedProseLayoutCheck() throws {
+        let source = String(
+            repeating: "Initial prose needs real width before shaping, while selection and copied text stay complete. ",
+            count: 3
+        )
+        let prose = AssistantProseView(frame: .zero)
+        let beforeApply = AssistantProseView.qaMeasurementCount
+        prose.apply(
+            block: AgentBlock(
+                id: AgentNodeID(rawValue: "prose-unsized-hydration")!,
+                revision: 1,
+                kind: .paragraph,
+                payload: .paragraph([.text(source)])
+            ),
+            context: AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+        )
+        try expect(prose.textFields.count == 1, "unsized prose fixture must create one native text row")
+        for _ in 0..<10 {
+            prose.needsLayout = true
+            prose.layoutSubtreeIfNeeded()
+        }
+        let unsizedMeasurements = AssistantProseView.qaMeasurementCount - beforeApply
+        let unsizedFrames = prose.textFields.map(\.frame)
+        print("prose unsized hydration: chars=\(source.utf16.count), passes=10, measurements=\(unsizedMeasurements), childFrames=\(unsizedFrames)")
+
+        let text = prose.textFields[0]
+        let selection = NSRange(location: 8, length: 35)
+        text.setSelectedRange(selection)
+        let beforeMount = AssistantProseView.qaMeasurementCount
+        prose.frame = NSRect(x: 0, y: 0, width: 320, height: 200)
+        prose.needsLayout = true
+        prose.layoutSubtreeIfNeeded()
+        let mountedMeasurements = AssistantProseView.qaMeasurementCount - beforeMount
+        let mountedFrame = text.frame
+        print("prose mounted hydration: measurements=\(mountedMeasurements), childFrame=\(mountedFrame)")
+        try expect(mountedMeasurements > 0,
+                   "giving unsized prose a real width must perform an actual text measurement")
+        try expect(text.string.utf8.elementsEqual(source.utf8),
+                   "mounting previously unsized prose lost or changed source text")
+        try expect(mountedFrame.width == 320 && mountedFrame.height.isFinite && mountedFrame.height > 0
+                   && mountedFrame.origin.x.isFinite && mountedFrame.origin.y.isFinite,
+                   "mounted prose did not receive finite, positive geometry: \(mountedFrame)")
+        let usedRect = text.qaUsedRectForChecks
+        try expect(usedRect.map { $0.height.isFinite && $0.height > 0 && $0.maxY <= mountedFrame.height + 0.5 } == true,
+                   "mounted prose geometry clipped its actual native text layout")
+        try expect(text.selectedRange() == selection,
+                   "first real prose layout changed the native selection")
+        // Copy routing is covered by the document selection witness below.
+
+        try expect(unsizedMeasurements == 0,
+                   "10 zero-width prose layouts must perform zero row measurements; performed \(unsizedMeasurements)")
+        try expect(unsizedFrames.allSatisfy { $0 == .zero },
+                   "zero-width prose assigned premature child geometry: \(unsizedFrames)")
+    }
+
     static func runMarkdownPerformanceCheck() throws {
+        try runUnsizedProseLayoutCheck()
+        try runUnchangedMarkdownSurfaceCheck()
+        try runUnchangedCodeBlockLayoutCheck()
         let document = perfFixture()
         let host = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
         let view = FileMarkdownDocumentView(frame: NSRect(x: 0, y: 0, width: 620, height: 460))

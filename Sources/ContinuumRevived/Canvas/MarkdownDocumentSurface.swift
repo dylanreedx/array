@@ -45,6 +45,11 @@ final class MarkdownDocumentSurface: NSObject, NSSplitViewDelegate {
     private(set) var mode: MarkdownDocumentMode
 
     private var draft: String
+    // Literal equality matters for link destinations: Swift String equality
+    // folds canonically equivalent Unicode spellings. NSString preserves them
+    // without walking the UTF-8 view in Swift on every unchanged refresh.
+    private var lastRenderedDraft: NSString?
+    private var lastRenderedTheme: TokenTheme?
     private var previewWork: DispatchWorkItem?
     private var dividerFraction: CGFloat = 0.5
     private var sourceSelection = NSRange(location: 0, length: 0)
@@ -129,7 +134,11 @@ final class MarkdownDocumentSurface: NSObject, NSSplitViewDelegate {
         if mode != .edit { renderDraft() }
     }
 
-    func applyTheme() { previewView?.applyTheme(theme()) }
+    func applyTheme() {
+        let currentTheme = theme()
+        previewView?.applyTheme(currentTheme)
+        if previewView != nil { lastRenderedTheme = currentTheme }
+    }
 
     func restorePresentationState() {
         let textLength = textView.string.utf16.count
@@ -213,7 +222,14 @@ final class MarkdownDocumentSurface: NSObject, NSSplitViewDelegate {
     }
 
     private func renderDraft() {
-        previewView?.apply(markdown: draft, theme: theme())
+        if let previewView {
+            let currentTheme = theme()
+            if lastRenderedDraft?.isEqual(to: draft) != true || lastRenderedTheme != currentTheme {
+                previewView.apply(markdown: draft, theme: currentTheme)
+                lastRenderedDraft = draft as NSString
+                lastRenderedTheme = currentTheme
+            }
+        }
         restorePresentationState()
     }
 
