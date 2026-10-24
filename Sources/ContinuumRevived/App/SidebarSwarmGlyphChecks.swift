@@ -195,7 +195,21 @@ enum SidebarSwarmGlyphChecks {
         motion.advance(by: 1)
 
         // Working children: a ripple runs while any child works, on its period.
-        guard let (_, working) = control(inbox, parent) else { throw Failure(description: "\(label): lost the control") }
+        guard let (workingCell, working) = control(inbox, parent) else { throw Failure(description: "\(label): lost the control") }
+        // Filled = working, outlined = not: one of three children works here.
+        try expect(working.dotFillsForQA == [true, false, false],
+                   "\(label): 1 of 3 children working drew dots \(working.dotFillsForQA), not one filled and two outlined")
+        try expect(InboxSwarmFoldControl.filledDots(children: 3, working: 0) == 0
+                   && InboxSwarmFoldControl.filledDots(children: 3, working: 2) == 2
+                   && InboxSwarmFoldControl.filledDots(children: 8, working: 1) == 1
+                   && InboxSwarmFoldControl.filledDots(children: 8, working: 8) == 3,
+                   "\(label): the filled share is not the working share of the children")
+        // The glyph heads its lane, inset from the window edge.
+        let glyph = working.convert(working.glyphFrameForQA, to: inbox)
+        let lane = AgentInbox96CellView.spineMetrics.spineX(level: 0)
+        let laneInInbox = workingCell.convert(NSPoint(x: lane, y: 0), to: inbox).x
+        try expect(abs(glyph.midX - laneInInbox) < 0.5 && glyph.midX >= 16,
+                   "\(label): the glyph centre \(glyph.midX) is not on its lane \(laneInInbox) at least 16pt in")
         if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             try expect(working.workingChildren == 1 && working.isTwinkling
                        && working.twinklePeriodForQA == InboxSwarmFoldControl.ripplePeriod,

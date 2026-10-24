@@ -21,7 +21,8 @@ struct SwarmPose: Equatable {
     var strokeEnd: CGFloat = 0
 
     static let side: CGFloat = 14
-    static let dotDiameterPoints: CGFloat = 3
+    /// Large enough that an outlined dot still reads as a ring, not a smudge.
+    static let dotDiameterPoints: CGFloat = 4
 
     static func dotCount(_ variant: SwarmGlyphVariant, children: Int) -> Int { 3 }
     static func dotDiameter(_ variant: SwarmGlyphVariant) -> CGFloat { dotDiameterPoints }
@@ -36,11 +37,11 @@ struct SwarmPose: Equatable {
     static func pose(_ variant: SwarmGlyphVariant = .triad, seed: UUID = UUID(), children: Int = 3,
                      expanded: Bool, hovered: Bool) -> SwarmPose {
         if expanded {
-            return SwarmPose(dots: [CGPoint(x: 0, y: 1.5), CGPoint(x: 0, y: -4), CGPoint(x: 0, y: 7)])
+            return SwarmPose(dots: [CGPoint(x: 0, y: 1.5), CGPoint(x: 0, y: -4.5), CGPoint(x: 0, y: 7.5)])
         }
-        let rest = [CGPoint(x: 0, y: -3.5), CGPoint(x: -3.6, y: 2.6), CGPoint(x: 3.6, y: 2.6)]
+        let rest = [CGPoint(x: 0, y: -3.6), CGPoint(x: -3.9, y: 2.7), CGPoint(x: 3.9, y: 2.7)]
         guard hovered else { return SwarmPose(dots: rest) }
-        let angle = CGFloat(12) * .pi / 180, spread: CGFloat = 1.18
+        let angle = CGFloat(6) * .pi / 180, spread: CGFloat = 1.08
         return SwarmPose(dots: rest.map {
             CGPoint(x: ($0.x * cos(angle) - $0.y * sin(angle)) * spread,
                     y: ($0.x * sin(angle) + $0.y * cos(angle)) * spread)
@@ -68,7 +69,9 @@ struct SwarmPose: Equatable {
 /// the morph is what the screen shows, not a photograph of either end.
 @MainActor
 final class InboxSwarmFoldControl: NSControl, TokenThemed {
-    static let glyphCentreX = CGFloat(AgentInboxView.indentPerLevel) / 2
+    /// Extra inset from the window edge for the glyph and the lane it heads.
+    static let laneInset = Space.s
+    static let glyphCentreX = CGFloat(AgentInboxView.indentPerLevel) / 2 + CGFloat(laneInset)
     static let countGap: CGFloat = 3
     static let countFont = NSFont.monospacedDigitSystemFont(
         ofSize: Typography.style(for: .label).size, weight: .medium)
@@ -77,12 +80,13 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
     /// The hover/pressed circle around the glyph.
     static let chipDiameter: CGFloat = 22
 
-    static let expandMorph: CFTimeInterval = 0.26
-    static let collapseMorph: CFTimeInterval = 0.22
-    static let hoverMorph: CFTimeInterval = 0.18
+    static let expandMorph: CFTimeInterval = 0.32
+    static let collapseMorph: CFTimeInterval = 0.28
+    static let hoverMorph: CFTimeInterval = 0.24
     static let fadeDuration: CFTimeInterval = 0.12
-    /// Fast out, long soft landing — no overshoot, so the run lands as a lane.
-    static let morphTiming = CAMediaTimingFunction(controlPoints: 0.22, 0.9, 0.3, 1)
+    /// A soft start and a long, quiet landing — no overshoot, so the run lands
+    /// as a lane.
+    static let morphTiming = CAMediaTimingFunction(controlPoints: 0.32, 0.72, 0.28, 1)
 
     /// The control's width for `childCount`: fixed by its digit count, never
     /// measured in layout.
@@ -96,6 +100,20 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
     private(set) var disclosure: RowDisclosure = .none
     private(set) var childCount = 0
     private(set) var workingChildren = 0
+    /// How many of the three dots are filled: the working share of the
+    /// children, at least one while any works. The rest are outlined.
+    static func filledDots(children: Int, working: Int) -> Int {
+        guard working > 0, children > 0 else { return 0 }
+        return min(3, max(1, Int((3 * Double(working) / Double(children)).rounded())))
+    }
+    var filledDotCount: Int { Self.filledDots(children: childCount, working: workingChildren) }
+    /// Dot indices top to bottom in the pose on screen; the first
+    /// `filledDotCount` of them are filled.
+    private var dotOrder: [Int] {
+        let pose = currentPose.dots
+        return dots.indices.sorted { pose[$0].y != pose[$1].y ? pose[$0].y < pose[$1].y : pose[$0].x < pose[$1].x }
+    }
+    private var shownFilled = -1
     private var seed = UUID()
     private var leadColour: NSColor?
     private(set) var isPointerInside = false
@@ -179,6 +197,7 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         isPressed = Self.pressedSeed == seed && disclosure != .none
         isHidden = disclosure == .none
         countLabel.stringValue = self.childCount > 0 ? "\(self.childCount)" : ""
+        if shownFilled != filledDotCount { shownFilled = filledDotCount; isTwinkling = false; dots.forEach { $0.removeAnimation(forKey: "swarm.ripple") } }
         let expanded = disclosure == .expanded
         let now = CACurrentMediaTime()
         if let arm = Self.armed[seed], arm.from != disclosure, now - arm.at < 1 {
@@ -276,7 +295,7 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
             let a = layerPoint(morph.from[index]), b = layerPoint(to[index])
             let mid = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
             let dx = b.x - a.x, dy = b.y - a.y
-            let bend: CGFloat = morph.expanded ? 0.35 : -0.35
+            let bend: CGFloat = morph.expanded ? 0.18 : -0.18
             let control = CGPoint(x: mid.x - dy * bend, y: mid.y + dx * bend)
             let path = CGMutablePath()
             path.move(to: a)
@@ -297,11 +316,11 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
 
     // MARK: Working children
 
-    /// While a child works, a ripple runs through the dots — each one swells and
-    /// brightens in turn, top to bottom when the group is open, so the run reads
-    /// as work flowing down into the children. It moves in place and never
-    /// rotates, so it cannot be mistaken for the status gyro. Still when every
-    /// child is done; nothing under Reduce Motion.
+    /// While a child works, a quiet ripple runs through the FILLED dots — each
+    /// swells a little and brightens in turn, top to bottom when the group is
+    /// open. It moves in place and never rotates, so it cannot be mistaken for
+    /// the status gyro. Outlined dots (children not working) stay still, and
+    /// the whole glyph is still when every child is done.
     private func refreshTwinkle() {
         setTwinkling(workingChildren > 0 && !isHidden && !prefersReducedMotion())
     }
@@ -317,7 +336,7 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         }
     }
 
-    static let ripplePeriod: CFTimeInterval = 1.6
+    static let ripplePeriod: CFTimeInterval = 2.4
 
     func setTwinkling(_ on: Bool) {
         guard on != isTwinkling else { return }
@@ -325,26 +344,26 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         // Order the ripple top to bottom on screen.
-        let order = dots.indices.sorted { currentPose.dots[$0].y < currentPose.dots[$1].y }
+        let order = dotOrder
         let base = CACurrentMediaTime()
         for (rank, index) in order.enumerated() {
             let dot = dots[index]
-            guard on else {
+            guard on, rank < filledDotCount else {
                 dot.removeAnimation(forKey: "swarm.ripple")
                 continue
             }
             let swell = CAKeyframeAnimation(keyPath: "transform.scale")
-            swell.values = [1, 1.5, 1, 1]
-            swell.keyTimes = [0, 0.14, 0.36, 1]
+            swell.values = [1, 1.2, 1, 1]
+            swell.keyTimes = [0, 0.2, 0.5, 1]
             let glow = CAKeyframeAnimation(keyPath: "opacity")
-            glow.values = [0.55, 1, 0.55, 0.55]
+            glow.values = [0.7, 1, 0.7, 0.7]
             glow.keyTimes = swell.keyTimes
             let ripple = CAAnimationGroup()
             ripple.animations = [swell, glow]
             ripple.duration = Self.ripplePeriod
             ripple.repeatCount = .infinity
             ripple.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            ripple.beginTime = dot.convertTime(base, from: nil) + Double(rank) * 0.16
+            ripple.beginTime = dot.convertTime(base, from: nil) + Double(rank) * 0.24
             ripple.fillMode = .backwards
             dot.add(ripple, forKey: "swarm.ripple")
         }
@@ -352,7 +371,7 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
     }
 
     var twinklePeriodForQA: CFTimeInterval? {
-        dots.first?.animation(forKey: "swarm.ripple")?.duration
+        dots.lazy.compactMap { $0.animation(forKey: "swarm.ripple")?.duration }.first
     }
 
     override func viewDidMoveToWindow() {
@@ -429,14 +448,26 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         chip.opacity = targetOpacity
         if step == nil, !animated { chip.backgroundColor = nil }
         let ink = (emphasised ? TextToken.textPrimary : TextToken.textSecondary).color
-        for (index, dot) in dots.enumerated() {
-            dot.backgroundColor = index == 0 && leadColour != nil
-                ? leadColour.map { colour in
-                    var resolved = colour.cgColor
-                    effectiveAppearance.performAsCurrentDrawingAppearance { resolved = colour.cgColor }
-                    return resolved
-                  }
-                : ink.cgColor(in: self)
+        let lead: CGColor? = leadColour.map { colour in
+            var resolved = colour.cgColor
+            effectiveAppearance.performAsCurrentDrawingAppearance { resolved = colour.cgColor }
+            return resolved
+        }
+        // Filled = a working child; outlined = one that is not. The lead dot
+        // (the top one on screen) carries the parent's identity colour.
+        let filled = filledDotCount
+        for (rank, index) in dotOrder.enumerated() {
+            let dot = dots[index]
+            let colour = rank == 0 && lead != nil ? lead! : ink.cgColor(in: self)
+            if rank < filled {
+                dot.backgroundColor = colour
+                dot.borderWidth = 0
+                dot.borderColor = nil
+            } else {
+                dot.backgroundColor = nil
+                dot.borderWidth = 1
+                dot.borderColor = colour
+            }
         }
         countLabel.textColor = ink.nsColor(in: self)
         CATransaction.commit()
@@ -542,8 +573,11 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
     /// The chip's fill as presented: nil while it is faded out.
     var chipFillForQA: CGColor? { chip.opacity > 0 ? chip.backgroundColor : nil }
     var chipFrameForQA: CGRect { chip.frame }
+    var glyphFrameForQA: CGRect { glyph.frame }
     var countTextForQA: String { countLabel.stringValue }
-    var dotColoursForQA: [CGColor?] { dots.map(\.backgroundColor) }
+    var dotColoursForQA: [CGColor?] { dots.map { $0.backgroundColor ?? $0.borderColor } }
+    /// Per dot, top to bottom: filled (true) or outlined (false).
+    var dotFillsForQA: [Bool] { dotOrder.map { dots[$0].backgroundColor != nil } }
     /// The state the control shows, in the vocabulary the older checks use.
     var qaGlyph: String { isHidden ? "" : disclosure.glyph }
     var qaTitle: String { isHidden ? "" : (childCount > 0 ? "\(disclosure.glyph) \(childCount)" : disclosure.glyph) }
@@ -560,8 +594,6 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         layoutSubtreeIfNeeded()
         applyPose(animated: false, duration: 0)
         // A still of the working state: the first dot at the crest of its ripple.
-        if workingChildren > 0 {
-            for (index, dot) in dots.enumerated() { dot.opacity = index == 0 ? 1 : 0.55 }
-        }
+        if filledDotCount > 0, let first = dotOrder.first { dots[first].opacity = 1 }
     }
 }

@@ -1104,10 +1104,10 @@ enum UIProbeAppearance {
             return [hex(SurfaceToken.tileBody.color.cgColor(for: theme))]
         }
         if owner == "InboxSwarmFoldControl" {
-            guard kind == .background || kind == .fill else {
-                return [hex(LineToken.border.color.cgColor(for: theme))]
-            }
+            // Fills and outlines share one palette: a dot is filled (a working
+            // child) or outlined (one that is not) in the same ink.
             var admitted: Set<String> = [
+                hex(LineToken.border.color.cgColor(for: theme)),
                 hex(TextToken.textSecondary.color.cgColor(for: theme)),
                 hex(TextToken.textPrimary.color.cgColor(for: theme)),
                 hex(SidebarControlRole.hover.color.cgColor(for: theme)),

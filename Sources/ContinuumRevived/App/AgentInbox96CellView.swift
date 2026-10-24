@@ -806,7 +806,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             gutter: outerGutter,
             indentPerLevel: AgentInboxView.indentPerLevel,
             lineWidth: LineWidth.hairline,
-            endGap: Space.s)
+            endGap: Space.s,
+            laneInset: InboxSwarmFoldControl.laneInset)
     }
 
     /// How much taller than a card a row at this place in the tree is. Read by the
