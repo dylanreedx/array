@@ -23,6 +23,17 @@ export DEV_BUNDLE_ID=dev.arrayapp.macos.sidebar
 export DEV_BUNDLE_NAME="Array Sidebar"
 mkdir -p "$(dirname "$DEV_APP_PATH")"
 
+# Project icons for the Lab's "Stacks" rows (SidebarPolishFixtures). Copied, never
+# linked: the preview must not read a real project's root (hazard 10, and a new
+# bundle id would raise a ~/Documents folder-grant prompt).
+fixtures="$DEV_PROJECT_ROOT/fixture-projects"
+mkdir -p "$fixtures/array/website/public" "$fixtures/harmony/.array" "$fixtures/selectus/.array"
+cp "$ROOT_DIR/website/public/favicon.svg" "$fixtures/array/website/public/favicon.svg"
+for p in harmony selectus; do
+  src="$HOME/Documents/work/$p/.array/icon.svg"
+  if [[ -f "$src" ]]; then cp "$src" "$fixtures/$p/.array/icon.svg"; else echo "==> no $src; $p shows the folder" >&2; fi
+done
+
 "$ROOT_DIR/scripts/dev-app.sh" "$@"
 
 # dev-app.sh returns when LaunchServices takes the launch, before the app is up.

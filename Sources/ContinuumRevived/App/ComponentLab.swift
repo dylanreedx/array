@@ -1830,7 +1830,7 @@ final class SidebarInbox96PlaygroundView: NSView {
     private let modelTextButton = NSButton(
         checkboxWithTitle: "Model name", target: nil, action: nil)
     private let rowsControl = NSSegmentedControl(
-        labels: ["96 rules", "Queue 94"],
+        labels: ["96 rules", "Queue 94", "Stacks"],
         trackingMode: .selectOne, target: nil, action: nil)
     /// The header is shipped chrome, so it gets its own A/B rather than riding on
     /// the row switch: the point is to compare the two headers, not to see one
@@ -1874,6 +1874,7 @@ final class SidebarInbox96PlaygroundView: NSView {
         inbox.onRowAction = { _, _ in }
         inbox.onSnoozeSelection = { _, _ in }
         inbox.wiredRowActions = Set(InboxRowAction.allCases.filter { $0 != .generateName })
+        inbox.setProjectIconSources(SidebarPolishFixtures.iconRoots())
 
         borderControl.addItems(withTitles: Self.borders.map(\.title))
         pitchControl.selectedSegment = 0
@@ -1957,9 +1958,13 @@ final class SidebarInbox96PlaygroundView: NSView {
     /// see `live96-production-*.png` in the screenshot artifact for what the app
     /// actually makes.
     private func applyRows() {
-        let rows = rowsControl.selectedSegment == 0
-            ? AgentInbox96Fixtures.rows(now: Self.now)
-            : LabFixtures.inboxRows()
+        let rows: [AgentInboxRow]
+        switch rowsControl.selectedSegment {
+        case 0: rows = AgentInbox96Fixtures.rows(now: Self.now)
+        case 1: rows = LabFixtures.inboxRows()
+        // The sidebar polish pass: folded stacks, working children, project icons.
+        default: rows = SidebarPolishFixtures.rows(now: Self.now)
+        }
         guard rows.map(\.id) != shownRowIDs else { return }
         shownRowIDs = rows.map(\.id)
         inbox.reload(rows: rows)
