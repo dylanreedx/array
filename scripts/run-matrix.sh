@@ -1404,6 +1404,7 @@ run_app_check .build/debug/Array --project-root-resolution-check
 run_app_check .build/debug/Array --project-picker-resolution-check
 run_app_check .build/debug/Array --fresh-install-check
 run_app_check .build/debug/Array --child-crash-isolation-check
+run_app_check .build/debug/Array --sidebar-push-coalescing-check
 run_app_check .build/debug/Array --topology-migration-check
 run_app_check .build/debug/Array --terminal-tmux-persistence-check
 run_app_check .build/debug/Array --terminal-tmux-no-mirror-check

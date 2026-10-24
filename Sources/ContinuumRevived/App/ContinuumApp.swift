@@ -4197,6 +4197,10 @@ enum ContinuumApp {
         // libghostty's Breakpad handler would otherwise catch every child's crash
         // and exit Array with it — see `ChildCrashIsolation`.
         ChildCrashIsolation.detachInProcessHandler()
+        if CommandLine.arguments.contains("--sidebar-push-coalescing-check") {
+            do { print(try CoalescedPushChecks.run()); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+        }
         if CommandLine.arguments.contains("--child-crash-isolation-check") {
             do { print(try ChildCrashIsolationChecks.run()); Foundation.exit(0) }
             catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
@@ -5479,7 +5483,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Coalesces surface pushes on the runner event path. `recordManagedActivity` is
     /// called per streamed token, and a push reloads the sidebar and sweeps the
     /// canvas — debounced exactly like `scheduleCompanionSyncPublish`.
-    private var agentSurfaceRefreshDebounceWorkItem: DispatchWorkItem?
+    private lazy var agentSurfacePush = CoalescedPush { [weak self] in self?.pushAgentSurfaces() }
     private var sidebarTurnObserverToken: UUID?
     /// Every STRUCTURAL sidebar reload (the ones that read disk) — the workspace-
     /// switch witness reads the delta across one switch.
@@ -8332,14 +8336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// It pushes; it does NOT rebuild — the snapshot was already advanced
     /// incrementally by the time this fires.
     private func scheduleAgentSurfacePush(debounce: TimeInterval) {
-        agentSurfaceRefreshDebounceWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.agentSurfaceRefreshDebounceWorkItem = nil
-            self.pushAgentSurfaces()
-        }
-        agentSurfaceRefreshDebounceWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + debounce, execute: workItem)
+        agentSurfacePush.request(within: debounce)
     }
 
     /// `TmuxControl` is async throughout (it may shell out to a real `tmux`
