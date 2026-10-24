@@ -374,6 +374,15 @@ private func runCodexRunnerArgvChecks() {
         cwdPath: "/tmp/work",
         extraArgs: [],
         prompt: AgentPrompt("do the thing"))
+    // Managed agents start with the ChatGPT app's computer-use and browser-use
+    // plugins off (`.plans/80-browser-computer-use`, §9). Written out, not read
+    // back from `providerComputerUseOverrides`, so a drift in either is RED.
+    let computerUseOff = [
+        "-c", "plugins.unified-computer-use@openai-bundled.enabled=false",
+        "-c", "plugins.computer-use@openai-bundled.enabled=false",
+        "-c", "plugins.browser@openai-bundled.enabled=false",
+        "-c", "mcp_servers.node_repl={command=\"/usr/bin/true\",enabled=false}",
+    ]
     expect(fresh == [
         "exec",
         "--json", "--skip-git-repo-check",
@@ -382,6 +391,7 @@ private func runCodexRunnerArgvChecks() {
         "-m", "gpt-5.6-sol",
         "-c", "model_reasoning_effort=high",
         "-C", "/tmp/work",
+    ] + computerUseOff + [
         "do the thing",
     ], "CodexCLIBackend argv (fresh) drifted: \(fresh)")
 
@@ -411,8 +421,15 @@ private func runCodexRunnerArgvChecks() {
         "-m", "gpt-5.6-sol",
         "-c", "model_reasoning_effort=xhigh",
         "--extra",
+    ] + computerUseOff + [
         "recall",
     ], "CodexCLIBackend argv (resume) drifted: \(resume)")
+
+    let appServer = CodexCLIBackend.appServerArguments(extraArgs: [])
+    expect(appServer == [
+        "-c", "approval_policy=never",
+        "-c", "sandbox_mode=workspace-write",
+    ] + computerUseOff + ["app-server"], "CodexCLIBackend app-server argv drifted: \(appServer)")
 
     expect(CodexCLIBackend.sandboxMode == "workspace-write",
            "CodexCLIBackend: the pinned sandbox posture must be workspace-write")

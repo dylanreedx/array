@@ -230,6 +230,10 @@ if CommandLine.arguments.contains("--canvas-background-model-check") {
 if CommandLine.arguments.contains("--provider-context-support-check") {
     runClaudeAgentBackendChecks()
     runClaudeAgentStateReaderTests()
+    // The Codex argv pins (including the computer-use-off overrides,
+    // `.plans/80-browser-computer-use` §9) sit late in the combined entry;
+    // this leg is where the gate actually reports them.
+    runCodexAgentBackendChecks()
     print("ProviderContextSupportChecks passed")
     Foundation.exit(0)
 }

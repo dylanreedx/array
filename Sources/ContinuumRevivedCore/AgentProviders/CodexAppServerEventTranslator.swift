@@ -140,6 +140,14 @@ public struct CodexAppServerEventTranslator {
             return []
         }
 
+        // A request FROM codex (it carries an id). `CodexAppServerTransport`
+        // answers every one with a decline; this records that it happened, so
+        // a computer-use prompt Array refused is a visible row, not a silent
+        // failure (`.plans/80-browser-computer-use`, §9).
+        if let requestId = object["id"], !(requestId is NSNull) {
+            return translateDeclinedServerRequest(method: method, requestId: "\(requestId)", params: params)
+        }
+
         switch method {
         case "thread/started":
             return translateThreadStarted(params)
@@ -227,6 +235,39 @@ public struct CodexAppServerEventTranslator {
     }
 
     // MARK: - items
+
+    /// One finished row per declined request: started and completed together,
+    /// status `.declined`. The title is the request's own wording when it has
+    /// some (an elicitation's `message`, e.g. "Allow ChatGPT to use Finder?").
+    private mutating func translateDeclinedServerRequest(
+        method: String,
+        requestId: String,
+        params: [String: Any]
+    ) -> [AgentRuntimeEvent] {
+        guard let threadId = params["threadId"] as? String, !threadId.isEmpty else { return [] }
+        let itemId = "array-declined-request-\(requestId)"
+        let message = (params["message"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let asked = message.isEmpty ? method : String(message.prefix(160))
+        let title = "Declined: \(asked)"
+        if let onRuntimeObservation {
+            var fields: [(key: String, value: String)] = []
+            if let server = params["serverName"] as? String, !server.isEmpty {
+                fields.append((key: "server", value: server))
+            }
+            fields.append((key: "reason", value: "Array answers no provider permission requests"))
+            onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
+                phase: .started,
+                toolName: title,
+                fields: fields,
+                observedAt: now()
+            )))
+        }
+        return [
+            .itemStarted(threadId: threadId, itemId: itemId, kind: .mcpToolCall, title: title),
+            .itemCompleted(threadId: threadId, itemId: itemId, kind: .mcpToolCall, status: .declined),
+        ]
+    }
 
     private mutating func translateItemStarted(_ params: [String: Any]) -> [AgentRuntimeEvent] {
         guard let threadId = params["threadId"] as? String,

@@ -33,6 +33,7 @@ import Foundation
 //      in. Restored via `defer` before the function returns.
 func runCodexAppServerRunnerChecks() {
     runCodexAppServerTransportChecks()
+    runCodexAppServerDeclineChecks()
     runCodexAgentRunnerAppServerChecks()
 }
 
@@ -52,6 +53,11 @@ private enum FakeAppServerStep {
     case stderr(byteCount: Int)
     /// A request the fake deliberately never answers, to exercise a timeout.
     case hang
+    /// A request FROM the fake to Array (it carries an id), e.g. an MCP
+    /// elicitation. Array must answer it; see `expectReply`.
+    case emitRequest(id: Int, method: String, params: [String: Any], delayMs: Int = 0)
+    /// Read one line Array writes back and append it verbatim to `replies.log`.
+    case expectReply
 
     var jsonValue: [String: Any] {
         switch self {
@@ -67,6 +73,10 @@ private enum FakeAppServerStep {
             return ["kind": "stderr", "byte_count": byteCount]
         case .hang:
             return ["kind": "hang"]
+        case let .emitRequest(id, method, params, delayMs):
+            return ["kind": "emit", "notification": ["id": id, "method": method, "params": params], "delay_ms": delayMs]
+        case .expectReply:
+            return ["kind": "expect_reply"]
         }
     }
 }
@@ -86,7 +96,25 @@ private enum FakeAppServerStep {
 /// the same directory — the directory (hence the fake `codex` executable
 /// path) is shared across every spawn of the same check's runner.
 private let fakeAppServerPythonSource = #"""
-import json, os, sys, time
+import json, os, select, sys, time
+
+# One unbuffered line reader for every step: `expect_reply` needs a timeout,
+# and select() on a buffered sys.stdin can miss a line already read ahead.
+_pending = b""
+def read_line(timeout=None):
+    global _pending
+    deadline = None if timeout is None else time.time() + timeout
+    while b"\n" not in _pending:
+        wait = None if deadline is None else max(0.0, deadline - time.time())
+        ready, _, _ = select.select([0], [], [], wait)
+        if not ready:
+            return None
+        chunk = os.read(0, 65536)
+        if not chunk:
+            return ""
+        _pending += chunk
+    line, _, _pending = _pending.partition(b"\n")
+    return line.decode("utf-8") + "\n"
 
 scenario_dir = os.path.dirname(os.path.abspath(sys.argv[1]))
 counter_path = os.path.join(scenario_dir, "invocation.count")
@@ -109,6 +137,9 @@ def send(obj):
     sys.stdout.flush()
 
 progress_path = os.path.join(scenario_dir, "progress.log")
+replies_path = os.path.join(scenario_dir, "replies.log")
+with open(os.path.join(scenario_dir, "argv.log"), "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
 
 def log_received(method):
     with open(progress_path, "a") as f:
@@ -117,7 +148,7 @@ def log_received(method):
 for action in scenario:
     kind = action["kind"]
     if kind in ("expect_request", "expect_notification"):
-        line = sys.stdin.readline()
+        line = read_line()
         if not line:
             break
         obj = json.loads(line)
@@ -137,6 +168,15 @@ for action in scenario:
         sys.stderr.flush()
     elif kind == "hang":
         time.sleep(30)
+    elif kind == "expect_reply":
+        # Bounded: an Array that never answers must fail the check, not hang it.
+        line = read_line(timeout=5)
+        if line is None:
+            continue
+        if not line:
+            break
+        with open(replies_path, "a") as f:
+            f.write(line)
 
 time.sleep(0.3)
 """#
@@ -273,6 +313,56 @@ private func runCodexAppServerTransportChecks() {
     }
 }
 
+// MARK: - 1d. Requests FROM codex are always answered
+
+/// `.plans/80-browser-computer-use` §9: codex's own computer-use plugin asks
+/// permission through `mcpServer/elicitation/request`. The transport used to
+/// forward every request as a notification and never answer, so each call
+/// failed and the turn waited on it. RED before: no reply is ever written, so
+/// `replies.log` stays empty.
+private func readReplies(_ dir: URL) -> [[String: Any]] {
+    guard let text = try? String(contentsOf: dir.appendingPathComponent("replies.log"), encoding: .utf8) else { return [] }
+    return text.split(separator: "\n").compactMap {
+        try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+    }
+}
+
+private func runCodexAppServerDeclineChecks() {
+    let (script, scenario) = try! makeFakeAppServer(scenario: [
+        .emitRequest(id: 41, method: "mcpServer/elicitation/request",
+                     params: ["threadId": "t", "serverName": "computer-use",
+                              "message": "Allow ChatGPT to use Finder?", "mode": "form",
+                              "requestedSchema": ["type": "object", "properties": [:]]]),
+        .expectReply,
+        .emitRequest(id: 42, method: "item/commandExecution/requestApproval", params: ["threadId": "t"]),
+        .expectReply,
+        .emitRequest(id: 43, method: "item/tool/call", params: ["threadId": "t"]),
+        .expectReply,
+    ])
+    let child = try! ProcessGroupChild.spawn(
+        executable: "/usr/bin/env",
+        arguments: ["python3", script.path, scenario.path],
+        environment: ["PATH": "/usr/bin:/bin"],
+        currentDirectory: nil,
+        standardInput: .pipe)
+    let forwarded = ThreadIdCollector()
+    let transport = CodexAppServerTransport(child: child) { forwarded.append($0) }
+    _ = child.wait()
+    transport.shutdown()
+    let replies = readReplies(scenario.deletingLastPathComponent())
+    expect(replies.count == 3, "transport: every request from codex must get exactly one reply; got \(replies.count)")
+    func reply(_ id: Int) -> [String: Any]? { replies.first { ($0["id"] as? Int) == id } }
+    expect((reply(41)?["result"] as? [String: Any])?["action"] as? String == "decline",
+           "transport: an MCP elicitation must be answered with action=decline; got \(String(describing: reply(41)))")
+    expect((reply(42)?["result"] as? [String: Any])?["decision"] as? String == "decline",
+           "transport: a command approval must be answered with decision=decline; got \(String(describing: reply(42)))")
+    expect((reply(43)?["error"] as? [String: Any])?["code"] as? Int == -32601,
+           "transport: any other request must get a JSON-RPC error, never silence; got \(String(describing: reply(43)))")
+    expect(forwarded.snapshot().count == 3,
+           "transport: each request must still reach the translator so the transcript records it")
+    try? FileManager.default.removeItem(at: scenario.deletingLastPathComponent())
+}
+
 // MARK: - 2. CodexAgentRunner, driven through its real `run()`
 
 /// Mutates real process environment for the duration of `body`, restoring the
@@ -374,6 +464,71 @@ private func runCodexAgentRunnerAppServerChecks() {
                    "runner (fresh, app-server): a streamed delta must forward as contentDelta")
             expect(events.contains { if case .turnCompleted(_, let turnId, let outcome, _) = $0 { return turnId == "fixture-fresh-turn" && outcome == .completed } else { return false } },
                    "runner (fresh, app-server): turn/completed must forward as a .completed outcome")
+        }
+        try? FileManager.default.removeItem(at: fakeRoot)
+    }
+
+    // 2a′. `.plans/80-browser-computer-use` §9, through the production run():
+    // a computer-use permission prompt mid-turn is declined, shows as a
+    // declined row, and the turn still completes; and the spawned codex was
+    // told to load neither the computer-use nor the browser-use plugins.
+    do {
+        let (script, fakeRoot) = try! makeFakeAppServer(
+            scenario: [
+                .expectRequest(result: [:]),          // initialize
+                .expectNotification,                  // initialized
+                .expectRequest(result: [:]),          // config/read
+                .expectRequest(result: ["thread": ["id": "fixture-cu-thread"]]),   // thread/start
+                .expectRequest(result: ["turn": ["id": "fixture-cu-turn"]]),       // turn/start
+                .emitRequest(id: 7, method: "mcpServer/elicitation/request",
+                             params: ["threadId": "fixture-cu-thread", "turnId": "fixture-cu-turn",
+                                      "serverName": "computer-use", "mode": "form",
+                                      "message": "Allow ChatGPT to use Finder?",
+                                      "requestedSchema": ["type": "object", "properties": [:]]],
+                             delayMs: 10),
+                .expectReply,
+                .emit(method: "turn/completed",
+                      params: ["threadId": "fixture-cu-thread",
+                               "turn": ["id": "fixture-cu-turn", "status": "completed"]],
+                      delayMs: 10),
+            ],
+            asExecutableNamed: "codex")
+        let fakeDir = script.deletingLastPathComponent()
+        withEnvironmentOverride([
+            "CONTINUUM_CODEX_TRANSPORT": "app-server",
+            "PATH": "\(fakeDir.path):\(ProcessInfo.processInfo.environment["PATH"] ?? "")",
+        ]) {
+            let runner = CodexAgentRunner(config: .init(model: "gpt-5.6-sol", cwd: cwd, threadId: nil))
+            let collector = EventCollector()
+            var caught: Error?
+            do { try runner.run(prompt: "use the browser") { collector.append($0) } } catch { caught = error }
+            let events = collector.snapshot()
+            expect(caught == nil, "runner (computer-use prompt): the turn must complete; threw \(String(describing: caught))")
+            let replies = readReplies(fakeRoot)
+            expect(replies.count == 1
+                   && (replies.first?["id"] as? Int) == 7
+                   && ((replies.first?["result"] as? [String: Any])?["action"] as? String) == "decline",
+                   "runner (computer-use prompt): codex's elicitation must be answered with a decline; got \(replies)")
+            let rowId = "array-declined-request-7"
+            expect(events.contains {
+                if case .itemStarted("fixture-cu-thread", rowId, .mcpToolCall, let title) = $0 {
+                    return title == "Declined: Allow ChatGPT to use Finder?"
+                }
+                return false
+            }, "runner (computer-use prompt): the declined request must show as a transcript row naming what was asked")
+            expect(events.contains {
+                if case .itemCompleted("fixture-cu-thread", rowId, .mcpToolCall, .declined) = $0 { return true }
+                return false
+            }, "runner (computer-use prompt): that row must be marked declined")
+            let argv = (try? String(contentsOf: fakeRoot.appendingPathComponent("argv.log"), encoding: .utf8)) ?? ""
+            for override in [
+                "plugins.unified-computer-use@openai-bundled.enabled=false",
+                "plugins.computer-use@openai-bundled.enabled=false",
+                "plugins.browser@openai-bundled.enabled=false",
+            ] {
+                expect(argv.contains(override), "runner (computer-use prompt): spawned codex argv lacks \(override): \(argv)")
+            }
+            expect(argv.contains("mcp_servers.node_repl="), "runner (computer-use prompt): spawned codex argv must disable node_repl: \(argv)")
         }
         try? FileManager.default.removeItem(at: fakeRoot)
     }

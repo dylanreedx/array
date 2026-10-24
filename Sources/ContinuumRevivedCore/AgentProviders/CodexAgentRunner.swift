@@ -105,6 +105,7 @@ public enum CodexCLIBackend {
             args += ["-C", cwdPath]
         }
         args += extraArgs
+        for override in providerComputerUseOverrides { args += ["-c", override] }
         if let workspaceMCP {
             for override in workspaceMCP.codexConfigOverrides { args += ["-c", override] }
         }
@@ -123,6 +124,25 @@ public enum CodexCLIBackend {
         return segments.joined(separator: "\n")
     }
 
+    /// Managed agents start with the ChatGPT app's own computer use and browser
+    /// use switched off. Those plugins load from the user's `~/.codex` into every
+    /// codex process; inside Array they drove whole Mac apps by pixels, asked
+    /// permission through prompts nobody could answer, and failed on every call
+    /// (`.plans/80-browser-computer-use`, §9). Measured on codex 0.163.0
+    /// (`research/s0-cli-probes.md`):
+    /// - plugin keys must be UNQUOTED; `plugins."id".enabled` is silently ignored;
+    /// - a plugin override for a plugin that is not installed is harmless;
+    /// - `node_repl` is an `[mcp_servers]` entry, and `mcp_servers.X.enabled=false`
+    ///   for a server the config lacks stops app-server answering `initialize`.
+    ///   A whole disabled table is safe both when the entry exists and when it
+    ///   does not.
+    public static let providerComputerUseOverrides: [String] = [
+        "plugins.unified-computer-use@openai-bundled.enabled=false",
+        "plugins.computer-use@openai-bundled.enabled=false",
+        "plugins.browser@openai-bundled.enabled=false",
+        "mcp_servers.node_repl={command=\"/usr/bin/true\",enabled=false}",
+    ]
+
     /// codex args for the `app-server` subprocess. Same `-c` overrides as
     /// `processArguments` (`approval_policy=never`, `sandbox_mode`) since those
     /// are process-level flags either way; there is no per-thread equivalent.
@@ -135,6 +155,7 @@ public enum CodexCLIBackend {
             "-c", "approval_policy=never",
             "-c", "sandbox_mode=\(sandboxMode)",
         ]
+        for override in providerComputerUseOverrides { args += ["-c", override] }
         if let workspaceMCP {
             for override in workspaceMCP.codexConfigOverrides { args += ["-c", override] }
         }

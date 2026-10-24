@@ -76,14 +76,22 @@ public final class CodexAppServerTransport: @unchecked Sendable {
     }
 
     /// Queue-confined. A frame with a matching numeric `id` and a `result`/
-    /// `error` key is a response to OUR request; everything else (including a
-    /// request FROM the server — out of scope here since `approval_policy=
-    /// never` means codex never asks) is a notification, forwarded verbatim.
+    /// `error` key is a response to OUR request. A frame with an `id` AND a
+    /// `method` is a request FROM codex: it is forwarded like a notification
+    /// (the translator records it in the transcript) and then answered with a
+    /// decline. Everything else is a notification, forwarded verbatim.
+    ///
+    /// `approval_policy=never` stops codex asking about commands and patches,
+    /// but not MCP elicitations: the ChatGPT app's computer-use plugin asks
+    /// "Allow ChatGPT to use Finder?" through `mcpServer/elicitation/request`,
+    /// and while this went unanswered every such call failed and the turn
+    /// waited on it (`.plans/80-browser-computer-use`, §9).
     private func handleLine(_ lineData: Data) {
         guard let line = String(data: lineData, encoding: .utf8),
               !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return }
-        if let object = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+        let object = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+        if let object,
            let id = object["id"] as? Int,
            object["result"] != nil || object["error"] != nil {
             pendingResults[id] = (object["result"] as? [String: Any], object["error"] as? [String: Any])
@@ -91,6 +99,27 @@ public final class CodexAppServerTransport: @unchecked Sendable {
             return
         }
         onNotificationLine(line)
+        if let object,
+           let method = object["method"] as? String,
+           let requestId = object["id"], !(requestId is NSNull) {
+            try? writeLine(Self.declineReply(requestId: requestId, method: method))
+        }
+    }
+
+    /// The reply Array sends to a request codex makes of it. Array grants
+    /// nothing through this channel: an elicitation is declined, a command or
+    /// file-change approval is declined, and any other method gets a JSON-RPC
+    /// error naming it, so codex never waits on an unanswered request.
+    public static func declineReply(requestId: Any, method: String) -> [String: Any] {
+        switch method {
+        case "mcpServer/elicitation/request":
+            return ["jsonrpc": "2.0", "id": requestId, "result": ["action": "decline"]]
+        case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
+            return ["jsonrpc": "2.0", "id": requestId, "result": ["decision": "decline"]]
+        default:
+            return ["jsonrpc": "2.0", "id": requestId,
+                    "error": ["code": -32601, "message": "Array does not answer \(method); declined"]]
+        }
     }
 
     /// Send one JSON-RPC request and block until its correlated response
@@ -131,10 +160,17 @@ public final class CodexAppServerTransport: @unchecked Sendable {
         try writeLine(["jsonrpc": "2.0", "method": method, "params": params])
     }
 
+    /// Requests are written from the caller's thread and declines from this
+    /// transport's queue, so writes are serialized: two lines interleaving on
+    /// the pipe would corrupt both frames.
+    private let writeLock = NSLock()
+
     private func writeLine(_ payload: [String: Any]) throws {
         guard let stdin = child.standardInput else { throw TransportClosedError() }
         var data = try JSONSerialization.data(withJSONObject: payload)
         data.append(0x0A)
+        writeLock.lock()
+        defer { writeLock.unlock() }
         try stdin.write(contentsOf: data)
     }
 
