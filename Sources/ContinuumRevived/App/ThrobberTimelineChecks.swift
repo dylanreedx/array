@@ -402,9 +402,17 @@ enum ThrobberTimelineChecks {
         fresh.removeFromSuperview()
         try expect(fresh.qaThrobberActiveAnimationCount == 0,
                    "a row out of the window must not animate, found \(fresh.qaThrobberActiveAnimationCount)")
-        // A row that stops working gives the throbber up entirely.
+        // A row that stops working gives the throbber up entirely — at once.
         apply(cellA, id: idA, state: .ready)
+        try expect(cellA.qaThrobberPhaseOffset == nil,
+                   "a row that is no longer working must drop its throbber at once")
+        // And then NOTHING on it animates. The hover above left its finite fill
+        // fade and deck spring attached, because this check never lets time
+        // pass; let them run out (they take ~0.3s on screen) before the strict
+        // read, so a transient fade is never mistaken for a kept throbber and a
+        // kept throbber is never excused as a fade.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
         try expect(cellA.qaAnimatingViewCount == 0,
-                   "a row that is no longer working must hold no throbber, found \(cellA.qaAnimatingViewCount)")
+                   "a row that is no longer working must hold no animation, found \(cellA.qaAnimatingViewCount): \(cellA.qaAnimatingViewNames)")
     }
 }

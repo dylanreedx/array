@@ -2083,6 +2083,16 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var qaGlyph: String { throbber != nil ? "throbber" : (statusGlyph.symbol ?? "") }
     /// Whether anything in this row is ANIMATING: a subview of the throbber's class
     /// or any layer carrying a `CAAnimation`. Only a working row's throbber may.
+    /// Every view in the row whose layer carries an animation, with its keys.
+    var qaAnimatingViewNames: [String] {
+        var out: [String] = []
+        func visit(_ view: NSView) {
+            if let keys = view.layer?.animationKeys(), !keys.isEmpty { out.append("\(type(of: view)):\(keys)") }
+            view.subviews.forEach(visit)
+        }
+        visit(self)
+        return out
+    }
     var qaAnimatingViewCount: Int {
         func count(_ view: NSView) -> Int {
             let own = (view is DualPlaneGyroTiltedThinkingIndicatorView ? 1 : 0)
