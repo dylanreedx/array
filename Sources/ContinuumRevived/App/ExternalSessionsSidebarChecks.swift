@@ -41,10 +41,10 @@ enum ExternalSessionsSidebarChecks {
         let monitor = delegate.externalSessionMonitor
         try expect(!monitor.isStarted, "the monitor must be inert in a check until something drives it (hazard 6)")
 
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 1240),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 1240),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: .darkAqua)
-        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 320, height: 1240))
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 340, height: 1240))
         window.contentView = sidebar
         window.orderFrontOffscreenForChecks()
         defer { window.orderOut(nil) }
@@ -95,6 +95,10 @@ enum ExternalSessionsSidebarChecks {
                                status: .unknown, host: .app("Codex app"), ago: 600, pid: nil)
         let ghostty = session("s-scratch", cwd: scratch, title: "Port scanner spike", status: .idle,
                               host: .app("Ghostty"), ago: 500)
+        let referenceFolder = fixture.tempRoot.appendingPathComponent("roast-web", isDirectory: true)
+        try FileManager.default.createDirectory(at: referenceFolder, withIntermediateDirectories: true)
+        let referenceTerminal = session("s-reference-terminal", cwd: referenceFolder,
+            title: "Metadata reference", status: .idle, host: .app("Terminal"), ago: 450)
         let otherWorkspace = session("s-pc", cwd: fixture.pcRoot, title: "Bannockburn invoice export", status: .busy,
                                      host: .app("cmux"), ago: 400)
         // Array's own: a session the fixture agent's record names, and its tile's Terminal face.
@@ -103,7 +107,7 @@ enum ExternalSessionsSidebarChecks {
         let face = session("s-face", cwd: fixture.pbRoot, title: "face", status: .busy,
                            host: .arrayTerminalFace(agentId: agentTag))
         monitor.publish(ExternalSessionSnapshot(sessions: [
-            cmux, shell, desktop, codexApp, ghostty, otherWorkspace, owned, face,
+            cmux, shell, desktop, codexApp, ghostty, otherWorkspace, referenceTerminal, owned, face,
         ]))
         inbox.layoutForQA()
         func rowId(_ session: ExternalAgentSession) -> UUID { ExternalSessionRows.rowId(forSessionKey: session.id) }
@@ -165,12 +169,40 @@ enum ExternalSessionsSidebarChecks {
         if let pngPath {
             try writePNG(of: sidebar, to: URL(fileURLWithPath: pngPath))
         }
+        // A baseline-only/icon-to-icon witness passed while both glyphs sat below
+        // the words. Measure ink painted by the production cells in both appearances.
+        var metadataInkFailures: [String] = []
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            window.appearance = NSAppearance(named: appearance)
+            inbox.layoutForQA()
+            for session in [cmux, shell, desktop, codexApp, ghostty, otherWorkspace, referenceTerminal] {
+                guard let ink = inbox.metadataInkGeometryForQA(id: rowId(session)),
+                      let folder = ink["folder"], let project = ink["project"],
+                      let origin = ink["origin"], let text = ink["originText"],
+                      let cap = ink["opticalCentre"] else {
+                    throw Failure(message: "missing native metadata ink for \(session.id)")
+                }
+                let folderDelta = folder.midY - cap.minY
+                let originDelta = origin.midY - cap.minY
+                print("metadata-ink \(appearance.rawValue) \(session.host): folder=\(folder) project=\(project) origin=\(origin) text=\(text) opticalY=\(cap.minY) deltas=\(folderDelta),\(originDelta)")
+                if abs(folderDelta) > 0.5 || abs(originDelta) > 0.5
+                    || abs(folder.midY - project.midY) > 1.5 || abs(origin.midY - text.midY) > 1.5 {
+                    metadataInkFailures.append("\(appearance.rawValue) \(session.host): folder/optical \(folderDelta)pt, origin/optical \(originDelta)pt, folder/text \(folder.midY - project.midY)pt, origin/text \(origin.midY - text.midY)pt")
+                }
+            }
+            if let pngPath {
+                let base = URL(fileURLWithPath: pngPath).deletingPathExtension()
+                try writePNG(of: sidebar, to: base.appendingPathExtension(appearance == .aqua ? "aqua.png" : "dark.png"))
+            }
+        }
+        try expect(metadataInkFailures.isEmpty, "metadata visible ink misaligned: " + metadataInkFailures.joined(separator: "; "))
+
         for session in [cmux, shell, desktop, codexApp, ghostty, otherWorkspace] {
             guard let marker = inbox.whereMarkerForQA(id: rowId(session)) else {
                 throw Failure(message: "missing metadata for \(session.title ?? session.id)")
             }
-            try expect(abs(marker.iconInkCenterDelta) <= 0.5 && abs(marker.projectIconBaselineDelta) <= 0.5,
-                       "folder and host icons must align visually for \(marker.text); folder baseline delta \(marker.projectIconBaselineDelta)pt, icon ink center delta \(marker.iconInkCenterDelta)pt")
+            try expect(abs(marker.iconInkCenterDelta) <= 0.5 && abs(marker.projectIconOpticalCenterDelta) <= 0.5,
+                       "folder and host icons must align visually for \(marker.text); folder ink/optical-centre delta \(marker.projectIconOpticalCenterDelta)pt, icon ink center delta \(marker.iconInkCenterDelta)pt")
         }
         try expect(inbox.hoverRowForQA(id: rowId(codexApp)), "the Codex row must be hoverable")
         // Nor Move here: the Codex app runs every thread in one server, so a

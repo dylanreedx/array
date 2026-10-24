@@ -2981,12 +2981,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     /// The where marker drawn on row `id`, read off its cell.
-    func whereMarkerForQA(id: UUID) -> (text: String, frame: NSRect, placementFrame: NSRect, iconInkCenterDelta: CGFloat, projectIconBaselineDelta: CGFloat)? {
+    func whereMarkerForQA(id: UUID) -> (text: String, frame: NSRect, placementFrame: NSRect, iconInkCenterDelta: CGFloat, projectIconOpticalCenterDelta: CGFloat)? {
         guard let tableRow = tableRow(forAgentId: id),
               let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
         else { return nil }
         card.layoutSubtreeIfNeeded()
         return card.qaWhereMarker
+    }
+
+    func metadataInkGeometryForQA(id: UUID) -> [String: NSRect]? {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return nil }
+        card.layoutSubtreeIfNeeded()
+        return card.qaMetadataInkGeometry
     }
 
     /// Hover row `id` the way the pointer does, then press one of its external actions.

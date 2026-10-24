@@ -246,6 +246,25 @@ enum InkAlignedSymbol {
         return inkBounds(of: rep)
     }
 
+    /// Paint a native cell at its real bounds before scanning; do not stretch a
+    /// deferred NSImage drawing handler into the measurement square.
+    static func measureCellInk(of view: NSControl, scale: CGFloat = 8) -> NSRect? {
+        let size = view.bounds.size
+        guard size.width > 0, size.height > 0,
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                pixelsWide: Int(ceil(size.width * scale)), pixelsHigh: Int(ceil(size.height * scale)),
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        context.cgContext.scaleBy(x: scale, y: scale)
+        NSColor.black.setFill()
+        view.cell?.draw(withFrame: view.bounds, in: view)
+        NSGraphicsContext.restoreGraphicsState()
+        return inkBounds(of: rep)
+    }
+
     /// Alpha extent of a bitmap, normalised to its own size, measured top-down.
     static func inkBounds(of rep: NSBitmapImageRep, threshold: Int = 24) -> NSRect? {
         guard let data = rep.bitmapData else { return nil }
@@ -457,11 +476,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private let projectIcon = NSImageView(frame: .zero)
     private static let metadataIconSide: CGFloat = 12
     private static var metadataSymbols: [String: NSImage] = [:]
-    private static let metadataInkCenters: NSCache<NSImage, NSNumber> = {
-        let cache = NSCache<NSImage, NSNumber>()
-        cache.countLimit = 128
-        return cache
-    }()
+    private static var metadataInkCenters: [CGFloat: NSCache<NSImage, NSNumber>] = [:]
+    private var metadataRasterScale: CGFloat = 1
     private var projectIconInkCenterY: CGFloat = 6
     private var whereIconInkCenterY: CGFloat = 6
 
@@ -478,19 +494,39 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// NSImageView's baseline includes symbol padding, so equal baselines can
     /// still put the visible glyphs on different lines. Measure the native cell
     /// once per image, when it changes; layout only uses the cached offset.
-    private static func metadataInkCenter(of image: NSImage?) -> CGFloat {
+    private static func metadataInkCenter(of image: NSImage?, scale: CGFloat) -> CGFloat {
         guard let image else { return metadataIconSide / 2 }
-        if let cached = metadataInkCenters.object(forKey: image) { return CGFloat(cached.doubleValue) }
+        let cache: NSCache<NSImage, NSNumber>
+        if let existing = metadataInkCenters[scale] { cache = existing } else {
+            cache = NSCache<NSImage, NSNumber>()
+            cache.countLimit = 128
+            metadataInkCenters[scale] = cache
+        }
+        if let cached = cache.object(forKey: image) { return CGFloat(cached.doubleValue) }
         let view = NSImageView(frame: NSRect(x: 0, y: 0, width: metadataIconSide, height: metadataIconSide))
         view.imageScaling = .scaleProportionallyDown
         view.image = image
-        let rendered = NSImage(size: view.bounds.size, flipped: false) { rect in
-            view.cell?.draw(withFrame: rect, in: view)
-            return true
-        }
-        let center = (InkAlignedSymbol.measureInk(of: rendered)?.midY ?? 0.5) * metadataIconSide
-        metadataInkCenters.setObject(NSNumber(value: Double(center)), forKey: image)
+        view.contentTintColor = .black
+        let center = (InkAlignedSymbol.measureCellInk(of: view, scale: scale)?.midY ?? 0.5) * metadataIconSide
+        cache.setObject(NSNumber(value: Double(center)), forKey: image)
         return center
+    }
+    private static var metadataOpticalCenters: [String: CGFloat] = [:]
+    private var metadataTextOpticalCenterY: CGFloat = 0
+
+    /// A fixed capital/ascender pair establishes the native text optical band,
+    /// independent of project spelling and descenders. Measure at the real backing
+    /// scale: an 8x vector estimate misses SF Symbol/text hinting at 1x/2x.
+    private static func metadataOpticalCenter(font: NSFont, height: CGFloat, scale: CGFloat) -> CGFloat {
+        let key = "\(font.fontName):\(font.pointSize):\(height):\(scale)"
+        if let cached = metadataOpticalCenters[key] { return cached }
+        let label = NSTextField(labelWithString: "Hl")
+        label.frame = NSRect(x: 0, y: 0, width: 32, height: height)
+        label.font = font
+        label.textColor = .black
+        let centre = (InkAlignedSymbol.measureCellInk(of: label, scale: scale)?.midY ?? 0.5) * height
+        metadataOpticalCenters[key] = centre
+        return centre
     }
     private let stateLabel = NSTextField(labelWithString: "")
     private let titleLabel = NSTextField(labelWithString: "")
@@ -596,7 +632,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.addSubview(decorations)
         card.addSubview(statusGlyph)
 
-        placementLabel.font = .token(.caption)
+        metadataRasterScale = NSScreen.main?.backingScaleFactor ?? 1
+        let metadataFont = NSFont.token(.caption)
+        placementLabel.font = metadataFont
+        metadataTextOpticalCenterY = Self.metadataOpticalCenter(font: metadataFont, height: proposal.bandTop, scale: metadataRasterScale)
         projectIcon.imageScaling = .scaleProportionallyDown
         projectIcon.setAccessibilityElement(false)
         card.addSubview(projectIcon)
@@ -686,6 +725,37 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        refreshMetadataBackingScale()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        refreshMetadataBackingScale()
+    }
+
+    private func refreshMetadataBackingScale() {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        guard scale != metadataRasterScale else { return }
+        metadataRasterScale = scale
+        if let font = placementLabel.font {
+            metadataTextOpticalCenterY = Self.metadataOpticalCenter(
+                font: font, height: proposal.bandTop, scale: scale)
+        }
+        projectIconInkCenterY = Self.metadataInkCenter(of: projectIcon.image, scale: scale)
+        whereIconInkCenterY = Self.metadataInkCenter(of: whereIcon.image, scale: scale)
+        needsLayout = true
+    }
+
+    /// Keep small glyphs on the backing grid, toward the text's upper edge. A
+    /// fractional image origin otherwise adds another raster-row drop below text.
+    private func alignMetadataIconToBacking(_ icon: NSImageView) {
+        var pixels = card.convertToBacking(icon.frame)
+        pixels.origin.y = card.isFlipped ? floor(pixels.origin.y) : ceil(pixels.origin.y)
+        icon.frame = card.convertFromBacking(pixels)
+    }
+
     override var isFlipped: Bool { true }
 
     // MARK: Content
@@ -741,11 +811,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         whereIcon.image = row.whereMarker.flatMap {
             Self.metadataSymbol($0.symbol, pointSize: Typography.style(for: .caption).size - 1)
         }
-        whereIconInkCenterY = Self.metadataInkCenter(of: whereIcon.image)
+        whereIconInkCenterY = Self.metadataInkCenter(of: whereIcon.image, scale: metadataRasterScale)
         for view in [whereDot, whereIcon, whereLabel] as [NSView] { view.isHidden = row.whereMarker == nil }
         projectIcon.image = !placement.isEmpty
             ? Self.metadataSymbol("folder") : nil
-        projectIconInkCenterY = Self.metadataInkCenter(of: projectIcon.image)
+        projectIconInkCenterY = Self.metadataInkCenter(of: projectIcon.image, scale: metadataRasterScale)
         titleLabel.stringValue = row.displayTitle
         let rollupSummary: String?
         if disclosure == .collapsed {
@@ -1288,21 +1358,20 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 width: max(0, min(Self.width(of: whereLabel), placementLeft + placementRoom - x)),
                 height: proposal.bandTop))
         }
-        if var iconFrame = projectIconFrame {
-            // A folder symbol and an NSTextField report different baselines inside
-            // equally centred boxes. Align the baselines AppKit exposes instead of
-            // aligning the boxes; otherwise the folder sits a point away from the
-            // directory word even though their frame midpoints are identical.
-            iconFrame.origin.y = placementFrame.minY
-                + placementLabel.firstBaselineOffsetFromTop
-                - projectIcon.firstBaselineOffsetFromTop
+        // Centre visible icon ink on the native text cell's optical band. An
+        // NSImageView baseline includes symbol padding; matching that baseline
+        // aligned both icons with each other while leaving both below the words.
+        let textOpticalCenter = placementLabel.frame.maxY - metadataTextOpticalCenterY
+        if let iconFrame = projectIconFrame {
             projectIcon.frame = inCard(iconFrame)
+            projectIcon.frame.origin.y += textOpticalCenter
+                - (projectIcon.frame.maxY - projectIconInkCenterY)
+            alignMetadataIconToBacking(projectIcon)
         }
         if !whereIcon.isHidden {
-            let target = projectIcon.image != nil
-                ? projectIcon.frame.maxY - projectIconInkCenterY
-                : whereLabel.frame.maxY - whereLabel.firstBaselineOffsetFromTop + (whereLabel.font?.capHeight ?? 0) / 2
-            whereIcon.frame.origin.y += target - (whereIcon.frame.maxY - whereIconInkCenterY)
+            whereIcon.frame.origin.y += textOpticalCenter
+                - (whereIcon.frame.maxY - whereIconInkCenterY)
+            alignMetadataIconToBacking(whereIcon)
         }
         stateLabel.frame = inCard(NSRect(
             x: metaRight - stateWidth, y: bandY,
@@ -1430,6 +1499,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     #if ARRAY_FILM
     /// Film build only: the fold triangle a pointer clicks (nil while it is hidden).
     var filmDisclosureButton: NSView? { disclosureButton.isHidden ? nil : disclosureButton }
+    var filmMoveHereButton: NSView? { hoverMoveHere.isHidden ? nil : hoverMoveHere }
+    var filmWhereMarkerRect: NSRect? {
+        guard !whereLabel.isHidden, !whereLabel.stringValue.isEmpty else { return nil }
+        return whereIcon.convert(whereIcon.bounds, to: self).union(whereLabel.convert(whereLabel.bounds, to: self))
+    }
     #endif
     var settleNudgeTitleForQA: String { settleNudge.title }
     @objc private func hoverSnoozeClicked() { onHoverSnooze?() }
@@ -1513,7 +1587,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     func setProjectIcon(_ image: NSImage?, for rowID: UUID) {
         guard shown?.row.id == rowID, let image else { return }
         projectIcon.image = image
-        projectIconInkCenterY = Self.metadataInkCenter(of: image)
+        projectIconInkCenterY = Self.metadataInkCenter(of: image, scale: metadataRasterScale)
         projectIcon.contentTintColor = nil
         needsLayout = true
     }
@@ -1535,19 +1609,33 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
     /// The where marker as drawn: its text, and whether it sits clear of the
     /// project name on the same line.
-    var qaWhereMarker: (text: String, frame: NSRect, placementFrame: NSRect, iconInkCenterDelta: CGFloat, projectIconBaselineDelta: CGFloat)? {
+    var qaWhereMarker: (text: String, frame: NSRect, placementFrame: NSRect, iconInkCenterDelta: CGFloat, projectIconOpticalCenterDelta: CGFloat)? {
         guard !whereLabel.isHidden else { return nil }
-        func inkCenter(_ view: NSImageView) -> CGFloat {
-            let rendered = NSImage(size: view.bounds.size, flipped: false) { rect in
-                view.cell?.draw(withFrame: rect, in: view)
-                return true
-            }
-            guard let ink = InkAlignedSymbol.measureInk(of: rendered) else { return .nan }
-            return view.frame.maxY - ink.midY * view.bounds.height
-        }
+        let ink = qaMetadataInkGeometry
+        let iconDelta = (ink["origin"]?.midY ?? .nan) - (ink["folder"]?.midY ?? .nan)
         return (whereLabel.stringValue, whereLabel.frame, placementLabel.frame,
-                inkCenter(whereIcon) - inkCenter(projectIcon), qaProjectBaselineDeltaForQA)
+                iconDelta, qaProjectOpticalCenterDeltaForQA)
     }
+    /// Actual cell-rendered ink in the card's native (bottom-up) coordinates.
+    /// A declared NSImage baseline cannot establish alignment with visible text.
+    var qaMetadataInkGeometry: [String: NSRect] {
+        func renderedInk(_ view: NSControl) -> NSRect? {
+            guard !view.isHidden, view.bounds.width > 0, view.bounds.height > 0 else { return nil }
+            guard let ink = InkAlignedSymbol.measureCellInk(of: view, scale: metadataRasterScale) else { return nil }
+            return NSRect(x: view.frame.minX + ink.minX * view.bounds.width,
+                          y: view.frame.maxY - ink.maxY * view.bounds.height,
+                          width: ink.width * view.bounds.width, height: ink.height * view.bounds.height)
+        }
+        var result: [String: NSRect] = [:]
+        for (key, view) in [("folder", projectIcon as NSControl), ("project", placementLabel),
+                            ("origin", whereIcon), ("originText", whereLabel)] {
+            if let ink = renderedInk(view) { result[key] = ink }
+        }
+        let opticalCentre = placementLabel.frame.maxY - metadataTextOpticalCenterY
+        result["opticalCentre"] = NSRect(x: 0, y: opticalCentre, width: 0, height: 0)
+        return result
+    }
+
     /// Presses a shown external action through its own target/action.
     func clickExternalActionForQA(_ action: InboxExternalSessionAction) -> Bool {
         let button: NSButton
@@ -1678,13 +1766,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return modelLabel.isHidden ? "" : modelLabel.stringValue
     }
     var qaProject: String { placementLabel.stringValue }
-    var qaProjectBaselineDeltaForQA: CGFloat {
-        guard projectIcon.frame.width > 0 else { return 0 }
-        let labelBaseline = placementLabel.frame.maxY
-            - placementLabel.firstBaselineOffsetFromTop
-        let iconBaseline = projectIcon.frame.maxY
-            - projectIcon.firstBaselineOffsetFromTop
-        return iconBaseline - labelBaseline
+    var qaProjectOpticalCenterDeltaForQA: CGFloat {
+        guard let folder = qaMetadataInkGeometry["folder"],
+              let cap = qaMetadataInkGeometry["opticalCentre"] else { return 0 }
+        return folder.midY - cap.minY
     }
     var qaTextAlpha: Double { Double(titleLabel.alphaValue) }
     var qaAccentAlpha: Double { Double(stateLabel.alphaValue) }
