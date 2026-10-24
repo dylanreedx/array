@@ -28,6 +28,8 @@ struct SwarmPose: Equatable {
     var stem: CGFloat
 
     static let side: CGFloat = 14
+    /// The cards' radius at the Default corner style; Settings › Appearance ›
+    /// Corner style scales it like every other corner (`radius(_:)`).
     static let cornerRadius: CGFloat = 1.8
     /// The gap the front card cuts out of the one behind it.
     static let knockout: CGFloat = 1.3
@@ -157,7 +159,6 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.masksToBounds = false
-        chip.cornerRadius = Self.chipDiameter / 2
         chip.opacity = 0
         layer?.addSublayer(chip)
         layer?.addSublayer(glyph)
@@ -257,10 +258,16 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
                       width: snap(rect.width), height: snap(rect.height))
     }
 
+    /// A Default-style radius resolved for the current corner style, clamped
+    /// to the shape it rounds.
+    private static func styled(_ base: CGFloat, in rect: CGRect) -> CGFloat {
+        min(CGFloat(CornerStyle.current.radius(Double(base))), min(rect.width, rect.height) / 2)
+    }
+
     private func cardPath(_ rect: CGRect, filled: Bool) -> CGPath {
         let r = layerRect(rect)
         let shape = filled ? r : r.insetBy(dx: 0.5, dy: 0.5)
-        let radius = filled ? SwarmPose.cornerRadius : SwarmPose.cornerRadius - 0.5
+        let radius = Self.styled(filled ? SwarmPose.cornerRadius : SwarmPose.cornerRadius - 0.5, in: shape)
         return CGPath(roundedRect: shape, cornerWidth: radius, cornerHeight: radius, transform: nil)
     }
 
@@ -268,8 +275,8 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         let path = CGMutablePath()
         path.addRect(glyph.bounds.insetBy(dx: -8, dy: -8))
         let gap = SwarmPose.knockout, r = layerRect(front).insetBy(dx: -gap, dy: -gap)
-        path.addRoundedRect(in: r, cornerWidth: SwarmPose.cornerRadius + gap,
-                            cornerHeight: SwarmPose.cornerRadius + gap)
+        let radius = Self.styled(SwarmPose.cornerRadius + gap, in: r)
+        path.addRoundedRect(in: r, cornerWidth: radius, cornerHeight: radius)
         return path
     }
 
@@ -458,6 +465,8 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         let emphasised = isPointerInside || isPressed
         let step: SidebarControlRole? = isPressed ? .pressed : (isPointerInside ? .hover : nil)
         if let step { chip.backgroundColor = step.color.cgColor(in: self) }
+        // A capsule at Default and Rounded, square at Sharp — the pill role.
+        chip.cornerRadius = min(CGFloat(CornerStyle.current.radius(CornerRole.capsuleBase)), Self.chipDiameter / 2)
         let targetOpacity: Float = step == nil ? 0 : 1
         if animated, chip.opacity != targetOpacity {
             let fade = CABasicAnimation(keyPath: "opacity")
