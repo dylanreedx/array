@@ -1226,6 +1226,21 @@ enum ContinuumApp {
             }
             RunLoop.main.run()
         }
+        if CommandLine.arguments.contains("--sidebar-motion-film-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let out = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                        .appendingPathComponent("qa-runs/sidebar-motion-film", isDirectory: true)
+                    print(try await SidebarMotionFilm.run(outputDirectory: out))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("sidebar-motion-film check failed: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
         if CommandLine.arguments.contains("--inbox-parent-fold-check") {
             _ = NSApplication.shared
             Task { @MainActor in
