@@ -585,7 +585,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// The tree connector, in the indent gutters to the left of the card.
     private let spine = InboxSpineView()
     private let jumpHint = InboxJumpHintView()
-    private let disclosureButton = InboxDisclosureButton()
+    private let disclosureButton = InboxSwarmFoldControl(frame: .zero)
     var onToggleDisclosure: (() -> Void)?
     private let settleNudge = InboxSettleNudgeButton(frame: .zero)
     private var onSettleNudge: (() -> Void)?
@@ -855,7 +855,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
         disclosureButton.target = self
         disclosureButton.action = #selector(disclosureClicked)
-        disclosureButton.isHidden = true
+        disclosureButton.prefersReducedMotion = prefersReducedMotion
         card.addSubview(disclosureButton)
         // ONE action, one label. The "×" this used to carry was title text, not a
         // target — the whole pill settled — and there is no "dismiss the nudge"
@@ -966,21 +966,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         needsLayout = true
     }
 
-    /// The disclosure control's square, and the lane it is centred in.
-    private static let disclosureSide: CGFloat = 14
-    private static var disclosureLaneX: CGFloat {
-        (CGFloat(AgentInboxView.indentPerLevel) - disclosureSide) / 2
-    }
-    private static let sizingDisclosure = InboxDisclosureButton()
-
-    /// Where a row's disclosure control ends, in its own card's x: the lane
-    /// offset plus the control's real width for this glyph and count. ONE
-    /// function for the parent's own frame and for the clearance its children
-    /// keep, so the two cannot disagree.
+    /// Where a row's fold control ends, in its own card's x: the lane, the
+    /// glyph and the count, fixed by the count's digits. ONE function for the
+    /// parent's own frame and for the clearance its children keep, so the two
+    /// cannot disagree.
     static func disclosureTrailing(for disclosure: RowDisclosure, childCount: Int) -> CGFloat {
         guard disclosure != .none else { return 0 }
-        sizingDisclosure.show(disclosure, childCount: childCount)
-        return disclosureLaneX + max(disclosureSide, sizingDisclosure.fittingSize.width)
+        return InboxSwarmFoldControl.width(childCount: childCount)
     }
 
     func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
@@ -1043,8 +1035,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         decorations.drawsBranchGlyph = rollupSummary == nil && !branchLabel.stringValue.isEmpty
         refreshContentInk()
 
-        disclosureButton.isHidden = disclosure == .none
-        disclosureButton.show(disclosure, childCount: rollup?.children ?? 0)
+        disclosureButton.show(
+            disclosure, childCount: rollup?.children ?? 0, workingChildren: rollup?.working ?? 0,
+            seed: row.id, leadColour: row.identityColor.map(AgentInboxView.identityDotColour(named:)))
 
         applyColours()
         applyAccessibility()
@@ -1434,20 +1427,20 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         var textLeft = insetH + anatomy.leadingGutter
         let textRight = card.bounds.width - insetH
 
-        // THE TRIANGLE LIVES IN THE CONNECTOR LANE, not in the text column.
+        // THE FOLD CONTROL LIVES IN THE CONNECTOR LANE, not in the text column.
         // It used to sit at `textLeft` inside an already-indented card, which put a
         // parent's control and its child's title within 2 pt of the same x — the
         // reported defect: the second group under the first read as nested inside
-        // it. Centred on `spineX(depth)` instead, it is the head of its own
-        // descender and 11 pt clear of any child title.
+        // it. Centred on `spineX(depth)` instead, its glyph is the head of its own
+        // descender. It takes the card's full height across the lane and the
+        // count, so the fold target is generous and the rest of the card is
+        // "go to agent"; the glyph sits on the title's line.
         if !disclosureButton.isHidden, let shown {
-            let side = Self.disclosureSide
-            let laneX = Self.disclosureLaneX
             let trailing = Self.disclosureTrailing(
                 for: shown.disclosure, childCount: shown.rollup?.children ?? 0)
-            disclosureButton.frame = inCard(NSRect(
-                x: laneX, y: (card.bounds.height - side) / 2,
-                width: trailing - laneX, height: side))
+            disclosureButton.frame = NSRect(x: 0, y: 0, width: trailing, height: card.bounds.height)
+            disclosureButton.glyphCentreY = proposal.insetV + proposal.bandTop + proposal.gapTop
+                + lineCentres.title
             textLeft = max(textLeft, trailing + CGFloat(Space.s))
         }
         // A CHILD'S TITLE CLEARS ITS PARENT'S CONTROL. One indent level is 16pt
@@ -2111,6 +2104,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var qaGroupBackgroundCornersForQA: (top: Bool, bottom: Bool) {
         (groupBackground.qaRoundsTopForQA, groupBackground.qaRoundsBottomForQA)
     }
+    /// The fold button, when this row is a parent.
+    var qaFoldControlForQA: InboxSwarmFoldControl? { disclosureButton.isHidden ? nil : disclosureButton }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
     var qaDisclosureTitle: String { disclosureButton.qaTitle }
     var qaJumpHint: String { jumpHint.qaChord }

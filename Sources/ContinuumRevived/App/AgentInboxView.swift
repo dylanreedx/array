@@ -3172,6 +3172,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // A session from another app has no tile to frame.
             if rows.first(where: { $0.id == id })?.externalSession == nil { onPreviewRow?(id) }
             return true
+        case 123, 124: // ← folds the selected parent, → unfolds it
+            guard let row = rows.first(where: { $0.id == id }) else { return false }
+            let current = disclosure(for: row)
+            guard current == (event.keyCode == 123 ? .expanded : .collapsed) else { return false }
+            InboxSwarmFoldControl.noteToggle(seed: id, from: current)
+            toggleCollapse(parentId: id)
+            // A fold drops the selection; the keyboard keeps its place.
+            if let tableRow = tableRow(forAgentId: id) {
+                tableView.selectRowIndexes(IndexSet(integer: tableRow), byExtendingSelection: false)
+            }
+            return true
         default:
             return false
         }
