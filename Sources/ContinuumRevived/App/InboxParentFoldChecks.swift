@@ -81,6 +81,7 @@ enum InboxParentFoldChecks {
             lines.append(try checkDefaultsAndDecoration(appearance: appearance, windows: &windows))
         }
         lines.append(try checkTuckedCards(windows: &windows))
+        lines.append(try checkHoverInPlace(windows: &windows))
         lines.append(try checkPersistence(windows: &windows))
         lines.append(try checkAutoExpandRule(windows: &windows))
         lines.append(try checkProductionWiring())
@@ -302,6 +303,56 @@ enum InboxParentFoldChecks {
         try expect(near(restAbove, restBelow),
                    "wash: at rest the sheet shows \(restAbove)pt above the project line and \(restBelow)pt below the detail line")
         return "wash: " + notes.joined(separator: "; ") + "; open parent wash top = card top; hovered text \(above)pt above / \(below)pt below"
+    }
+
+    // MARK: - Hover updates the card on screen
+
+    /// Hover used to reload the row, which vends a NEW cell: the fill snapped,
+    /// the 150 ms hover-action crossfade never ran (the new cell had no window),
+    /// the settle nudge replayed its arrival and a running fold was cancelled.
+    static func checkHoverInPlace(windows: inout [NSWindow]) throws -> String {
+        let inbox = makeInbox(rows(), appearance: .darkAqua, windows: &windows)
+        inbox.prefersReducedMotion = { false }
+        inbox.hoverCardEnabled = false
+        inbox.onRowAction = { _, _ in }
+        inbox.wiredRowActions = [.snooze, .settle]
+        inbox.rebuildRowsForQA()
+        let sweep = [oneChildParent, threeChildParent, askingParent, loneRoot]
+        let before = Dictionary(uniqueKeysWithValues: sweep.map { ($0, inbox.onScreenCardForQA(id: $0)) })
+        let builds = inbox.cellBuildCountForQA
+        var fades = 0
+        for id in sweep + [nil] {
+            try expect(inbox.hoverRowForQA(id: id), "hover: could not hover \(String(describing: id))")
+            if let id, inbox.onScreenCardForQA(id: id)?.qaHoverFadeInFlightForQA == true { fades += 1 }
+            inbox.layoutViewportForQA()
+            if let id {
+                guard let cell = inbox.onScreenCardForQA(id: id) else {
+                    throw Failure(description: "hover: \(id) has no cell on screen")
+                }
+                try expect(cell === before[id] ?? nil,
+                           "hover: hovering \(id) replaced its on-screen cell instead of updating it")
+                try expect(cell.qaGeometry.surfaceRole == .hover,
+                           "hover: the hovered card paints \(cell.qaGeometry.surfaceRole), not hover")
+                try expect(cell.qaTextAlpha == 1, "hover: the hovered card's words stayed receded (\(cell.qaTextAlpha))")
+            }
+        }
+        try expect(inbox.cellBuildCountForQA == builds,
+                   "hover: a sweep over \(sweep.count) rows built \(inbox.cellBuildCountForQA - builds) cells")
+        try expect(sweep.allSatisfy { inbox.onScreenCardForQA(id: $0)?.qaGeometry.surfaceRole == .resting },
+                   "hover: leaving the list left a card lit")
+        try expect(fades == sweep.count,
+                   "hover: the fill and hover-action crossfade ran on \(fades) of \(sweep.count) hovered cards")
+        // A hover in the middle of a fold must not cut the fold short.
+        try expect(inbox.clickDisclosureForQA(id: threeChildParent), "hover: parent disclosure was unavailable")
+        let motion = inbox.foldMotionForQA
+        try expect(motion.isAnimating, "hover: the fold did not start")
+        motion.advance(by: 0.04)
+        let elapsed = motion.elapsed
+        try expect(inbox.hoverRowForQA(id: loneRoot), "hover: could not hover mid-fold")
+        try expect(motion.isAnimating && motion.elapsed == elapsed,
+                   "hover: pointing at a row mid-fold cancelled the fold")
+        motion.cancel()
+        return "hover: \(sweep.count)-row sweep updated the cards on screen with 0 builds, fill and action crossfade on each, a fold kept running through a hover"
     }
 
     // MARK: - Persistence across a reload

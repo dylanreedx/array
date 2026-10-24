@@ -4110,6 +4110,28 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         )
     }
 
+    /// Repaint hover on the cells already on screen. Rebuilding them, as a
+    /// reload does, snaps every transition (the new cell has no window to
+    /// animate in), replays arrival motion and would cancel a running fold.
+    /// Rows not on screen read hover when they are built.
+    private func applyHoverInPlace(tableRows indexes: [Int]) {
+        var reload: [Int] = []
+        for row in indexes where items.indices.contains(row) {
+            guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
+                    as? AgentInboxRowCell,
+                  let model = item(at: row)?.agentRow else { continue }
+            let emphasis = AgentInboxRow.emphasis(
+                for: model.state, attention: model.attention, isInteracting: isInteracting(row: row))
+            guard cell.updateEmphasisInPlace(emphasis) else { reload.append(row); continue }
+            cell.applyInteraction(interaction(forTableRow: row))
+        }
+        guard !reload.isEmpty else { return }
+        // A variant that cannot repaint in place is rebuilt, and a fold in
+        // flight keeps running over the replacement.
+        tableView.reloadData(forRowIndexes: IndexSet(reload), columnIndexes: IndexSet(integer: 0))
+        foldMotion.cover(reload.compactMap { tableView.view(atColumn: 0, row: $0, makeIfNecessary: false) })
+    }
+
     /// Rebuild the cells of just these rows, ignoring any that are not on screen.
     private func redraw(tableRows indexes: [Int]) {
         let touched = IndexSet(indexes.filter { items.indices.contains($0) })
@@ -4576,7 +4598,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard agentId != hoveredAgentId else { return }
         let previous = hoveredAgentId
         hoveredAgentId = agentId
-        redraw(tableRows: [tableRow(forAgentId: previous), tableRow(forAgentId: agentId)]
+        applyHoverInPlace(tableRows: [tableRow(forAgentId: previous), tableRow(forAgentId: agentId)]
             .compactMap { $0 })
         // The card hangs off THIS, the one choke point, rather than off a tracking
         // area of its own. Everything that already nulls hover — the list
@@ -4959,6 +4981,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return (tucked.count, tucked.rects, tucked.card, cell, tableView.rect(ofRow: tableRow))
     }
     var parentFoldChoicesForQA: [UUID: Bool] { foldChoices }
+    /// The card the table is showing for row `id` right now, never one it builds.
+    func onScreenCardForQA(id: UUID) -> AgentInbox96CellView? {
+        guard let tableRow = tableRow(forAgentId: id) else { return nil }
+        return tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+    }
 
     func groupBackgroundForQA(id: UUID) -> (visible: Bool, roundsTop: Bool, roundsBottom: Bool)? {
         guard let cell = qaMaterializedRowCells.first(where: { $0.qaAgentID == id }) else {
@@ -6608,6 +6635,11 @@ protocol AgentInboxRowCell: NSTableCellView {
     /// place hover state could be dropped.
     func applyInteraction(_ interaction: RowInteraction)
 
+    /// Re-recede or restore the row's words without rebuilding it — the one
+    /// part of `apply` that depends on hover. Answers false when the variant
+    /// cannot, and the list reloads the row instead.
+    func updateEmphasisInPlace(_ emphasis: RowEmphasis) -> Bool
+
     /// Increase Contrast changes the strength of a semantic interaction fill, not
     /// the row's state or hierarchy. It is set separately so a live accessibility
     /// preference change repaints existing cells without re-deriving row content.
@@ -6669,6 +6701,10 @@ protocol AgentInboxRowCell: NSTableCellView {
     var renameNestedControlFrameForQA: NSRect? { get }
     @discardableResult
     func clickDisclosureForQA() -> Bool
+}
+
+extension AgentInboxRowCell {
+    func updateEmphasisInPlace(_ emphasis: RowEmphasis) -> Bool { false }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
@@ -7752,15 +7788,15 @@ final class AgentInboxCardView: NSView, TokenThemed {
     /// ladder, and "selected" and "hovered" and "route-active" have to be
     /// distinguishable from each other, not merely from resting.
     var isSelected = false {
-        didSet { guard isSelected != oldValue else { return }; applyTokens() }
+        didSet { guard isSelected != oldValue else { return }; applyFill(fading: true) }
     }
     var isHovered = false {
-        didSet { guard isHovered != oldValue else { return }; applyTokens() }
+        didSet { guard isHovered != oldValue else { return }; applyFill(fading: true) }
     }
     /// The agent whose tile is open — the loudest step, because it answers
     /// "where am I" from anywhere in the list.
     var isRouteActive = false {
-        didSet { guard isRouteActive != oldValue else { return }; applyTokens() }
+        didSet { guard isRouteActive != oldValue else { return }; applyFill(fading: true) }
     }
     /// P1.4. Not part of the fill ladder at all: focus is a temporary ring, so a
     /// keyboard-focused row and a merely selected row are distinguishable
@@ -7778,6 +7814,8 @@ final class AgentInboxCardView: NSView, TokenThemed {
     }
 
     private let focusRing = InboxRowFocusRingView()
+    /// The layer animation that carries an interaction fill change.
+    static let fillFadeKey = "interaction-fill"
 
     /// Which step of `SidebarSurfaceRole` this row is on, loudest input first.
     ///
@@ -7843,12 +7881,31 @@ final class AgentInboxCardView: NSView, TokenThemed {
         return TokenColor(mixed).cgColor(for: theme)
     }
 
-    func applyTokens() {
+    func applyTokens() { applyFill(fading: false) }
+
+    /// How long an interaction change takes to cross-fade the fill. A colour
+    /// change, not motion, so Reduce Motion keeps it.
+    static let fillFadeDuration: CFTimeInterval = 0.12
+
+    /// Paint the role's fill. A change of interaction on a card already on
+    /// screen fades from whatever is presented now, so a quick pass over a row
+    /// never jumps; a card still being built (no window) and an appearance flip
+    /// paint at once.
+    private func applyFill(fading: Bool) {
+        guard let layer else { return }
         // Corner style (Settings › Appearance): re-resolved on every repaint.
-        layer?.cornerRadius = Radius.card
-        let theme = effectiveTokenTheme
-        layer?.backgroundColor = Self.interactionFill(
-            for: surfaceRole, increasedContrast: usesIncreasedContrast, theme: theme)
+        layer.cornerRadius = Radius.card
+        let fill = Self.interactionFill(
+            for: surfaceRole, increasedContrast: usesIncreasedContrast, theme: effectiveTokenTheme)
+        let presented = layer.presentation()?.backgroundColor ?? layer.backgroundColor
+        layer.backgroundColor = fill
+        guard fading, window != nil, presented != fill else { return }
+        let fade = CABasicAnimation(keyPath: "backgroundColor")
+        fade.fromValue = presented ?? fill?.copy(alpha: 0)
+        fade.toValue = fill ?? presented?.copy(alpha: 0)
+        fade.duration = Self.fillFadeDuration
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(fade, forKey: Self.fillFadeKey)
     }
 
     override func viewDidChangeEffectiveAppearance() {

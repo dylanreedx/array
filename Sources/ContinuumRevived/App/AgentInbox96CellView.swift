@@ -1521,6 +1521,33 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     // MARK: AgentInboxRowCell
 
+    func updateEmphasisInPlace(_ emphasis: RowEmphasis) -> Bool {
+        guard let current = shown else { return false }
+        guard current.emphasis != emphasis else { return true }
+        shown?.emphasis = emphasis
+        // The value lands now, so anything reading the row reads the new state;
+        // only the presentation fades. The state word's alpha belongs to the
+        // hover crossfade that follows.
+        let fades = !prefersReducedMotion() && window != nil
+        for label in [placementLabel, titleLabel, branchLabel, modelLabel] {
+            Self.setAlpha(label, CGFloat(emphasis.textOpacity), fading: fades)
+        }
+        Self.setAlpha(decorations, CGFloat(emphasis.accentOpacity), fading: fades)
+        return true
+    }
+
+    private static func setAlpha(_ view: NSView, _ alpha: CGFloat, fading: Bool) {
+        let presented = view.layer?.presentation()?.opacity ?? Float(view.alphaValue)
+        view.alphaValue = alpha
+        guard fading, let layer = view.layer, presented != Float(alpha) else { return }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = presented
+        fade.toValue = Float(alpha)
+        fade.duration = AgentInboxCardView.fillFadeDuration
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(fade, forKey: "emphasis")
+    }
+
     func applyInteraction(_ interaction: RowInteraction) {
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
@@ -1528,6 +1555,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         setHoverActionsShown(interaction.isHovered)
     }
 
+    /// Whether a hover transition is animating right now: the card's fill or the
+    /// status slot's crossfade. False when the change snapped.
+    var qaHoverFadeInFlightForQA: Bool {
+        card.layer?.animation(forKey: AgentInboxCardView.fillFadeKey) != nil
+            && [hoverSnooze, hoverSettle, stateLabel, statusGlyph].contains {
+                $0.layer?.animationKeys()?.isEmpty == false
+            }
+    }
     /// Whether the hover actions are what the status slot shows right now.
     var qaHoverActionsShown: Bool { hoverActionsShown }
     var qaHoverActionTitles: [String] {
