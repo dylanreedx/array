@@ -4368,11 +4368,14 @@ enum UIProbeGeometry {
                 // Place: the meta band, never over the title.
                 try require(!nudge.frame.intersects(nudge.titleLabelFrame),
                             "\(label): the nudge \(nudge.frame) overlaps the title \(nudge.titleLabelFrame)")
-                try require(abs(nudge.frame.midY - nudge.metaBand.midY) <= 1
+                // Centred on the meta line's rendered x-height, not on the band
+                // box: the words sit high in their 20pt band, so a box-centred
+                // pill read as a line below them.
+                try require(nudge.metaLineCentreY.map { abs(nudge.frame.midY - $0) <= 0.5 } == true
                                 && nudge.frame.maxY <= nudge.titleLabelFrame.minY
                                 && nudge.frame.minY >= nudge.cardFrame.minY
                                 && nudge.frame.maxX <= nudge.cardFrame.maxX,
-                            "\(label): the nudge \(nudge.frame) is not centred in the meta band \(nudge.metaBand)")
+                            "\(label): the nudge \(nudge.frame) is not centred on the meta line (x-height centre \(String(describing: nudge.metaLineCentreY)), band \(nudge.metaBand))")
                 // Content: one label, system face at the meta size, no stray glyph.
                 try require(!nudge.title.contains("  ") && !nudge.title.contains("×")
                                 && nudge.title == nudge.title.trimmingCharacters(in: .whitespaces),

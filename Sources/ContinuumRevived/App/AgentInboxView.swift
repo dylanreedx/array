@@ -2989,6 +2989,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return card.qaWhereMarker
     }
 
+    /// Every visible icon on row `id` against its line's rendered x-height.
+    func iconAlignmentForQA(id: UUID) -> [AgentInbox96CellView.IconInkForQA]? {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return nil }
+        return card.qaIconAlignmentForQA()
+    }
+
     func metadataInkGeometryForQA(id: UUID) -> [String: NSRect]? {
         guard let tableRow = tableRow(forAgentId: id),
               let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView

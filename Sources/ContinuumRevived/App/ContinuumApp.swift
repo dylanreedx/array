@@ -2526,6 +2526,7 @@ enum ContinuumApp {
             do {
                 _ = NSApplication.shared
                 try UIProbeGeometry.runSidebarUXChecks()
+                print(try SidebarIconAlignmentChecks.run())
                 print("ContinuumRevivedSidebarUXChecks passed")
                 Foundation.exit(0)
             } catch {
