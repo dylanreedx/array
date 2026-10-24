@@ -805,6 +805,9 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        if CommandLine.arguments.contains(ChildCrashIsolationChecks.trapChildFlag) {
+            ChildCrashIsolationChecks.trapChild()
+        }
         // The stand-in agent CLI and jobs `--agent-process-tracker-check` launches.
         if let index = CommandLine.arguments.firstIndex(of: ProcessTrackingQAHelper.flag) {
             ProcessTrackingQAHelper.run(Array(CommandLine.arguments[(index + 1)...]))
@@ -4164,6 +4167,13 @@ enum ContinuumApp {
         guard ghosttyInitStatus == GHOSTTY_SUCCESS else {
             fputs("ghostty_init failed\n", stderr)
             Foundation.exit(1)
+        }
+        // libghostty's Breakpad handler would otherwise catch every child's crash
+        // and exit Array with it — see `ChildCrashIsolation`.
+        ChildCrashIsolation.detachInProcessHandler()
+        if CommandLine.arguments.contains("--child-crash-isolation-check") {
+            do { print(try ChildCrashIsolationChecks.run()); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
         }
 
         // The onboarding witness exercises its real Terminal-view action and
