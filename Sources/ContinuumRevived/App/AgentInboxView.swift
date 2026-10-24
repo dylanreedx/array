@@ -2434,14 +2434,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     // MARK: - Nesting (P2D.4)
 
-    /// Fold or unfold one parent's children.
+    /// Fold or unfold one parent's children. The entry point a disclosure
+    /// control calls, on mouse-down; everything it needs is read from the list.
     ///
-    /// A FULL RE-RENDER, not an incremental apply: folding removes rows, so the
-    /// identity sequence changed and `apply(rows:changed:)`'s own rule ("if an agent
-    /// appeared, vanished or moved, the LIST changed and a full reload is the honest
-    /// answer") applies. Selection and hover are dropped for the same reason
-    /// `setScope` drops them — their indexes belong to the list that just went away,
-    /// and a bulk action (P3.11) must never reach a row you cannot see.
+    /// The identity sequence changes, but only by one contiguous block, so the
+    /// table inserts or removes exactly those rows (`applyFoldIncrementally`)
+    /// rather than reloading whole; anything else falls back to a full render.
+    /// Selection and hover are dropped for the same reason `setScope` drops them —
+    /// their indexes belong to the list that just went away, and a bulk action
+    /// (P3.11) must never reach a row you cannot see.
     func toggleCollapse(parentId: UUID) {
         let animates = window != nil && !prefersReducedMotion()
         let presentation = animates ? foldMotion.takePresentation() : [:]
@@ -2451,7 +2452,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         for ghost in exitGhostViews { ghost.removeFromSuperview() }
         exitGhostViews.removeAll()
         qaLastRowMotion = ([], [])
-        let previous = animates ? captureFoldRows().snapshots.merging(presentation) { _, drawn in drawn } : [:]
+        // ONE photograph of what is on screen. Every cell the fold leaves alone
+        // is the same view with the same pixels afterwards, so these images are
+        // reused at the far end and only the rebuilt cells are taken again.
+        let before = animates ? captureFoldRows() : FoldCapture()
         let expanded = collapsedParents.contains(parentId)
         let anchor = tableRow(forAgentId: parentId).map {
             (id: parentId, viewportMinY: tableView.rect(ofRow: $0).minY - tableView.visibleRect.minY)
@@ -2461,33 +2465,109 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         // P1.2: hover and the focus ring are dropped and then RE-DERIVED from
-        // where the pointer actually is once the new list is on screen
-        // (`render` ends in `refreshHoverFromPointer()`), so a fold or a scope
-        // flip cannot leave a row lit that the pointer is no longer over — and
-        // cannot un-light the row it still is over either.
+        // where the pointer actually is once the new list is on screen, so a
+        // fold or a scope flip cannot leave a row lit that the pointer is no
+        // longer over — and cannot un-light the row it still is over either.
+        // The cell that was lit survives an incremental fold, so it is
+        // repainted here, and its earlier photograph is not reused.
+        let lit = tableRow(forAgentId: hoveredAgentId)
+        let relit = Set([lit.flatMap { item(at: $0)?.identity }].compactMap { $0 })
         hoveredAgentId = nil
         keyboardFocusIntent = nil
-        render(display(from: allRows), animateRows: false)
+        applyHoverInPlace(tableRows: [lit].compactMap { $0 })
+        let next = display(from: allRows)
+        if !applyFoldIncrementally(next, parentId: parentId) {
+            render(next, animateRows: false)
+        }
         layoutSubtreeIfNeeded()
         tableView.layoutSubtreeIfNeeded()
         layoutSubtreeIfNeeded()
         restoreScrollAnchor(anchor)
         guard animates else { return }
-        let next = captureFoldRows()
-        foldMotion.start(from: previous, to: next.snapshots,
+        let after = captureFoldRows(reusing: before, excluding: relit)
+        foldMotion.start(from: before.snapshots.merging(presentation) { _, drawn in drawn },
+                         to: after.snapshots,
                          parentKey: "agent:\(parentId.uuidString)", expanded: expanded,
-                         container: scrollView.contentView, covering: next.views)
+                         container: scrollView.contentView, covering: Array(after.sources.values))
+    }
+
+    /// Fold by inserting or removing the parent's rows and nothing else. The
+    /// surviving cells stay the same views — no rebuild, and their photographs
+    /// stay valid — and only the rows whose drawing depends on the fold are
+    /// rebuilt: the parent (triangle, rollup, tucked cards), any row whose place
+    /// in the tree moved (connector, wash, end gap) and the settle nudge's old
+    /// and new rows. Answers false, leaving everything untouched, when the
+    /// change is not one contiguous block; the caller then renders whole.
+    private func applyFoldIncrementally(_ next: [InboxListItem], parentId: UUID) -> Bool {
+        let old = items.map(\.identity), new = next.map(\.identity)
+        let shared = min(old.count, new.count)
+        var prefix = 0
+        while prefix < shared, old[prefix] == new[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < shared - prefix, old[old.count - 1 - suffix] == new[new.count - 1 - suffix] { suffix += 1 }
+        let removed = IndexSet(integersIn: prefix..<(old.count - suffix))
+        let inserted = IndexSet(integersIn: prefix..<(new.count - suffix))
+        guard removed.isEmpty != inserted.isEmpty else { return false }
+        let oldNesting = Dictionary(zip(old, nestingByTableRow)) { first, _ in first }
+        let renderNow = clock()
+        let oldNudge = settleNudgeTargetID(now: renderNow)
+        endRename(commit: true)
+        cancelCrossfades()
+        setItems(next)
+        tableView.beginUpdates()
+        if inserted.isEmpty {
+            tableView.removeRows(at: removed, withAnimation: [])
+        } else {
+            tableView.insertRows(at: inserted, withAnimation: [])
+        }
+        tableView.endUpdates()
+        // The table moved the surviving cells; key them by the rows they are on now.
+        cellsByRow.removeAll()
+        for row in 0..<tableView.numberOfRows {
+            if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
+                cellsByRow[row] = cell
+            }
+        }
+        let nudges: Set<UUID> = Set([oldNudge, settleNudgeTargetID(now: renderNow)].compactMap { $0 })
+        var stale = IndexSet(new.indices.filter { row in
+            guard !inserted.contains(row) else { return false }
+            if let id = next[row].agentRow?.id, id == parentId || nudges.contains(id) { return true }
+            return oldNesting[new[row]] != nestingByTableRow[row]
+        })
+        // A jump chord names "the Nth agent", and the rows below the fold moved.
+        if jumpHintsVisible {
+            stale.formUnion(IndexSet((0..<InboxJump.maximumRows).compactMap(tableRow(forRowIndex:))))
+        }
+        tableView.noteHeightOfRows(withIndexesChanged: stale)
+        tableView.reloadData(forRowIndexes: stale, columnIndexes: IndexSet(integer: 0))
+        updateShelfSpacerHeight()
+        updateEmptyState()
+        updateBulkBar()
+        updateAccessibilityHierarchy()
+        refreshHoverFromPointer()
+        scheduleWakeRerender()
+        return true
+    }
+
+    /// What one fold photograph holds: native geometry for every row, pixels
+    /// for the visible materialized ones, and the cell each image came from.
+    private struct FoldCapture {
+        var snapshots: [String: InboxFoldMotion.Snapshot] = [:]
+        var sources: [String: NSView] = [:]
     }
 
     /// Native geometry for every row, pixels only for the visible materialized
     /// ones. Geometry-only entries let a following row travel out of the viewport
-    /// rather than being mistaken for a child being tucked into the parent.
-    private func captureFoldRows() -> (snapshots: [String: InboxFoldMotion.Snapshot], views: [NSView]) {
+    /// rather than being mistaken for a child being tucked into the parent. An
+    /// image from `earlier` is reused when it was taken of this same cell at
+    /// this same size, unless the row is in `excluding`.
+    private func captureFoldRows(reusing earlier: FoldCapture = FoldCapture(),
+                                 excluding: Set<String> = []) -> FoldCapture {
         let clip = scrollView.contentView
-        var snapshots: [String: InboxFoldMotion.Snapshot] = [:]
-        var views: [NSView] = []
+        var capture = FoldCapture()
         for index in items.indices {
             if case .shelfSpacer = items[index] { continue }
+            let key = items[index].identity
             let cell = tableView.view(atColumn: 0, row: index, makeIfNecessary: false)
             var rect = tableView.rect(ofRow: index)
             var local = cell?.bounds ?? NSRect(origin: .zero, size: rect.size)
@@ -2502,13 +2582,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             frame.origin.x -= clip.bounds.minX
             frame.origin.y -= clip.bounds.minY
             let visible = frame.intersects(NSRect(origin: .zero, size: clip.bounds.size))
-            let image = visible && views.count < InboxFoldMotion.snapshotLimit
-                ? cell.flatMap { InboxFoldMotion.image(of: $0, in: local) } : nil
-            snapshots[items[index].identity] = InboxFoldMotion.Snapshot(
-                key: items[index].identity, frame: frame, image: image, order: index)
-            if image != nil, let cell { views.append(cell) }
+            var image: NSImage?
+            if visible, let cell, capture.sources.count < InboxFoldMotion.snapshotLimit {
+                if !excluding.contains(key), earlier.sources[key] === cell,
+                   let reused = earlier.snapshots[key]?.image, reused.size == local.size {
+                    image = reused
+                } else {
+                    image = InboxFoldMotion.image(of: cell, in: local)
+                }
+            }
+            capture.snapshots[key] = InboxFoldMotion.Snapshot(key: key, frame: frame, image: image, order: index)
+            if image != nil, let cell { capture.sources[key] = cell }
         }
-        return (snapshots, views)
+        return capture
     }
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
@@ -2836,7 +2922,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         case .card: cell = cardStyleOverride?.makeCell() ?? AgentInboxCellView()
         case .slim: cell = AgentInboxSlimCellView()
         }
-        needsHeightRevalidation = true
+        // A 96 card's height is its fixed pitch, never measured off its content,
+        // so building one gives the height cache nothing to revalidate. Arming
+        // it anyway made the next layout pass reload and rebuild EVERY cell —
+        // after each fold, mid-animation, and after every hover reload.
+        if cardStyleOverride == nil || model.variant != .card { needsHeightRevalidation = true }
         // AppKit may ask for a cell before it has assigned the row frame. Give
         // the cell the live column width before `apply` measures its fit tier;
         // otherwise an empty initial frame leaves a hidden band visible while

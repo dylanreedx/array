@@ -55,13 +55,14 @@ enum InboxParentFoldChecks {
         ]
     }
 
-    static func makeInbox(_ rows: [AgentInboxRow], appearance: NSAppearance.Name, windows: inout [NSWindow]) -> AgentInboxView {
-        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 1_100))
+    static func makeInbox(_ rows: [AgentInboxRow], appearance: NSAppearance.Name, height: CGFloat = 1_100,
+                          windows: inout [NSWindow]) -> AgentInboxView {
+        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: height))
         view.clock = { epoch }
         // What the app's sidebar sets (`configureWorkspaceSidebar`); the
         // production-wiring section below asserts it does.
         view.foldsUntouchedGroups = true
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 1_100),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: height),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: appearance)
         window.contentView = view
@@ -77,6 +78,7 @@ enum InboxParentFoldChecks {
         defer { windows.forEach { $0.orderOut(nil) } }
         var lines: [String] = []
         lines.append(try checkFoldMotion(windows: &windows))
+        lines.append(try checkFoldLatency(windows: &windows))
         for appearance in [NSAppearance.Name.darkAqua, .aqua] {
             lines.append(try checkDefaultsAndDecoration(appearance: appearance, windows: &windows))
         }
@@ -113,13 +115,22 @@ enum InboxParentFoldChecks {
         try expect(inbox.clickDisclosureForQA(id: threeChildParent), "motion: parent disclosure was unavailable")
         let motion = inbox.foldMotionForQA
         try expect(motion.isAnimating, "motion: opening a parent must unfold its children instead of only fading their final positions")
-        try expect(motion.duration == 0.26, "motion: expanding must take exactly 260 ms")
+        try expect(motion.duration == 0.18, "motion: expanding must take exactly 180 ms")
         let parentKey = "agent:\(threeChildParent.uuidString)"
         let childKey = "agent:\(threeChildren[0].uuidString)"
         let followingKey = "agent:\(askingParent.uuidString)"
-        guard let parent = motion.poses[parentKey], let child = motion.poses[childKey] else {
+        guard let parent = motion.poses[parentKey], let child = motion.poses[childKey],
+              let path = motion.endpointsForQA[childKey] else {
             throw Failure(description: "motion: the visible parent and child must both participate")
         }
+        // The frame committed with the click is already one frame of travel in:
+        // a first frame at fraction 0 repeats the old layout and reads as lag.
+        let firstFrame = motion.elapsed
+        let travelled = (child.frame.minY - path.from.minY) / (path.to.minY - path.from.minY)
+        try expect(firstFrame > 0 && firstFrame <= 1.0 / 60 + 1e-9,
+                   "motion: the first presented frame must be exactly one frame in, not \(firstFrame)s")
+        try expect(travelled >= 0.10,
+                   "motion: one 1/60 s frame must carry the child at least 10% of its path — it moved \(Int(travelled * 100))%")
         let following = motion.poses[followingKey]?.frame
         let coveredViews = motion.coveredViewsForQA
         try expect(!coveredViews.isEmpty && motion.overlayPassesHitTestingForQA,
@@ -144,17 +155,25 @@ enum InboxParentFoldChecks {
             lastActiveAt: previousChild.lastActiveAt, depth: previousChild.depth,
             createdAt: previousChild.createdAt, parentId: previousChild.parentId)
         inbox.apply(rows: streamed, changed: AgentsBoardChangeSet(added: [], updated: [threeChildren[0]], removed: []))
-        try expect(motion.isAnimating && motion.poses[childKey]?.frame == movingChild.frame && motion.elapsed == 0.04,
+        try expect(motion.isAnimating && motion.poses[childKey]?.frame == movingChild.frame
+                    && abs(motion.elapsed - (firstFrame + 0.04)) < 1e-9,
                    "motion: streamed content must neither interrupt nor restart an unfold")
         try expect(inbox.titlesForQA.contains("Updated while unfolding"),
                    "motion: streamed content must still update the native list immediately")
         try expect(inbox.clickDisclosureForQA(id: threeChildParent), "motion: the moving group could not be reversed")
-        try expect(motion.duration == 0.21, "motion: collapsing must take exactly 210 ms")
-        try expect(motion.poses[childKey]?.frame == movingChild.frame,
+        try expect(motion.duration == 0.15, "motion: collapsing must take exactly 150 ms")
+        try expect(motion.endpointsForQA[childKey]?.from == movingChild.frame,
                    "motion: a reversal must begin at the current position, without a jump")
         try expect(!inbox.rowIdsForQA.contains(threeChildren[0]), "motion: folded children must leave the semantic list immediately")
-        motion.advance(by: 0.21)
-        try expect(!motion.isAnimating && motion.poses.isEmpty, "motion: the overlay must retire at the duration boundary")
+        // The tail under 0.5% of travel is invisible, and the real rows stay
+        // hidden for as long as it runs: the overlay retires where it starts.
+        let settle = motion.settleTime
+        try expect(settle < motion.duration && abs(1 - InboxFoldMotion.progress(at: InboxFoldMotion.settleFraction)) < 0.005,
+                   "motion: the overlay must retire once under 0.5% of travel remains (\(settle)s of \(motion.duration)s)")
+        motion.advance(by: settle - motion.elapsed - 0.001)
+        try expect(motion.isAnimating, "motion: the overlay retired before the spring settled")
+        motion.advance(by: 0.002)
+        try expect(!motion.isAnimating && motion.poses.isEmpty, "motion: the overlay must retire at the settle point")
         try expect(coveredViews.allSatisfy { ($0.layer?.opacity ?? 0) > 0 },
                    "motion: completion must restore the native rows' visibility")
         let peak = (0...200).map { InboxFoldMotion.progress(at: CGFloat($0) / 200) }.max() ?? 0
@@ -183,7 +202,68 @@ enum InboxParentFoldChecks {
         _ = inbox.clickDisclosureForQA(id: threeChildParent)
         inbox.removeFromSuperview()
         try expect(!motion.isAnimating, "motion: detaching the sidebar must stop its display link and restore its rows")
-        return "motion: 260/210 ms soft unfold, softened toolbar spring peak \(peak), anchored parent, continuous reversal, uninterrupted stream updates, no per-frame cell builds, reduced motion and cleanup"
+        return "motion: 180/150 ms soft unfold retiring at \(Int(InboxFoldMotion.settleFraction * 100))% (under 0.5% travel left), first frame \(Int(travelled * 100))% in, softened toolbar spring peak \(peak), anchored parent, continuous reversal, uninterrupted stream updates, no per-frame cell builds, reduced motion and cleanup"
+    }
+
+    /// Dylan: "it feels delayed and almost unresponsive." The delay is the work
+    /// before the first frame, so measure exactly that: the wall time of one
+    /// fold with a full screen of cards, and how far the first frame moves.
+    /// Measured on a debug build with a loaded machine (load average ~20):
+    /// 158–211 ms median before the incremental fold, 52–92 ms after.
+    static let foldLatencyBudget: TimeInterval = 0.13
+
+    static func checkFoldLatency(windows: inout [NSWindow]) throws -> String {
+        let parent = id(100)
+        let children = (0..<3).map { id(110 + $0) }
+        func root(_ id: UUID, _ title: String, _ age: Double) -> AgentInboxRow {
+            AgentInboxRow(id: id, title: title, state: .ready,
+                          lastActiveAt: epoch.addingTimeInterval(-age), createdAt: epoch.addingTimeInterval(-age))
+        }
+        var list = [root(parent, "Busy parent", 10)]
+        list += children.enumerated().map { index, child in
+            AgentInboxRow(id: child, title: "Child \(index)", state: .ready,
+                          lastActiveAt: epoch.addingTimeInterval(-Double(9 - index)), depth: 1,
+                          createdAt: epoch.addingTimeInterval(-Double(9 - index)), parentId: parent)
+        }
+        list += (0..<19).map { root(id(200 + $0), "Root \($0)", Double(20 + $0)) }
+        let inbox = makeInbox(list, appearance: .darkAqua, height: 1_900, windows: &windows)
+        inbox.prefersReducedMotion = { false }
+        let motion = inbox.foldMotionForQA
+        // The first display pass a real window makes, which settles the list's
+        // initial height revalidation before anyone can click.
+        inbox.needsLayout = true
+        inbox.layoutSubtreeIfNeeded()
+        let visible = inbox.qaMaterializedRowCells.count
+        var samples: [TimeInterval] = []
+        var builds: [Int] = []
+        for _ in 0..<10 {
+            let built = inbox.cellBuildCountForQA
+            let start = CACurrentMediaTime()
+            try expect(inbox.clickDisclosureForQA(id: parent), "latency: the parent's disclosure was unavailable")
+            samples.append(CACurrentMediaTime() - start)
+            builds.append(inbox.cellBuildCountForQA - built)
+            try expect(motion.isAnimating, "latency: the fold did not animate")
+            // The next display cycle lands on the fold's first frames: it must
+            // not rebuild the list under the presentation.
+            let settled = inbox.cellBuildCountForQA
+            inbox.needsLayout = true
+            inbox.layoutSubtreeIfNeeded()
+            try expect(inbox.cellBuildCountForQA == settled,
+                       "latency: the layout pass after a fold rebuilt \(inbox.cellBuildCountForQA - settled) cells")
+            motion.cancel()
+            inbox.layoutViewportForQA()
+        }
+        // Only the parent, its children and the rows whose place in the tree
+        // moved are rebuilt — never the screenful of cards around them.
+        try expect(builds.allSatisfy { $0 <= children.count + 2 },
+                   "latency: a fold rebuilt \(builds) cells; at most the parent, its \(children.count) children and one neighbour")
+        let sorted = samples.sorted()
+        let median = sorted[sorted.count / 2], worst = sorted.last ?? 0
+        try expect(median < foldLatencyBudget,
+                   String(format: "latency: a fold with %d cards took %.1f ms before its first frame (budget %.0f ms)",
+                          visible, median * 1000, foldLatencyBudget * 1000))
+        return String(format: "latency: fold with %d cards in %.1f ms median, %.1f ms worst, %@ cells built, none on the next layout",
+                      visible, median * 1000, worst * 1000, builds.description)
     }
 
     static func checkDefaultsAndDecoration(appearance: NSAppearance.Name, windows: inout [NSWindow]) throws -> String {
