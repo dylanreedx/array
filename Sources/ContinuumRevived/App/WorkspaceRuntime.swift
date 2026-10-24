@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import ContinuumRevivedCore
 import Foundation
 
@@ -1708,6 +1709,17 @@ final class WorkspaceRuntime {
         // The zone as DRAWN: auto-layout grows a zone on the canvas ahead of the
         // document, and the layer must not shrink it back.
         let placement = canvasView.zonePlacement(for: zone.zoneId) ?? zone
+        // A zone becoming live builds every tile view on the main thread; Dylan saw
+        // zones fill in seconds late and the canvas lag while they did (2026-10-24).
+        let installStart = ProcessInfo.processInfo.systemUptime
+        defer {
+            if let layer = installedLayers.last, layer.placement.zoneId == zone.zoneId {
+                let ms = (ProcessInfo.processInfo.systemUptime - installStart) * 1_000
+                let line = "zone install: \(zone.zoneId.uuidString.prefix(8)) \(layer.tiles.count) tiles in "
+                    + String(format: "%.1f ms", ms)
+                Logger(subsystem: "continuum.canvas", category: "hydration").notice("\(line, privacy: .public)")
+            }
+        }
         var membershipCache: [UUID: [UUID: [Tile]]] = [:]
         guard let layer = makeProjectZoneLayer(
             zone: placement, projectId: projectId, controller: controller,

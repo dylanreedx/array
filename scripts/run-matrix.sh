@@ -1367,6 +1367,11 @@ if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
 else
   run_app_check .build/debug/Array --tile-surface-residency-check
 fi
+# The live gesture log names the first and the worst frame of every gesture and
+# what each paid for (a hit-test promotion, a far-parked return, text measures, a
+# zone install). Percentiles never move for one slow frame, and one slow frame is
+# what Dylan reported. Not display-dependent: far parking bakes nothing.
+run_app_check .build/debug/Array --gesture-telemetry-check
 # The correctness oracle for the incremental row index, and the reason the cheap
 # path is allowed to exist. transcript.delta measures what a delta COSTS and is
 # structurally blind to a fast path that is cheap and WRONG — every count budget

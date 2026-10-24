@@ -894,6 +894,10 @@ class TileNSView: NSView, TokenThemed {
     /// to hit-testing (scroll routing, tooltips, cursor updates) versus AX reads
     /// versus a liveness clause.
     private(set) var qaHitTestPromotionCount: UInt64 = 0
+    /// Every tile's hit-test promotions, for the canvas's per-frame gesture
+    /// attribution: a promotion costs a reparent, and the scroll router hit-tests
+    /// on every pan event, so a frame has to be able to say it paid one.
+    static private(set) var hitTestPromotionTotal = 0
 
     /// **A surfaced tile must hand back its real body before an accessibility client
     /// reads it** — the same trade `hitTest` makes for input, for the same reason.
@@ -987,6 +991,7 @@ class TileNSView: NSView, TokenThemed {
         // named before it can be fixed.
         if surfaceResidency == .surfaced, bounds.contains(local) {
             qaHitTestPromotionCount &+= 1
+            Self.hitTestPromotionTotal &+= 1
             promoteBodyToNative()
         }
         // Keep the visible close glyph usable when the enlarged corner target

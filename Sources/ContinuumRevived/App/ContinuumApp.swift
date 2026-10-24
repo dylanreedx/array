@@ -2273,6 +2273,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--gesture-telemetry-check") {
+            do {
+                _ = NSApplication.shared
+                try TileSurfaceResidencyChecks.runGestureTelemetry()
+                print("GestureTelemetryChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--tile-surface-residency-check") {
             do {
                 _ = NSApplication.shared
@@ -8999,10 +9011,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // is exactly the "lags when I start panning" handoff. Checking the
             // session first also skips the full-window hit test on every event
             // of an active camera gesture.
-            if !canvas.cameraDriver.isCameraSessionActive,
-               self.eventTargetsScrollableTileContent(event, in: window) {
-                return event
+            let routedToTile = canvas.measureGestureInputRouting(at: event.timestamp) {
+                !canvas.cameraDriver.isCameraSessionActive
+                    && self.eventTargetsScrollableTileContent(event, in: window)
             }
+            if routedToTile { return event }
             canvas.scrollWheel(with: event)
             return nil
         }
@@ -9012,6 +9025,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self, let canvas = self.canvasView else { return event }
             guard let window = canvas.window, event.window === window else { return event }
             guard !self.inWindowModalIsPresented(in: window) else { return event }
+            canvas.noteGestureInput(at: event.timestamp)
             canvas.handlePinch(event)
             return nil
         }
