@@ -192,7 +192,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// is insufficient when the same composer view is rebound more than once.
     private var bindingGeneration: UInt64 = 0
     private(set) var isEditorFocused = false
-    private var referenceDropHighlighted = false
+    private(set) var referenceDropHighlighted = false
 
     func setReferenceDropHighlight(_ value: Bool) {
         guard referenceDropHighlighted != value else { return }

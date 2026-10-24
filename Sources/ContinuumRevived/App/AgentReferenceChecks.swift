@@ -2,8 +2,9 @@ import AppKit
 import ContinuumRevivedAgentContent
 import ContinuumRevivedCore
 
-/// Exercises the real source control and destination handler in the production
-/// workspace scene, then drives the composer's actual send action to its sink.
+/// Exercises the real recipient route in the production workspace scene, then
+/// drives the composer's actual send action to its sink. The header drag that
+/// reaches this route is `CanvasPointerPathChecks`.
 @MainActor
 enum AgentReferenceChecks {
     static func run() async throws {
@@ -70,120 +71,26 @@ enum AgentReferenceChecks {
         // Flush the mount/camera's pending save before attributing any later
         // canvas write to the gesture under test.
         try mounted.runtime.controller(for: WorkspaceInvariantsFixture.projectA1)?.flushCanvasSave()
-        canvas.tileSelection.selectOnly(tileIDs[0])
-        let selectionPoint = target.convert(NSPoint(x: target.bounds.midX, y: 12), to: nil)
-        _ = canvas.tileSelection.mouseDown(on: target,
-            event: event(.leftMouseDown, selectionPoint, [.shift]), isHeader: true, isResize: false)
-        _ = canvas.tileSelection.mouseUp(with: event(.leftMouseUp, selectionPoint, [.shift]))
-        try TileInsertSlideChecks.expect(canvas.tileSelection.ids == Set(tileIDs), "reference witness must start with a real multi-selection")
-        let selectionBefore = canvas.tileSelection.ids
+        // The pointer gesture itself is `--canvas-pointer-path-check`, through
+        // real window events. This leg owns the recipient route and the draft.
         let before = canvas.allTilesInWorldFrames()
         let documentBefore = mounted.runtime.document
         let diskBefore = try Data(contentsOf: projectStore.layout.canvasFile)
-        let undoBefore = canvas.undoManager?.canUndo
-        // The requested gesture is the TILE HEADER, not the supplemental @
-        // control. Cross the recipient's swap region before its composer: the
-        // layout must remain fixed throughout, or the drop target runs away.
-        canvas.tileSelection.selectOnly(tileIDs[0])
-        let headerStart = source.convert(NSPoint(x: source.bounds.midX, y: source.chromeBarHeight / 2), to: nil)
-        let recipientHeader = target.convert(NSPoint(x: target.bounds.midX, y: target.chromeBarHeight / 2), to: nil)
-        let compose = target.qaPageZoomComposeBackdrop
-        let recipientComposer = compose.convert(NSPoint(x: compose.bounds.midX, y: compose.bounds.midY), to: nil)
-        source.mouseDown(with: event(.leftMouseDown, headerStart))
-        source.mouseDragged(with: event(.leftMouseDragged, recipientHeader))
-        try TileInsertSlideChecks.expect(canvas.allTilesInWorldFrames() == before,
-            "header drag must defer auto-layout before crossing the recipient's swap region")
-        source.mouseDragged(with: event(.leftMouseDragged, recipientComposer))
-        try TileInsertSlideChecks.expect(canvas.allTilesInWorldFrames() == before,
-            "composer reference hover must leave source, recipient and sibling geometry fixed")
-        if zoom == 1, !autoLayout {
-            let directory = URL(fileURLWithPath: "qa-runs/agent-reference-check", isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            for (name, appearance) in [("header-drop-light", NSAppearance.Name.aqua), ("header-drop-dark", .darkAqua)] {
-                canvas.appearance = NSAppearance(named: appearance)
-                canvas.layoutSubtreeIfNeeded()
-                guard let bitmap = canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds) else {
-                    throw TileInsertSlideChecks.Failure(message: "cannot render header reference hover")
-                }
-                canvas.cacheDisplay(in: canvas.bounds, to: bitmap)
-                try bitmap.representation(using: .png, properties: [:])!.write(to: directory.appendingPathComponent(name + ".png"))
-            }
-        }
-        source.mouseUp(with: event(.leftMouseUp, recipientComposer))
+        let dropped = AgentPromptReference(agentID: agents[0], displayName: "spoofed label")
+        try TileInsertSlideChecks.expect(target.handleAgentReference(dropped, commit: false), "recipient must accept reference hover")
+        try TileInsertSlideChecks.expect(target.handleAgentReference(dropped, commit: true), "recipient must forward a reference to the draft")
+        try TileInsertSlideChecks.expect(target.handleAgentReference(dropped, commit: true), "repeated drop must be harmless")
+        try TileInsertSlideChecks.expect(!source.handleAgentReference(dropped, commit: true), "self-drop must be refused")
         await target.qaAwaitReferenceDrop()
-        try TileInsertSlideChecks.expect(composer.draft.agentReferences.map(\.agentID) == [agents[0]] && sink.prompts.isEmpty,
-            "dragging the tile header onto a composer must add exactly one unsent reference")
-        try TileInsertSlideChecks.expect(canvas.allTilesInWorldFrames() == before && mounted.runtime.document == documentBefore,
-            "header reference drop must preserve tile frames and zone document")
-        let diskAfterHeaderReference = try Data(contentsOf: projectStore.layout.canvasFile)
-        try TileInsertSlideChecks.expect(diskAfterHeaderReference == diskBefore,
-            "header reference drop must not persist geometry")
-        composer.qaRemoveAgentReference(at: 0)
-        source.mouseDown(with: event(.leftMouseDown, headerStart))
-        source.mouseDragged(with: event(.leftMouseDragged, recipientComposer))
-        canvas.cancelOperation(nil)
-        source.mouseUp(with: event(.leftMouseUp, recipientComposer))
-        await target.qaAwaitReferenceDrop()
-        try TileInsertSlideChecks.expect(composer.draft.agentReferences.isEmpty && canvas.allTilesInWorldFrames() == before
-            && !canvas.isGeometryGestureActive && !AgentReferenceDragHandle.isTracking(in: window),
-            "Escape during header reference hover must cancel without a late drop or geometry commit")
-        _ = canvas.tileSelection.mouseDown(on: target,
-            event: event(.leftMouseDown, selectionPoint, [.shift]), isHeader: true, isResize: false)
-        _ = canvas.tileSelection.mouseUp(with: event(.leftMouseUp, selectionPoint, [.shift]))
-        print("AgentReferenceChecks header drag through swap region passed zoom=\(zoom) autoLayout=\(autoLayout)")
-        let handle = source.qaReferenceDragHandle
-        try TileInsertSlideChecks.expect(!handle.isHidden && handle.bounds.width > 0, "reference control must be reachable at zoom \(zoom)")
-        let point = handle.convert(NSPoint(x: handle.bounds.midX, y: handle.bounds.midY), to: nil)
-        let hit = source.hitTest(source.superview!.convert(point, from: nil))
-        try TileInsertSlideChecks.expect(hit === handle, "reference control must win over the enlarged move strip")
-        func event(_ type: NSEvent.EventType, _ point: NSPoint, _ flags: NSEvent.ModifierFlags = []) -> NSEvent {
-            NSEvent.mouseEvent(with: type, location: point, modifierFlags: flags,
-                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
-        }
-        let board = NSPasteboard.withUniqueName()
-        defer { board.releaseGlobally() }
-        var transferred: Data?
-        var nativePasteboardAvailable = false
-        handle.dragSessionForChecks = { item in
-            transferred = item.data(forType: AgentReferenceDragHandle.pasteboardType)
-            board.clearContents()
-            nativePasteboardAvailable = board.writeObjects([item])
-        }
-        handle.mouseDown(with: event(.leftMouseDown, point, [.shift]))
-        handle.mouseDragged(with: event(.leftMouseDragged, NSPoint(x: point.x + 60, y: point.y - 50), [.shift]))
-        try TileInsertSlideChecks.expect(handle.startedDragCount == 1, "explicit handle must start exactly one copy drag even with Shift")
-        try TileInsertSlideChecks.expect(AgentReferenceDragHandle.isTracking(in: window), "reference intent must suppress mouse-up selection/focus routing")
-        guard let transferredReference = AgentReferenceDragHandle.reference(from: transferred) else {
-            throw TileInsertSlideChecks.Failure(message: "source did not encode a valid reference")
-        }
-        try TileInsertSlideChecks.expect(transferredReference.agentID == agents[0], "native drag item must name its owning agent")
-        if !nativePasteboardAvailable {
-            print("MATRIX-NOTE: native pasteboard service unavailable; reference source item and production recipient exercised through the decoded data seam")
-        }
-        func drop(_ view: ManagedAgentTileNSView, commit: Bool) -> Bool {
-            nativePasteboardAvailable ? view.handleAgentReference(board, commit: commit)
-                : view.handleAgentReference(transferredReference, commit: commit)
-        }
-        try TileInsertSlideChecks.expect(drop(target, commit: false), "whole tile must accept reference hover")
-        try TileInsertSlideChecks.expect(drop(target, commit: true), "whole tile must forward a reference to the draft")
-        try TileInsertSlideChecks.expect(drop(target, commit: true), "repeated drop must be harmless")
-        try TileInsertSlideChecks.expect(!drop(source, commit: true), "self-drop must be refused")
-        await target.qaAwaitReferenceDrop()
-        handle.mouseUp(with: event(.leftMouseUp, point))
+        try TileInsertSlideChecks.expect(composer.draft.agentReferences.map(\.displayName) == ["Same name"],
+            "the chip must name the source from its record, never the caller's label")
         try TileInsertSlideChecks.expect(composer.draft.agentReferences.map(\.agentID) == [agents[0]], "duplicate names must resolve by exact identity and repeated drops deduplicate")
         try TileInsertSlideChecks.expect(composer.draft.text == "Compare your changes with theirs" && sink.prompts.isEmpty, "drop preserves text and never sends")
         try TileInsertSlideChecks.expect(canvas.allTilesInWorldFrames() == before && mounted.runtime.document == documentBefore,
-            "reference drag must change no world frames, ordering, membership or zones")
-        try TileInsertSlideChecks.expect(canvas.tileSelection.ids == selectionBefore && canvas.undoManager?.canUndo == undoBefore,
-            "reference drag must preserve selection and geometry undo")
+            "reference drop must change no world frames, ordering, membership or zones")
         let diskAfter = try Data(contentsOf: projectStore.layout.canvasFile)
         try TileInsertSlideChecks.expect(diskAfter == diskBefore, "drop must not write project canvas")
 
-        // The same private type is also handled when AppKit picks the editor.
-        if nativePasteboardAvailable {
-            try TileInsertSlideChecks.expect(composer.textView.onAgentReferenceDrag?(board, true) == true, "editor drop must use the same validated recipient route")
-        }
         await target.qaAwaitReferenceDrop()
         let ref = composer.draft.agentReferences[0]
         for _ in 0..<10 { await Task.yield() }
@@ -230,24 +137,7 @@ enum AgentReferenceChecks {
         composer.apply(.init(text: "", selection: NSRange(location: 0, length: 0), revision: 3, agentReferences: [ref]))
         composer.qaRemoveAgentReference(at: 0)
         try TileInsertSlideChecks.expect(composer.draft.agentReferences.isEmpty, "remove chip must remove its reference")
-        // Leave the reference target, then release over the recipient's header.
-        // That must still go through the ordinary move/swap persistence path.
-        canvas.tileSelection.selectOnly(tileIDs[0])
-        source.mouseDown(with: event(.leftMouseDown, headerStart))
-        source.mouseDragged(with: event(.leftMouseDragged, recipientComposer))
-        source.mouseDragged(with: event(.leftMouseDragged, recipientHeader))
-        try TileInsertSlideChecks.expect(canvas.allTilesInWorldFrames() == before && composer.draft.agentReferences.isEmpty,
-            "retreating from composer must keep layout pending and add no reference")
-        source.mouseUp(with: event(.leftMouseUp, recipientHeader))
-        await target.qaAwaitReferenceDrop()
-        try TileInsertSlideChecks.expect(canvas.allTilesInWorldFrames() != before && composer.draft.agentReferences.isEmpty
-            && !canvas.isGeometryGestureActive && !AgentReferenceDragHandle.isTracking(in: window),
-            "header release outside composer must commit a normal move/swap and add no reference")
-        let persistedAfterMove = try projectStore.loadCanvas()
-        let visibleSource = canvas.allTilesInWorldFrames().first { $0.id == tileIDs[0] }
-        try TileInsertSlideChecks.expect(persistedAfterMove.tiles.first { $0.id == tileIDs[0] }?.frame == visibleSource?.frame,
-            "ordinary fallback must persist the same world frame shown on canvas")
-        print("AgentReferenceChecks PASS zoom=\(zoom) autoLayout=\(autoLayout): source, drop, layout, draft, queue, steer, send, harnesses, transcript")
+        print("AgentReferenceChecks PASS zoom=\(zoom) autoLayout=\(autoLayout): drop, draft, queue, steer, send, harnesses, transcript")
     }
 }
 

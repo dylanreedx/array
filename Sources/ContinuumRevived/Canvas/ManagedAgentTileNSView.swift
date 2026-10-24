@@ -123,7 +123,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// only under the v2 fixture flag. The compatibility shell and its baselines
     /// remain untouched until final live migration.
     private let agentHeader = AgentTileHeaderView()
-    private let referenceDragHandle = AgentReferenceDragHandle(frame: .zero)
     private var referenceDropTask: Task<Void, Never>?
     /// The compact row is the sole live Home/Where/What and activity surface;
     /// its action button remains the host's native location route. The former
@@ -436,20 +435,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             object: nil)
         agentHeader.installStatusBadge(awarenessBadge)
         enableTitleBarActions()
-        referenceDragHandle.tileView = self
-        referenceDragHandle.referenceProvider = { [weak self] in
-            guard let self, let id = self.attachedAgentID,
-                  let record = self.agentSource?.records[id] else { return nil }
-            return AgentPromptReference(agentID: id, displayName: record.humanDisplayName)
-        }
-        setReferenceDragControl(referenceDragHandle)
-        registerForDraggedTypes([AgentReferenceDragHandle.pasteboardType])
-        v2Composer?.textView.onAgentReferenceDrag = { [weak self] pasteboard, commit in
-            self?.handleAgentReference(pasteboard, commit: commit) ?? false
-        }
-        v2Composer?.textView.onAgentReferenceDragExited = { [weak self] in
-            self?.v2Composer?.setReferenceDropHighlight(false)
-        }
         compactStatusRow.hideLocationActions()
         refreshTitleBarIdentity()
         // TileNSView establishes its compatibility border after its polymorphic
@@ -888,24 +873,25 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             && !composeBackdrop.isHidden && v2Composer != nil && !isHiddenOrHasHiddenAncestor
     }
 
-    var agentReferenceComposerFrameInWindow: NSRect? {
+    /// Where another agent's header drag drops as a reference, in this tile's
+    /// own coordinates: the composer, and the middle half of the body. The title
+    /// bar and the body's outer quarters stay layout — swap and slide in between.
+    var agentReferenceDropRegions: [CGRect] {
         guard window != nil, !composeBackdrop.isHidden, !composeBackdrop.bounds.isEmpty,
-              !isHiddenOrHasHiddenAncestor else { return nil }
-        return composeBackdrop.convert(composeBackdrop.bounds, to: nil)
+              !isHiddenOrHasHiddenAncestor else { return [] }
+        let header = chromeBarHeight
+        let body = CGRect(x: bounds.width / 4, y: header,
+                          width: bounds.width / 2, height: max(0, bounds.height - header))
+        return [body, composeBackdrop.convert(composeBackdrop.bounds, to: self)]
     }
 
     func setAgentReferenceDropHighlight(_ value: Bool) {
         v2Composer?.setReferenceDropHighlight(value)
     }
 
-    /// A separate native drop destination. No tile geometry, zone, selection,
-    /// or canvas persistence callbacks participate in this route.
-    @discardableResult
-    func handleAgentReference(_ pasteboard: NSPasteboard, commit: Bool) -> Bool {
-        guard let reference = AgentReferenceDragHandle.reference(from: pasteboard) else { return false }
-        return handleAgentReference(reference, commit: commit)
-    }
-
+    /// The drop of another agent's header drag. No tile geometry, zone,
+    /// selection or canvas persistence takes part: the drag has already put
+    /// every tile back where it rested.
     @discardableResult
     func handleAgentReference(_ reference: AgentPromptReference, commit: Bool) -> Bool {
         guard let target = attachedAgentID, target != reference.agentID,
@@ -922,7 +908,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         guard commit else { composer.setReferenceDropHighlight(true); return true }
         composer.setReferenceDropHighlight(false)
         // Resolve the display snapshot from the trusted record, never the
-        // pasteboard's label. The stable ID remains the only lookup key.
+        // caller's label. The stable ID remains the only lookup key.
         let trusted = AgentPromptReference(agentID: reference.agentID, displayName: sourceRecord.humanDisplayName)
         let previous = referenceDropTask
         referenceDropTask = Task { @MainActor [weak self] in
@@ -934,27 +920,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         return true
     }
 
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        handleAgentReference(sender.draggingPasteboard, commit: false) ? .copy : []
-    }
-
-    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        draggingEntered(sender)
-    }
-
-    override func draggingExited(_ sender: NSDraggingInfo?) {
-        v2Composer?.setReferenceDropHighlight(false)
-    }
-
-    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        handleAgentReference(sender.draggingPasteboard, commit: false)
-    }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        handleAgentReference(sender.draggingPasteboard, commit: true)
-    }
-
-    var qaReferenceDragHandle: AgentReferenceDragHandle { referenceDragHandle }
     func qaAwaitReferenceDrop() async { await referenceDropTask?.value }
 
     override func layout() {

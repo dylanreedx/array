@@ -512,6 +512,13 @@ final class CanvasNSView: NSView, TokenThemed {
         autoLayoutPreferSwap = preferSwap
     }
 
+    /// A held move (an agent header drag over a reference target) points the
+    /// solver at the tile's own rest, where nothing latches and nothing is pushed.
+    func setAutoLayoutMovePointer(worldPoint: CGPoint) {
+        autoLayoutMovePointer = worldPoint
+        autoLayoutPreferSwap = false
+    }
+
     var isAutoLayoutEnabled: Bool { CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) }
 
     func commitGeometryGesture() {

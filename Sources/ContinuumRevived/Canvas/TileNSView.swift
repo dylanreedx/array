@@ -33,10 +33,6 @@ class TileNSView: NSView, TokenThemed {
     /// re-arms it when a view is installed again.
     final func retireFromScene() {
         guard !hasRetiredFromScene else { return }
-        if agentTileReferenceMove != nil {
-            canvas?.cancelGeometryEdit()
-            cancelActiveGeometryGesture()
-        }
         hasRetiredFromScene = true
         prepareForRemovalFromScene()
     }
@@ -160,10 +156,6 @@ class TileNSView: NSView, TokenThemed {
     func enableTitleBarActions() { titleBar?.enableActions() }
     var titleBarUsesCustomOverflowForQA: Bool { titleBar?.usesCustomActionsForQA ?? false }
     var titleBarActionsFrameForQA: NSRect? { titleBar?.actionsFrameForQA.map { titleBar!.convert($0, to: self) } }
-
-    func setReferenceDragControl(_ control: NSControl) {
-        titleBar?.setReferenceDragControl(control)
-    }
 
     func setTitleBarAccessory(_ accessory: NSView?) {
         invalidateTitleBarAccessory()
@@ -609,7 +601,8 @@ class TileNSView: NSView, TokenThemed {
     private var dragKind: DragKind = .none
     private var dragLastWindowPoint: CGPoint = .zero
     private var mouseDraggedSinceDown = false
-    private var agentTileReferenceMove: AgentTileReferenceMove?
+    /// An agent header drag's reference watch; nil for every other drag.
+    private var agentReferenceDrag: AgentReferenceDrag?
     /// Raw gesture geometry is world-space so rebasing a growing zone cannot
     /// feed a snap or a zone-origin correction back into the pointer delta.
     private var moveFreeWorldFrame: TileFrame?
@@ -1021,9 +1014,8 @@ class TileNSView: NSView, TokenThemed {
     // MARK: - Mouse handling for drag and resize
 
     override func mouseDown(with event: NSEvent) {
-        if agentTileReferenceMove != nil { canvas?.cancelGeometryEdit() }
-        agentTileReferenceMove?.cancel()
-        agentTileReferenceMove = nil
+        agentReferenceDrag?.end()
+        agentReferenceDrag = nil
         canvas?.tileSelection.preparePointerDown()
         mouseDraggedSinceDown = false
         // A fresh pointer-down is an unconditional gesture boundary. Normally
@@ -1060,10 +1052,8 @@ class TileNSView: NSView, TokenThemed {
         if local.y < grabHeightInLocalCoordinates {
             dragKind = .move
             canvas?.beginGeometryEdit(.moveTile, tileIds: [tile.id], includeAllZones: true)
-            if let agent = self as? ManagedAgentTileNSView {
-                agentTileReferenceMove = AgentTileReferenceMove(source: agent, event: event)
-            }
-            if agentTileReferenceMove == nil { canvas?.beginAutoLayoutGesture() }
+            canvas?.beginAutoLayoutGesture()
+            if let agent = self as? ManagedAgentTileNSView { agentReferenceDrag = AgentReferenceDrag(source: agent) }
             return
         }
         // Below the grab strip: defer to subclass / content view.
@@ -1073,11 +1063,6 @@ class TileNSView: NSView, TokenThemed {
 
     override func mouseDragged(with event: NSEvent) {
         if canvas?.tileSelection.mouseDragged(with: event) == true { return }
-        if let agentTileReferenceMove {
-            agentTileReferenceMove.update(with: event)
-            mouseDraggedSinceDown = agentTileReferenceMove.moved
-            return
-        }
         mouseDraggedSinceDown = true
         guard let canvas else { return super.mouseDragged(with: event) }
         let dx = event.locationInWindow.x - dragLastWindowPoint.x
@@ -1094,6 +1079,14 @@ class TileNSView: NSView, TokenThemed {
             freeTile.frame = moveFreeWorldFrame ?? canvas.worldFrame(forTileFrame: tile.frame, tileId: tile.id)
             let free = CanvasEngine.tile(freeTile, draggedByScreenDelta: delta, viewport: canvas.viewport).frame
             moveFreeWorldFrame = free
+            if let referenceDrag = agentReferenceDrag {
+                let pointer = CanvasEngine.screenToWorld(canvas.convert(event.locationInWindow, from: nil), viewport: canvas.viewport)
+                referenceDrag.setRecipient(referenceDrag.recipient(atWorld: pointer, event: event))
+                if let recipient = referenceDrag.recipient {
+                    holdForReference(referenceDrag, recipient: recipient, pointer: pointer, canvas: canvas)
+                    return
+                }
+            }
             canvas.setAutoLayoutMovePointer(
                 windowPoint: event.locationInWindow, preferSwap: event.modifierFlags.contains(.option))
             // While the move is latched (a swap partner, or a slot it slides
@@ -1149,23 +1142,23 @@ class TileNSView: NSView, TokenThemed {
 
     override func mouseUp(with event: NSEvent) {
         if canvas?.tileSelection.mouseUp(with: event) == true { return }
-        if let pending = agentTileReferenceMove {
-            pending.update(with: event)
-            let recipient = pending.recipient(at: event)
-            pending.cancel()
-            agentTileReferenceMove = nil
+        if let referenceDrag = agentReferenceDrag {
+            var recipient: ManagedAgentTileNSView?
+            if case .move = dragKind, mouseDraggedSinceDown, let canvas {
+                let pointer = CanvasEngine.screenToWorld(canvas.convert(event.locationInWindow, from: nil), viewport: canvas.viewport)
+                recipient = referenceDrag.recipient(atWorld: pointer, event: event)
+                // Released just off a reference target: land the tile under the
+                // pointer, not at the rest it was holding.
+                if recipient == nil, referenceDrag.recipient != nil { mouseDragged(with: event) }
+            }
+            referenceDrag.end()
+            agentReferenceDrag = nil
             if let recipient {
                 canvas?.cancelGeometryEdit()
+                _ = canvas?.finishAutoLayoutGesture()
                 cancelActiveGeometryGesture()
-                recipient.handleAgentReference(pending.reference, commit: true)
+                recipient.handleAgentReference(referenceDrag.reference, commit: true)
                 return
-            }
-            // Replay the total delta once through the same production solver
-            // and transaction boundary used by an ordinary tile move.
-            if pending.moved {
-                dragLastWindowPoint = pending.start
-                canvas?.beginAutoLayoutGesture()
-                mouseDragged(with: event)
             }
         }
         let completedDragKind = dragKind
@@ -1219,13 +1212,35 @@ class TileNSView: NSView, TokenThemed {
     /// the matching mouse-up. The canvas restores the model snapshot; the tile
     /// clears gesture-only state so a later event cannot recommit the preview.
     func cancelActiveGeometryGesture() {
-        agentTileReferenceMove?.cancel()
-        agentTileReferenceMove = nil
+        agentReferenceDrag?.end()
+        agentReferenceDrag = nil
         dragKind = .none
         mouseDraggedSinceDown = false
         resizeFreeFrame = nil
         canvas?.hideResizeDimensions()
         if let canvas { cancelDragGhost(on: canvas) } else { teardownDragGhostState() }
+    }
+
+    /// Over a reference target the move stands down: every tile, this one
+    /// included, holds where it rested, so the recipient stays under the pointer
+    /// and nothing it covers is hidden. A label rides the pointer instead.
+    private func holdForReference(_ referenceDrag: AgentReferenceDrag, recipient: ManagedAgentTileNSView,
+                                  pointer: CGPoint, canvas: CanvasNSView) {
+        let rest = referenceDrag.restFrame
+        canvas.setAutoLayoutMovePointer(worldPoint: CGPoint(x: rest.x + rest.width / 2, y: rest.y + rest.height / 2))
+        var held = tile
+        held.frame = canvas.tileFrame(fromWorldFrame: rest, tileId: tile.id)
+        canvas.updateTile(held, recalculateZoneBounds: false, notifyChange: false)
+        magneticTarget = nil
+        dragSnapTarget = nil
+        let zoom = canvas.viewport.zoom
+        let name = recipient.agentReferenceForDragging?.displayName ?? "this agent"
+        canvas.showDragGhost(
+            at: TileFrame(x: Double(pointer.x) + 14 / zoom, y: Double(pointer.y) + 14 / zoom,
+                          width: 280 / zoom, height: 54 / zoom),
+            label: "Reference \(referenceDrag.reference.displayName)",
+            detail: "Release to add to \(name)'s draft",
+            opaqueLabel: true)
     }
 
     private func cancelDragGhost(on canvas: CanvasNSView) {
@@ -1836,16 +1851,6 @@ private final class TitleBarView: NSView, TokenThemed {
         )
     }
 
-    private var referenceDragControl: NSControl?
-
-    func setReferenceDragControl(_ control: NSControl) {
-        referenceDragControl?.removeFromSuperview()
-        referenceDragControl = control
-        addSubview(control)
-        needsLayout = true
-        invalidateChrome()
-    }
-
     private var actionsButton: AgentTileOverflowButton?
     var usesCustomActionsForQA: Bool { actionsButton.map { $0.subviews.allSatisfy { !($0 is NSButton) } } ?? false }
     var actionsFrameForQA: NSRect? { actionsButton?.frame }
@@ -2072,7 +2077,6 @@ private final class TitleBarView: NSView, TokenThemed {
     /// QA: the band's controls that are on screen, by name.
     var qaVisibleControls: [(name: String, frame: NSRect)] {
         var controls: [(String, NSRect)] = [("close", closeButton.frame)]
-        if let referenceDragControl, !referenceDragControl.isHidden { controls.append(("agent.reference", referenceDragControl.frame)) }
         if let actionsButton, !actionsButton.isHidden { controls.append(("actions", actionsButton.frame)) }
         if let faceToggle, !faceToggle.isHidden {
             controls.append(("face.toggle", faceToggle.frame))
@@ -2134,7 +2138,6 @@ private final class TitleBarView: NSView, TokenThemed {
     /// layer fill without re-drawing would leave a dark title on a light bar.
     func applyTokens() {
         layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(in: self)
-        referenceDragControl?.needsDisplay = true
         closeButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         providerMarkView.contentTintColor = BrandMark96.foreground(in: self)
         needsDisplay = true
@@ -2201,16 +2204,6 @@ private final class TitleBarView: NSView, TokenThemed {
             actionsButton.frame = NSRect(x: x, y: (bounds.height - size) / 2, width: size, height: size)
             if !actionsButton.isHidden { trailingEdge = x }
             actionsButton.applyTokens()
-        }
-        if let referenceDragControl {
-            let side = closeButtonWorldSize
-            let x = trailingEdge - CGFloat(Space.s) * chromeScale - side
-            // Keep a usable title grab area, while giving the explicit reference
-            // handle priority over the optional face switch at low canvas zoom.
-            referenceDragControl.isHidden = x < titleLeadingX + 40 * chromeScale
-            let rect = NSRect(x: x, y: (bounds.height - side) / 2, width: side, height: side)
-            if referenceDragControl.frame != rect { referenceDragControl.frame = rect }
-            if !referenceDragControl.isHidden { trailingEdge = x }
         }
         layoutFaceSwitch(trailingEdge: trailingEdge)
         // Left of the switch when there is one; without ⋯, left of the drag
@@ -2325,9 +2318,6 @@ private final class TitleBarView: NSView, TokenThemed {
         if let actionsButton, !actionsButton.isHidden, actionsButton.frame.contains(point) { return actionsButton }
         // The face switch, ahead of the drag fallback below. Without this
         // branch a press on the toggle starts a tile drag.
-        if let referenceDragControl, !referenceDragControl.isHidden, referenceDragControl.frame.contains(point) {
-            return referenceDragControl
-        }
         if let faceToggle, !faceToggle.isHidden, faceToggle.frame.contains(point) {
             return faceToggle
         }

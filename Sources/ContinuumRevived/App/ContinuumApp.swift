@@ -8877,12 +8877,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self, let canvas = self.canvasView else { return event }
             guard let window = canvas.window, event.window === window else { return event }
             guard !self.inWindowModalIsPresented(in: window) else { return event }
-            // A reference control owns its pointer sequence independently of
-            // focus mode and tile selection.
-            if AgentReferenceDragHandle.isTracking(in: event.window) {
-                self.workspaceRuntime?.noteUserInteraction()
-                return event
-            }
             if let session = self.focusModeSession {
                 _ = self.visitFocusModeTile(
                     at: event.locationInWindow, candidateTileIDs: session.protectedTileIds)

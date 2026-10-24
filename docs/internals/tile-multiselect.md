@@ -91,10 +91,11 @@ Later build/completion follow-ups were refused because that agent was mid-turn;
 Array does not queue or interrupt a running agent for this operation. This
 document is the durable completion handoff; the initial notification succeeded.
 
-Selection/group geometry owns ordinary selected headers and outer handles.
-Agent-reference dragging must retain an explicit separate handle/intent, and a
-group transform must never mint or deliver a reference payload. Preserve the
-small selection forwarding hooks when integrating header/reference gestures.
+Selection/group geometry owns selected headers within a group and the outer
+handles; a group transform never references. A single agent's header drag is
+the ordinary live move, and reads as a reference only while the pointer is over
+another agent's composer or the middle of its body (`AgentReferenceDrag`). The
+explicit "@" handle and the frozen-layout header drag of 0.7.31 are gone.
 Native title accessory controls keep hit-test precedence.
 
 ## Witnesses and evidence
