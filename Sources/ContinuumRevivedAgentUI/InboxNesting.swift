@@ -73,12 +73,17 @@ public struct InboxSpineMetrics: Equatable, Sendable {
     /// Extra room under the last row of a group. The strongest grouping cue a list
     /// has is space, and it costs no colour and no new vocabulary.
     public let endGap: Double
+    /// How far the lane (and the fold glyph at its head) sits right of the
+    /// lane's centre, so a root's glyph is not pressed against the window edge.
+    public let laneInset: Double
 
-    public init(gutter: Double, indentPerLevel: Double, lineWidth: Double, endGap: Double) {
+    public init(gutter: Double, indentPerLevel: Double, lineWidth: Double, endGap: Double,
+                laneInset: Double = 0) {
         self.gutter = gutter
         self.indentPerLevel = indentPerLevel
         self.lineWidth = lineWidth
         self.endGap = endGap
+        self.laneInset = laneInset
     }
 
     /// The leading edge of the card of a row at this depth.
@@ -90,7 +95,7 @@ public struct InboxSpineMetrics: Equatable, Sendable {
     /// centre of that row's own disclosure triangle, so the descender leaves the
     /// triangle it belongs to rather than running beside it.
     public func spineX(level: Int) -> Double {
-        cardLeading(depth: level) + indentPerLevel / 2
+        cardLeading(depth: level) + indentPerLevel / 2 + laneInset
     }
 
     /// How much taller than a card a row is, given where it sits in the tree.

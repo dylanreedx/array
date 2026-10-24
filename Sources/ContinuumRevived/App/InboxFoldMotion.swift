@@ -7,9 +7,23 @@ import QuartzCore
 /// with no text measurement or table layout on a frame tick.
 @MainActor
 final class InboxFoldMotion: NSObject {
-    static let expandDuration: TimeInterval = 0.26
-    static let collapseDuration: TimeInterval = 0.21
+    static let expandDuration: TimeInterval = 0.18
+    static let collapseDuration: TimeInterval = 0.15
     static let snapshotLimit = 40
+    /// Where the spring's remaining travel drops under 0.5% for good, as a
+    /// fraction of the duration. The presentation retires there instead of
+    /// holding the real rows hidden through a tail nobody can see; the fade is
+    /// paced to land at the same point.
+    static let settleFraction: CGFloat = {
+        let steps = 1_000
+        var settled = 1.0
+        for step in stride(from: steps, through: 0, by: -1) {
+            let fraction = CGFloat(step) / CGFloat(steps)
+            guard abs(1 - progress(at: fraction)) < 0.005 else { break }
+            settled = Double(fraction)
+        }
+        return CGFloat(settled)
+    }()
 
     struct Snapshot {
         let key: String
@@ -81,9 +95,13 @@ final class InboxFoldMotion: NSObject {
     private var tracks: [Track] = []
     private var coveredViews: [(view: NSView, opacity: Float)] = []
     private var link: CADisplayLink?
-    private var lastTimestamp: CFTimeInterval?
+    /// The clock time the presentation counts from, set one frame early so the
+    /// frame committed with the click already shows motion.
+    private var origin: CFTimeInterval?
     private(set) var duration: TimeInterval = 0
     private(set) var elapsed: TimeInterval = 0
+    /// When the presentation retires: the spring's settle point.
+    var settleTime: TimeInterval { duration * Double(Self.settleFraction) }
     var isAnimating: Bool { overlay != nil }
     var coveredViewsForQA: [NSView] { coveredViews.map(\.view) }
     var overlayPassesHitTestingForQA: Bool { overlay?.hitTest(.zero) == nil }
@@ -91,6 +109,9 @@ final class InboxFoldMotion: NSObject {
         Dictionary(uniqueKeysWithValues: tracks.map {
             ($0.snapshot.key, Pose(frame: $0.view.frame, opacity: $0.view.alphaValue))
         })
+    }
+    var endpointsForQA: [String: (from: NSRect, to: NSRect)] {
+        Dictionary(uniqueKeysWithValues: tracks.map { ($0.snapshot.key, ($0.from.frame, $0.to.frame)) })
     }
 
     /// The toolbar's firmer orientation spring gives the cards a little give
@@ -147,7 +168,13 @@ final class InboxFoldMotion: NSObject {
         self.overlay = overlay
         duration = expanded ? Self.expandDuration : Self.collapseDuration
         elapsed = 0
-        for key in keys.sorted() {
+        // The parent row stays LIVE: it does not move, and its fold control
+        // morphs on its own clock (`InboxSwarmFoldControl`). A photograph of it
+        // would cross-fade a picture of the old glyph into a picture of the new
+        // one and hide the real motion. The overlay is masked out over the
+        // parent so the children still slide out from UNDER it.
+        let parentFrame = (after[parentKey] ?? before[parentKey])?.frame ?? .zero
+        for key in keys.sorted() where key != parentKey {
             guard let snapshot = after[key] ?? before[key],
                   let image = after[key]?.image ?? before[key]?.image else { continue }
             let depth = min(2, max(1, snapshot.order - parent.order))
@@ -174,16 +201,28 @@ final class InboxFoldMotion: NSObject {
                 to: Pose(frame: endFrame, opacity: after[key] == nil ? 0 : 1)))
         }
         guard !tracks.isEmpty else { cancel(); return }
+        overlay.wantsLayer = true
+        let mask = CAShapeLayer()
+        let maskPath = CGMutablePath()
+        maskPath.addRect(overlay.bounds)
+        maskPath.addRect(parentFrame)
+        mask.path = maskPath
+        mask.fillRule = .evenOdd
+        overlay.layer?.mask = mask
         container.addSubview(overlay, positioned: .above, relativeTo: nil)
+        // The first frame presented after the click is already one frame in;
+        // starting at fraction 0 would spend it repeating the old layout.
+        let frame = 1 / Double(max(60, container.window?.screen?.maximumFramesPerSecond ?? 60))
+        elapsed = frame
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         cover(liveViews)
-        draw(fraction: 0)
+        draw(fraction: CGFloat(elapsed / duration))
         CATransaction.commit()
         let link = container.displayLink(target: self, selector: #selector(tick(_:)))
         link.add(to: .main, forMode: .common)
         self.link = link
-        lastTimestamp = CACurrentMediaTime()
+        origin = CACurrentMediaTime() - frame
     }
 
     /// A streamed update may replace a native cell while the presentation keeps
@@ -202,17 +241,18 @@ final class InboxFoldMotion: NSObject {
         CATransaction.commit()
     }
 
+    /// Pose each frame for the moment it will be ON SCREEN, not the moment the
+    /// callback happens to run.
     @objc private func tick(_ link: CADisplayLink) {
-        let dt = lastTimestamp.map { max(0, link.timestamp - $0) } ?? 1.0 / 60.0
-        lastTimestamp = link.timestamp
-        advance(by: dt)
+        guard let origin else { return }
+        advance(by: link.targetTimestamp - origin - elapsed)
     }
 
     /// Also stepped by the production fold witness, without wall-clock sleeps.
     func advance(by dt: TimeInterval) {
         guard isAnimating else { return }
         elapsed = min(duration, elapsed + max(0, dt))
-        if elapsed >= duration { cancel(); return }
+        if elapsed >= settleTime { cancel(); return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         draw(fraction: CGFloat(elapsed / duration))
@@ -221,7 +261,7 @@ final class InboxFoldMotion: NSObject {
 
     private func draw(fraction: CGFloat) {
         let movement = Self.progress(at: fraction)
-        let fade = 1 - pow(1 - fraction, 3)
+        let fade = 1 - pow(1 - min(1, fraction / Self.settleFraction), 3)
         func interpolate(_ a: CGFloat, _ b: CGFloat) -> CGFloat { a + (b - a) * movement }
         for track in tracks {
             let a = track.from.frame, b = track.to.frame
@@ -236,7 +276,7 @@ final class InboxFoldMotion: NSObject {
     func cancel() {
         link?.invalidate()
         link = nil
-        lastTimestamp = nil
+        origin = nil
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         for (view, opacity) in coveredViews { view.layer?.opacity = opacity }

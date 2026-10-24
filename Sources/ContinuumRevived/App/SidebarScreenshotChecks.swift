@@ -478,8 +478,8 @@ enum SidebarScreenshotChecks {
                         }
                         if let cell = cell as? AgentInbox96CellView,
                            placementIcon.width > 0,
-                           abs(cell.qaProjectBaselineDeltaForQA) > 0.5 {
-                            throw Failure(description: "live96-\(rowSetID): directory icon and label baselines differ for '\(cell.qaTitle)' by \(cell.qaProjectBaselineDeltaForQA)pt")
+                           abs(cell.qaProjectOpticalCenterDeltaForQA) > 0.5 {
+                            throw Failure(description: "live96-\(rowSetID): directory icon ink and text optical centre differ for '\(cell.qaTitle)' by \(cell.qaProjectOpticalCenterDeltaForQA)pt")
                         }
                     }
                     if rowSetID == "rules" {

@@ -983,6 +983,12 @@ enum UIProbeAppearance {
         // fill, which is what made the first version vanish into the row. It
         // is always filled while shown; hidden, it paints its resting step.
         "InboxSettleNudgeButton",
+        // The fold button's swarm glyph: its dots are TEXT tokens painted as
+        // layer fills (secondary at rest, primary under the pointer), the lead
+        // dot may take the agent's identity palette colour, its press chip is the
+        // `SidebarControlRole` ladder (nil at rest), and the `chart` strokes are
+        // `LineToken.border` (the lane's hairline vanishes on the hover chip).
+        "InboxSwarmFoldControl",
         // P3.10. The ⌘-hold hint pill: `SurfaceToken.overlay` fill with a
         // `LineToken.border` outline. It only paints while the modifier is held, so
         // what puts it under this gate is the `chrome.agentInbox.jumpHints` Lab card
@@ -1096,6 +1102,24 @@ enum UIProbeAppearance {
         }
         if owner == "KanbanColumnView" {
             return [hex(SurfaceToken.tileBody.color.cgColor(for: theme))]
+        }
+        if owner == "InboxSwarmFoldControl" {
+            // Fills and outlines share one palette: a dot is filled (a working
+            // child) or outlined (one that is not) in the same ink.
+            var admitted: Set<String> = [
+                hex(LineToken.border.color.cgColor(for: theme)),
+                hex(TextToken.textSecondary.color.cgColor(for: theme)),
+                hex(TextToken.textPrimary.color.cgColor(for: theme)),
+                hex(SidebarControlRole.hover.color.cgColor(for: theme)),
+                hex(SidebarControlRole.pressed.color.cgColor(for: theme)),
+            ]
+            let appearance = NSAppearance(named: theme == .dark ? .darkAqua : .aqua)
+            for name in ["mint", "blue", "purple", "orange", "red", "yellow", "teal"] {
+                appearance?.performAsCurrentDrawingAppearance {
+                    admitted.insert(hex(AgentInboxView.identityDotColour(named: name).cgColor))
+                }
+            }
+            return admitted
         }
         if owner == "CompactionBoundaryView" {
             // Exactly the hairline and nothing else: a boundary that grew a
