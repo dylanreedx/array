@@ -5547,6 +5547,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The chord each row is ADVERTISING ("" for a row with no pill), read off the
     /// rendered pill rather than recomputed from the index.
     var jumpHintsForQA: [String] { cells().map(\.qaJumpHint) }
+    /// Each card's hint pill and its label, in the card's coordinates.
+    var jumpHintGeometryForQA: [(pill: NSRect, label: NSRect)] {
+        cells().compactMap { ($0 as? AgentInbox96CellView)?.qaJumpHintGeometry }
+    }
     var jumpHintHitTestPassesThroughForQA: Bool {
         cells().allSatisfy(\.qaJumpHintHitTestPassesThrough)
     }
@@ -6868,6 +6872,7 @@ final class InboxJumpHintView: NSView, TokenThemed {
     }
 
     var qaChord: String { isHidden ? "" : label.stringValue }
+    var qaLabelFrame: NSRect { label.frame }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md

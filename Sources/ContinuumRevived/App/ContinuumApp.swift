@@ -37033,6 +37033,19 @@ extension AppDelegate {
                "holding ⌘ shows one pill per jumpable row and none on the tenth — got \(jumper.jumpHintsForQA)")
     try expect(jumper.statusFramesForQA == statusBefore,
                "a hint pill is an OVERLAY: no status label may move — \(statusBefore) became \(jumper.statusFramesForQA)")
+    // .plans/81-live-performance: the card sized its pill from
+    // `intrinsicContentSize`, which the pill never defines (-1 x -1), so AppKit
+    // broke the label's margin constraints on every layout: 84% of 138,753
+    // constraint faults in one live session. Each shown pill must be sized to hold
+    // its chord.
+    let pillGeometry = jumper.jumpHintGeometryForQA
+    try expect(pillGeometry.count == 10, "every card must report its hint pill — got \(pillGeometry.count)")
+    for (index, geometry) in pillGeometry.prefix(InboxJump.maximumRows).enumerated() {
+        try expect(geometry.pill.width > 0 && geometry.pill.height > 0
+                   && geometry.label.width > 0 && geometry.label.height > 0
+                   && geometry.pill.insetBy(dx: -0.5, dy: -0.5).contains(geometry.label),
+                   "row \(index + 1)'s hint pill must hold its chord — pill \(geometry.pill), label \(geometry.label)")
+    }
     jumper.setJumpHintsVisible(false)
     jumper.layoutForQA()
     try expect(jumper.jumpHintsForQA.allSatisfy(\.isEmpty),

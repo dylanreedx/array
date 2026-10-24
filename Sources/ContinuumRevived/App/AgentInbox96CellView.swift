@@ -1386,11 +1386,15 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         decorations.paintsBorder = Self.isAttention(shown?.row, now: shown?.now ?? Date())
         decorations.needsDisplay = true
 
+        // The pill sizes itself with constraints and defines no intrinsic size, so
+        // `intrinsicContentSize` was -1 x -1: a 1 pt dot whose label constraints
+        // AppKit broke on every layout (.plans/81-live-performance).
+        let hintSize = jumpHint.fittingSize
         jumpHint.frame = NSRect(
-            x: bounds.width - jumpHint.intrinsicContentSize.width - 8,
-            y: (bounds.height - jumpHint.intrinsicContentSize.height) / 2,
-            width: jumpHint.intrinsicContentSize.width,
-            height: jumpHint.intrinsicContentSize.height)
+            x: bounds.width - hintSize.width - 8,
+            y: (bounds.height - hintSize.height) / 2,
+            width: hintSize.width,
+            height: hintSize.height)
         // The hover actions sit in the status slot, right-aligned on the meta line.
         let actionSide: CGFloat = 20
         let actionY = proposal.insetV + (proposal.bandTop - actionSide) / 2
@@ -1773,6 +1777,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
     var qaDisclosureTitle: String { disclosureButton.qaTitle }
     var qaJumpHint: String { jumpHint.qaChord }
+    var qaJumpHintGeometry: (pill: NSRect, label: NSRect) {
+        layoutSubtreeIfNeeded()
+        jumpHint.layoutSubtreeIfNeeded()
+        return (jumpHint.frame, jumpHint.convert(jumpHint.qaLabelFrame, to: self))
+    }
     var qaJumpHintHitTestPassesThrough: Bool {
         jumpHint.hitTest(NSPoint(x: jumpHint.bounds.midX, y: jumpHint.bounds.midY)) == nil
     }
