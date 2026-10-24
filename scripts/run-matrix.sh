@@ -1033,6 +1033,10 @@ run_app_check .build/debug/Array --agent-process-tracker-check
 # by session, marked where they live, scoped by "This Mac", never doubled; Copy
 # forks one into a managed Claude agent in its project.
 run_app_check .build/debug/Array --external-sessions-sidebar-check
+# The sidebar's project icon: `.array/icon.*` beats a shipped favicon; static/,
+# website/public/, Packaging/*.icns and an xcassets AppIcon resolve; a miss is
+# cached, and an added override or an edited winning file still shows.
+run_app_check .build/debug/Array --project-icon-check
 # .plans/79 phase 2: a session another app holds. Clicking its row watches it
 # read-only in its project — no runner, the file never written, appended lines
 # rendered once, the same tile on a second click, Ended then Continue here on
