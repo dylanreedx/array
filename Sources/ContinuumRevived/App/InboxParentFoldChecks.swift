@@ -84,6 +84,7 @@ enum InboxParentFoldChecks {
         }
         lines.append(try checkTuckedCards(windows: &windows))
         lines.append(try checkHoverInPlace(windows: &windows))
+        lines.append(try checkDeckBreathe(windows: &windows))
         lines.append(try checkPersistence(windows: &windows))
         lines.append(try checkAutoExpandRule(windows: &windows))
         lines.append(try checkProductionWiring())
@@ -208,9 +209,10 @@ enum InboxParentFoldChecks {
     /// Dylan: "it feels delayed and almost unresponsive." The delay is the work
     /// before the first frame, so measure exactly that: the wall time of one
     /// fold with a full screen of cards, and how far the first frame moves.
-    /// Measured on a debug build with a loaded machine (load average ~20):
+    /// Held against the FASTEST of ten folds — the fold's own cost, which a
+    /// shared machine's load can only add to. Debug build, load average ~20:
     /// 158–211 ms median before the incremental fold, 52–92 ms after.
-    static let foldLatencyBudget: TimeInterval = 0.13
+    static let foldLatencyBudget: TimeInterval = 0.1
 
     static func checkFoldLatency(windows: inout [NSWindow]) throws -> String {
         let parent = id(100)
@@ -258,12 +260,12 @@ enum InboxParentFoldChecks {
         try expect(builds.allSatisfy { $0 <= children.count + 2 },
                    "latency: a fold rebuilt \(builds) cells; at most the parent, its \(children.count) children and one neighbour")
         let sorted = samples.sorted()
-        let median = sorted[sorted.count / 2], worst = sorted.last ?? 0
-        try expect(median < foldLatencyBudget,
-                   String(format: "latency: a fold with %d cards took %.1f ms before its first frame (budget %.0f ms)",
-                          visible, median * 1000, foldLatencyBudget * 1000))
-        return String(format: "latency: fold with %d cards in %.1f ms median, %.1f ms worst, %@ cells built, none on the next layout",
-                      visible, median * 1000, worst * 1000, builds.description)
+        let fastest = sorted.first ?? 0, median = sorted[sorted.count / 2], worst = sorted.last ?? 0
+        try expect(fastest < foldLatencyBudget,
+                   String(format: "latency: a fold with %d cards took at least %.1f ms before its first frame (budget %.0f ms)",
+                          visible, fastest * 1000, foldLatencyBudget * 1000))
+        return String(format: "latency: fold with %d cards in %.1f ms fastest, %.1f ms median, %.1f ms worst, %@ cells built, none on the next layout",
+                      visible, fastest * 1000, median * 1000, worst * 1000, builds.description)
     }
 
     static func checkDefaultsAndDecoration(appearance: NSAppearance.Name, windows: inout [NSWindow]) throws -> String {
@@ -433,6 +435,127 @@ enum InboxParentFoldChecks {
                    "hover: pointing at a row mid-fold cancelled the fold")
         motion.cancel()
         return "hover: \(sweep.count)-row sweep updated the cards on screen with 0 builds, fill and action crossfade on each, a fold kept running through a hover"
+    }
+
+    // MARK: - Deck breathe
+
+    /// Hovering a folded parent lifts its card a point and fans the cards
+    /// tucked behind it — per agent, inside the gap, without touching the tree
+    /// lines — and Reduce Motion, a fold and a scroll each land it flat.
+    static func checkDeckBreathe(windows: inout [NSWindow]) throws -> String {
+        let inbox = makeInbox(rows(), appearance: .darkAqua, windows: &windows)
+        inbox.prefersReducedMotion = { false }
+        inbox.hoverCardEnabled = false
+        func card(_ id: UUID) throws -> AgentInbox96CellView {
+            guard let cell = inbox.onScreenCardForQA(id: id) else { throw Failure(description: "deck: \(id) is not on screen") }
+            return cell
+        }
+        func angle(_ t: CATransform3D) -> CGFloat { atan2(t.m12, t.m11) * 180 / .pi }
+        func near(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 0.01 }
+        func isIdentity(_ t: CATransform3D) -> Bool { CATransform3DIsIdentity(t) }
+        let deck = InboxGroupBackgroundView.Deck.self
+
+        let three = try card(threeChildParent)
+        let spine = three.qaSpineSegmentsForQA
+        try expect(inbox.hoverRowForQA(id: threeChildParent), "deck: could not hover")
+        let posed = three.qaDeckForQA
+        try expect(near(posed.card.m42, -deck.lift) && near(posed.sheets[0].m42, -deck.lift),
+                   "deck: the hovered card and its front sheet must rise \(deck.lift)pt — card \(posed.card.m42), sheet \(posed.sheets[0].m42)")
+        try expect(posed.sheets.count == 3, "deck: the three-child parent posed \(posed.sheets.count - 1) tucked cards, not 2")
+        let back = Array(posed.sheets.dropFirst())
+        // The specified fan, shrunk evenly to fit the gap when it must; never
+        // so far that it stops reading as a fan.
+        let scale = three.qaDeckScaleForQA
+        try expect(scale > 0.4 && scale <= 1, "deck: the fan was scaled to \(scale) of the spec to fit its gap")
+        for (index, t) in back.enumerated() {
+            try expect(near(t.m42, deck.drops[index] * scale),
+                       "deck: tucked card \(index + 1) drops \(t.m42)pt, not \(deck.drops[index])×\(scale)")
+            try expect(abs(abs(angle(t)) - deck.angles[index] * scale) <= (deck.angleJitter + 0.01) * scale,
+                       "deck: tucked card \(index + 1) turns \(angle(t))°, outside (\(deck.angles[index])±\(deck.angleJitter)°)×\(scale)")
+            try expect(abs(t.m41) <= (deck.lateralJitter + 0.01) * scale, "deck: tucked card \(index + 1) slides \(t.m41)pt sideways")
+        }
+        try expect(angle(back[0]) * angle(back[1]) < 0, "deck: the two tucked cards must turn opposite ways")
+        try expect(posed.springs == 4, "deck: \(posed.springs) of 4 layers sprang — the pose must animate in")
+        try expect(three.qaSpineSegmentsForQA == spine, "deck: hovering moved the row's tree lines")
+        // Inside the gap: nothing reaches the next card or leaves the row's width.
+        guard let next = inbox.onScreenCardForQA(id: askingParent) else { throw Failure(description: "deck: no next row") }
+        let nextTop = next.qaCardFrameForQA.minY
+        var clearance = CGFloat.greatestFiniteMagnitude
+        for box in posed.tuckedBoxes {
+            let inNext = three.convert(box, to: next)
+            clearance = min(clearance, nextTop - inNext.maxY)
+            try expect(inNext.maxY <= nextTop && box.minX >= 0 && box.maxX <= three.bounds.width,
+                       "deck: a fanned card \(inNext) crosses the next card at \(nextTop) or the row's width")
+        }
+
+        // Per agent: another agent fans differently, the same one identically.
+        try expect(inbox.hoverRowForQA(id: askingParent), "deck: could not move hover")
+        try expect(isIdentity(three.qaDeckForQA.card) && three.qaDeckForQA.sheets.allSatisfy(isIdentity),
+                   "deck: leaving the row must land it at rest")
+        try expect(inbox.clickDisclosureForQA(id: askingParent), "deck: could not fold the asking parent")
+        inbox.foldMotionForQA.cancel()
+        inbox.layoutForQA()
+        try expect(inbox.hoverRowForQA(id: askingParent), "deck: could not hover the folded asking parent")
+        let other = try card(askingParent).qaDeckForQA.sheets.dropFirst()
+        try expect(!(near(other.first!.m41, back[0].m41) && near(angle(other.first!), angle(back[0]))),
+                   "deck: two agents fanned identically — the pose is not per agent")
+        try expect(inbox.hoverRowForQA(id: threeChildParent), "deck: could not hover back")
+        let again = try card(threeChildParent).qaDeckForQA.sheets
+        try expect(zip(again, posed.sheets).allSatisfy { CATransform3DEqualToTransform($0, $1) },
+                   "deck: the same agent fanned differently the second time")
+
+        // A card with nothing tucked behind it only lifts.
+        try expect(inbox.hoverRowForQA(id: loneRoot), "deck: could not hover the lone root")
+        let lone = try card(loneRoot).qaDeckForQA
+        try expect(near(lone.card.m42, -deck.lift) && lone.sheets.allSatisfy(isIdentity),
+                   "deck: a card with nothing tucked must lift \(deck.lift)pt and pose nothing else")
+
+        // Reduce Motion, re-read live: flat at once, and the fill still fades.
+        try expect(inbox.hoverRowForQA(id: threeChildParent), "deck: could not hover")
+        inbox.prefersReducedMotion = { true }
+        inbox.reapplyDisplayPreferencesForQA()
+        let flat = three.qaDeckForQA
+        try expect(isIdentity(flat.card) && flat.sheets.allSatisfy(isIdentity) && flat.springs == 0,
+                   "deck: turning on Reduce Motion must land the hovered deck flat")
+        try expect(inbox.hoverRowForQA(id: oneChildParent), "deck: could not hover under Reduce Motion")
+        let reduced = try card(oneChildParent)
+        try expect(isIdentity(reduced.qaDeckForQA.card) && reduced.qaDeckForQA.sheets.allSatisfy(isIdentity),
+                   "deck: under Reduce Motion hover must not move or turn anything")
+        try expect(reduced.qaFillFadeInFlightForQA, "deck: under Reduce Motion the fill must still cross-fade")
+        inbox.prefersReducedMotion = { false }
+
+        // A fold photographs the resting deck.
+        try expect(inbox.hoverRowForQA(id: threeChildParent), "deck: could not hover")
+        try expect(three.qaDeckIsPosedForQA, "deck: the hover did not pose the deck")
+        let posedPhotos = inbox.qaPosedDecksPhotographed
+        try expect(inbox.clickDisclosureForQA(id: threeChildParent), "deck: could not fold")
+        try expect(inbox.qaPosedDecksPhotographed == posedPhotos,
+                   "deck: the fold photographed \(inbox.qaPosedDecksPhotographed - posedPhotos) card(s) mid-pose instead of at rest")
+        inbox.foldMotionForQA.cancel()
+
+        // The hover card leaves by fading, not by vanishing.
+        inbox.hoverCardEnabled = true
+        inbox.hoverCardScheduler = { _, work in work(); return {} }
+        try expect(inbox.hoverRowForQA(id: loneRoot) && inbox.isHoverCardVisibleForQA, "deck: the hover card did not open")
+        inbox.hoverRowForQA(id: nil)
+        try expect(!inbox.isHoverCardVisibleForQA && inbox.isHoverCardFadingOutForQA,
+                   "deck: the hover card must fade out over \(AgentInboxView.hoverCardFadeOut)s, not vanish")
+        inbox.hoverCardEnabled = false
+        inbox.hoverCardScheduler = nil
+
+        // Scrolling removes the springs: a short list in a short window.
+        let short = makeInbox(rows(), appearance: .darkAqua, height: 300, windows: &windows)
+        short.prefersReducedMotion = { false }
+        short.hoverCardEnabled = false
+        try expect(short.hoverRowForQA(id: oneChildParent), "deck: could not hover in the short list")
+        guard let scrolled = short.onScreenCardForQA(id: oneChildParent) else { throw Failure(description: "deck: no card") }
+        try expect(scrolled.qaDeckForQA.springs > 0, "deck: the short list's hover did not spring")
+        short.scrollListForQA(by: 20)
+        try expect(scrolled.qaDeckForQA.springs == 0, "deck: scrolling must remove the deck's springs")
+
+        let fan = back.map { String(format: "%.1fpt/%.2f°", $0.m42, angle($0)) }.joined(separator: ", ")
+            + String(format: " (%.0f%% of the spec)", scale * 100)
+        return "deck: hovered folded parent lifts \(deck.lift)pt and fans \(fan) with \(String(format: "%.1f", clearance))pt to the next card, per agent and stable, tree lines unmoved; Reduce Motion, a fold and a scroll land it flat; the hover card fades out"
     }
 
     // MARK: - Persistence across a reload

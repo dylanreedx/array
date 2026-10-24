@@ -520,6 +520,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// the QA seam the list already owns (`AgentInboxView.prefersReducedMotion`) can
     /// drive it, and so a check can render both branches.
     private let prefersReducedMotion: () -> Bool
+    /// Whether hover may MOVE anything (the deck breathe). Set by the list to
+    /// its own preference, which production reads from the system on every
+    /// hover; the fill still cross-fades either way.
+    var reducesHoverMotion: () -> Bool
+    /// Whether the deck is posed for hover. Held apart from `card.isHovered`
+    /// so a repeat of the same interaction never restarts a spring.
+    private var deckHovered = false
     /// The leading status glyph. A VIEW, not a painted decoration, for one reason:
     /// it is the only thing on the row that can animate.
     private let statusGlyph = StatusGlyphView()
@@ -584,6 +591,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         self.proposal = proposal
         self.anatomy = anatomy
         self.prefersReducedMotion = prefersReducedMotion
+        self.reducesHoverMotion = prefersReducedMotion
         super.init(frame: NSRect(x: 0, y: 0, width: 280,
                                  height: Self.rowHeight(for: proposal)))
         wantsLayer = true
@@ -1169,7 +1177,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             nesting, hasChildren: !disclosureButton.isHidden,
             metrics: Self.spineMetrics,
             rowHeight: bounds.height + bleed * 2, tuckedCards: tucked,
-            cardRect: convert(card.frame, to: groupBackground))
+            cardRect: convert(card.frame, to: groupBackground),
+            // To the next row's card: this row's room below its card, the
+            // intercell spacing, and the next card's own inset.
+            roomBelowCard: bounds.height - card.frame.maxY + CGFloat(AgentInboxView.rowSpacing) + gap / 2)
         spine.clipsToBounds = false
         spine.frame = bounds.insetBy(dx: 0, dy: -bleed)
         spine.show(
@@ -1553,7 +1564,38 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.isRouteActive = interaction.isRouteActive
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
         setHoverActionsShown(interaction.isHovered)
+        if interaction.isHovered != deckHovered {
+            deckHovered = interaction.isHovered
+            poseDeck(animated: window != nil)
+        }
     }
+
+    // MARK: Deck breathe
+
+    /// Pose the card (a 1pt lift) and, for a folded parent, the deck behind it.
+    /// Reduce Motion poses nothing: the fill's cross-fade is the whole answer.
+    private func poseDeck(animated: Bool) {
+        let moves = deckHovered && !reducesHoverMotion()
+        let deck = moves ? shown.map { InboxGroupBackgroundView.Deck.pose(for: $0.row.id) } : nil
+        if let layer = card.layer {
+            // Up is -y in this flipped cell's layer space.
+            InboxGroupBackgroundView.spring(
+                layer, to: CATransform3DMakeTranslation(0, -(deck?.lift ?? 0), 0),
+                rising: deck != nil, delay: 0, animated: animated && moves == deckHovered)
+        }
+        groupBackground.setDeck(deck, animated: animated && moves == deckHovered)
+    }
+
+    /// Land the deck on its current target now, without a spring — for a list
+    /// scrolling under the pointer, and to re-read Reduce Motion.
+    func snapDeck() { poseDeck(animated: false) }
+
+    /// The resting pose, at once: what a fold photographs.
+    func restDeck() {
+        deckHovered = false
+        poseDeck(animated: false)
+    }
+
 
     /// Whether a hover transition is animating right now: the card's fill or the
     /// status slot's crossfade. False when the change snapped.
@@ -1562,6 +1604,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             && [hoverSnooze, hoverSettle, stateLabel, statusGlyph].contains {
                 $0.layer?.animationKeys()?.isEmpty == false
             }
+    }
+    var qaFillFadeInFlightForQA: Bool {
+        card.layer?.animation(forKey: AgentInboxCardView.fillFadeKey) != nil
     }
     /// Whether the hover actions are what the status slot shows right now.
     var qaHoverActionsShown: Bool { hoverActionsShown }
@@ -1798,6 +1843,24 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
     var qaNestingForQA: InboxNesting { nesting }
     var qaGroupBackgroundVisibleForQA: Bool { groupBackground.qaIsVisibleForQA }
+    /// The deck as posed: the card's model transform, the front sheet's and the
+    /// tucked cards' (front to back), the tucked cards' on-screen boxes in this
+    /// cell's coordinates, and how many of its layers are mid-spring.
+    var qaDeckScaleForQA: CGFloat { groupBackground.deckScale }
+    /// Whether any part of the deck is out of its resting pose, as a
+    /// photograph of the layers would show it.
+    var qaDeckIsPosedForQA: Bool {
+        let deck = qaDeckForQA
+        return !CATransform3DIsIdentity(deck.card) || !deck.sheets.allSatisfy(CATransform3DIsIdentity)
+    }
+    var qaDeckForQA: (card: CATransform3D, sheets: [CATransform3D], tuckedBoxes: [NSRect], springs: Int) {
+        let springs = groupBackground.qaDeckAnimationCountForQA
+            + (card.layer?.animation(forKey: InboxGroupBackgroundView.deckAnimationKey) == nil ? 0 : 1)
+        return (card.layer?.transform ?? CATransform3DIdentity,
+                groupBackground.qaDeckTransformsForQA,
+                groupBackground.qaTuckedBoundingRectsForQA.map { groupBackground.convert($0, to: self) },
+                springs)
+    }
     /// The group wash as painted, in this cell's coordinates; nil when the row
     /// is not part of a group.
     var qaWashRectForQA: NSRect? {

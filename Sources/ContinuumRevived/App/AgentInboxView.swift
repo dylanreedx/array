@@ -1773,6 +1773,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         foldMotion.cancel()
         let increasedContrast = prefersIncreasedContrast()
         for cell in cellsByRow.values { cell.setIncreasedContrast(increasedContrast) }
+        for card in deckCells.allObjects { card.snapDeck() }
     }
 
     func reapplyDisplayPreferencesForQA() {
@@ -2455,6 +2456,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // ONE photograph of what is on screen. Every cell the fold leaves alone
         // is the same view with the same pixels afterwards, so these images are
         // reused at the far end and only the rebuilt cells are taken again.
+        // The fold photographs the resting deck, never a pose mid-spring.
+        for card in deckCells.allObjects { card.restDeck() }
         let before = animates ? captureFoldRows() : FoldCapture()
         let expanded = collapsedParents.contains(parentId)
         let anchor = tableRow(forAgentId: parentId).map {
@@ -2589,6 +2592,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     image = reused
                 } else {
                     image = InboxFoldMotion.image(of: cell, in: local)
+                    if (cell as? AgentInbox96CellView)?.qaDeckIsPosedForQA == true { qaPosedDecksPhotographed += 1 }
                 }
             }
             capture.snapshots[key] = InboxFoldMotion.Snapshot(key: key, frame: frame, image: image, order: index)
@@ -2967,6 +2971,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         )
         configureHoverActions(on: cell, for: model)
         if let redesigned = cell as? AgentInbox96CellView {
+            redesigned.reducesHoverMotion = { [weak self] in self?.prefersReducedMotion() ?? false }
             // The tree connector. Set from the LIST, which is the only thing that
             // knows what is drawn above and below this row.
             redesigned.setNesting(nesting(atTableRow: row))
@@ -4214,6 +4219,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 for: model.state, attention: model.attention, isInteracting: isInteracting(row: row))
             guard cell.updateEmphasisInPlace(emphasis) else { reload.append(row); continue }
             cell.applyInteraction(interaction(forTableRow: row))
+            if let card = cell as? AgentInbox96CellView {
+                deckCells.add(card)
+                if snapsDeck { card.snapDeck() }
+            }
         }
         guard !reload.isEmpty else { return }
         // A variant that cannot repaint in place is rebuilt, and a fold in
@@ -4221,6 +4230,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         tableView.reloadData(forRowIndexes: IndexSet(reload), columnIndexes: IndexSet(integer: 0))
         foldMotion.cover(reload.compactMap { tableView.view(atColumn: 0, row: $0, makeIfNecessary: false) })
     }
+
+    /// The cards hover has posed or is springing back: at most the hovered row
+    /// and the one before it, so folding, scrolling and a Reduce Motion change
+    /// touch only those and never walk the list.
+    private let deckCells = NSHashTable<AgentInbox96CellView>.weakObjects()
+    /// How many cards the fold photographs have caught out of their resting
+    /// pose, ever. A photograph is what the presentation shows.
+    private(set) var qaPosedDecksPhotographed = 0
+    /// Set while the list moves under a still pointer: hover then lands its
+    /// pose at once instead of springing.
+    private var snapsDeck = false
 
     /// Rebuild the cells of just these rows, ignoring any that are not on screen.
     private func redraw(tableRows indexes: [Int]) {
@@ -4513,7 +4533,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.foldMotion.cancel()
+                // Scrolling removes the deck's springs: what moves is the list.
+                for card in self.deckCells.allObjects { card.snapDeck() }
+                self.snapsDeck = true
                 self.refreshHoverFromPointer()
+                self.snapsDeck = false
                 self.syncElapsedTickTimer()
                 self.window?.invalidateCursorRects(for: self.tableView)
             }
@@ -4775,18 +4799,49 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         origin.y = max(Self.hoverCardGap, min(origin.y, contentView.bounds.maxY - size.height))
         card.frame = NSRect(origin: origin, size: size)
 
+        // A card still fading out is taken back rather than stacked on.
+        let wasFading = hoverCardRemoval != nil
+        hoverCardRemoval?.cancel()
+        hoverCardRemoval = nil
+        if wasFading, card.superview != nil {
+            card.alphaValue = 1
+            card.layer?.removeAnimation(forKey: Self.hoverCardFadeKey)
+        }
         guard card.superview == nil else { return }
         contentView.addSubview(card)
         guard !prefersReducedMotion() else { return }
         card.animatePresentation(duration: Self.crossfadeDuration)
     }
 
+    /// The card leaves over this long instead of vanishing mid-read.
+    static let hoverCardFadeOut: TimeInterval = 0.12
+    private static let hoverCardFadeKey = "inbox-hover-card-dismiss"
+    private var hoverCardRemoval: DispatchWorkItem?
+
     private func dismissHoverCard() {
         hoverCardCancel?()
         hoverCardCancel = nil
-        guard let card = hoverCard, card.superview != nil else { return }
-        card.removeFromSuperview()
+        guard let card = hoverCard, card.superview != nil, hoverCardRemoval == nil else { return }
         hoverCardClosedAt = clock()
+        guard !prefersReducedMotion(), window != nil, let layer = card.layer else {
+            card.removeFromSuperview()
+            return
+        }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = layer.presentation()?.opacity ?? 1
+        fade.toValue = 0
+        fade.duration = Self.hoverCardFadeOut
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        card.alphaValue = 0
+        layer.add(fade, forKey: Self.hoverCardFadeKey)
+        let removal = DispatchWorkItem { [weak self, weak card] in
+            guard let self, let card, self.hoverCardRemoval != nil else { return }
+            self.hoverCardRemoval = nil
+            card.removeFromSuperview()
+            card.alphaValue = 1
+        }
+        hoverCardRemoval = removal
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hoverCardFadeOut, execute: removal)
     }
 
     /// The hovered row's rect, in the window content view's coordinates.
@@ -4872,7 +4927,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return formatter
     }()
 
-    var isHoverCardVisibleForQA: Bool { hoverCard?.superview != nil }
+    /// Open and not on its way out: a card fading after its hover ended is
+    /// already dismissed.
+    var isHoverCardVisibleForQA: Bool { hoverCard?.superview != nil && hoverCardRemoval == nil }
+    /// Still on screen, fading: the half of a dismissal a still image misses.
+    var isHoverCardFadingOutForQA: Bool {
+        hoverCard?.superview != nil && hoverCardRemoval != nil
+            && hoverCard?.layer?.animation(forKey: Self.hoverCardFadeKey) != nil
+    }
     var hoverCardFrameForQA: NSRect? { hoverCard?.superview == nil ? nil : hoverCard?.frame }
     var hoverCardLinesForQA: [String] { hoverCard?.qaLinesForQA ?? [] }
     var hoverCardTruncatedLinesForQA: [String] { hoverCard?.qaTruncatedLinesForQA ?? [] }
@@ -5071,6 +5133,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return (tucked.count, tucked.rects, tucked.card, cell, tableView.rect(ofRow: tableRow))
     }
     var parentFoldChoicesForQA: [UUID: Bool] { foldChoices }
+    /// Scroll the list the way a wheel does, through the clip view.
+    func scrollListForQA(by dy: CGFloat) {
+        let clip = scrollView.contentView
+        clip.scroll(to: NSPoint(x: clip.bounds.minX, y: clip.bounds.minY + dy))
+        scrollView.reflectScrolledClipView(clip)
+    }
     /// The card the table is showing for row `id` right now, never one it builds.
     func onScreenCardForQA(id: UUID) -> AgentInbox96CellView? {
         guard let tableRow = tableRow(forAgentId: id) else { return nil }
