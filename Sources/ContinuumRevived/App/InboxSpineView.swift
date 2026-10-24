@@ -76,6 +76,12 @@ final class InboxGroupBackgroundView: NSView {
     private var roundsTop = false
     private var roundsBottom = false
     private var horizontalInset: CGFloat = 0
+    /// The row's card, in this view's coordinates, when the cell hands it in.
+    /// A group's first row starts its wash at the card's top, and a folded
+    /// parent's wash IS its card: at rest the wash is the sheet you see, and
+    /// hover paints the card's own plate, so any difference between the two is
+    /// a band that appears and vanishes under the pointer.
+    private var cardRect: NSRect?
     /// Launch polish, item Q: how many cards a FOLDED parent shows tucked behind
     /// its own — 1 for one hidden child, 2 for two or more, 0 when open.
     private(set) var tuckedCards = 0
@@ -88,16 +94,15 @@ final class InboxGroupBackgroundView: NSView {
     /// lower in contrast than the sheet in front, so the stack recedes.
     static let washAlpha: CGFloat = 0.035
     static let tuckedAlphas: [CGFloat] = [0.08, 0.055]
-    /// Background left between the last tucked card and the next group's wash,
-    /// so the stack ends in an edge and not in a seam.
-    static let tuckedClearance: CGFloat = 2
 
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     func show(_ nesting: InboxNesting, hasChildren: Bool,
-              metrics: InboxSpineMetrics, rowHeight: CGFloat, tuckedCards: Int = 0) {
+              metrics: InboxSpineMetrics, rowHeight: CGFloat, tuckedCards: Int = 0,
+              cardRect: NSRect? = nil) {
         isGroupMember = hasChildren || nesting.depth > 0
+        self.cardRect = cardRect
         roundsTop = isGroupMember && nesting.depth == 0
         roundsBottom = isGroupMember && nesting.nextDepth == 0
         horizontalInset = CGFloat(metrics.gutter)
@@ -108,26 +113,36 @@ final class InboxGroupBackgroundView: NSView {
     }
 
     /// The tucked cards as drawn, back to front, in this view's coordinates.
+    /// Anchored at the front sheet: each one spans it and shows only its lower
+    /// edge, `tuckedPeek` further down per step back.
     var tuckedCardRects: [NSRect] {
-        let rect = NSRect(x: horizontalInset, y: 0,
-                          width: max(0, bounds.width - horizontalInset * 2),
-                          height: bounds.height)
-        guard tuckedCards > 0, rect.width > 0, rect.height > 0 else { return [] }
+        let sheet = washRect
+        guard tuckedCards > 0, sheet.width > 0, sheet.height > 0 else { return [] }
         return (1...tuckedCards).reversed().map { depth in
             let inset = Self.tuckedInset * CGFloat(depth)
-            let bottom = rect.maxY - Self.tuckedClearance - Self.tuckedPeek * CGFloat(tuckedCards - depth)
-            // Each card spans the front sheet's height less its own peek, so only
-            // its lower edge shows; the front sheet covers the rest.
-            return NSRect(x: rect.minX + inset, y: rect.minY,
-                          width: max(0, rect.width - inset * 2), height: max(0, bottom - rect.minY))
+            let bottom = sheet.maxY + Self.tuckedPeek * CGFloat(depth)
+            return NSRect(x: sheet.minX + inset, y: sheet.minY,
+                          width: max(0, sheet.width - inset * 2), height: max(0, bottom - sheet.minY))
         }
+    }
+
+    /// The shared wash this strip paints, in this view's coordinates. One
+    /// property read by `draw` and by the witness.
+    var washRect: NSRect {
+        // A group's first row starts at its card; a row inside the group runs
+        // edge to edge so it joins the strips above and below across the
+        // intercell gap; a folded parent ends at its card, and its tucked cards
+        // show below it.
+        let top = roundsTop ? (cardRect?.minY ?? 0) : 0
+        let bottom = tuckedCards > 0 ? (cardRect?.maxY ?? bounds.height) : bounds.height
+        return NSRect(x: horizontalInset, y: top,
+                      width: max(0, bounds.width - horizontalInset * 2),
+                      height: max(0, bottom - top))
     }
 
     override func draw(_ dirtyRect: NSRect) {
         guard isGroupMember else { return }
-        var rect = NSRect(x: horizontalInset, y: 0,
-                          width: max(0, bounds.width - horizontalInset * 2),
-                          height: bounds.height)
+        let rect = washRect
         guard rect.width > 0, rect.height > 0 else { return }
         let appearance = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
         let theme: TokenTheme = appearance == .darkAqua ? .dark : .light
@@ -143,10 +158,9 @@ final class InboxGroupBackgroundView: NSView {
             TokenColor(foreground.composited(over: base, alpha: alpha)).nsColor(for: theme).setFill()
             NSBezierPath(roundedRect: card, xRadius: radius, yRadius: radius).fill()
         }
-        if tuckedCards > 0 { rect.size.height -= Self.tuckedClearance + Self.tuckedPeek * CGFloat(tuckedCards) }
         let wash = TokenColor(foreground.composited(over: base, alpha: Self.washAlpha))
         wash.nsColor(for: theme).setFill()
-        roundedGroupStrip(rect, top: roundsTop ? 8 : 0, bottom: roundsBottom ? 8 : 0).fill()
+        roundedGroupStrip(rect, top: roundsTop ? radius : 0, bottom: roundsBottom ? radius : 0).fill()
     }
 
     private func roundedGroupStrip(_ rect: NSRect, top: CGFloat, bottom: CGFloat) -> NSBezierPath {

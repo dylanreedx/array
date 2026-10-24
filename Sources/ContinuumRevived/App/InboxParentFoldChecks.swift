@@ -80,6 +80,7 @@ enum InboxParentFoldChecks {
         for appearance in [NSAppearance.Name.darkAqua, .aqua] {
             lines.append(try checkDefaultsAndDecoration(appearance: appearance, windows: &windows))
         }
+        lines.append(try checkTuckedCards(windows: &windows))
         lines.append(try checkPersistence(windows: &windows))
         lines.append(try checkAutoExpandRule(windows: &windows))
         lines.append(try checkProductionWiring())
@@ -238,6 +239,69 @@ enum InboxParentFoldChecks {
         try expect(inbox.disclosureTitleForQA(id: threeChildParent)?.hasPrefix("▾") == true,
                    "\(label): an opened parent's triangle must point down")
         return "\(label): one-child parent tucks \(one.count) at \(one.rects.map(\.maxY)) under card maxY \(one.card.maxY), three-child tucks \(three.count), rows \(one.rowFrame.height)pt = lone \(lone.rowFrame.height)pt"
+    }
+
+    // MARK: - The wash IS the card
+
+    /// At rest a folded parent's visible sheet is the group wash, not the card,
+    /// whose fill is nil until hovered. If the two rects differ, hover swaps one
+    /// sheet for another of a different shape: the reported "weird inset at the
+    /// top of a card when hovering", and an off-centre card at rest.
+    static func checkTuckedCards(windows: inout [NSWindow]) throws -> String {
+        let inbox = makeInbox(rows(), appearance: .darkAqua, windows: &windows)
+        inbox.prefersReducedMotion = { true }
+        try expect(inbox.clickDisclosureForQA(id: askingParent), "wash: the asking parent's triangle could not be clicked")
+        inbox.layoutForQA()
+        func near(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) <= 0.5 }
+        let peek = InboxGroupBackgroundView.tuckedPeek
+        var notes: [String] = []
+        for (name, id, depths) in [("one-child", oneChildParent, 1), ("three-child", threeChildParent, 2)] {
+            guard let tucked = inbox.tuckedCardsForQA(id: id),
+                  let cell = tucked.cell as? AgentInbox96CellView,
+                  let wash = cell.qaWashRectForQA else {
+                throw Failure(description: "wash \(name): no materialized folded parent with a wash")
+            }
+            let card = tucked.card
+            try expect(near(wash.minY, card.minY),
+                       "wash \(name): the folded parent's wash starts at \(wash.minY), its card at \(card.minY) — hover will swap sheets")
+            try expect(near(wash.maxY, card.maxY),
+                       "wash \(name): the folded parent's wash ends at \(wash.maxY), its card at \(card.maxY)")
+            try expect(tucked.rects.count == depths, "wash \(name): \(tucked.rects.count) tucked cards, wanted \(depths)")
+            let bottoms = tucked.rects.map(\.maxY).sorted()
+            for (index, bottom) in bottoms.enumerated() {
+                let wanted = card.maxY + peek * CGFloat(index + 1)
+                try expect(near(bottom, wanted),
+                           "wash \(name): tucked card \(index + 1) ends at \(bottom), wanted card bottom + \(peek)×\(index + 1) = \(wanted)")
+            }
+            notes.append("\(name) wash \(wash.minY)–\(wash.maxY) = card \(card.minY)–\(card.maxY), tucked \(bottoms)")
+        }
+        guard let open = inbox.qaMaterializedRowCells.first(where: { $0.qaAgentID == askingParent }) as? AgentInbox96CellView,
+              let openWash = open.qaWashRectForQA else {
+            throw Failure(description: "wash: the opened parent drew no wash")
+        }
+        try expect(near(openWash.minY, open.qaCardFrameForQA.minY),
+                   "wash open: an open parent's wash starts at \(openWash.minY), its card at \(open.qaCardFrameForQA.minY)")
+        // Hovered, the card's own plate is the sheet: its text must sit centred.
+        try expect(inbox.hoverRowForQA(id: threeChildParent), "wash: could not hover the folded parent")
+        inbox.layoutForQA()
+        guard let hovered = inbox.qaMaterializedRowCells.first(where: { $0.qaAgentID == threeChildParent }) as? AgentInbox96CellView else {
+            throw Failure(description: "wash: the hovered parent has no cell")
+        }
+        let frames = hovered.qaGeometry.elementFrames
+        guard let sheet = frames["card"], let project = frames["project"], let detail = frames["branch"] else {
+            throw Failure(description: "wash: the hovered card reported no project or detail line")
+        }
+        let above = project.minY - sheet.minY, below = sheet.maxY - detail.maxY
+        try expect(near(above, below),
+                   "wash: hovered, the plate shows \(above)pt above the project line and \(below)pt below the detail line")
+        // And at rest, where the sheet you see is the wash.
+        guard let restingWash = hovered.qaWashRectForQA else {
+            throw Failure(description: "wash: the hovered parent lost its wash")
+        }
+        let restAbove = project.minY - restingWash.minY, restBelow = restingWash.maxY - detail.maxY
+        try expect(near(restAbove, restBelow),
+                   "wash: at rest the sheet shows \(restAbove)pt above the project line and \(restBelow)pt below the detail line")
+        return "wash: " + notes.joined(separator: "; ") + "; open parent wash top = card top; hovered text \(above)pt above / \(below)pt below"
     }
 
     // MARK: - Persistence across a reload

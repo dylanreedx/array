@@ -1168,7 +1168,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         groupBackground.show(
             nesting, hasChildren: !disclosureButton.isHidden,
             metrics: Self.spineMetrics,
-            rowHeight: bounds.height + bleed * 2, tuckedCards: tucked)
+            rowHeight: bounds.height + bleed * 2, tuckedCards: tucked,
+            cardRect: convert(card.frame, to: groupBackground))
         spine.clipsToBounds = false
         spine.frame = bounds.insetBy(dx: 0, dy: -bleed)
         spine.show(
@@ -1762,6 +1763,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
     var qaNestingForQA: InboxNesting { nesting }
     var qaGroupBackgroundVisibleForQA: Bool { groupBackground.qaIsVisibleForQA }
+    /// The group wash as painted, in this cell's coordinates; nil when the row
+    /// is not part of a group.
+    var qaWashRectForQA: NSRect? {
+        groupBackground.qaIsVisibleForQA
+            ? groupBackground.convert(groupBackground.washRect, to: self) : nil
+    }
     /// The tucked cards as drawn, in the CELL's coordinates, and the card's frame.
     var qaTuckedCardsForQA: (count: Int, rects: [NSRect], card: NSRect) {
         (groupBackground.qaTuckedCardsForQA,
