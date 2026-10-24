@@ -847,6 +847,20 @@ enum ContinuumApp {
                 }
             }
         }
+        // The sidebar's project icon: the `.array/icon.*` override, the wider
+        // source search, and a cache that holds misses and notices edits.
+        if CommandLine.arguments.contains("--project-icon-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try ProjectIconChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if CommandLine.arguments.contains("--agent-process-tracker-check") {
             _ = NSApplication.shared
             MainActor.assumeIsolated {
