@@ -20030,12 +20030,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self else { call.respond(.unsupportedUnbound); return }
             self.workspaceAPI.handle(agentId: agentId, call: call)
         }
-        workspaceMCPHost.setHandler { [weak self] request in
+        workspaceMCPHost.setHandler { [weak self] request, reply in
             guard let self else {
-                return ["schema": WorkspaceAPISchema.v1, "status": "error",
-                        "error": ["code": "unsupported", "message": "Array host unavailable"]]
+                reply(["schema": WorkspaceAPISchema.v1, "status": "error",
+                       "error": ["code": "unsupported", "message": "Array host unavailable"]])
+                return
             }
-            return self.workspaceAPI.handleMCPRequest(request)
+            self.workspaceAPI.handleMCPRequest(request, completion: reply)
         }
         agentSupervisor.workspaceMCPConfigurationProvider = { [weak self] agentID, harness in
             guard harness == .claudeCode || harness == .codex,

@@ -190,6 +190,7 @@ func runWorkspaceMCPChecks() {
                "\(name)'s process environment carries the MCP capability: \(environment.keys.filter { $0.hasPrefix("ARRAY_WORKSPACE_") })")
     }
     runMCPConfigMaterializeFailureCheck()
+    runToolResultImageChecks()
     print("Workspace MCP checks passed: \(tools.count) shared tools + \(WorkspaceMCPToolCatalog.waitAgentsName) match pi minus \(piOnlyToolNames.keys.sorted()), Claude/Codex guidance, allowances and timeouts, and the token out of argv, config and agent env")
 }
 
@@ -243,4 +244,107 @@ private func runMCPConfigMaterializeFailureCheck() {
     expect(message.contains("workspace tools config") && message.contains(String(cString: strerror(ENOTDIR))),
            "mcp materialize: the launch must fail with the real write error, got \(message.isEmpty ? "no error" : message)")
     #endif
+}
+
+// MARK: - S1: a reply's picture reaches the model as an image (`.plans/80`)
+
+/// A distinctive payload, so a leak into any text is unmistakable.
+private let s1PictureBase64 = Data("ARRAY-S1-PICTURE-BYTES".utf8).base64EncodedString()
+
+private func runToolResultImageChecks() {
+    // The MCP side: the pure rule the helper applies to every tools/call.
+    let reply: WorkspaceMCPJSON = .object([
+        "schema": .string(WorkspaceAPISchema.v1), "status": .string("ok"),
+        "result": .object(["url": .string("http://localhost:3000"),
+                           "image": .object(["mimeType": .string("image/png"), "data": .string(s1PictureBase64)])])
+    ])
+    let made = WorkspaceMCPToolResult.make(reply: reply)
+    guard case .array(let content)? = made["content"] else { expect(false, "S1: tool result has no content array"); return }
+    expect(content.count == 2, "S1: a reply with a picture must yield a text item and an image item; got \(content.count)")
+    expect(content.last == .object(["type": .string("image"), "data": .string(s1PictureBase64), "mimeType": .string("image/png")]),
+           "S1: the picture must leave as an MCP image item, unchanged: \(String(describing: content.last))")
+    let text = content.first.flatMap { item -> String? in
+        if case .object(let fields) = item, case .string(let text)? = fields["text"] { return text }
+        return nil
+    } ?? ""
+    expect(!text.contains(s1PictureBase64) && text.contains("\"attached\":true") && text.contains("localhost:3000"),
+           "S1: the text item must keep the reply and drop the base64: \(text)")
+    expect(!(made["structuredContent"]?.jsonString ?? "").contains(s1PictureBase64),
+           "S1: structuredContent must not carry the base64")
+    expect(made["isError"] == nil, "S1: an ok reply is not a tool error")
+
+    // A malformed or unsupported picture is dropped, never forwarded as text.
+    let bad = WorkspaceMCPToolResult.make(reply: .object([
+        "status": .string("ok"),
+        "result": .object(["image": .object(["mimeType": .string("image/gif"), "data": .string(s1PictureBase64)])])
+    ]))
+    if case .array(let badContent)? = bad["content"] {
+        expect(badContent.count == 1 && !(bad["structuredContent"]?.jsonString ?? "").contains(s1PictureBase64),
+               "S1: an unsupported picture type must be dropped, not attached or leaked")
+    }
+    // A reply with no picture is unchanged in shape: one text item.
+    let plain = WorkspaceMCPToolResult.make(reply: .object(["status": .string("error"), "error": .object([:])]))
+    if case .array(let plainContent)? = plain["content"] {
+        expect(plainContent.count == 1 && plain["isError"] == .bool(true),
+               "S1: a reply without a picture keeps one text item and its error flag")
+    }
+
+    runPiExtensionImageCheck()
+}
+
+/// The pi side, driven for real: node loads the bundled
+/// `continuum-workspace-tools.ts` (node strips the types itself), registers its
+/// tools against a stand-in `pi`, and calls one whose host reply carries a
+/// picture. Skips when node is absent, like `--pi-extension-load-check` does
+/// for pi.
+private func runPiExtensionImageCheck() {
+    guard let node = ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
+        .first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+        print("S1 pi extension image check skipped: node is not installed")
+        return
+    }
+    guard let extensionURL = PiExtensionInstaller.bundledExtensionURL(
+        fileName: PiExtensionInstaller.workspaceToolsExtensionFileName) else {
+        expect(false, "S1: the bundled workspace tools extension is missing"); return
+    }
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("array-s1-pi-\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let harness = dir.appendingPathComponent("harness.mjs")
+    try? """
+    import { pathToFileURL } from "node:url";
+    const ext = (await import(pathToFileURL(process.argv[2]).href)).default;
+    const tools = [];
+    const noop = () => {};
+    ext({ registerTool: (t) => tools.push(t), on: noop, registerCommand: noop, registerShortcut: noop, registerFlag: noop });
+    const reply = JSON.parse(process.argv[3]);
+    const ctx = { hasUI: true, ui: { input: async (raw) => JSON.stringify({ ...reply, requestId: JSON.parse(raw).requestId }) } };
+    console.log(JSON.stringify(await tools[0].execute("s1-call", {}, undefined, undefined, ctx)));
+    """.write(to: harness, atomically: true, encoding: .utf8)
+    let hostReply = #"{"schema":"array.workspace.v1","status":"ok","result":{"url":"http://localhost:3000","image":{"mimeType":"image/png","data":"\#(s1PictureBase64)"}}}"#
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: node)
+    process.arguments = [harness.path, extensionURL.path, hostReply]
+    // The extension answers only inside an Array-managed session.
+    process.environment = ["PATH": "/usr/bin:/bin", "CONTINUUM_ARRAY_MANAGED_AGENT": "1",
+                           "NODE_NO_WARNINGS": "1"]
+    let output = Pipe(); let errors = Pipe()
+    process.standardOutput = output; process.standardError = errors
+    do { try process.run() } catch { expect(false, "S1: could not run node: \(error)"); return }
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    let errorText = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    process.waitUntilExit()
+    guard process.terminationStatus == 0,
+          let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let content = result["content"] as? [[String: Any]] else {
+        expect(false, "S1: the pi extension harness failed (\(process.terminationStatus)): \(String(decoding: data, as: UTF8.self)) \(errorText)")
+        return
+    }
+    let image = content.first { $0["type"] as? String == "image" }
+    expect(content.count == 2 && image?["data"] as? String == s1PictureBase64 && image?["mimeType"] as? String == "image/png",
+           "S1: pi's tool result must carry the picture as an image item: \(content)")
+    let text = content.first { $0["type"] as? String == "text" }?["text"] as? String ?? ""
+    let details = String(decoding: (try? JSONSerialization.data(withJSONObject: result["details"] ?? [:])) ?? Data(), as: UTF8.self)
+    expect(!text.contains(s1PictureBase64) && !details.contains(s1PictureBase64) && text.contains("localhost:3000"),
+           "S1: pi's text and details must keep the reply and drop the base64: text=\(text) details=\(details)")
 }

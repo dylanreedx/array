@@ -148,13 +148,9 @@ struct ArrayWorkspaceMCP {
                 return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null,
                                        "error": .object(["code": .int(-32602), "message": .string("Unknown workspace tool")])]))
             }
-            // Array's structured refusals are tool ERRORS: an MCP client that
-            // sees no `isError` reports them to the model as successes.
-            var result: [String: WorkspaceMCPJSON] = [
-                "content": .array([.object(["type": .string("text"), "text": .string(reply.jsonString)])]),
-                "structuredContent": reply
-            ]
-            if case .object(let fields) = reply, fields["status"] == .string("error") { result["isError"] = .bool(true) }
+            // Error flag, and a reply's picture lifted into an image item
+            // with its base64 kept out of the text (S1, `.plans/80`).
+            let result = WorkspaceMCPToolResult.make(reply: reply)
             return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null, "result": .object(result)]))
         }
 

@@ -145,3 +145,45 @@ public enum WorkspaceMCPToolCatalog {
     public static let serverInstructions =
         "This agent runs in a tile on the user's Array canvas. These array_* tools see and manage that canvas: array_workspace_context (who and where you are, what you may do), array_canvas_query, array_open_document, array_find_agent and array_inspect_agent. To run work in another visible tile, call array_delegate — a built-in subagent tool (Agent/Task) runs inside this tile and never creates one. array_message_agent starts a turn on another agent in your project, and wait_agents collects the results of children you delegated. To reach an agent by where it sits (\"the agent to your right\"), match array_canvas_query's tile rectangles with array_find_agent's tileIds. What needs the user's OK depends on their Agent permissions setting: under Free, nothing inside your project asks; under Ask first, the first delegation, message or canvas move asks the user in Array. array_workspace_context lists what you may do now."
 }
+
+/// How one host reply becomes an MCP `tools/call` result
+/// (`.plans/80-browser-computer-use`, S1).
+///
+/// A reply may carry ONE picture for the model at `result.image` =
+/// `{mimeType, data}` (base64 PNG or JPEG). It leaves as an MCP `image` content
+/// item, and is stripped from the text item and `structuredContent` alike: the
+/// whole reply is serialized into both, so a picture left in place would reach
+/// the model as megabytes of base64 text. What remains says `attached: true`.
+/// Measured 2026-10-24: codex 0.163 (exec and app-server) and Claude Code
+/// 2.1.307 both show the model an image sent alongside `structuredContent`.
+/// The pi bridge applies the same rule in `continuum-workspace-tools.ts`.
+public enum WorkspaceMCPToolResult {
+    public static let imageMimeTypes: Set<String> = ["image/png", "image/jpeg"]
+
+    public static func make(reply: WorkspaceMCPJSON) -> [String: WorkspaceMCPJSON] {
+        var visible = reply
+        var picture: (mimeType: String, data: String)?
+        if case .object(var fields) = reply,
+           case .object(var result)? = fields["result"],
+           let candidate = result.removeValue(forKey: "image") {
+            if case .object(let image) = candidate,
+               case .string(let mimeType)? = image["mimeType"], imageMimeTypes.contains(mimeType),
+               case .string(let data)? = image["data"], !data.isEmpty {
+                picture = (mimeType, data)
+                result["image"] = .object(["mimeType": .string(mimeType), "attached": .bool(true)])
+            }
+            fields["result"] = .object(result)
+            visible = .object(fields)
+        }
+        var content: [WorkspaceMCPJSON] = [.object(["type": .string("text"), "text": .string(visible.jsonString)])]
+        if let picture {
+            content.append(.object(["type": .string("image"), "data": .string(picture.data),
+                                    "mimeType": .string(picture.mimeType)]))
+        }
+        var result: [String: WorkspaceMCPJSON] = ["content": .array(content), "structuredContent": visible]
+        // Array's structured refusals are tool ERRORS: an MCP client that
+        // sees no `isError` reports them to the model as successes.
+        if case .object(let fields) = reply, fields["status"] == .string("error") { result["isError"] = .bool(true) }
+        return result
+    }
+}

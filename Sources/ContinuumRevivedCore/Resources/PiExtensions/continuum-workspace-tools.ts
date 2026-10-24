@@ -76,7 +76,27 @@ async function bridge(
   }
 }
 
+// A reply may carry ONE picture for the model at `result.image` =
+// `{mimeType, data}`. It leaves as an image content item and is stripped from
+// the text and `details`, so the base64 never reaches the model as text or the
+// session file. Same rule as `WorkspaceMCPToolResult` on the MCP side
+// (`.plans/80-browser-computer-use`, S1).
+const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg"]);
+
 function asToolResult(reply: Reply) {
+  const result = reply.result as Record<string, unknown> | undefined;
+  if (result && typeof result === "object" && !Array.isArray(result) && "image" in result) {
+    const { image, ...rest } = result as { image?: { mimeType?: unknown; data?: unknown } } & Record<string, unknown>;
+    const mimeType = typeof image?.mimeType === "string" ? image.mimeType : "";
+    const data = typeof image?.data === "string" ? image.data : "";
+    const attached = IMAGE_MIME_TYPES.has(mimeType) && data.length > 0;
+    const visible: Reply = { ...reply, result: attached ? { ...rest, image: { mimeType, attached: true } } : rest };
+    const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
+      { type: "text" as const, text: JSON.stringify(visible) },
+    ];
+    if (attached) content.push({ type: "image" as const, data, mimeType });
+    return { content, details: visible };
+  }
   return { content: [{ type: "text" as const, text: JSON.stringify(reply) }], details: reply };
 }
 

@@ -193,33 +193,47 @@ final class WorkspaceAPIService {
             call.respond(.cancelled())
             return
         }
-        let reply = dispatch(
+        dispatchAsync(
             agentId: agentId,
             requestId: request.requestId,
             op: request.op,
             payload: request.payload,
-            isCancelled: { call.isCancelled })
-        call.respond(Self.transportResponse(for: reply))
+            isCancelled: { call.isCancelled }
+        ) { reply in
+            call.respond(Self.transportResponse(for: reply))
+        }
     }
 
     /// The native-provider MCP entry (`WorkspaceMCPHost` → here). The host has
     /// already matched the per-agent token; identity is the supervisor's record
     /// for that agent, exactly as on the pi bridge.
-    func handleMCPRequest(_ request: [String: Any]) -> [String: Any] {
+    func handleMCPRequest(_ request: [String: Any], completion: @escaping ([String: Any]) -> Void) {
         guard let agentText = request["agentId"] as? String,
               let agentUUID = UUID(uuidString: agentText),
               let record = supervisor.records[AgentID(rawValue: agentUUID)],
               let op = request["op"] as? String,
               let requestID = request["requestId"] as? String,
               let payload = request["payload"] as? [String: Any] else {
-            return ["schema": WorkspaceAPISchema.v1, "status": "error",
-                    "error": ["code": "invalid_request", "message": "Malformed workspace request"]]
+            completion(["schema": WorkspaceAPISchema.v1, "status": "error",
+                        "error": ["code": "invalid_request", "message": "Malformed workspace request"]])
+            return
         }
-        let reply = dispatch(agentId: record.id, requestId: requestID, op: op, payload: payload)
-        let encoded = Self.transportResponse(for: reply).encodedValue(requestId: requestID)
-        return (try? JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any]) ??
-            ["schema": WorkspaceAPISchema.v1, "status": "error",
-             "error": ["code": "outcome_unknown", "message": "Array produced an unreadable reply"]]
+        dispatchAsync(agentId: record.id, requestId: requestID, op: op, payload: payload) { reply in
+            let encoded = Self.transportResponse(for: reply).encodedValue(requestId: requestID)
+            completion((try? JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any]) ??
+                ["schema": WorkspaceAPISchema.v1, "status": "error",
+                 "error": ["code": "outcome_unknown", "message": "Array produced an unreadable reply"]])
+        }
+    }
+
+    /// The same entry for callers that need the answer in hand (checks, the
+    /// film harness). It goes through the production async path; an op that
+    /// had not answered by return would read as `outcome_unknown`.
+    func handleMCPRequest(_ request: [String: Any]) -> [String: Any] {
+        var answer: [String: Any]?
+        handleMCPRequest(request) { answer = $0 }
+        return answer ?? ["schema": WorkspaceAPISchema.v1, "status": "error",
+                          "error": ["code": "outcome_unknown", "message": "Array has not answered this request yet"]]
     }
 
     static func transportResponse(for reply: Reply) -> PiHostToolResponse {
@@ -239,6 +253,21 @@ final class WorkspaceAPIService {
     }
 
     // MARK: - Dispatch (§14.2)
+
+    /// The answer-later entry both transports use (`.plans/80`, S1). Every op
+    /// today answers synchronously, so this is `dispatch` with a completion;
+    /// browser ops will answer when WebKit calls back. `completion` runs
+    /// exactly once, on the main actor.
+    func dispatchAsync(
+        agentId: AgentID,
+        requestId: String,
+        op: String,
+        payload: [String: Any],
+        isCancelled: @escaping () -> Bool = { false },
+        completion: @escaping (Reply) -> Void
+    ) {
+        completion(dispatch(agentId: agentId, requestId: requestId, op: op, payload: payload, isCancelled: isCancelled))
+    }
 
     /// THE host entry point. `isCancelled` is polled at the commit boundary and
     /// before presentation; the default never cancels.

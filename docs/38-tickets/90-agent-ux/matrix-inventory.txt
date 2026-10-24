@@ -276,6 +276,7 @@ check --workspace-invariants-check
 check --workspace-lifecycle-check
 check --workspace-management-polish-check
 check --workspace-mcp-check
+check --workspace-mcp-host-check
 check --workspace-profile-check
 check --workspace-restart-fault-check
 check --workspace-runtime-install-check
@@ -568,6 +569,7 @@ leg run_app_check .build/debug/Array --workspace-delete-failure-check
 leg run_app_check .build/debug/Array --workspace-invariants-check
 leg run_app_check .build/debug/Array --workspace-lifecycle-check
 leg run_app_check .build/debug/Array --workspace-management-polish-check
+leg run_app_check .build/debug/Array --workspace-mcp-host-check
 leg run_app_check .build/debug/Array --workspace-profile-check
 leg run_app_check .build/debug/Array --workspace-restart-fault-check
 leg run_app_check .build/debug/Array --workspace-runtime-install-check
@@ -677,7 +679,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 180
+count ContinuumRevivedCoreChecks 181
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

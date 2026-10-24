@@ -17,11 +17,16 @@ final class WorkspaceMCPHost {
         let endpoint: String
     }
 
+    /// Answers one authenticated request. The reply may come later: a browser
+    /// action finishes when WebKit calls back, so the handler gets a completion
+    /// and must call it exactly once (`.plans/80-browser-computer-use`, S1).
+    typealias Handler = (_ request: [String: Any], _ reply: @escaping ([String: Any]) -> Void) -> Void
+
     private var listener: WorkspaceMCPHTTPListener?
     private var registrations: [AgentID: Registration] = [:]
-    private var handler: (([String: Any]) -> [String: Any])?
+    private var handler: Handler?
 
-    func setHandler(_ handler: @escaping ([String: Any]) -> [String: Any]) {
+    func setHandler(_ handler: @escaping Handler) {
         self.handler = handler
     }
 
@@ -32,9 +37,22 @@ final class WorkspaceMCPHost {
         }
         do {
             if listener == nil {
+                // The listener runs each request on its own worker thread. That
+                // thread waits; the main thread never does. It used to be
+                // `DispatchQueue.main.sync`, which held main for the whole call
+                // and left no way to answer after an asynchronous WebKit step.
                 listener = try WorkspaceMCPHTTPListener { [weak self] body in
-                    guard let self else { return Self.error(code: "hostUnavailable", message: "Array host unavailable") }
-                    return DispatchQueue.main.sync { self.handle(body) }
+                    let pending = PendingReply()
+                    DispatchQueue.main.async {
+                        guard let self else {
+                            pending.resolve(Self.error(code: "hostUnavailable", message: "Array host unavailable"))
+                            return
+                        }
+                        MainActor.assumeIsolated { self.handle(body, reply: pending.resolve) }
+                    }
+                    return pending.wait(seconds: TimeInterval(WorkspaceMCPConfiguration.toolCallTimeoutSeconds))
+                        ?? Self.error(code: "outcome_unknown",
+                                      message: "Array did not answer before the tool deadline. Do not repeat the effect blindly; call array_workspace_context and read recentOperations.")
                 }
             }
             let token = UUID().uuidString + UUID().uuidString
@@ -48,26 +66,54 @@ final class WorkspaceMCPHost {
         }
     }
 
-    private func handle(_ body: Data) -> Data {
+    private func handle(_ body: Data, reply: @escaping (Data) -> Void) {
         guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
               let agentText = object["agentId"] as? String,
               let agentUUID = UUID(uuidString: agentText),
               let agentID = registrations.keys.first(where: { $0.rawValue == agentUUID }),
               let token = object["token"] as? String,
               registrations[agentID]?.token == token,
-              let handler,
-              let reply = handler(object) as? [String: Any],
-              JSONSerialization.isValidJSONObject(reply),
-              let data = try? JSONSerialization.data(withJSONObject: reply, options: [.sortedKeys]) else {
-            return Self.error(code: "permission_denied", message: "Invalid Array workspace capability")
+              let handler else {
+            reply(Self.error(code: "permission_denied", message: "Invalid Array workspace capability"))
+            return
         }
-        return data
+        handler(object) { answer in
+            guard JSONSerialization.isValidJSONObject(answer),
+                  let data = try? JSONSerialization.data(withJSONObject: answer, options: [.sortedKeys]) else {
+                reply(Self.error(code: "outcome_unknown", message: "Array produced an unreadable reply"))
+                return
+            }
+            reply(data)
+        }
     }
 
     nonisolated private static func error(code: String, message: String) -> Data {
         let object: [String: Any] = ["schema": WorkspaceAPISchema.v1, "status": "error",
                                      "error": ["code": code, "message": message]]
         return (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
+    }
+}
+
+/// One request's answer, handed from the main thread to the listener's worker
+/// thread. The first answer wins; a second (a handler that called back twice)
+/// is ignored rather than written to a closed socket.
+private final class PendingReply: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var data: Data?
+
+    func resolve(_ value: Data) {
+        lock.lock()
+        let first = data == nil
+        if first { data = value }
+        lock.unlock()
+        if first { semaphore.signal() }
+    }
+
+    func wait(seconds: TimeInterval) -> Data? {
+        guard semaphore.wait(timeout: .now() + seconds) == .success else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        return data
     }
 }
 
