@@ -1300,6 +1300,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--tile-multiselect-check") {
+            do {
+                _ = NSApplication.shared
+                try TileMultiselectChecks.run()
+                print("TileMultiselectChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --tile-multiselect-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--tile-insert-slide-check") {
             do {
                 _ = NSApplication.shared
@@ -8782,6 +8793,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             let pointInCanvas = canvas.convert(event.locationInWindow, from: nil)
             let clickedTileId = canvas.tileId(at: pointInCanvas)
+            if canvas.tileSelection.consumeFocusRouting(for: event) {
+                self.workspaceRuntime?.noteUserInteraction()
+                return event
+            }
             Self.routeTileClickFocus(at: event.locationInWindow, in: canvas, focusBroker: self.focusBroker)
             // CX-01: a click is the user's newer intent for focus and selection.
             self.workspaceRuntime?.noteUserInteraction()

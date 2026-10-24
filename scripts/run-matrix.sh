@@ -31,19 +31,27 @@ unset TMUX TMUX_PANE
 trap 'rm -rf "$MATRIX_TMUX_TMPDIR"' EXIT
 
 FAST=0
+TILE_SELECTION_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
     --fast)
       FAST=1
       shift
       ;;
+    --tile-selection)
+      TILE_SELECTION_ONLY=1
+      shift
+      ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--fast]
+Usage: scripts/run-matrix.sh [--fast | --tile-selection]
 
 Runs the project verification matrix. --fast skips the slower packaging bundle
 probe and keeps the build/check/app-flag/git hygiene gates used by the opt-in
 pre-commit hook.
+--tile-selection rebuilds the app and CoreChecks, then runs the two group
+selection witnesses with the normal matrix accounting and isolation. It is a
+targeted development gate, not the full release matrix.
 USAGE
       exit 0
       ;;
@@ -381,6 +389,15 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+if [[ "$TILE_SELECTION_ONLY" -eq 1 ]]; then
+  run_leg scripts/check-color-hygiene.sh
+  run swift build --product Array
+  run swift build --product ContinuumRevivedCoreChecks
+  run_leg .build/debug/ContinuumRevivedCoreChecks --tile-selection-geometry-check
+  run_app_check .build/debug/Array --tile-multiselect-check
+  matrix_report 'Tile selection matrix (targeted)'
+  exit $?
+fi
 # Program 91 setup: keep the 50-ticket agent-tile queue, dependency order,
 # packet structure, ledger rows, and supervised review gates from drifting.
 run scripts/check-agent-tile-ux-program.sh
@@ -450,6 +467,7 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --external-session-discovery-che
 # "Messaged …" row. Neither section it draws from is a leg of its own.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-message-transcript-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --tile-selection-geometry-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
 # Film phase 1: the pairing page and the user-facing copy that must say Array.
 # Standalone because the bare CoreChecks run stops at its KNOWN-RED pin first.
@@ -690,6 +708,7 @@ run_app_check .build/debug/Array --palette-agent-harness-check
 run_app_check .build/debug/Array --reveal-in-finder-check
 run_app_check .build/debug/Array --spawn-arrange-commit-check
 run_app_check .build/debug/Array --tile-insert-slide-check
+run_app_check .build/debug/Array --tile-multiselect-check
 run_app_check .build/debug/Array --settle-closes-tile-check
 run_app_check .build/debug/Array --inbox-parent-fold-check
 # M1.11 (.plans/46): the toolbar "+" creates an EMPTY workspace and switches into

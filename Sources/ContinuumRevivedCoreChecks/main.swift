@@ -16,6 +16,12 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--tile-selection-geometry-check") {
+    runTileSelectionGeometryChecks()
+    print("TileSelectionGeometryChecks passed")
+    Foundation.exit(0)
+}
+
 // 0.7.24: an arm of its own, because the bare run is KNOWN-RED and a witness
 // inside it can fail without the matrix reporting it. The two older model
 // sections ride along for the same reason; until now they ran only there.

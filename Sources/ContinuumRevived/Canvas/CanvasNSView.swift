@@ -93,6 +93,7 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     private(set) var canvasState: CanvasState
+    lazy var tileSelection = CanvasTileSelection(canvas: self)
     private struct PendingGeometryEdit {
         var action: CanvasGeometryAction
         var tileIds: Set<UUID>
@@ -1435,6 +1436,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // WS7: arithmetic plus at most one `needsDisplay`. No layout, no decode,
         // no tile or zone work — which is what the background counters assert.
         backgroundRenderer.updateCamera(viewport: viewport)
+        tileSelection.updatePresentation()
         // The document-relationship overlay does NOT need a per-camera-step
         // recompute: it is a world-space sibling now (see
         // `updateDocumentRelationshipOverlay`'s doc comment), so its content is
@@ -2998,6 +3000,42 @@ final class CanvasNSView: NSView, TokenThemed {
         if notifyChange { delegate?.canvasDidChange(self, tileId: tile.id) }
     }
 
+    /// Group transforms are explicit manual placement: preserve the arrangement
+    /// and source memberships even when automatic layout is on. Stage all local
+    /// conversions before writing, then do one presentation pass, never K solves.
+    @discardableResult
+    func applySelectionFrames(_ frames: [UUID: TileFrame]) -> Bool {
+        var seen = Set<UUID>()
+        var flat: [(Int, TileFrame)] = []
+        var layered: [(ZoneLayer, Int, TileFrame)] = []
+        if flatCompatibilitySceneActive {
+            for index in canvasState.tiles.indices {
+                let id = canvasState.tiles[index].id
+                guard let frame = frames[id], seen.insert(id).inserted else { continue }
+                flat.append((index, frame))
+            }
+        }
+        for layer in zoneLayers {
+            for index in layer.tiles.indices {
+                let id = layer.tiles[index].id
+                guard let frame = frames[id], seen.insert(id).inserted else { continue }
+                guard !layer.placement.collapsed else { return false }
+                let local = CanvasEngine.worldToZoneLocalPreservingWorld(frame, zoneOrigin: layer.placement.origin)
+                    ?? CanvasEngine.worldToZoneLocal(frame, zoneOrigin: layer.placement.origin)
+                layered.append((layer, index, local))
+            }
+        }
+        guard seen.count == frames.count else { return false }
+        for (index, frame) in flat where canvasState.tiles[index].frame != frame {
+            canvasState.tiles[index].frame = frame
+        }
+        for (layer, index, frame) in layered where layer.tiles[index].frame != frame {
+            layer.tiles[index].frame = frame
+        }
+        layoutAllTiles(onlyChangedTiles: true)
+        return true
+    }
+
     /// UserDefaults the drag-snap toggle resolves from (`DragMagnetizeConfig`).
     /// Overridable so `runDragMagnetizeSelfCheck` can drive enabled/disabled
     /// deterministically without touching standard defaults.
@@ -3183,6 +3221,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// WKWebView, flush note save, purge descriptor) is the caller's
     /// responsibility — `removeTile` is the canvas-side teardown only.
     func removeTile(id: UUID) {
+        tileSelection.cancel()
         // C11: the shared parent going away leaves every edge unanchored, so the
         // whole set clears; a single child going away only drops its own edge —
         // the rest of the parent's fan is still real and still on screen.
@@ -3233,6 +3272,7 @@ final class CanvasNSView: NSView, TokenThemed {
         updateDocumentRelationshipOverlay()
         delegate?.canvasSidebarModelDidChange(self)
         delegate?.canvasDidChange(self)
+        tileSelection.refresh()
     }
 
     /// A tile the person CLOSED — ✕, ⌘⌫, or closing its agent to History, all of
@@ -3322,6 +3362,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // A lost mouse-up must never leave preview geometry half-committed. Roll
         // the model back and clear per-view gesture state before focus returns.
         if pendingGeometryEdit != nil {
+            tileSelection.cancel()
             cancelGeometryEdit()
             zoneGesture = .none
             pendingMovedPlacement = nil
@@ -3342,6 +3383,7 @@ final class CanvasNSView: NSView, TokenThemed {
 
     private func cancelActiveGeometryCapture() {
         guard pendingGeometryEdit != nil else { return }
+        tileSelection.cancel()
         cancelGeometryEdit()
         zoneGesture = .none
         pendingMovedPlacement = nil
@@ -3356,6 +3398,10 @@ final class CanvasNSView: NSView, TokenThemed {
     override func cancelOperation(_ sender: Any?) {
         if pendingGeometryEdit != nil {
             cancelActiveGeometryCapture()
+            return
+        }
+        if !tileSelection.ids.isEmpty {
+            tileSelection.clear()
             return
         }
         super.cancelOperation(sender)
@@ -5882,6 +5928,7 @@ final class CanvasNSView: NSView, TokenThemed {
         navModeOverlayView?.needsDisplay = true
         updateDocumentRelationshipOverlay()
         updateContextualAgentLineageGeometry()
+        tileSelection.refresh()
     }
 
     /// Position and scale one tile view for the current camera, writing only what
@@ -6066,6 +6113,8 @@ final class CanvasNSView: NSView, TokenThemed {
     func pointerPanRequested(for event: NSEvent) -> Bool {
         spaceHeld || event.modifierFlags.contains(.command)
     }
+
+    var isPointerPanActive: Bool { pointerPanActive }
 
     /// Start the shared pointer-pan lifecycle. Canvas background gestures and
     /// Cmd/Space drags whose AppKit target is tile chrome both delegate here so
@@ -6252,6 +6301,7 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     override func mouseDown(with event: NSEvent) {
+        tileSelection.preparePointerDown()
         guard !isZoneScopePickerActive else { return }
         if pointerPanRequested(for: event) {
             beginPointerPan(with: event)
@@ -6314,6 +6364,7 @@ final class CanvasNSView: NSView, TokenThemed {
             // Fall through to deselect on background click.
         }
         // Click on canvas background — deselect.
+        tileSelection.clear()
         canvasState.lastActiveTileId = nil
         delegate?.canvasDidChange(self)
         window?.makeFirstResponder(self)
@@ -6631,6 +6682,7 @@ final class CanvasNSView: NSView, TokenThemed {
     ///   `--workspace-sidebar-actions-check`. Defaults to the layer set for callers
     ///   that have no document (PerfScenarios and the older zone fixtures).
     func setZones(_ layers: [ZoneLayer], documentZones: [ZoneRenderModel]? = nil) {
+        tileSelection.clear()
         // Unregister + remove all currently installed layers.
         for layer in zoneLayers {
             for (_, view) in layer.tileViews {

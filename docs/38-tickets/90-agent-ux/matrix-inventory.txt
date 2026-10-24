@@ -231,8 +231,10 @@ check --tile-chrome-scale-check
 check --tile-drag-grab-check
 check --tile-insert-slide-check
 check --tile-materialize-check
+check --tile-multiselect-check
 check --tile-project-scope-check
 check --tile-reveal-work-check
+check --tile-selection-geometry-check
 check --tile-surface-residency-check
 check --tile-world-bounds-check
 check --tool-detail-check
@@ -317,6 +319,8 @@ leg run git diff --check
 leg run scripts/check-agent-tile-ux-program.sh
 leg run scripts/check-sidebar-native-ux-program.sh
 leg run swift build
+leg run swift build --product Array
+leg run swift build --product ContinuumRevivedCoreChecks
 leg run swift run ContinuumRevivedSyncIntegrationChecks
 leg run_app_check .build/debug/Array --add-zone-check
 leg run_app_check .build/debug/Array --agent-awareness-check
@@ -523,6 +527,7 @@ leg run_app_check .build/debug/Array --tile-chrome-scale-check
 leg run_app_check .build/debug/Array --tile-drag-grab-check
 leg run_app_check .build/debug/Array --tile-insert-slide-check
 leg run_app_check .build/debug/Array --tile-materialize-check
+leg run_app_check .build/debug/Array --tile-multiselect-check
 leg run_app_check .build/debug/Array --tile-project-scope-check
 leg run_app_check .build/debug/Array --tile-reveal-work-check
 leg run_app_check .build/debug/Array --tile-surface-residency-check
@@ -631,6 +636,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-c
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --registry-ownership-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-lifecycle-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --tile-selection-geometry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --transcript-rehydration-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --unreadable-canvas-store-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
@@ -665,7 +671,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 179
+count ContinuumRevivedCoreChecks 180
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

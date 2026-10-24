@@ -1012,6 +1012,7 @@ class TileNSView: NSView, TokenThemed {
     // MARK: - Mouse handling for drag and resize
 
     override func mouseDown(with event: NSEvent) {
+        canvas?.tileSelection.preparePointerDown()
         mouseDraggedSinceDown = false
         // A fresh pointer-down is an unconditional gesture boundary. Normally
         // mouseUp/cancellation clears these, but an interrupted AppKit sequence
@@ -1032,6 +1033,12 @@ class TileNSView: NSView, TokenThemed {
             return
         }
         let local = convert(event.locationInWindow, from: nil)
+        if canvas?.tileSelection.mouseDown(on: self, event: event,
+                                          isHeader: local.y < grabHeightInLocalCoordinates,
+                                          isResize: resizeEdge(at: local) != nil) == true {
+            dragKind = .none
+            return
+        }
         if let edge = resizeEdge(at: local) {
             dragKind = .resize(edge)
             canvas?.beginGeometryEdit(.resizeTile, tileIds: [tile.id], includeAllZones: true)
@@ -1050,6 +1057,7 @@ class TileNSView: NSView, TokenThemed {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if canvas?.tileSelection.mouseDragged(with: event) == true { return }
         mouseDraggedSinceDown = true
         guard let canvas else { return super.mouseDragged(with: event) }
         let dx = event.locationInWindow.x - dragLastWindowPoint.x
@@ -1120,6 +1128,7 @@ class TileNSView: NSView, TokenThemed {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if canvas?.tileSelection.mouseUp(with: event) == true { return }
         let completedDragKind = dragKind
         let wasClick = !mouseDraggedSinceDown
         dragKind = .none
