@@ -6,10 +6,13 @@ CONFIGURATION=release
 OUTPUT=""
 CHANNEL=dev
 FILM=0
+BUNDLE_ID=""
+BUNDLE_NAME=""
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/make-app-bundle.sh [--configuration debug|release] [--channel dev|prod] [--film] --output <path>
+Usage: scripts/make-app-bundle.sh [--configuration debug|release] [--channel dev|prod] [--film]
+                                  [--bundle-id <id> --name <name>] --output <path>
 
 Builds the SwiftPM Array executable and assembles a macOS .app bundle.
 Channel split: the DEFAULT is the dev channel (bundle id dev.arrayapp.macos.dev,
@@ -24,6 +27,10 @@ builds never rebuild for the flag, stamped with its own identity
 (dev.arrayapp.macos.film, "Array Film"). Dev channel only. Never reuse
 dev.arrayapp.macos.dev for a second bundle: TCC keys folder grants by bundle id,
 and two ad-hoc bundles sharing one id invalidate each other's grants.
+
+--bundle-id/--name stamp a separate dev-channel identity for a preview that must
+run beside "Array Dev" (e.g. dev.arrayapp.macos.sidebar, "Array Sidebar"), for
+the same TCC reason. Never the prod or the shared dev id.
 USAGE
 }
 
@@ -42,6 +49,16 @@ while [[ $# -gt 0 ]]; do
     --film)
       FILM=1
       shift
+      ;;
+    --bundle-id)
+      [[ $# -ge 2 ]] || { echo "missing value for --bundle-id" >&2; exit 2; }
+      BUNDLE_ID="$2"
+      shift 2
+      ;;
+    --name)
+      [[ $# -ge 2 ]] || { echo "missing value for --name" >&2; exit 2; }
+      BUNDLE_NAME="$2"
+      shift 2
       ;;
     --output)
       [[ $# -ge 2 ]] || { echo "missing value for --output" >&2; exit 2; }
@@ -72,6 +89,15 @@ esac
 
 [[ -n "$OUTPUT" ]] || { echo "--output <path> is required" >&2; usage >&2; exit 2; }
 [[ "$FILM" == 0 || "$CHANNEL" == dev ]] || { echo "--film is dev-channel only" >&2; exit 2; }
+if [[ -n "$BUNDLE_ID" || -n "$BUNDLE_NAME" ]]; then
+  [[ -n "$BUNDLE_ID" && -n "$BUNDLE_NAME" ]] || { echo "--bundle-id and --name go together" >&2; exit 2; }
+  [[ "$CHANNEL" == dev && "$FILM" == 0 ]] || { echo "--bundle-id is for dev-channel, non-film bundles" >&2; exit 2; }
+  case "$BUNDLE_ID" in
+    dev.arrayapp.macos|dev.arrayapp.macos.dev|dev.arrayapp.macos.film) echo "--bundle-id must not reuse $BUNDLE_ID" >&2; exit 2 ;;
+    dev.arrayapp.macos.*) ;;
+    *) echo "--bundle-id must start with dev.arrayapp.macos." >&2; exit 2 ;;
+  esac
+fi
 
 # The film recorder exists only in a -DARRAY_FILM build, kept in its own scratch
 # path; every other bundle (dev-app.sh, the release pipeline) builds without it.
@@ -169,6 +195,12 @@ if [[ "$FILM" == 1 ]]; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier dev.arrayapp.macos.film' "$OUTPUT/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleName "Array Film"' "$OUTPUT/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName "Array Film"' "$OUTPUT/Contents/Info.plist"
+fi
+
+if [[ -n "$BUNDLE_ID" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$OUTPUT/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName \"$BUNDLE_NAME\"" "$OUTPUT/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName \"$BUNDLE_NAME\"" "$OUTPUT/Contents/Info.plist"
 fi
 
 # Sparkle: SwiftPM links the executable against @rpath/Sparkle.framework/… but

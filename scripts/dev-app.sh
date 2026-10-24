@@ -35,6 +35,8 @@
 #   scripts/dev-app.sh --env KEY=VALUE   # extra env for the launch, repeatable
 #   DEV_PROJECT_ROOT=/path scripts/dev-app.sh
 #   DEV_APP_PATH=... scripts/dev-app.sh
+#   DEV_BUNDLE_ID=dev.arrayapp.macos.x DEV_BUNDLE_NAME="Array X" scripts/dev-app.sh
+#   DEV_APP_SUPPORT=/path scripts/dev-app.sh   # own store via CONTINUUM_APP_SUPPORT
 #
 # `--env` exists because a default-off feature flag is only dogfoodable if it can
 # reach the launch, and `open` starts a detached process that inherits nothing
@@ -82,7 +84,11 @@ if [[ "$CONFIGURATION" == release ]]; then
 else
   echo "==> building (debug, incremental)"
 fi
-"$ROOT_DIR/scripts/make-app-bundle.sh" --configuration "$CONFIGURATION" --output "$APP_PATH"
+bundle_args=(--configuration "$CONFIGURATION" --output "$APP_PATH")
+if [[ -n "${DEV_BUNDLE_ID:-}" ]]; then
+  bundle_args+=(--bundle-id "$DEV_BUNDLE_ID" --name "${DEV_BUNDLE_NAME:?DEV_BUNDLE_NAME goes with DEV_BUNDLE_ID}")
+fi
+"$ROOT_DIR/scripts/make-app-bundle.sh" "${bundle_args[@]}"
 
 if [[ $LAUNCH -eq 1 ]]; then
   mkdir -p "$PROJECT_ROOT"
@@ -96,6 +102,10 @@ if [[ $LAUNCH -eq 1 ]]; then
   # `${arr[@]+...}` because macOS ships bash 3.2, where an empty array under
   # `set -u` is an unbound variable rather than nothing.
   open_args=(--env "CONTINUUM_PROJECT_ROOT=$PROJECT_ROOT")
+  if [[ -n "${DEV_APP_SUPPORT:-}" ]]; then
+    mkdir -p "$DEV_APP_SUPPORT"
+    open_args+=(--env "CONTINUUM_APP_SUPPORT=$DEV_APP_SUPPORT")
+  fi
   for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do
     echo "==> extra env: $kv"
     open_args+=(--env "$kv")
