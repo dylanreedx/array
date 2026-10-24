@@ -1226,6 +1226,18 @@ enum ContinuumApp {
             }
             RunLoop.main.run()
         }
+        if CommandLine.arguments.contains("--sidebar-indicator-options-check") {
+            _ = NSApplication.shared
+            do {
+                let out = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                    .appendingPathComponent("qa-runs/sidebar-indicator-options", isDirectory: true)
+                print(try MainActor.assumeIsolated { try SidebarIndicatorOptions.write(to: out) }.path)
+                Foundation.exit(0)
+            } catch {
+                fputs("sidebar-indicator-options check failed: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--sidebar-motion-film-check") {
             _ = NSApplication.shared
             Task { @MainActor in
