@@ -2128,6 +2128,21 @@ enum ContinuumApp {
             RunLoop.main.run()
             return
         }
+        if CommandLine.arguments.contains("--canvas-pointer-path-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await CanvasPointerPathChecks.run()
+                    print("CanvasPointerPathChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL --canvas-pointer-path-check: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+            return
+        }
         if CommandLine.arguments.contains("--agent-tile-file-mention-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -19787,6 +19802,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// The app's focus broker, for an offline check that must construct a
     /// `WorkspaceRuntime` the way production does.
     var qaFocusBroker: FocusBroker { focusBroker }
+    /// QA (`--canvas-pointer-path-check`): the production click monitor, which a
+    /// headless mount leaves out.
+    func qaInstallTileFocusMonitor() { if tileFocusMonitor == nil { installTileFocusMonitor() } }
+    func qaRemoveTileFocusMonitor() {
+        if let monitor = tileFocusMonitor { NSEvent.removeMonitor(monitor) }
+        tileFocusMonitor = nil
+    }
 
     /// QA (M1.11): the palette surface, so a leg can assert it actually opened in a
     /// workspace with no active controller.

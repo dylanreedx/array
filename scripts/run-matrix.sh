@@ -404,6 +404,7 @@ if [[ "$AGENT_REFERENCE_ONLY" -eq 1 ]]; then
   run swift build --product Array
   run swift build --product ContinuumRevivedCoreChecks
   run_app_check .build/debug/Array --agent-tile-reference-check
+  run_app_check .build/debug/Array --canvas-pointer-path-check
   run_app_check .build/debug/Array --tile-multiselect-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --agent-composer-draft-store-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --agent-transcript-projection-check
@@ -665,6 +666,10 @@ run_app_check .build/debug/Array --agent-completion-semantic-check
 # an agent worked) was invisible to it.
 run_app_check .build/debug/Array --agent-tile-file-mention-check
 run_app_check .build/debug/Array --agent-tile-reference-check
+# Resize, title-bar focus, Shift-select, live agent moves, header references
+# and swaps, through NSApp.sendEvent: the window hit-test and the focus monitor
+# that direct `mouseDown` calls skipped while all four regressed in 0.7.31.
+run_app_check .build/debug/Array --canvas-pointer-path-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
 # Real installed-provider warning/compaction/task-retention acceptance spends
 # subscription usage. Opt in explicitly; ordinary matrix runs stay offline.
