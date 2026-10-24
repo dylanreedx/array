@@ -27,8 +27,10 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed, AgentPageZoomSca
     private let scrollView = NSScrollView(frame: .zero)
     private let stack = NSStackView(frame: .zero)
     private var references: [AgentPromptFileReference] = []
+    private var agentReferences: [AgentPromptReference] = []
 
     var onRemove: ((AgentPromptFileReference) -> Void)?
+    var onRemoveAgent: ((AgentPromptReference) -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -40,26 +42,48 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed, AgentPageZoomSca
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: references.isEmpty ? 0 : railHeight)
+        NSSize(width: NSView.noIntrinsicMetric, height: references.isEmpty && agentReferences.isEmpty ? 0 : railHeight)
     }
 
     func setReferences(_ newReferences: [AgentPromptFileReference]) {
         references = newReferences
+        rebuildChips()
+    }
+
+    func setAgentReferences(_ newReferences: [AgentPromptReference]) {
+        agentReferences = newReferences
+        setAccessibilityLabel("Referenced agents")
+        setAccessibilityHelp("Agents referenced in this draft. References do not send messages or share conversations.")
+        rebuildChips()
+    }
+
+    private func rebuildChips() {
         for view in stack.arrangedSubviews {
             stack.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
         let theme = effectiveTokenTheme
-        for reference in newReferences {
+        for reference in references {
             // A chip minted after a zoom apply is born scaled: the rail's own
             // rung is handed to the initializer.
-            let chip = ComposerFileReferenceChipView(reference: reference, zoom: pageZoom) { [weak self] removed in
-                self?.onRemove?(removed)
+            let contentType = UTType(reference.contentType)
+            let type = contentType?.localizedDescription ?? contentType?.preferredFilenameExtension?.uppercased() ?? "File"
+            let name = ComposerImageDisplay.sanitizedFilename(reference.displayName)
+            let chip = ComposerFileReferenceChipView(name: name, glyph: "▤", label: "File attachment, \(name), \(type)", zoom: pageZoom) { [weak self] in
+                self?.onRemove?(reference)
             }
             chip.applyTokens(theme: theme)
             stack.addArrangedSubview(chip)
         }
-        isHidden = newReferences.isEmpty
+        for reference in agentReferences {
+            let chip = ComposerFileReferenceChipView(name: reference.displayName, glyph: "@", label: "Referenced agent, \(reference.displayName)", zoom: pageZoom) { [weak self] in
+                self?.onRemoveAgent?(reference)
+            }
+            chip.toolTip = "\(reference.displayName) · \(reference.agentID.rawValue.uuidString)"
+            chip.applyTokens(theme: theme)
+            stack.addArrangedSubview(chip)
+        }
+        isHidden = references.isEmpty && agentReferences.isEmpty
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -140,6 +164,11 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed, AgentPageZoomSca
         stack.arrangedSubviews.compactMap { ($0 as? ComposerFileReferenceChipView)?.accessibilityLabel() }
     }
 
+    func qaRemoveAgent(at index: Int) {
+        guard agentReferences.indices.contains(index) else { return }
+        onRemoveAgent?(agentReferences[index])
+    }
+
     func qaRemove(at index: Int) {
         guard references.indices.contains(index) else { return }
         onRemove?(references[index])
@@ -151,8 +180,10 @@ private final class ComposerFileReferenceChipView: NSView {
     private let glyphLabel = NSTextField(labelWithString: "")
     private let nameLabel = NSTextField(labelWithString: "")
     private let removeButton = NSButton(title: "×", target: nil, action: nil)
-    private let reference: AgentPromptFileReference
-    private let onRemove: (AgentPromptFileReference) -> Void
+    private let displayName: String
+    private let glyph: String
+    private let chipLabel: String
+    private let onRemove: () -> Void
 
     private(set) var pageZoom: AgentPageZoom
 
@@ -168,11 +199,13 @@ private final class ComposerFileReferenceChipView: NSView {
     private var removeHeightConstraint: NSLayoutConstraint!
 
     init(
-        reference: AgentPromptFileReference,
+        name: String, glyph: String, label: String,
         zoom: AgentPageZoom = .default,
-        onRemove: @escaping (AgentPromptFileReference) -> Void
+        onRemove: @escaping () -> Void
     ) {
-        self.reference = reference
+        self.displayName = name
+        self.glyph = glyph
+        self.chipLabel = label
         self.pageZoom = zoom
         self.onRemove = onRemove
         super.init(frame: .zero)
@@ -188,11 +221,11 @@ private final class ComposerFileReferenceChipView: NSView {
         wantsLayer = true
         setAccessibilityRole(.group)
 
-        glyphLabel.stringValue = "▤"
+        glyphLabel.stringValue = glyph
         glyphLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(glyphLabel)
 
-        nameLabel.stringValue = ComposerImageDisplay.sanitizedFilename(reference.displayName)
+        nameLabel.stringValue = displayName
         nameLabel.lineBreakMode = .byTruncatingMiddle
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -204,7 +237,7 @@ private final class ComposerFileReferenceChipView: NSView {
         removeButton.target = self
         removeButton.action = #selector(removePressed(_:))
         removeButton.translatesAutoresizingMaskIntoConstraints = false
-        removeButton.setAccessibilityLabel("Remove file attachment")
+        removeButton.setAccessibilityLabel(glyph == "@" ? "Remove agent reference" : "Remove file attachment")
         addSubview(removeButton)
 
         heightConstraint = heightAnchor.constraint(equalToConstant: 0)
@@ -269,16 +302,9 @@ private final class ComposerFileReferenceChipView: NSView {
         removeButton.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
     }
 
-    private func accessibilityChipLabel() -> String {
-        "File attachment, \(ComposerImageDisplay.sanitizedFilename(reference.displayName)), \(typeLabel())"
-    }
-
-    private func typeLabel() -> String {
-        guard let type = UTType(reference.contentType) else { return "File" }
-        return type.localizedDescription ?? type.preferredFilenameExtension?.uppercased() ?? "File"
-    }
+    private func accessibilityChipLabel() -> String { chipLabel }
 
     @objc private func removePressed(_ sender: NSButton) {
-        onRemove(reference)
+        onRemove()
     }
 }

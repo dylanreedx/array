@@ -658,7 +658,7 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
     /// tool without copying arbitrary project bytes into JSON.
     public static func promptPayloadText(_ prompt: AgentPrompt) -> String {
         var segments: [String] = []
-        if !prompt.text.isEmpty { segments.append(prompt.text) }
+        if !prompt.providerText.isEmpty { segments.append(prompt.providerText) }
         segments.append(contentsOf: prompt.fileReferences.map(\.piPathReference))
         return segments.joined(separator: " ")
     }

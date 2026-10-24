@@ -32,6 +32,7 @@ trap 'rm -rf "$MATRIX_TMUX_TMPDIR"' EXIT
 
 FAST=0
 TILE_SELECTION_ONLY=0
+AGENT_REFERENCE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
     --fast)
@@ -42,9 +43,13 @@ if [[ $# -gt 0 ]]; then
       TILE_SELECTION_ONLY=1
       shift
       ;;
+    --agent-reference)
+      AGENT_REFERENCE_ONLY=1
+      shift
+      ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--fast | --tile-selection]
+Usage: scripts/run-matrix.sh [--fast | --tile-selection | --agent-reference]
 
 Runs the project verification matrix. --fast skips the slower packaging bundle
 probe and keeps the build/check/app-flag/git hygiene gates used by the opt-in
@@ -52,6 +57,9 @@ pre-commit hook.
 --tile-selection rebuilds the app and CoreChecks, then runs the two group
 selection witnesses with the normal matrix accounting and isolation. It is a
 targeted development gate, not the full release matrix.
+--agent-reference rebuilds app/CoreChecks and reports reference transport,
+draft/transcript contracts and group-selection coexistence. It is also a
+targeted development gate; full release verification remains required.
 USAGE
       exit 0
       ;;
@@ -389,6 +397,20 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+# The executable-prefix structural guards already ran above. The scoped
+# reference gate leaves their lengthy mutation self-tests to the full matrix.
+if [[ "$AGENT_REFERENCE_ONLY" -eq 1 ]]; then
+  run_leg scripts/check-color-hygiene.sh
+  run swift build --product Array
+  run swift build --product ContinuumRevivedCoreChecks
+  run_app_check .build/debug/Array --agent-tile-reference-check
+  run_app_check .build/debug/Array --tile-multiselect-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --agent-composer-draft-store-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --agent-transcript-projection-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --agent-prompt-image-contract-check
+  matrix_report 'Agent reference matrix (targeted)'
+  exit $?
+fi
 if [[ "$TILE_SELECTION_ONLY" -eq 1 ]]; then
   run_leg scripts/check-color-hygiene.sh
   run swift build --product Array
@@ -635,6 +657,7 @@ run_app_check .build/debug/Array --agent-completion-semantic-check
 # tile rebinding its context on every agent event (which closed the menu while
 # an agent worked) was invisible to it.
 run_app_check .build/debug/Array --agent-tile-file-mention-check
+run_app_check .build/debug/Array --agent-tile-reference-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
 # Real installed-provider warning/compaction/task-retention acceptance spends
 # subscription usage. Opt in explicitly; ordinary matrix runs stay offline.

@@ -2042,6 +2042,21 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--agent-tile-reference-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await AgentReferenceChecks.run()
+                    print("AgentReferenceChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL --agent-tile-reference-check: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+            return
+        }
         if CommandLine.arguments.contains("--agent-tile-file-mention-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -8786,6 +8801,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self, let canvas = self.canvasView else { return event }
             guard let window = canvas.window, event.window === window else { return event }
             guard !self.inWindowModalIsPresented(in: window) else { return event }
+            // A reference control owns its pointer sequence independently of
+            // focus mode and tile selection.
+            if AgentReferenceDragHandle.isTracking(in: event.window) {
+                self.workspaceRuntime?.noteUserInteraction()
+                return event
+            }
             if let session = self.focusModeSession {
                 _ = self.visitFocusModeTile(
                     at: event.locationInWindow, candidateTileIDs: session.protectedTileIds)

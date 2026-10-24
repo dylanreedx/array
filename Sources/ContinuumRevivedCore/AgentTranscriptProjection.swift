@@ -500,7 +500,9 @@ public struct AgentTranscriptProjection: Sendable {
         // shows what the user did — the task, then their own words. Recognised
         // here, the one seam the live send and every provider's rehydration
         // share, so a relaunched transcript reads the same as the live one.
-        var proseText = prompt.text
+        let referenceEnvelope = AgentReferencePromptEnvelope.parse(prompt.text)
+        let references = AgentPromptReference.unique(prompt.agentReferences + (referenceEnvelope?.references ?? []))
+        var proseText = referenceEnvelope?.text ?? prompt.text
         if case let .agentMessage(message) = inbound {
             // The turn is the sender's, so the card replaces the prose: nothing
             // of it may draw as something the user typed.
@@ -510,13 +512,19 @@ public struct AgentTranscriptProjection: Sendable {
                 payload: .agentMessage(message)
             )))
             proseText = ""
-        } else if let task = BoardTaskPromptEnvelope.parse(prompt.text) {
+        } else if let task = BoardTaskPromptEnvelope.parse(proseText) {
             mutations.append(.upsertStructured(entryID: id, block: AgentBlock(
                 id: childID(of: id, key: "task"),
                 kind: .taskReference,
                 payload: .taskReference(task.transcriptReference)
             )))
             proseText = task.additionalInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if !references.isEmpty {
+            let labels = references.map { "@\($0.displayName)" }.joined(separator: ", ")
+            mutations.append(.upsertStructured(entryID: id, block: AgentBlock(
+                id: childID(of: id, key: "agent-mentions"), kind: .paragraph,
+                payload: .paragraph([.text("Referenced agents: " + labels)]))))
         }
         let hasStructuredBlocks = mutations.count > 1
         // Attachment blocks precede prose so the sent turn preserves the

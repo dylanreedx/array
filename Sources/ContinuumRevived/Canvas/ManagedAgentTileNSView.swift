@@ -123,6 +123,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// only under the v2 fixture flag. The compatibility shell and its baselines
     /// remain untouched until final live migration.
     private let agentHeader = AgentTileHeaderView()
+    private let referenceDragHandle = AgentReferenceDragHandle(frame: .zero)
+    private var referenceDropTask: Task<Void, Never>?
     /// The compact row is the sole live Home/Where/What and activity surface;
     /// its action button remains the host's native location route. The former
     /// location view stays hidden in the hierarchy only for its existing theme
@@ -434,6 +436,20 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             object: nil)
         agentHeader.installStatusBadge(awarenessBadge)
         enableTitleBarActions()
+        referenceDragHandle.tileView = self
+        referenceDragHandle.referenceProvider = { [weak self] in
+            guard let self, let id = self.attachedAgentID,
+                  let record = self.agentSource?.records[id] else { return nil }
+            return AgentPromptReference(agentID: id, displayName: record.humanDisplayName)
+        }
+        setReferenceDragControl(referenceDragHandle)
+        registerForDraggedTypes([AgentReferenceDragHandle.pasteboardType])
+        v2Composer?.textView.onAgentReferenceDrag = { [weak self] pasteboard, commit in
+            self?.handleAgentReference(pasteboard, commit: commit) ?? false
+        }
+        v2Composer?.textView.onAgentReferenceDragExited = { [weak self] in
+            self?.v2Composer?.setReferenceDropHighlight(false)
+        }
         compactStatusRow.hideLocationActions()
         refreshTitleBarIdentity()
         // TileNSView establishes its compatibility border after its polymorphic
@@ -858,6 +874,88 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         synchronizeV2Transcript(final: true)
         scheduleStreamingMarkupParseTimerIfNeeded()
     }
+
+    var agentReferenceForDragging: AgentPromptReference? {
+        guard let id = attachedAgentID, let record = agentSource?.records[id] else { return nil }
+        return AgentPromptReference(agentID: id, displayName: record.humanDisplayName)
+    }
+
+    func acceptsAgentReference(_ reference: AgentPromptReference) -> Bool {
+        guard let target = attachedAgentID, target != reference.agentID,
+              let records = agentSource?.records,
+              let source = records[reference.agentID], let recipient = records[target] else { return false }
+        return source.projectId == recipient.projectId && terminalFaceSession == nil
+            && !composeBackdrop.isHidden && v2Composer != nil && !isHiddenOrHasHiddenAncestor
+    }
+
+    var agentReferenceComposerFrameInWindow: NSRect? {
+        guard window != nil, !composeBackdrop.isHidden, !composeBackdrop.bounds.isEmpty,
+              !isHiddenOrHasHiddenAncestor else { return nil }
+        return composeBackdrop.convert(composeBackdrop.bounds, to: nil)
+    }
+
+    func setAgentReferenceDropHighlight(_ value: Bool) {
+        v2Composer?.setReferenceDropHighlight(value)
+    }
+
+    /// A separate native drop destination. No tile geometry, zone, selection,
+    /// or canvas persistence callbacks participate in this route.
+    @discardableResult
+    func handleAgentReference(_ pasteboard: NSPasteboard, commit: Bool) -> Bool {
+        guard let reference = AgentReferenceDragHandle.reference(from: pasteboard) else { return false }
+        return handleAgentReference(reference, commit: commit)
+    }
+
+    @discardableResult
+    func handleAgentReference(_ reference: AgentPromptReference, commit: Bool) -> Bool {
+        guard let target = attachedAgentID, target != reference.agentID,
+              let supervisor = agentSource,
+              let sourceRecord = supervisor.records[reference.agentID],
+              let targetRecord = supervisor.records[target],
+              sourceRecord.projectId == targetRecord.projectId,
+              terminalFaceSession == nil, !composeBackdrop.isHidden,
+              let composer = v2Composer else {
+            v2Composer?.setReferenceDropHighlight(false)
+            return false
+        }
+        promoteForIncomingFocus()
+        guard commit else { composer.setReferenceDropHighlight(true); return true }
+        composer.setReferenceDropHighlight(false)
+        // Resolve the display snapshot from the trusted record, never the
+        // pasteboard's label. The stable ID remains the only lookup key.
+        let trusted = AgentPromptReference(agentID: reference.agentID, displayName: sourceRecord.humanDisplayName)
+        let previous = referenceDropTask
+        referenceDropTask = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self, self.attachedAgentID == target, !Task.isCancelled else { return }
+            let accepted = await composer.addAgentReferenceAfterRestore(trusted, expectedAgentID: target)
+            if accepted, self.attachedAgentID == target { self.window?.makeFirstResponder(composer.textView) }
+        }
+        return true
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        handleAgentReference(sender.draggingPasteboard, commit: false) ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        draggingEntered(sender)
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        v2Composer?.setReferenceDropHighlight(false)
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        handleAgentReference(sender.draggingPasteboard, commit: false)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        handleAgentReference(sender.draggingPasteboard, commit: true)
+    }
+
+    var qaReferenceDragHandle: AgentReferenceDragHandle { referenceDragHandle }
+    func qaAwaitReferenceDrop() async { await referenceDropTask?.value }
 
     override func layout() {
         super.layout()
@@ -4107,11 +4205,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 canSteer: capabilities.canSteer,
                 canQueue: capabilities.canQueue
             ),
-            hasDraft: v2Composer?.draft.taskContext != nil || !(v2Composer?.draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            hasDraft: !(v2Composer?.draft.agentReferences.isEmpty ?? true) || v2Composer?.draft.taskContext != nil || !(v2Composer?.draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         )
         // 2026-10-13 — a draft typed while the turn works is offered its ways
         // in beside the Stop; an empty busy composer offers Stop alone.
-        let hasDraft = v2Composer?.draft.taskContext != nil
+        let hasDraft = !(v2Composer?.draft.agentReferences.isEmpty ?? true) || v2Composer?.draft.taskContext != nil
             || !(v2Composer?.draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         let workingNow = snapshot?.executionState == .working
         applyWorkingSendChoices(

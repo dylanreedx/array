@@ -311,7 +311,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// the shared contract with codex's positional prompt.
     public static func promptArgument(_ prompt: AgentPrompt) -> String {
         var segments: [String] = []
-        if !prompt.text.isEmpty { segments.append(prompt.text) }
+        if !prompt.providerText.isEmpty { segments.append(prompt.providerText) }
         segments.append(contentsOf: prompt.imageAttachments.map(\.piPathReference))
         segments.append(contentsOf: prompt.fileReferences.map(\.piPathReference))
         return segments.joined(separator: "\n")
@@ -322,7 +322,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// native image blocks instead — the same split pi's rpc prompt makes.
     public static func userMessageText(_ prompt: AgentPrompt) -> String {
         var segments: [String] = []
-        if !prompt.text.isEmpty { segments.append(prompt.text) }
+        if !prompt.providerText.isEmpty { segments.append(prompt.providerText) }
         segments.append(contentsOf: prompt.fileReferences.map(\.piPathReference))
         return segments.joined(separator: "\n")
     }

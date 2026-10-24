@@ -4,6 +4,7 @@ check --agent-awareness-check
 check --agent-compaction-check
 check --agent-compaction-ui-check
 check --agent-completion-semantic-check
+check --agent-composer-draft-store-check
 check --agent-context-live-compaction-check
 check --agent-display-name-check
 check --agent-face-flip-check
@@ -24,6 +25,7 @@ check --agent-paused-elsewhere-check
 check --agent-presence-check
 check --agent-process-tracker-check
 check --agent-process-tracking-check
+check --agent-prompt-image-contract-check
 check --agent-restore-check
 check --agent-status-check
 check --agent-steering-recovery-check
@@ -33,6 +35,7 @@ check --agent-supervisor-check
 check --agent-tile-binding-check
 check --agent-tile-click-focus-check
 check --agent-tile-file-mention-check
+check --agent-tile-reference-check
 check --agent-transcript-projection-check
 check --ambient-tile-frame-space-check
 check --app-support-channel-check
@@ -352,6 +355,7 @@ leg run_app_check .build/debug/Array --agent-supervisor-check
 leg run_app_check .build/debug/Array --agent-tile-binding-check
 leg run_app_check .build/debug/Array --agent-tile-click-focus-check
 leg run_app_check .build/debug/Array --agent-tile-file-mention-check
+leg run_app_check .build/debug/Array --agent-tile-reference-check
 leg run_app_check .build/debug/Array --ambient-tile-frame-space-check
 leg run_app_check .build/debug/Array --app-support-channel-check
 leg run_app_check .build/debug/Array --attention-notification-check
@@ -609,8 +613,10 @@ leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-composer-draft-store-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-message-transcript-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-process-tracking-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-prompt-image-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-transcript-projection-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check

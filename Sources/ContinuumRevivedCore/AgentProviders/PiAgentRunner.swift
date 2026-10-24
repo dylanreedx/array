@@ -123,7 +123,7 @@ public final class PiAgentRunner: @unchecked Sendable {
     /// each image is materialized as its own `@/local/file` token.
     public static func promptArgumentSegments(_ prompt: AgentPrompt) -> [String] {
         var segments: [String] = []
-        if !prompt.text.isEmpty { segments.append(prompt.text) }
+        if !prompt.providerText.isEmpty { segments.append(prompt.providerText) }
         segments.append(contentsOf: prompt.imageAttachments.map(\.piPathReference))
         segments.append(contentsOf: prompt.fileReferences.map(\.piPathReference))
         return segments.isEmpty ? [""] : segments

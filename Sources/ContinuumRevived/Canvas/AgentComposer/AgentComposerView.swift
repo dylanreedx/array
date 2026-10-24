@@ -11,6 +11,7 @@ struct AgentComposerDraft: Equatable {
     var revision: UInt64
     var imageAttachments: [AgentPromptImageAttachment] = []
     var fileReferences: [AgentPromptFileReference] = []
+    var agentReferences: [AgentPromptReference] = []
     var taskContext: BoardTaskContext? = nil
 
     static let empty = AgentComposerDraft(text: "", selection: NSRange(location: 0, length: 0), revision: 0, imageAttachments: [], fileReferences: [])
@@ -77,6 +78,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     private let attachmentRailHeightConstraint: NSLayoutConstraint
     private let fileReferenceRail: ComposerFileReferenceRailView
     private let fileReferenceRailHeightConstraint: NSLayoutConstraint
+    private let agentReferenceRail: ComposerFileReferenceRailView
+    private let agentReferenceRailHeightConstraint: NSLayoutConstraint
     private let replyOptionRail: ComposerReplyOptionRailView
     private let replyOptionRailHeightConstraint: NSLayoutConstraint
     private var replyOptions: [AgentReplyOption] = []
@@ -120,6 +123,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     private var attachmentStore: AgentComposerAttachmentStore?
     private var importedAttachments: [AgentPromptImageAttachment] = []
     private var importedFileReferences: [AgentPromptFileReference] = []
+    private var importedAgentReferences: [AgentPromptReference] = []
     private var imageImportFailureCount = 0
     private var imageImportFailureCategories: [String] = []
 
@@ -188,6 +192,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// is insufficient when the same composer view is rebound more than once.
     private var bindingGeneration: UInt64 = 0
     private(set) var isEditorFocused = false
+    private var referenceDropHighlighted = false
+
+    func setReferenceDropHighlight(_ value: Bool) {
+        guard referenceDropHighlighted != value else { return }
+        referenceDropHighlighted = value
+        applyTokens()
+    }
     private var isApplyingDraft = false
     private let heightController: ComposerHeightController
     /// WS5: the tile's page-zoom rung, delivered by the subtree walk.
@@ -234,6 +245,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         attachmentRailHeightConstraint = attachmentRail.heightAnchor.constraint(equalToConstant: 0)
         fileReferenceRail = ComposerFileReferenceRailView(frame: .zero)
         fileReferenceRailHeightConstraint = fileReferenceRail.heightAnchor.constraint(equalToConstant: 0)
+        agentReferenceRail = ComposerFileReferenceRailView(frame: .zero)
+        agentReferenceRailHeightConstraint = agentReferenceRail.heightAnchor.constraint(equalToConstant: 0)
         replyOptionRail = ComposerReplyOptionRailView(frame: .zero)
         replyOptionRailHeightConstraint = replyOptionRail.heightAnchor.constraint(equalToConstant: 0)
         queuedMessageRail = ComposerQueuedMessageRailView(frame: .zero)
@@ -258,6 +271,14 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         fileReferenceRail.translatesAutoresizingMaskIntoConstraints = false
         fileReferenceRail.onRemove = { [weak self] reference in
             self?.removeFileReference(reference)
+        }
+        agentReferenceRail.translatesAutoresizingMaskIntoConstraints = false
+        agentReferenceRail.onRemoveAgent = { [weak self] reference in
+            guard let self else { return }
+            self.importedAgentReferences.removeAll { $0.agentID == reference.agentID }
+            self.draft.revision &+= 1
+            self.updateAgentReferenceRail()
+            self.publishDraftChange()
         }
         replyOptionRail.translatesAutoresizingMaskIntoConstraints = false
         replyOptionRail.onSelect = { [weak self] option in
@@ -295,6 +316,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             taskContextButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12)])
         addSubview(replyOptionRail)
         addSubview(fileReferenceRail)
+        addSubview(agentReferenceRail)
         addSubview(attachmentRail)
         addSubview(scrollView)
         keyHintLabel.font = .token(.caption, zoom: pageZoom)
@@ -315,6 +337,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         leadingPaddingConstraints = [
             replyOptionRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
             fileReferenceRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
+            agentReferenceRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
             attachmentRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
             scrollView.topAnchor.constraint(equalTo: attachmentRail.bottomAnchor, constant: padding),
@@ -323,6 +346,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         trailingPaddingConstraints = [
             replyOptionRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
             fileReferenceRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
+            agentReferenceRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
             attachmentRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
             keyHintLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -padding),
@@ -335,7 +359,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             fileReferenceRailHeightConstraint,
             fileReferenceRail.topAnchor.constraint(equalTo: replyOptionRail.bottomAnchor),
             attachmentRailHeightConstraint,
-            attachmentRail.topAnchor.constraint(equalTo: fileReferenceRail.bottomAnchor),
+            agentReferenceRailHeightConstraint,
+            agentReferenceRail.topAnchor.constraint(equalTo: fileReferenceRail.bottomAnchor),
+            attachmentRail.topAnchor.constraint(equalTo: agentReferenceRail.bottomAnchor),
             keyHintHeightConstraint,
             keyHintGapConstraint,
             keyHintLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -padding),
@@ -392,7 +418,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         let hintHeight = (keyHintHeightConstraint?.constant ?? 0) + (keyHintGapConstraint?.constant ?? 0)
         return NSSize(
             width: NSView.noIntrinsicMetric,
-            height: (taskContextHeight?.constant ?? 0) + editorHeight + (internalPadding * 2) + railHeight + fileRailHeight + optionRailHeight + hintHeight
+            height: (taskContextHeight?.constant ?? 0) + editorHeight + (internalPadding * 2) + railHeight + fileRailHeight + (agentReferenceRail.isHidden ? 0 : ComposerFileReferenceRailView.railHeight(zoom: pageZoom)) + optionRailHeight + hintHeight
         )
     }
 
@@ -489,6 +515,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             guard let stored else {
                 self.importedAttachments = []
                 self.importedFileReferences = []
+                self.importedAgentReferences = []
                 self.updateAttachmentRail()
                 self.updateFileReferenceRail()
                 self.apply(.empty)
@@ -522,6 +549,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 revision: 0,
                 imageAttachments: resolved,
                 fileReferences: resolvedFileReferences,
+                agentReferences: stored.agentReferences,
                 taskContext: stored.taskContext
             ))
         }
@@ -649,6 +677,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 revision: self.draft.revision &+ 1,
                 imageAttachments: self.importedAttachments + images,
                 fileReferences: self.importedFileReferences + self.resolvedFileReferences(from: message.fileReferences),
+                agentReferences: AgentPromptReference.unique(self.importedAgentReferences + message.agentReferences),
                 taskContext: self.draft.taskContext))
             self.publishDraftChange()
             self.window?.makeFirstResponder(self.textView)
@@ -664,7 +693,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
 
     private var hasDraftContent: Bool {
         !textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || draft.taskContext != nil
+            || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || !importedAgentReferences.isEmpty || draft.taskContext != nil
     }
 
     func unbindActionSink() {
@@ -710,14 +739,17 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         textView.setSelectedRange(safeSelection)
         importedAttachments = newDraft.imageAttachments
         importedFileReferences = newDraft.fileReferences
+        importedAgentReferences = AgentPromptReference.unique(newDraft.agentReferences)
         updateAttachmentRail()
         updateFileReferenceRail()
+        updateAgentReferenceRail()
         draft = AgentComposerDraft(
             text: newDraft.text,
             selection: safeSelection,
             revision: newDraft.revision,
             imageAttachments: importedAttachments,
             fileReferences: importedFileReferences,
+            agentReferences: importedAgentReferences,
             taskContext: newDraft.taskContext
         )
         updateTaskContextRail()
@@ -754,6 +786,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         // constant means the rail is currently withdrawn, and scaling must not
         // bring it back.
         rescaleRail(replyOptionRailHeightConstraint, to: ComposerReplyOptionRailView.railHeight(zoom: pageZoom))
+        rescaleRail(agentReferenceRailHeightConstraint, to: ComposerFileReferenceRailView.railHeight(zoom: pageZoom))
         rescaleRail(fileReferenceRailHeightConstraint, to: ComposerFileReferenceRailView.railHeight(zoom: pageZoom))
         rescaleRail(attachmentRailHeightConstraint, to: ComposerImageAttachmentRailView.railHeight(zoom: pageZoom))
         keyHintLabel.font = .token(.caption, zoom: pageZoom)
@@ -779,8 +812,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         layer?.cornerRadius = Self.cornerRadius(zoom: pageZoom)
         let theme = effectiveTokenTheme
         layer?.backgroundColor = AgentSurfaceRole.composer.color.cgColor(for: theme)
-        layer?.borderColor = (isEditorFocused ? AgentLineRole.focusRing : .decorativeHairline).color.cgColor(for: theme)
-        layer?.borderWidth = isEditorFocused ? Self.focusedBorderWidth : Self.idleBorderWidth
+        layer?.borderColor = (isEditorFocused || referenceDropHighlighted ? AgentLineRole.focusRing : .decorativeHairline).color.cgColor(for: theme)
+        layer?.borderWidth = isEditorFocused || referenceDropHighlighted ? Self.focusedBorderWidth : Self.idleBorderWidth
         placeholderLabel.font = .token(.body, zoom: pageZoom)
         placeholderLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
         keyHintLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
@@ -927,7 +960,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     func composerHasSendableAttachments(_ textView: ComposerTextView) -> Bool {
-        !importedAttachments.isEmpty || !importedFileReferences.isEmpty || draft.taskContext != nil
+        !importedAttachments.isEmpty || !importedFileReferences.isEmpty || !importedAgentReferences.isEmpty || draft.taskContext != nil
     }
 
     func composerRequestedSend(_ textView: ComposerTextView) {
@@ -943,14 +976,14 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         }
         qaSendRequestCount += 1
         let prompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || draft.taskContext != nil else { return }
+        guard !prompt.isEmpty || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || !importedAgentReferences.isEmpty || draft.taskContext != nil else { return }
         if let snapshot = turnSnapshot, actionSink != nil, draftAgentID != nil {
             let resolver = AgentComposerIntentState(
                 executionState: snapshot.executionState,
                 capabilities: snapshot.capabilities
             )
             let intent: AgentComposerIntent?
-            if draft.taskContext == nil, importedAttachments.isEmpty, importedFileReferences.isEmpty,
+            if draft.taskContext == nil, importedAttachments.isEmpty, importedFileReferences.isEmpty, importedAgentReferences.isEmpty,
                let invocation = resolvedSelectedCommand(in: prompt)
                 ?? typedArrayCompactInvocation(in: prompt) {
                 // By descriptor ID, not by name. `/compact` is Array's own typed
@@ -971,11 +1004,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                     // user had no way to tell whether the command had run.
                     intent = .providerCommand(invocation)
                 }
-            } else if !importedAttachments.isEmpty || !importedFileReferences.isEmpty || draft.taskContext != nil {
+            } else if !importedAttachments.isEmpty || !importedFileReferences.isEmpty || !importedAgentReferences.isEmpty || draft.taskContext != nil {
                 let attachedPrompt = AgentPrompt(
                     text: draft.taskContext?.promptText(additionalInstructions: prompt) ?? prompt,
                     imageAttachments: importedAttachments,
-                    fileReferences: importedFileReferences
+                    fileReferences: importedFileReferences,
+                    agentReferences: importedAgentReferences
                 )
                 switch snapshot.executionState {
                 case .ready:
@@ -1001,11 +1035,11 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             )
         } else if let onSubmitIntent {
             pendingSubmittedPrompt = nil
-            guard onSubmitIntent(prompt) else { return }
+            guard onSubmitIntent(AgentReferencePromptEnvelope.text(prompt, references: importedAgentReferences)) else { return }
             completeAcceptedSend(prompt)
         } else if let onSubmitPrompt {
             pendingSubmittedPrompt = prompt
-            onSubmitPrompt(prompt)
+            onSubmitPrompt(AgentReferencePromptEnvelope.text(prompt, references: importedAgentReferences))
         }
     }
 
@@ -1288,6 +1322,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             revision: textChanged ? draft.revision &+ 1 : draft.revision,
             imageAttachments: importedAttachments,
             fileReferences: importedFileReferences,
+            agentReferences: importedAgentReferences,
             taskContext: draft.taskContext
         )
         onDraftChange?(draft)
@@ -1298,6 +1333,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 updatedAt: Date(),
                 imageAttachments: importedAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) },
                 fileReferences: persistedFileReferences(),
+                agentReferences: importedAgentReferences,
                 taskContext: draft.taskContext
             )
             Task { await draftStore.save(persisted, for: draftAgentID) }
@@ -1502,7 +1538,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             updatedAt: Date(),
             imageAttachments: importedAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) },
             fileReferences: persistedFileReferences(),
-                taskContext: draft.taskContext
+            agentReferences: importedAgentReferences,
+            taskContext: draft.taskContext
         )
     }
 
@@ -1548,6 +1585,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             revision: draft.revision &+ 1,
             imageAttachments: resolved,
             fileReferences: resolvedFileReferences,
+            agentReferences: persisted.agentReferences,
             taskContext: persisted.taskContext
         ))
     }
@@ -1762,6 +1800,43 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         textView.insertCompletion(option, replacementRange: fullRange)
         textView.window?.makeFirstResponder(textView)
     }
+
+    func addAgentReferenceAfterRestore(_ reference: AgentPromptReference, expectedAgentID: AgentID) async -> Bool {
+        let generation = bindingGeneration
+        await restoreTask?.value
+        guard !Task.isCancelled, isCurrentBinding(agentID: expectedAgentID, generation: generation) else { return false }
+        return addAgentReference(reference)
+    }
+
+    func qaAwaitDraftRestore() async { await restoreTask?.value }
+
+    /// Called by the tile's private reference-drop route. This only edits a
+    /// draft; agent identity never enters the canvas move/layout lifecycle.
+    @discardableResult
+    func addAgentReference(_ reference: AgentPromptReference) -> Bool {
+        guard reference.agentID != draftAgentID else { return false }
+        if importedAgentReferences.contains(where: { $0.agentID == reference.agentID }) { return true }
+        guard importedAgentReferences.count < 16 else {
+            showTransientHint("A draft can reference up to 16 agents.")
+            return false
+        }
+        importedAgentReferences.append(reference)
+        draft.revision &+= 1
+        updateAgentReferenceRail()
+        publishDraftChange()
+        editorContentsChanged()
+        return true
+    }
+
+    private func updateAgentReferenceRail() {
+        agentReferenceRail.setAgentReferences(importedAgentReferences)
+        agentReferenceRailHeightConstraint.constant = importedAgentReferences.isEmpty ? 0 : ComposerFileReferenceRailView.railHeight(zoom: pageZoom)
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
+    var qaAgentReferences: [AgentPromptReference] { importedAgentReferences }
+    func qaRemoveAgentReference(at index: Int) { agentReferenceRail.qaRemoveAgent(at: index) }
 
     private func updateFileReferenceRail() {
         fileReferenceRail.setReferences(importedFileReferences)

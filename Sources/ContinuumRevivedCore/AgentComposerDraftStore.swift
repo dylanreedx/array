@@ -41,6 +41,7 @@ public struct AgentComposerDraft: Codable, Equatable, Sendable {
     public var imageAttachments: [AgentComposerDraftImageAttachment]
     public var taskContext: BoardTaskContext?
     public var fileReferences: [AgentComposerDraftFileReference]
+    public var agentReferences: [AgentPromptReference]
 
     public init(
         text: String,
@@ -48,6 +49,7 @@ public struct AgentComposerDraft: Codable, Equatable, Sendable {
         updatedAt: Date,
         imageAttachments: [AgentComposerDraftImageAttachment] = [],
         fileReferences: [AgentComposerDraftFileReference] = [],
+        agentReferences: [AgentPromptReference] = [],
         taskContext: BoardTaskContext? = nil
     ) {
         self.text = text
@@ -55,11 +57,12 @@ public struct AgentComposerDraft: Codable, Equatable, Sendable {
         self.updatedAt = updatedAt
         self.imageAttachments = imageAttachments
         self.fileReferences = fileReferences
+        self.agentReferences = AgentPromptReference.unique(agentReferences)
         self.taskContext = taskContext
     }
 
     private enum CodingKeys: String, CodingKey {
-        case text, selection, updatedAt, imageAttachments, fileReferences, taskContext
+        case text, selection, updatedAt, imageAttachments, fileReferences, agentReferences, taskContext
     }
 
     public init(from decoder: Decoder) throws {
@@ -70,11 +73,13 @@ public struct AgentComposerDraft: Codable, Equatable, Sendable {
         updatedAt = try values.decode(Date.self, forKey: .updatedAt)
         imageAttachments = try values.decodeIfPresent([AgentComposerDraftImageAttachment].self, forKey: .imageAttachments) ?? []
         fileReferences = try values.decodeIfPresent([AgentComposerDraftFileReference].self, forKey: .fileReferences) ?? []
+        agentReferences = try values.decodeIfPresent([AgentPromptReference].self, forKey: .agentReferences) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encodeIfPresent(taskContext, forKey: .taskContext)
+        if !agentReferences.isEmpty { try values.encode(agentReferences, forKey: .agentReferences) }
         try values.encode(text, forKey: .text)
         try values.encode(selection, forKey: .selection)
         try values.encode(updatedAt, forKey: .updatedAt)
@@ -141,6 +146,7 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
     public var text: String
     public var imageAttachments: [AgentComposerDraftImageAttachment]
     public var fileReferences: [AgentComposerDraftFileReference]
+    public var agentReferences: [AgentPromptReference]
     public var queuedAt: Date
     /// T5 — a HELD steer rather than a queued follow-up. Held steers sit at the
     /// front of the queue, oldest first, until the running turn reaches a tool
@@ -153,6 +159,7 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
         text: String,
         imageAttachments: [AgentComposerDraftImageAttachment] = [],
         fileReferences: [AgentComposerDraftFileReference] = [],
+        agentReferences: [AgentPromptReference] = [],
         queuedAt: Date,
         isSteer: Bool = false
     ) {
@@ -160,12 +167,13 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
         self.text = text
         self.imageAttachments = imageAttachments
         self.fileReferences = fileReferences
+        self.agentReferences = AgentPromptReference.unique(agentReferences)
         self.queuedAt = queuedAt
         self.isSteer = isSteer
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, text, imageAttachments, fileReferences, queuedAt, isSteer
+        case id, text, imageAttachments, fileReferences, agentReferences, queuedAt, isSteer
     }
 
     public init(from decoder: Decoder) throws {
@@ -174,6 +182,7 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
         text = try values.decode(String.self, forKey: .text)
         imageAttachments = try values.decode([AgentComposerDraftImageAttachment].self, forKey: .imageAttachments)
         fileReferences = try values.decode([AgentComposerDraftFileReference].self, forKey: .fileReferences)
+        agentReferences = try values.decodeIfPresent([AgentPromptReference].self, forKey: .agentReferences) ?? []
         queuedAt = try values.decode(Date.self, forKey: .queuedAt)
         isSteer = try values.decodeIfPresent(Bool.self, forKey: .isSteer) ?? false
     }
@@ -181,6 +190,7 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encode(id, forKey: .id)
+        if !agentReferences.isEmpty { try values.encode(agentReferences, forKey: .agentReferences) }
         try values.encode(text, forKey: .text)
         try values.encode(imageAttachments, forKey: .imageAttachments)
         try values.encode(fileReferences, forKey: .fileReferences)
@@ -759,6 +769,7 @@ public actor AgentComposerDraftStore {
         text: String,
         imageAttachments: [AgentComposerDraftImageAttachment] = [],
         fileReferences: [AgentComposerDraftFileReference] = [],
+        agentReferences: [AgentPromptReference] = [],
         for agentID: AgentID,
         queuedAt: Date? = nil
     ) -> AgentComposerQueuedMessage {
@@ -766,6 +777,7 @@ public actor AgentComposerDraftStore {
             text: text,
             imageAttachments: imageAttachments,
             fileReferences: fileReferences,
+            agentReferences: agentReferences,
             queuedAt: queuedAt ?? clock.now()
         )
         var current = loadQueue(for: agentID)
@@ -778,11 +790,11 @@ public actor AgentComposerDraftStore {
     /// before later follow-ups. An app exit can never replay the prompt alone.
     public func enqueueContextRecovery(
         text: String, imageAttachments: [AgentComposerDraftImageAttachment],
-        fileReferences: [AgentComposerDraftFileReference], for agentID: AgentID
+        fileReferences: [AgentComposerDraftFileReference], agentReferences: [AgentPromptReference] = [], for agentID: AgentID
     ) {
         let compaction = AgentComposerQueuedCompaction(operationID: UUID(), focus: nil, queuedAt: clock.now())
         let prompt = AgentComposerQueuedMessage(text: text, imageAttachments: imageAttachments,
-            fileReferences: fileReferences, queuedAt: clock.now())
+            fileReferences: fileReferences, agentReferences: agentReferences, queuedAt: clock.now())
         var current = loadQueue(for: agentID)
         let boundary: AgentComposerQueuedWorkItem
         if let index = current.firstIndex(where: { if case .compaction = $0 { return true }; return false }) {
@@ -898,6 +910,7 @@ public actor AgentComposerDraftStore {
         text: String,
         imageAttachments: [AgentComposerDraftImageAttachment] = [],
         fileReferences: [AgentComposerDraftFileReference] = [],
+        agentReferences: [AgentPromptReference] = [],
         for agentID: AgentID,
         queuedAt: Date? = nil
     ) -> AgentComposerQueuedMessage {
@@ -905,6 +918,7 @@ public actor AgentComposerDraftStore {
             text: text,
             imageAttachments: imageAttachments,
             fileReferences: fileReferences,
+            agentReferences: agentReferences,
             queuedAt: queuedAt ?? clock.now(),
             isSteer: true
         )

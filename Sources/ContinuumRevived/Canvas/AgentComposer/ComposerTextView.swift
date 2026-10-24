@@ -33,6 +33,8 @@ protocol ComposerTextViewObserver: AnyObject {
 @MainActor
 final class ComposerTextView: NSTextView, NSTextViewDelegate, AgentPageZoomScalable {
     weak var composerObserver: ComposerTextViewObserver?
+    var onAgentReferenceDrag: ((NSPasteboard, Bool) -> Bool)?
+    var onAgentReferenceDragExited: (() -> Void)?
     /// Set by the completion controller while its custom surface is presented.
     /// Escape remains native when there is no completion surface to dismiss.
     var suggestionsAreVisible = false
@@ -87,7 +89,7 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate, AgentPageZoomScala
         setAccessibilityRole(.textArea)
         setAccessibilityLabel("Agent prompt")
         setAccessibilityHelp("Enter a prompt for the agent")
-        registerForDraggedTypes([.fileURL, .png, .tiff, ComposerImagePasteboardDecoder.jpegPasteboardType])
+        registerForDraggedTypes([AgentReferenceDragHandle.pasteboardType, .fileURL, .png, .tiff, ComposerImagePasteboardDecoder.jpegPasteboardType])
     }
 
     /// Every zoom-derived metric this editor owns, assigned from scratch. Text
@@ -194,11 +196,36 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate, AgentPageZoomScala
     }
 
     override func performDragOperation(_ draggingInfo: NSDraggingInfo) -> Bool {
-        handleAttachmentIntake(from: draggingInfo.draggingPasteboard)
+        if draggingInfo.draggingPasteboard.availableType(from: [AgentReferenceDragHandle.pasteboardType]) != nil {
+            return onAgentReferenceDrag?(draggingInfo.draggingPasteboard, true) ?? false
+        }
+        return handleAttachmentIntake(from: draggingInfo.draggingPasteboard)
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        ComposerPasteboardIntake(from: sender.draggingPasteboard).isEmpty ? [] : .copy
+        if sender.draggingPasteboard.availableType(from: [AgentReferenceDragHandle.pasteboardType]) != nil {
+            return onAgentReferenceDrag?(sender.draggingPasteboard, false) == true ? .copy : []
+        }
+        return ComposerPasteboardIntake(from: sender.draggingPasteboard).isEmpty ? [] : .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.availableType(from: [AgentReferenceDragHandle.pasteboardType]) != nil {
+            return draggingEntered(sender)
+        }
+        return super.draggingUpdated(sender)
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if sender.draggingPasteboard.availableType(from: [AgentReferenceDragHandle.pasteboardType]) != nil {
+            return onAgentReferenceDrag?(sender.draggingPasteboard, false) ?? false
+        }
+        return super.prepareForDragOperation(sender)
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        onAgentReferenceDragExited?()
+        super.draggingExited(sender)
     }
 
     @discardableResult

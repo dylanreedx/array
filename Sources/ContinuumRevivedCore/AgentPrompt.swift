@@ -60,15 +60,18 @@ public struct AgentPrompt: Equatable, Sendable {
     public var text: String
     public var imageAttachments: [AgentPromptImageAttachment]
     public var fileReferences: [AgentPromptFileReference]
+    public var agentReferences: [AgentPromptReference]
 
     public init(
         text: String = "",
         imageAttachments: [AgentPromptImageAttachment] = [],
-        fileReferences: [AgentPromptFileReference] = []
+        fileReferences: [AgentPromptFileReference] = [],
+        agentReferences: [AgentPromptReference] = []
     ) {
         self.text = text
         self.imageAttachments = imageAttachments
         self.fileReferences = fileReferences
+        self.agentReferences = AgentPromptReference.unique(agentReferences)
     }
 
     public init(_ text: String) {
@@ -78,9 +81,14 @@ public struct AgentPrompt: Equatable, Sendable {
     /// Whitespace-only prose is not a sendable prompt; a local attachment or a
     /// file reference is. Keep this provider-neutral predicate in one place so
     /// keyboard, composer, and supervisor routes agree on attachment-only sends.
+    public var providerText: String {
+        AgentReferencePromptEnvelope.text(text, references: agentReferences)
+    }
+
     public var isEmpty: Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && imageAttachments.isEmpty
             && fileReferences.isEmpty
+            && agentReferences.isEmpty
     }
 }
