@@ -120,10 +120,14 @@ enum InboxParentFoldChecks {
         let parentKey = "agent:\(threeChildParent.uuidString)"
         let childKey = "agent:\(threeChildren[0].uuidString)"
         let followingKey = "agent:\(askingParent.uuidString)"
-        guard let parent = motion.poses[parentKey], let child = motion.poses[childKey],
-              let path = motion.endpointsForQA[childKey] else {
-            throw Failure(description: "motion: the visible parent and child must both participate")
+        guard let child = motion.poses[childKey], let path = motion.endpointsForQA[childKey] else {
+            throw Failure(description: "motion: the visible child must participate")
         }
+        // The parent stays LIVE: never photographed, never covered, so its fold
+        // control's morph is what the screen shows.
+        try expect(motion.poses[parentKey] == nil
+                   && !motion.coveredViewsForQA.contains { ($0 as? AgentInbox96CellView)?.qaAgentID == threeChildParent },
+                   "motion: the clicked parent must stay live, not a photograph")
         // The frame committed with the click is already one frame of travel in:
         // a first frame at fraction 0 repeats the old layout and reads as lag.
         let firstFrame = motion.elapsed
@@ -144,7 +148,6 @@ enum InboxParentFoldChecks {
         }
         try expect(movingChild.frame.minY > child.frame.minY && movingChild.opacity > child.opacity,
                    "motion: the child must travel out of its stack while its text appears")
-        try expect(motion.poses[parentKey]?.frame == parent.frame, "motion: the clicked parent must stay anchored")
         try expect((motion.poses[followingKey]?.frame.minY ?? 0) > (following?.minY ?? .greatestFiniteMagnitude),
                    "motion: following chats must move down with the unfolding cards")
         try expect(inbox.cellBuildCountForQA == builds, "motion: a frame tick must not rebuild the native table cells")
@@ -416,6 +419,8 @@ enum InboxParentFoldChecks {
                 try expect(cell.qaGeometry.surfaceRole == .hover,
                            "hover: the hovered card paints \(cell.qaGeometry.surfaceRole), not hover")
                 try expect(cell.qaTextAlpha == 1, "hover: the hovered card's words stayed receded (\(cell.qaTextAlpha))")
+                try expect(cell.qaStatusAlphasForQA.allSatisfy { $0 > 0.99 },
+                           "hover: hovering hid the card's status (\(cell.qaStatusAlphasForQA))")
             }
         }
         try expect(inbox.cellBuildCountForQA == builds,

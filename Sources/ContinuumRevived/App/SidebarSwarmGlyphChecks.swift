@@ -5,16 +5,14 @@ import Foundation
 /// Part of `--inbox-parent-fold-check`: the fold BUTTON on a parent card.
 ///
 /// Dylan wanted the card to stay "go to agent" and the fold to be a clear
-/// button. Read off the SHIPPED list, for each of the three temporary glyph
-/// variants: the control spans the card's height across the lane and count at a
-/// width fixed by the count's digits; a mouse DOWN folds (the rows change before
-/// the button is released) and paints the pressed step; only the control has a
-/// pointing hand; hover paints its own step and moves the glyph; ←/→ fold the
-/// selected parent and keep it selected; the glyph holds its pose under the fold
-/// photographs and morphs after they retire; working children twinkle one dot at
-/// a time on the 2 s rhythm and not while the window is not key; and the seeded
-/// constellation is stable per parent and differs between parents. It also
-/// renders the contact sheet of every variant x state x appearance x scale.
+/// button. Read off the SHIPPED list: the control spans the card's height across
+/// the lane and count at a width fixed by the count's digits; its highlight is a
+/// circle around the glyph, never a pill across the count; a mouse DOWN folds and
+/// paints the pressed step; only the control has a pointing hand; hover moves the
+/// glyph; ←/→ fold the selected parent and keep it selected; the glyph morphs AT
+/// the press on the live parent row, every dot travels, and a rebuilt control
+/// joins the same morph on the same clock; a working child runs the ripple. It
+/// also renders the stills sheet (state x appearance x scale).
 @MainActor
 enum SidebarSwarmGlyphChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
@@ -52,7 +50,6 @@ enum SidebarSwarmGlyphChecks {
                 lines.append(try await checkControl(variant: variant, appearance: appearance))
             }
         }
-        lines.append(try checkSeededConstellation())
         lines.append("contact sheet: " + (try writeContactSheet()))
         return lines.map { "  " + $0 }.joined(separator: "\n")
     }
@@ -119,14 +116,18 @@ enum SidebarSwarmGlyphChecks {
         // Resting paints no chip; hover paints the hover step and spreads.
         let theme: TokenTheme = appearance == .darkAqua ? .dark : .light
         try expect(fold.chipFillForQA == nil, "\(label): a resting fold control paints a chip")
+        // The highlight is a circle around the glyph, never a pill across the count.
+        try expect(abs(fold.chipFrameForQA.width - fold.chipFrameForQA.height) < 0.01
+                   && fold.chipFrameForQA.width <= InboxSwarmFoldControl.chipDiameter
+                   && fold.chipFrameForQA.maxX < fold.bounds.width - 4,
+                   "\(label): the highlight \(fold.chipFrameForQA) is not a circle around the glyph in \(fold.bounds)")
         let rest = fold.modelDotOffsetsForQA
         fold.mouseEntered(with: try mouseEvent(.mouseMoved, fold, window))
         let hoverExpected = SwarmPose.pose(variant, seed: parent, children: 3, expanded: false, hovered: true)
         try expect(fold.chipFillForQA.map { hex($0) } == hex(SidebarControlRole.hover.color.cgColor(for: theme)),
                    "\(label): hover painted \(String(describing: fold.chipFillForQA))")
-        // Triad and seeded spread their dots; the chart draws its strokes in.
-        try expect(close(fold.modelDotOffsetsForQA, hoverExpected.dots)
-                   && (variant == .chart ? fold.strokeEndForQA == 1 : fold.modelDotOffsetsForQA != rest),
+        // Hover opens and turns the triangle.
+        try expect(close(fold.modelDotOffsetsForQA, hoverExpected.dots) && fold.modelDotOffsetsForQA != rest,
                    "\(label): hover did not move the glyph — rest \(rest), hover \(fold.modelDotOffsetsForQA)")
         fold.mouseExited(with: try mouseEvent(.mouseMoved, fold, window))
         try expect(fold.chipFillForQA == nil && close(fold.modelDotOffsetsForQA, rest),
@@ -154,20 +155,31 @@ enum SidebarSwarmGlyphChecks {
         try expect(!held.isPressed && !fold.isPressed && held.chipFillForQA == nil,
                    "\(label): the pressed step outlived the release")
 
-        // The glyph holds its pose under the fold photographs, then morphs.
-        guard let (_, open) = control(inbox, parent) else { throw Failure(description: "\(label): the unfolded parent lost its control") }
+        // The glyph morphs AT the press, on the live parent row, and any control
+        // showing the parent joins the same motion at the same absolute start.
+        guard let (openCell, open) = control(inbox, parent) else { throw Failure(description: "\(label): the unfolded parent lost its control") }
         let motion = inbox.foldMotionForQA
-        let systemReduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if motion.isAnimating, !systemReduce {
-            try expect(!open.shownExpanded && close(open.modelDotOffsetsForQA, SwarmPose.pose(variant, seed: parent, children: 3, expanded: false, hovered: false).dots),
-                       "\(label): the glyph changed pose under the fold photographs")
-            motion.advance(by: 1)
-            try await Task.sleep(nanoseconds: UInt64((InboxFoldMotion.expandDuration + 0.25) * 1e9))
-        }
         let expandedPose = SwarmPose.pose(variant, seed: parent, children: 3, expanded: true, hovered: false)
+        let restPose = SwarmPose.pose(variant, seed: parent, children: 3, expanded: false, hovered: false)
         try expect(open.shownExpanded && close(open.modelDotOffsetsForQA, expandedPose.dots)
                    && Set(expandedPose.dots.map(\.x)) == [0],
-                   "\(label): after the fold the glyph is not the lane line — \(open.modelDotOffsetsForQA)")
+                   "\(label): after the press the glyph does not rest on the lane line — \(open.modelDotOffsetsForQA)")
+        try expect(zip(restPose.dots, expandedPose.dots).allSatisfy { hypot($0.x - $1.x, $0.y - $1.y) >= 3 },
+                   "\(label): a dot barely moves between the triangle and the line")
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            try expect(open.isMorphingForQA, "\(label): the parent's glyph did not start its morph at the press")
+            try expect(motion.isAnimating && (openCell.layer?.opacity ?? 0) == 1,
+                       "\(label): the fold covered the live parent row (opacity \(openCell.layer?.opacity ?? -1))")
+            let joiner = InboxSwarmFoldControl(frame: open.frame)
+            joiner.prefersReducedMotion = { false }
+            joiner.glyphCentreY = open.glyphCentreY
+            joiner.show(.expanded, childCount: 3, workingChildren: 0, seed: parent, leadColour: nil)
+            joiner.layoutSubtreeIfNeeded()
+            try expect(joiner.isMorphingForQA && joiner.morphStartForQA == open.morphStartForQA,
+                       "\(label): a rebuilt control did not join the parent's morph on the same clock")
+            motion.advance(by: 1)
+            try await Task.sleep(nanoseconds: UInt64((InboxSwarmFoldControl.expandMorph + 0.1) * 1e9))
+        }
         try expect(open.accessibilityLabel() == "Collapse 3 subagents" && open.isAccessibilityExpanded() == true,
                    "\(label): unfolded control reads '\(open.accessibilityLabel() ?? "")'")
 
@@ -182,29 +194,14 @@ enum SidebarSwarmGlyphChecks {
                    "\(label): → did not unfold")
         motion.advance(by: 1)
 
-        // Working children: never twinkles in a window that is not key; the
-        // twinkle itself is one dot at a time on the 2 s rhythm, floor 40%.
+        // Working children: a ripple runs while any child works, on its period.
         guard let (_, working) = control(inbox, parent) else { throw Failure(description: "\(label): lost the control") }
-        try expect(working.workingChildren == 1 && !window.isKeyWindow && !working.isTwinkling,
-                   "\(label): twinkling in a window that is not key")
-        working.setTwinkling(true)
-        try expect(working.twinklePeriodForQA == 2.0, "\(label): twinkle period \(String(describing: working.twinklePeriodForQA))")
-        working.setTwinkling(false)
-        return "\(label): \(Int(fold.bounds.width))/\(Int(wide.bounds.width))pt wide for 1/2 digits, \(Int(frame.height))pt tall; mouse-down folded with the pressed step; hover step + glyph spread; hand on the control only; ←/→ fold with selection kept; pose held under the photographs then morphed to the lane line"
-    }
-
-    static func checkSeededConstellation() throws -> String {
-        let a = SwarmPose.pose(.seeded, seed: parent, children: 5, expanded: false, hovered: false)
-        let again = SwarmPose.pose(.seeded, seed: parent, children: 5, expanded: false, hovered: false)
-        let b = SwarmPose.pose(.seeded, seed: bigParent, children: 5, expanded: false, hovered: false)
-        try expect(a == again, "seeded: one parent's constellation changed between calls")
-        try expect(a != b, "seeded: two parents drew the same constellation")
-        try expect(a.dots.count == 5 && SwarmPose.pose(.seeded, seed: parent, children: 9, expanded: false, hovered: false).dots.count == 5,
-                   "seeded: draws min(count, 5) dots")
-        let half = SwarmPose.side / 2 - SwarmPose.dotDiameter(.seeded) / 2
-        try expect(a.dots.allSatisfy { abs($0.x) <= half && abs($0.y) <= half },
-                   "seeded: a dot leaves the glyph's square: \(a.dots)")
-        return "seeded: stable per parent, distinct between parents, min(count,5) dots inside the square"
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            try expect(working.workingChildren == 1 && working.isTwinkling
+                       && working.twinklePeriodForQA == InboxSwarmFoldControl.ripplePeriod,
+                       "\(label): a working child drew no ripple (period \(String(describing: working.twinklePeriodForQA)))")
+        }
+        return "\(label): \(Int(fold.bounds.width))/\(Int(wide.bounds.width))pt wide for 1/2 digits, \(Int(frame.height))pt tall; mouse-down folded with the pressed step; hover step + glyph spread; hand on the control only; ←/→ fold with selection kept; circle highlight; morph at the press on the live row, one clock per parent; every dot travels; ripple while a child works"
     }
 
     // MARK: - Contact sheet

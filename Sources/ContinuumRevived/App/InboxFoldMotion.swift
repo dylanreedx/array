@@ -168,7 +168,13 @@ final class InboxFoldMotion: NSObject {
         self.overlay = overlay
         duration = expanded ? Self.expandDuration : Self.collapseDuration
         elapsed = 0
-        for key in keys.sorted() {
+        // The parent row stays LIVE: it does not move, and its fold control
+        // morphs on its own clock (`InboxSwarmFoldControl`). A photograph of it
+        // would cross-fade a picture of the old glyph into a picture of the new
+        // one and hide the real motion. The overlay is masked out over the
+        // parent so the children still slide out from UNDER it.
+        let parentFrame = (after[parentKey] ?? before[parentKey])?.frame ?? .zero
+        for key in keys.sorted() where key != parentKey {
             guard let snapshot = after[key] ?? before[key],
                   let image = after[key]?.image ?? before[key]?.image else { continue }
             let depth = min(2, max(1, snapshot.order - parent.order))
@@ -195,6 +201,14 @@ final class InboxFoldMotion: NSObject {
                 to: Pose(frame: endFrame, opacity: after[key] == nil ? 0 : 1)))
         }
         guard !tracks.isEmpty else { cancel(); return }
+        overlay.wantsLayer = true
+        let mask = CAShapeLayer()
+        let maskPath = CGMutablePath()
+        maskPath.addRect(overlay.bounds)
+        maskPath.addRect(parentFrame)
+        mask.path = maskPath
+        mask.fillRule = .evenOdd
+        overlay.layer?.mask = mask
         container.addSubview(overlay, positioned: .above, relativeTo: nil)
         // The first frame presented after the click is already one frame in;
         // starting at fraction 0 would spend it repeating the old layout.

@@ -4,87 +4,47 @@ import QuartzCore
 
 // MARK: - The swarm glyph
 
-/// Which constellation the fold button draws.
-///
-/// TEMPORARY: three candidates behind `ARRAY_SWARM_GLYPH=triad|chart|seeded`, read
-/// once at startup, so they can be compared live in the dev preview. Delete this
-/// switch and the two losing variants once one is picked.
+/// The constellation the fold button draws. One design survived review (the
+/// triad); the enum stays so stills and checks can name what they draw.
 enum SwarmGlyphVariant: String, CaseIterable {
-    case triad, chart, seeded
+    case triad
 
-    @MainActor static var current: SwarmGlyphVariant = ProcessInfo.processInfo
-        .environment["ARRAY_SWARM_GLYPH"].flatMap(SwarmGlyphVariant.init(rawValue:)) ?? .triad
+    @MainActor static var current: SwarmGlyphVariant = .triad
 }
 
-/// Where a constellation's dots (and, for `chart`, its strokes) sit. Pure, so
-/// the control, its witness and the contact sheet share one geometry.
-///
-/// Points are offsets from the glyph's centre in points, y DOWN.
+/// Where the constellation's dots sit. Pure, so the control, its witness and
+/// the stills share one geometry. Points are offsets from the glyph's centre in
+/// points, y DOWN.
 struct SwarmPose: Equatable {
     var dots: [CGPoint]
-    /// How much of the polyline through `dots` is drawn (`chart` only).
-    var strokeEnd: CGFloat
+    /// Kept for the stills' vocabulary; the triad draws no strokes.
+    var strokeEnd: CGFloat = 0
 
     static let side: CGFloat = 14
+    static let dotDiameterPoints: CGFloat = 3
 
-    static func dotCount(_ variant: SwarmGlyphVariant, children: Int) -> Int {
-        switch variant {
-        case .triad: return 3
-        case .chart: return children >= 4 ? 4 : 3
-        case .seeded: return min(max(children, 2), 5)
-        }
-    }
+    static func dotCount(_ variant: SwarmGlyphVariant, children: Int) -> Int { 3 }
+    static func dotDiameter(_ variant: SwarmGlyphVariant) -> CGFloat { dotDiameterPoints }
 
-    static func dotDiameter(_ variant: SwarmGlyphVariant) -> CGFloat {
-        variant == .triad ? 3 : 2.5
-    }
-
-    /// The pose for one state. Expanded wins over hover: an open group's dots
-    /// are the head of its connector lane, and the lane does not wobble.
-    static func pose(_ variant: SwarmGlyphVariant, seed: UUID, children: Int,
+    /// Folded: a triangle. Hovered: the triangle opens a little and turns a few
+    /// degrees, so pointing at it reads as "this moves". Expanded: a vertical
+    /// run that becomes the head of the connector lane.
+    ///
+    /// The dots are assigned so that EVERY dot travels on a fold — the triangle's
+    /// apex drops to the middle of the run, its base corners swing to the ends —
+    /// rather than the apex sitting still while two dots slide under it.
+    static func pose(_ variant: SwarmGlyphVariant = .triad, seed: UUID = UUID(), children: Int = 3,
                      expanded: Bool, hovered: Bool) -> SwarmPose {
-        let count = dotCount(variant, children: children)
-        if expanded { return SwarmPose(dots: line(count), strokeEnd: variant == .chart ? 1 : 0) }
-        switch variant {
-        case .triad:
-            let spread: CGFloat = hovered ? 1.25 : 1
-            let rest = [CGPoint(x: 0, y: -3.5), CGPoint(x: -3.6, y: 2.6), CGPoint(x: 3.6, y: 2.6)]
-            return SwarmPose(dots: rest.map { CGPoint(x: $0.x * spread, y: $0.y * spread) }, strokeEnd: 0)
-        case .chart:
-            let four = [CGPoint(x: -4.5, y: 2.5), CGPoint(x: -1.5, y: -3.5),
-                        CGPoint(x: 2.5, y: -1), CGPoint(x: 4.5, y: 4)]
-            let three = [CGPoint(x: -4.5, y: 3), CGPoint(x: -0.5, y: -3.5), CGPoint(x: 4, y: 1.5)]
-            return SwarmPose(dots: count == 4 ? four : three, strokeEnd: hovered ? 1 : 0)
-        case .seeded:
-            // Every byte of the id feeds the pattern: ids minted in sequence
-            // differ only at the end.
-            var state = withUnsafeBytes(of: seed.uuid) { raw in
-                raw.load(fromByteOffset: 0, as: UInt64.self) ^ raw.load(fromByteOffset: 8, as: UInt64.self).byteSwapped
-            }
-            func unit() -> CGFloat {
-                state &+= 0x9E37_79B9_7F4A_7C15
-                var z = state
-                z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-                z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-                return CGFloat((z ^ (z >> 31)) >> 11) / CGFloat(1 << 53)
-            }
-            let rotation = unit() * 2 * .pi
-            let reach: CGFloat = hovered ? 1.3 : 1
-            return SwarmPose(dots: (0..<count).map { index in
-                let jitter = (unit() - 0.5) * (.pi / CGFloat(count)) * 0.7
-                let angle = rotation + CGFloat(index) * 2 * .pi / CGFloat(count) + jitter
-                let radius = min(6, (3 + unit() * 2.5) * reach)
-                return CGPoint(x: cos(angle) * radius, y: sin(angle) * radius)
-            }, strokeEnd: 0)
+        if expanded {
+            return SwarmPose(dots: [CGPoint(x: 0, y: 1.5), CGPoint(x: 0, y: -4), CGPoint(x: 0, y: 7)])
         }
-    }
-
-    /// The expanded pose: a vertical run down the lane, head at the top.
-    private static func line(_ count: Int) -> [CGPoint] {
-        let top: CGFloat = -4, bottom: CGFloat = 7
-        return (0..<count).map { index in
-            CGPoint(x: 0, y: top + (bottom - top) * CGFloat(index) / CGFloat(max(1, count - 1)))
-        }
+        let rest = [CGPoint(x: 0, y: -3.5), CGPoint(x: -3.6, y: 2.6), CGPoint(x: 3.6, y: 2.6)]
+        guard hovered else { return SwarmPose(dots: rest) }
+        let angle = CGFloat(12) * .pi / 180, spread: CGFloat = 1.18
+        return SwarmPose(dots: rest.map {
+            CGPoint(x: ($0.x * cos(angle) - $0.y * sin(angle)) * spread,
+                    y: ($0.x * sin(angle) + $0.y * cos(angle)) * spread)
+        })
     }
 }
 
@@ -96,12 +56,16 @@ struct SwarmPose: Equatable {
 /// The CARD is the "go to agent" target; this is the one fold target on it. It
 /// takes the card's full height across the lane and the count, acts on MOUSE
 /// DOWN, shows a pressed step at once, and is the only thing on the card with a
-/// pointing hand.
+/// pointing hand. Its highlight is a circle around the glyph alone.
 ///
-/// Motion is Core Animation on the glyph's own layers. A fold photographs the
-/// rows and cross-fades them (`InboxFoldMotion`), so a morph started at the click
-/// would play hidden under the photographs: the glyph HOLDS the pose you clicked
-/// through the photographs and morphs once they have gone.
+/// ONE CLOCK PER PARENT. A fold rebuilds the parent's cell, so the control that
+/// starts a morph is rarely the one that finishes it. The morph is therefore a
+/// record keyed by the parent's id — from-pose, to-pose, start time — and every
+/// control that shows that parent adds the same animation with the same absolute
+/// `beginTime`. A replacement cell joins the motion mid-flight at exactly the
+/// phase the old one was in; nothing waits on a timer, so nothing can drift.
+/// The fold presentation leaves the parent row live (see `InboxFoldMotion`), so
+/// the morph is what the screen shows, not a photograph of either end.
 @MainActor
 final class InboxSwarmFoldControl: NSControl, TokenThemed {
     static let glyphCentreX = CGFloat(AgentInboxView.indentPerLevel) / 2
@@ -110,6 +74,15 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         ofSize: Typography.style(for: .label).size, weight: .medium)
     private static let digitAdvance = ceil(("0" as NSString).size(withAttributes: [.font: countFont]).width)
     private static let countPadding: CGFloat = 2
+    /// The hover/pressed circle around the glyph.
+    static let chipDiameter: CGFloat = 22
+
+    static let expandMorph: CFTimeInterval = 0.26
+    static let collapseMorph: CFTimeInterval = 0.22
+    static let hoverMorph: CFTimeInterval = 0.18
+    static let fadeDuration: CFTimeInterval = 0.12
+    /// Fast out, long soft landing — no overshoot, so the run lands as a lane.
+    static let morphTiming = CAMediaTimingFunction(controlPoints: 0.22, 0.9, 0.3, 1)
 
     /// The control's width for `childCount`: fixed by its digit count, never
     /// measured in layout.
@@ -127,7 +100,7 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
     private var leadColour: NSColor?
     private(set) var isPointerInside = false
     private(set) var isPressed = false
-    /// The pose the layers hold, which lags `disclosure` while a fold plays.
+    /// The pose the layers rest on.
     private(set) var shownExpanded = false
     /// Where the glyph's centre sits, top-down from the control's top.
     var glyphCentreY: CGFloat = 0 { didSet { if oldValue != glyphCentreY { needsLayout = true } } }
@@ -136,21 +109,28 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
     // Layers
     private let chip = CALayer()
     private let glyph = CALayer()
-    private let strokes = CAShapeLayer()
     private var dots: [CALayer] = []
     private let countLabel = NSTextField(labelWithString: "")
     private var pointerTracking: NSTrackingArea?
-    private var morphGeneration = 0
-    private var keyObservers: [NSObjectProtocol] = []
     private(set) var isTwinkling = false
     private(set) var registeredCursorsForQA: [(rect: NSRect, cursor: NSCursor)] = []
 
-    /// One toggle in flight, so whichever cell the reload binds to the parent
-    /// can hold the pose the click came from.
-    private static var pendingToggle: (seed: UUID, from: RowDisclosure, at: CFTimeInterval)?
-    /// The parent whose control is held down. The fold reloads the list on the
-    /// press, which can bind the parent to another cell; the pressed step
-    /// follows the parent, and the release clears it wherever it landed.
+    // MARK: The per-parent clock
+
+    private struct Morph {
+        let expanded: Bool
+        let from: [CGPoint]
+        let start: CFTimeInterval
+        let duration: CFTimeInterval
+        var end: CFTimeInterval { start + duration }
+    }
+    /// In-flight morphs by parent. Entries retire once they end.
+    private static var morphs: [UUID: Morph] = [:]
+    /// A toggle armed by the control or the keyboard: the NEXT show of this
+    /// parent in the opposite state starts a morph. Anything else (a scroll, a
+    /// streamed update) lands its state without motion.
+    private static var armed: [UUID: (from: RowDisclosure, at: CFTimeInterval)] = [:]
+
     private static var pressedSeed: UUID?
     private static var releaseMonitor: Any?
     private static let live = NSHashTable<InboxSwarmFoldControl>.weakObjects()
@@ -159,17 +139,22 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.masksToBounds = false
-        chip.cornerRadius = 5
+        chip.cornerRadius = Self.chipDiameter / 2
+        chip.opacity = 0
         layer?.addSublayer(chip)
         layer?.addSublayer(glyph)
-        strokes.fillColor = nil
-        strokes.lineWidth = LineWidth.hairline
-        strokes.lineJoin = .round
-        strokes.strokeEnd = 0
-        glyph.addSublayer(strokes)
+        dots = (0..<3).map { _ in
+            let dot = CALayer()
+            let d = SwarmPose.dotDiameterPoints
+            dot.bounds = CGRect(x: 0, y: 0, width: d, height: d)
+            dot.cornerRadius = d / 2
+            glyph.addSublayer(dot)
+            return dot
+        }
         countLabel.font = Self.countFont
         countLabel.alignment = .left
         countLabel.setAccessibilityElement(false)
+        countLabel.wantsLayer = true
         addSubview(countLabel)
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
@@ -182,11 +167,10 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
 
     // MARK: Content
 
-    /// Configure for a row. `seed` is the parent's id: the seeded constellation
-    /// is drawn from it, and a toggle is matched to it across a reload.
+    /// Configure for a row. `seed` is the parent's id: a fold's morph is keyed
+    /// to it so whichever cell shows the parent plays the same motion.
     func show(_ disclosure: RowDisclosure, childCount: Int, workingChildren: Int,
               seed: UUID, leadColour: NSColor?) {
-        let previousSeed = self.seed
         self.disclosure = disclosure
         self.childCount = disclosure == .none ? 0 : max(0, childCount)
         self.workingChildren = disclosure == .none ? 0 : workingChildren
@@ -195,67 +179,39 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         isPressed = Self.pressedSeed == seed && disclosure != .none
         isHidden = disclosure == .none
         countLabel.stringValue = self.childCount > 0 ? "\(self.childCount)" : ""
-        rebuildDotsIfNeeded()
         let expanded = disclosure == .expanded
-        if let pending = Self.pendingToggle, pending.seed == seed,
-           CACurrentMediaTime() - pending.at < 1, disclosure != pending.from {
-            Self.pendingToggle = nil
-            setPose(expanded: pending.from == .expanded, animated: false)
-            // Not `canAnimate`: the reload configures a cell before the table
-            // puts it back in the window.
+        let now = CACurrentMediaTime()
+        if let arm = Self.armed[seed], arm.from != disclosure, now - arm.at < 1 {
+            Self.armed[seed] = nil
             if !prefersReducedMotion() {
-                let delay = expanded ? InboxFoldMotion.expandDuration : InboxFoldMotion.collapseDuration
-                scheduleMorph(to: expanded, after: delay)
-            } else {
-                setPose(expanded: expanded, animated: false)
+                let from = SwarmPose.pose(expanded: arm.from == .expanded, hovered: false).dots
+                Self.morphs[seed] = Morph(expanded: expanded, from: from, start: now,
+                                          duration: expanded ? Self.expandMorph : Self.collapseMorph)
             }
-        } else if previousSeed != seed || shownExpanded != expanded {
-            morphGeneration += 1
-            setPose(expanded: expanded, animated: false)
         }
+        if let morph = Self.morphs[seed], morph.end <= now || morph.expanded != expanded {
+            Self.morphs[seed] = nil
+        }
+        shownExpanded = expanded
+        applyPose(animated: false, duration: 0)
+        joinMorph()
         applyAccessibility()
-        applyTokens()
+        applyTokens(animated: false)
         refreshTwinkle()
         needsLayout = true
     }
 
     /// The control, or the keyboard, is about to fold `seed`'s group.
     static func noteToggle(seed: UUID, from disclosure: RowDisclosure) {
-        pendingToggle = (seed, disclosure, CACurrentMediaTime())
+        armed[seed] = (disclosure, CACurrentMediaTime())
     }
 
     private var canAnimate: Bool { window != nil && !prefersReducedMotion() }
 
-    private func scheduleMorph(to expanded: Bool, after delay: TimeInterval) {
-        morphGeneration += 1
-        let generation = morphGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.02) { [weak self] in
-            guard let self, self.morphGeneration == generation else { return }
-            self.setPose(expanded: expanded, animated: self.canAnimate)
-        }
-    }
-
-    private func rebuildDotsIfNeeded() {
-        let count = SwarmPose.dotCount(variant, children: childCount)
-        let diameter = SwarmPose.dotDiameter(variant)
-        guard dots.count != count || dots.first?.bounds.width != diameter else { return }
-        dots.forEach { $0.removeFromSuperlayer() }
-        dots = (0..<count).map { _ in
-            let dot = CALayer()
-            dot.bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
-            dot.cornerRadius = diameter / 2
-            glyph.addSublayer(dot)
-            return dot
-        }
-        isTwinkling = false
-        setPose(expanded: shownExpanded, animated: false)
-    }
-
     // MARK: Pose
 
     var currentPose: SwarmPose {
-        SwarmPose.pose(variant, seed: seed, children: childCount,
-                       expanded: shownExpanded, hovered: isPointerInside && !isPressed)
+        SwarmPose.pose(expanded: shownExpanded, hovered: isPointerInside && !isPressed && !shownExpanded)
     }
 
     /// The dots' model positions as offsets from the glyph centre, y down — what
@@ -264,124 +220,145 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         let centre = CGPoint(x: glyph.bounds.midX, y: glyph.bounds.midY)
         return dots.map { CGPoint(x: $0.position.x - centre.x, y: -($0.position.y - centre.y)) }
     }
-    var strokeEndForQA: CGFloat { strokes.strokeEnd }
-
-    private func setPose(expanded: Bool, animated: Bool) {
-        shownExpanded = expanded
-        applyPose(animated: animated, duration: 0.24, stagger: variant == .seeded ? 0.03 : 0)
-    }
+    var strokeEndForQA: CGFloat { 0 }
+    /// Whether this control is playing its parent's fold morph right now.
+    var isMorphingForQA: Bool { dots.contains { $0.animation(forKey: "swarm.morph") != nil } }
+    /// The morph's absolute start, shared by every control showing the parent.
+    var morphStartForQA: CFTimeInterval? { Self.morphs[seed]?.start }
 
     /// The scale the glyph rasterises at; a still sets it explicitly.
     private var stillScale: CGFloat?
     private var rasterScale: CGFloat { window?.backingScaleFactor ?? stillScale ?? 2 }
 
-    private func applyPose(animated: Bool, duration: CFTimeInterval, stagger: CFTimeInterval = 0) {
-        let pose = currentPose
+    /// Glyph-layer point (y up) for a pose offset (y down), on the backing grid.
+    private func layerPoint(_ offset: CGPoint) -> CGPoint {
         let centre = CGPoint(x: glyph.bounds.midX, y: glyph.bounds.midY)
-        // A 3pt dot on a half pixel smears into a plus at 1x: put each dot's
-        // edge on the backing grid, in the control's coordinates.
-        let scale = rasterScale, radius = SwarmPose.dotDiameter(variant) / 2
+        let scale = rasterScale, radius = SwarmPose.dotDiameterPoints / 2
         func snap(_ value: CGFloat, origin: CGFloat) -> CGFloat {
             ((origin + value - radius) * scale).rounded() / scale + radius - origin
         }
-        // The glyph layer is y-up; a pose is y-down.
-        let targets = pose.dots.map {
-            CGPoint(x: snap(centre.x + $0.x, origin: glyph.frame.minX),
-                    y: snap(centre.y - $0.y, origin: glyph.frame.minY))
-        }
-        let path = CGMutablePath()
-        if let first = targets.first {
-            path.move(to: first)
-            for point in targets.dropFirst() { path.addLine(to: point) }
-        }
+        return CGPoint(x: snap(centre.x + offset.x, origin: glyph.frame.minX),
+                       y: snap(centre.y - offset.y, origin: glyph.frame.minY))
+    }
+
+    /// Rest the dots on the current pose; `animated` eases there from wherever
+    /// they are on screen (hover).
+    private func applyPose(animated: Bool, duration: CFTimeInterval) {
+        let targets = currentPose.dots.map(layerPoint)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let now = CACurrentMediaTime()
-        for (index, dot) in dots.enumerated() where index < targets.count {
-            if animated {
+        for (dot, target) in zip(dots, targets) {
+            if animated, dot.animation(forKey: "swarm.morph") == nil {
                 let move = CABasicAnimation(keyPath: "position")
                 move.fromValue = NSValue(point: dot.presentation()?.position ?? dot.position)
-                move.toValue = NSValue(point: targets[index])
+                move.toValue = NSValue(point: target)
                 move.duration = duration
-                move.beginTime = now + stagger * Double(index)
-                move.fillMode = .backwards
-                move.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                dot.add(move, forKey: "swarm.position")
+                move.timingFunction = Self.morphTiming
+                dot.add(move, forKey: "swarm.hover")
             }
-            dot.position = targets[index]
+            dot.position = target
         }
-        if animated {
-            let reshape = CABasicAnimation(keyPath: "path")
-            reshape.fromValue = strokes.presentation()?.path ?? strokes.path
-            reshape.toValue = path
-            reshape.duration = duration
-            reshape.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            strokes.add(reshape, forKey: "swarm.path")
-            let draw = CABasicAnimation(keyPath: "strokeEnd")
-            draw.fromValue = strokes.presentation()?.strokeEnd ?? strokes.strokeEnd
-            draw.toValue = pose.strokeEnd
-            draw.duration = duration
-            draw.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            strokes.add(draw, forKey: "swarm.strokeEnd")
-        }
-        strokes.path = path
-        strokes.strokeEnd = pose.strokeEnd
         CATransaction.commit()
+    }
+
+    /// Add the parent's in-flight morph to these layers, at its absolute start.
+    /// Each dot swings on a curve (clockwise), so the triangle reads as turning
+    /// into the run rather than sliding.
+    private func joinMorph() {
+        guard let morph = Self.morphs[seed], glyph.bounds.width > 0 else {
+            dots.forEach { $0.removeAnimation(forKey: "swarm.morph") }
+            return
+        }
+        let to = SwarmPose.pose(expanded: morph.expanded, hovered: false).dots
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (index, dot) in dots.enumerated() where index < to.count && index < morph.from.count {
+            let a = layerPoint(morph.from[index]), b = layerPoint(to[index])
+            let mid = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+            let dx = b.x - a.x, dy = b.y - a.y
+            let bend: CGFloat = morph.expanded ? 0.35 : -0.35
+            let control = CGPoint(x: mid.x - dy * bend, y: mid.y + dx * bend)
+            let path = CGMutablePath()
+            path.move(to: a)
+            path.addQuadCurve(to: b, control: control)
+            let swing = CAKeyframeAnimation(keyPath: "position")
+            swing.path = path
+            swing.duration = morph.duration
+            swing.beginTime = dot.convertTime(morph.start, from: nil)
+            swing.fillMode = .backwards
+            swing.timingFunction = Self.morphTiming
+            swing.calculationMode = .paced
+            dot.removeAnimation(forKey: "swarm.hover")
+            dot.add(swing, forKey: "swarm.morph")
+        }
+        CATransaction.commit()
+        refreshTwinkleAfterMorph(morph)
     }
 
     // MARK: Working children
 
-    /// One dot at a time brightens, on the status glyph's 2 s rhythm with its
-    /// 40% floor, while a child is working and the window is key.
+    /// While a child works, a ripple runs through the dots — each one swells and
+    /// brightens in turn, top to bottom when the group is open, so the run reads
+    /// as work flowing down into the children. It moves in place and never
+    /// rotates, so it cannot be mistaken for the status gyro. Still when every
+    /// child is done; nothing under Reduce Motion.
     private func refreshTwinkle() {
-        let wants = workingChildren > 0 && !isHidden && !prefersReducedMotion()
-            && (window?.isKeyWindow ?? false)
-        setTwinkling(wants)
+        setTwinkling(workingChildren > 0 && !isHidden && !prefersReducedMotion())
     }
+
+    private func refreshTwinkleAfterMorph(_ morph: Morph) {
+        // Re-seat the ripple in the new order once the morph has landed.
+        guard isTwinkling else { return }
+        let delay = max(0, morph.end - CACurrentMediaTime())
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.isTwinkling else { return }
+            self.isTwinkling = false
+            self.refreshTwinkle()
+        }
+    }
+
+    static let ripplePeriod: CFTimeInterval = 1.6
 
     func setTwinkling(_ on: Bool) {
         guard on != isTwinkling else { return }
         isTwinkling = on
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        for (index, dot) in dots.enumerated() {
-            guard on else { dot.removeAnimation(forKey: "swarm.twinkle"); dot.opacity = 1; continue }
-            let count = Double(dots.count)
-            let start = Double(index) / count, end = Double(index + 1) / count
-            let twinkle = CAKeyframeAnimation(keyPath: "opacity")
-            twinkle.values = [0.4, 0.4, 1.0, 0.4, 0.4]
-            twinkle.keyTimes = [0, start, (start + end) / 2, end, 1].map { NSNumber(value: $0) }
-            twinkle.duration = 2.0 * count
-            twinkle.repeatCount = .infinity
-            twinkle.calculationMode = .linear
-            dot.opacity = 0.4
-            dot.add(twinkle, forKey: "swarm.twinkle")
+        // Order the ripple top to bottom on screen.
+        let order = dots.indices.sorted { currentPose.dots[$0].y < currentPose.dots[$1].y }
+        let base = CACurrentMediaTime()
+        for (rank, index) in order.enumerated() {
+            let dot = dots[index]
+            guard on else {
+                dot.removeAnimation(forKey: "swarm.ripple")
+                continue
+            }
+            let swell = CAKeyframeAnimation(keyPath: "transform.scale")
+            swell.values = [1, 1.5, 1, 1]
+            swell.keyTimes = [0, 0.14, 0.36, 1]
+            let glow = CAKeyframeAnimation(keyPath: "opacity")
+            glow.values = [0.55, 1, 0.55, 0.55]
+            glow.keyTimes = swell.keyTimes
+            let ripple = CAAnimationGroup()
+            ripple.animations = [swell, glow]
+            ripple.duration = Self.ripplePeriod
+            ripple.repeatCount = .infinity
+            ripple.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            ripple.beginTime = dot.convertTime(base, from: nil) + Double(rank) * 0.16
+            ripple.fillMode = .backwards
+            dot.add(ripple, forKey: "swarm.ripple")
         }
         CATransaction.commit()
     }
 
     var twinklePeriodForQA: CFTimeInterval? {
-        (dots.first?.animation(forKey: "swarm.twinkle") as? CAKeyframeAnimation).map { $0.duration / Double(dots.count) }
-    }
-
-    override func viewWillMove(toWindow newWindow: NSWindow?) {
-        super.viewWillMove(toWindow: newWindow)
-        keyObservers.forEach(NotificationCenter.default.removeObserver)
-        keyObservers = []
-        guard let newWindow else { return }
-        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
-            keyObservers.append(NotificationCenter.default.addObserver(
-                forName: name, object: newWindow, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.refreshTwinkle() }
-                })
-        }
+        dots.first?.animation(forKey: "swarm.ripple")?.duration
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         countInkMidY = Self.countInkMidY(scale: rasterScale)
-        refreshTwinkle()
-        applyTokens()
+        applyTokens(animated: false)
     }
 
     // MARK: Layout
@@ -394,14 +371,17 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         CATransaction.setDisableActions(true)
         let side = SwarmPose.side
         let centreY = bounds.height - glyphCentreY
+        let oldFrame = glyph.frame
         glyph.frame = CGRect(x: Self.glyphCentreX - side / 2, y: centreY - side / 2, width: side, height: side)
         let countX = Self.glyphCentreX + side / 2 + Self.countGap
-        let countInk = countInkMidY
-        countLabel.frame = NSRect(x: countX, y: centreY + countInk - Self.countHeight,
+        countLabel.frame = NSRect(x: countX, y: centreY + countInkMidY - Self.countHeight,
                                   width: max(0, bounds.width - countX), height: Self.countHeight)
-        chip.frame = CGRect(x: 0, y: centreY - 9, width: bounds.width, height: 18)
+        let d = Self.chipDiameter
+        chip.frame = CGRect(x: Self.glyphCentreX - d / 2, y: centreY - d / 2, width: d, height: d)
         CATransaction.commit()
         applyPose(animated: false, duration: 0)
+        // A cell configured before it had bounds joins its parent's morph now.
+        if oldFrame != glyph.frame { joinMorph() }
     }
 
     /// Read in layout, measured only when the backing scale changes.
@@ -427,13 +407,27 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
 
     // MARK: Tokens
 
-    func applyTokens() {
+    func applyTokens() { applyTokens(animated: false) }
+
+    /// The chip is painted once in its step's colour and faded by opacity, so a
+    /// hover arrives and leaves over `fadeDuration` instead of snapping.
+    private func applyTokens(animated: Bool) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let emphasised = isPointerInside || isPressed
-        chip.backgroundColor = isPressed
-            ? SidebarControlRole.pressed.color.cgColor(in: self)
-            : (isPointerInside ? SidebarControlRole.hover.color.cgColor(in: self) : nil)
+        let step: SidebarControlRole? = isPressed ? .pressed : (isPointerInside ? .hover : nil)
+        if let step { chip.backgroundColor = step.color.cgColor(in: self) }
+        let targetOpacity: Float = step == nil ? 0 : 1
+        if animated, chip.opacity != targetOpacity {
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = chip.presentation()?.opacity ?? chip.opacity
+            fade.toValue = targetOpacity
+            fade.duration = Self.fadeDuration
+            fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            chip.add(fade, forKey: "swarm.chip")
+        }
+        chip.opacity = targetOpacity
+        if step == nil, !animated { chip.backgroundColor = nil }
         let ink = (emphasised ? TextToken.textPrimary : TextToken.textSecondary).color
         for (index, dot) in dots.enumerated() {
             dot.backgroundColor = index == 0 && leadColour != nil
@@ -444,15 +438,13 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
                   }
                 : ink.cgColor(in: self)
         }
-        // The lane's own hairline has no contrast on the hover chip.
-        strokes.strokeColor = LineToken.border.color.cgColor(in: self)
         countLabel.textColor = ink.nsColor(in: self)
         CATransaction.commit()
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        applyTokens()
+        applyTokens(animated: false)
     }
 
     // MARK: Pointer
@@ -472,8 +464,8 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
     func setPointerInside(_ inside: Bool) {
         guard inside != isPointerInside else { return }
         isPointerInside = inside
-        applyTokens()
-        applyPose(animated: canAnimate, duration: 0.12)
+        applyTokens(animated: canAnimate)
+        applyPose(animated: canAnimate, duration: Self.hoverMorph)
     }
 
     override func resetCursorRects() {
@@ -494,9 +486,9 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         guard !isHidden, disclosure != .none else { return }
         Self.pressedSeed = seed
         isPressed = true
-        applyTokens()
-        // The release may be routed to a cell the reload detached; watch for it
-        // at the application instead.
+        applyTokens(animated: false)
+        // The release may be routed to a cell the fold rebuilt; watch for it at
+        // the application instead.
         if Self.releaseMonitor == nil {
             Self.releaseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { event in
                 MainActor.assumeIsolated { Self.release() }
@@ -506,10 +498,7 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         toggle()
     }
 
-    override func mouseUp(with event: NSEvent) {
-        print("DEBUG mouseUp self===held? window=\(window != nil) pressed=\(isPressed)")
-        Self.release()
-    }
+    override func mouseUp(with event: NSEvent) { Self.release() }
 
     private static func release() {
         if let monitor = releaseMonitor { NSEvent.removeMonitor(monitor) }
@@ -517,7 +506,7 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         pressedSeed = nil
         for control in live.allObjects where control.isPressed {
             control.isPressed = false
-            control.applyTokens()
+            control.applyTokens(animated: control.canAnimate)
         }
     }
 
@@ -550,7 +539,9 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
 
     // MARK: QA
 
-    var chipFillForQA: CGColor? { chip.backgroundColor }
+    /// The chip's fill as presented: nil while it is faded out.
+    var chipFillForQA: CGColor? { chip.opacity > 0 ? chip.backgroundColor : nil }
+    var chipFrameForQA: CGRect { chip.frame }
     var countTextForQA: String { countLabel.stringValue }
     var dotColoursForQA: [CGColor?] { dots.map(\.backgroundColor) }
     /// The state the control shows, in the vocabulary the older checks use.
@@ -565,12 +556,12 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
         prefersReducedMotion = { true }
         show(disclosure, childCount: childCount, workingChildren: workingChildren, seed: seed, leadColour: nil)
         isPointerInside = hovered
-        applyTokens()
+        applyTokens(animated: false)
         layoutSubtreeIfNeeded()
         applyPose(animated: false, duration: 0)
-        // A still of the working state: the first dot at the top of its twinkle.
+        // A still of the working state: the first dot at the crest of its ripple.
         if workingChildren > 0 {
-            for (index, dot) in dots.enumerated() { dot.opacity = index == 0 ? 1 : 0.4 }
+            for (index, dot) in dots.enumerated() { dot.opacity = index == 0 ? 1 : 0.55 }
         }
     }
 }

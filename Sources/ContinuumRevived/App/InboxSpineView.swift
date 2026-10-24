@@ -154,6 +154,21 @@ final class InboxGroupBackgroundView: NSView {
         }
     }
 
+    /// How much fill already sits under the card's centre at rest — the wash
+    /// and every tucked card beneath it, composited. A stacked parent's face is
+    /// this, not the panel, so its interaction steps must start from here or a
+    /// hover paints the colour the card already is.
+    var alphaUnderCard: CGFloat {
+        guard isGroupMember, let card = cardRect else { return 0 }
+        let centre = NSPoint(x: card.midX, y: card.midY)
+        var clear: CGFloat = washRect.contains(centre) ? 1 - Self.washAlpha : 1
+        for (index, rect) in tuckedCardRects.reversed().enumerated()
+        where rect.contains(centre) && Self.tuckedAlphas.indices.contains(index) {
+            clear *= 1 - Self.tuckedAlphas[index]
+        }
+        return 1 - clear
+    }
+
     /// The shared wash this strip paints, in this view's coordinates. One
     /// property read by the layers and by the witness.
     var washRect: NSRect {

@@ -2491,7 +2491,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         foldMotion.start(from: before.snapshots.merging(presentation) { _, drawn in drawn },
                          to: after.snapshots,
                          parentKey: "agent:\(parentId.uuidString)", expanded: expanded,
-                         container: scrollView.contentView, covering: Array(after.sources.values))
+                         container: scrollView.contentView,
+                         covering: after.sources.filter { $0.key != "agent:\(parentId.uuidString)" }.map(\.value))
     }
 
     /// Fold by inserting or removing the parent's rows and nothing else. The
@@ -7978,6 +7979,10 @@ final class AgentInboxCardView: NSView, TokenThemed {
     var isHovered = false {
         didSet { guard isHovered != oldValue else { return }; applyFill(fading: true) }
     }
+    /// The fill the group's sheets already show under this card at rest.
+    var underlayAlpha: CGFloat = 0 {
+        didSet { guard underlayAlpha != oldValue else { return }; applyFill(fading: false) }
+    }
     /// The agent whose tile is open — the loudest step, because it answers
     /// "where am I" from anywhere in the list.
     var isRouteActive = false {
@@ -8050,9 +8055,21 @@ final class AgentInboxCardView: NSView, TokenThemed {
     /// sidebar's own `panel` IS the row's background in both gates, which is
     /// exactly what the design decision says a resting row shows.
     static func interactionFill(
-        for role: SidebarSurfaceRole, increasedContrast: Bool, theme: TokenTheme
+        for role: SidebarSurfaceRole, increasedContrast: Bool, theme: TokenTheme,
+        underlay: CGFloat = 0
     ) -> CGColor? {
         guard role != .resting else { return nil }
+        // A card over a group's sheets (a stacked parent, a child in an open
+        // group) already shows `underlay` at rest. Step up from THAT, keeping
+        // the ladder's order and spacing, or hover repaints the same colour.
+        if underlay > 0 {
+            let base = SidebarSurfaceRole.rowBase.color.resolved(for: theme)
+            let foreground = TextToken.textPrimary.color.resolved(for: theme)
+            let step = role.emphasisAlpha - SidebarSurfaceRole.selected.emphasisAlpha + 0.025
+                + (increasedContrast ? 0.015 : 0)
+            let alpha = min(0.22, 1 - (1 - underlay) * (1 - step))
+            return TokenColor(foreground.composited(over: base, alpha: alpha)).cgColor(for: theme)
+        }
         guard increasedContrast else { return role.color.cgColor(for: theme) }
         // Use the existing semantic text/panel tokens and a stronger mix rather
         // than a new literal. The bounded +1.5pt step keeps every interaction
@@ -8081,7 +8098,8 @@ final class AgentInboxCardView: NSView, TokenThemed {
         // Corner style (Settings › Appearance): re-resolved on every repaint.
         layer.cornerRadius = Radius.card
         let fill = Self.interactionFill(
-            for: surfaceRole, increasedContrast: usesIncreasedContrast, theme: effectiveTokenTheme)
+            for: surfaceRole, increasedContrast: usesIncreasedContrast, theme: effectiveTokenTheme,
+            underlay: underlayAlpha)
         let presented = layer.presentation()?.backgroundColor ?? layer.backgroundColor
         layer.backgroundColor = fill
         guard fading, window != nil, presented != fill else { return }

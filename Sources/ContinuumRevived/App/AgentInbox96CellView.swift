@@ -1428,6 +1428,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             // To the next row's card: this row's room below its card, the
             // intercell spacing, and the next card's own inset.
             roomBelowCard: bounds.height - card.frame.maxY + CGFloat(AgentInboxView.rowSpacing) + gap / 2)
+        card.underlayAlpha = groupBackground.alphaUnderCard
         spine.clipsToBounds = false
         spine.frame = bounds.insetBy(dx: 0, dy: -bleed)
         spine.show(
@@ -1645,16 +1646,19 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             y: (bounds.height - jumpHint.intrinsicContentSize.height) / 2,
             width: jumpHint.intrinsicContentSize.width,
             height: jumpHint.intrinsicContentSize.height)
-        // The hover actions sit in the status slot, right-aligned on the meta line.
+        // The hover actions take the provider mark's corner on the detail line,
+        // cross-fading with it. The status slot on the meta line is never
+        // touched by hover: what the agent is doing stays readable while you
+        // point at it.
         let actionSide = Self.hoverActionSide
-        // While the nudge shows, the hover Settle is hidden (one settle
-        // affordance at a time) and Snooze takes the slot before the nudge.
+        let actionCentreX = textRight - trailing + (hasMark ? markSide / 2 : -actionSide / 2)
         hoverSettle.frame = inCard(NSRect(
-            x: metaRight - actionSide, y: snapped(topLine - hoverSettleInkMidY),
+            x: actionCentreX - actionSide / 2, y: snapped(detailLine - hoverSettleInkMidY),
             width: actionSide, height: actionSide))
         hoverSnooze.frame = inCard(NSRect(
-            x: settleNudge.isHidden ? metaRight - actionSide * 2 - 4 : metaRight - actionSide,
-            y: snapped(topLine - hoverSnoozeInkMidY), width: actionSide, height: actionSide))
+            x: hoverSettle.isHidden || !settleNudge.isHidden
+                ? actionCentreX - actionSide / 2 : actionCentreX - actionSide * 1.5 - 4,
+            y: snapped(detailLine - hoverSnoozeInkMidY), width: actionSide, height: actionSide))
     }
 
     /// The states that are asking for a person, as opposed to reporting one. The
@@ -1725,29 +1729,38 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             needsLayout = true
         }
         hoverActionsShown = any || moveOn || copyOn
-        let statusAlpha: CGFloat = any ? 0 : CGFloat(self.shown?.emphasis.accentOpacity ?? 1)
-        hoverSnooze.isHidden = !snoozeOn
-        hoverSettle.isHidden = !settleOn
+        let wasShown = !hoverSnooze.isHidden || !hoverSettle.isHidden
+        // Shown before fading in; hidden only once faded out, so a leaving
+        // pointer never blinks the corner empty.
+        if snoozeOn { hoverSnooze.isHidden = false }
+        if settleOn { hoverSettle.isHidden = false }
+        if any != wasShown { needsLayout = true }
         let apply = {
             self.hoverSnooze.alphaValue = snoozeOn ? 1 : 0
             self.hoverSettle.alphaValue = settleOn ? 1 : 0
-            self.stateLabel.alphaValue = statusAlpha
-            self.statusGlyph.alphaValue = any ? 0 : 1
-            self.throbber?.alphaValue = any ? 0 : 1
+            self.decorations.setMarkVisible(!any, animated: false)
         }
         if prefersReducedMotion() || window == nil {
             apply()
+            if !any { finishHoverFade() }
         } else {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.15
+            decorations.setMarkVisible(!any, animated: true)
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = AgentInboxCardView.fillFadeDuration
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 context.allowsImplicitAnimation = true
                 self.hoverSnooze.animator().alphaValue = snoozeOn ? 1 : 0
                 self.hoverSettle.animator().alphaValue = settleOn ? 1 : 0
-                self.stateLabel.animator().alphaValue = statusAlpha
-                self.statusGlyph.animator().alphaValue = any ? 0 : 1
-                self.throbber?.animator().alphaValue = any ? 0 : 1
-            }
+            }, completionHandler: { [weak self] in
+                MainActor.assumeIsolated { if !any { self?.finishHoverFade() } }
+            })
         }
+    }
+
+    /// Hide the actions once their fade-out lands, unless hover came back.
+    private func finishHoverFade() {
+        if !(hoverActionsShown && onHoverSnooze != nil) { hoverSnooze.isHidden = true }
+        if !(hoverActionsShown && onHoverSettle != nil && settleNudge.isHidden) { hoverSettle.isHidden = true }
     }
 
     func showSettleNudge(_ shown: Bool, onSettle: (() -> Void)?) {
@@ -1846,12 +1859,17 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     /// Whether a hover transition is animating right now: the card's fill or the
     /// status slot's crossfade. False when the change snapped.
+    /// Whether hover is animating rather than snapping: the card's fill, and —
+    /// when the row has hover actions — their fade with the provider mark's.
     var qaHoverFadeInFlightForQA: Bool {
-        card.layer?.animation(forKey: AgentInboxCardView.fillFadeKey) != nil
-            && [hoverSnooze, hoverSettle, stateLabel, statusGlyph].contains {
-                $0.layer?.animationKeys()?.isEmpty == false
-            }
+        let fill = card.layer?.animation(forKey: AgentInboxCardView.fillFadeKey) != nil
+        let hasActions = onHoverSnooze != nil || (onHoverSettle != nil && settleNudge.isHidden)
+        guard hasActions else { return fill }
+        return fill && ([hoverSnooze, hoverSettle].contains { $0.layer?.animationKeys()?.isEmpty == false }
+            || decorations.qaMarkFadingForQA)
     }
+    /// Hover never touches the status slot: what the agent is doing stays read.
+    var qaStatusAlphasForQA: [CGFloat] { [stateLabel.alphaValue, statusGlyph.alphaValue, throbber?.alphaValue ?? 1] }
     var qaFillFadeInFlightForQA: Bool {
         card.layer?.animation(forKey: AgentInboxCardView.fillFadeKey) != nil
     }
@@ -1921,8 +1939,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if let throbber { add("gyro (orbit centre)", throbber.frame.midY, top) }
         add("folder", projectIcon.image == nil ? nil : qaRenderedInk(projectIcon)?.midY, top)
         add("where", whereIcon.isHidden ? nil : qaRenderedInk(whereIcon)?.midY, top)
-        add("hover snooze", hoverSnooze.isHidden ? nil : qaRenderedInk(hoverSnooze)?.midY, top)
-        add("hover settle", hoverSettle.isHidden ? nil : qaRenderedInk(hoverSettle)?.midY, top)
+        add("hover snooze", hoverSnooze.isHidden ? nil : qaRenderedInk(hoverSnooze)?.midY, detail)
+        add("hover settle", hoverSettle.isHidden ? nil : qaRenderedInk(hoverSettle)?.midY, detail)
         func pillIcon(_ pill: InboxSettleNudgeButton) -> CGFloat? {
             guard !pill.isHidden, let rect = pill.cell?.imageRect(forBounds: pill.bounds) else { return nil }
             // The capsule's fill is ink too; measure the glyph without it.
@@ -2362,14 +2380,60 @@ private final class Decorations: NSView {
                 Self.branchSymbol, in: slot, colour: muted,
                 alignment: .centred, flipped: isFlipped)
         }
-        if let slot = markSlot, let mark {
-            // Full-strength black in Aqua, white in Dark Aqua. The old secondary
-            // colour at 85% made already-tiny vendor silhouettes needlessly faint.
-            // §4.5's trademark question remains open — `brand-marks/PROVENANCE.md`.
-            InkAlignedSymbol.drawTinted(
-                mark, in: slot, colour: markColour, flipped: isFlipped)
-        }
+        // Full-strength black in Aqua, white in Dark Aqua. The old secondary
+        // colour at 85% made already-tiny vendor silhouettes needlessly faint.
+        // §4.5's trademark question remains open — `brand-marks/PROVENANCE.md`.
+        // Drawn into its own layer so hover can fade it under the row actions.
+        refreshMarkLayer()
     }
+
+    private let markLayer = CALayer()
+    private var markRendered: (mark: NSImage, colour: NSColor, size: NSSize, scale: CGFloat)?
+
+    private func refreshMarkLayer() {
+        guard let host = layer else { return }
+        if markLayer.superlayer !== host { host.addSublayer(markLayer) }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard let slot = markSlot, let mark else {
+            markLayer.contents = nil
+            markRendered = nil
+            return
+        }
+        markLayer.frame = slot
+        let scale = window?.backingScaleFactor ?? 2
+        if let done = markRendered, done.mark === mark, done.colour == markColour,
+           done.size == slot.size, done.scale == scale { return }
+        let colour = markColour
+        let image = NSImage(size: slot.size, flipped: false) { rect in
+            InkAlignedSymbol.drawTinted(mark, in: rect, colour: colour, flipped: false)
+            return true
+        }
+        markLayer.contentsScale = scale
+        markLayer.contents = image.layerContents(forContentsScale: scale)
+        markRendered = (mark, colour, slot.size, scale)
+    }
+
+    /// Fade the provider mark out from under the hover actions, and back.
+    func setMarkVisible(_ visible: Bool, animated: Bool) {
+        let target: Float = visible ? 1 : 0
+        guard markLayer.opacity != target else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if animated {
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = markLayer.presentation()?.opacity ?? markLayer.opacity
+            fade.toValue = target
+            fade.duration = AgentInboxCardView.fillFadeDuration
+            fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            markLayer.add(fade, forKey: "mark.fade")
+        }
+        markLayer.opacity = target
+        CATransaction.commit()
+    }
+    var markOpacityForQA: Float { markLayer.opacity }
+    var qaMarkFadingForQA: Bool { markLayer.animation(forKey: "mark.fade") != nil }
 
     /// The card-edge treatments. The dashed variant quotes
     /// `FocusBorderOverlayView.lineWidth` and `.dashPattern` rather than inventing
