@@ -317,6 +317,8 @@ enum TileSurfaceResidencyChecks {
         if CommandLine.arguments.contains("--bake-cost-only") { try checkBakeCost(); return }
         try checkDefaultIsOff()
         try checkFlagOffChangesNothing()
+        try checkFarOffscreenLiveTilesParkAndReturn()
+        try checkFarParkingCoversMarkdownEditorsAndBodySwaps()
         try checkQuietSurfacesAndLiveStaysNative()
         try checkHysteresisIgnoresAPointerSweep()
         try checkPointerJitterAtATileEdgeDoesNotFlap()
@@ -636,6 +638,169 @@ enum TileSurfaceResidencyChecks {
                    "flag off must park nothing, saw \(world.canvas.qaParkedBodyCount)")
         try expect(world.transcriptLayoutPasses > layoutsBefore,
                    "flag off must still pay the native cascade — a gesture that laid nothing out was not a gesture")
+    }
+
+    /// Far parking, which runs with the flag OFF. Zooming resizes the world plane
+    /// and AppKit walks every view inside it, on screen or not, so a live tile far
+    /// off screen re-laid out its transcript on every step. Measured on 24 docs and
+    /// 8 streaming agents: parking the never-visible tiles doubled zoom delivery.
+    ///
+    /// The cost is asserted directly: zoom steps far from the tiles lay out no
+    /// transcript at all once they are parked. A parked agent keeps streaming, a
+    /// focused tile is never parked, nothing parks mid-gesture, and every tile is
+    /// back the moment the camera returns.
+    private static func checkFarOffscreenLiveTilesParkAndReturn() throws {
+        let world = World(tileCount: 6)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = false
+        world.canvas.qaResetSurfaceResidencyCounters()
+        // Every tile sits within (0, 0, 1440, 720); half a viewport past 9,000 is
+        // far beyond the park margin.
+        let far = CanvasViewport(x: 9_000, y: 0, zoom: 1)
+        world.canvas.setViewport(far)
+        world.pump()
+
+        // Not while the camera moves: the residency hold.
+        world.cameraStep(toZoom: 0.95, anchor: CGPoint(x: 800, y: 500))
+        world.pump()
+        world.canvas.qaRunFarParkingPass()
+        try expect(world.canvas.qaFarParkedTileCount == 0,
+                   "far parking must not cross while the camera moves; parked \(world.canvas.qaFarParkedTileCount)")
+        world.settle()
+
+        // A tile holding the keyboard stays live wherever it is.
+        let focused = world.agentViews[world.tiles[0].id]
+        let responder = focused?.qaTranscriptForChecks?.collectionView
+        try expect(responder.map { world.window.makeFirstResponder($0) } == true,
+                   "the fixture could not focus a transcript")
+
+        var passes = 0
+        while world.canvas.qaRunFarParkingPass() { passes += 1; world.pump() }
+        world.pump()
+        let parked = world.canvas.qaFarParkedTileCount
+        print("far parking: \(parked) of \(world.tiles.count) parked in \(passes + 1) passes, focused tile native=\(focused?.surfaceResidency == .native)")
+        try expect(parked == world.tiles.count - 1,
+                   "every settled tile far off screen must park, except the focused one; parked \(parked) of \(world.tiles.count)")
+        try expect(focused?.surfaceResidency == .native && focused?.isFarParked == false,
+                   "a tile holding the first responder must never be parked")
+        try expect(world.canvas.qaParkedBodyCount == parked,
+                   "every parked body must sit in the park, saw \(world.canvas.qaParkedBodyCount) for \(parked)")
+        try expect(world.canvas.tileSurfaceStore.qaBakeCount == 0,
+                   "far parking must not bake: nobody can see these pixels")
+        world.window.makeFirstResponder(nil)
+
+        // The cost: zoom steps far from every tile lay out no parked transcript.
+        // The focused tile stayed native, so it is the positive control: it must
+        // still pay, or the steps were not real.
+        let liveLayouts = { focused?.qaTranscriptForChecks?.qaLayoutPassCount ?? 0 }
+        let parkedBefore = world.parkedTranscriptLayoutPasses
+        let liveBefore = liveLayouts()
+        for step in 1...8 {
+            world.cameraStep(toZoom: 1.0 - 0.05 * Double(step), anchor: CGPoint(x: 800, y: 500))
+            world.pump()
+        }
+        world.settle()
+        let parkedLayouts = world.parkedTranscriptLayoutPasses - parkedBefore
+        let nativeLayouts = liveLayouts() - liveBefore
+        print("far parking: 8 zoom steps laid out \(parkedLayouts) parked and \(nativeLayouts) native transcript(s)")
+        try expect(nativeLayouts > 0,
+                   "the native control tile laid out nothing, so these zoom steps proved nothing")
+        try expect(parkedLayouts == 0,
+                   "zoom steps must not lay out parked transcripts; \(parkedLayouts) passes over 8 steps")
+
+        // A parked agent keeps streaming: same body, new content.
+        guard let streaming = world.agentViews[world.tiles[1].id], streaming.isFarParked,
+              let body = streaming.qaParkedBody else {
+            throw Failure(message: "the streaming witness tile was not parked")
+        }
+        let revisionBefore = streaming.surfaceContentRevision
+        let thread = streaming.qaThreadIdForChecks
+        streaming.ingest(.turnStarted(threadId: thread, turnId: "far-park-stream"))
+        streaming.ingest(.contentDelta(threadId: thread, turnId: "far-park-stream", streamKind: .assistant,
+                                       delta: "Streamed while parked far off screen."))
+        streaming.qaTranscriptForChecks?.flushPendingVisualUpdate()
+        world.pump()
+        try expect(streaming.surfaceContentRevision != revisionBefore,
+                   "a parked agent must keep taking its stream")
+        try expect(streaming.isFarParked,
+                   "content arriving off screen must not unpark a tile nobody can see")
+
+        // A window resize reveals world without any camera step. Just past the
+        // return margin, then widen the canvas over the first column.
+        world.canvas.setViewport(CanvasViewport(x: -2_000, y: 0, zoom: 1))
+        world.pump()
+        try expect(world.canvas.qaFarParkedTileCount == world.tiles.count - 1,
+                   "tiles beyond the return margin must stay parked")
+        world.canvas.setFrameSize(NSSize(width: 2_600, height: 1_000))
+        world.pump()
+        let revealed = world.tiles.compactMap { world.agentViews[$0.id] }
+            .filter { $0.frame.intersects(world.canvas.qaVisibleWorldRect) }
+        try expect(!revealed.isEmpty, "the resize revealed no tile, so this proved nothing")
+        try expect(revealed.allSatisfy { !$0.isFarParked },
+                   "a resize that reveals a parked tile must give its body back; \(revealed.filter(\.isFarParked).count) still parked")
+        world.canvas.setFrameSize(NSSize(width: 1_600, height: 1_000))
+
+        // Back on screen: every body returns in the same camera commit.
+        world.canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        world.pump()
+        try expect(world.canvas.qaFarParkedTileCount == 0,
+                   "every tile on screen must have its body back; \(world.canvas.qaFarParkedTileCount) still parked")
+        try expect(world.canvas.qaParkedBodyCount == 0,
+                   "the park must be empty once every tile is back, saw \(world.canvas.qaParkedBodyCount)")
+        try expect(streaming.contentView === body,
+                   "the returned body must be the same view that streamed in the park")
+    }
+
+    /// A split-mode Markdown tile was the heaviest off-screen body left after
+    /// agents parked: it cannot be pictured (a caret, a selection), so it never
+    /// surfaced. Far parking takes no picture, so it parks. And a family swapping
+    /// its body while parked (a mode switch, a reload, a terminal face ending) must
+    /// get its old body back first, or the park keeps a view the tile no longer shows.
+    private static func checkFarParkingCoversMarkdownEditorsAndBodySwaps() throws {
+        let world = World(tileCount: 1)
+        defer { world.teardown() }
+        let markdownPath = NSTemporaryDirectory() + "far-park-\(UUID().uuidString).md"
+        try ("# Far\n\n" + String(repeating: "Split-mode prose with a live editor beside it. ", count: 20))
+            .write(toFile: markdownPath, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: markdownPath) }
+        var metadata = TileMetadata()
+        metadata.filePath = markdownPath
+        let fileTile = Tile(
+            id: UUID(), kind: .file, title: "far.md",
+            frame: TileFrame(x: 40, y: 800, width: 620, height: 400),
+            zPosition: .fromLegacyRank(90), zoneId: world.layer.placement.zoneId, runtimeRef: nil, metadata: metadata
+        )
+        let fileView = FileTileNSView(tile: fileTile)
+        world.layer.tileViews[fileTile.id] = fileView
+        world.layer.tiles.append(fileTile)
+        world.canvas.setZones([world.layer])
+        world.canvas.surfaceResidencyEnabled = false
+        fileView.setMode(.split)
+        world.pump()
+        try expect(fileView.surfaceableBody == nil,
+                   "precondition: a split-mode Markdown tile is never pictured")
+
+        world.canvas.setViewport(CanvasViewport(x: 9_000, y: 0, zoom: 1))
+        world.settle()
+        while world.canvas.qaRunFarParkingPass() { world.pump() }
+        world.pump()
+        try expect(fileView.isFarParked,
+                   "a split-mode Markdown tile far off screen must park; it was the heaviest native body left")
+
+        guard let parkedBody = fileView.qaParkedBody else {
+            throw Failure(message: "the parked file tile holds no body")
+        }
+        let replacement = NSView(frame: .zero)
+        fileView.setContentView(replacement)
+        world.pump()
+        try expect(fileView.surfaceResidency == .native && !fileView.isFarParked,
+                   "installing a new body must end the park")
+        try expect(fileView.qaParkedBody == nil && parkedBody.superview !== world.canvas.surfaceParkView,
+                   "a body swap while parked stranded the old body in the park")
+        try expect(fileView.contentView === replacement,
+                   "the new body must be what the tile shows")
+        try expect(world.canvas.qaParkedBodyCount == world.canvas.qaFarParkedTileCount,
+                   "the park must hold exactly the parked tiles' bodies")
     }
 
     /// **Option A's rule, from production transitions only.** Quiet tiles surface,

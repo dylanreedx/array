@@ -1399,7 +1399,7 @@ final class CanvasNSView: NSView, TokenThemed {
     var qaVisibleWorldRect: CGRect { worldPlane.bounds }
 
     var qaSurfacedTileViews: [TileNSView] {
-        tileViewsInVisualOrder.filter { $0.surfaceResidency == .surfaced }
+        tileViewsInVisualOrder.filter { $0.surfaceResidency == .surfaced && !$0.isFarParked }
     }
 
     /// The same population according to the maintained set.
@@ -1441,6 +1441,8 @@ final class CanvasNSView: NSView, TokenThemed {
         // camera-invariant and every real invalidation (links set, tiles
         // added/removed/moved, hover/focus) already calls it directly.
         updateContextualAgentLineageGeometry()
+        // Every camera commit AND a window resize: both change what is visible.
+        returnFarParkedTiles(offscreenBudget: Self.maxFarReturnsPerStep)
     }
 
     /// Every installed tile view in BACK-TO-FRONT paint order, read from the view
@@ -3902,6 +3904,8 @@ final class CanvasNSView: NSView, TokenThemed {
         // Sharp on screen is ONE transition per gesture, together.
         enforceSurfaceSharpness()
         evaluateTileResidency()
+        returnFarParkedTiles(offscreenBudget: .max)
+        scheduleFarParkingPass()
         logGestureCost()
     }
 
@@ -4168,6 +4172,9 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         let occurrenceCounts = Dictionary(grouping: ordered, by: { $0.tile.id }).mapValues(\.count)
         for tileView in ordered {
+            // Far parking owns these until they come back into range; this pass
+            // would read the missing surface as stale and promote them.
+            guard !tileView.isFarParked else { continue }
             guard tileView.surfaceableBody != nil,
                   surfaceResidencyEnabled || (filePreviewResidencyEnabled && tileView is FileTileNSView) else { continue }
             // The surface store is keyed by tile ID. Two mounted occurrences of
@@ -4602,6 +4609,98 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         return false
     }
+
+    // MARK: - Far parking
+
+    /// Every zoom step resizes the world plane, and AppKit then walks every view
+    /// inside it, on screen or not: each scroll view re-snaps its clip and its
+    /// scrollers. Agent residency is off by default, so a live tile far off screen
+    /// paid that on every step. Measured on 24 docs and 8 streaming agents with 24
+    /// tiles never on screen: parking them doubled zoom delivery (2.2-2.8 -> 4.8-5.8
+    /// camera states/s) and pan (6.7 -> 9.0-10.5).
+    ///
+    /// Nobody can see these pixels, so `D-F` (streaming is streaming) does not
+    /// apply, and this runs whatever `surfaceResidencyEnabled` says. Parked beyond
+    /// half a viewport, returned inside a quarter: the gap is the hysteresis.
+    static let farParkMargin: CGFloat = 0.5
+    static let farReturnMargin: CGFloat = 0.25
+    /// A park is a reparent, a few ms each, so the settle edge spreads them.
+    static let maxFarParksPerPass = 4
+    /// Mid-gesture returns for tiles still in the margin. Tiles already ON screen
+    /// return regardless: a blank body is not a brief softness.
+    static let maxFarReturnsPerStep = 2
+
+    private(set) var qaFarParkCount = 0
+    private(set) var qaFarReturnCount = 0
+    private(set) var qaFarReturnDeferredCount = 0
+    var qaFarParkedTileCount: Int { tileViewsInVisualOrder.filter(\.isFarParked).count }
+    private var farParkingPassScheduled = false
+
+    /// Bring parked bodies back before they reach the screen. Per camera step, so
+    /// it asks the visibility index: O(nearby), never O(installed).
+    private func returnFarParkedTiles(offscreenBudget: Int) {
+        let visible = worldPlane.bounds
+        let lead = visible.insetBy(
+            dx: -visible.width * Self.farReturnMargin, dy: -visible.height * Self.farReturnMargin)
+        let parked = worldPlane.tileViews(intersecting: lead).filter(\.isFarParked)
+        guard !parked.isEmpty else { return }
+        func distance(_ view: TileNSView) -> CGFloat {
+            hypot(view.frame.midX - visible.midX, view.frame.midY - visible.midY)
+        }
+        var budget = offscreenBudget
+        for view in parked.sorted(by: { distance($0) < distance($1) }) {
+            if !view.frame.intersects(visible) {
+                guard budget > 0 else {
+                    qaFarReturnDeferredCount += 1
+                    continue
+                }
+                budget -= 1
+            }
+            view.promoteBodyToNative()
+            qaFarReturnCount += 1
+        }
+    }
+
+    /// Park a settled pass's worth, then come back for the rest. Deferred off the
+    /// settle frame; a gesture starting first simply wins, and its settle re-arms.
+    private func scheduleFarParkingPass() {
+        guard !farParkingPassScheduled else { return }
+        farParkingPassScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self else { return }
+            farParkingPassScheduled = false
+            if parkFarTiles() { scheduleFarParkingPass() }
+        }
+    }
+
+    /// Returns true when tiles remain to park.
+    @discardableResult
+    private func parkFarTiles() -> Bool {
+        // The residency hold: nothing crosses while the camera moves. VoiceOver
+        // reads the whole canvas, so a parked tile would be promoted on every
+        // query; leave it native for an assistive client.
+        guard window != nil, cameraDriver.isSettled, !TileNSView.assistiveClientActive() else { return false }
+        let visible = worldPlane.bounds
+        let keep = visible.insetBy(
+            dx: -visible.width * Self.farParkMargin, dy: -visible.height * Self.farParkMargin)
+        let responder = window?.firstResponder as? NSView
+        var budget = Self.maxFarParksPerPass
+        for view in tileViewsInVisualOrder
+        where view.surfaceResidency == .native && !view.frame.intersects(keep) {
+            // Typing into a tile panned away keeps it live.
+            if let responder, view.containsResponder(responder) { continue }
+            guard budget > 0 else { return true }
+            if view.parkBodyFarOffscreen(park: surfaceParkView) {
+                budget -= 1
+                qaFarParkCount += 1
+            }
+        }
+        return false
+    }
+
+    /// QA: one synchronous parking pass, as the settled schedule would run it.
+    @discardableResult
+    func qaRunFarParkingPass() -> Bool { parkFarTiles() }
 
     /// The 10 Hz heartbeat behind `evaluateTileResidency`. Everything else that
     /// changes liveness — a keystroke, a streamed token, the pointer moving — does
@@ -6594,6 +6693,9 @@ final class CanvasNSView: NSView, TokenThemed {
         // back into this canvas. Pruning here is what stops a workspace switch from
         // accumulating megabytes of pixels for tiles nobody can reach.
         tileSurfaceStore.prune(keeping: Set(tileViewsInVisualOrder.map { $0.tile.id }))
+        // A fresh scene has not settled yet; without this its first gesture would
+        // pay for every far tile.
+        scheduleFarParkingPass()
     }
 
     /// Take every installed layer off the canvas WITHOUT retiring its views, and

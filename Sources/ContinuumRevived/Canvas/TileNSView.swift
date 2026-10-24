@@ -352,6 +352,10 @@ class TileNSView: NSView, TokenThemed {
 
     private(set) var surfaceResidency: SurfaceResidency = .native
     private(set) var parkedBody: NSView?
+    /// Parked only because the tile is far off screen: a blank stand-in, no
+    /// surface. Everything that promotes a surfaced tile on contact (hitTest,
+    /// focus, accessibility, a resize) treats this one the same way.
+    private(set) var isFarParked = false
     private var surfaceHost: TileSurfaceHostView?
 
     /// The host is RETAINED across gestures, not rebuilt on every demotion.
@@ -369,6 +373,10 @@ class TileNSView: NSView, TokenThemed {
     /// one owes its own pixel-equivalence witness, so a new tile kind cannot start
     /// rendering from a cache by inheriting it.
     var surfaceableBody: NSView? { nil }
+
+    /// The body far parking may move to the park. No picture is taken, so a family
+    /// whose body cannot be faithfully pictured may still park.
+    var farParkableBody: NSView? { surfaceableBody }
 
     /// The family's content revision, for freshness. nil means "cannot say", which
     /// is treated as stale — the safe direction.
@@ -453,7 +461,7 @@ class TileNSView: NSView, TokenThemed {
             surface: surface.image, bakedScale: surface.bakedScale, backingScale: backingScale
         )
         retainedSurfaceHost = host
-        setContentView(host)
+        installContentView(host)
         surfaceHost = host
     }
 
@@ -484,7 +492,7 @@ class TileNSView: NSView, TokenThemed {
         // immediately afterwards or it stops being laid out and stops streaming —
         // which is the entire property this design depends on.
         if surfacesTitleAccessory { titleBar?.surfaceAccessory() }
-        setContentView(host)
+        installContentView(host)
         let t2 = ProcessInfo.processInfo.systemUptime
         body.frame = CGRect(origin: .zero, size: bodySize)
         park.addSubview(body)
@@ -498,6 +506,28 @@ class TileNSView: NSView, TokenThemed {
         return true
     }
 
+    /// Park the body while the tile is far off screen, with nothing in its place.
+    ///
+    /// Zooming resizes the world plane, and AppKit then walks every view inside it
+    /// — on screen or not — re-snapping each scroll view's clip. A live tile no one
+    /// can see paid that on every camera step. No bake: nobody is looking, and
+    /// the body keeps laying out and streaming in the park.
+    @discardableResult
+    func parkBodyFarOffscreen(park: NSView) -> Bool {
+        guard surfaceResidency == .native,
+              let body = farParkableBody,
+              body === contentView else { return false }
+        let bodySize = body.bounds.size
+        if surfacesTitleAccessory { titleBar?.surfaceAccessory() }
+        installContentView(NSView(frame: .zero))
+        body.frame = CGRect(origin: .zero, size: bodySize)
+        park.addSubview(body)
+        parkedBody = body
+        surfaceResidency = .surfaced
+        isFarParked = true
+        return true
+    }
+
     /// Put the real body back. Idempotent, and safe to call from anywhere —
     /// including `hitTest`, which is how a click during the settle window reaches
     /// the real body instead of being swallowed by a picture of it.
@@ -505,9 +535,10 @@ class TileNSView: NSView, TokenThemed {
         guard surfaceResidency == .surfaced, let body = parkedBody else { return }
         let start = ProcessInfo.processInfo.systemUptime
         body.removeFromSuperview()
-        setContentView(body)
+        installContentView(body)
         Self.qaPromoteMs += (ProcessInfo.processInfo.systemUptime - start) * 1_000
         parkedBody = nil
+        isFarParked = false
         // `surfaceHost` tracks what is INSTALLED; `retainedSurfaceHost` keeps the
         // view and its uploaded texture alive for the next gesture.
         surfaceHost = nil
@@ -715,6 +746,15 @@ class TileNSView: NSView, TokenThemed {
     /// Subclasses install their content view via this entry point so the
     /// title bar stays on top and the body is automatically resized.
     func setContentView(_ view: NSView) {
+        // A family installing a new body (a mode switch, a reload) while its old
+        // one is parked: give the old one back first, or residency keeps pointing
+        // at a view the tile no longer shows.
+        if surfaceResidency == .surfaced { promoteBodyToNative() }
+        installContentView(view)
+    }
+
+    /// The residency transitions' own swap, which must not promote.
+    private func installContentView(_ view: NSView) {
         contentView?.removeFromSuperview()
         contentView = view
         view.translatesAutoresizingMaskIntoConstraints = true

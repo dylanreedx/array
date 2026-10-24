@@ -228,6 +228,10 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         if presentation == .sourceText || (presentation == .markdown && mode != .preview) { return nil }
         return activeBody
     }
+    /// Markdown in every mode parks: no picture is taken, and the editor's caret,
+    /// selection and undo stay on the same views in the park. The source editor is
+    /// a WKWebView, whose remote layer tree is not proven to survive reparenting.
+    override var farParkableBody: NSView? { presentation == .sourceText ? nil : activeBody }
     override var surfaceContentRevision: UInt64? { surfaceEpoch }
 
     /// `activeBody` is a scroll view for some file kinds and a container holding
