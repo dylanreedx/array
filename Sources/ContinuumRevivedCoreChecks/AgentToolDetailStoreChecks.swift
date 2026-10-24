@@ -516,6 +516,20 @@ private func runAgentToolDetailImplicitSensitivityChecks() async throws {
     let falsePositive = SecretRedactor.redact("runner --tokenize keep-tokenized --monkey keep-monkey")
     expect(falsePositive.contains("keep-tokenized") && falsePositive.contains("keep-monkey"),
            "SecretRedactor argv matrix: near-match option names must not redact ordinary values, got \(falsePositive)")
+
+    // .plans/81-live-performance: redact compiled all of its patterns on every
+    // call, per tool row per render. Once warm, fifty calls must compile nothing.
+    _ = SecretRedactor.redact("warm password=w Bearer w --api-key w https://u:p@h/x?q=w")
+    let compiledWarm = SecretRedactor.compiledPatternCountForQA
+    for index in 0..<50 {
+        let secret = "cache-secret-\(index)"
+        let redacted = SecretRedactor.redact(
+            "call password=\(secret) Bearer \(secret) --api-key \(secret) https://u:\(secret)@h/x?q=\(secret)")
+        expect(!redacted.contains(secret), "SecretRedactor cache: call \(index) leaked its secret: \(redacted)")
+    }
+    let compiledDuringCalls = SecretRedactor.compiledPatternCountForQA - compiledWarm
+    expect(compiledDuringCalls == 0,
+           "SecretRedactor cache: 50 warm redact calls compiled \(compiledDuringCalls) patterns; each pattern must compile once")
 }
 
 private func runAgentToolDetailTruncationChecks() async throws {

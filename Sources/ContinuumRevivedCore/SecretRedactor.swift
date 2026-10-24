@@ -163,14 +163,43 @@ public enum SecretRedactor {
         return components.contains(where: sensitiveComponents.contains)
     }
 
+    /// How many patterns have been compiled since launch. Each pattern compiles
+    /// once; `redact` runs per tool row on every transcript render.
+    public static var compiledPatternCountForQA: Int { patterns.compiledCount }
+
+    private static let patterns = PatternCache()
+
+    /// The redactor's patterns are a fixed set of literals, so the cache is
+    /// bounded. Compiling them on every call cost 3-8% of the live main thread
+    /// (.plans/81-live-performance).
+    private final class PatternCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var compiled: [String: NSRegularExpression] = [:]
+        private var count = 0
+
+        var compiledCount: Int {
+            lock.lock(); defer { lock.unlock() }
+            return count
+        }
+
+        func regex(_ pattern: String) -> NSRegularExpression? {
+            lock.lock(); defer { lock.unlock() }
+            if let regex = compiled[pattern] { return regex }
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+            count += 1
+            compiled[pattern] = regex
+            return regex
+        }
+    }
+
     private static func matches(in text: String, pattern: String) -> [NSTextCheckingResult] {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        guard let regex = patterns.regex(pattern) else { return [] }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         return regex.matches(in: text, options: [], range: range)
     }
 
     private static func replace(_ text: String, pattern: String, template: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        guard let regex = patterns.regex(pattern) else { return text }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
     }
