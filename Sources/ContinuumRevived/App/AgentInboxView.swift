@@ -2981,12 +2981,28 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     /// The where marker drawn on row `id`, read off its cell.
-    func whereMarkerForQA(id: UUID) -> (text: String, frame: NSRect, placementFrame: NSRect, iconInkCenterDelta: CGFloat, projectIconBaselineDelta: CGFloat)? {
+    func whereMarkerForQA(id: UUID) -> (text: String, frame: NSRect, placementFrame: NSRect, iconInkCenterDelta: CGFloat, projectIconOpticalCenterDelta: CGFloat)? {
         guard let tableRow = tableRow(forAgentId: id),
               let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
         else { return nil }
         card.layoutSubtreeIfNeeded()
         return card.qaWhereMarker
+    }
+
+    /// Every visible icon on row `id` against its line's rendered x-height.
+    func iconAlignmentForQA(id: UUID) -> [AgentInbox96CellView.IconInkForQA]? {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return nil }
+        return card.qaIconAlignmentForQA()
+    }
+
+    func metadataInkGeometryForQA(id: UUID) -> [String: NSRect]? {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return nil }
+        card.layoutSubtreeIfNeeded()
+        return card.qaMetadataInkGeometry
     }
 
     /// Hover row `id` the way the pointer does, then press one of its external actions.
@@ -3155,6 +3171,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         case 49: // Space
             // A session from another app has no tile to frame.
             if rows.first(where: { $0.id == id })?.externalSession == nil { onPreviewRow?(id) }
+            return true
+        case 123, 124: // ← folds the selected parent, → unfolds it
+            guard let row = rows.first(where: { $0.id == id }) else { return false }
+            let current = disclosure(for: row)
+            guard current == (event.keyCode == 123 ? .expanded : .collapsed) else { return false }
+            InboxSwarmFoldControl.noteToggle(seed: id, from: current)
+            toggleCollapse(parentId: id)
+            // A fold drops the selection; the keyboard keeps its place.
+            if let tableRow = tableRow(forAgentId: id) {
+                tableView.selectRowIndexes(IndexSet(integer: tableRow), byExtendingSelection: false)
+            }
             return true
         default:
             return false

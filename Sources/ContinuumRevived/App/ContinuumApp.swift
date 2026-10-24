@@ -1231,6 +1231,7 @@ enum ContinuumApp {
             Task { @MainActor in
                 do {
                     try await InboxParentFoldChecks.run()
+                    print("SidebarSwarmGlyphChecks passed:\n" + (try await SidebarSwarmGlyphChecks.run()))
                     Foundation.exit(0)
                 } catch {
                     fputs("inbox-parent-fold check failed: \(error)\n", stderr)
@@ -2540,6 +2541,7 @@ enum ContinuumApp {
             do {
                 _ = NSApplication.shared
                 try UIProbeGeometry.runSidebarUXChecks()
+                print(try SidebarIconAlignmentChecks.run())
                 print("ContinuumRevivedSidebarUXChecks passed")
                 Foundation.exit(0)
             } catch {

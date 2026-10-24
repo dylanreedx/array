@@ -22,6 +22,11 @@ final class InboxSettleNudgeButton: NSButton, TokenThemed {
         didSet { if oldValue != isPointerInside { applyTokens() } }
     }
     private var pointerTracking: NSTrackingArea?
+    /// The line the pill sits on: where its title's x-height centre and its
+    /// icon's ink centre go, top-down in the pill's bounds. nil centres by box.
+    var opticalCentreY: CGFloat? {
+        didSet { if oldValue != opticalCentreY { needsDisplay = true } }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -105,6 +110,53 @@ private final class InboxSettleNudgeCell: NSButtonCell {
 
     private var iconSize: NSSize { image?.size ?? .zero }
 
+    /// The row's optical line, when the pill is placed on one, and the scale it
+    /// rasterises at.
+    private var opticalLine: (y: CGFloat, scale: CGFloat)? {
+        guard let button = controlView as? InboxSettleNudgeButton, let y = button.opticalCentreY else { return nil }
+        return (y, button.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2)
+    }
+
+    /// Top-down ink of the icon / the title's x-height inside their own boxes,
+    /// measured once per image or font and scale on a probe pill — this cell's
+    /// own drawing, without a fill.
+    private static var iconInks: [String: NSCache<NSImage, NSNumber>] = [:]
+    private static var titleXCentres: [String: CGFloat] = [:]
+    private static func probeInk(scale: CGFloat, image: NSImage?, title: NSAttributedString,
+                                 part: (NSButtonCell, NSRect) -> NSRect) -> CGFloat? {
+        let probe = InboxSettleNudgeButton(frame: .zero)
+        probe.image = image
+        probe.attributedTitle = title
+        probe.setFrameSize(probe.intrinsicContentSize)
+        guard let cell = probe.cell as? NSButtonCell else { return nil }
+        let rect = part(cell, probe.bounds)
+        return InkProbe.ink(of: probe, scale: scale, in: rect.insetBy(dx: -1, dy: -1)).map { $0.midY - rect.minY }
+    }
+    private func iconInkMidY(scale: CGFloat) -> CGFloat {
+        guard let image else { return 0 }
+        let key = "\(scale)"
+        let cache = Self.iconInks[key] ?? NSCache<NSImage, NSNumber>()
+        Self.iconInks[key] = cache
+        if let cached = cache.object(forKey: image) { return CGFloat(cached.doubleValue) }
+        let mid = Self.probeInk(scale: scale, image: image, title: NSAttributedString()) {
+            $0.imageRect(forBounds: $1)
+        } ?? image.size.height / 2
+        cache.setObject(NSNumber(value: Double(mid)), forKey: image)
+        return mid
+    }
+    private func titleXCentre(scale: CGFloat) -> CGFloat {
+        let font = attributedTitle.length > 0
+            ? attributedTitle.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil
+        let key = "\(font?.fontName ?? ""):\(font?.pointSize ?? 0):\(scale)"
+        if let cached = Self.titleXCentres[key] { return cached }
+        let probe = NSAttributedString(string: "xxxx", attributes: font.map { [.font: $0] } ?? [:])
+        let centre = Self.probeInk(scale: scale, image: nil, title: probe) {
+            $0.titleRect(forBounds: $1)
+        } ?? textSize.height / 2
+        Self.titleXCentres[key] = centre
+        return centre
+    }
+
     override var cellSize: NSSize {
         let icon = iconSize.width > 0 ? iconSize.width + InboxSettleNudgeButton.iconTextGap : 0
         return NSSize(
@@ -115,10 +167,11 @@ private final class InboxSettleNudgeCell: NSButtonCell {
     override func imageRect(forBounds rect: NSRect) -> NSRect {
         let size = iconSize
         guard size.width > 0 else { return .zero }
+        let y = opticalLine.map { InkProbe.snap($0.y - iconInkMidY(scale: $0.scale), scale: $0.scale) }
+            ?? ((rect.height - size.height) / 2).rounded()
         return NSRect(
             x: rect.minX + InboxSettleNudgeButton.horizontalPadding,
-            y: rect.minY + ((rect.height - size.height) / 2).rounded(),
-            width: size.width, height: size.height)
+            y: rect.minY + y, width: size.width, height: size.height)
     }
 
     override func titleRect(forBounds rect: NSRect) -> NSRect {
@@ -127,8 +180,10 @@ private final class InboxSettleNudgeCell: NSButtonCell {
             ? icon.maxX + InboxSettleNudgeButton.iconTextGap
             : rect.minX + InboxSettleNudgeButton.horizontalPadding
         let height = textSize.height
+        let y = opticalLine.map { InkProbe.snap($0.y - titleXCentre(scale: $0.scale), scale: $0.scale) }
+            ?? ((rect.height - height) / 2).rounded()
         return NSRect(
-            x: x, y: rect.minY + ((rect.height - height) / 2).rounded(),
+            x: x, y: rect.minY + y,
             width: max(0, rect.maxX - InboxSettleNudgeButton.horizontalPadding - x),
             height: height)
     }
@@ -318,6 +373,106 @@ enum InkAlignedSymbol {
     }
 }
 
+// MARK: - Ink at the real raster
+
+/// Where ink really lands, measured on the raster AppKit paints at a backing
+/// scale. A 96 pt measurement scaled down drifts by a raster row at 11 pt, and an
+/// image view's box or baseline says nothing about its glyph. Callers cache by
+/// content and scale; nothing here runs per layout pass.
+@MainActor
+enum InkProbe {
+    /// A view's own drawing (and its subviews'), as `cacheDisplay` paints it, in
+    /// the view's top-down points. Alpha is the ink, so tints and appearance do
+    /// not move it.
+    static func ink(of view: NSView, scale: CGFloat) -> NSRect? {
+        rendered(view, scale: scale).flatMap { points(InkAlignedSymbol.inkBounds(of: $0), size: view.bounds.size) }
+    }
+
+    /// The same, restricted to `region` (top-down points in the view): one mark
+    /// among several a view paints.
+    static func ink(of view: NSView, scale: CGFloat, in region: NSRect) -> NSRect? {
+        let pixels = NSRect(x: region.minX * scale, y: region.minY * scale,
+                            width: region.width * scale, height: region.height * scale).integral
+        guard let rep = rendered(view, scale: scale),
+              let cropped = rep.cgImage?.cropping(to: pixels) else { return nil }
+        let unit = NSRect(origin: .zero, size: NSSize(width: pixels.width / scale, height: pixels.height / scale))
+        return points(InkAlignedSymbol.inkBounds(of: NSBitmapImageRep(cgImage: cropped)), size: unit.size)
+            .map { $0.offsetBy(dx: pixels.minX / scale, dy: pixels.minY / scale) }
+    }
+
+    /// The x-height band of a rendered LABEL, top-down in its points: its
+    /// rendered baseline — the bottom of the rows dense with ink, below which a
+    /// descender is a lone stem — and the font's x-height above it. Density
+    /// alone cannot find the x-height of "Pb", whose capital fills the rows
+    /// above it.
+    static func xHeightBand(of label: NSTextField, scale: CGFloat) -> (top: CGFloat, bottom: CGFloat)? {
+        guard let font = label.font, let rep = rendered(label, scale: scale), let data = rep.bitmapData
+        else { return nil }
+        let pixelBytes = rep.bitsPerPixel / 8
+        var counts = [Int](repeating: 0, count: rep.pixelsHigh)
+        for y in 0..<rep.pixelsHigh {
+            let row = y * rep.bytesPerRow
+            for x in 0..<rep.pixelsWide where Int(data[row + x * pixelBytes + pixelBytes - 1]) > 24 {
+                counts[y] += 1
+            }
+        }
+        guard let peak = counts.max(), peak > 0,
+              let last = counts.indices.last(where: { counts[$0] * 5 >= peak * 2 }) else { return nil }
+        let baseline = CGFloat(last + 1) * label.bounds.height / CGFloat(rep.pixelsHigh)
+        return (baseline - font.xHeight, baseline)
+    }
+
+    /// The optical centre of a line of `font` text inside a label of `height`:
+    /// the middle of the x-height, top-down from the label's top. Lowercase
+    /// carries a line; a capital/ascender reference ("Hl") sat a point high.
+    static func xHeightCentre(font: NSFont, height: CGFloat, scale: CGFloat) -> CGFloat {
+        let key = "\(font.fontName):\(font.pointSize):\(height):\(scale)"
+        if let cached = xHeightCentres[key] { return cached }
+        let label = NSTextField(labelWithString: "xxxx")
+        label.frame = NSRect(x: 0, y: 0, width: 48, height: height)
+        label.font = font
+        let centre = ink(of: label, scale: scale)?.midY ?? height / 2
+        xHeightCentres[key] = centre
+        return centre
+    }
+    private static var xHeightCentres: [String: CGFloat] = [:]
+
+    /// Top-down ink of `view` cached by `key` and scale: for controls whose
+    /// drawing depends only on what the key names.
+    static func cachedInk(_ key: String, scale: CGFloat, of view: () -> NSView) -> NSRect? {
+        let full = "\(key)@\(scale)"
+        if let cached = viewInks[full] { return cached }
+        let measured = ink(of: view(), scale: scale)
+        viewInks[full] = measured
+        return measured
+    }
+    private static var viewInks: [String: NSRect?] = [:]
+
+    /// `y` moved onto the backing grid at `scale`.
+    static func snap(_ y: CGFloat, scale: CGFloat) -> CGFloat { (y * scale).rounded() / scale }
+
+    private static func bitmap(size: NSSize, scale: CGFloat) -> NSBitmapImageRep? {
+        guard size.width > 0, size.height > 0 else { return nil }
+        let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int(ceil(size.width * scale)),
+            pixelsHigh: Int(ceil(size.height * scale)), bitsPerSample: 8, samplesPerPixel: 4,
+            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+        rep?.size = size
+        return rep
+    }
+
+    private static func rendered(_ view: NSView, scale: CGFloat) -> NSBitmapImageRep? {
+        guard let rep = bitmap(size: view.bounds.size, scale: scale) else { return nil }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        return rep
+    }
+
+    private static func points(_ unit: NSRect?, size: NSSize) -> NSRect? {
+        unit.map { NSRect(x: $0.minX * size.width, y: $0.minY * size.height,
+                          width: $0.width * size.width, height: $0.height * size.height) }
+    }
+}
+
 // MARK: - Brand marks
 
 /// Vendor marks bundled into the app at build time, with a repo-relative fallback
@@ -430,7 +585,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// The tree connector, in the indent gutters to the left of the card.
     private let spine = InboxSpineView()
     private let jumpHint = InboxJumpHintView()
-    private let disclosureButton = InboxDisclosureButton()
+    private let disclosureButton = InboxSwarmFoldControl(frame: .zero)
     var onToggleDisclosure: (() -> Void)?
     private let settleNudge = InboxSettleNudgeButton(frame: .zero)
     private var onSettleNudge: (() -> Void)?
@@ -457,11 +612,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private let projectIcon = NSImageView(frame: .zero)
     private static let metadataIconSide: CGFloat = 12
     private static var metadataSymbols: [String: NSImage] = [:]
-    private static let metadataInkCenters: NSCache<NSImage, NSNumber> = {
-        let cache = NSCache<NSImage, NSNumber>()
-        cache.countLimit = 128
-        return cache
-    }()
+    private var metadataRasterScale: CGFloat = 1
     private var projectIconInkCenterY: CGFloat = 6
     private var whereIconInkCenterY: CGFloat = 6
 
@@ -475,23 +626,107 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return image
     }
 
-    /// NSImageView's baseline includes symbol padding, so equal baselines can
-    /// still put the visible glyphs on different lines. Measure the native cell
-    /// once per image, when it changes; layout only uses the cached offset.
-    private static func metadataInkCenter(of image: NSImage?) -> CGFloat {
-        guard let image else { return metadataIconSide / 2 }
-        if let cached = metadataInkCenters.object(forKey: image) { return CGFloat(cached.doubleValue) }
-        let view = NSImageView(frame: NSRect(x: 0, y: 0, width: metadataIconSide, height: metadataIconSide))
-        view.imageScaling = .scaleProportionallyDown
-        view.image = image
-        let rendered = NSImage(size: view.bounds.size, flipped: false) { rect in
-            view.cell?.draw(withFrame: rect, in: view)
-            return true
+    // MARK: Optical lines
+
+    /// Each line's optical centre — the middle of its x-height — top-down from
+    /// the top of its band. Every icon on a line puts its measured ink midY here.
+    private var lineCentres = (top: CGFloat(0), title: CGFloat(0), detail: CGFloat(0))
+    /// Measured ink midY, top-down inside each icon's own frame or slot.
+    private var statusInkMidY: CGFloat = 0
+    private var branchInkMidY: CGFloat = 0
+    private var markInkMidY: CGFloat = 0
+    private var hoverSnoozeInkMidY: CGFloat = 0
+    private var hoverSettleInkMidY: CGFloat = 0
+    private static let branchGlyphSide: CGFloat = 11
+    private static let markSide: CGFloat = 14
+    private static let hoverActionSide: CGFloat = 20
+
+    /// Ink midY of `image` as `view` paints it in a `side` square at `scale`,
+    /// top-down, measured once per image, kind, side and scale through the real
+    /// view's own drawing. Layout reads the result.
+    private static var slotInks: [String: NSCache<NSImage, NSNumber>] = [:]
+    private static func inkMidY(_ kind: String, of image: NSImage?, side: CGFloat, scale: CGFloat,
+                                view: (NSImage, NSRect) -> NSView) -> CGFloat {
+        guard let image else { return side / 2 }
+        let key = "\(kind):\(side):\(scale)"
+        let cache: NSCache<NSImage, NSNumber>
+        if let existing = slotInks[key] { cache = existing } else {
+            cache = NSCache<NSImage, NSNumber>()
+            cache.countLimit = 64
+            slotInks[key] = cache
         }
-        let center = (InkAlignedSymbol.measureInk(of: rendered)?.midY ?? 0.5) * metadataIconSide
-        metadataInkCenters.setObject(NSNumber(value: Double(center)), forKey: image)
-        return center
+        if let cached = cache.object(forKey: image) { return CGFloat(cached.doubleValue) }
+        let box = NSRect(x: 0, y: 0, width: side, height: side)
+        let mid = InkProbe.ink(of: view(image, box), scale: scale)?.midY ?? side / 2
+        cache.setObject(NSNumber(value: Double(mid)), forKey: image)
+        return mid
     }
+
+    /// NSImageView's baseline includes symbol padding, so equal baselines can
+    /// still put the visible glyphs on different lines. Measure the native view
+    /// once per image, when it changes; layout only uses the cached offset.
+    private static func metadataInkCenter(of image: NSImage?, scale: CGFloat) -> CGFloat {
+        inkMidY("metadata", of: image, side: metadataIconSide, scale: scale) { image, box in
+            let view = NSImageView(frame: box)
+            view.imageScaling = .scaleProportionallyDown
+            view.image = image
+            return view
+        }
+    }
+
+    /// The line centres and the fixed icons' ink, for this backing scale.
+    private func refreshInkMetrics() {
+        let scale = metadataRasterScale
+        lineCentres = (
+            InkProbe.xHeightCentre(font: placementLabel.font ?? .token(.caption), height: proposal.bandTop, scale: scale),
+            InkProbe.xHeightCentre(font: titleLabel.font ?? .token(.title), height: proposal.bandTitle, scale: scale),
+            InkProbe.xHeightCentre(font: branchLabel.font ?? .token(.label), height: proposal.bandDetail, scale: scale))
+        let side = Self.hoverActionSide
+        func hoverInk(_ symbol: String, _ label: String) -> CGFloat {
+            InkProbe.cachedInk("hover:\(symbol):\(side)", scale: scale) {
+                let probe = InboxRowHoverActionButton(symbol: symbol, label: label)
+                probe.frame = NSRect(x: 0, y: 0, width: side, height: side)
+                return probe
+            }?.midY ?? side / 2
+        }
+        hoverSnoozeInkMidY = hoverInk("clock", "Snooze")
+        hoverSettleInkMidY = hoverInk("checkmark", "Settle")
+        refreshContentInk()
+    }
+
+    /// The ink of what THIS row draws: called when its content or scale changes.
+    private func refreshContentInk() {
+        let scale = metadataRasterScale
+        projectIconInkCenterY = Self.metadataInkCenter(of: projectIcon.image, scale: scale)
+        whereIconInkCenterY = Self.metadataInkCenter(of: whereIcon.image, scale: scale)
+        let alignment = statusGlyph.alignment, fraction = statusGlyph.inkFraction
+        statusInkMidY = Self.inkMidY("status:\(alignment):\(fraction)",
+                                     of: statusGlyph.symbol.flatMap(InkAlignedSymbol.image),
+                                     side: anatomy.statusIconSide, scale: scale) { [symbol = statusGlyph.symbol] _, box in
+            let probe = StatusGlyphView(frame: box)
+            probe.alignment = alignment
+            probe.inkFraction = fraction
+            probe.symbol = symbol
+            return probe
+        }
+        branchInkMidY = Self.inkMidY("branch", of: InkAlignedSymbol.image(Decorations.branchSymbol),
+                                     side: Self.branchGlyphSide, scale: scale) { _, box in
+            let probe = Decorations(frame: box)
+            probe.drawsBranchGlyph = true
+            probe.branchSlot = box
+            return probe
+        }
+        markInkMidY = Self.inkMidY("mark", of: decorations.mark, side: Self.markSide, scale: scale) { image, box in
+            let probe = Decorations(frame: box)
+            probe.mark = image
+            probe.markSlot = box
+            return probe
+        }
+    }
+
+    /// `y` (top-down in the card) on the backing grid.
+    private func snapped(_ y: CGFloat) -> CGFloat { InkProbe.snap(y, scale: metadataRasterScale) }
+
     private let stateLabel = NSTextField(labelWithString: "")
     private let titleLabel = NSTextField(labelWithString: "")
     private let branchLabel = NSTextField(labelWithString: "")
@@ -596,6 +831,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.addSubview(decorations)
         card.addSubview(statusGlyph)
 
+        metadataRasterScale = NSScreen.main?.backingScaleFactor ?? 1
         placementLabel.font = .token(.caption)
         projectIcon.imageScaling = .scaleProportionallyDown
         projectIcon.setAccessibilityElement(false)
@@ -619,7 +855,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
         disclosureButton.target = self
         disclosureButton.action = #selector(disclosureClicked)
-        disclosureButton.isHidden = true
+        disclosureButton.prefersReducedMotion = prefersReducedMotion
         card.addSubview(disclosureButton)
         // ONE action, one label. The "×" this used to carry was title text, not a
         // target — the whole pill settled — and there is no "dismiss the nudge"
@@ -681,10 +917,29 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
         setAccessibilityElement(true)
         setAccessibilityRole(.row)
+        refreshInkMetrics()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        refreshMetadataBackingScale()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        refreshMetadataBackingScale()
+    }
+
+    private func refreshMetadataBackingScale() {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        guard scale != metadataRasterScale else { return }
+        metadataRasterScale = scale
+        refreshInkMetrics()
+        needsLayout = true
+    }
 
     override var isFlipped: Bool { true }
 
@@ -711,21 +966,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         needsLayout = true
     }
 
-    /// The disclosure control's square, and the lane it is centred in.
-    private static let disclosureSide: CGFloat = 14
-    private static var disclosureLaneX: CGFloat {
-        (CGFloat(AgentInboxView.indentPerLevel) - disclosureSide) / 2
-    }
-    private static let sizingDisclosure = InboxDisclosureButton()
-
-    /// Where a row's disclosure control ends, in its own card's x: the lane
-    /// offset plus the control's real width for this glyph and count. ONE
-    /// function for the parent's own frame and for the clearance its children
-    /// keep, so the two cannot disagree.
+    /// Where a row's fold control ends, in its own card's x: the lane, the
+    /// glyph and the count, fixed by the count's digits. ONE function for the
+    /// parent's own frame and for the clearance its children keep, so the two
+    /// cannot disagree.
     static func disclosureTrailing(for disclosure: RowDisclosure, childCount: Int) -> CGFloat {
         guard disclosure != .none else { return 0 }
-        sizingDisclosure.show(disclosure, childCount: childCount)
-        return disclosureLaneX + max(disclosureSide, sizingDisclosure.fittingSize.width)
+        return InboxSwarmFoldControl.width(childCount: childCount)
     }
 
     func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
@@ -741,11 +988,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         whereIcon.image = row.whereMarker.flatMap {
             Self.metadataSymbol($0.symbol, pointSize: Typography.style(for: .caption).size - 1)
         }
-        whereIconInkCenterY = Self.metadataInkCenter(of: whereIcon.image)
         for view in [whereDot, whereIcon, whereLabel] as [NSView] { view.isHidden = row.whereMarker == nil }
         projectIcon.image = !placement.isEmpty
             ? Self.metadataSymbol("folder") : nil
-        projectIconInkCenterY = Self.metadataInkCenter(of: projectIcon.image)
         titleLabel.stringValue = row.displayTitle
         let rollupSummary: String?
         if disclosure == .collapsed {
@@ -788,9 +1033,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         statusGlyph.setPulsing(false)
         applyThrobber(isWorking: row.state == .working)
         decorations.drawsBranchGlyph = rollupSummary == nil && !branchLabel.stringValue.isEmpty
+        refreshContentInk()
 
-        disclosureButton.isHidden = disclosure == .none
-        disclosureButton.show(disclosure, childCount: rollup?.children ?? 0)
+        disclosureButton.show(
+            disclosure, childCount: rollup?.children ?? 0, workingChildren: rollup?.working ?? 0,
+            seed: row.id, leadColour: row.identityColor.map(AgentInboxView.identityDotColour(named:)))
 
         applyColours()
         applyAccessibility()
@@ -1180,20 +1427,20 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         var textLeft = insetH + anatomy.leadingGutter
         let textRight = card.bounds.width - insetH
 
-        // THE TRIANGLE LIVES IN THE CONNECTOR LANE, not in the text column.
+        // THE FOLD CONTROL LIVES IN THE CONNECTOR LANE, not in the text column.
         // It used to sit at `textLeft` inside an already-indented card, which put a
         // parent's control and its child's title within 2 pt of the same x — the
         // reported defect: the second group under the first read as nested inside
-        // it. Centred on `spineX(depth)` instead, it is the head of its own
-        // descender and 11 pt clear of any child title.
+        // it. Centred on `spineX(depth)` instead, its glyph is the head of its own
+        // descender. It takes the card's full height across the lane and the
+        // count, so the fold target is generous and the rest of the card is
+        // "go to agent"; the glyph sits on the title's line.
         if !disclosureButton.isHidden, let shown {
-            let side = Self.disclosureSide
-            let laneX = Self.disclosureLaneX
             let trailing = Self.disclosureTrailing(
                 for: shown.disclosure, childCount: shown.rollup?.children ?? 0)
-            disclosureButton.frame = inCard(NSRect(
-                x: laneX, y: (card.bounds.height - side) / 2,
-                width: trailing - laneX, height: side))
+            disclosureButton.frame = NSRect(x: 0, y: 0, width: trailing, height: card.bounds.height)
+            disclosureButton.glyphCentreY = proposal.insetV + proposal.bandTop + proposal.gapTop
+                + lineCentres.title
             textLeft = max(textLeft, trailing + CGFloat(Space.s))
         }
         // A CHILD'S TITLE CLEARS ITS PARENT'S CONTROL. One indent level is 16pt
@@ -1222,10 +1469,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             ? 0 : min(card.bounds.width * 0.55, Self.width(of: stateLabel))
         var placementLeft = textLeft
         var trailingIconWidth: CGFloat = 0
+        // Every icon on a line puts its measured INK on the line's x-height
+        // centre, on the backing grid. The gyro is point-symmetric about its box.
+        let topLine = bandY + lineCentres.top
+        let statusY = snapped(topLine - (isWorking ? iconSide / 2 : statusInkMidY))
         if leadsWithIcon {
             statusSlot = hasIcon
-                ? NSRect(x: textLeft, y: bandY + (proposal.bandTop - iconSide) / 2,
-                         width: iconSide, height: iconSide)
+                ? NSRect(x: textLeft, y: statusY, width: iconSide, height: iconSide)
                 : nil
             // The slot is NOT reserved when nothing is drawn in it. The column is
             // made of the icons, which are pinned to one x and aligned to each
@@ -1235,8 +1485,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         } else if hasIcon {
             trailingIconWidth = iconSide + 4
             statusSlot = NSRect(
-                x: metaRight - stateWidth - trailingIconWidth,
-                y: bandY + (proposal.bandTop - iconSide) / 2,
+                x: metaRight - stateWidth - trailingIconWidth, y: statusY,
                 width: iconSide, height: iconSide)
         } else {
             statusSlot = nil
@@ -1249,7 +1498,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if projectIcon.image != nil {
             let side = Self.metadataIconSide
             projectIconFrame = NSRect(
-                x: placementLeft, y: bandY + (proposal.bandTop - side) / 2,
+                x: placementLeft, y: snapped(topLine - projectIconInkCenterY),
                 width: side, height: side)
             placementLeft += side + 4
         } else {
@@ -1279,7 +1528,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             whereDot.frame = inCard(NSRect(x: x, y: bandY, width: dotWidth, height: proposal.bandTop))
             x += dotWidth
             let iconFrame = NSRect(
-                x: x, y: bandY + (proposal.bandTop - markerIconSide) / 2,
+                x: x, y: snapped(topLine - whereIconInkCenterY),
                 width: markerIconSide, height: markerIconSide)
             whereIcon.frame = inCard(iconFrame)
             x += markerIconSide + 3
@@ -1288,29 +1537,21 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 width: max(0, min(Self.width(of: whereLabel), placementLeft + placementRoom - x)),
                 height: proposal.bandTop))
         }
-        if var iconFrame = projectIconFrame {
-            // A folder symbol and an NSTextField report different baselines inside
-            // equally centred boxes. Align the baselines AppKit exposes instead of
-            // aligning the boxes; otherwise the folder sits a point away from the
-            // directory word even though their frame midpoints are identical.
-            iconFrame.origin.y = placementFrame.minY
-                + placementLabel.firstBaselineOffsetFromTop
-                - projectIcon.firstBaselineOffsetFromTop
+        if let iconFrame = projectIconFrame {
             projectIcon.frame = inCard(iconFrame)
-        }
-        if !whereIcon.isHidden {
-            let target = projectIcon.image != nil
-                ? projectIcon.frame.maxY - projectIconInkCenterY
-                : whereLabel.frame.maxY - whereLabel.firstBaselineOffsetFromTop + (whereLabel.font?.capHeight ?? 0) / 2
-            whereIcon.frame.origin.y += target - (whereIcon.frame.maxY - whereIconInkCenterY)
         }
         stateLabel.frame = inCard(NSRect(
             x: metaRight - stateWidth, y: bandY,
             width: stateWidth, height: proposal.bandTop))
-        settleNudge.frame = settleNudge.isHidden ? .zero : inCard(NSRect(
-            x: textRight - nudgeSize.width,
-            y: (bandY + (proposal.bandTop - nudgeSize.height) / 2).rounded(),
-            width: nudgeSize.width, height: nudgeSize.height))
+        if !settleNudge.isHidden {
+            let top = snapped(topLine - nudgeSize.height / 2)
+            settleNudge.opticalCentreY = topLine - top
+            settleNudge.frame = inCard(NSRect(
+                x: textRight - nudgeSize.width, y: top,
+                width: nudgeSize.width, height: nudgeSize.height))
+        } else {
+            settleNudge.frame = .zero
+        }
         bandY += proposal.bandTop + proposal.gapTop
 
         // Band 2 — the subject. Never sacrificed, at any width. An identity
@@ -1320,7 +1561,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if let name = shown?.row.identityColor {
             let side = AgentInboxView.identityDotSide
             decorations.identityDot = NSRect(
-                x: textLeft, y: bandY + (proposal.bandTitle - side) / 2,
+                x: textLeft, y: snapped(bandY + lineCentres.title - side / 2),
                 width: side, height: side)
             decorations.identityDotColour = AgentInboxView.identityDotColour(named: name)
             titleLeft += side + CGFloat(Space.s)
@@ -1334,15 +1575,16 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         bandY += proposal.bandTitle + proposal.gapBottom
 
         // Band 3 — branch left, provider mark right.
-        let markSide: CGFloat = 14
+        let markSide = Self.markSide
+        let detailLine = bandY + lineCentres.detail
         let modelWidth = modelLabel.isHidden
             ? 0 : min(card.bounds.width * 0.45, Self.width(of: modelLabel))
         let hasMark = decorations.mark != nil
         let trailing = (hasMark ? markSide : 0)
             + (modelLabel.isHidden ? 0 : modelWidth + (hasMark ? 6 : 0))
-        let branchGlyph: CGFloat = decorations.drawsBranchGlyph ? 11 : 0
+        let branchGlyph: CGFloat = decorations.drawsBranchGlyph ? Self.branchGlyphSide : 0
         decorations.branchSlot = decorations.drawsBranchGlyph
-            ? NSRect(x: textLeft, y: bandY + (proposal.bandDetail - branchGlyph) / 2,
+            ? NSRect(x: textLeft, y: snapped(detailLine - branchInkMidY),
                      width: branchGlyph, height: branchGlyph)
             : nil
         let branchLeft = textLeft + branchGlyph + (branchGlyph > 0 ? 4 : 0)
@@ -1351,8 +1593,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             width: max(0, textRight - trailing - 6 - branchLeft),
             height: proposal.bandDetail))
         decorations.markSlot = hasMark
-            ? NSRect(x: textRight - trailing,
-                     y: bandY + (proposal.bandDetail - markSide) / 2,
+            ? NSRect(x: textRight - trailing, y: snapped(detailLine - markInkMidY),
                      width: markSide, height: markSide)
             : nil
         modelLabel.frame = inCard(NSRect(
@@ -1363,9 +1604,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         var actionRight = textRight - trailing - 6
         for button in [hoverCopy, hoverMoveHere] where !button.isHidden {
             let size = button.intrinsicContentSize
+            let top = snapped(detailLine - size.height / 2)
+            button.opticalCentreY = detailLine - top
             button.frame = inCard(NSRect(
-                x: actionRight - size.width,
-                y: (bandY + (proposal.bandDetail - size.height) / 2).rounded(),
+                x: actionRight - size.width, y: top,
                 width: size.width, height: size.height))
             actionRight -= size.width + 6
         }
@@ -1392,15 +1634,15 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             width: jumpHint.intrinsicContentSize.width,
             height: jumpHint.intrinsicContentSize.height)
         // The hover actions sit in the status slot, right-aligned on the meta line.
-        let actionSide: CGFloat = 20
-        let actionY = proposal.insetV + (proposal.bandTop - actionSide) / 2
+        let actionSide = Self.hoverActionSide
         // While the nudge shows, the hover Settle is hidden (one settle
         // affordance at a time) and Snooze takes the slot before the nudge.
         hoverSettle.frame = inCard(NSRect(
-            x: metaRight - actionSide, y: actionY, width: actionSide, height: actionSide))
+            x: metaRight - actionSide, y: snapped(topLine - hoverSettleInkMidY),
+            width: actionSide, height: actionSide))
         hoverSnooze.frame = inCard(NSRect(
             x: settleNudge.isHidden ? metaRight - actionSide * 2 - 4 : metaRight - actionSide,
-            y: actionY, width: actionSide, height: actionSide))
+            y: snapped(topLine - hoverSnoozeInkMidY), width: actionSide, height: actionSide))
     }
 
     /// The states that are asking for a person, as opposed to reporting one. The
@@ -1430,6 +1672,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     #if ARRAY_FILM
     /// Film build only: the fold triangle a pointer clicks (nil while it is hidden).
     var filmDisclosureButton: NSView? { disclosureButton.isHidden ? nil : disclosureButton }
+    var filmMoveHereButton: NSView? { hoverMoveHere.isHidden ? nil : hoverMoveHere }
+    var filmWhereMarkerRect: NSRect? {
+        guard !whereLabel.isHidden, !whereLabel.stringValue.isEmpty else { return nil }
+        return whereIcon.convert(whereIcon.bounds, to: self).union(whereLabel.convert(whereLabel.bounds, to: self))
+    }
     #endif
     var settleNudgeTitleForQA: String { settleNudge.title }
     @objc private func hoverSnoozeClicked() { onHoverSnooze?() }
@@ -1513,7 +1760,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     func setProjectIcon(_ image: NSImage?, for rowID: UUID) {
         guard shown?.row.id == rowID, let image else { return }
         projectIcon.image = image
-        projectIconInkCenterY = Self.metadataInkCenter(of: image)
+        projectIconInkCenterY = Self.metadataInkCenter(of: image, scale: metadataRasterScale)
         projectIcon.contentTintColor = nil
         needsLayout = true
     }
@@ -1535,19 +1782,103 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
     /// The where marker as drawn: its text, and whether it sits clear of the
     /// project name on the same line.
-    var qaWhereMarker: (text: String, frame: NSRect, placementFrame: NSRect, iconInkCenterDelta: CGFloat, projectIconBaselineDelta: CGFloat)? {
+    var qaWhereMarker: (text: String, frame: NSRect, placementFrame: NSRect, iconInkCenterDelta: CGFloat, projectIconOpticalCenterDelta: CGFloat)? {
         guard !whereLabel.isHidden else { return nil }
-        func inkCenter(_ view: NSImageView) -> CGFloat {
-            let rendered = NSImage(size: view.bounds.size, flipped: false) { rect in
-                view.cell?.draw(withFrame: rect, in: view)
-                return true
-            }
-            guard let ink = InkAlignedSymbol.measureInk(of: rendered) else { return .nan }
-            return view.frame.maxY - ink.midY * view.bounds.height
-        }
+        let ink = qaMetadataInkGeometry
+        let iconDelta = (ink["origin"]?.midY ?? .nan) - (ink["folder"]?.midY ?? .nan)
         return (whereLabel.stringValue, whereLabel.frame, placementLabel.frame,
-                inkCenter(whereIcon) - inkCenter(projectIcon), qaProjectBaselineDeltaForQA)
+                iconDelta, qaProjectOpticalCenterDeltaForQA)
     }
+    /// Actual rendered ink in the card's native (bottom-up) coordinates.
+    /// A declared NSImage baseline cannot establish alignment with visible text.
+    var qaMetadataInkGeometry: [String: NSRect] {
+        var result: [String: NSRect] = [:]
+        for (key, view) in [("folder", projectIcon as NSView), ("project", placementLabel),
+                            ("origin", whereIcon), ("originText", whereLabel)] {
+            if let ink = qaRenderedInk(view) { result[key] = ink }
+        }
+        if let centre = qaLineCentre(of: placementLabel) {
+            result["opticalCentre"] = NSRect(x: 0, y: centre, width: 0, height: 0)
+        }
+        return result
+    }
+
+    /// One icon on the card and the line it sits on, both read off the render.
+    struct IconInkForQA {
+        let name: String
+        /// The icon's ink midY, card coordinates (bottom-up).
+        let inkMidY: CGFloat
+        /// The x-height centre of the line's RENDERED text, card coordinates.
+        let lineCentreY: CGFloat
+        let neighbour: String
+        var delta: CGFloat { inkMidY - lineCentreY }
+    }
+
+    /// Every visible icon on the card against the rendered x-height of its own
+    /// line's text — never the cached reference layout used. The gyro is the one
+    /// icon read by its box: it is point-symmetric about its orbit centre and its
+    /// nodes are mid-flight in any one frame.
+    func qaIconAlignmentForQA() -> [IconInkForQA] {
+        layoutSubtreeIfNeeded()
+        func line(_ labels: [NSTextField]) -> (centre: CGFloat, text: String)? {
+            for label in labels where !label.isHidden && !label.stringValue.isEmpty {
+                if let centre = qaLineCentre(of: label) { return (centre, label.stringValue) }
+            }
+            return nil
+        }
+        var out: [IconInkForQA] = []
+        func add(_ name: String, _ ink: CGFloat?, _ line: (centre: CGFloat, text: String)?) {
+            guard let ink, let line else { return }
+            out.append(IconInkForQA(name: name, inkMidY: ink, lineCentreY: line.centre, neighbour: line.text))
+        }
+        let top = line([placementLabel, whereLabel, stateLabel])
+        let title = line([titleLabel])
+        let detail = line([branchLabel, modelLabel])
+        if !statusGlyph.isHidden, statusGlyph.symbol != nil {
+            add("status \(statusGlyph.symbol ?? "")", qaRenderedInk(statusGlyph)?.midY, top)
+        }
+        if let throbber { add("gyro (orbit centre)", throbber.frame.midY, top) }
+        add("folder", projectIcon.image == nil ? nil : qaRenderedInk(projectIcon)?.midY, top)
+        add("where", whereIcon.isHidden ? nil : qaRenderedInk(whereIcon)?.midY, top)
+        add("hover snooze", hoverSnooze.isHidden ? nil : qaRenderedInk(hoverSnooze)?.midY, top)
+        add("hover settle", hoverSettle.isHidden ? nil : qaRenderedInk(hoverSettle)?.midY, top)
+        func pillIcon(_ pill: InboxSettleNudgeButton) -> CGFloat? {
+            guard !pill.isHidden, let rect = pill.cell?.imageRect(forBounds: pill.bounds) else { return nil }
+            // The capsule's fill is ink too; measure the glyph without it.
+            let fill = pill.layer?.backgroundColor
+            pill.layer?.backgroundColor = nil
+            defer { pill.layer?.backgroundColor = fill }
+            guard let ink = InkProbe.ink(of: pill, scale: metadataRasterScale, in: rect.insetBy(dx: -1, dy: -1))
+            else { return nil }
+            return pill.frame.maxY - ink.midY
+        }
+        add("settle nudge icon", pillIcon(settleNudge), top)
+        func decoration(_ slot: NSRect?) -> CGFloat? {
+            guard let slot,
+                  let ink = InkProbe.ink(of: decorations, scale: metadataRasterScale, in: slot.insetBy(dx: -1, dy: -1))
+            else { return nil }
+            return decorations.frame.maxY - ink.midY
+        }
+        add("identity dot", decoration(decorations.identityDot), title)
+        add("branch", decorations.drawsBranchGlyph ? decoration(decorations.branchSlot) : nil, detail)
+        add("provider mark", decorations.mark == nil ? nil : decoration(decorations.markSlot), detail)
+        add("copy icon", pillIcon(hoverCopy), detail)
+        add("move icon", pillIcon(hoverMoveHere), detail)
+        return out
+    }
+
+    private func qaRenderedInk(_ view: NSView) -> NSRect? {
+        guard !view.isHidden, let ink = InkProbe.ink(of: view, scale: metadataRasterScale) else { return nil }
+        return NSRect(x: view.frame.minX + ink.minX, y: view.frame.maxY - ink.maxY,
+                      width: ink.width, height: ink.height)
+    }
+
+    /// The middle of a label's rendered x-height, card coordinates.
+    private func qaLineCentre(of label: NSTextField) -> CGFloat? {
+        guard let band = InkProbe.xHeightBand(of: label, scale: metadataRasterScale) else { return nil }
+        return label.frame.maxY - (band.top + band.bottom) / 2
+    }
+
     /// Presses a shown external action through its own target/action.
     func clickExternalActionForQA(_ action: InboxExternalSessionAction) -> Bool {
         let button: NSButton
@@ -1678,13 +2009,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return modelLabel.isHidden ? "" : modelLabel.stringValue
     }
     var qaProject: String { placementLabel.stringValue }
-    var qaProjectBaselineDeltaForQA: CGFloat {
-        guard projectIcon.frame.width > 0 else { return 0 }
-        let labelBaseline = placementLabel.frame.maxY
-            - placementLabel.firstBaselineOffsetFromTop
-        let iconBaseline = projectIcon.frame.maxY
-            - projectIcon.firstBaselineOffsetFromTop
-        return iconBaseline - labelBaseline
+    var qaProjectOpticalCenterDeltaForQA: CGFloat {
+        guard let folder = qaMetadataInkGeometry["folder"],
+              let cap = qaMetadataInkGeometry["opticalCentre"] else { return 0 }
+        return folder.midY - cap.minY
     }
     var qaTextAlpha: Double { Double(titleLabel.alphaValue) }
     var qaAccentAlpha: Double { Double(stateLabel.alphaValue) }
@@ -1718,6 +2046,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let cardFrame: NSRect
         /// Band 1 — the placement/state line — in this cell's coordinates.
         let metaBand: NSRect
+        /// The x-height centre of the meta line's RENDERED text, cell coordinates.
+        let metaLineCentreY: CGFloat?
         let title: String
         let font: NSFont?
         let metaFont: NSFont?
@@ -1749,6 +2079,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             cardFrame: cardFrame,
             metaBand: NSRect(x: cardFrame.minX, y: cardFrame.minY + proposal.insetV,
                              width: cardFrame.width, height: proposal.bandTop),
+            metaLineCentreY: [placementLabel, stateLabel]
+                .first { !$0.isHidden && !$0.stringValue.isEmpty }
+                .flatMap(qaLineCentre(of:))
+                .map { card.convert(NSPoint(x: 0, y: $0), to: self).y },
             title: settleNudge.title,
             font: settleNudge.font,
             metaFont: stateLabel.font,
@@ -1770,6 +2104,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var qaGroupBackgroundCornersForQA: (top: Bool, bottom: Bool) {
         (groupBackground.qaRoundsTopForQA, groupBackground.qaRoundsBottomForQA)
     }
+    /// The fold button, when this row is a parent.
+    var qaFoldControlForQA: InboxSwarmFoldControl? { disclosureButton.isHidden ? nil : disclosureButton }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
     var qaDisclosureTitle: String { disclosureButton.qaTitle }
     var qaJumpHint: String { jumpHint.qaChord }
@@ -1891,6 +2227,7 @@ final class StatusGlyphView: NSView {
 /// Markdown tile freezing the app for three releases.
 @MainActor
 private final class Decorations: NSView {
+    static let branchSymbol = "arrow.triangle.branch"
     var branchSlot: NSRect?
     var drawsBranchGlyph = false
     var markSlot: NSRect?
@@ -1917,7 +2254,7 @@ private final class Decorations: NSView {
         }
         if let slot = branchSlot, drawsBranchGlyph {
             InkAlignedSymbol.draw(
-                "arrow.triangle.branch", in: slot, colour: muted,
+                Self.branchSymbol, in: slot, colour: muted,
                 alignment: .centred, flipped: isFlipped)
         }
         if let slot = markSlot, let mark {
