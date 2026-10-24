@@ -1704,6 +1704,13 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // snapshots as an applied-but-EMPTY collection (P5.5 removal finding:
         // rows and layout attributes existed, live hosts were zero).
         collectionView.layoutSubtreeIfNeeded()
+        // A structural update goes through the diffable source's ANIMATED apply
+        // (zero duration, so unchanged cells are retained), and AppKit creates
+        // the inserted items only in a display cycle. Offscreen nothing runs one,
+        // so a delegated child's first rows stayed itemless: laid out at real
+        // frames, drawn as nothing (`--agent-message-card-check`). Ask for the
+        // visible items explicitly; a live window already has them.
+        collectionView.prepareContent(in: collectionView.visibleRect)
         // And drive the layout's own prepare pass: offscreen, AppKit neither
         // re-prepares an invalidated layout nor repositions materialized items —
         // both only happen in a live display cycle — so a probe re-hosted at a
