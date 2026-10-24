@@ -15,6 +15,8 @@ final class CanvasTileSelection {
         let start: NSPoint
         let zoom: Double
         let edge: ResizeEdge?
+        /// The member whose title bar was pressed; nil for the group handles.
+        let pressedTileId: UUID?
         var moved = false
         var lastDelta: CGSize = .zero
     }
@@ -56,14 +58,14 @@ final class CanvasTileSelection {
             return true
         }
         if isHeader, !isResize, ids.count > 1, ids.contains(tile.tile.id) {
-            return begin(event: event, edge: nil)
+            return begin(event: event, edge: nil, pressedTileId: tile.tile.id)
         }
         selectOnly(tile.tile.id)
         return false
     }
 
     @discardableResult
-    func begin(event: NSEvent, edge: ResizeEdge?) -> Bool {
+    func begin(event: NSEvent, edge: ResizeEdge?, pressedTileId: UUID? = nil) -> Bool {
         guard let canvas, gesture == nil, ids.count > 1,
               let snapshot = TileSelectionGeometry.Snapshot(tiles: selectedWorldTiles()),
               snapshot.frames.count == ids.count,
@@ -71,7 +73,7 @@ final class CanvasTileSelection {
                                        tileIds: ids, includeAllZones: true) else { return false }
         consumedHeaderClick = false
         gesture = Gesture(snapshot: snapshot, start: event.locationInWindow,
-                          zoom: canvas.viewport.zoom, edge: edge)
+                          zoom: canvas.viewport.zoom, edge: edge, pressedTileId: pressedTileId)
         canvas.window?.makeFirstResponder(canvas)
         return true
     }
@@ -114,8 +116,12 @@ final class CanvasTileSelection {
         // Include the final pointer coordinate even if AppKit coalesced its
         // matching drag event. All previews derive from the initial snapshot.
         _ = mouseDragged(with: event)
-        guard gesture != nil else { return true }
-        gesture = nil
+        guard let gesture else { return true }
+        if !gesture.moved, let pressed = gesture.pressedTileId {
+            resolveClick(on: pressed)
+            return true
+        }
+        self.gesture = nil
         _ = canvas.commitGeometryEdit()
         refresh()
         return true
@@ -130,8 +136,14 @@ final class CanvasTileSelection {
     }
 
     /// The app's pre-dispatch mouse-up monitor must not focus/reorder a member
-    /// while this owner is still tracking a group or a Shift-toggle.
+    /// while this owner is still tracking a group or a Shift-toggle. A press on
+    /// a member that never moved is a click, though: that tile alone, focused.
     func consumeFocusRouting(for event: NSEvent) -> Bool {
+        if let gesture, !gesture.moved, let pressed = gesture.pressedTileId,
+           hypot(event.locationInWindow.x - gesture.start.x, event.locationInWindow.y - gesture.start.y) < 3 {
+            resolveClick(on: pressed)
+            return false
+        }
         if ownsPointer { return true }
         guard let canvas else { return false }
         if canvas.isPointerPanActive { return true }
@@ -139,6 +151,16 @@ final class CanvasTileSelection {
             selectOnly(canvas.tileId(at: canvas.convert(event.locationInWindow, from: nil)))
         }
         return false
+    }
+
+    /// Ends an unmoved member press as a click on that member. The tile's own
+    /// mouse-up then has nothing left to do.
+    private func resolveClick(on id: UUID) {
+        gesture = nil
+        canvas?.cancelGeometryEdit()
+        consumedHeaderClick = true
+        ids = [id]
+        refresh()
     }
 
     private func selectedWorldTiles() -> [Tile] {

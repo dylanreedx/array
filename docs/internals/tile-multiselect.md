@@ -11,8 +11,12 @@ agent-reference dragging and file-preview work.
 - Shift-click a tile's header (excluding controls and the resize ring) toggles
   its membership in the selection. A previously focused tile seeds the set.
 - Drag a selected header to translate the selection rigidly. Three screen
-  points distinguish movement from a click. Clicking a selected header retains
-  the group; clicking an unselected header selects that tile.
+  points distinguish movement from a click. Clicking a selected header without
+  moving collapses the selection to that tile and focuses it, as any title-bar
+  click does; clicking an unselected header selects that tile. (0.7.31 kept the
+  group and skipped focus, so after one Shift-select no title-bar click
+  focused anything. `--canvas-pointer-path-check` drives that click through
+  the real window and focus monitor.)
 - One outer selection rectangle has eight resize handles. Edges scale one axis;
   corners scale both independently. The opposite edge/corner stays fixed. Tile
   frames and gaps scale; native text/browser/terminal content reflows at its new
