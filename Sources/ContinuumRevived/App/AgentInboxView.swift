@@ -1773,6 +1773,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         foldMotion.cancel()
         let increasedContrast = prefersIncreasedContrast()
         for cell in cellsByRow.values { cell.setIncreasedContrast(increasedContrast) }
+        for card in deckCells.allObjects { card.snapDeck() }
     }
 
     func reapplyDisplayPreferencesForQA() {
@@ -2434,14 +2435,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     // MARK: - Nesting (P2D.4)
 
-    /// Fold or unfold one parent's children.
+    /// Fold or unfold one parent's children. The entry point a disclosure
+    /// control calls, on mouse-down; everything it needs is read from the list.
     ///
-    /// A FULL RE-RENDER, not an incremental apply: folding removes rows, so the
-    /// identity sequence changed and `apply(rows:changed:)`'s own rule ("if an agent
-    /// appeared, vanished or moved, the LIST changed and a full reload is the honest
-    /// answer") applies. Selection and hover are dropped for the same reason
-    /// `setScope` drops them — their indexes belong to the list that just went away,
-    /// and a bulk action (P3.11) must never reach a row you cannot see.
+    /// The identity sequence changes, but only by one contiguous block, so the
+    /// table inserts or removes exactly those rows (`applyFoldIncrementally`)
+    /// rather than reloading whole; anything else falls back to a full render.
+    /// Selection and hover are dropped for the same reason `setScope` drops them —
+    /// their indexes belong to the list that just went away, and a bulk action
+    /// (P3.11) must never reach a row you cannot see.
     func toggleCollapse(parentId: UUID) {
         let animates = window != nil && !prefersReducedMotion()
         let presentation = animates ? foldMotion.takePresentation() : [:]
@@ -2451,7 +2453,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         for ghost in exitGhostViews { ghost.removeFromSuperview() }
         exitGhostViews.removeAll()
         qaLastRowMotion = ([], [])
-        let previous = animates ? captureFoldRows().snapshots.merging(presentation) { _, drawn in drawn } : [:]
+        // ONE photograph of what is on screen. Every cell the fold leaves alone
+        // is the same view with the same pixels afterwards, so these images are
+        // reused at the far end and only the rebuilt cells are taken again.
+        // The fold photographs the resting deck, never a pose mid-spring.
+        for card in deckCells.allObjects { card.restDeck() }
+        let before = animates ? captureFoldRows() : FoldCapture()
         let expanded = collapsedParents.contains(parentId)
         let anchor = tableRow(forAgentId: parentId).map {
             (id: parentId, viewportMinY: tableView.rect(ofRow: $0).minY - tableView.visibleRect.minY)
@@ -2461,33 +2468,109 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         // P1.2: hover and the focus ring are dropped and then RE-DERIVED from
-        // where the pointer actually is once the new list is on screen
-        // (`render` ends in `refreshHoverFromPointer()`), so a fold or a scope
-        // flip cannot leave a row lit that the pointer is no longer over — and
-        // cannot un-light the row it still is over either.
+        // where the pointer actually is once the new list is on screen, so a
+        // fold or a scope flip cannot leave a row lit that the pointer is no
+        // longer over — and cannot un-light the row it still is over either.
+        // The cell that was lit survives an incremental fold, so it is
+        // repainted here, and its earlier photograph is not reused.
+        let lit = tableRow(forAgentId: hoveredAgentId)
+        let relit = Set([lit.flatMap { item(at: $0)?.identity }].compactMap { $0 })
         hoveredAgentId = nil
         keyboardFocusIntent = nil
-        render(display(from: allRows), animateRows: false)
+        applyHoverInPlace(tableRows: [lit].compactMap { $0 })
+        let next = display(from: allRows)
+        if !applyFoldIncrementally(next, parentId: parentId) {
+            render(next, animateRows: false)
+        }
         layoutSubtreeIfNeeded()
         tableView.layoutSubtreeIfNeeded()
         layoutSubtreeIfNeeded()
         restoreScrollAnchor(anchor)
         guard animates else { return }
-        let next = captureFoldRows()
-        foldMotion.start(from: previous, to: next.snapshots,
+        let after = captureFoldRows(reusing: before, excluding: relit)
+        foldMotion.start(from: before.snapshots.merging(presentation) { _, drawn in drawn },
+                         to: after.snapshots,
                          parentKey: "agent:\(parentId.uuidString)", expanded: expanded,
-                         container: scrollView.contentView, covering: next.views)
+                         container: scrollView.contentView, covering: Array(after.sources.values))
+    }
+
+    /// Fold by inserting or removing the parent's rows and nothing else. The
+    /// surviving cells stay the same views — no rebuild, and their photographs
+    /// stay valid — and only the rows whose drawing depends on the fold are
+    /// rebuilt: the parent (triangle, rollup, tucked cards), any row whose place
+    /// in the tree moved (connector, wash, end gap) and the settle nudge's old
+    /// and new rows. Answers false, leaving everything untouched, when the
+    /// change is not one contiguous block; the caller then renders whole.
+    private func applyFoldIncrementally(_ next: [InboxListItem], parentId: UUID) -> Bool {
+        let old = items.map(\.identity), new = next.map(\.identity)
+        let shared = min(old.count, new.count)
+        var prefix = 0
+        while prefix < shared, old[prefix] == new[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < shared - prefix, old[old.count - 1 - suffix] == new[new.count - 1 - suffix] { suffix += 1 }
+        let removed = IndexSet(integersIn: prefix..<(old.count - suffix))
+        let inserted = IndexSet(integersIn: prefix..<(new.count - suffix))
+        guard removed.isEmpty != inserted.isEmpty else { return false }
+        let oldNesting = Dictionary(zip(old, nestingByTableRow)) { first, _ in first }
+        let renderNow = clock()
+        let oldNudge = settleNudgeTargetID(now: renderNow)
+        endRename(commit: true)
+        cancelCrossfades()
+        setItems(next)
+        tableView.beginUpdates()
+        if inserted.isEmpty {
+            tableView.removeRows(at: removed, withAnimation: [])
+        } else {
+            tableView.insertRows(at: inserted, withAnimation: [])
+        }
+        tableView.endUpdates()
+        // The table moved the surviving cells; key them by the rows they are on now.
+        cellsByRow.removeAll()
+        for row in 0..<tableView.numberOfRows {
+            if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
+                cellsByRow[row] = cell
+            }
+        }
+        let nudges: Set<UUID> = Set([oldNudge, settleNudgeTargetID(now: renderNow)].compactMap { $0 })
+        var stale = IndexSet(new.indices.filter { row in
+            guard !inserted.contains(row) else { return false }
+            if let id = next[row].agentRow?.id, id == parentId || nudges.contains(id) { return true }
+            return oldNesting[new[row]] != nestingByTableRow[row]
+        })
+        // A jump chord names "the Nth agent", and the rows below the fold moved.
+        if jumpHintsVisible {
+            stale.formUnion(IndexSet((0..<InboxJump.maximumRows).compactMap(tableRow(forRowIndex:))))
+        }
+        tableView.noteHeightOfRows(withIndexesChanged: stale)
+        tableView.reloadData(forRowIndexes: stale, columnIndexes: IndexSet(integer: 0))
+        updateShelfSpacerHeight()
+        updateEmptyState()
+        updateBulkBar()
+        updateAccessibilityHierarchy()
+        refreshHoverFromPointer()
+        scheduleWakeRerender()
+        return true
+    }
+
+    /// What one fold photograph holds: native geometry for every row, pixels
+    /// for the visible materialized ones, and the cell each image came from.
+    private struct FoldCapture {
+        var snapshots: [String: InboxFoldMotion.Snapshot] = [:]
+        var sources: [String: NSView] = [:]
     }
 
     /// Native geometry for every row, pixels only for the visible materialized
     /// ones. Geometry-only entries let a following row travel out of the viewport
-    /// rather than being mistaken for a child being tucked into the parent.
-    private func captureFoldRows() -> (snapshots: [String: InboxFoldMotion.Snapshot], views: [NSView]) {
+    /// rather than being mistaken for a child being tucked into the parent. An
+    /// image from `earlier` is reused when it was taken of this same cell at
+    /// this same size, unless the row is in `excluding`.
+    private func captureFoldRows(reusing earlier: FoldCapture = FoldCapture(),
+                                 excluding: Set<String> = []) -> FoldCapture {
         let clip = scrollView.contentView
-        var snapshots: [String: InboxFoldMotion.Snapshot] = [:]
-        var views: [NSView] = []
+        var capture = FoldCapture()
         for index in items.indices {
             if case .shelfSpacer = items[index] { continue }
+            let key = items[index].identity
             let cell = tableView.view(atColumn: 0, row: index, makeIfNecessary: false)
             var rect = tableView.rect(ofRow: index)
             var local = cell?.bounds ?? NSRect(origin: .zero, size: rect.size)
@@ -2502,13 +2585,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             frame.origin.x -= clip.bounds.minX
             frame.origin.y -= clip.bounds.minY
             let visible = frame.intersects(NSRect(origin: .zero, size: clip.bounds.size))
-            let image = visible && views.count < InboxFoldMotion.snapshotLimit
-                ? cell.flatMap { InboxFoldMotion.image(of: $0, in: local) } : nil
-            snapshots[items[index].identity] = InboxFoldMotion.Snapshot(
-                key: items[index].identity, frame: frame, image: image, order: index)
-            if image != nil, let cell { views.append(cell) }
+            var image: NSImage?
+            if visible, let cell, capture.sources.count < InboxFoldMotion.snapshotLimit {
+                if !excluding.contains(key), earlier.sources[key] === cell,
+                   let reused = earlier.snapshots[key]?.image, reused.size == local.size {
+                    image = reused
+                } else {
+                    image = InboxFoldMotion.image(of: cell, in: local)
+                    if (cell as? AgentInbox96CellView)?.qaDeckIsPosedForQA == true { qaPosedDecksPhotographed += 1 }
+                }
+            }
+            capture.snapshots[key] = InboxFoldMotion.Snapshot(key: key, frame: frame, image: image, order: index)
+            if image != nil, let cell { capture.sources[key] = cell }
         }
-        return (snapshots, views)
+        return capture
     }
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
@@ -2836,7 +2926,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         case .card: cell = cardStyleOverride?.makeCell() ?? AgentInboxCellView()
         case .slim: cell = AgentInboxSlimCellView()
         }
-        needsHeightRevalidation = true
+        // A 96 card's height is its fixed pitch, never measured off its content,
+        // so building one gives the height cache nothing to revalidate. Arming
+        // it anyway made the next layout pass reload and rebuild EVERY cell —
+        // after each fold, mid-animation, and after every hover reload.
+        if cardStyleOverride == nil || model.variant != .card { needsHeightRevalidation = true }
         // AppKit may ask for a cell before it has assigned the row frame. Give
         // the cell the live column width before `apply` measures its fit tier;
         // otherwise an empty initial frame leaves a hidden band visible while
@@ -2877,6 +2971,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         )
         configureHoverActions(on: cell, for: model)
         if let redesigned = cell as? AgentInbox96CellView {
+            redesigned.reducesHoverMotion = { [weak self] in self?.prefersReducedMotion() ?? false }
             // The tree connector. Set from the LIST, which is the only thing that
             // knows what is drawn above and below this row.
             redesigned.setNesting(nesting(atTableRow: row))
@@ -4137,6 +4232,43 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         )
     }
 
+    /// Repaint hover on the cells already on screen. Rebuilding them, as a
+    /// reload does, snaps every transition (the new cell has no window to
+    /// animate in), replays arrival motion and would cancel a running fold.
+    /// Rows not on screen read hover when they are built.
+    private func applyHoverInPlace(tableRows indexes: [Int]) {
+        var reload: [Int] = []
+        for row in indexes where items.indices.contains(row) {
+            guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
+                    as? AgentInboxRowCell,
+                  let model = item(at: row)?.agentRow else { continue }
+            let emphasis = AgentInboxRow.emphasis(
+                for: model.state, attention: model.attention, isInteracting: isInteracting(row: row))
+            guard cell.updateEmphasisInPlace(emphasis) else { reload.append(row); continue }
+            cell.applyInteraction(interaction(forTableRow: row))
+            if let card = cell as? AgentInbox96CellView {
+                deckCells.add(card)
+                if snapsDeck { card.snapDeck() }
+            }
+        }
+        guard !reload.isEmpty else { return }
+        // A variant that cannot repaint in place is rebuilt, and a fold in
+        // flight keeps running over the replacement.
+        tableView.reloadData(forRowIndexes: IndexSet(reload), columnIndexes: IndexSet(integer: 0))
+        foldMotion.cover(reload.compactMap { tableView.view(atColumn: 0, row: $0, makeIfNecessary: false) })
+    }
+
+    /// The cards hover has posed or is springing back: at most the hovered row
+    /// and the one before it, so folding, scrolling and a Reduce Motion change
+    /// touch only those and never walk the list.
+    private let deckCells = NSHashTable<AgentInbox96CellView>.weakObjects()
+    /// How many cards the fold photographs have caught out of their resting
+    /// pose, ever. A photograph is what the presentation shows.
+    private(set) var qaPosedDecksPhotographed = 0
+    /// Set while the list moves under a still pointer: hover then lands its
+    /// pose at once instead of springing.
+    private var snapsDeck = false
+
     /// Rebuild the cells of just these rows, ignoring any that are not on screen.
     private func redraw(tableRows indexes: [Int]) {
         let touched = IndexSet(indexes.filter { items.indices.contains($0) })
@@ -4428,7 +4560,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.foldMotion.cancel()
+                // Scrolling removes the deck's springs: what moves is the list.
+                for card in self.deckCells.allObjects { card.snapDeck() }
+                self.snapsDeck = true
                 self.refreshHoverFromPointer()
+                self.snapsDeck = false
                 self.syncElapsedTickTimer()
                 self.window?.invalidateCursorRects(for: self.tableView)
             }
@@ -4603,7 +4739,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard agentId != hoveredAgentId else { return }
         let previous = hoveredAgentId
         hoveredAgentId = agentId
-        redraw(tableRows: [tableRow(forAgentId: previous), tableRow(forAgentId: agentId)]
+        applyHoverInPlace(tableRows: [tableRow(forAgentId: previous), tableRow(forAgentId: agentId)]
             .compactMap { $0 })
         // The card hangs off THIS, the one choke point, rather than off a tracking
         // area of its own. Everything that already nulls hover — the list
@@ -4690,18 +4826,49 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         origin.y = max(Self.hoverCardGap, min(origin.y, contentView.bounds.maxY - size.height))
         card.frame = NSRect(origin: origin, size: size)
 
+        // A card still fading out is taken back rather than stacked on.
+        let wasFading = hoverCardRemoval != nil
+        hoverCardRemoval?.cancel()
+        hoverCardRemoval = nil
+        if wasFading, card.superview != nil {
+            card.alphaValue = 1
+            card.layer?.removeAnimation(forKey: Self.hoverCardFadeKey)
+        }
         guard card.superview == nil else { return }
         contentView.addSubview(card)
         guard !prefersReducedMotion() else { return }
         card.animatePresentation(duration: Self.crossfadeDuration)
     }
 
+    /// The card leaves over this long instead of vanishing mid-read.
+    static let hoverCardFadeOut: TimeInterval = 0.12
+    private static let hoverCardFadeKey = "inbox-hover-card-dismiss"
+    private var hoverCardRemoval: DispatchWorkItem?
+
     private func dismissHoverCard() {
         hoverCardCancel?()
         hoverCardCancel = nil
-        guard let card = hoverCard, card.superview != nil else { return }
-        card.removeFromSuperview()
+        guard let card = hoverCard, card.superview != nil, hoverCardRemoval == nil else { return }
         hoverCardClosedAt = clock()
+        guard !prefersReducedMotion(), window != nil, let layer = card.layer else {
+            card.removeFromSuperview()
+            return
+        }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = layer.presentation()?.opacity ?? 1
+        fade.toValue = 0
+        fade.duration = Self.hoverCardFadeOut
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        card.alphaValue = 0
+        layer.add(fade, forKey: Self.hoverCardFadeKey)
+        let removal = DispatchWorkItem { [weak self, weak card] in
+            guard let self, let card, self.hoverCardRemoval != nil else { return }
+            self.hoverCardRemoval = nil
+            card.removeFromSuperview()
+            card.alphaValue = 1
+        }
+        hoverCardRemoval = removal
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hoverCardFadeOut, execute: removal)
     }
 
     /// The hovered row's rect, in the window content view's coordinates.
@@ -4787,7 +4954,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return formatter
     }()
 
-    var isHoverCardVisibleForQA: Bool { hoverCard?.superview != nil }
+    /// Open and not on its way out: a card fading after its hover ended is
+    /// already dismissed.
+    var isHoverCardVisibleForQA: Bool { hoverCard?.superview != nil && hoverCardRemoval == nil }
+    /// Still on screen, fading: the half of a dismissal a still image misses.
+    var isHoverCardFadingOutForQA: Bool {
+        hoverCard?.superview != nil && hoverCardRemoval != nil
+            && hoverCard?.layer?.animation(forKey: Self.hoverCardFadeKey) != nil
+    }
     var hoverCardFrameForQA: NSRect? { hoverCard?.superview == nil ? nil : hoverCard?.frame }
     var hoverCardLinesForQA: [String] { hoverCard?.qaLinesForQA ?? [] }
     var hoverCardTruncatedLinesForQA: [String] { hoverCard?.qaTruncatedLinesForQA ?? [] }
@@ -4986,6 +5160,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return (tucked.count, tucked.rects, tucked.card, cell, tableView.rect(ofRow: tableRow))
     }
     var parentFoldChoicesForQA: [UUID: Bool] { foldChoices }
+    /// Scroll the list the way a wheel does, through the clip view.
+    func scrollListForQA(by dy: CGFloat) {
+        let clip = scrollView.contentView
+        clip.scroll(to: NSPoint(x: clip.bounds.minX, y: clip.bounds.minY + dy))
+        scrollView.reflectScrolledClipView(clip)
+    }
+    /// The card the table is showing for row `id` right now, never one it builds.
+    func onScreenCardForQA(id: UUID) -> AgentInbox96CellView? {
+        guard let tableRow = tableRow(forAgentId: id) else { return nil }
+        return tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+    }
 
     func groupBackgroundForQA(id: UUID) -> (visible: Bool, roundsTop: Bool, roundsBottom: Bool)? {
         guard let cell = qaMaterializedRowCells.first(where: { $0.qaAgentID == id }) else {
@@ -6635,6 +6820,11 @@ protocol AgentInboxRowCell: NSTableCellView {
     /// place hover state could be dropped.
     func applyInteraction(_ interaction: RowInteraction)
 
+    /// Re-recede or restore the row's words without rebuilding it — the one
+    /// part of `apply` that depends on hover. Answers false when the variant
+    /// cannot, and the list reloads the row instead.
+    func updateEmphasisInPlace(_ emphasis: RowEmphasis) -> Bool
+
     /// Increase Contrast changes the strength of a semantic interaction fill, not
     /// the row's state or hierarchy. It is set separately so a live accessibility
     /// preference change repaints existing cells without re-deriving row content.
@@ -6696,6 +6886,10 @@ protocol AgentInboxRowCell: NSTableCellView {
     var renameNestedControlFrameForQA: NSRect? { get }
     @discardableResult
     func clickDisclosureForQA() -> Bool
+}
+
+extension AgentInboxRowCell {
+    func updateEmphasisInPlace(_ emphasis: RowEmphasis) -> Bool { false }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
@@ -7779,15 +7973,15 @@ final class AgentInboxCardView: NSView, TokenThemed {
     /// ladder, and "selected" and "hovered" and "route-active" have to be
     /// distinguishable from each other, not merely from resting.
     var isSelected = false {
-        didSet { guard isSelected != oldValue else { return }; applyTokens() }
+        didSet { guard isSelected != oldValue else { return }; applyFill(fading: true) }
     }
     var isHovered = false {
-        didSet { guard isHovered != oldValue else { return }; applyTokens() }
+        didSet { guard isHovered != oldValue else { return }; applyFill(fading: true) }
     }
     /// The agent whose tile is open — the loudest step, because it answers
     /// "where am I" from anywhere in the list.
     var isRouteActive = false {
-        didSet { guard isRouteActive != oldValue else { return }; applyTokens() }
+        didSet { guard isRouteActive != oldValue else { return }; applyFill(fading: true) }
     }
     /// P1.4. Not part of the fill ladder at all: focus is a temporary ring, so a
     /// keyboard-focused row and a merely selected row are distinguishable
@@ -7805,6 +7999,8 @@ final class AgentInboxCardView: NSView, TokenThemed {
     }
 
     private let focusRing = InboxRowFocusRingView()
+    /// The layer animation that carries an interaction fill change.
+    static let fillFadeKey = "interaction-fill"
 
     /// Which step of `SidebarSurfaceRole` this row is on, loudest input first.
     ///
@@ -7870,12 +8066,31 @@ final class AgentInboxCardView: NSView, TokenThemed {
         return TokenColor(mixed).cgColor(for: theme)
     }
 
-    func applyTokens() {
+    func applyTokens() { applyFill(fading: false) }
+
+    /// How long an interaction change takes to cross-fade the fill. A colour
+    /// change, not motion, so Reduce Motion keeps it.
+    static let fillFadeDuration: CFTimeInterval = 0.12
+
+    /// Paint the role's fill. A change of interaction on a card already on
+    /// screen fades from whatever is presented now, so a quick pass over a row
+    /// never jumps; a card still being built (no window) and an appearance flip
+    /// paint at once.
+    private func applyFill(fading: Bool) {
+        guard let layer else { return }
         // Corner style (Settings › Appearance): re-resolved on every repaint.
-        layer?.cornerRadius = Radius.card
-        let theme = effectiveTokenTheme
-        layer?.backgroundColor = Self.interactionFill(
-            for: surfaceRole, increasedContrast: usesIncreasedContrast, theme: theme)
+        layer.cornerRadius = Radius.card
+        let fill = Self.interactionFill(
+            for: surfaceRole, increasedContrast: usesIncreasedContrast, theme: effectiveTokenTheme)
+        let presented = layer.presentation()?.backgroundColor ?? layer.backgroundColor
+        layer.backgroundColor = fill
+        guard fading, window != nil, presented != fill else { return }
+        let fade = CABasicAnimation(keyPath: "backgroundColor")
+        fade.fromValue = presented ?? fill?.copy(alpha: 0)
+        fade.toValue = fill ?? presented?.copy(alpha: 0)
+        fade.duration = Self.fillFadeDuration
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(fade, forKey: Self.fillFadeKey)
     }
 
     override func viewDidChangeEffectiveAppearance() {
