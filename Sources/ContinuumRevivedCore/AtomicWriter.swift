@@ -97,6 +97,17 @@ public struct AtomicWriterFileOperations: Sendable {
 }
 
 public struct AtomicWriter: Sendable {
+    /// Scans of a backups directory since launch. One write makes one.
+    public static var backupScanCountForQA: Int { backupScans.value }
+    private static let backupScans = ScanCounter()
+
+    private final class ScanCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+        func increment() { lock.lock(); count += 1; lock.unlock() }
+    }
+
     public let backupsDirectory: URL?
     public let retainedBackups: Int
     public let prettyPrint: Bool
@@ -144,18 +155,12 @@ public struct AtomicWriter: Sendable {
             // cross-process critical section. A failed writer can therefore
             // never roll an acknowledged later writer back out of existence.
             let priorBytes = try existingBytes(at: url)
-            try backupExistingFile(at: url)
+            let backups = try backupExistingFile(at: url)
             try atomicDurableWrite(data, to: url, priorBytes: priorBytes)
             // Replacement + directory fsync is the commit point. Backup
             // maintenance is deliberately non-transactional and must not turn
             // an already durable generation into a reported save failure.
-            do {
-                try pruneOldBackups(for: url)
-            } catch {
-                // The replacement is already durable. Report maintenance
-                // separately without lying to the caller about its commit.
-                fputs("AtomicWriter: post-commit backup maintenance failed: \(error)\n", stderr)
-            }
+            pruneOldBackups(backups)
         }
     }
 
@@ -378,22 +383,32 @@ public struct AtomicWriter: Sendable {
         guard Darwin.fsync(dfd) == 0 else { throw POSIXError(.EIO) }
     }
 
-    private func backupExistingFile(at url: URL) throws {
-        guard
-            let backupsDirectory,
-            FileManager.default.fileExists(atPath: url.path)
-        else { return }
-
-        try FileManager.default.createDirectory(
-            at: backupsDirectory,
-            withIntermediateDirectories: true
-        )
+    /// Copies the current file into `backupsDirectory` and returns this
+    /// target's backups, the new copy included, from ONE scan of the directory.
+    /// Every target a store owns shares that directory (1,898 files for 625
+    /// agents on one machine), so pruning reuses this scan instead of making a
+    /// second one: the target lock keeps the set from changing in between
+    /// (.plans/81-live-performance).
+    private func backupExistingFile(at url: URL) throws -> [BackupEntry] {
+        guard let backupsDirectory else { return [] }
+        let targetExists = FileManager.default.fileExists(atPath: url.path)
+        if targetExists {
+            try FileManager.default.createDirectory(
+                at: backupsDirectory,
+                withIntermediateDirectories: true
+            )
+        } else if !FileManager.default.fileExists(atPath: backupsDirectory.path) {
+            return []
+        }
 
         // The canonical target lock covers this directory scan and copy. The
         // generation is therefore durable, process-independent ordering truth;
         // wall clock is only human-readable metadata.
-        let existing = try backupEntries(for: url, entries:
-            FileManager.default.contentsOfDirectory(at: backupsDirectory, includingPropertiesForKeys: nil))
+        Self.backupScans.increment()
+        var existing = backupEntries(
+            for: url, in: backupsDirectory,
+            names: try FileManager.default.contentsOfDirectory(atPath: backupsDirectory.path))
+        guard targetExists else { return existing }
         let maximum = existing.compactMap(\.generation).max() ?? 0
         guard maximum < UInt64.max else { throw POSIXError(.EOVERFLOW) }
         let generation = maximum + 1
@@ -403,11 +418,12 @@ public struct AtomicWriter: Sendable {
         // Never remove or overwrite a collision. This should be unreachable
         // under the target lock, but copyItem's exclusive failure is fail-safe.
         try FileManager.default.copyItem(at: url, to: backupURL)
+        existing.append(BackupEntry(url: backupURL, generation: generation))
+        return existing
     }
 
-    private func pruneOldBackups(for url: URL) throws {
-        guard backupsDirectory != nil else { return }
-        let urls = try backupURLsNewestFirst(for: url)
+    private func pruneOldBackups(_ backups: [BackupEntry]) {
+        let urls = newestFirst(backups)
         guard urls.count > retainedBackups else { return }
         for stale in urls.dropFirst(retainedBackups) {
             try? FileManager.default.removeItem(at: stale)
@@ -420,7 +436,11 @@ public struct AtomicWriter: Sendable {
             FileManager.default.fileExists(atPath: backupsDirectory.path)
         else { return [] }
 
-        return try backupEntries(for: url).sorted { lhs, rhs in
+        return newestFirst(try backupEntries(for: url))
+    }
+
+    private func newestFirst(_ entries: [BackupEntry]) -> [URL] {
+        entries.sorted { lhs, rhs in
             switch (lhs.generation, rhs.generation) {
             case let (l?, r?): return l == r ? lhs.url.lastPathComponent > rhs.url.lastPathComponent : l > r
             case (_?, nil): return true       // every new generation follows legacy history
@@ -442,16 +462,29 @@ public struct AtomicWriter: Sendable {
     }
 
     private func backupEntries(for url: URL, entries: [URL]) -> [BackupEntry] {
+        var byName: [String: URL] = [:]
+        for entry in entries { byName[entry.lastPathComponent] = entry }
+        return matchBackups(for: url, names: entries.map(\.lastPathComponent)) { byName[$0]! }
+    }
+
+    /// Matches by NAME and builds a URL only for this target's backups, so a
+    /// scan of a directory shared by hundreds of targets stays cheap.
+    private func backupEntries(for url: URL, in directory: URL, names: [String]) -> [BackupEntry] {
+        matchBackups(for: url, names: names) { directory.appendingPathComponent($0) }
+    }
+
+    private func matchBackups(
+        for url: URL, names: [String], url makeURL: (String) -> URL
+    ) -> [BackupEntry] {
         let identity = targetNamespace(for: url)
         let newPrefix = "array-backup-v2-\(identity)-"
         let legacyStem = url.deletingPathExtension().lastPathComponent
         let legacyPrefix = "\(legacyStem)."
         let legacySuffix = ".\(url.pathExtension)"
-        return entries.compactMap { entry in
-            let name = entry.lastPathComponent
+        return names.compactMap { name in
             if name.hasPrefix(newPrefix) {
                 guard let generation = v2Generation(in: name, identity: identity) else { return nil }
-                return BackupEntry(url: entry, generation: generation)
+                return BackupEntry(url: makeURL(name), generation: generation)
             }
             // Legacy: exact stem/extension plus a parseable ISO-8601 timestamp
             // and the historical 6- or 12-digit suffix. This rejects similarly
@@ -472,7 +505,7 @@ public struct AtomicWriter: Sendable {
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             guard (suffix.count == 6 || suffix.count == 12), suffix.allSatisfy(\.isNumber),
                   formatter.date(from: timestamp) != nil else { return nil }
-            return BackupEntry(url: entry, generation: nil)
+            return BackupEntry(url: makeURL(name), generation: nil)
         }
     }
 

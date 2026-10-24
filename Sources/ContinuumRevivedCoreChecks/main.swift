@@ -396,6 +396,11 @@ if CommandLine.arguments.contains("--agent-location-presentation-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--agent-store-check") {
+    runAgentStoreChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-tool-detail-store-check") {
     try runAsyncCheck {
         try await runAgentToolDetailStoreChecks()

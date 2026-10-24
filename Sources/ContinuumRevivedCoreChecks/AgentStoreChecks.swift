@@ -24,7 +24,8 @@ func runAgentStoreChecks() {
         try runAgentStoreCrossProjectOrderingCheck(root: root)
         try runAgentStoreCorruptFileCheck(root: root)
         try runAgentStoreConcurrentUpsertCheck(root: root)
-        print("AgentStore checks: app-support root, round-trip, cross-project deterministic order, corrupt-file skip, and concurrent upsert passed")
+        try runAgentStoreBackupScanCheck(root: root)
+        print("AgentStore checks: app-support root, round-trip, cross-project deterministic order, corrupt-file skip, concurrent upsert, and one backup scan per save passed")
     } catch {
         fputs("FAIL: AgentStore checks failed: \(error)\n", stderr)
         Foundation.exit(1)
@@ -389,4 +390,42 @@ private func runAgentStoreConcurrentUpsertCheck(root: URL) throws {
     let loaded = try store.loadAll()
     expect(loaded.count == count, "concurrent upserts lose no agent — got \(loaded.count) of \(count)")
     expect(loaded == records, "every concurrently written agent round-trips, in createdAt order")
+}
+
+// 6 · One scan per save (.plans/81-live-performance). Every agent shares one
+// backups directory (1,898 files for 625 agents on one machine), and a save
+// scanned it twice on the main thread: once to number the new backup, once to
+// prune. Pruning must reuse the first scan and still keep exactly
+// `retainedBackups` of this agent's backups, leaving every other agent's alone.
+private func runAgentStoreBackupScanCheck(root: URL) throws {
+    let directory = root.appendingPathComponent("backup-scans", isDirectory: true)
+    let store = AgentStore(applicationSupportDirectory: directory, retainedBackups: 3)
+    let created = Date(timeIntervalSinceReferenceDate: 806_100_000)
+    for index in 0..<20 {
+        var neighbour = makeAgentStoreFixture(
+            id: agentId(String(format: "%02X", 0x40 + index)), createdAt: created)
+        try store.upsert(neighbour)
+        neighbour.displayName = "Neighbour \(index)"
+        try store.upsert(neighbour)
+    }
+    let backupsBefore = try FileManager.default.contentsOfDirectory(atPath: store.layout.backupsDirectory.path).count
+
+    var record = makeAgentStoreFixture(id: agentId("7F"), createdAt: created)
+    for revision in 0..<6 {
+        record.displayName = "Revision \(revision)"
+        let scansBefore = AtomicWriter.backupScanCountForQA
+        try store.upsert(record)
+        let scans = AtomicWriter.backupScanCountForQA - scansBefore
+        guard revision == 0 || scans == 1 else {
+            throw AgentStoreCheckError("save \(revision) scanned the shared backups directory \(scans) times; one scan must serve both the backup and the prune")
+        }
+    }
+    guard try store.load(id: record.id)?.displayName == "Revision 5" else {
+        throw AgentStoreCheckError("the last save did not land")
+    }
+    let names = try FileManager.default.contentsOfDirectory(atPath: store.layout.backupsDirectory.path)
+    let ownCount = names.count - backupsBefore
+    guard ownCount == 3 else {
+        throw AgentStoreCheckError("this agent keeps \(ownCount) backups after 6 saves; retention is 3 and no neighbour's backup may go")
+    }
 }
