@@ -32,12 +32,54 @@ enum SettleClosesTileChecks {
     static func run() async throws {
         var failures: [String] = []
         var lines: [String] = []
+        do { lines.append(try checkNudgeTickRepaintsOnlyChangedRows()) } catch { failures.append("nudge tick: \(error)") }
         for entry in EntryPoint.allCases {
             do { lines.append(try check(entry)) } catch { failures.append("\(entry.rawValue): \(error)") }
         }
         guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "\n")) }
         for line in lines { print("  \(line)") }
         print("SettleClosesTileChecks passed: the nudge, the hover Settle, the row menu and the bulk bar each closed the settled agent's tile from its zone layer and its project's canvas file, kept the record settled and on disk, drew the row in the one History shelf under a 'Moved to History' toast, put the tile back at its world frame and zone on Undo, and opened a tile again from the row")
+    }
+
+    /// .plans/81-live-performance: the 30 s nudge tick reloaded every row to
+    /// re-read one five-minute threshold. A quiet tick must rebuild nothing, and
+    /// a tick that moves the nudge must rebuild only the row that loses or gains it.
+    private static func checkNudgeTickRepaintsOnlyChangedRows() throws -> String {
+        let world = try SidebarTruthChecks.makeWorld(
+            zoneOriginA: ZonePoint(x: 260, y: 140), idleAgentsFinishedATurn: true)
+        defer { SidebarTruthChecks.tearDown(world) }
+        let inbox = world.inbox
+        inbox.layoutForQA()
+        let target = SidebarTruthChecks.idleAgent.rawValue
+        try expect(inbox.settleNudgeForQA(id: target) != nil, "setup: the idle agent shows no nudge")
+        let rows = inbox.rowCountForQA
+        try expect(rows > 2, "setup: \(rows) rows cannot tell one rebuilt row from all of them")
+
+        var builds = inbox.cellBuildCountForQA
+        inbox.fireSettleNudgeTickForQA()
+        inbox.layoutForQA()
+        try expect(inbox.cellBuildCountForQA - builds == 0,
+                   "a nudge tick with nothing changed rebuilt \(inbox.cellBuildCountForQA - builds) of \(rows) rows")
+        try expect(inbox.settleNudgeForQA(id: target) != nil, "a quiet tick took the nudge away")
+
+        // Before the agent finished, so nothing has sat for five minutes.
+        let now = inbox.clock()
+        inbox.clock = { now.addingTimeInterval(-86_400) }
+        builds = inbox.cellBuildCountForQA
+        inbox.fireSettleNudgeTickForQA()
+        inbox.layoutForQA()
+        try expect(inbox.settleNudgeForQA(id: target) == nil, "the tick left a nudge no row qualifies for")
+        try expect(inbox.cellBuildCountForQA - builds == 1,
+                   "the nudge left one row and the tick rebuilt \(inbox.cellBuildCountForQA - builds)")
+
+        inbox.clock = { now }
+        builds = inbox.cellBuildCountForQA
+        inbox.fireSettleNudgeTickForQA()
+        inbox.layoutForQA()
+        try expect(inbox.settleNudgeForQA(id: target) != nil, "the tick did not bring the nudge back")
+        try expect(inbox.cellBuildCountForQA - builds == 1,
+                   "the nudge came back to one row and the tick rebuilt \(inbox.cellBuildCountForQA - builds)")
+        return "nudge tick: a quiet tick rebuilt 0 of \(rows) rows; moving the nudge rebuilt 1"
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {

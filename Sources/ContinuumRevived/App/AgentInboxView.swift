@@ -4597,15 +4597,31 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         scheduleWakeRerender()
         settleNudgeTimer?.invalidate()
         let timer = Timer(timeInterval: Self.settleNudgePeriod, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.redraw(tableRows: Array(self.items.indices))
-            }
+            MainActor.assumeIsolated { self?.refreshSettleNudge() }
         }
         RunLoop.main.add(timer, forMode: .common)
         settleNudgeTimer = timer
         syncElapsedTickTimer()
     }
+
+    /// The nudge's five-minute threshold is the only part of a card that changes
+    /// with time alone (the elapsed clocks have their own tick), so a tick re-reads
+    /// WHICH row carries it and repaints only a row that gains or loses it. It used
+    /// to reload every row every 30 s: ~135 ms of a long session's main thread, a
+    /// hitch twice a minute (.plans/81-live-performance). A row off screen is
+    /// configured with the current target when it is next materialized.
+    private func refreshSettleNudge() {
+        let target = settleNudgeTargetID(now: clock())
+        let stale = (0..<tableView.numberOfRows).filter { tableRow in
+            guard let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
+                    as? AgentInbox96CellView,
+                  let id = item(at: tableRow)?.agentRow?.id else { return false }
+            return card.showsSettleNudge != (id == target)
+        }
+        redraw(tableRows: stale)
+    }
+
+    func fireSettleNudgeTickForQA() { refreshSettleNudge() }
 
     private func visibleTimedTableRows() -> [Int] {
         let range = tableView.rows(in: tableView.visibleRect)

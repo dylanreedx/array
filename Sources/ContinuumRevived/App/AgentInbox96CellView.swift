@@ -1689,6 +1689,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     @objc private func disclosureClicked() { onToggleDisclosure?() }
     @objc private func settleNudgeClicked() { onSettleNudge?() }
 
+    var showsSettleNudge: Bool { !settleNudge.isHidden }
     var isSettleNudgeShownForQA: Bool { !settleNudge.isHidden && onSettleNudge != nil }
     #if ARRAY_FILM
     /// Film build only: the fold triangle a pointer clicks (nil while it is hidden).
