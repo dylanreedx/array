@@ -1616,6 +1616,32 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--file-image-check") {
+            do { try FileImageChecks.run(); print("PASS: file-image-check") }
+            catch { fputs("FAIL: file-image-check: \(error)\n", stderr); exit(1) }
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--file-formats-scene-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do { try await FileFormatsChecks.run(); exit(0) }
+                catch { fputs("FAIL: file-formats-scene-check: \(error)\n", stderr); exit(1) }
+            }
+            NSApp.run()
+        }
+        if CommandLine.arguments.contains("--file-data-grid-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do { try await DelimitedGridChecks.run(); exit(0) }
+                catch { fputs("FAIL: file-data-grid-check: \(error)\n", stderr); exit(1) }
+            }
+            NSApp.run()
+        }
+        if CommandLine.arguments.contains("--file-initial-load-check") {
+            do { try FileInitialLoadChecks.run(); print("PASS: file-initial-load-check") }
+            catch { fputs("FAIL: file-initial-load-check: \(error)\n", stderr); exit(1) }
+            exit(0)
+        }
         if CommandLine.arguments.contains("--editor-navigation-check") {
             do { try EditorNavigationChecks.run(); print("PASS: editor-navigation-check") }
             catch { fputs("FAIL: editor-navigation-check: \(error)\n", stderr); exit(1) }

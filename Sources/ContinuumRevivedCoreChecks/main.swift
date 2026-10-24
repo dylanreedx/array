@@ -274,6 +274,23 @@ if CommandLine.arguments.contains("--language-service-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--file-format-backends-check") {
+    runSecureFileSnapshotChecks()
+    runDelimitedFileDocumentChecks()
+    do { try runBoundedZIPArchiveChecks() }
+    catch { fputs("FAIL: bounded ZIP checks: \(error)\n", stderr); Foundation.exit(1) }
+    runXLSXDocumentChecks()
+    print("FileFormatBackendChecks passed")
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--file-content-foundation-check") {
+    runFileDocumentInitialLoadChecks()
+    runDelimitedTextParserChecks()
+    print("FileContentFoundationChecks passed")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--file-document-session-check") {
     runFileDocumentSessionChecks()
     runEditorPreferencesChecks()

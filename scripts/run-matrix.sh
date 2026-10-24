@@ -498,6 +498,8 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --local-pairing-endpoint-check
 # KNOWN-RED seed-1 pin in the bare run and never reported; this arm runs them.
 run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-lifecycle-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --file-content-foundation-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --file-format-backends-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --onboarding-foundation-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 # T3 (0.7.26): Claude/Codex get pi's workspace tools over array-workspace-mcp.
@@ -1222,6 +1224,10 @@ run_app_check .build/debug/Array --tool-detail-check
 # unsaved preview, explicit atomic save, clean reload, and conflict overwrite are witnessed.
 run_app_check .build/debug/Array --file-markdown-preview-check
 run_app_check .build/debug/Array --editor-web-bridge-check
+run_app_check .build/debug/Array --file-initial-load-check
+run_app_check .build/debug/Array --file-image-check
+run_app_check .build/debug/Array --file-data-grid-check
+run_app_check .build/debug/Array --file-formats-scene-check
 run_app_check .build/debug/Array --editor-navigation-check
 # A transcript file link resolves against its source checkout/zone, canonicalizes
 # to one tile, preserves line reveal, and records/draws multiple referring agents.

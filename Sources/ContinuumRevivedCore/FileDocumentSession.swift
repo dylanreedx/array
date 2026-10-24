@@ -72,6 +72,20 @@ package struct FileDocumentFileOperations: @unchecked Sendable {
     )
 }
 
+/// The preview and optional editable session derived from one initial disk read.
+/// Unsupported input never creates a text editing session.
+public struct FileDocumentInitialLoad: Sendable {
+    public let preview: FilePreview
+    fileprivate let canonicalPath: String
+    fileprivate let fileOperations: FileDocumentFileOperations
+
+    /// Materialize on the receiving actor. This performs no disk I/O and
+    /// creates no editing session for unavailable input.
+    public func makeSession() -> FileDocumentSession? {
+        FileDocumentSession.makeSession(from: self)
+    }
+}
+
 /// Owns one file's draft and disk baseline. UI components supply edits tagged
 /// with a revision; only this object decides whether disk may be replaced.
 public final class FileDocumentSession {
@@ -90,10 +104,45 @@ public final class FileDocumentSession {
         self.init(path: path, fileOperations: .live)
     }
 
-    package init(path: String, fileOperations: FileDocumentFileOperations) {
-        filePath = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+    package convenience init(path: String, fileOperations: FileDocumentFileOperations) {
+        let canonicalPath = Self.canonicalPath(path)
+        self.init(path: canonicalPath, fileOperations: fileOperations,
+                  initialRead: Self.readDisk(path: canonicalPath, fileOperations: fileOperations))
+    }
+
+    /// Loads display text and its editable baseline together, without a second
+    /// preview read that could represent a different disk revision.
+    public static func load(path: String) -> FileDocumentInitialLoad {
+        load(path: path, fileOperations: .live)
+    }
+
+    package static func load(path: String, fileOperations: FileDocumentFileOperations) -> FileDocumentInitialLoad {
+        let canonicalPath = canonicalPath(path)
+        let initialRead = readDisk(path: canonicalPath, fileOperations: fileOperations)
+        let preview: FilePreview
+        switch initialRead {
+        case let .text(text): preview = .text(text)
+        case let .unavailable(reason):
+            let message: String
+            switch reason {
+            case .tooLarge: message = "File too large to preview (> 1 MB)"
+            case .unsupportedEncoding: message = "Binary file -- open in preferred editor"
+            case .missing, .notRegularFile, .unreadable: message = "File not found"
+            }
+            preview = .unavailable(message)
+        }
+        return FileDocumentInitialLoad(preview: preview, canonicalPath: canonicalPath, fileOperations: fileOperations)
+    }
+
+    fileprivate static func makeSession(from load: FileDocumentInitialLoad) -> FileDocumentSession? {
+        guard case let .text(text) = load.preview else { return nil }
+        return FileDocumentSession(path: load.canonicalPath, fileOperations: load.fileOperations, initialRead: .text(text))
+    }
+
+    private init(path: String, fileOperations: FileDocumentFileOperations, initialRead: DiskRead) {
+        filePath = path
         self.fileOperations = fileOperations
-        switch readDisk() {
+        switch initialRead {
         case let .text(text):
             draftText = text
             baselineText = text
@@ -101,6 +150,10 @@ public final class FileDocumentSession {
             unavailableReason = reason
             externalState = .unavailable(reason)
         }
+    }
+
+    private static func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
     }
 
     public var isDirty: Bool { draftText != baselineText }
@@ -235,6 +288,10 @@ public final class FileDocumentSession {
     }
 
     private func readDisk() -> DiskRead {
+        Self.readDisk(path: filePath, fileOperations: fileOperations)
+    }
+
+    private static func readDisk(path filePath: String, fileOperations: FileDocumentFileOperations) -> DiskRead {
         let attributes: [FileAttributeKey: Any]
         do {
             attributes = try fileOperations.attributes(filePath)

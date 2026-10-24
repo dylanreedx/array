@@ -70,6 +70,14 @@ enum EditorNavigationChecks {
         let standalone = DocumentLocation(path: first.path, scope: .standalone)
         try expect(try navigate(view, to: standalone), "standalone transition must succeed")
         try expect(view.qaSidebarRoot == nil, "standalone transition must remove checkout sidebar")
+        let binary = root.appendingPathComponent("data.bin")
+        try Data([0, 1, 2]).write(to: binary)
+        try expect(try navigate(view, to: DocumentLocation(path: binary.path, scope: .standalone)),
+                   "source-to-binary navigation must succeed")
+        try expect(!view.qaHasDocumentSession && view.loadedText == nil,
+                   "binary navigation must release the prior text session")
+        try expect(try navigate(view, to: standalone), "binary-to-source navigation must not request a stale editor barrier")
+        try expect(try snapshot(view).text.contains("// saved"), "returning to source must load its current saved text")
         print("Editor navigation checks passed: real WebKit switch, barrier, Save/Discard/Cancel, failed commit, missing-file protection, Markdown, sidebar scope")
     }
 

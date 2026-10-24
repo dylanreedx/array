@@ -1,0 +1,177 @@
+{
+  "checked_date": "2026-10-24",
+  "baseline": "81bb3717eec92bde6c987662d2771db57f591b0e",
+  "workspace_kind": "real Git worktree file-tile-previews; historical research archive preserved",
+  "planning_markdown_files": 13,
+  "document_validation_issues": [],
+  "runtime_verification": "Local implementation integrated; focused matrix harness passes 11 legs; full release matrix blocked by environment.",
+  "handoff_review": {
+    "architecture": "Reviewed; no material gaps identified",
+    "verification": "Provider-boundary gap identified; input policy, external-reference and provider-resource gates added"
+  },
+  "planning_only_baseline_comparison": {
+    "files_compared": 2526,
+    "files_changed": []
+  },
+  "implementation": {
+    "status": "first local foundation slice verified; roadmap incomplete",
+    "core_build": "passed; rebuilt after final app build",
+    "core_foundation": "passed",
+    "core_session_regression": "passed",
+    "app_build": "passed; final restored implementation build 312.35s",
+    "app_initial_load": "passed",
+    "markdown_preview": "passed",
+    "editor_navigation": "same WebKit timeout reproduced on rebuilt baseline; extended assertions not reached",
+    "markdown_performance": "same clipboard byte assertion reproduced on rebuilt baseline",
+    "full_matrix": "not run; new legs registered, not full-gate qualified",
+    "workspace": "isolated source archive; worktree denied",
+    "baseline_build": "passed; 234.08s",
+    "review": "all material findings addressed; final inspection no further material issue",
+    "final_results": {
+      "--file-content-foundation-check": 0,
+      "--file-document-session-check": 0,
+      "--file-initial-load-check": 0,
+      "--file-markdown-preview-check": 0,
+      "--workspace-api-open-check": 0,
+      "--workspace-api-grants-check": 0,
+      "--workspace-scene-owner-check": 0
+    },
+    "bundle_appearance": "not run; no new renderer/UI preview",
+    "bench_disposition": "isolated archive retained with unlanded source; real worktree creation denied",
+    "baseline_comparison": {
+      "files_compared": 2526,
+      "changed_existing_files": [
+        "Sources/ContinuumRevived/App/ContinuumApp.swift",
+        "Sources/ContinuumRevived/App/EditorNavigationChecks.swift",
+        "Sources/ContinuumRevived/Canvas/FileTileNSView.swift",
+        "Sources/ContinuumRevivedCore/FileDocumentSession.swift",
+        "Sources/ContinuumRevivedCoreChecks/main.swift",
+        "docs/38-tickets/90-agent-ux/matrix-inventory.txt",
+        "scripts/run-matrix.sh"
+      ]
+    }
+  },
+  "current_markdown_files": 18,
+  "rich_implementation": {
+    "status": "local implementation and focused qualification complete; release gate blocked",
+    "protected_execution": "All builds/native tests since safety instruction use /tmp/exc-probe/noexc",
+    "backend_build": "passed v4",
+    "backend_checks": "passed --file-format-backends-check",
+    "app_build": "passed final qualified build (35.58s), protected noexc, two jobs",
+    "direct_targeted_results": {
+      "--file-formats-scene-check": {
+        "exit": 0,
+        "log": "qa-runs/file-tiles-rich/v7-file-formats-scene-check.log"
+      },
+      "--file-image-check": {
+        "exit": 0,
+        "seconds": 0.075,
+        "children_peak_rss_so_far_bytes": 142704640
+      },
+      "--file-data-grid-check": {
+        "exit": 0,
+        "seconds": 0.283,
+        "children_peak_rss_so_far_bytes": 142704640
+      },
+      "--file-initial-load-check": {
+        "exit": 0,
+        "seconds": 0.287,
+        "children_peak_rss_so_far_bytes": 142704640
+      },
+      "--file-markdown-preview-check": {
+        "exit": 0,
+        "seconds": 3.434,
+        "children_peak_rss_so_far_bytes": 142704640
+      },
+      "--workspace-api-open-check": {
+        "exit": 0,
+        "seconds": 0.273,
+        "children_peak_rss_so_far_bytes": 142704640
+      },
+      "--workspace-api-grants-check": {
+        "exit": 0,
+        "seconds": 0.469,
+        "children_peak_rss_so_far_bytes": 142704640
+      },
+      "--workspace-scene-owner-check": {
+        "exit": 0,
+        "seconds": 0.215,
+        "children_peak_rss_so_far_bytes": 142704640
+      }
+    },
+    "full_matrix": {
+      "status": "blocked, not passed",
+      "original_exit": 74,
+      "original_log": "qa-runs/file-tiles-rich/matrix.log",
+      "reason": "iOS xcodebuild denied default SwiftPM manifest-cache diagnostics; task-local packageCachePath retry failed identically; simulator services unavailable",
+      "continuation": "130 invocations observed, 22 recorded red outcomes including known reds, then hung at --palette-captures-keys-over-browser-check awaiting WebKit callbacks; no final report",
+      "continuation_log": "qa-runs/file-tiles-rich/matrix-continuation.log",
+      "termination": "owned QA PID 88369 SIGTERM denied by sandbox; not confirmed stopped",
+      "skipped": "UI baselines, terminal surfaces, packaging; no baseline updates"
+    },
+    "resource_measurement": "time -l query denied; direct Python child getrusage available, max so far 142704640 bytes for sequential focused checks",
+    "known_baseline_failures": [
+      "editor navigation WebKit timeout",
+      "markdown performance clipboard byte assertion"
+    ],
+    "no_release_or_git_mutation": true,
+    "production_scene": "passed final focused gate for all four formats; no resource/observer leak; retired hosts cannot resurrect on rename; regular light/dark pixel witness",
+    "appearance": "PNG/CSV/UTF-16 TSV/XLSX light and dark rendered, inspected; opaque themed backgrounds, bounded draws, visible controls; toolbar pixel regression RED then GREEN; artifacts qa-runs/file-tiles-rich/appearances-qualified",
+    "focused_gate": {
+      "exit": 0,
+      "legs_run": 11,
+      "summary": "Focused file-tile gate passed.",
+      "log": "qa-runs/file-tiles-rich/focused-matrix.log",
+      "runner": "task-local harness reusing exact registered matrix invocations and reporting functions; not the full release matrix"
+    },
+    "remaining_release_evidence": [
+      "coordinator review/commit and final integration full matrix, including unresolved broad diagnostic failures",
+      "supported macOS floor and optional image codec fixtures",
+      "live VoiceOver and preview bundle smoke"
+    ],
+    "transfer": {
+      "patch": "qa-runs/file-tiles-rich/implementation.patch",
+      "manifest": "qa-runs/file-tiles-rich/transfer-manifest.json",
+      "base": "81bb3717eec92bde6c987662d2771db57f591b0e",
+      "status": "final patch and manifest generated against exact baseline; apply-check result recorded alongside artifacts"
+    },
+    "bench_cleanup": "completed .build-film removed after verifying build.db had no owner; archive, normal build and review evidence retained"
+  },
+  "active_bench": {
+    "path": "/Users/dylan/Documents/personal/Array/.worktrees/file-tile-previews",
+    "branch": "array/file-tile-previews",
+    "base": "fe734156",
+    "transfer_files": 48,
+    "adapted_paths": [
+      "Sources/ContinuumRevived/App/ContinuumApp.swift",
+      "Sources/ContinuumRevived/Canvas/FileTileNSView.swift",
+      "Sources/ContinuumRevivedCoreChecks/main.swift",
+      "docs/38-tickets/90-agent-ux/matrix-inventory.txt",
+      "scripts/run-matrix.sh"
+    ],
+    "research_preserved": true,
+    "new_base_verification": "fresh builds and 13-leg focused gate passed; ready for coordinator review",
+    "landing_patch": "qa-runs/file-tile-previews/landing.patch",
+    "commit_subject": "feat(files): add bounded image and spreadsheet previews",
+    "commit_owner": "release coordinator under Dylan identity",
+    "app_build": {
+      "exit": 0,
+      "seconds": 171.61,
+      "log": "qa-runs/file-tile-previews/app-build.log"
+    },
+    "core_build": {
+      "exit": 0,
+      "seconds": 24.17,
+      "log": "qa-runs/file-tile-previews/core-build.log"
+    },
+    "focused_gate": {
+      "exit": 0,
+      "legs_run": 13,
+      "summary": "File previews and multiselect regressions passed.",
+      "log": "qa-runs/file-tile-previews/focused-matrix.log",
+      "scope": "11 file-tile/editing/API legs plus tile-selection-geometry and tile-multiselect"
+    },
+    "landing_cached_apply_check": "passed; final patch regenerated after documentation updates",
+    "index": "unchanged; no stage, commit or push"
+  }
+}

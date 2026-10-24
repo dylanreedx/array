@@ -30,6 +30,26 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     private var documentSession: FileDocumentSession?
     private var codeEditor: CodeEditorHostView?
     private var documentGeneration = UUID()
+    private var loadGeneration = UUID()
+    private var fileLoadTask: Task<Void, Never>?
+    private var contentRequest: FileContentRequest?
+    private var renderer: (any FileTileRenderer)?
+    private weak var lastRetiredRenderer: (any FileTileRenderer)?
+    var qaRetiredRendererAlive: Bool { lastRetiredRenderer != nil }
+    private var contentLoad: FileContentLoad?
+    private var richKind: FileContentKind?
+    private var richSuspended = false
+    private var delimiterOverride: UInt8?
+    private var sourceModeOverride = false
+    private var dataModeChoice: ChoiceButton?
+    private var contentObserver: UUID?
+    private var observedStamp: FileContentObservation.Stamp?
+    var qaRenderer: (any FileTileRenderer)? { renderer }
+    var qaRichLoading: Bool { contentRequest != nil }
+    private let initialLoader: @Sendable (String) -> FileDocumentInitialLoad
+    private let asynchronousLoadOverride: Bool?
+    var qaHasDocumentSession: Bool { documentSession != nil }
+    var qaPendingFileLoad: Task<Void, Never>? { fileLoadTask }
     private var bridgeDocumentID: String { (filePath ?? "") + "#" + documentGeneration.uuidString }
     private var documentTransitionPending = false
     var isCodeEditorFocused: Bool {
@@ -92,13 +112,22 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     private var trashedOriginalURL: URL?
     private var trashedItemURL: URL?
 
-    override init(tile: Tile) {
+    override convenience init(tile: Tile) {
+        self.init(tile: tile, initialLoader: { FileDocumentSession.load(path: $0) })
+    }
+
+    init(tile: Tile, initialLoader: @escaping @Sendable (String) -> FileDocumentInitialLoad,
+         loadAsynchronously: Bool? = nil) {
+        self.initialLoader = initialLoader
+        self.asynchronousLoadOverride = loadAsynchronously
         let resolvedPath = tile.metadata.documentLocation?.path ?? tile.metadata.filePath
         self.filePath = resolvedPath
         self.sourceLanguage = FilePreview.sourceLanguage(
             forPath: resolvedPath ?? ""
         )
-        self.documentSession = resolvedPath.map(FileDocumentSession.init(path:))
+        // The loaded revision creates the editing session; init must not read
+        // the same file separately from its presentation.
+        self.documentSession = nil
         self.editorState = tile.metadata.fileEditorViewState ?? FileEditorViewState(sidebarExpanded: false)
 
         let tv = NSTextView()
@@ -156,19 +185,40 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    deinit { NotificationCenter.default.removeObserver(self) }
+    deinit {
+        fileLoadTask?.cancel()
+        NotificationCenter.default.removeObserver(self)
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        renderer?.setVisible(window != nil)
         if window == nil {
+            FileContentObservation.shared.remove(contentObserver); contentObserver = nil
             externalChangeTimer?.invalidate()
             externalChangeTimer = nil
+        } else if richSuspended {
+            richSuspended = false
+            loadFile()
+        } else if richKind != nil {
+            observeRichContent()
         } else if loadedText != nil {
             startExternalChangeMonitoring()
         }
     }
 
+    override func prepareForParking() {
+        super.prepareForParking()
+        // Warm workspaces keep their host views, but read-only decoded pixels,
+        // pages and observation must give their admission back to the live scene.
+        if richKind != nil {
+            richSuspended = true
+            cancelFileLoad()
+        }
+    }
+
     override func prepareForRemovalFromScene() {
+        cancelFileLoad()
         externalChangeTimer?.invalidate()
         externalChangeTimer = nil
         flushRecoveryDraft()
@@ -185,6 +235,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         if presentation == .sourceText, loadedText != nil { applyCodePresentation() }
         messageContainer?.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(in: self)
         messageLabel?.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        renderer?.applyTheme()
         markdownSurface?.applyTheme()
         fileBrowser?.applyTokens()
         applyEditorPreferences()
@@ -198,6 +249,10 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         // Before targeting a view inside the body: while surfaced, that view is
         // PARKED, and AppKit will happily focus it there.
         promoteForIncomingFocus()
+        if let renderer {
+            window?.makeFirstResponder(renderer.focusView)
+            return true
+        }
         if (presentation == .sourceText || mode != .preview), let codeEditor {
             codeEditor.focusEditor(documentID: bridgeDocumentID)
         } else {
@@ -223,6 +278,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     override var surfacesTitleAccessory: Bool { true }
 
     override var surfaceableBody: NSView? {
+        if renderer != nil { return activeBody }
         // WKWebView snapshots are intentionally excluded until a dedicated
         // visual/performance witness proves they survive canvas residency.
         if presentation == .sourceText || (presentation == .markdown && mode != .preview) { return nil }
@@ -234,10 +290,23 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     override var farParkableBody: NSView? { presentation == .sourceText ? nil : activeBody }
     override var surfaceContentRevision: UInt64? { surfaceEpoch }
 
+    override func demoteBodyToSurface(_ surface: TileSurface, park: NSView, backingScale: CGFloat) -> Bool {
+        let demoted = super.demoteBodyToSurface(surface, park: park, backingScale: backingScale)
+        if demoted { renderer?.setVisible(false) }
+        return demoted
+    }
+
+    override func promoteBodyToNative() {
+        super.promoteBodyToNative()
+        renderer?.setVisible(window != nil)
+    }
+
+
     /// `activeBody` is a scroll view for some file kinds and a container holding
     /// one for others, so both shapes are covered — one level only, deliberately:
     /// this is polled per residency pass.
     override var surfaceScrollOffsets: [CGPoint] {
+        if let renderer { return renderer.scrollOffsets }
         // The preview's scroller sits inside the document view, inside the
         // Markdown surface: deeper than the walk below. Unreported, a picture
         // baked at the top of the file stayed "current" after any scroll, and
@@ -330,7 +399,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     func flushEditorBarrier(_ completion: @escaping (Bool) -> Void) {
         guard !documentTransitionPending else { completion(false); return }
         if qaEditorBarrierNeverAnswers { documentTransitionPending = true; return }
-        guard let codeEditor else { completion(true); return }
+        guard documentSession != nil, loadedText != nil, let codeEditor else { completion(true); return }
         documentTransitionPending = true
         let identity = bridgeDocumentID
         var finished = false
@@ -415,8 +484,12 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
             self.documentGeneration = UUID()
             self.documentTransitionPending = false
             let oldRoot = self.tile.metadata.documentLocation?.checkoutRootPath
+            self.sourceModeOverride = false
+            self.dataModeChoice = nil
+            self.delimiterOverride = nil
+            self.richKind = nil
             self.filePath = location.path
-            self.documentSession = FileDocumentSession(path: location.path)
+            self.documentSession = nil
             self.sourceLanguage = FilePreview.sourceLanguage(forPath: location.path)
             self.loadedText = nil
             self.savedText = nil
@@ -532,6 +605,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         if let languageLabel { views.append(languageLabel) }
         if let markdownFormatControl { views.append(markdownFormatControl) }
         if let modeControl { views.append(modeControl) }
+        if let dataModeChoice { views.append(dataModeChoice) }
         let stack = NSStackView(views: views)
         stack.orientation = .horizontal
         stack.spacing = 4
@@ -610,6 +684,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     }
 
     private func currentDocumentBody() -> NSView {
+        if let renderer { return renderer.view }
         if presentation == .sourceText, let codeEditor { return codeEditor }
         if presentation == .markdown, let markdownSurface {
             switch mode {
@@ -722,19 +797,22 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     }
 
     @objc private func projectFileMoved(_ notification: Notification) {
+        guard !hasRetiredFromScene else { return }
         guard let current = filePath,
               let source = notification.userInfo?["source"] as? String,
               let destination = notification.userInfo?["destination"] as? String,
               let mapped = Self.replacingPathPrefix(current, source: source, destination: destination) else { return }
         onLanguageDocumentClose?(URL(fileURLWithPath: current))
         let draft = documentSession?.draftText ?? loadedText
+        let needsInitialLoad = documentSession == nil && draft == nil
+        cancelFileLoad()
         filePath = mapped
         sourceLanguage = FilePreview.sourceLanguage(forPath: mapped)
-        let replacement = FileDocumentSession(path: mapped)
-        if let draft, replacement.draftText != draft { _ = replacement.updateDraft(draft) }
+        let replacement = needsInitialLoad ? nil : FileDocumentSession(path: mapped)
+        if let draft, let replacement, replacement.draftText != draft { _ = replacement.updateDraft(draft) }
         documentSession = replacement
-        loadedText = draft ?? replacement.draftText
-        savedText = replacement.baselineText
+        loadedText = draft ?? replacement?.draftText
+        savedText = replacement?.baselineText
         tile.metadata.filePath = mapped
         if var location = tile.metadata.documentLocation {
             location.path = mapped
@@ -748,15 +826,22 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         }
         if current == source { tile.title = URL(fileURLWithPath: mapped).lastPathComponent }
         canvas?.updateTile(tile, recalculateZoneBounds: false)
-        configureCodeEditorIfNeeded()
-        setDirty(replacement.isDirty)
+        if needsInitialLoad {
+            // Parked hosts keep identity current but acquire no preview resources.
+            if !richSuspended { loadFile() }
+        } else {
+            configureCodeEditorIfNeeded()
+        }
+        setDirty(replacement?.isDirty ?? false)
         if let languageServiceManager { connectLanguageServices(languageServiceManager) }
     }
 
     @objc private func projectFileTrashed(_ notification: Notification) {
+        guard !hasRetiredFromScene else { return }
         guard let current = filePath,
               let source = notification.userInfo?["source"] as? String,
               Self.replacingPathPrefix(current, source: source, destination: source) != nil else { return }
+        cancelFileLoad()
         flushRecoveryDraft()
         trashedOriginalURL = URL(fileURLWithPath: current)
         if let trashRoot = notification.userInfo?["trash"] as? String {
@@ -808,8 +893,12 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
             try FileManager.default.moveItem(at: source, to: destination)
             trashedItemURL = nil
             trashedOriginalURL = nil
-            refreshFromDisk(force: true)
-            showBody()
+            if documentSession == nil, loadedText == nil {
+                loadFile()
+            } else {
+                refreshFromDisk(force: true)
+                showBody()
+            }
         } catch { presentFileOperationError(error) }
     }
 
@@ -831,6 +920,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     }
 
     private func relocateDocument(to mapped: String, preservingDraft draft: String?) {
+        cancelFileLoad()
         if let filePath { onLanguageDocumentClose?(URL(fileURLWithPath: filePath)) }
         codeEditor?.tearDown()
         codeEditor?.removeFromSuperview()
@@ -951,6 +1041,10 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     /// draft is never overwritten; it is marked conflicted for the next save.
     func refreshFromDisk(force: Bool = false) {
         guard !documentTransitionPending || force else { return }
+        if richKind != nil {
+            if force || observedStamp != filePath.map({ FileContentObservation.Stamp(path: $0) }) { loadFile() }
+            return
+        }
         guard let filePath, let session = documentSession else { return }
         let signature = Self.fileSignature(for: filePath)
         guard force || signature != loadedFileSignature else { return }
@@ -1422,24 +1516,51 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         textVisibilityEvidence(containing: expectedText).visibleLayoutOK
     }
 
+    private func cancelFileLoad() {
+        contentRequest?.cancel(); contentRequest = nil
+        FileContentObservation.shared.remove(contentObserver); contentObserver = nil
+        if let renderer { lastRetiredRenderer = renderer }
+        renderer?.dispose(); renderer?.view.removeFromSuperview(); renderer = nil
+        contentLoad = nil
+        loadGeneration = UUID()
+        fileLoadTask?.cancel()
+        fileLoadTask = nil
+    }
+
     private func loadFile() {
+        cancelFileLoad()
         guard let filePath, !filePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             showMessage("File not found")
             return
         }
 
-        if Self.shouldLoadAsynchronously(path: filePath) {
+        var selected = sourceModeOverride ? FileContentKind.text : FileContentKind.select(path: filePath)
+        if case .delimited = selected, let delimiterOverride { selected = .delimited(delimiterOverride) }
+        if selected != .text {
+            loadRichContent(path: filePath, kind: selected)
+            return
+        }
+        richKind = nil
+
+        if asynchronousLoadOverride ?? Self.shouldLoadAsynchronously(path: filePath) {
             textView.string = "Loading file..."
-            let generation = documentGeneration
-            Task.detached { [filePath] in
-                let result = FilePreview.load(path: filePath)
+            let generation = loadGeneration
+            let loader = initialLoader
+            fileLoadTask = Task.detached { [weak self, filePath] in
+                guard !Task.isCancelled else { return }
+                let result = loader(filePath)
+                guard !Task.isCancelled else { return }
                 await MainActor.run { [weak self] in
-                    guard let self, self.documentGeneration == generation else { return }
-                    self.apply(result)
+                    guard let self, self.loadGeneration == generation else { return }
+                    self.fileLoadTask = nil
+                    self.documentSession = result.makeSession()
+                    self.apply(result.preview)
                 }
             }
         } else {
-            apply(FilePreview.load(path: filePath))
+            let result = initialLoader(filePath)
+            documentSession = result.makeSession()
+            apply(result.preview)
         }
     }
 
@@ -1486,11 +1607,18 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
                 applyCodePresentation()
             }
             configureCodeEditorIfNeeded()
+            if sourceModeOverride { installDataModeChoice(canEdit: true) }
             showBody()
             startExternalChangeMonitoring()
             if let manager = languageServiceManager { connectLanguageServices(manager) }
         case let .unavailable(message):
-            if let recovery = readRecoveryDraft(), let session = documentSession,
+            // Only a real recovery draft needs an editing session when the
+            // current file cannot be decoded. Ordinary binary previews never do.
+            let recovery = readRecoveryDraft()
+            if recovery != nil, documentSession == nil, let filePath {
+                documentSession = FileDocumentSession(path: filePath)
+            }
+            if let recovery, let session = documentSession,
                session.restoreRecovery(FileDocumentRecoverySnapshot(
                    filePath: recovery.filePath,
                    baselineText: recovery.baseText,
@@ -1520,10 +1648,131 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
                 showBody()
             } else {
                 loadedText = nil
-                showMessage(message)
+                if message.hasPrefix("Binary file"), let filePath {
+                    loadRichContent(path: filePath, kind: .image)
+                } else { showMessage(message) }
             }
         }
     }
+
+    private func loadRichContent(path: String, kind: FileContentKind) {
+        richKind = kind
+        documentSession = nil; loadedText = nil; savedText = nil
+        externalChangeTimer?.invalidate(); externalChangeTimer = nil
+        codeEditor?.tearDown(); codeEditor?.removeFromSuperview(); codeEditor = nil
+        markdownSurface = nil
+        modeControl = nil; markdownFormatControl = nil; languageLabel = nil
+        dataModeChoice = nil; rebuildTitleAccessory()
+        setDirty(false); hasExternalConflict = false
+        observedStamp = FileContentObservation.Stamp(path: path)
+        if case let .external(reason) = kind {
+            showRichMessage(reason); observeRichContent(); return
+        }
+        showMessage("Preparing read-only preview…")
+        let generation = loadGeneration
+        // These two OS aliases are fixed system locations, not user-controlled
+        // symlink targets. The snapshot reader still rejects every other link.
+        let readPath: String
+        if path.hasPrefix("/var/") { readPath = "/private" + path }
+        else if path.hasPrefix("/tmp/") { readPath = "/private" + path }
+        else { readPath = path }
+        contentRequest = FileContentCoordinator.shared.load(path: readPath, kind: kind) { [weak self] result in
+            guard let self, self.loadGeneration == generation else { return }
+            self.contentRequest = nil
+            switch result {
+            case let .success(load):
+                self.contentLoad = load
+                do {
+                let body: any FileTileRenderer
+                switch load.payload {
+                case let .image(document): body = FileImageRenderer(document: document)
+                case let .table(document):
+                    let viewerLease = try FileContentBudget.shared.reserve(32 * 1_024 * 1_024)
+                    let grid = DelimitedGridRenderer(source: RetainedDelimitedSource(document: document, owner: load, viewerLease: viewerLease),
+                                                     title: "Data", allowsHeaderChoice: true, delimiter: document.delimiter)
+                    grid.onDelimiterChange = { [weak self] delimiter in
+                        self?.delimiterOverride = delimiter; self?.loadFile()
+                    }
+                    self.installDataModeChoice(canEdit: document.encodingName == "UTF-8" && load.byteCount <= FilePreview.maxReadBytes)
+                    body = grid
+                case let .workbook(document):
+                    let viewerLease = try FileContentBudget.shared.reserve(32 * 1_024 * 1_024)
+                    body = WorkbookGridRenderer(workbook: document, owner: load, viewerLease: viewerLease)
+                }
+                body.onRevisionChange = { [weak self] in self?.bumpSurfaceEpoch() }
+                self.renderer = body
+                self.promoteForIncomingFocus()
+                self.rebuildEditorShell(documentBody: body.view)
+                body.setVisible(self.window != nil)
+                self.bumpSurfaceEpoch()
+                } catch {
+                    self.contentLoad = nil
+                    self.showRichMessage(error.localizedDescription)
+                }
+            case let .failure(error): self.showRichMessage(error.localizedDescription)
+            }
+            self.observeRichContent()
+        }
+    }
+
+    private func installDataModeChoice(canEdit: Bool) {
+        let choice = ChoiceButton(title: "File View")
+        choice.items = [ChoiceItem(id: "data", title: "Data Preview"),
+                        ChoiceItem(id: "source", title: "Edit Source", detail: canEdit ? nil : "UTF-8 files up to 1 MiB", enabled: canEdit)]
+        choice.selectedID = sourceModeOverride ? "source" : "data"
+        choice.onSelection = { [weak self] item in self?.changeDataMode(source: item.id == "source") }
+        dataModeChoice = choice; rebuildTitleAccessory()
+    }
+
+    private func changeDataMode(source: Bool) {
+        guard source != sourceModeOverride else { return }
+        flushEditorBarrier { [weak self] success in
+            guard let self, success else { return }
+            if self.isDirty {
+                let alert = NSAlert()
+                alert.messageText = "Save source changes before showing data?"
+                alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Discard"); alert.addButton(withTitle: "Cancel")
+                switch self.qaSetSwitchDecision?() ?? alert.runModal() {
+                case .alertFirstButtonReturn:
+                    guard self.saveInteractively() else { self.resumeEditorAfterBarrier(); return }
+                case .alertSecondButtonReturn:
+                    self.documentSession?.discardDraft(); self.discardRecoveryDraft(); self.setDirty(false)
+                default: self.resumeEditorAfterBarrier(); self.installDataModeChoice(canEdit: true); return
+                }
+            }
+            self.resumeEditorAfterBarrier()
+            if let filePath = self.filePath { self.onLanguageDocumentClose?(URL(fileURLWithPath: filePath)) }
+            self.sourceModeOverride = source
+            self.loadFile()
+        }
+    }
+
+    private func observeRichContent() {
+        guard window != nil, richKind != nil, contentObserver == nil, let filePath else { return }
+        contentObserver = FileContentObservation.shared.observe(
+            path: filePath, stamp: observedStamp ?? .init(path: filePath)) { [weak self] in self?.loadFile() }
+    }
+
+    private func showRichMessage(_ message: String) {
+        showMessage(message)
+        guard let container = messageContainer else { return }
+        let open = NSButton(title: "Open Externally", target: self, action: #selector(openRichExternally))
+        let reload = NSButton(title: "Reload", target: self, action: #selector(reloadRichContent))
+        let buttons = NSStackView(views: [open, reload])
+        buttons.orientation = .horizontal; buttons.spacing = 8
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(buttons)
+        NSLayoutConstraint.activate([
+            buttons.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            buttons.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12)
+        ])
+    }
+    @objc private func openRichExternally() {
+        guard let filePath else { return }
+        let url = URL(fileURLWithPath: filePath)
+        if let onOpenExternally { onOpenExternally(url) } else { NSWorkspace.shared.open(url) }
+    }
+    @objc private func reloadRichContent() { loadFile() }
 
     private func configureMarkdownEditor() {
         textView.isEditable = true
