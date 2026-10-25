@@ -3845,9 +3845,24 @@ final class CanvasNSView: NSView, TokenThemed {
     /// these — the N-inputs-one-commit witness counts this, and it is the
     /// number that used to equal the raw event rate.
     private(set) var qaViewportApplyCount = 0
+    /// The motion benchmark's observer, called after every camera apply.
+    var qaOnViewportApplied: ((CanvasViewport) -> Void)?
+
+    /// QA: cumulative counts of the off-camera work a frame can pay for, read
+    /// between camera commits to name what a slow frame spent its time on.
+    var qaFrameWorkCounters: [String: Int] {
+        ["promotions": qaSurfacePromotionCount, "demotions": qaSurfaceDemotionCount,
+         "hitTestPromotions": TileNSView.hitTestPromotionTotal,
+         "farParks": qaFarParkCount, "farReturns": qaFarReturnCount,
+         "proseMeasures": AssistantProseView.qaMeasurementCount,
+         "markdownPasses": FileMarkdownDocumentView.qaTotalMeasurePasses,
+         "zoneInstalls": qaZoneLayerInstallCount,
+         "transcriptApplies": AgentTranscriptUpdateScheduler.qaTotalVisualApplies]
+    }
 
     func setViewport(_ viewport: CanvasViewport) {
         let cameraStepStart = ProcessInfo.processInfo.systemUptime
+        defer { qaOnViewportApplied?(viewport) }
         if let last = lastViewportCommitAt {
             gestureCommitGapsMs.append((cameraStepStart - last) * 1_000)
         }
@@ -4844,6 +4859,8 @@ final class CanvasNSView: NSView, TokenThemed {
     static let maxFarReturnsPerStep = 2
 
     private(set) var qaFarParkCount = 0
+    /// Off only for the motion benchmark's comparison arms (`--canvas-motion-probe`).
+    var farParkingEnabled = true
     private(set) var qaFarReturnCount = 0
     /// Zone layers installed this session: a zone becoming live builds every one
     /// of its tile views synchronously, so a frame that waited on one says so.
@@ -4895,7 +4912,8 @@ final class CanvasNSView: NSView, TokenThemed {
         // The residency hold: nothing crosses while the camera moves. VoiceOver
         // reads the whole canvas, so a parked tile would be promoted on every
         // query; leave it native for an assistive client.
-        guard window != nil, cameraDriver.isSettled, !TileNSView.assistiveClientActive() else { return false }
+        guard farParkingEnabled, window != nil, cameraDriver.isSettled,
+              !TileNSView.assistiveClientActive() else { return false }
         let visible = worldPlane.bounds
         let keep = visible.insetBy(
             dx: -visible.width * Self.farParkMargin, dy: -visible.height * Self.farParkMargin)

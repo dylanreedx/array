@@ -10,6 +10,8 @@ final class AgentTranscriptUpdateScheduler {
     private var timer: Timer?
     private var pending: (() -> Void)?
     private(set) var visualApplyCount = 0
+    /// QA: every visual apply, across all transcripts.
+    static private(set) var qaTotalVisualApplies = 0
 
     func schedule(_ update: @escaping () -> Void, final: Bool = false) {
         pending = update // latest snapshot wins; semantic source remains authoritative
@@ -30,6 +32,7 @@ final class AgentTranscriptUpdateScheduler {
         guard let update = pending else { return }
         pending = nil
         visualApplyCount += 1
+        Self.qaTotalVisualApplies += 1
         update()
     }
 

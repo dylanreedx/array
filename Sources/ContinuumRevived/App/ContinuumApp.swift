@@ -805,6 +805,16 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        // Opt-in motion benchmark: a visible window and own-window capture, so it is
+        // never a matrix leg.
+        if CommandLine.arguments.contains("--canvas-motion-probe") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                Foundation.exit(await runCanvasMotionPresentationCheck())
+            }
+            NSApp.run()
+            return
+        }
         if CommandLine.arguments.contains(ChildCrashIsolationChecks.trapChildFlag) {
             ChildCrashIsolationChecks.trapChild()
         }
@@ -19943,6 +19953,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA (M1.11): `openProfilePalette` needs a host window. Borderless and never
     /// ordered front, so a check cannot take the screen.
     func qaAttachWindowForOfflineCheck(_ window: NSWindow) { self.window = window }
+
+    /// The motion benchmark runs an experienced workspace in a disposable defaults suite.
+    func qaSetMotionDefaults(_ defaults: UserDefaults) {
+        onboardingProgressStore = OnboardingProgressStore(defaults: defaults)
+        onboardingProgressStore.save(OnboardingProgress(
+            introVersion: OnboardingProgress.currentIntroVersion,
+            explicitlyDismissedIntro: true,
+            explicitlySkippedStarter: true,
+            skippedTasks: Set(GettingStartedTask.allCases)
+        ))
+    }
 
     /// QA seam for `.addProject`, mirroring `workspaceCreatePromptProvider`. A
     /// `--*-check` may never raise an `NSOpenPanel` (AGENTS hazard 6).
