@@ -318,6 +318,7 @@ enum TileSurfaceResidencyChecks {
         try checkDefaultIsOff()
         try checkFlagOffChangesNothing()
         try checkFarOffscreenLiveTilesParkAndReturn()
+        try runUnseenTranscriptsWaitUntilOnScreen()
         try checkFarParkingCoversMarkdownEditorsAndBodySwaps()
         try checkQuietSurfacesAndLiveStaysNative()
         try checkHysteresisIgnoresAPointerSweep()
@@ -649,6 +650,65 @@ enum TileSurfaceResidencyChecks {
     /// transcript at all once they are parked. A parked agent keeps streaming, a
     /// focused tile is never parked, nothing parks mid-gesture, and every tile is
     /// back the moment the camera returns.
+    /// An agent streaming off screen must not lay out its transcript: the
+    /// benchmark (`.plans/84`) measured visual applies at a quarter of the main
+    /// thread with 8 agents streaming, half of them for tiles nobody could see.
+    /// The latest snapshot waits and applies once the tile is back on screen.
+    private static func runUnseenTranscriptsWaitUntilOnScreen() throws {
+        let world = World(tileCount: 2)
+        defer { world.teardown() }
+        let canvas = world.canvas
+        canvas.surfaceResidencyEnabled = false
+        canvas.farParkingEnabled = false
+        world.pump()
+        guard let seen = world.agentViews[world.tiles[0].id]?.qaTranscriptForChecks,
+              let unseenTile = world.agentViews[world.tiles[1].id],
+              let unseen = unseenTile.qaTranscriptForChecks,
+              let seenTile = world.agentViews[world.tiles[0].id] else {
+            throw Failure(message: "fixture has no transcripts")
+        }
+        func stream(_ tile: ManagedAgentTileNSView, _ index: Int, _ text: String) {
+            let thread = "surface-residency-\(index)", turn = "live-\(index)"
+            tile.ingest(.turnStarted(threadId: thread, turnId: turn))
+            tile.ingest(.contentDelta(threadId: thread, turnId: turn, streamKind: .assistant, delta: text))
+        }
+        func wait(_ seconds: TimeInterval) {
+            RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+            world.pump()
+        }
+        // Tile 1 off screen: the camera looks a viewport to the right of it.
+        let frame = world.tiles[1].frame
+        canvas.setViewport(CanvasViewport(x: frame.x + frame.width + 2_000, y: 0, zoom: 1))
+        world.pump()
+        try expect(!unseen.isOnScreenForVisualUpdates && seen.isOnScreenForVisualUpdates == false,
+                   "both tiles must be off screen for the first half")
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        world.pump()
+        try expect(seen.isOnScreenForVisualUpdates, "tile 0 must be on screen at the origin")
+        // Positive control: the on-screen transcript applies on its timer.
+        let seenBefore = seen.qaVisualApplyCount
+        stream(seenTile, 0, "on screen")
+        wait(0.15)
+        try expect(seen.qaVisualApplyCount > seenBefore, "an on-screen transcript must apply on its timer")
+        // Now look away from tile 1 only and stream into it.
+        canvas.setViewport(CanvasViewport(x: frame.x + frame.width + 2_000, y: 0, zoom: 1))
+        world.pump()
+        let before = unseen.qaVisualApplyCount
+        stream(unseenTile, 1, "off screen")
+        wait(0.4)
+        try expect(unseen.qaVisualApplyCount == before,
+                   "an off-screen transcript applied \(unseen.qaVisualApplyCount - before) times")
+        try expect(unseen.qaAppliedVersion < unseen.qaEnqueuedVersion,
+                   "the off-screen rows must still be the old version")
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        world.pump()
+        wait(AgentTranscriptUpdateScheduler.unseenRecheckInterval + 0.15)
+        try expect(unseen.qaVisualApplyCount == before + 1,
+                   "back on screen it must apply once; applied \(unseen.qaVisualApplyCount - before) times")
+        try expect(unseen.qaAppliedVersion == unseen.qaEnqueuedVersion,
+                   "the applied rows must be the document streamed while it was off screen")
+        print("transcripts: an off-screen agent streamed without applying and caught up once on screen")
+
     /// `--gesture-telemetry-check`: the gesture log must name the frame a reparent
     /// landed in. Dylan's report was about ONE frame ("the first initial movement
     /// is a lag", 2026-10-24) and the log only had percentiles, which a single slow
