@@ -2283,6 +2283,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--streaming-ingest-check") {
+            do {
+                _ = NSApplication.shared
+                try StreamingIngestChecks.run()
+                print("StreamingIngestChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--gesture-telemetry-check") {
             do {
                 _ = NSApplication.shared

@@ -3982,6 +3982,7 @@ final class AgentSupervisor {
     private func transcriptProjection(for id: AgentID) -> ManagedAgentTranscriptModel {
         if let projection = transcriptProjections[id] { return projection }
         var projection = ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+        projection.streamingParsesPerSecond = Self.transcriptStreamingParsesPerSecond
         if let restored = rehydratedTranscripts[id] {
             // The tile's own restore draws the same notice and steps.
             projection.appendNotice(id: "notice-previous-session", title: "previous session", text: restored.boundaryNoticeText)
@@ -6243,6 +6244,9 @@ final class AgentSupervisor {
     /// the same projection the durable snapshot is written from — or nil when no
     /// event has reached it in this session. A READ: nothing is flushed, marked,
     /// persisted or woken. Absence here is not evidence the agent did nothing.
+    /// QA: how many times the supervisor's copy re-parsed an open stream.
+    func qaTranscriptParseCount(for id: AgentID) -> Int { transcriptProjections[id]?.streamingMarkupParseCount ?? 0 }
+
     func transcriptDocumentProjection(for id: AgentID) -> AgentDocument? {
         transcriptProjections[id]?.document
     }
@@ -7430,11 +7434,18 @@ final class AgentSupervisor {
     /// Feeds one provider event into the durable semantic document, then
     /// schedules a save. A no-op with no `transcriptStore` injected, which is
     /// every check that does not pass one.
+    /// The supervisor's copy is persisted and previewed, never drawn: the tile keeps
+    /// its own at the view rate. Re-parsing a long open message 30 times a second per
+    /// agent was the largest single cost of streaming on the motion benchmark
+    /// (`.plans/84`).
+    static let transcriptStreamingParsesPerSecond: Double = 4
+
     private func ingestTranscriptEvent(_ event: AgentRuntimeEvent, for id: AgentID) {
         guard transcriptStore != nil else { return }
-        var projection = transcriptProjection(for: id)
-        projection.ingest(event)
-        transcriptProjections[id] = projection
+        if transcriptProjections[id] == nil { transcriptProjections[id] = transcriptProjection(for: id) }
+        // In place: a copy mutated while the dictionary still held the original
+        // duplicated the whole transcript's storage on every streamed chunk.
+        transcriptProjections[id]!.ingest(event)
         scheduleTranscriptPersist(for: id, final: Self.isTranscriptPersistBoundary(event))
     }
 

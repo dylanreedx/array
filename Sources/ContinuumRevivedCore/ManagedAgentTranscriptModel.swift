@@ -113,6 +113,12 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
     }
     public var activeToolCount: Int { semanticProjection.activeToolCount }
     public var streamingMarkupParseCount: Int { semanticProjection.streamingMarkupParseCount }
+    /// See `AgentTranscriptProjection.streamingParsesPerSecond`. Takes effect at the
+    /// next stream; `rebound(to:)` restores the view rate.
+    public var streamingParsesPerSecond: Double {
+        get { semanticProjection.streamingParsesPerSecond }
+        set { semanticProjection.streamingParsesPerSecond = newValue }
+    }
     public var nextStreamingMarkupParseDeadline: TimeInterval? { semanticProjection.nextStreamingMarkupParseDeadline }
 
     /// A complete value snapshot for a newly-created view of this agent. This is
@@ -121,6 +127,8 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
     public func rebound(to threadId: String) -> ManagedAgentTranscriptModel {
         var copy = self
         copy.semanticProjection = semanticProjection.rebound(to: threadId)
+        // The copy feeds a view, which parses at the view rate whatever the source did.
+        copy.semanticProjection.streamingParsesPerSecond = AgentTranscriptProjection(threadId: threadId).streamingParsesPerSecond
         return copy
     }
 

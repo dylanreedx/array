@@ -2588,8 +2588,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         localPresence.reduce(event, at: AgentElapsedClock.now())
         hasPresenceFacts = true
         let captureEvent = originalEvent ?? event
-        let priorEntryIDs = Set(model.document.entries.map(\.id))
         let capturedIdentity = transcriptCollectionFixture?.captureRuntimeEvent(captureEvent)
+        // Only an item event binds a tool detail; building the set of every entry
+        // ID on every streamed chunk cost O(transcript) per chunk (history S02).
+        let priorEntryIDs: Set<AgentNodeID> = capturedIdentity == nil
+            ? [] : Set(model.document.entries.map(\.id))
         model.ingest(event)
         if let identity = capturedIdentity,
            case let .itemStarted(_, itemID, _, _) = captureEvent {
@@ -2607,7 +2610,16 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         }
         refreshV2TurnSnapshot()
         updateCompactStatusFacts(for: event)
-        refreshLocationStatus()
+        // A streamed chunk changes no status fact (the location projector dedupes
+        // it, and the elapsed clock has its own tick), but rebuilding the row per
+        // chunk was a tenth of the main thread with eight agents streaming
+        // (`.plans/84`). Chunks refresh it at most every `chunkStatusInterval`;
+        // every other event refreshes it at once.
+        if case .contentDelta = event {
+            scheduleChunkStatusRefresh()
+        } else {
+            refreshLocationStatus()
+        }
         refreshTranscriptThinkingIndicator()
         // Streamed chunks ride the 30Hz visual gate. A turn boundary or an opened
         // request is the last frame of that stream and the moment the reader acts
@@ -4329,7 +4341,24 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         refreshCompactStatus(at: now, location: settled)
     }
 
+    static let chunkStatusInterval: TimeInterval = 0.25
+    private var chunkStatusTimer: Timer?
+    /// QA: status-row refreshes, however they were triggered.
+    private(set) var qaLocationRefreshCount = 0
+
+    private func scheduleChunkStatusRefresh() {
+        guard chunkStatusTimer == nil else { return }
+        let timer = Timer(timeInterval: Self.chunkStatusInterval, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshLocationStatus() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        chunkStatusTimer = timer
+    }
+
     private func refreshLocationStatus(at now: Date = AgentElapsedClock.now()) {
+        qaLocationRefreshCount += 1
+        chunkStatusTimer?.invalidate()
+        chunkStatusTimer = nil
         locationStaleTimer?.invalidate()
         locationStaleTimer = nil
         guard let agentID = projectedAgentID,

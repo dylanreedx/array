@@ -16,6 +16,9 @@ public struct AgentTranscriptProjection: Sendable {
     /// Source deltas are still appended losslessly; this count advances only when
     /// the accumulated source is reparsed for presentation.
     public private(set) var streamingMarkupParseCount = 0
+    /// How often an open stream's whole Markdown source is re-parsed. A view of
+    /// the transcript needs 30; a reader that only persists or previews it does not.
+    public var streamingParsesPerSecond: Double = 30
     /// Counts source materializations for reasoning-chunk separation, separately
     /// from parsing. Assistant deltas must keep this at zero even when a long
     /// answer is waiting for the next coalesced parse.
@@ -725,7 +728,7 @@ public struct AgentTranscriptProjection: Sendable {
             kind: kind,
             entryID: entryID,
             buffer: buffer,
-            scheduler: StreamingMarkupParseScheduler(maximumParsesPerSecond: 30)
+            scheduler: StreamingMarkupParseScheduler(maximumParsesPerSecond: streamingParsesPerSecond)
         )
         openStream!.scheduler.requestParse()
         result += [
