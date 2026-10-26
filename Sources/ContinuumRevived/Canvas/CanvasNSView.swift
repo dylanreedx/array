@@ -3141,15 +3141,13 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// Show the translucent drag-snap ghost at `worldFrame`'s screen rect, keeping
     /// it topmost (tile installs/reorders can otherwise bury it).
-    func showDragGhost(at worldFrame: TileFrame, label: String? = nil, detail: String? = nil, role: CornerRole = .tile,
-                       opaqueLabel: Bool = false) {
+    func showDragGhost(at worldFrame: TileFrame, label: String? = nil, detail: String? = nil, role: CornerRole = .tile) {
         let overlay = dragGhostOverlayView()
         overlay.show(
             at: CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport),
             label: label,
             detail: detail,
             role: role,
-            opaqueLabel: opaqueLabel,
             // A tile is drawn under the canvas zoom; zone chrome is screen-space.
             radiusScale: role == .tile ? CGFloat(canvasState.viewport.zoom) : 1
         )
@@ -13219,16 +13217,6 @@ final class DragGhostOverlayView: NSView, CornerStyled {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        refreshLabelBackground()
-    }
-
-    private func refreshLabelBackground() {
-        titleLabel.backgroundColor = SurfaceToken.tileChrome.color.nsColor(in: self)
-        detailLabel.backgroundColor = SurfaceToken.tileChrome.color.nsColor(in: self)
-    }
-
     /// Draw only — never consume mouse events.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -13245,7 +13233,7 @@ final class DragGhostOverlayView: NSView, CornerStyled {
 
     func show(
         at screenFrame: CGRect, label: String? = nil, detail: String? = nil,
-        role: CornerRole = .tile, opaqueLabel: Bool = false, radiusScale: CGFloat = 1
+        role: CornerRole = .tile, radiusScale: CGFloat = 1
     ) {
         self.role = role
         self.radiusScale = radiusScale
@@ -13260,9 +13248,6 @@ final class DragGhostOverlayView: NSView, CornerStyled {
         detailLabel.stringValue = detail ?? ""
         titleLabel.isHidden = label == nil
         detailLabel.isHidden = detail == nil
-        titleLabel.drawsBackground = opaqueLabel
-        detailLabel.drawsBackground = opaqueLabel
-        refreshLabelBackground()
         titleLabel.frame = NSRect(x: 12, y: 10, width: max(0, bounds.width - 24), height: 18)
         detailLabel.frame = NSRect(x: 12, y: 29, width: max(0, bounds.width - 24), height: 16)
         guard let layer else { return }

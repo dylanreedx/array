@@ -1083,7 +1083,7 @@ class TileNSView: NSView, TokenThemed {
                 let pointer = CanvasEngine.screenToWorld(canvas.convert(event.locationInWindow, from: nil), viewport: canvas.viewport)
                 referenceDrag.setRecipient(referenceDrag.recipient(atWorld: pointer, event: event))
                 if let recipient = referenceDrag.recipient {
-                    holdForReference(referenceDrag, recipient: recipient, pointer: pointer, canvas: canvas)
+                    holdForReference(referenceDrag, windowPoint: event.locationInWindow, canvas: canvas)
                     return
                 }
             }
@@ -1223,9 +1223,8 @@ class TileNSView: NSView, TokenThemed {
 
     /// Over a reference target the move stands down: every tile, this one
     /// included, holds where it rested, so the recipient stays under the pointer
-    /// and nothing it covers is hidden. A label rides the pointer instead.
-    private func holdForReference(_ referenceDrag: AgentReferenceDrag, recipient: ManagedAgentTileNSView,
-                                  pointer: CGPoint, canvas: CanvasNSView) {
+    /// and nothing it covers is hidden. A card rides the pointer instead.
+    private func holdForReference(_ referenceDrag: AgentReferenceDrag, windowPoint: NSPoint, canvas: CanvasNSView) {
         let rest = referenceDrag.restFrame
         canvas.setAutoLayoutMovePointer(worldPoint: CGPoint(x: rest.x + rest.width / 2, y: rest.y + rest.height / 2))
         var held = tile
@@ -1233,14 +1232,8 @@ class TileNSView: NSView, TokenThemed {
         canvas.updateTile(held, recalculateZoneBounds: false, notifyChange: false)
         magneticTarget = nil
         dragSnapTarget = nil
-        let zoom = canvas.viewport.zoom
-        let name = recipient.agentReferenceForDragging?.displayName ?? "this agent"
-        canvas.showDragGhost(
-            at: TileFrame(x: Double(pointer.x) + 14 / zoom, y: Double(pointer.y) + 14 / zoom,
-                          width: 280 / zoom, height: 54 / zoom),
-            label: "Reference \(referenceDrag.reference.displayName)",
-            detail: "Release to add to \(name)'s draft",
-            opaqueLabel: true)
+        canvas.hideDragGhost()
+        referenceDrag.showCard(atWindowPoint: windowPoint, in: canvas)
     }
 
     private func cancelDragGhost(on canvas: CanvasNSView) {

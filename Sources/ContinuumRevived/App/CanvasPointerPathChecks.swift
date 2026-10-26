@@ -122,6 +122,7 @@ enum CanvasPointerPathChecks {
         composer.bindDraftStore(AgentComposerDraftStore(applicationSupportDirectory: fixture.appSupport), agentID: agents[1])
         await composer.qaAwaitDraftRestore()
         canvas.layoutSubtreeIfNeeded()
+        if autoLayout { _ = mounted.delegate.agentSupervisor.setIdentityColor(agentID: agents[0], "teal") }
         try TileInsertSlideChecks.expect(
             recipient.acceptsAgentReference(AgentPromptReference(agentID: agents[0], displayName: "Alpha"))
                 && !recipient.agentReferenceDropRegions.isEmpty,
@@ -278,15 +279,34 @@ enum CanvasPointerPathChecks {
         check(world(agentA) == restA && world(agentB) == restB,
             "\(label): hovering A on B's body must hold both at rest: A \(String(describing: world(agentA))) B \(String(describing: world(agentB)))")
         check(composer.referenceDropHighlighted, "\(label): B's composer did not light while A hovered its body")
-        check(canvas.qaDragGhostFrame != nil, "\(label): no reference label rode the pointer over B")
+        let cards = canvas.subviews.compactMap { $0 as? AgentReferenceDragCard }.filter { !$0.isHidden }
+        check(cards.count == 1 && cards.first?.qaText == "Reference Alpha",
+            "\(label): over B the pointer card read \(cards.map(\.qaText))")
+        if zoom == 1, let card = cards.first {
+            // The card in place, beside B's lit composer, in both appearances.
+            let directory = URL(fileURLWithPath: "qa-runs/canvas-pointer-path", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let around = card.frame.insetBy(dx: -260, dy: -160)
+            // Layout off renders the uncoloured agent; layout on, a teal one.
+            let variant = autoLayout ? "teal" : "plain"
+            for (name, appearance) in [("reference-card-\(variant)-light", NSAppearance.Name.aqua), ("reference-card-\(variant)-dark", .darkAqua)] {
+                window.appearance = NSAppearance(named: appearance)
+                canvas.layoutSubtreeIfNeeded()
+                canvas.displayIfNeeded()
+                guard let bitmap = canvas.bitmapImageRepForCachingDisplay(in: around) else { continue }
+                canvas.cacheDisplay(in: around, to: bitmap)
+                try bitmap.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent(name + ".png"))
+            }
+            window.appearance = nil
+        }
         try send(.leftMouseUp, onBody)
         await recipient.qaAwaitReferenceDrop()
         canvas.layoutSubtreeIfNeeded()
         check(composer.draft.agentReferences.map(\.agentID) == [agents[0]],
             "\(label): dropping A's header on B's body left B's draft with \(composer.draft.agentReferences.map(\.displayName))")
         check(canvas.allTilesInWorldFrames() == rest, "\(label): a reference drop moved tiles")
-        check(!composer.referenceDropHighlighted && canvas.qaDragGhostFrame == nil,
-            "\(label): the reference highlight or label outlived the drop")
+        check(!composer.referenceDropHighlighted && !canvas.subviews.contains { $0 is AgentReferenceDragCard },
+            "\(label): the reference highlight or card outlived the drop")
         check(!canvas.isGeometryGestureActive, "\(label): a reference drop left a geometry gesture open")
         check(broker.activeSurface == .tile(agentB),
             "\(label): after a reference drop focus is on \(String(describing: broker.activeSurface)), not B")
