@@ -722,6 +722,34 @@ enum TileSurfaceResidencyChecks {
                    "frames before the return paid for nothing")
         try expect(returned.inputEvents == 0 && returned.inputToFirstFrameMs == nil,
                    "a gesture with no routed input must not invent an input time")
+        try runSelectionDefersCursorRectsWhileTheCameraMoves()
+    }
+
+    /// With a tile selected, every camera step invalidated the selection overlay's
+    /// cursor rects, which walks the whole window (155 samples a minute live,
+    /// 2026-10-24 22:42). A driver step defers it; the settle edge does it once.
+    private static func runSelectionDefersCursorRectsWhileTheCameraMoves() throws {
+        let world = World(tileCount: 4)
+        defer { world.teardown() }
+        let canvas = world.canvas
+        canvas.surfaceResidencyEnabled = false
+        canvas.tileSelection.selectOnly(world.tiles[0].id)
+        canvas.tileSelection.refresh()
+        world.pump()
+        world.settle()
+        let selection = canvas.tileSelection
+        let before = selection.qaCursorInvalidations
+        let deferredBefore = selection.qaDeferredCursorInvalidations
+        for step in 1...6 {
+            world.cameraStep(toZoom: 1.0 - 0.05 * Double(step))
+            world.pump()
+        }
+        let during = selection.qaCursorInvalidations - before
+        let deferred = selection.qaDeferredCursorInvalidations - deferredBefore
+        print("selection: 6 camera steps invalidated cursor rects \(during) times and deferred \(deferred)")
+        try expect(during == 0 && deferred >= 6, "camera steps must defer the selection's cursor rects; invalidated \(during), deferred \(deferred)")
+        world.settle()
+        try expect(selection.qaCursorInvalidations - before == 1, "the settle must invalidate them exactly once")
     }
 
     private static func checkFarOffscreenLiveTilesParkAndReturn() throws {

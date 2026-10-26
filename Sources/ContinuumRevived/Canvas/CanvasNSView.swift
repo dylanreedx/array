@@ -3938,7 +3938,11 @@ final class CanvasNSView: NSView, TokenThemed {
     /// housekeeping its commits deferred. Cursor rects rebuild against the
     /// resting camera; the delegate arms its persistence/hydration debounces
     /// exactly once.
+    var isCameraDriverStepInFlight: Bool { cameraDriver.isApplying }
+
     private func cameraGestureDidSettle() {
+        // Selection cursor rects were deferred while the driver moved the camera.
+        tileSelection.updatePresentation()
         discardCursorRects()
         window?.invalidateCursorRects(for: self)
         delegate?.canvasDidChange(self)

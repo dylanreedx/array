@@ -185,8 +185,20 @@ final class CanvasTileSelection {
         overlay.rects = worldFrames.map { CanvasEngine.tileScreenFrame($0, viewport: canvas.viewport) }
         overlay.isHidden = false
         overlay.needsDisplay = true
-        canvas.window?.invalidateCursorRects(for: overlay)
+        // Invalidating cursor rects makes AppKit walk the WHOLE window's view tree
+        // (`_invalidateCursorRectsForViewsWithNoTrackingAreas`, ~2.5 ms a step in a
+        // live 18-tile session). The handles are not usable mid-gesture, so a driver
+        // step defers it and the settle edge does it once.
+        if canvas.isCameraDriverStepInFlight {
+            qaDeferredCursorInvalidations += 1
+        } else {
+            canvas.window?.invalidateCursorRects(for: overlay)
+            qaCursorInvalidations += 1
+        }
     }
+
+    private(set) var qaCursorInvalidations = 0
+    private(set) var qaDeferredCursorInvalidations = 0
 
     var qaOverlay: TileSelectionOverlay? { overlay }
 }
