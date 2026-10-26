@@ -708,6 +708,7 @@ enum TileSurfaceResidencyChecks {
         try expect(unseen.qaAppliedVersion == unseen.qaEnqueuedVersion,
                    "the applied rows must be the document streamed while it was off screen")
         print("transcripts: an off-screen agent streamed without applying and caught up once on screen")
+    }
 
     /// `--gesture-telemetry-check`: the gesture log must name the frame a reparent
     /// landed in. Dylan's report was about ONE frame ("the first initial movement

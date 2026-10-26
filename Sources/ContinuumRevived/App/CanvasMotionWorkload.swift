@@ -65,6 +65,7 @@ final class CanvasMotionWorkload {
     private var residualPanY = 0.0
     private var residualZoom = 0.0
     private var pointerPanLocation: NSPoint?
+    private var replaySummary: [String: Any]?
 
     init(root: URL, support: URL, markdownCount: Int, agentCount: Int) throws {
         let env = ProcessInfo.processInfo.environment
@@ -110,7 +111,8 @@ final class CanvasMotionWorkload {
         realDocumentCopies = realDocument == nil ? 0 : min(markdownCount, 2)
         let now = Date()
         let workspaceID = UUID(), projectID = UUID(), zoneID = UUID()
-        let initialViewport = CanvasViewport(x: 0, y: 0, zoom: 0.35)
+        let startZoom = Double(env["CANVAS_MOTION_ZOOM"] ?? "").flatMap { $0 > 0.05 && $0 <= 4 ? $0 : nil } ?? 0.35
+        let initialViewport = CanvasViewport(x: 0, y: 0, zoom: startZoom)
         let project = Project(
             id: projectID, name: "Canvas motion workload", rootPath: root.path,
             createdAt: now, updatedAt: now, defaultLaunchProfileId: "shell", editorPreference: .auto,
@@ -133,7 +135,7 @@ final class CanvasMotionWorkload {
         }
         var tiles: [Tile] = []
         var fileIDs: [UUID] = []
-        for index in 0..<markdownCount {
+        for index in 0..<(env["CANVAS_MOTION_REPLAY"] == nil ? markdownCount : 0) {
             let path = root.appendingPathComponent(String(format: "document-%02d.md", index))
             let content = index < 2 ? (realDocument ?? Self.markdown(index: index, sections: sections))
                 : Self.markdown(index: index, sections: sections)
@@ -150,7 +152,7 @@ final class CanvasMotionWorkload {
             tiles.append(tile)
         }
         var managedTileIDs: [UUID] = []
-        for index in 0..<agentCount {
+        for index in 0..<(env["CANVAS_MOTION_REPLAY"] == nil ? agentCount : 0) {
             let tile = Tile(id: UUID(), kind: .managedAgent, title: "Motion agent \(index + 1)",
                             frame: frame(index: index, agent: true), zPosition: .fromLegacyRank(tiles.count + 1),
                             zoneId: zoneID, runtimeRef: nil,
@@ -158,13 +160,28 @@ final class CanvasMotionWorkload {
             managedTileIDs.append(tile.id)
             tiles.append(tile)
         }
-        let state = CanvasState(viewport: initialViewport, tiles: tiles, groups: [], lastActiveTileId: nil)
+        // CANVAS_MOTION_REPLAY: a real workspace's layout and agents instead of the
+        // synthetic grid (`scripts/canvas-motion/export-replay.py`).
+        let replay = try env["CANVAS_MOTION_REPLAY"].map {
+            try CanvasMotionReplay.load(spec: URL(fileURLWithPath: $0), root: root, projectID: projectID)
+        }
+        if let replay {
+            tiles = replay.tiles
+            fileIDs = replay.tiles.filter { $0.kind == .file }.map(\.id)
+            managedTileIDs = replay.tiles.filter { $0.kind == .managedAgent }.map(\.id)
+        }
+        let viewport = replay.map { replay in
+            env["CANVAS_MOTION_ZOOM"] == nil ? replay.document.viewport
+                : CanvasViewport(x: replay.document.viewport.x, y: replay.document.viewport.y, zoom: startZoom)
+        } ?? initialViewport
+        let state = CanvasState(viewport: viewport, tiles: tiles, groups: [], lastActiveTileId: nil)
         try projectStore.saveCanvas(state)
-        let zone = ZonePlacement(zoneId: zoneID, projectId: projectID,
+        let zone = replay?.document.zones.first ?? ZonePlacement(zoneId: zoneID, projectId: projectID,
                                  origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 14_000, height: 12_000),
                                  color: "blue", collapsed: false, hydrationPolicy: .pinnedLive)
-        let document = WorkspaceDocument(viewport: initialViewport, zones: [zone],
+        var document = replay?.document ?? WorkspaceDocument(viewport: initialViewport, zones: [zone],
                                          zoneZOrder: [zoneID], lastActiveZoneId: zoneID)
+        document.viewport = viewport
         try WorkspaceStore(workspaceId: workspaceID, applicationSupportDirectory: support).save(document)
         var registry = Registry.empty()
         registry.lastActiveWorkspaceId = workspaceID
@@ -195,8 +212,30 @@ final class CanvasMotionWorkload {
             harness: .codex, readiness: .ready, models: ["fixture/canvas-motion"],
             displayNames: ["fixture/canvas-motion": "Offline motion fixture"],
             contextWindows: ["fixture/canvas-motion": 200_000]))
+        if let replay {
+            // Each harness offers exactly the models its replayed agents ran.
+            for harness in Set(replay.agents.values.map(\.harness)) {
+                let models = Array(Set(replay.agents.values.filter { $0.harness == harness }.map(\.model))).sorted()
+                AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: harness, readiness: .ready, models: models))
+            }
+        }
         var ids: [AgentID] = []
+        var replayHistory: [String: Any] = [:]
         for (index, tileID) in managedTileIDs.enumerated() {
+            if let source = replay?.agents[tileID] {
+                let id = agents.spawn(role: nil, prompt: nil, cwd: root, harness: source.harness,
+                                      model: source.model, thinking: "low",
+                                      projectId: projectID, projectRoot: root, tileId: tileID,
+                                      displayName: source.name)
+                // The history the app shows at boot: rebuilt from the CLI's own
+                // session log of the ORIGINAL agent, read only.
+                let history = source.rehydrate()
+                if let history { agents.seedRehydratedTranscript(history, for: id) }
+                replayHistory[tileID.uuidString] = history.map { ["steps": $0.steps.count,
+                    "messages": $0.restoredMessageCount, "omittedEarlier": $0.omittedEarlier] } ?? NSNull()
+                ids.append(id)
+                continue
+            }
             let id = agents.spawn(role: nil, prompt: nil, cwd: root, harness: .codex,
                                   model: "fixture/canvas-motion", thinking: "low",
                                   projectId: projectID, projectRoot: root, tileId: tileID,
@@ -215,8 +254,9 @@ final class CanvasMotionWorkload {
                                        focusBroker: delegate.qaFocusBroker, registryStore: registryStore,
                                        ghostty: nil, browserEngine: browser)
         let scene = CanvasNSView(canvasState: state, activeZone: zone,
-                                 zoneRenderModels: [.init(placement: zone, displayName: "Mixed workload")])
-        scene.frame = NSRect(x: 0, y: 0, width: 1280, height: 800)
+                                 zoneRenderModels: document.zones.map { .init(placement: $0, displayName: $0.name) })
+        let windowSize = replay?.window ?? NSSize(width: 1280, height: 800)
+        scene.frame = NSRect(origin: .zero, size: windowSize)
         if env["CANVAS_MOTION_NATIVE_PREVIEWS"] == "1" { scene.filePreviewResidencyEnabled = false }
         scene.farParkingEnabled = CanvasMotionVariants.farParkingEnabled
         delegate.wireCanvasCallbacks(scene)
@@ -241,6 +281,7 @@ final class CanvasMotionWorkload {
         }
         let host = delegate.makeWorkspaceWindow(canvasView: scene, title: "Array Dev — live canvas performance")
         host.isReleasedWhenClosed = false
+        if replay?.window != nil { host.setContentSize(windowSize) }
         delegate.qaAttachWindowForOfflineCheck(host)
         canvas = scene
         window = host
@@ -249,6 +290,23 @@ final class CanvasMotionWorkload {
         supervisor = agents
         emitter = events
         agentIDs = ids
+        events.deltaIntervalMs = max(5, Int(env["CANVAS_MOTION_DELTA_MS"] ?? "") ?? 50)
+        // CANVAS_MOTION_STREAMING_AGENTS=k: the k agents nearest the camera stream.
+        if let count = Int(env["CANVAS_MOTION_STREAMING_AGENTS"] ?? ""), count < ids.count {
+            let center = CGPoint(x: viewport.x + windowSize.width / 2 / viewport.zoom,
+                                 y: viewport.y + windowSize.height / 2 / viewport.zoom)
+            func distance(_ tileID: UUID) -> Double {
+                guard let frame = scene.tileView(for: tileID)?.tile.frame else { return .infinity }
+                return hypot(frame.x + frame.width / 2 - center.x, frame.y + frame.height / 2 - center.y)
+            }
+            let nearest = zip(managedTileIDs, ids).sorted { distance($0.0) < distance($1.0) }.prefix(max(0, count))
+            events.streaming = Set(nearest.map(\.1))
+        }
+        replaySummary = replay.map { replay in
+            ["source": replay.source, "zones": replay.document.zones.count, "tiles": replay.tiles.count,
+             "agents": replay.agents.count, "omitted": replay.omitted, "history": replayHistory,
+             "window": ["width": windowSize.width, "height": windowSize.height]]
+        }
         agentTileIDs = managedTileIDs
         markdownTileIDs = fileIDs
         defaults = isolatedDefaults
@@ -485,6 +543,8 @@ final class CanvasMotionWorkload {
             "filePreviewResidency": canvas.filePreviewResidencyEnabled,
             "agentSurfaceResidency": canvas.surfaceResidencyEnabled,
             "farParking": canvas.farParkingEnabled,
+            "replay": replaySummary as Any? ?? NSNull(),
+            "streamingAgents": emitter.streamingCount ?? agentIDs.count,
             "farParkedTiles": canvas.qaFarParkedTileCount,
             "lastGestureReport": canvas.qaLastGestureReport?.summary as Any? ?? NSNull(),
             "work": canvas.qaFrameWorkCounters,
@@ -594,6 +654,10 @@ private final class CanvasMotionEmitter: @unchecked Sendable {
     private var sourceFinished = false
     private var finalized = false
     private var firstTickUptime: TimeInterval?
+    /// Agents that stream; nil streams all. The rest stay attached and idle.
+    var streaming: Set<AgentID>?
+    /// Milliseconds between deltas per streaming agent (`CANVAS_MOTION_DELTA_MS`).
+    var deltaIntervalMs = 50
     private var lastTickUptime: TimeInterval?
 
     func runner(for id: AgentID) -> ScriptedAgentRunner {
@@ -614,7 +678,7 @@ private final class CanvasMotionEmitter: @unchecked Sendable {
             let next = DispatchSource.makeTimerSource(queue: queue)
             let startDelay = delay.isFinite ? max(0, delay) : 0
             next.schedule(deadline: .now() + startDelay + 0.05,
-                          repeating: .milliseconds(50), leeway: .milliseconds(1))
+                          repeating: .milliseconds(deltaIntervalMs), leeway: .milliseconds(1))
             next.setEventHandler { [weak self] in self?.tick() }
             timer = next
             next.resume()
@@ -649,6 +713,8 @@ private final class CanvasMotionEmitter: @unchecked Sendable {
         }
     }
 
+    var streamingCount: Int? { lock.withLock { streaming?.count } }
+
     func deliveryProgress() -> [AgentID: (deltas: Int, finalMarker: Int?)] {
         lock.withLock { entries.mapValues { (deltas: $0.deltas, finalMarker: $0.finalMarker) } }
     }
@@ -660,7 +726,7 @@ private final class CanvasMotionEmitter: @unchecked Sendable {
             if firstTickUptime == nil { firstTickUptime = now }
             lastTickUptime = now
             attemptedTicks += 1
-            for id in Array(entries.keys) {
+            for id in Array(entries.keys) where streaming?.contains(id) ?? true {
                 guard var entry = entries[id] else { continue }
                 if !entry.started {
                     guard entry.runner.emit(.turnStarted(threadId: entry.thread, turnId: entry.turn)) else { continue }
@@ -703,5 +769,91 @@ private final class CanvasMotionEmitter: @unchecked Sendable {
              "deltasPerAgent": entries.values.map(\.deltas),
              "deltasByAgentID": Dictionary(uniqueKeysWithValues: entries.map { ($0.key.rawValue.uuidString, $0.value.deltas) })]
         }
+    }
+}
+
+/// A real workspace for `--canvas-motion-probe` (`CANVAS_MOTION_REPLAY=<spec.json>`),
+/// exported read-only by `scripts/canvas-motion/export-replay.py`: the zones, tile
+/// kinds, frames and camera exactly as the user left them. Every path is rewritten
+/// into the disposable replay root; nothing here can reach the source project.
+struct CanvasMotionReplay {
+    struct Agent {
+        let sourceID: UUID
+        let harness: AgentHarness
+        let model: String
+        let cwd: String
+        let providerSessionId: String?
+        let codexThreadId: String?
+        let name: String
+
+        /// What the app restores at boot, from the original agent's CLI session
+        /// log under the real home directory. Read only.
+        func rehydrate() -> RehydratedTranscript? {
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            return ManagedTranscriptRehydrator.rehydrate(.init(
+                agentUUID: sourceID, cwd: cwd, model: model, harness: harness,
+                claudeCLIAvailable: false, homeURL: home, codexThreadId: codexThreadId,
+                codexHomeURL: home.appendingPathComponent(".codex", isDirectory: true),
+                claudeSessionId: providerSessionId))
+        }
+    }
+
+    let source: [String: Any]
+    let document: WorkspaceDocument
+    let tiles: [Tile]
+    let agents: [UUID: Agent]
+    let window: NSSize?
+    let omitted: [[String: Any]]
+
+    static func load(spec url: URL, root: URL, projectID: UUID) throws -> CanvasMotionReplay {
+        struct Bad: Error, CustomStringConvertible { let description: String }
+        guard let spec = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any],
+              let documentJSON = spec["document"], let tilesJSON = spec["tiles"] as? [[String: Any]] else {
+            throw Bad(description: "replay spec \(url.path) has no document or tiles")
+        }
+        let decoder = JSONDecoder()
+        var document = try decoder.decode(WorkspaceDocument.self,
+                                          from: JSONSerialization.data(withJSONObject: documentJSON))
+        for index in document.zones.indices { document.zones[index].projectId = projectID }
+        let files = spec["files"] as? [String: String] ?? [:]
+        var tiles: [Tile] = []
+        for json in tilesJSON {
+            var tile = try decoder.decode(Tile.self, from: JSONSerialization.data(withJSONObject: json))
+            let original = tile.metadata
+            switch tile.kind {
+            case .managedAgent:
+                tile.metadata = TileMetadata(launchProfileId: "managed-agent", projectRelativeCwd: ".")
+            case .file:
+                guard let relative = files[tile.id.uuidString] else { continue }
+                let source = url.deletingLastPathComponent().appendingPathComponent(relative)
+                let destination = root.appendingPathComponent(source.lastPathComponent)
+                try FileManager.default.copyItem(at: source, to: destination)
+                var metadata = TileMetadata()
+                metadata.filePath = destination.path
+                metadata.markdownDocumentMode = original.markdownDocumentMode
+                tile.metadata = metadata
+            default:
+                continue
+            }
+            tiles.append(tile)
+        }
+        var agents: [UUID: Agent] = [:]
+        for (tileID, value) in spec["agents"] as? [String: [String: Any]] ?? [:] {
+            guard let tile = UUID(uuidString: tileID), let id = (value["id"] as? String).flatMap(UUID.init),
+                  let harness = (value["harness"] as? String).flatMap(AgentHarness.init(rawValue:)),
+                  let model = value["model"] as? String, let cwd = value["cwd"] as? String else {
+                throw Bad(description: "replay agent for tile \(tileID) is incomplete")
+            }
+            agents[tile] = Agent(sourceID: id, harness: harness, model: model, cwd: cwd,
+                                 providerSessionId: value["providerSessionId"] as? String,
+                                 codexThreadId: value["codexThreadId"] as? String,
+                                 name: value["displayName"] as? String ?? model)
+        }
+        let window = (spec["window"] as? [String: Double]).flatMap { size in
+            size["width"].flatMap { w in size["height"].map { NSSize(width: w, height: $0) } }
+        }
+        return CanvasMotionReplay(source: spec["source"] as? [String: Any] ?? [:], document: document,
+                                  tiles: tiles, agents: agents, window: window,
+                                  omitted: spec["omitted"] as? [[String: Any]] ?? [])
     }
 }
