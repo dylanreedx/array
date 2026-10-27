@@ -475,11 +475,16 @@ enum QuickHideChecks {
         photograph(inbox, "3-hidden-expanded")
 
         // Show one: it is a normal row again, and the footer counts one.
-        try click(try showButton(h.rowId("s-tmux"), in: inbox).orThrow("the tmux row lost its Show"))
+        let show = try showButton(h.rowId("s-tmux"), in: inbox).orThrow("the tmux row lost its Show")
+        let target = show.convert(NSPoint(x: show.bounds.midX, y: show.bounds.midY), to: nil)
+        let hit = h.window.contentView?.hitTest(h.window.contentView!.convert(target, from: nil))
+        try click(show)
         inbox.layoutForQA()
         try expect(h.shown("s-tmux") && !inbox.isRevealedHiddenForQA(id: h.rowId("s-tmux"))
                    && !h.delegate.externalSessionHiding.isHidden(h.session("s-tmux").id),
-                   "Show brings the session back for good")
+                   "Show brings the session back for good — shown \(h.shown("s-tmux")), revealed \(inbox.isRevealedHiddenForQA(id: h.rowId("s-tmux"))), "
+                   + "hidden \(h.delegate.externalSessionHiding.isHidden(h.session("s-tmux").id)), click hit \(hit.map { String(describing: type(of: $0)) } ?? "nothing") "
+                   + "label \(hit?.accessibilityLabel() ?? "-") alpha \(show.alphaValue) hidden \(show.isHiddenOrHasHiddenAncestor)")
         try expect(inbox.hiddenFooterTitleForQA == "Hidden (1)", "the footer counts one — got '\(inbox.hiddenFooterTitleForQA ?? "none")'")
 
         // A second click on the footer folds the hidden rows away again.
