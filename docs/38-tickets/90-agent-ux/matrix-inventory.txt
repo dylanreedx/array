@@ -282,6 +282,7 @@ check --workspace-api-pi-bridge-check
 check --workspace-boot-persistence-check
 check --workspace-chrome-polish-check
 check --workspace-delete-failure-check
+check --workspace-filter-sheet-check
 check --workspace-invariants-check
 check --workspace-lifecycle-check
 check --workspace-management-polish-check
@@ -584,6 +585,7 @@ leg run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 leg run_app_check .build/debug/Array --workspace-boot-persistence-check
 leg run_app_check .build/debug/Array --workspace-chrome-polish-check
 leg run_app_check .build/debug/Array --workspace-delete-failure-check
+leg run_app_check .build/debug/Array --workspace-filter-sheet-check
 leg run_app_check .build/debug/Array --workspace-invariants-check
 leg run_app_check .build/debug/Array --workspace-lifecycle-check
 leg run_app_check .build/debug/Array --workspace-management-polish-check
@@ -698,7 +700,7 @@ bundle-check --palette-duplicate-root-check
 bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
-count ContinuumRevivedAgentUIChecks 20
+count ContinuumRevivedAgentUIChecks 21
 count ContinuumRevivedCoreChecks 188
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0

@@ -923,6 +923,8 @@ run_app_check .build/debug/Array --sidebar-ux-check
 run_app_check .build/debug/Array --sidebar-production-corpus-check
 run_app_check .build/debug/Array --sidebar-screenshot-check
 run_app_check .build/debug/Array --workspace-sidebar-shell-check
+# .plans/86: the multi-workspace checklist driven through the real popover.
+run_app_check .build/debug/Array --workspace-filter-sheet-check
 run_app_check .build/debug/Array --workspace-sidebar-default-visible-check
 run_app_check .build/debug/Array --workspace-sidebar-actions-check
 run_app_check .build/debug/Array --workspace-sidebar-live-status-check
