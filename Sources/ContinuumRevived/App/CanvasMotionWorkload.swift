@@ -66,6 +66,7 @@ final class CanvasMotionWorkload {
     private var residualZoom = 0.0
     private var pointerPanLocation: NSPoint?
     private var replaySummary: [String: Any]?
+    private(set) var replayWindowSize: NSSize?
 
     init(root: URL, support: URL, markdownCount: Int, agentCount: Int) throws {
         let env = ProcessInfo.processInfo.environment
@@ -284,7 +285,6 @@ final class CanvasMotionWorkload {
         }
         let host = delegate.makeWorkspaceWindow(canvasView: scene, title: "Array Dev — live canvas performance")
         host.isReleasedWhenClosed = false
-        if replay?.window != nil { host.setContentSize(windowSize) }
         delegate.qaAttachWindowForOfflineCheck(host)
         canvas = scene
         window = host
@@ -305,6 +305,7 @@ final class CanvasMotionWorkload {
             let nearest = zip(managedTileIDs, ids).sorted { distance($0.0) < distance($1.0) }.prefix(max(0, count))
             events.streaming = Set(nearest.map(\.1))
         }
+        replayWindowSize = replay?.window
         replaySummary = replay.map { replay in
             ["source": replay.source, "zones": replay.document.zones.count, "tiles": replay.tiles.count,
              "agents": replay.agents.count, "omitted": replay.omitted, "history": replayHistory,
@@ -354,6 +355,9 @@ final class CanvasMotionWorkload {
     /// streaming markup; an idle contentDelta alone deliberately does not.
     /// Runner processes themselves are stopped only during close().
     func stopStreaming() { emitter.stop() }
+
+    /// Agents the source streams into (all of them unless the run picked a subset).
+    var streamingAgentCount: Int { emitter.streamingCount ?? agentIDs.count }
 
     /// Call only outside measured motion, after stopStreaming(). This reads the
     /// real semantic projections; it does not flush their pending event queues.
@@ -772,7 +776,7 @@ private final class CanvasMotionEmitter: @unchecked Sendable {
              "finalWitnessEvents": entries.values.filter { $0.finalMarker != nil }.count,
              "finalWitnessBoundaries": entries.values.filter(\.finalBoundary).count,
              "emittedUTF8Bytes": entries.values.reduce(0) { $0 + $1.bytes },
-             "deltasPerAgent": entries.values.map(\.deltas),
+             "deltasPerAgent": entries.filter { streaming?.contains($0.key) ?? true }.values.map(\.deltas),
              "deltasByAgentID": Dictionary(uniqueKeysWithValues: entries.map { ($0.key.rawValue.uuidString, $0.value.deltas) })]
         }
     }

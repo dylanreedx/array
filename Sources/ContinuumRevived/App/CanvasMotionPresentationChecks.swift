@@ -320,7 +320,8 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         }
         // CANVAS_MOTION_STREAM=0 is the quiet control: agents attached, nothing streaming.
         let streams = env["CANVAS_MOTION_STREAM"] != "0"
-        let sourceTickLimit = streams ? Int(duration * 20) : 0
+        let deltaMs = max(5, Int(env["CANVAS_MOTION_DELTA_MS"] ?? "") ?? 50)
+        let sourceTickLimit = streams ? Int(duration * 1_000 / Double(deltaMs)) : 0
         let fixture = try CanvasMotionWorkload(root: URL(fileURLWithPath: rootPath),
             support: URL(fileURLWithPath: supportPath), markdownCount: markdownCount, agentCount: agentCount)
         workload = fixture
@@ -329,7 +330,10 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
             return CGDisplayIsBuiltin(id.uint32Value) != 0
         }) ?? NSScreen.main {
             let visible = screen.visibleFrame
-            let size = NSSize(width: min(1_400, visible.width - 40), height: min(900, visible.height - 40))
+            // A replay keeps the source window's size (its frame, as the window
+            // server reported it); otherwise the fixed benchmark size.
+            let wanted = fixture.replayWindowSize ?? NSSize(width: 1_400, height: 900)
+            let size = NSSize(width: min(wanted.width, visible.width), height: min(wanted.height, visible.height))
             fixture.window.setFrame(NSRect(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2,
                                           width: size.width, height: size.height), display: true)
         }
@@ -612,8 +616,9 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         let deltas = finalSource["deltasPerAgent"] as? [Int] ?? []
         let expectedPerAgentDelivered = deltas.allSatisfy { $0 == sourceTickLimit }
         let successfulDeltas = finalSource["successfulDeltas"] as? Int ?? -1
-        if deltas.count != agentCount || !expectedPerAgentDelivered ||
-            successfulDeltas != sourceTickLimit * agentCount {
+        let streamingCount = fixture.streamingAgentCount
+        if deltas.count != streamingCount || !expectedPerAgentDelivered ||
+            successfulDeltas != sourceTickLimit * streamingCount {
             sourceErrors.append("source per-agent delta counts do not match the fixed offered workload")
         }
         let errors = summaries.compactMap { summary -> String? in
