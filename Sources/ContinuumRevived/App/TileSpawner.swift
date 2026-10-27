@@ -8316,10 +8316,16 @@ final class TileSpawner {
             gap: TileGapResolver.resolvedGap(),
             // The camera clamp above keeps the point of attention in the zone, not
             // the tile: a centre near the zone's edge framed an agent half a tile
-            // past it. With auto-layout on, the settle grew the zone over it; with
-            // it off the tile hung out of its own zone. The content rect is the
-            // one the auto-layout engine packs into.
-            bounds: zoneLocalContentRect(zone, defaults: canvasView.autoLayoutDefaults)
+            // past it, and with auto-layout off the tile hung out of its own zone.
+            // The content rect is the one the auto-layout engine packs into.
+            //
+            // Under auto-layout the zone grows around the tile instead, in any
+            // direction (`arrangeAutoLayoutAfterSpawn`). Clamping there turned
+            // every docked slot of a full zone into an overlap, and the settle
+            // then sent the tile to the zone's far edge, off screen (0.7.30;
+            // `--zone-arming-check` §10b).
+            bounds: canvasView.isAutoLayoutActive(inZone: zone.zoneId)
+                ? nil : zoneLocalContentRect(zone, defaults: canvasView.autoLayoutDefaults)
         ))
     }
 

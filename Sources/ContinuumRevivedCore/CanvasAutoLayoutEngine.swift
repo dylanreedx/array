@@ -79,14 +79,15 @@ public enum CanvasAutoLayoutEngine {
         /// (a completed slot exchange): the anchor never relocates — residents
         /// it presses on are pushed aside instead, so a horizontal exchange can
         /// never resolve into a different lane.
-        /// `grow` lets an unpinned anchor that finds no gap-contact slot inside
-        /// the zone take the nearest one beyond its right or bottom edge; the
-        /// caller grows the zone around it. A SPAWN asks for this: a zone too
-        /// small for its new tile otherwise leaves it overlapping a sibling.
-        /// Growth is right/down only, so the zone origin — and every member's
-        /// exact world frame — never has to move. A neighbour the growth runs
-        /// into is pushed afterwards (`pushPeers(ofGrownZone:)`).
-        case settle(zoneId: UUID, anchor: UUID?, pin: Bool, grow: Bool = false)
+        /// `grow` is a SPAWN: the unpinned anchor is a new tile the placement put
+        /// where the camera is looking, possibly outside the zone, and the
+        /// caller grows the zone around wherever it settles, in any direction.
+        /// It is never clamped into the zone first. If it already sits at gap
+        /// contact with a member and overlaps nothing it stays exactly there;
+        /// otherwise it takes the contact slot most visible in `view` (WORLD),
+        /// then the one nearest its placement. A neighbour the growth runs into
+        /// is pushed afterwards (`pushPeers(ofGrownZone:)`).
+        case settle(zoneId: UUID, anchor: UUID?, pin: Bool, grow: Bool = false, view: TileFrame? = nil)
     }
 
     /// What a member move is latched to.
@@ -153,7 +154,7 @@ public enum CanvasAutoLayoutEngine {
         let targetZoneIds: [UUID]
         switch mutation {
         case let .tidy(zoneId): targetZoneIds = zoneId.map { [$0] } ?? zones.keys.sorted(by: uuidLess)
-        case let .settle(zoneId, _, _, _): targetZoneIds = [zoneId]
+        case let .settle(zoneId, _, _, _, _): targetZoneIds = [zoneId]
         case let .zone(id, _): targetZoneIds = [id]
         case let .tile(id, _): targetZoneIds = tiles[id]?.zoneId.map { [$0] } ?? []
         }
@@ -231,8 +232,8 @@ public enum CanvasAutoLayoutEngine {
 
             // Rest-state magnetism: tidy and settle pull members into exact
             // gap-contact with the cluster instead of running the packer.
-            var settleMover: (mover: UUID?, pin: Bool, grow: Bool)?
-            if case let .settle(_, anchor, pin, grow) = mutation { settleMover = (anchor, pin, grow) }
+            var settleMover: (mover: UUID?, pin: Bool, grow: Bool, view: TileFrame?)?
+            if case let .settle(_, anchor, pin, grow, view) = mutation { settleMover = (anchor, pin, grow, view) }
             if explicitTidy {
                 let compacted = compactMembers(memberIds: memberIds, tiles: tiles, gap: gap)
                 for (id, frame) in compacted { tiles[id]?.frame = frame }
@@ -245,11 +246,11 @@ public enum CanvasAutoLayoutEngine {
                 }
                 continue
             }
-            if let (mover, pin, grow) = settleMover {
+            if let (mover, pin, grow, view) = settleMover {
                 let settled = settleMembers(
                     memberIds: memberIds, tiles: tiles, zone: zone,
                     gap: gap, padding: padding, header: header, mover: mover, pinMover: pin,
-                    growMover: grow)
+                    growMover: grow, view: view)
                 for (id, frame) in settled { tiles[id]?.frame = frame }
                 continue
             }
@@ -750,12 +751,20 @@ public enum CanvasAutoLayoutEngine {
     private static func settleMembers(
         memberIds: [UUID], tiles: [UUID: LayoutTile], zone: ZonePlacement,
         gap: Double, padding: Double, header: Double, mover: UUID?, pinMover: Bool,
-        growMover: Bool = false
+        growMover: Bool = false, view: TileFrame? = nil
     ) -> [UUID: TileFrame] {
         let content = contentRect(zone: zone, padding: padding, header: header)
         guard content.width > 0, content.height > 0 else { return [:] }
+        let growing = growMover && !pinMover && mover != nil
         var result: [UUID: TileFrame] = [:]
-        for id in memberIds { if let tile = tiles[id] { result[id] = clampIntoContent(tile.frame, content: content) } }
+        for id in memberIds {
+            guard let tile = tiles[id] else { continue }
+            // A spawn's placement is where the camera is looking. Clamping it
+            // into the zone first is what threw that away (0.7.30). A zone's
+            // first tile has nothing to dock onto and still goes inside.
+            result[id] = growing && id == mover && memberIds.count > 1
+                ? tile.frame : clampIntoContent(tile.frame, content: content)
+        }
         guard result.count > 1 else { return result }
         var pending = memberIds.filter { result[$0] != nil }
         // A pinned mover (completed slot exchange) is authoritative: it seeds
@@ -778,14 +787,12 @@ public enum CanvasAutoLayoutEngine {
         }!
         var cluster: [TileFrame] = [result[anchor]!]
         pending.removeAll { $0 == anchor }
-        // A growing mover may look past the right and bottom edges; the zone
-        // follows it there (the origin, top and left edges stay put).
-        let growContent = growMover && mover != nil
-            ? CGRect(x: content.minX, y: content.minY,
-                     width: content.width + 1_000_000, height: content.height + 1_000_000)
+        // A growing mover may settle past any edge; the zone follows it there.
+        let growContent = growing
+            ? content.insetBy(dx: -1_000_000, dy: -1_000_000)
             : nil
         absorb(pending: &pending, cluster: &cluster, result: &result, mover: mover, content: content, gap: gap,
-               growContent: growContent)
+               growContent: growContent, view: view)
         // A mover that found no contact placement (e.g. dropped against the
         // wall where its exchanged slot needs the row to shift) may still press
         // on the cluster: resolve it with the same minimal single-axis pushes
@@ -804,10 +811,18 @@ public enum CanvasAutoLayoutEngine {
     /// always joins last.
     private static func absorb(
         pending: inout [UUID], cluster: inout [TileFrame], result: inout [UUID: TileFrame],
-        mover: UUID?, content: CGRect, gap: Double, growContent: CGRect? = nil
+        mover: UUID?, content: CGRect, gap: Double, growContent: CGRect? = nil, view: TileFrame? = nil
     ) {
         while !pending.isEmpty {
             let wave = pending.contains { $0 != mover } ? pending.filter { $0 != mover } : pending
+            if let growContent, let mover, wave == [mover], let frame = result[mover] {
+                let settled = spawnPlacement(for: frame, cluster: cluster, content: growContent, gap: gap, view: view)
+                    ?? frame
+                result[mover] = settled
+                cluster.append(settled)
+                pending.removeAll { $0 == mover }
+                continue
+            }
             // memberIds (and therefore wave) retain stable UUID order. A
             // valid existing contact costs zero: no candidate search can beat
             // it. Check those contacts first, preserving the greedy tie-break,
@@ -829,10 +844,6 @@ public enum CanvasAutoLayoutEngine {
                 if best == nil || cost < best!.cost || (cost == best!.cost && uuidLess(id, best!.id)) {
                     best = (id, placement, cost)
                 }
-            }
-            if best == nil, let growContent, let mover, wave == [mover], let frame = result[mover],
-               let placement = contactPlacement(for: frame, cluster: cluster, content: growContent, gap: gap) {
-                best = (mover, placement, squaredDistance(placement, frame))
             }
             if let best {
                 result[best.id] = best.frame
@@ -858,7 +869,49 @@ public enum CanvasAutoLayoutEngine {
         }
         let touching = cluster.contains { isGapAdjacent(frame, $0, gap: gap, tolerance: tolerance) }
         if touching, isValid(frame) { return frame }
+        return contactCandidates(for: frame, cluster: cluster, gap: gap).filter(isValid).min { lhs, rhs in
+            let a = squaredDistance(lhs, frame), b = squaredDistance(rhs, frame)
+            if a != b { return a < b }
+            if lhs.y != rhs.y { return lhs.y < rhs.y }
+            return lhs.x < rhs.x
+        }
+    }
 
+    /// Where a spawned tile settles. Its placement already docked it where the
+    /// camera is looking, so a placement at gap contact that overlaps nothing is
+    /// kept exactly. Otherwise (the placement found no free slot on screen) the
+    /// contact slot most visible in `view` wins, then the one nearest the
+    /// placement — never "nearest" alone, which sent the tile to whichever edge
+    /// of the zone was closest, on screen or not.
+    private static func spawnPlacement(
+        for frame: TileFrame, cluster: [TileFrame], content: CGRect, gap: Double, view: TileFrame?
+    ) -> TileFrame? {
+        let tolerance = 0.26
+        func isValid(_ candidate: TileFrame) -> Bool {
+            valid(candidate, in: content, against: cluster, gap: gap - tolerance)
+        }
+        let touching = cluster.contains { isGapAdjacent(frame, $0, gap: gap, tolerance: tolerance) }
+        if touching, isValid(frame) { return frame }
+        func visible(_ candidate: TileFrame) -> Double {
+            guard let view else { return 0 }
+            let w = max(0, min(candidate.x + candidate.width, view.x + view.width) - max(candidate.x, view.x))
+            let h = max(0, min(candidate.y + candidate.height, view.y + view.height) - max(candidate.y, view.y))
+            return w * h / max(candidate.width * candidate.height, 1)
+        }
+        return contactCandidates(for: frame, cluster: cluster, gap: gap).filter(isValid).min { lhs, rhs in
+            let va = visible(lhs), vb = visible(rhs)
+            if abs(va - vb) > 0.001 { return va > vb }
+            let a = squaredDistance(lhs, frame), b = squaredDistance(rhs, frame)
+            if a != b { return a < b }
+            if lhs.y != rhs.y { return lhs.y < rhs.y }
+            return lhs.x < rhs.x
+        }
+    }
+
+    /// Every slot at exact gap contact with a cluster member: each side of each
+    /// member, aligned to the frame's own position where it can be, else to
+    /// either end of the member's edge.
+    private static func contactCandidates(for frame: TileFrame, cluster: [TileFrame], gap: Double) -> [TileFrame] {
         func aligned(_ value: Double, edge: Double, edgeLength: Double, length: Double) -> [Double] {
             let far = edge + edgeLength - length
             return [min(max(value, min(edge, far)), max(edge, far)), edge, far]
@@ -874,12 +927,7 @@ public enum CanvasAutoLayoutEngine {
                 candidates.append(TileFrame(x: x, y: other.y - frame.height - gap, width: frame.width, height: frame.height))
             }
         }
-        return candidates.filter(isValid).min { lhs, rhs in
-            let a = squaredDistance(lhs, frame), b = squaredDistance(rhs, frame)
-            if a != b { return a < b }
-            if lhs.y != rhs.y { return lhs.y < rhs.y }
-            return lhs.x < rhs.x
-        }
+        return candidates
     }
 
     private static func shrinkNeighborsAndPack(
