@@ -301,10 +301,44 @@ enum TileChromeCanvasChecks {
 
         try runTranscriptGeometryIsStable()
         try runCameraMotionDoesNotWake()
+        try measureChunkCost()
 
         if let directory = ProcessInfo.processInfo.environment["TILE_CHROME_CANVAS_PNG_DIR"] {
             try writeReviewRenders(to: URL(fileURLWithPath: directory, isDirectory: true))
         }
+    }
+
+    // MARK: Streaming cost
+
+    /// What one streamed chunk costs a resting tile on the main thread, chunk
+    /// handling plus the frame it lands in, against today's tile. Reported, not
+    /// gated: the gate is the per-frame layout/draw count below.
+    static func measureChunkCost() throws {
+        let key = AgentTranscriptCanvasView.rendererEnvironmentKey
+        var results: [String] = []
+        for renderer in ["today", "drawn"] {
+            if renderer == "drawn" { setenv(key, "canvas", 1) } else { unsetenv(key) }
+            let (tile, window) = makeTile()
+            defer { window.orderOut(nil) }
+            tile.ingest(.turnStarted(threadId: "chrome", turnId: "cost"))
+            pump(0.3)
+            if renderer == "drawn" {
+                tile.restChromeIfIdle()
+                try expect(tile.isChromeResting, "the cost tile did not rest")
+            }
+            window.displayIfNeeded()
+            let chunks = 120
+            let start = ProcessInfo.processInfo.systemUptime
+            for index in 0..<chunks {
+                tile.ingest(.contentDelta(threadId: "chrome", turnId: "cost", streamKind: .assistant, delta: " word\(index)"))
+                if index % 3 == 2 { window.displayIfNeeded() }
+            }
+            window.displayIfNeeded()
+            let perChunk = (ProcessInfo.processInfo.systemUptime - start) * 1_000 / Double(chunks)
+            results.append("\(renderer) \(String(format: "%.3f", perChunk)) ms")
+        }
+        setenv(key, "canvas", 1)
+        print("tile chrome canvas: main-thread cost per streamed chunk (3 chunks a frame): " + results.joined(separator: ", "))
     }
 
     // MARK: Camera motion
@@ -366,6 +400,23 @@ enum TileChromeCanvasChecks {
                                                eventNumber: 0, trackingNumber: 0, userData: nil)!
             if type == .mouseEntered { view.mouseEntered(with: event) } else { view.mouseExited(with: event) }
         }
+        // Three of the four stream through the pan, three chunks between frames.
+        let streaming = Array(views.prefix(3))
+        for view in streaming { view.ingest(.turnStarted(threadId: view.wiringThreadId, turnId: "pan")) }
+        canvas.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        for view in views where !view.isChromeResting { view.restChromeIfIdle() }
+        canvas.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        CATransaction.flush()
+        var worstFrame = (layouts: 0, draws: 0)
+        var chunk = 0
+        func chromeWork() -> (layouts: Int, draws: Int) {
+            views.reduce((0, 0)) { total, view in
+                guard let chrome = view.qaChromeCanvas else { return total }
+                return (total.0 + chrome.qaBodyLayoutCount, total.1 + chrome.qaDrawCount)
+            }
+        }
         var inside = Set(views.filter(under).map(ObjectIdentifier.init))
         let wakesBefore = views.map(\.qaChromeWakeCount).reduce(0, +)
         var crossings = 0
@@ -376,9 +427,21 @@ enum TileChromeCanvasChecks {
         for step in 0..<120 {
             if step >= 30, crossings >= 4, views.contains(where: under) { break }
             clock.now += gap
+            for view in streaming {
+                for _ in 0..<3 {
+                    view.ingest(.contentDelta(threadId: view.wiringThreadId, turnId: "pan", streamKind: .assistant,
+                                              delta: " chunk\(chunk)"))
+                    chunk += 1
+                }
+            }
+            let before = chromeWork()
             canvas.cameraDriver.noteScrollPan(dx: -20, dy: 0, location: pointer)
             canvas.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
+            CATransaction.flush()
+            let after = chromeWork()
+            worstFrame = (max(worstFrame.layouts, after.layouts - before.layouts),
+                          max(worstFrame.draws, after.draws - before.draws))
             sawMotion = sawMotion || canvas.isCameraInMotion
             for view in views {
                 let now = under(view), was = inside.contains(ObjectIdentifier(view))
@@ -392,6 +455,9 @@ enum TileChromeCanvasChecks {
         let wakesDuringMotion = views.map(\.qaChromeWakeCount).reduce(0, +) - wakesBefore
         try expect(sawMotion, "the camera never reported motion; the assertion is vacuous")
         try expect(crossings >= 4, "the pan slid only \(crossings) tile edge(s) under the pointer; the assertion is vacuous")
+        try expect(worstFrame.layouts <= 3 && worstFrame.draws <= 3,
+                   "a camera frame with 3 streaming tiles cost \(worstFrame.layouts) resting body layouts and "
+                   + "\(worstFrame.draws) chrome draws; at most 3 each")
         try expect(wakesDuringMotion == 0,
                    "\(wakesDuringMotion) tile(s) woke while the camera moved them under a still pointer")
         canvas.cameraDriver.qaMarkSettledNow()
@@ -403,6 +469,8 @@ enum TileChromeCanvasChecks {
         try expect(settleWakes == 1 && !underPointer[0].isChromeResting
                    && views.filter { $0 !== underPointer[0] }.allSatisfy(\.isChromeResting),
                    "at the settle exactly the tile under the pointer must wake; \(settleWakes) woke")
+        print("tile chrome canvas: a pan with 3 tiles streaming 3 chunks a frame cost at most "
+              + "\(worstFrame.layouts) body layouts and \(worstFrame.draws) chrome draws a frame")
         print("tile chrome canvas: a pan slid \(crossings) tile edges under a still pointer with 0 wakes; "
               + "the settle woke \(settleWakes), the tile under the pointer")
     }
@@ -526,6 +594,38 @@ enum TileChromeCanvasChecks {
                    "streaming woke a tile whose chrome shows nothing moving")
         try expect(chunkDraws <= 2, "30 streamed chunks redrew the unchanged resting chrome \(chunkDraws) times")
         try expect(chrome.qaUnchangedInvalidations > 0, "no invalidation was ever skipped; the assertion is vacuous")
+        // Ten chunks inside one frame are ONE settle: at most one body layout and one
+        // redraw, and none when nothing shown changed. A real change in the same
+        // frame (another effort) is exactly one of each.
+        var settles = chrome.qaSettleCount, layouts = chrome.qaBodyLayoutCount, draws = chrome.qaDrawCount
+        for index in 0..<10 {
+            tile.ingest(.contentDelta(threadId: thread, turnId: "s2", streamKind: .assistant, delta: " frame\(index)"))
+        }
+        // One display cycle: AppKit's layout and display, then the commit that
+        // draws layer-backed views.
+        window.displayIfNeeded()
+        CATransaction.flush()
+        try expect(chrome.qaSettleCount - settles <= 1 && chrome.qaBodyLayoutCount - layouts <= 1
+                   && chrome.qaDrawCount - draws <= 1,
+                   "10 chunks in one frame cost \(chrome.qaSettleCount - settles) settles, "
+                   + "\(chrome.qaBodyLayoutCount - layouts) body layouts, \(chrome.qaDrawCount - draws) draws")
+        settles = chrome.qaSettleCount; layouts = chrome.qaBodyLayoutCount; draws = chrome.qaDrawCount
+        let current = tile.qaProviderSettings
+        for index in 0..<10 {
+            tile.ingest(.contentDelta(threadId: thread, turnId: "s2", streamKind: .assistant, delta: " change\(index)"))
+            if index == 4 {
+                let other = AgentModelConfig.thinkingOptions.first { $0 != current.thinking } ?? current.thinking
+                tile.applyProviderSettings(AgentModelConfig.Resolution(model: current.model, thinking: other))
+            }
+        }
+        window.displayIfNeeded()
+        CATransaction.flush()
+        try expect(chrome.qaSettleCount - settles == 1 && chrome.qaBodyLayoutCount - layouts == 1
+                   && chrome.qaDrawCount - draws == 1,
+                   "a real change among 10 chunks must cost one settle, one layout and one draw: "
+                   + "\(chrome.qaSettleCount - settles), \(chrome.qaBodyLayoutCount - layouts), \(chrome.qaDrawCount - draws)")
+        tile.applyProviderSettings(current)
+        window.displayIfNeeded()
         print("tile chrome canvas: rest -> wake -> rest and zoom 2x/0.5x/1x and a wake/rest at zoom 0.37/0.61/1.43 kept the transcript at \(resting); "
               + "30 streamed chunks redrew the resting chrome \(chunkDraws) time(s)")
     }
