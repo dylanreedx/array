@@ -1754,6 +1754,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return whereIcon.convert(whereIcon.bounds, to: self).union(whereLabel.convert(whereLabel.bounds, to: self))
     }
     #endif
+    /// The host label and its glyph (`⌸ tmux`), in this cell's coordinates: a
+    /// right-click there opens the host's menu (.plans/87). nil without one.
+    var whereMarkerRect: NSRect? {
+        guard !whereLabel.isHidden, !whereLabel.stringValue.isEmpty else { return nil }
+        return whereIcon.convert(whereIcon.bounds, to: self).union(whereLabel.convert(whereLabel.bounds, to: self))
+    }
     var settleNudgeTitleForQA: String { settleNudge.title }
     @objc private func hoverSnoozeClicked() { onHoverSnooze?() }
     @objc private func hoverSettleClicked() { onHoverSettle?() }

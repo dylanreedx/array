@@ -818,6 +818,18 @@ enum ContinuumApp {
         // sidebar; Copy forks one into a managed agent in its project.
         // .plans/87 (quick hide/show): the sidebar's toggle pills, driven through
         // real events on the production sidebar.
+        if CommandLine.arguments.contains("--sidebar-bulk-hide-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try QuickHideChecks.runBulkHide())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if CommandLine.arguments.contains("--sidebar-hidden-footer-check") {
             _ = NSApplication.shared
             MainActor.assumeIsolated {

@@ -1130,9 +1130,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var listBottomToToast: NSLayoutConstraint?
     private var toastAboveBar: NSLayoutConstraint?
     private var toastAtBottom: NSLayoutConstraint?
-    /// QA: the `+N` checklist opens inside the (offscreen) window rather than on
-    /// a screen, and without taking the keyboard.
-    var presentsPillOverflowOffscreenForQA = false
+    /// QA: the `+N` checklist and the row menus open inside the (offscreen)
+    /// window rather than on a screen, and without taking the keyboard.
+    var presentsPopoversOffscreenForQA = false
     // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
     /// A workspace verb was picked from the scope menu. WHICH workspace it lands on
     /// is not this view's business — it holds a scope, not a workspace id — so the
@@ -2511,7 +2511,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func presentPillOverflow(anchor: NSRect) {
         let items = pillOverflowItems()
         guard !items.isEmpty else { return }
-        let offscreen = presentsPillOverflowOffscreenForQA
+        let offscreen = presentsPopoversOffscreenForQA
         pillOverflowController.present(
             items: items, selectedID: nil, presentation: .checklist, anchor: anchor, relativeTo: pillStrip,
             placementFrame: offscreen ? window?.frame : nil, takesFocus: !offscreen,
@@ -2523,7 +2523,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     /// QA: the open `+N` checklist, if any.
     var pillOverflowListForQA: ChoiceListView? {
-        pillOverflowController.isPresented || presentsPillOverflowOffscreenForQA ? pillOverflowController.listView : nil
+        pillOverflowController.isPresented || presentsPopoversOffscreenForQA ? pillOverflowController.listView : nil
     }
 
     func dismissPillOverflowForQA() { pillOverflowController.dismiss() }
@@ -4473,7 +4473,70 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Selection changes only when the pointer is outside an existing multi-selection.
     fileprivate func presentContextMenu(for event: NSEvent) {
         let point = tableView.convert(event.locationInWindow, from: nil)
-        presentContextMenu(atTableRow: tableView.row(at: point), anchor: NSRect(origin: point, size: .zero))
+        let tableRow = tableView.row(at: point)
+        if presentHostMenu(atTableRow: tableRow, windowPoint: event.locationInWindow) { return }
+        presentContextMenu(atTableRow: tableRow, anchor: NSRect(origin: point, size: .zero))
+    }
+
+    // MARK: - Bulk hide from a host label (.plans/87)
+
+    static let hideAllFromHostItemId = "host:hide-all"
+    static let hideThisSessionItemId = "host:hide-one"
+    static let showOnlyHostItemId = "host:show-only"
+
+    /// The host a session's label names (`tmux`, `cmux`, `Claude app`), without
+    /// the "· 4m ago" an unknown status adds.
+    static func hostLabel(of row: AgentInboxRow) -> String? {
+        guard row.externalSession != nil, let text = row.whereMarker?.text else { return nil }
+        return text.components(separatedBy: " · ").first ?? text
+    }
+
+    /// A right-click ON a session's host label opens the host's menu: hide every
+    /// session the list shows from that host, hide this one, or show only that
+    /// host. Anywhere else on the row keeps the row menu.
+    private func presentHostMenu(atTableRow tableRow: Int, windowPoint: NSPoint) -> Bool {
+        guard tableRow >= 0, let model = item(at: tableRow)?.agentRow, let host = Self.hostLabel(of: model),
+              externalSessionHiding != nil,
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView,
+              let marker = card.whereMarkerRect,
+              marker.insetBy(dx: -2, dy: -2).contains(card.convert(windowPoint, from: nil))
+        else { return false }
+        if tableView.selectedRowIndexes != IndexSet(integer: tableRow) {
+            tableView.selectRowIndexes(IndexSet(integer: tableRow), byExtendingSelection: false)
+        }
+        let sameHost = rows.filter { Self.hostLabel(of: $0) == host && canHide($0) }.map(\.id)
+        let source = InboxSource.key(for: model)
+        let sourceRows = pillRows.filter { $0.externalSession != nil && InboxSource.key(for: $0) == source }
+        // "Show only tmux" while every session of the pill is tmux; the pill's own
+        // name once it gathers more than one host (Terminal holds tmux too).
+        let onlyName = sourceRows.allSatisfy { Self.hostLabel(of: $0) == host } ? host : source
+        var items: [ChoiceItem] = []
+        items.append(ChoiceItem(id: Self.hideAllFromHostItemId,
+                                title: "Hide all \(sameHost.count) from \(host)", icon: .system("eye.slash")))
+        items.append(ChoiceItem(id: Self.hideThisSessionItemId, title: "Hide this session", icon: .system("xmark")))
+        var only = ChoiceItem(id: Self.showOnlyHostItemId, title: "Show only \(onlyName)",
+                              icon: .system(model.whereMarker?.symbol ?? "terminal"))
+        only.separatorBefore = true
+        items.append(only)
+        rowChoiceTargetIds.removeAll()
+        let rowId = model.id
+        let anchor = card.convert(marker, to: tableView)
+        return presentRowChoices(items, anchor: anchor) { [weak self] item in
+            guard let self else { return }
+            switch item.id {
+            case Self.hideAllFromHostItemId:
+                self.hideRows(sameHost, message: "Hid \(sameHost.count) from \(host)")
+            case Self.hideThisSessionItemId:
+                self.hideRows([rowId])
+            case Self.showOnlyHostItemId:
+                let outside = Set(self.pillRows.filter { $0.externalSession != nil }.map(InboxSource.key(for:)))
+                self.setFilters(scope: self.scope,
+                                hiddenSources: outside.subtracting([source]).union([InboxSource.arrayAgents]),
+                                notify: true)
+            default:
+                break
+            }
+        }
     }
 
     @discardableResult
@@ -4547,9 +4610,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             return true
         }
         qaChoiceListForQA = nil
+        let offscreen = presentsPopoversOffscreenForQA
         rowChoiceController.present(
             items: items, selectedID: nil, presentation: .commands, anchor: anchor,
-            relativeTo: tableView,
+            relativeTo: tableView, placementFrame: offscreen ? window?.frame : nil, takesFocus: !offscreen,
             onSelection: onSelection, focusReturnView: tableView
         )
         // The controller owns the production list even when AppKit cannot make the
@@ -6894,6 +6958,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     private var activeChoiceListForQA: ChoiceListView? { rowChoiceController.listView ?? qaChoiceListForQA }
     var rowMenuTitlesForQA: [String] { activeChoiceListForQA?.qaItems.map(\.title) ?? [] }
+    /// The open row menu's list, for a picture.
+    var rowMenuListForQA: ChoiceListView? { rowChoiceController.listView }
+    /// Whether the row menu on screen is the shared choice popover's panel.
+    var isRowMenuChoicePopoverForQA: Bool { rowChoiceController.isPresented && rowChoiceController.listView != nil }
+    func dismissRowMenuForQA() { rowChoiceController.dismiss() }
     var rowMenuEnabledForQA: [Bool] { activeChoiceListForQA?.qaItems.map(\.enabled) ?? [] }
     var rowMenuTooltipsForQA: [String] { activeChoiceListForQA?.qaItems.map { $0.detail ?? "" } ?? [] }
     var rowMenuFocusedTitleForQA: String? {

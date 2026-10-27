@@ -502,6 +502,82 @@ enum QuickHideChecks {
             + "Show and Show all bring sessions back; a second click folds them; the popover's Hidden list is gone"
     }
 
+    // MARK: - 4. Bulk hide from a host label
+
+    /// A right-click on the middle of row `id`'s host label, through the app.
+    static func rightClickHostLabel(_ id: UUID, in inbox: AgentInboxView) throws {
+        guard let card = card(id, in: inbox), let marker = card.whereMarkerRect else {
+            throw Failure(description: "row \(id) draws no host label")
+        }
+        try rightClick(card, at: NSPoint(x: marker.midX, y: marker.midY))
+    }
+
+    /// `--sidebar-bulk-hide-check`. A right-click on a session's host label opens
+    /// the shared choice popover with Hide all N from the host, Hide this session
+    /// and Show only the host; Hide all takes every session of that host off the
+    /// list under ONE undo; a right-click elsewhere on the row keeps the row menu.
+    static func runBulkHide() throws -> String {
+        let h = try makeHarness(name: "bulk-hide")
+        defer { h.tearDown() }
+        let inbox = h.inbox
+        inbox.presentsPopoversOffscreenForQA = true
+        inbox.setScope(.all)
+        let now = Date()
+        let second = ExternalAgentSession(
+            provider: .claude, sessionId: "s-tmux-2", pid: 4243, cwd: h.fixture.pbRoot.path, title: "Port scanner spike",
+            status: .idle, startedAt: now.addingTimeInterval(-3600), statusSince: now.addingTimeInterval(-600),
+            lastActivity: now.addingTimeInterval(-600), host: .tmux,
+            transcriptURL: h.fixture.tempRoot.appendingPathComponent("s-tmux-2.jsonl"))
+        h.publish(h.sessions + [second])
+        let tmux = [h.rowId("s-tmux"), ExternalSessionRows.rowId(forSessionKey: second.id)]
+        try expect(tmux.allSatisfy(inbox.rowIdsForQA.contains), "precondition: two tmux rows — got \(inbox.titlesForQA)")
+
+        // The host label's menu, from a real right-click on the label.
+        try rightClickHostLabel(tmux[0], in: inbox)
+        try expect(inbox.rowMenuTitlesForQA == ["Hide all 2 from tmux", "Hide this session", "Show only Terminal"],
+                   "a right-click on 'tmux' opens the host's menu — got \(inbox.rowMenuTitlesForQA)")
+        try expect(inbox.isRowMenuChoicePopoverForQA, "the host's menu is the shared choice popover, never an NSMenu")
+        photograph(inbox, "4-bulk-menu", panel: inbox.rowMenuListForQA)
+
+        // Hide all: both tmux sessions go, one notice, one undo.
+        try expect(inbox.pickRowMenuItemForQA(id: AgentInboxView.hideAllFromHostItemId), "Hide all must be pickable")
+        inbox.layoutForQA()
+        try expect(!tmux.contains(where: inbox.rowIdsForQA.contains) && h.shown("s-cmux"),
+                   "Hide all takes every tmux session off the list and nothing else — got \(inbox.titlesForQA)")
+        try expect(inbox.undoToastTextForQA == "Hid 2 from tmux · Undo", "one notice for the batch — got '\(inbox.undoToastTextForQA)'")
+        photograph(inbox, "4-bulk-hidden")
+        try pressUndo(inbox)
+        try expect(tmux.allSatisfy(inbox.rowIdsForQA.contains) && h.delegate.externalSessionHiding.entries.isEmpty,
+                   "one ⌘Z brings the whole batch back — got \(inbox.titlesForQA)")
+
+        // Hide this session: only the one right-clicked.
+        try rightClickHostLabel(tmux[1], in: inbox)
+        try expect(inbox.pickRowMenuItemForQA(id: AgentInboxView.hideThisSessionItemId), "Hide this session must be pickable")
+        inbox.layoutForQA()
+        try expect(!inbox.rowIdsForQA.contains(tmux[1]) && inbox.rowIdsForQA.contains(tmux[0]),
+                   "Hide this session hides that one only — got \(inbox.titlesForQA)")
+        try pressUndo(inbox)
+
+        // Show only: the host's pill soloed.
+        try rightClickHostLabel(tmux[0], in: inbox)
+        try expect(inbox.pickRowMenuItemForQA(id: AgentInboxView.showOnlyHostItemId), "Show only must be pickable")
+        inbox.layoutForQA()
+        try expect(Set(inbox.rowIdsForQA) == Set(tmux + [h.rowId("s-terminal")]),
+                   "Show only shows the Terminal pill's sessions alone — got \(inbox.titlesForQA)")
+        try expect(value("source:Terminal", inbox) == "on" && value("source:cmux", inbox) == "off",
+                   "…by soloing its pill — got \(pills(inbox).map { "\($0.id)=\($0.value)" })")
+        inbox.setHiddenSources([])
+
+        // Anywhere else on the row: the row's own menu.
+        guard let card = card(tmux[0], in: inbox) else { throw Failure(description: "the tmux row drew no card") }
+        try rightClick(card, at: NSPoint(x: card.bounds.midX, y: card.bounds.midY))
+        try expect(inbox.rowMenuTitlesForQA == ["Hide"], "a right-click off the label keeps the row menu — got \(inbox.rowMenuTitlesForQA)")
+        inbox.dismissRowMenuForQA()
+
+        return "QuickHide bulk-hide: right-clicking a host label opens the choice popover with Hide all N, Hide this session "
+            + "and Show only; Hide all is one batch under one undo; Show only solos the host's pill; elsewhere keeps the row menu"
+    }
+
     // MARK: - 1. Toggle pills
 
     /// `--sidebar-pills-check`. One pill per workspace and per outside source,
@@ -604,7 +680,7 @@ enum QuickHideChecks {
         let tops = Set(views(in: inbox) { $0.accessibilityIdentifier().hasPrefix("ContinuumAgentInboxPill:") && !$0.isHiddenOrHasHiddenAncestor }
             .map { Int($0.convert($0.bounds, to: nil).minY) })
         try expect(tops.count == 1, "the pills stay on one line — got rows at \(tops)")
-        inbox.presentsPillOverflowOffscreenForQA = true
+        inbox.presentsPopoversOffscreenForQA = true
         defer { inbox.dismissPillOverflowForQA() }
         try click(try pill("more", in: inbox))
         guard let list = inbox.pillOverflowListForQA else { throw Failure(description: "+N opened no checklist") }

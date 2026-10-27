@@ -1098,6 +1098,7 @@ run_app_check .build/debug/Array --hide-external-rows-check
 run_app_check .build/debug/Array --sidebar-pills-check
 run_app_check .build/debug/Array --sidebar-hide-any-row-check
 run_app_check .build/debug/Array --sidebar-hidden-footer-check
+run_app_check .build/debug/Array --sidebar-bulk-hide-check
 # The sidebar's project icon: `.array/icon.*` beats a shipped favicon; static/,
 # website/public/, Packaging/*.icns and an xcassets AppIcon resolve; a miss is
 # cached, and an added override or an edited winning file still shows.

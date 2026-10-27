@@ -210,6 +210,7 @@ check --settings-search-check
 check --settle-closes-tile-check
 check --shell-open-as-agent-check
 check --shell-tool-row-check
+check --sidebar-bulk-hide-check
 check --sidebar-hidden-footer-check
 check --sidebar-hide-any-row-check
 check --sidebar-lifecycle-check
@@ -524,6 +525,7 @@ leg run_app_check .build/debug/Array --settings-search-check
 leg run_app_check .build/debug/Array --settle-closes-tile-check
 leg run_app_check .build/debug/Array --shell-open-as-agent-check
 leg run_app_check .build/debug/Array --shell-tool-row-check
+leg run_app_check .build/debug/Array --sidebar-bulk-hide-check
 leg run_app_check .build/debug/Array --sidebar-hidden-footer-check
 leg run_app_check .build/debug/Array --sidebar-hide-any-row-check
 leg run_app_check .build/debug/Array --sidebar-pills-check
