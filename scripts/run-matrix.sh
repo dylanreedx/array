@@ -1376,6 +1376,10 @@ run_app_check .build/debug/Array --gesture-telemetry-check
 # re-parses an open message at its own low rate and keeps every chunk; streamed
 # chunks refresh a tile's status row at most every 0.25 s.
 run_app_check .build/debug/Array --streaming-ingest-check
+# The one-view CoreText transcript behind ARRAY_TRANSCRIPT_RENDERER=canvas, driven
+# through a real agent tile: a delta re-lays out only its block, tail follow,
+# selection + Cmd-C, link click, and a redraw at 2x/4x zoom with no layout.
+run_app_check .build/debug/Array --transcript-canvas-check
 # The correctness oracle for the incremental row index, and the reason the cheap
 # path is allowed to exist. transcript.delta measures what a delta COSTS and is
 # structurally blind to a fast path that is cheap and WRONG — every count budget
