@@ -37,3 +37,8 @@ for t, gap, phase, work in late:
 w0, w1 = r["baseline"]["work"], final["work"]
 print("work over run:", ", ".join("%s %+d" % (k, w1[k] - w0.get(k, 0)) for k in sorted(w1) if w1[k] != w0.get(k, 0)))
 print("gesture log:", final.get("lastGestureReport"))
+for f in r.get("fidelity", []):
+    print("fidelity: zoom %.2f %s  mean diff %.2f  changed %.3f%%  sharpness %.3f%s" % (
+        f.get("zoom", 0), "PASS" if f.get("pass") else "FAIL", f.get("meanDifference", -1),
+        100 * f.get("changedFraction", -1), f.get("sharpnessRatio", -1),
+        ("  " + f["error"]) if "error" in f else ""))

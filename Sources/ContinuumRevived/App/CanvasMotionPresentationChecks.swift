@@ -92,6 +92,30 @@ private final class MotionStreamReceiver: NSObject, SCStreamOutput, SCStreamDele
     private var markerOrigin: (Double, Double)?
     private var callbackCount = 0
     let cellPixels: Double
+    /// Fidelity gate (`CANVAS_MOTION_FIDELITY=1`): every `keepEvery`-th verified
+    /// frame is kept whole while `keeping`, up to `keepLimit`, keyed by its serial.
+    var keepEvery = 0
+    let keepLimit = 6
+    private var keeping = false
+    private var verifiedSeen = 0
+    private var kept: [(serial: Int, image: CGImage)] = []
+    func setKeeping(_ on: Bool) { lock.lock(); keeping = on; lock.unlock() }
+    func keptFrames() -> [(serial: Int, image: CGImage)] { lock.lock(); defer { lock.unlock() }; return kept }
+
+    /// A whole-frame copy: the buffer is recycled by the stream after the callback.
+    static func copyImage(_ buffer: CVPixelBuffer) -> CGImage? {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        guard let provider = CGDataProvider(data: Data(bytes: base, count: stride * height) as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: stride,
+                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue
+                           | CGBitmapInfo.byteOrder32Little.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    }
 
     init(cellPixels: Double) {
         self.cellPixels = cellPixels
@@ -129,6 +153,16 @@ private final class MotionStreamReceiver: NSObject, SCStreamOutput, SCStreamDele
         if status == SCFrameStatus.complete.rawValue,
            let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
             decoded = decode(buffer)
+            if keepEvery > 0, decoded?.valid == true, let serial = decoded?.serial {
+                lock.lock()
+                let take = keeping && kept.count < keepLimit && kept.last?.serial != serial
+                if take { verifiedSeen += 1 }
+                let due = take && verifiedSeen % keepEvery == 0
+                lock.unlock()
+                if due, let image = Self.copyImage(buffer) {
+                    lock.lock(); kept.append((serial, image)); lock.unlock()
+                }
+            }
         }
         let record = MotionCapturedFrame(arrival: arrival,
             display: displayMach.map(MotionClock.seconds), displayMach: displayMach,
@@ -314,6 +348,8 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         let settle = number("CANVAS_MOTION_SETTLE_SECONDS", 2, 0.5...10)
         let hz = number("CANVAS_MOTION_INPUT_HZ", 120, 30...240)
         let captureEnabled = env["CANVAS_MOTION_CAPTURE"] != "0"
+        // Fidelity gate: full-resolution capture, so it is never mixed into a timing arm.
+        let fidelity = env["CANVAS_MOTION_FIDELITY"] == "1"
         let selectedPhase = env["CANVAS_MOTION_PHASE"] ?? "zoom"
         guard ["pan", "zoom", "mixed"].contains(selectedPhase) else {
             throw Failure(description: "CANVAS_MOTION_PHASE must be pan, zoom or mixed")
@@ -393,7 +429,8 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
                 throw Failure(description: "invalid own-window capture dimensions: \(dimensions)")
             }
             let config = SCStreamConfiguration()
-            config.width = max(640, Int(dimensions.width * 0.5))
+            config.width = fidelity ? Int(dimensions.width * fixture.window.backingScaleFactor)
+                : max(640, Int(dimensions.width * 0.5))
             config.height = Int(Double(config.width) * dimensions.height / dimensions.width)
             config.minimumFrameInterval = .zero
             config.queueDepth = 5
@@ -411,6 +448,7 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
                 "screenBackingScale": fixture.window.backingScaleFactor,
                 "worldFiducial": [worldRect.minX, worldRect.minY, worldRect.width, worldRect.height]]
             let sink = MotionStreamReceiver(cellPixels: 8 * Double(config.width) / dimensions.width)
+            if fidelity { sink.keepEvery = 25 }
             receiver = sink
             sink.register(serial: state.serial, viewport: fixture.canvas.viewport, worldRect: worldRect)
             let stream = SCStream(filter: filter, configuration: config, delegate: sink)
@@ -457,6 +495,7 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
             to: URL(fileURLWithPath: output.path + ".ready.json"))
         for phase in [selectedPhase] {
             state.phase = phase
+            receiver?.setKeeping(true)
             let before = fixture.snapshot()
             checkVisibility(before, phase + "-before")
             let beginMach = mach_absolute_time() + MotionClock.ticks(0.1)
@@ -502,6 +541,7 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
             let drained = MotionClock.now
             let afterInput = fixture.snapshot()
             checkVisibility(afterInput, phase + "-afterInput")
+            receiver?.setKeeping(false)
             state.phase = phase + "-settle"
             try await Task.sleep(for: .seconds(settle))
             let afterSettle = fixture.snapshot()
@@ -521,6 +561,12 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
             try await Task.sleep(for: .milliseconds(25))
         }
         if let capture { try await capture.stopCapture() }
+        var fidelityResults: [[String: Any]] = []
+        if fidelity, let filter = screenshotFilter, let kept = receiver?.keptFrames() {
+            fidelityResults = try await MotionFidelityGate.run(kept: kept, commits: state.commits, canvas: fixture.canvas,
+                filter: filter, directory: output.deletingLastPathComponent(),
+                excludeTopPixels: Int(80 * fixture.window.backingScaleFactor))
+        }
         capture = nil
         let (frames, captureError) = receiver?.snapshot() ?? ([], nil)
         var summaries: [[String: Any]] = []
@@ -667,6 +713,7 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
                 "inputHz": hz, "captureEnabled": captureEnabled, "captureQueueDepth": 5,
                 "minimumFrameInterval": "zero/native", "os": ProcessInfo.processInfo.operatingSystemVersionString],
             "baseline": baseline, "final": finalSnapshot, "phases": state.phases, "summaries": summaries,
+            "fidelity": fidelityResults,
             "captureGeometry": captureGeometry, "screenshot": screenshot as Any? ?? NSNull(),
             "screenshotError": screenshotError as Any? ?? NSNull(),
             "capture": ["frames": frames.count, "validMarkerFrames": validFrames.count,
@@ -716,3 +763,96 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         return 1
     }
 }
+
+/// The visual-fidelity gate (`.plans/84`, step 3): a frame shown mid-gesture must
+/// look like the still canvas at the same camera. Each kept frame's camera is set
+/// again, the canvas is left to settle, and the still is captured at the same size.
+/// Blur shows as a sharpness ratio below 1; a tint or fade as a mean difference.
+@MainActor
+enum MotionFidelityGate {
+    static let maxMeanDifference = 1.5
+    static let maxChangedFraction = 0.002
+    static let minSharpnessRatio = 0.97
+
+    static func run(kept: [(serial: Int, image: CGImage)], commits: [[String: Any]], canvas: CanvasNSView,
+                    filter: SCContentFilter, directory: URL, excludeTopPixels: Int) async throws -> [[String: Any]] {
+        var results: [[String: Any]] = []
+        for (index, frame) in kept.enumerated() {
+            guard let commit = commits.first(where: { $0["serial"] as? Int == frame.serial }),
+                  let x = commit["x"] as? Double, let y = commit["y"] as? Double,
+                  let zoom = commit["zoom"] as? Double else { continue }
+            canvas.setViewport(CanvasViewport(x: x, y: y, zoom: zoom))
+            try await Task.sleep(for: .milliseconds(1_500))
+            let config = SCStreamConfiguration()
+            config.width = frame.image.width
+            config.height = frame.image.height
+            config.showsCursor = false
+            config.ignoreShadowsSingleWindow = true
+            config.colorSpaceName = CGColorSpace.sRGB
+            let still = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            var result = compare(moving: frame.image, still: still, excludeTopPixels: excludeTopPixels)
+            result["serial"] = frame.serial
+            result["zoom"] = zoom
+            let stem = directory.appendingPathComponent(String(format: "fidelity-%d-zoom-%.2f", index, zoom))
+            write(frame.image, to: stem.appendingPathExtension("moving.png"))
+            write(still, to: stem.appendingPathExtension("still.png"))
+            results.append(result)
+        }
+        return results
+    }
+
+    static func pixels(_ image: CGImage, width: Int, height: Int) -> [UInt8] {
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        bytes.withUnsafeMutableBytes { raw in
+            let context = CGContext(data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                    bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            context?.interpolationQuality = .none
+            context?.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        return bytes
+    }
+
+    static func compare(moving: CGImage, still: CGImage, excludeTopPixels: Int) -> [String: Any] {
+        let width = moving.width, height = moving.height
+        guard still.width == width, still.height == height else {
+            return ["pass": false, "error": "size mismatch \(width)x\(height) vs \(still.width)x\(still.height)"]
+        }
+        let a = pixels(moving, width: width, height: height), b = pixels(still, width: width, height: height)
+        // Memory row 0 is the top of the image (checked): skip the title bar and
+        // the commit barcode, which carries a different serial in the still.
+        let first = min(height, excludeTopPixels)
+        let rows = height - first
+        var sum = 0, changed = 0, gradA = 0, gradB = 0
+        for row in first..<height {
+            let base = row * width * 4
+            for col in 0..<width {
+                let i = base + col * 4
+                let dr = abs(Int(a[i]) - Int(b[i])), dg = abs(Int(a[i + 1]) - Int(b[i + 1])), db = abs(Int(a[i + 2]) - Int(b[i + 2]))
+                sum += dr + dg + db
+                if max(dr, dg, db) > 24 { changed += 1 }
+                if col + 1 < width, row + 1 < height {
+                    let la = Int(a[i]) + Int(a[i + 1]) + Int(a[i + 2])
+                    let lb = Int(b[i]) + Int(b[i + 1]) + Int(b[i + 2])
+                    let r = i + 4, d = i + width * 4
+                    gradA += abs(la - (Int(a[r]) + Int(a[r + 1]) + Int(a[r + 2]))) + abs(la - (Int(a[d]) + Int(a[d + 1]) + Int(a[d + 2])))
+                    gradB += abs(lb - (Int(b[r]) + Int(b[r + 1]) + Int(b[r + 2]))) + abs(lb - (Int(b[d]) + Int(b[d + 1]) + Int(b[d + 2])))
+                }
+            }
+        }
+        let count = max(1, rows * width)
+        let mean = Double(sum) / Double(count * 3)
+        let fraction = Double(changed) / Double(count)
+        let sharpness = gradB > 0 ? Double(gradA) / Double(gradB) : 1
+        let pass = mean <= maxMeanDifference && fraction <= maxChangedFraction && sharpness >= minSharpnessRatio
+        return ["pass": pass, "meanDifference": mean, "changedFraction": fraction, "sharpnessRatio": sharpness,
+                "comparedPixels": count]
+    }
+
+    static func write(_ image: CGImage, to url: URL) {
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { return }
+        CGImageDestinationAddImage(destination, image, nil)
+        CGImageDestinationFinalize(destination)
+    }
+}
+
