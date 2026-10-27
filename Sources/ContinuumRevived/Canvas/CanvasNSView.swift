@@ -3577,6 +3577,20 @@ final class CanvasNSView: NSView, TokenThemed {
         guard borderedTileId != targetId else { return }
         borderedTileId = targetId
         applyFocusBorder()
+        // The focused member wears the ants instead of a selection ring.
+        tileSelection.updatePresentation()
+    }
+
+    /// True when the tile already wears the focus ants or the attention ring,
+    /// so a selection ring there would draw a second outline.
+    func tileWearsRing(_ id: UUID) -> Bool {
+        (id == borderedTileId && focusBorderOverlay?.isHidden == false) || attentionTileIds.contains(id)
+    }
+
+    /// The colour and gap of the focus ants, for the selection rings to match.
+    var focusRingStyle: (color: NSColor, gap: CGFloat) {
+        let config = FocusBorderConfig.resolvedFromDefaults(defaults: focusBorderDefaults)
+        return (Self.focusBorderColor(named: config.color).withAlphaComponent(0.7), CGFloat(config.gap))
     }
 
     /// Resolve `FocusBorderConfig` and show/hide + style the overlay for the
@@ -13298,7 +13312,11 @@ final class FocusBorderOverlayView: NSView, CornerStyled {
     /// The tile's on-screen radius + gap, so the border stays concentric with
     /// the rounded tile at any gap — in every corner style, and square at Sharp.
     /// (This used to be a fixed 6 + gap, left behind when the tile went to 10.)
-    private var cornerRadius: CGFloat {
+    private var cornerRadius: CGFloat { Self.ringRadius(tileScale: tileScale, gap: gap) }
+
+    /// The radius of any ring drawn `gap` outside a tile at `tileScale`. The
+    /// selection rings use it too, so every outline on a tile is concentric.
+    static func ringRadius(tileScale: CGFloat, gap: CGFloat) -> CGFloat {
         CornerStyle.current == .sharp ? 0 : CornerRole.tile.cgRadius() * tileScale + gap
     }
 

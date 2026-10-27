@@ -233,6 +233,28 @@ enum CanvasPointerPathChecks {
         try click(try header(noteC), [.shift])
         check(canvas.tileSelection.ids == [agentA, agentB, noteC],
             "\(label): shift-clicking three title bars selected \(canvas.tileSelection.ids)")
+        // One outline per tile: the focused member keeps its ants, the others
+        // get rings in the same geometry, never a second ring on one tile.
+        let rings = canvas.tileSelection.qaOverlay?.qaDrawnRingCount ?? 0
+        let antsInGroup = [agentA, agentB, noteC].filter { canvas.tileWearsRing($0) }.count
+        check(rings + antsInGroup == 3,
+            "\(label): a three-tile group drew \(rings) selection rings beside \(antsInGroup) focus rings")
+        if autoLayout {
+            let directory = URL(fileURLWithPath: "qa-runs/canvas-pointer-path", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let group = canvas.tileSelection.qaOverlay?.groupRect.insetBy(dx: -30, dy: -30) ?? canvas.bounds
+            let around = group.intersection(canvas.bounds)
+            for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                window.appearance = NSAppearance(named: appearance)
+                canvas.layoutSubtreeIfNeeded()
+                canvas.displayIfNeeded()
+                guard let bitmap = canvas.bitmapImageRepForCachingDisplay(in: around) else { continue }
+                canvas.cacheDisplay(in: around, to: bitmap)
+                try bitmap.representation(using: .png, properties: [:])?
+                    .write(to: directory.appendingPathComponent("selection-group-zoom\(zoom)-\(name).png"))
+            }
+            window.appearance = nil
+        }
         // A single tile's own corner still resizes it while a group is selected.
         try resizeCorners("with a group selected")
         try click(try header(agentA))
@@ -242,6 +264,8 @@ enum CanvasPointerPathChecks {
         try click(try header(agentB))
         check(canvas.tileSelection.ids == [agentB],
             "\(label): a plain click after a multi-selection selected \(canvas.tileSelection.ids)")
+        check(canvas.tileSelection.qaOverlay?.qaDrawnRingCount ?? 0 == 0,
+            "\(label): one selected tile drew a selection ring on top of its focus ring")
         check(broker.activeSurface == .tile(agentB),
             "\(label): a plain title-bar click after a multi-selection left focus on \(String(describing: broker.activeSurface))")
 

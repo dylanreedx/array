@@ -9,7 +9,7 @@ final class CanvasTileSelection {
     private(set) var ids: Set<UUID> = []
     private var overlay: TileSelectionOverlay?
     private var consumedHeaderClick = false
-    private var worldFrames: [TileFrame] = []
+    private var worldFrames: [(id: UUID, frame: TileFrame)] = []
     private struct Gesture {
         let snapshot: TileSelectionGeometry.Snapshot
         let start: NSPoint
@@ -97,7 +97,7 @@ final class CanvasTileSelection {
             frames = gesture.snapshot.translated(byWorldDelta: delta)
         }
         guard let frames else { cancel(); return true }
-        worldFrames = Array(frames.values)
+        worldFrames = frames.map { ($0.key, $0.value) }
         guard canvas.applySelectionFrames(frames) else {
             cancel()
             return true
@@ -186,14 +186,15 @@ final class CanvasTileSelection {
         }
         let tiles = selectedWorldTiles()
         ids.formIntersection(tiles.map(\.id))
-        worldFrames = tiles.map(\.frame)
+        worldFrames = tiles.map { ($0.id, $0.frame) }
         updatePresentation()
     }
 
     /// A camera change touches selected rectangles only, never the tile index.
     func updatePresentation() {
         guard let canvas else { return }
-        guard !worldFrames.isEmpty else {
+        // One tile draws nothing: the focus ants already mark it.
+        guard worldFrames.count > 1 else {
             overlay?.isHidden = true
             return
         }
@@ -204,7 +205,10 @@ final class CanvasTileSelection {
         }
         guard let overlay else { return }
         if overlay.frame != canvas.bounds { overlay.frame = canvas.bounds }
-        overlay.rects = worldFrames.map { CanvasEngine.tileScreenFrame($0, viewport: canvas.viewport) }
+        overlay.rects = worldFrames.map { CanvasEngine.tileScreenFrame($0.frame, viewport: canvas.viewport) }
+        overlay.ringed = worldFrames.map { !canvas.tileWearsRing($0.id) }
+        overlay.style = canvas.focusRingStyle
+        overlay.tileScale = CGFloat(canvas.viewport.zoom)
         overlay.isHidden = false
         overlay.needsDisplay = true
         canvas.window?.invalidateCursorRects(for: overlay)
@@ -215,10 +219,20 @@ final class CanvasTileSelection {
 
 /// One viewport-sized overlay, regardless of selection spread. Only handles
 /// hit-test: native tile bodies and title controls remain interactive.
+///
+/// It draws nothing for one tile: the focus ants already mark it. A group's
+/// members get rings in the ants' own colour, gap, radius and dash, except a
+/// member that already wears the ants or the attention ring.
 @MainActor
 final class TileSelectionOverlay: NSView {
     weak var selection: CanvasTileSelection?
     var rects: [CGRect] = []
+    /// Parallel to `rects`: false where the tile already wears a ring.
+    var ringed: [Bool] = []
+    var style: (color: NSColor, gap: CGFloat) = (.controlAccentColor, CGFloat(FocusBorderConfig.defaultGap))
+    var tileScale: CGFloat = 1
+    /// How far the group frame sits outside the member rings.
+    static let groupInset: CGFloat = 6
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
     init(selection: CanvasTileSelection) {
@@ -227,7 +241,9 @@ final class TileSelectionOverlay: NSView {
         setAccessibilityElement(false)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    var groupRect: CGRect { rects.reduce(CGRect.null) { $0.union($1) }.insetBy(dx: -5, dy: -5) }
+    var groupRect: CGRect {
+        rects.reduce(CGRect.null) { $0.union($1) }.insetBy(dx: -(style.gap + Self.groupInset), dy: -(style.gap + Self.groupInset))
+    }
     var handles: [(ResizeEdge, CGRect)] {
         let r = groupRect
         guard rects.count > 1, !r.isNull, !r.isInfinite else { return [] }
@@ -241,6 +257,8 @@ final class TileSelectionOverlay: NSView {
                 (.left, CGPoint(x: r.minX, y: r.midY))]
         return positions.map { ($0.0, CGRect(x: $0.1.x - 4, y: $0.1.y - 4, width: 8, height: 8)) }
     }
+    /// QA: how many member rings the overlay draws right now.
+    var qaDrawnRingCount: Int { isHidden || rects.count < 2 ? 0 : ringed.filter { $0 }.count }
     func edge(at point: NSPoint) -> ResizeEdge? {
         handles.first { $0.1.insetBy(dx: -3, dy: -3).contains(point) }?.0
     }
@@ -251,24 +269,31 @@ final class TileSelectionOverlay: NSView {
         return edge(at: local) == nil ? nil : self
     }
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.controlAccentColor.withAlphaComponent(0.7).setStroke()
-        for rect in rects where rect.insetBy(dx: -3, dy: -3).intersects(dirtyRect) {
-            let outline = NSBezierPath(roundedRect: rect.insetBy(dx: -2, dy: -2), xRadius: 8, yRadius: 8)
-            outline.lineWidth = FocusBorderOverlayView.lineWidth
-            outline.stroke()
-        }
-        if rects.count > 1 {
-            let path = NSBezierPath(rect: groupRect)
-            path.lineWidth = FocusBorderOverlayView.lineWidth
-            path.setLineDash([4, 3], count: 2, phase: 0)
+        guard rects.count > 1 else { return }
+        let lineWidth = FocusBorderOverlayView.lineWidth
+        let dash = FocusBorderOverlayView.dashPattern.map { CGFloat($0.doubleValue) }
+        let ringRadius = FocusBorderOverlayView.ringRadius(tileScale: tileScale, gap: style.gap)
+        style.color.setStroke()
+        for (rect, ringed) in zip(rects, ringed) where ringed {
+            // The ants' own geometry: the stroke sits inside the gap-outset rect.
+            let ring = rect.insetBy(dx: -style.gap + lineWidth / 2, dy: -style.gap + lineWidth / 2)
+            guard ring.insetBy(dx: -lineWidth, dy: -lineWidth).intersects(dirtyRect) else { continue }
+            let path = NSBezierPath(roundedRect: ring, xRadius: ringRadius, yRadius: ringRadius)
+            path.lineWidth = lineWidth
+            path.setLineDash(dash, count: dash.count, phase: 0)
             path.stroke()
         }
+        let groupRadius = ringRadius == 0 ? 0 : ringRadius + Self.groupInset
+        let group = NSBezierPath(roundedRect: groupRect.insetBy(dx: 0.5, dy: 0.5), xRadius: groupRadius, yRadius: groupRadius)
+        group.lineWidth = 1
+        style.color.withAlphaComponent(style.color.alphaComponent * 0.5).setStroke()
+        group.stroke()
         for (_, rect) in handles {
+            let handle = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 2, yRadius: 2)
+            handle.lineWidth = 1
             NSColor.windowBackgroundColor.setFill()
-            let handle = NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2)
-            handle.lineWidth = FocusBorderOverlayView.lineWidth
             handle.fill()
-            NSColor.controlAccentColor.setStroke()
+            style.color.withAlphaComponent(1).setStroke()
             handle.stroke()
         }
     }

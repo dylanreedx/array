@@ -17,6 +17,12 @@ agent-reference dragging and file-preview work.
   group and skipped focus, so after one Shift-select no title-bar click
   focused anything. `--canvas-pointer-path-check` drives that click through
   the real window and focus monitor.)
+- One outline per tile. A single selected tile draws nothing extra: the focus
+  ants already mark it. A group's members get rings in the ants' own colour,
+  gap, radius and dash (`FocusBorderOverlayView.ringRadius`), except the member
+  already wearing the ants or the attention ring. (0.7.31 drew a second, solid
+  ring on every selected tile at a fixed 8pt radius, so a clicked tile wore two
+  outlines that never lined up.)
 - One outer selection rectangle has eight resize handles. Edges scale one axis;
   corners scale both independently. The opposite edge/corner stays fixed. Tile
   frames and gaps scale; native text/browser/terminal content reflows at its new
