@@ -8148,6 +8148,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// built next to it.
     private static let agentActivityReplicaId = UUID(uuidString: "75000000-0000-4000-8000-00000000D35A")!
 
+    /// What a companion publish sends: the one snapshot the desktop is showing.
+    ///
+    /// It rebuilds from disk only while that snapshot has never been reconciled —
+    /// the startup and pairing publishes can run before any surface refresh, and
+    /// returning the stored value alone would send `.empty`. After that the
+    /// snapshot is already current: agent activity folds into it as it happens and
+    /// structural changes rebuild it. Rebuilding here on every publish read the
+    /// registry, every project canvas and every session folder on the main thread
+    /// 0.5 s after each burst of agent activity — 6% of the main thread in Dylan's
+    /// CPU spikes (2026-10-26).
+    func companionActivitySnapshot() throws -> ActivityLogSnapshot {
+        if !agentActivity.isReconciled { rebuildAgentActivitySnapshot() }
+        // P3.2: SKIP the publish rather than send an empty inventory. The provider
+        // is `async throws` and `publishCurrentDesktopSnapshot` calls it BEFORE
+        // either `demux.send`, so throwing here leaves the phone holding the last
+        // inventory it was given instead of being told every agent vanished.
+        guard agentActivity.isReconciled else {
+            throw CompanionSyncAppError.managedSessionsUnreconciled
+        }
+        return agentActivity.snapshot
+    }
+
     /// Rebuilds `agentActivity` from `AgentInventory` (P2B.1) — the one fold over
     /// terminal sessions and agents — and nothing else. Every consumer reads the
     /// result; none of them re-derives a status.
@@ -11365,27 +11387,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // sessions only, with its own status map — which is how a status could be
             // on the phone and not in the sidebar, and vice versa.
             //
-            // DELIBERATE DEVIATION from the packet's "returns it directly": it
-            // recomputes first, as a reader (see the invariant at
-            // `AgentActivitySurface`). Returning the stored value alone would publish
-            // `.empty` on the startup and pairing publishes, which run before any
-            // surface refresh has happened — the phone would show an empty inbox
-            // until something else moved. `--agent-inventory-wiring-check` gates that
-            // this closure holds NO derivation of its own.
+            // `--agent-inventory-wiring-check` gates that this holds NO derivation of
+            // its own (see `companionActivitySnapshot`).
             activitySnapshot: { [weak self] in
                 try await MainActor.run {
                     guard let self else { return ActivityLogSnapshot.empty }
-                    self.rebuildAgentActivitySnapshot()
-                    // P3.2: SKIP the publish rather than send an empty inventory. The
-                    // provider is `async throws` and `publishCurrentDesktopSnapshot`
-                    // calls it BEFORE either `demux.send`, so throwing here leaves the
-                    // phone holding the last inventory it was given instead of being
-                    // told every agent vanished. The startup and pairing publishes are
-                    // exactly the two that can run before the sweep has committed.
-                    guard self.agentActivity.isReconciled else {
-                        throw CompanionSyncAppError.managedSessionsUnreconciled
-                    }
-                    return self.agentActivity.snapshot
+                    return try self.companionActivitySnapshot()
                 }
             },
             transcriptChannels: {
@@ -33332,10 +33339,12 @@ extension AppDelegate {
             .appendingPathComponent("Sources/ContinuumRevived/App/ContinuumApp.swift"),
         encoding: .utf8
     )
-    guard let closureStart = appSource.range(of: "activitySnapshot: { [weak self] in"),
-          let closureEnd = appSource.range(of: "freshnessPublisher:", range: closureStart.upperBound..<appSource.endIndex) else {
-        throw CheckError.failed("could not find the companion activitySnapshot closure — this scan is looking in the wrong place")
+    guard let closureStart = appSource.range(of: "func companionActivitySnapshot() throws -> ActivityLogSnapshot {"),
+          let closureEnd = appSource.range(of: "private func rebuildAgentActivitySnapshot(", range: closureStart.upperBound..<appSource.endIndex) else {
+        throw CheckError.failed("could not find companionActivitySnapshot — this scan is looking in the wrong place")
     }
+    try expect(appSource.contains("return try self.companionActivitySnapshot()"),
+               "the companion activitySnapshot closure must publish through companionActivitySnapshot()")
     let closureBody = String(appSource[closureStart.upperBound..<closureEnd.lowerBound])
         .split(separator: "\n", omittingEmptySubsequences: false)
         .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
@@ -33346,6 +33355,16 @@ extension AppDelegate {
         try expect(closureBody.contains(forbidden) == false,
                    "the companion closure must not build its own inventory — it names \(forbidden)")
     }
+    // A publish sends the snapshot the desktop already holds: once it is reconciled,
+    // reading it must not rebuild from disk (it did on every publish, 0.5 s after
+    // each burst of agent activity — 6% of the main thread in Dylan's spikes).
+    _ = try app.companionActivitySnapshot()
+    try expect(app.agentActivity.isReconciled, "the fixture's activity snapshot must be reconciled by now")
+    let rebuildsBefore = WorkspaceSwitchCounters.activitySnapshotRebuilds
+    let published = try app.companionActivitySnapshot()
+    try expect(WorkspaceSwitchCounters.activitySnapshotRebuilds == rebuildsBefore,
+               "a companion publish rebuilt the activity snapshot from disk \(WorkspaceSwitchCounters.activitySnapshotRebuilds - rebuildsBefore) time(s)")
+    try expect(published == app.agentActivity.snapshot, "a companion publish must send the snapshot the desktop shows")
 
     // MARK: 7 · the nav-cycle order reads the same statuses
 
