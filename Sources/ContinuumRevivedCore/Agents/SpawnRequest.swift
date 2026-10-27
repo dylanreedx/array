@@ -275,6 +275,13 @@ public struct AgentRunnerLaunch: Sendable {
 /// name. `ClaudeAgentRunner` already had this exact method.
 public protocol SubagentEventObserving: AnyObject {
     func observeSubagentEvents(_ handler: @escaping @Sendable (String, AgentRuntimeEvent) -> Void)
+    /// A child's activity that carries no transcript content (claude's
+    /// `task_progress`), keyed like `observeSubagentEvents`.
+    func observeSubagentProgress(_ handler: @escaping @Sendable (String) -> Void)
+}
+
+extension SubagentEventObserving {
+    public func observeSubagentProgress(_ handler: @escaping @Sendable (String) -> Void) {}
 }
 
 /// Local-only structured activity from a provider that owns its subagents and

@@ -38,7 +38,7 @@ func runAgentPresenceChecks() async throws {
     }
     if wants("land") { summary.append(try await AgentPresenceChecks.checkOwnActionsVisiblyLand(originalPath: originalPath)) }
     if wants("n1") { summary.append(try await AgentPresenceChecks.checkUnsolicitedTurnAfterStopSettles()) }
-    if wants("background") { summary.append(try await AgentPresenceChecks.checkMirroredBackgroundChildLifetime()) }
+    if wants("background") { summary.append(try await AgentPresenceChecks.checkMirroredBackgroundChildLifetime(originalPath: originalPath)) }
     if wants("activity") { summary.append(try AgentPresenceChecks.checkLastActivityMovesOnFrames()) }
     print("AgentPresenceChecks passed: " + summary.joined(separator: "; "))
 }
@@ -591,6 +591,117 @@ enum AgentPresenceChecks {
     }
 
 
+    /// A parent's result is a turn boundary, not the end of a persistent
+    /// Claude session's background child.
+    ///
+    /// The first three sections run the PRODUCTION runner and translator
+    /// against the fake claude: whether a child is still running is claude's
+    /// own stream to decide (`Fixtures/claude-async-subagent.jsonl`, replayed),
+    /// never a flag a test runner sets. The scripted runner after them only
+    /// drives the supervisor's session-ending paths, which no stream can reach.
+    static func checkMirroredBackgroundChildLifetime(originalPath: String) async throws -> String {
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("ContinuumRevivedCoreChecks/Fixtures/claude-async-subagent.jsonl")
+        for mode in ["async-launch"] {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("array-presence-stream-\(mode)-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let bin = root.appendingPathComponent("bin", isDirectory: true)
+            try AgentSteeringQAFakes.install(.claude, in: bin)
+            try FileManager.default.copyItem(at: fixture, to: bin.appendingPathComponent("replay.jsonl"))
+            let work = root.appendingPathComponent("work", isDirectory: true)
+            try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+            setenv("PATH", "\(bin.path):\(originalPath)", 1)
+            defer { setenv("PATH", originalPath, 1) }
+            let supervisor = AgentSupervisor(
+                store: AgentStore(applicationSupportDirectory: root),
+                makeRunner: AgentSupervisor.productionRunner,
+                idleRunnerTimeout: 60)
+            defer { supervisor.stopAll() }
+            let parent = supervisor.spawn(role: nil, prompt: nil, cwd: work,
+                harness: .claudeCode, model: "anthropic/claude-haiku-4-5-20251001", thinking: "low")
+            switch mode {
+            case "async-launch":
+                try expect(supervisor.send("REPLAY", to: parent), "\(mode): parent refused")
+                let child = AgentID(rawValue: AgentRecord.observedChildID(
+                    parentAgentID: parent.rawValue, toolUseID: "toolu_0164hvbb7oKHD8HqnBRJVh8E"))
+                try await eventually("\(mode): the background child was never adopted") { supervisor.records[child] != nil }
+                try await eventually("\(mode): the parent's launching turn never ended") {
+                    supervisor.records[parent]?.latestTerminalEvent != nil
+                }
+                try expect(supervisor.records[child]?.latestTerminalEvent == nil
+                           && supervisor.turnSnapshot(for: child)?.state == .working,
+                    "\(mode): the async_launched acknowledgement settled the background child at launch (\(String(describing: supervisor.records[child]?.latestTerminalEvent?.outcome)))")
+                try await eventually("\(mode): the child's own notification, after the parent's result, never settled it") {
+                    supervisor.records[child]?.latestTerminalEvent?.outcome == .succeeded
+                }
+                try expect(supervisor.lastActivity(for: child) != nil,
+                    "\(mode): the headless child's frames did not move its last activity")
+            default:
+                break
+            }
+        }
+        return try await checkMirroredChildSessionEnds()
+            + "; a background child stays working past its launch acknowledgement and the parent's result and settles on its own notification"
+    }
+
+    /// `.plans/87` Step 3.4 — a Codex child is running only while its session
+    /// is. The runner here is the provider's whole family in one process, and
+    /// the process ends with a grandchild's turn still open and no word about
+    /// it, as a crash leaves things.
+    static func checkCodexDescendantsEndWithSession() async throws -> String {
+        final class FamilyRunner: AgentRunning, ProviderSubagentActivityObserving, @unchecked Sendable {
+            private let lock = NSLock()
+            private var activity: (@Sendable (ProviderSubagentActivity) -> Void)?
+            var keepsSessionAliveBetweenTurns: Bool { false }
+            var canAcceptAnotherTurn: Bool { true }
+            var commandCapabilities: AgentSessionCommandCapabilities { ScriptedAgentRunner(script: []).commandCapabilities }
+            func observeProviderSubagentActivity(_ handler: @escaping @Sendable (ProviderSubagentActivity) -> Void) {
+                lock.withLock { activity = handler }
+            }
+            func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+                let send = lock.withLock { activity }
+                onEvent(.turnStarted(threadId: "root", turnId: "root-turn"))
+                send?(.primaryThread(providerThreadID: "root"))
+                send?(.childAnnounced(parentProviderThreadID: "root", childProviderThreadID: "child",
+                                      sourceItemID: "call-child", displayLabel: "child"))
+                send?(.threadEvent(providerThreadID: "child", event: .turnStarted(threadId: "child", turnId: "c")))
+                send?(.childAnnounced(parentProviderThreadID: "child", childProviderThreadID: "grandchild",
+                                      sourceItemID: "call-grandchild", displayLabel: "grandchild"))
+                send?(.threadEvent(providerThreadID: "grandchild", event: .turnStarted(threadId: "grandchild", turnId: "g")))
+                send?(.threadEvent(providerThreadID: "child", event: .turnCompleted(threadId: "child", turnId: "c", outcome: .completed, errorMessage: nil)))
+                Thread.sleep(forTimeInterval: 0.2)
+                onEvent(.turnCompleted(threadId: "root", turnId: "root-turn", outcome: .completed, errorMessage: nil))
+            }
+            func stop() {}
+            func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+            func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-presence-codex-family-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root),
+                                         makeRunner: { _ in FamilyRunner() })
+        defer { supervisor.stopAll() }
+        let parent = supervisor.spawn(role: nil, prompt: nil, cwd: root,
+            harness: .codex, model: "openai-codex/gpt-5.6-sol", thinking: "low")
+        try expect(supervisor.send("delegate", to: parent), "codex family: parent refused")
+        let child = AgentID(rawValue: AgentRecord.observedChildID(parentAgentID: parent.rawValue, toolUseID: "call-child"))
+        let grandchild = AgentID(rawValue: AgentRecord.observedChildID(parentAgentID: child.rawValue, toolUseID: "call-grandchild"))
+        try await eventually("codex family: the grandchild was never adopted") { supervisor.records[grandchild] != nil }
+        try await eventually("codex family: the session never ended") {
+            !supervisor.isRunning(parent) && supervisor.records[parent]?.latestTerminalEvent != nil
+        }
+        try await Task.sleep(for: .milliseconds(80))
+        try expect(supervisor.records[child]?.latestTerminalEvent?.outcome == .succeeded,
+                   "codex family: the child's own completion must stand, got \(String(describing: supervisor.records[child]?.latestTerminalEvent?.outcome))")
+        try expect(supervisor.records[grandchild]?.latestTerminalEvent?.outcome == .interrupted
+                   && supervisor.turnSnapshot(for: grandchild)?.state != .working,
+                   "codex family: a grandchild whose session ended was left \(String(describing: supervisor.turnSnapshot(for: grandchild)?.state)) with outcome \(String(describing: supervisor.records[grandchild]?.latestTerminalEvent?.outcome))")
+        return "a Codex descendant still open when its session ends settles interrupted; a finished one keeps its outcome"
+    }
+
     /// `.plans/87` Step 3.6 — one last-activity time per agent, owned by the
     /// supervisor: every timeline frame and streamed delta moves it, at most
     /// once a second, and a meter reading does not.
@@ -620,9 +731,9 @@ enum AgentPresenceChecks {
         return "last activity moves on frames and streaming, once a second, and not on meter readings"
     }
 
-    /// A parent's result is a turn boundary, not the end of a persistent
-    /// Claude session's background child. Exercise the real bound-runner path.
-    static func checkMirroredBackgroundChildLifetime() async throws -> String {
+    /// The supervisor's session-ending paths, which settle children no stream
+    /// can: exit, reap, settings, /clear, dead reuse and stopAll.
+    private static func checkMirroredChildSessionEnds() async throws -> String {
         final class BackgroundRunner: AgentSteeringRunning, AgentIdleExitReporting, @unchecked Sendable {
             private let lock = NSLock()
             private let gate = DispatchSemaphore(value: 0)

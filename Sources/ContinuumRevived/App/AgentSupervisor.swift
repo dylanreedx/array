@@ -3058,12 +3058,28 @@ final class AgentSupervisor {
         // for every other harness — including pi, whose delegation Dylan was
         // actually using.
         if let observing = runner as? SubagentEventObserving {
+            // A background child keeps working after the parent's result, while
+            // the session sits in the idle pool or runs a turn claude began on
+            // its own. Its children belong to the SESSION, so the owner test is
+            // the runner's identity, not the turn's generation: adopting that
+            // next turn mints a new generation while this one's frames are
+            // already queued behind it.
             observing.observeSubagentEvents { [weak self] toolUseID, event in
                 DispatchQueue.main.async {
                     guard let self,
-                          self.runnerGenerationTokens[id] == runnerGeneration,
-                          self.runners[id] === runner else { return }
+                          self.runners[id] === runner || self.idleSessionRunners[id] === runner
+                    else { return }
                     self.deliverSubagentEvent(event, parent: id, toolUseID: toolUseID)
+                }
+            }
+            observing.observeSubagentProgress { [weak self] toolUseID in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.runners[id] === runner || self.idleSessionRunners[id] === runner
+                    else { return }
+                    let childID = AgentID(rawValue: AgentRecord.observedChildID(
+                        parentAgentID: id.rawValue, toolUseID: toolUseID))
+                    self.noteActivity(childID)
                 }
             }
         }
