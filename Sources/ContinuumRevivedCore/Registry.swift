@@ -121,6 +121,18 @@ public struct Registry: Codable, Equatable, Sendable {
         return true
     }
 
+    /// A palette name, or nil to go back to the derived default. Anything off the
+    /// palette is refused rather than stored: a name the renderer cannot resolve
+    /// would draw as teal and look like a choice nobody made.
+    @discardableResult
+    public mutating func setWorkspaceColour(id: UUID, colour: String?, now: Date) -> Bool {
+        guard let idx = workspaces.firstIndex(where: { $0.id == id }) else { return false }
+        if let colour, !ZoneColorConfig.palette.contains(colour) { return false }
+        workspaces[idx].colour = colour
+        workspaces[idx].updatedAt = now
+        return true
+    }
+
     /// Projects are workspace-owned, not shared layout ingredients. Legacy
     /// registries that name the same project from multiple workspaces are left
     /// untouched and reported so the user can explicitly move the project.
@@ -398,6 +410,11 @@ public struct WorkspaceEntry: Codable, Equatable, Sendable {
     /// current workspace is deleted; nil for one never mounted since this field
     /// existed.
     public var lastActiveAt: Date?
+    // Plan: .plans/86-workspace-filter/README.md
+    /// A `ZoneColorConfig.palette` name the user chose for this workspace — the
+    /// sidebar's dots and card edge marks. nil until one is chosen; read it through
+    /// `resolvedColour`, which never is.
+    public var colour: String?
 
     public init(
         id: UUID,
@@ -405,7 +422,8 @@ public struct WorkspaceEntry: Codable, Equatable, Sendable {
         projectIds: [UUID],
         createdAt: Date,
         updatedAt: Date,
-        lastActiveAt: Date? = nil
+        lastActiveAt: Date? = nil,
+        colour: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -413,6 +431,17 @@ public struct WorkspaceEntry: Codable, Equatable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.lastActiveAt = lastActiveAt
+        self.colour = colour
+    }
+
+    /// The chosen colour, else one picked from the id. Derived rather than written
+    /// at creation, so no registry is rewritten just by being read.
+    public var resolvedColour: String { colour ?? Self.defaultColour(for: id) }
+
+    public static func defaultColour(for id: UUID) -> String {
+        let palette = ZoneColorConfig.palette
+        let bytes = withUnsafeBytes(of: id.uuid) { Array($0) }
+        return palette[bytes.reduce(0) { ($0 &* 31 &+ Int($1)) & 0xFFFF } % palette.count]
     }
 }
 

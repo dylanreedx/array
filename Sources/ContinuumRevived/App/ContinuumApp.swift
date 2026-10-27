@@ -18917,6 +18917,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    // Plan: .plans/86-workspace-filter/README.md
+    @discardableResult
+    private func setWorkspaceColour(workspaceId: UUID, colour: String) -> Bool {
+        guard let registryStore else { return false }
+        do {
+            var registry = try registryStore.loadOrEmpty()
+            guard registry.setWorkspaceColour(id: workspaceId, colour: colour, now: Date()) else { return false }
+            try registryStore.save(registry)
+            // A structural reload: it is the one that re-reads the registry.
+            reloadWorkspaceSidebar()
+            return true
+        } catch {
+            fputs("Set workspace colour failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage("Couldn't save the workspace colour: \(error.localizedDescription)", kind: .error)
+            return false
+        }
+    }
+
     @discardableResult
     private func renameWorkspace(workspaceId: UUID, name: String) -> Bool {
         guard let registryStore else { return false }

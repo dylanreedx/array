@@ -4599,6 +4599,25 @@ do {
     expect(mutable.renameWorkspace(id: created.id, name: "  Client  ", now: Date(timeIntervalSince1970: 1_700_001_500)), "Registry.renameWorkspace updates existing workspace")
     expect(mutable.workspaces.first(where: { $0.id == created.id })?.name == "Client", "Registry.renameWorkspace stores trimmed name")
     expect(!mutable.renameWorkspace(id: created.id, name: "   ", now: Date()), "Registry.renameWorkspace rejects blank names")
+    // Plan: .plans/86-workspace-filter/README.md — the sidebar's workspace colour.
+    expect(mutable.workspaces.first(where: { $0.id == created.id })?.colour == nil
+           && ZoneColorConfig.palette.contains(WorkspaceEntry.defaultColour(for: created.id)),
+           "a workspace nobody coloured resolves to a palette colour without storing one")
+    expect(mutable.setWorkspaceColour(id: created.id, colour: "orange", now: Date()),
+           "Registry.setWorkspaceColour stores a palette colour")
+    expect(!mutable.setWorkspaceColour(id: created.id, colour: "chartreuse", now: Date()),
+           "Registry.setWorkspaceColour refuses a name off the palette")
+    do {
+        let coloured = try JSONDecoder().decode(Registry.self, from: JSONEncoder().encode(mutable))
+        expect(coloured.workspaces.first(where: { $0.id == created.id })?.resolvedColour == "orange",
+               "a chosen workspace colour survives the registry round trip")
+        var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(mutable)) as? [String: Any] ?? [:]
+        legacy["workspaces"] = (legacy["workspaces"] as? [[String: Any]])?.map { $0.filter { $0.key != "colour" } }
+        let old = try JSONDecoder().decode(Registry.self, from: JSONSerialization.data(withJSONObject: legacy))
+        expect(old.workspaces.allSatisfy { $0.colour == nil }, "a registry written before colours decodes with none")
+    } catch {
+        expect(false, "registry colour round trip threw: \(error)")
+    }
     expect(mutable.deleteWorkspace(id: workspaceId, replacementId: created.id, now: Date(timeIntervalSince1970: 1_700_002_000)), "Registry.deleteWorkspace removes non-last workspace")
     expect(!mutable.workspaces.contains(where: { $0.id == workspaceId }), "Registry.deleteWorkspace removes the registry entry")
     expect(mutable.lastActiveWorkspaceId == created.id, "Registry.deleteWorkspace reassigns last active workspace")
