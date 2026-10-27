@@ -345,7 +345,8 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
             items: items, selectedID: selectedID,
             presentation: popoverPresentation,
             anchor: bounds, relativeTo: self,
-            takesFocus: !presentsWithoutFocusForQA,
+            placementFrame: presentsOffscreenForQA ? window?.frame : nil,
+            takesFocus: !presentsWithoutFocusForQA && !presentsOffscreenForQA,
             onSelection: { [weak self] item in
                 guard let self else { return }
                 self.handleSelection(item)
@@ -369,6 +370,9 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     /// A check that renders the open list on the user's screen must not take
     /// their keyboard: a key panel receives what they type in another app.
     var presentsWithoutFocusForQA = false
+    /// A check driving the real trigger: the popover opens inside the (offscreen)
+    /// check window instead of on a screen, and without the keyboard.
+    var presentsOffscreenForQA = false
     var qaPresentedSurfaceFrame: NSRect? { popoverController.surfaceFrame }
 
     func handleSelection(_ item: ChoiceItem) {

@@ -218,6 +218,7 @@ check --sidebar-liveness-check
 check --sidebar-pills-check
 check --sidebar-production-corpus-check
 check --sidebar-push-coalescing-check
+check --sidebar-scope-popover-check
 check --sidebar-screenshot-check
 check --sidebar-truth-check
 check --sidebar-ux-check
@@ -531,6 +532,7 @@ leg run_app_check .build/debug/Array --sidebar-hide-any-row-check
 leg run_app_check .build/debug/Array --sidebar-pills-check
 leg run_app_check .build/debug/Array --sidebar-production-corpus-check
 leg run_app_check .build/debug/Array --sidebar-push-coalescing-check
+leg run_app_check .build/debug/Array --sidebar-scope-popover-check
 leg run_app_check .build/debug/Array --sidebar-screenshot-check
 leg run_app_check .build/debug/Array --sidebar-truth-check
 leg run_app_check .build/debug/Array --sidebar-ux-check

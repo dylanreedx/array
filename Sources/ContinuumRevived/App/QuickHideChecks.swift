@@ -578,6 +578,89 @@ enum QuickHideChecks {
             + "and Show only; Hide all is one batch under one undo; Show only solos the host's pill; elsewhere keeps the row menu"
     }
 
+    // MARK: - 5. Scope popover fixes
+
+    /// `--sidebar-scope-popover-check`. Opened by a real click on the trigger:
+    /// `This workspace` carries the only tick (no grey follow on the workspace on
+    /// screen); `This Mac` is a checkbox that ticks and unticks; the projects fold
+    /// into `Projects ›`, whose drill-in counts each one and dots who needs you;
+    /// every count is top-level agents; with every workspace ticked the trigger
+    /// reads `All workspaces`.
+    static func runScopePopover() throws -> String {
+        let h = try makeHarness(name: "scope-popover")
+        defer { h.tearDown() }
+        let inbox = h.inbox
+        // A subagent: the popover counts its parent once.
+        _ = try h.delegate.qaAgentSupervisor.spawn(
+            role: "Explore", prompt: nil, cwd: h.fixture.pbRoot, harness: .pi,
+            model: "openai-codex/gpt-5.6-sol", thinking: "high",
+            projectId: h.fixture.projectPb, projectRoot: h.fixture.pbRoot, parentAgentID: h.fixture.agentId)
+        h.delegate.qaRefreshAgentSurfaces()
+        inbox.setScope(.currentWorkspace)
+        inbox.layoutForQA()
+        let trigger = inbox.scopeButtonForQA
+        trigger.presentsOffscreenForQA = true
+        defer { trigger.dismissPopoverForQA() }
+        func items() -> [ChoiceItem] { trigger.qaPresentedItems }
+        func item(_ id: String) -> ChoiceItem? { items().first { $0.id == id } }
+        let a = InboxScope.workspaceID(h.workspaceA, "").storageValue
+        let b = InboxScope.workspaceID(h.workspaceB, "").storageValue
+
+        try click(trigger)
+        try expect(trigger.qaIsPopoverPresented, "a click on the trigger opens the scope popover")
+        photograph(inbox, "5-popover-this-workspace", panel: trigger.qaPresentedList)
+        let ticked = items().filter { $0.check == .on || $0.check == .following }.map(\.title)
+        try expect(ticked == ["This workspace"],
+                   "This workspace carries the ONLY tick, no grey follow on A — got \(ticked)")
+        try expect(item(InboxScope.thisMac.storageValue)?.check == .off,
+                   "This Mac is a checkbox — got \(String(describing: item(InboxScope.thisMac.storageValue)?.check))")
+        try expect(item(a)?.detail == "3 agents",
+                   "workspace counts are top-level agents (the agent, not its subagent, + tmux + cmux) — got \(item(a)?.detail ?? "nil")")
+        try expect(!items().contains { $0.id.hasPrefix("project:") } && item("projects:open")?.trailing == "3 ›",
+                   "the projects fold into one Projects › row — got \(items().map(\.id))")
+
+        // Drill into Projects: counts and dots, the popover stays open.
+        try expect(trigger.choosePresentedItemForQA(id: "projects:open"), "Projects › must be a row")
+        try expect(trigger.qaIsPopoverPresented, "drilling in keeps the popover open")
+        let pc = InboxScope.project("Pc").storageValue, pb = InboxScope.project("Pb").storageValue
+        try expect(items().first?.id == "projects:back" && item(pb)?.detail == "3 agents"
+                   && item(pc)?.detail == "2 agents · 1 needs you" && item(pc)?.attention == true,
+                   "the drill-in lists each project with top-level counts and a needs-you dot — got \(items().map { "\($0.id): \($0.detail ?? "")" })")
+        photograph(inbox, "5-popover-projects", panel: trigger.qaPresentedList)
+        // Closed while drilled in, it reopens on the top level.
+        trigger.dismissPopoverForQA()
+        try click(trigger)
+        try expect(item("projects:open") != nil && item(pc) == nil,
+                   "closing inside Projects › reopens on the top level — got \(items().map(\.id))")
+        try expect(trigger.choosePresentedItemForQA(id: "projects:open"), "Projects › must be a row again")
+        try expect(trigger.choosePresentedItemForQA(id: pc), "Pc must be pickable")
+        try expect(inbox.scope == .project("Pc") && !trigger.qaIsPopoverPresented,
+                   "picking a project scopes to it and closes — got \(inbox.scope.storageValue)")
+
+        // This Mac ticks and unticks, staying open like a checkbox.
+        try click(trigger)
+        try expect(item("projects:open") != nil, "the popover reopens on the top level, not inside Projects")
+        try expect(trigger.choosePresentedItemForQA(id: InboxScope.thisMac.storageValue), "This Mac must be a row")
+        try expect(inbox.scope == .thisMac && trigger.qaIsPopoverPresented && item(InboxScope.thisMac.storageValue)?.check == .on,
+                   "ticking This Mac shows everything and keeps the popover open — got \(inbox.scope.storageValue)")
+        try expect(trigger.choosePresentedItemForQA(id: InboxScope.thisMac.storageValue), "This Mac must untick")
+        try expect(inbox.scope == .all && item(InboxScope.thisMac.storageValue)?.check == .off,
+                   "unticking This Mac goes back to every agent — got \(inbox.scope.storageValue)")
+
+        // Every workspace ticked reads All workspaces.
+        try expect(trigger.choosePresentedItemForQA(id: InboxScope.currentWorkspace.storageValue), "This workspace must be a row")
+        try expect(trigger.choosePresentedItemForQA(id: b), "B must be a row")
+        try expect(inbox.scope.workspaceFilter?.shows(workspace: h.workspaceA, current: h.workspaceA) == true
+                   && inbox.scope.workspaceFilter?.shows(workspace: h.workspaceB, current: h.workspaceA) == true,
+                   "setup: A and B both ticked — got \(inbox.scope.storageValue)")
+        try expect(inbox.scopeTriggerTitleForQA == "All workspaces",
+                   "every workspace ticked reads All workspaces — got '\(inbox.scopeTriggerTitleForQA)'")
+        photograph(inbox, "5-popover-all-workspaces", panel: trigger.qaPresentedList)
+
+        return "QuickHide scope-popover: one tick on This workspace, This Mac a checkbox, Projects › with top-level counts and "
+            + "needs-you dots, top-level workspace counts, All workspaces when every workspace is ticked"
+    }
+
     // MARK: - 1. Toggle pills
 
     /// `--sidebar-pills-check`. One pill per workspace and per outside source,

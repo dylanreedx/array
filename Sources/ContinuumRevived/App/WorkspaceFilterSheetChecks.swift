@@ -259,9 +259,12 @@ enum WorkspaceFilterSheet {
         try expect(reported.last.map { InboxScope(storageValue: $0.storageValue) == $0 } == true,
                    "\(tag): the set is reported to the host in a storable form")
         let rowsInList = trigger.qaPresentedList?.qaItems ?? []
+        // .plans/87: Array is in the set because it is the workspace on screen, and
+        // `This workspace` carries that one tick; Array's own row draws no grey copy.
         try expect(rowsInList.first { $0.id == filmID }?.check == .on
-                   && rowsInList.first { $0.id == InboxScope.workspaceID(array.id, "").storageValue }?.check == .following,
-                   "\(tag): the open list's boxes follow the toggle — Film on, Array following")
+                   && rowsInList.first { $0.id == InboxScope.currentWorkspace.storageValue }?.check == .on
+                   && rowsInList.first { $0.id == InboxScope.workspaceID(array.id, "").storageValue }?.check == .off,
+                   "\(tag): the open list's boxes follow the toggle — Film on, This workspace on, no grey tick on Array")
 
         // Peek: keyboard focus onto Film's row, every other card sinks.
         guard let list = trigger.qaPresentedList,

@@ -1507,6 +1507,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         scopeButton.onFocusChange = { [weak self] id in self?.scopeFocusChanged(id) }
         scopeButton.onPopoverDismiss = { [weak self] in
             self?.colourEditingWorkspace = nil
+            // Closed inside Projects ›: the next open starts at the top level.
+            if self?.projectsDrilled == true {
+                self?.projectsDrilled = false
+                self?.updateScopeMenu()
+            }
             self?.focusedScopeItemID = nil
             self?.setPeek(nil)
         }
@@ -3155,7 +3160,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// so a menu rebuilt under it never resets the label to its first row.
     private func applyScopeTrigger() {
         let names = workspaceNamesById
-        let title = InboxScopeMenu.title(for: effectiveScope, names: names, current: currentWorkspaceId)
+        var title = InboxScopeMenu.title(for: effectiveScope, names: names, current: currentWorkspaceId)
+        // .plans/87: a set that ticks every workspace there is says so, rather than
+        // "3 workspaces" or "Array + Film".
+        if case .workspaces(let filter) = effectiveScope, names.count > 1,
+           names.keys.allSatisfy({ filter.shows(workspace: $0, current: currentWorkspaceId) }) {
+            title = Self.allWorkspacesTitle
+        }
         scopeButton.selectedTitleOverride = title
         scopeButton.selectedID = InboxScope.all.storageValue
         scopeButton.setAccessibilityValue(title)
@@ -3210,6 +3221,24 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         var items = entries.enumerated().map { index, entry in
             choiceItem(for: entry, separatorBefore: index > 0 && entries[index - 1].section != entry.section)
         }
+        // .plans/87: the project picks live behind one `Projects ›` row.
+        let projectEntries = entries.filter { if case .project = $0.kind { return true } else { return false } }
+        if projectsDrilled, !projectEntries.isEmpty {
+            scopeButton.items = projectDrillItems(projectEntries)
+            restoreScopeSelection()
+            return
+        }
+        projectsDrilled = false
+        if let first = items.firstIndex(where: { id in projectEntries.contains { $0.id == id.id } }) {
+            let projectIds = Set(projectEntries.map(\.id))
+            items.removeAll { projectIds.contains($0.id) }
+            var drill = ChoiceItem(id: Self.projectsItemId, title: "Projects", icon: .system("folder"))
+            drill.trailing = "\(projectEntries.count) ›"
+            drill.keepsOpen = true
+            drill.separatorBefore = true
+            items.insert(drill, at: min(first, items.count))
+            if items.indices.contains(first + 1) { items[first + 1].separatorBefore = true }
+        }
         managementItems.removeAll()
         // Keep every management affordance visible. Unsupported actions are
         // disabled in place, rather than disappearing and making the menu's
@@ -3232,12 +3261,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         restoreScopeSelection()
     }
 
+    static let allWorkspacesTitle = "All workspaces"
+    static let projectsItemId = "projects:open"
+    static let projectsBackItemId = "projects:back"
+
     private func choiceItem(for entry: InboxScopeMenuEntry, separatorBefore: Bool) -> ChoiceItem {
         // Checkboxes combine; picks replace, so a pick wears the old menu's
         // checkmark instead of a box. `All agents` is the set's select-all.
+        // `This Mac` is a checkbox since .plans/87.
         let isPick: Bool
         switch entry.kind {
-        case .thisMac, .project, .legacyWorkspace: isPick = true
+        case .project, .legacyWorkspace: isPick = true
         default: isPick = false
         }
         var item = ChoiceItem(id: entry.id, title: entry.title, detail: entry.detail,
@@ -3247,7 +3281,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             case .on: item.check = .on
             case .off: item.check = .off
             case .mixed: item.check = .mixed
-            case .following: item.check = .following
+            // ONE tick for "the workspace on screen": This workspace carries it, and
+            // the workspace's own row does not repeat it in grey (.plans/87).
+            case .following: item.check = .off
             }
         }
         item.trailing = entry.trailing
@@ -3273,6 +3309,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             break
         }
         return item
+    }
+
+    /// The projects, in place of the scopes: each a pick with its top-level count
+    /// and who needs you, behind a Back row.
+    private func projectDrillItems(_ entries: [InboxScopeMenuEntry]) -> [ChoiceItem] {
+        var back = ChoiceItem(id: Self.projectsBackItemId, title: "Projects", icon: .system("chevron.left"))
+        back.keepsOpen = true
+        return [back] + entries.enumerated().map { index, entry in
+            guard case .project(let name) = entry.kind else { return choiceItem(for: entry, separatorBefore: false) }
+            let count = InboxTally.count(allRows.filter { $0.projectName == name })
+            var item = ChoiceItem(id: entry.id, title: entry.title, detail: InboxTally.detail(count),
+                                  icon: .system(entry.check == .on ? "checkmark" : "folder"))
+            item.attention = count.needsYou > 0
+            item.separatorBefore = index == 0
+            return item
+        }
     }
 
     /// The palette, in place of the scopes, for one workspace. Choosing a colour
@@ -3319,6 +3371,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The popover row under the pointer or the keyboard, kept so a toggle can
     /// settle the peek for the list it produces.
     private var focusedScopeItemID: String?
+    /// The popover is showing the projects behind `Projects ›`.
+    private var projectsDrilled = false
 
     private func peekTarget(forScopeItem id: String?) -> UUID? {
         guard colourEditingWorkspace == nil, marksWorkspaces, let id,
@@ -3366,6 +3420,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private func choicePicked(_ item: ChoiceItem) {
+        if item.id == Self.projectsItemId || item.id == Self.projectsBackItemId {
+            projectsDrilled = item.id == Self.projectsItemId
+            setPeek(nil)
+            updateScopeMenu()
+            return
+        }
+        if item.id.hasPrefix("project:") { projectsDrilled = false }
         if item.id == "colour:back" {
             colourEditingWorkspace = nil
             updateScopeMenu()
@@ -6409,6 +6470,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     @discardableResult
     func pickScopeForQA(_ scope: InboxScope) -> Bool {
         guard scopeMenuEntries.contains(where: { $0.id == scope.storageValue }) else { return false }
+        // A project sits behind `Projects ›` (.plans/87): reach it the way a person
+        // does, through the drill-in.
+        if case .project = scope, !scopeButton.items.contains(where: { $0.id == scope.storageValue }) {
+            guard scopeButton.chooseForQA(id: Self.projectsItemId) else { return false }
+        }
         return scopeButton.chooseForQA(id: scope.storageValue)
     }
 

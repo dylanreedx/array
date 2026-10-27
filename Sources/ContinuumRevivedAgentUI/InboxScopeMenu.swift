@@ -53,10 +53,11 @@ public struct InboxScopeMenuEntry: Equatable, Sendable {
     }
 
     /// Whether choosing this row keeps the popover open. Checkboxes do; picks close it.
+    /// `This Mac` is a checkbox since .plans/87: it ticks and unticks.
     public var isToggle: Bool {
         switch kind {
-        case .current, .workspace, .unplaced: return true
-        case .all, .thisMac, .project, .legacyWorkspace: return false
+        case .current, .workspace, .unplaced, .thisMac: return true
+        case .all, .project, .legacyWorkspace: return false
         }
     }
 }
@@ -100,11 +101,10 @@ public enum InboxScopeMenu {
             return order == .orderedSame ? left.id.uuidString < right.id.uuidString : order == .orderedAscending
         }
         let active = rows.filter { $0.lifecycle == .active }
+        // Top-level agents only (`InboxTally`): the pills count the same way.
         func tally(_ rows: [AgentInboxRow]) -> (detail: String, needsYou: Bool) {
-            let needs = rows.filter { $0.state == .approval || $0.state == .input }.count
-            var detail = rows.count == 1 ? "1 agent" : "\(rows.count) agents"
-            if needs > 0 { detail += " · \(needs) needs you" }
-            return (detail, needs > 0)
+            let count = InboxTally.count(rows)
+            return (InboxTally.detail(count), count.needsYou > 0)
         }
 
         var entries: [InboxScopeMenuEntry] = []
@@ -144,7 +144,7 @@ public enum InboxScopeMenu {
                 kind: .workspace(workspace.id), title: workspace.name, detail: counts.detail, trailing: nil,
                 check: check, needsYou: counts.needsYou, section: .workspaces))
         }
-        let unplaced = active.filter { $0.workspaceId == nil && $0.workspaceName == nil }
+        let unplaced = active.filter { $0.workspaceId == nil && $0.workspaceName == nil && $0.parentId == nil }
         if !unplaced.isEmpty || filter?.showsUnplaced == true && filter?.mode == .include {
             entries.append(InboxScopeMenuEntry(
                 kind: .unplaced, title: InboxWorkspaceFilter.unplacedTitle, detail: nil,
@@ -193,7 +193,9 @@ public enum InboxScopeMenu {
         let filter = scope.workspaceFilter ?? .current
         switch kind {
         case .all: next = .all
-        case .thisMac: next = .thisMac
+        // A checkbox (.plans/87): unticking it goes back to every agent, the
+        // nearest scope that still shows what This Mac did.
+        case .thisMac: next = scope == .thisMac ? .all : .thisMac
         case .project(let name): next = .project(name)
         case .legacyWorkspace(let name): next = .workspace(name)
         case .current:

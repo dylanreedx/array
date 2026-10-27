@@ -4530,6 +4530,12 @@ enum UIProbeGeometry {
                     throw fail("\(label): could not materialize the scope keyboard path")
                 }
                 scopeButton.keyDown(with: returnKey)
+                // .plans/87: the projects sit behind `Projects ›`; open it through the
+                // open list, and hold the drill-in to the same no-ellipsis rule.
+                guard probe.inbox.isScopePopoverPresentedForQA,
+                      scopeButton.choosePresentedItemForQA(id: AgentInboxView.projectsItemId) else {
+                    throw fail("\(label): the open scope popover offered no Projects › row")
+                }
                 let keyboardItems = probe.inbox.scopePopoverItemsForQA
                 guard probe.inbox.isScopePopoverPresentedForQA,
                       scopeButton.qaTruncatedPresentedRowTitles == [],
