@@ -194,6 +194,9 @@ final class CanvasMotionWorkload {
         try registryStore.save(registry)
 
         let delegate = AppDelegate()
+        // Boot's launch sweep arms the managed-session source; without it every
+        // activity rebuild refuses and retries four times a second.
+        try delegate.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
         let suiteName = "dev.arrayapp.canvas-motion.\(UUID().uuidString)"
         guard let isolatedDefaults = QAIsolatedDefaults(isolatedSuiteName: suiteName) else {
             throw Failure(description: "cannot create isolated settings suite")
