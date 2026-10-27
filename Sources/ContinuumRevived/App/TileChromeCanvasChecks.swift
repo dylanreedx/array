@@ -178,10 +178,14 @@ enum TileChromeCanvasChecks {
         tile.restChromeIfIdle()
 
         // An appearance change while resting reaches the detached body.
+        // Live layers fade a colour change over Core Animation's implicit 0.25 s;
+        // a capture inside that fade compares a half-dark tile.
         window.appearance = NSAppearance(named: .darkAqua)
         try expect(tile.isChromeResting, "an appearance change must not wake the tile")
+        pump(0.5)
         let darkRest = try render(tile)
         tile.wakeChrome()
+        pump(0.5)
         let darkLive = try render(tile)
         let dark = diff(darkRest, darkLive, excluding: nil)
         try expect(dark.fraction <= restVersusLiveBudget,
@@ -295,9 +299,235 @@ enum TileChromeCanvasChecks {
               + "median wake+display \(String(format: "%.1f", wakeMedian)) ms, rest+display \(String(format: "%.1f", restMedian)) ms; "
               + "dark flip while resting \(percent(dark.fraction)) px; redrew at 2x and 4x with 0 chrome layouts; composer, picker, ⋯ and × reached through drawn chrome")
 
+        try runTranscriptGeometryIsStable()
+        try runCameraMotionDoesNotWake()
+
         if let directory = ProcessInfo.processInfo.environment["TILE_CHROME_CANVAS_PNG_DIR"] {
             try writeReviewRenders(to: URL(fileURLWithPath: directory, isDirectory: true))
         }
+    }
+
+    // MARK: Camera motion
+
+    /// Tiles sliding under a still pointer during a pan must not wake: each wake
+    /// re-parents ~230 views (7-15 ms) inside a camera frame. At the settle, the
+    /// one tile under the pointer wakes. A real canvas, real agent tiles and the
+    /// real camera driver on an injected clock; the tracking area's enter and exit
+    /// are delivered by hand at the moments AppKit would send them, because no
+    /// check can move the real cursor.
+    static func runCameraMotionDoesNotWake() throws {
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [],
+                                     lastActiveTileId: nil),
+            activeZone: nil, zoneRenderModels: [], showsZoneChrome: true)
+        canvas.frame = CGRect(x: 0, y: 0, width: 1_400, height: 700)
+        let window = KeyableFixtureWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontOffscreenForChecks()
+        defer { window.orderOut(nil); window.contentView = nil }
+        final class Clock { var now: TimeInterval = 1_000 }
+        let clock = Clock()
+        canvas.cameraDriver.nowProvider = { clock.now }
+        let pointer = NSPoint(x: 700, y: 350)
+        canvas.residencyPointerProvider = { pointer }
+        canvas.occlusionVisibilityProvider = { true }
+        let zoneId = UUID()
+        let placement = ZonePlacement(
+            zoneId: zoneId, projectId: UUID(), origin: ZonePoint(x: 0, y: 0),
+            size: ZoneSize(width: 20_000, height: 20_000), color: "blue", collapsed: false, hydrationPolicy: .automatic)
+        var tiles: [Tile] = []
+        for index in 0..<4 {
+            tiles.append(Tile(
+                id: UUID(), kind: .managedAgent, title: "chrome-motion-\(index)",
+                frame: TileFrame(x: Double(index) * 380 + 40, y: 120, width: 340, height: 420),
+                zPosition: .fromLegacyRank(index + 1), zoneId: zoneId, runtimeRef: nil, metadata: TileMetadata()))
+        }
+        let layer = CanvasNSView.ZoneLayer(
+            placement: placement,
+            renderModel: CanvasNSView.ZoneRenderModel(placement: placement, displayName: "Chrome motion"),
+            tiles: tiles)
+        var views: [ManagedAgentTileNSView] = []
+        for tile in tiles {
+            let view = ManagedAgentTileNSView(tile: tile, threadId: tile.title)
+            views.append(view)
+            layer.tileViews[tile.id] = view
+        }
+        canvas.setZones([layer])
+        canvas.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        for view in views { view.restChromeIfIdle() }
+        try expect(views.allSatisfy(\.isChromeResting), "every motion tile must start resting")
+
+        func under(_ view: NSView) -> Bool { view.convert(view.bounds, to: nil).contains(pointer) }
+        func crossing(_ view: ManagedAgentTileNSView, _ type: NSEvent.EventType) {
+            let event = NSEvent.enterExitEvent(with: type, location: pointer, modifierFlags: [],
+                                               timestamp: ProcessInfo.processInfo.systemUptime,
+                                               windowNumber: window.windowNumber, context: nil,
+                                               eventNumber: 0, trackingNumber: 0, userData: nil)!
+            if type == .mouseEntered { view.mouseEntered(with: event) } else { view.mouseExited(with: event) }
+        }
+        var inside = Set(views.filter(under).map(ObjectIdentifier.init))
+        let wakesBefore = views.map(\.qaChromeWakeCount).reduce(0, +)
+        var crossings = 0
+        var sawMotion = false
+        let gap = canvas.cameraDriver.tuning.minCommitInterval + 0.001
+        // Pan until at least four edges have crossed AND a tile is under the
+        // pointer, so the settle has exactly one tile to wake.
+        for step in 0..<120 {
+            if step >= 30, crossings >= 4, views.contains(where: under) { break }
+            clock.now += gap
+            canvas.cameraDriver.noteScrollPan(dx: -20, dy: 0, location: pointer)
+            canvas.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            sawMotion = sawMotion || canvas.isCameraInMotion
+            for view in views {
+                let now = under(view), was = inside.contains(ObjectIdentifier(view))
+                if now != was {
+                    crossings += 1
+                    crossing(view, now ? .mouseEntered : .mouseExited)
+                    if now { inside.insert(ObjectIdentifier(view)) } else { inside.remove(ObjectIdentifier(view)) }
+                }
+            }
+        }
+        let wakesDuringMotion = views.map(\.qaChromeWakeCount).reduce(0, +) - wakesBefore
+        try expect(sawMotion, "the camera never reported motion; the assertion is vacuous")
+        try expect(crossings >= 4, "the pan slid only \(crossings) tile edge(s) under the pointer; the assertion is vacuous")
+        try expect(wakesDuringMotion == 0,
+                   "\(wakesDuringMotion) tile(s) woke while the camera moved them under a still pointer")
+        canvas.cameraDriver.qaMarkSettledNow()
+        canvas.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        let settleWakes = views.map(\.qaChromeWakeCount).reduce(0, +) - wakesBefore
+        let underPointer = views.filter(under)
+        try expect(underPointer.count == 1, "the pan must end with one tile under the pointer, ended with \(underPointer.count)")
+        try expect(settleWakes == 1 && !underPointer[0].isChromeResting
+                   && views.filter { $0 !== underPointer[0] }.allSatisfy(\.isChromeResting),
+                   "at the settle exactly the tile under the pointer must wake; \(settleWakes) woke")
+        print("tile chrome canvas: a pan slid \(crossings) tile edges under a still pointer with 0 wakes; "
+              + "the settle woke \(settleWakes), the tile under the pointer")
+    }
+
+    // MARK: Transcript geometry
+
+    struct TranscriptGeometry: Equatable, CustomStringConvertible {
+        let frame: NSRect
+        let scrollOffset: CGFloat
+        let lines: [NSPoint]
+        var description: String { "frame \(NSStringFromRect(frame)) offset \(scrollOffset) lines \(lines)" }
+    }
+
+    /// Where the transcript is, how far it is scrolled, and where three of its
+    /// characters sit, all in the tile's own coordinates.
+    static func transcriptGeometry(_ tile: ManagedAgentTileNSView) throws -> TranscriptGeometry {
+        guard let surface = tile.qaTranscriptSurface as? AgentTranscriptCanvasView else {
+            throw Failure(description: "the tile has no canvas transcript")
+        }
+        tile.layoutSubtreeIfNeeded()
+        surface.flushPendingVisualUpdate()
+        let text = surface.qaLaidOutText as NSString
+        let anchors = ["Follow paragraph 20", "Follow paragraph 22", "the last line"].map { text.range(of: $0).location }
+        let lines = anchors.compactMap { $0 == NSNotFound ? nil : surface.qaPoint(forCharacterIndex: $0) }
+            .map { surface.convert($0, to: tile) }
+        return TranscriptGeometry(frame: surface.convert(surface.bounds, to: tile),
+                                  scrollOffset: surface.qaScrollOffset, lines: lines)
+    }
+
+    /// Resting and live must put every transcript line on the same pixel, and a
+    /// zoom by itself must never scroll the transcript: the frame comes from the
+    /// body's layout, and a body laid out out of the window must lay out exactly
+    /// as it does in it, or a follow-tail transcript re-scrolls on every wake.
+    static func runTranscriptGeometryIsStable() throws {
+        // A real tile's world frame is rarely whole points: drags and resizes at
+        // a camera zoom leave fractions, and a fraction is where a body laid out
+        // out of the window (1x rounding) and in it (2x rounding) can disagree.
+        let (tile, window) = makeTile(width: 460.25, height: 561.75)
+        defer { window.orderOut(nil) }
+        let thread = "chrome", turn = "g1"
+        tile.appendUserPrompt("Lay the transcript out past its viewport.")
+        tile.ingest(.turnStarted(threadId: thread, turnId: turn))
+        for index in 0..<24 {
+            tile.ingest(.contentDelta(threadId: thread, turnId: turn, streamKind: .assistant,
+                                      delta: "\n\nFollow paragraph \(index) carries enough words to wrap across the column."))
+        }
+        tile.ingest(.contentDelta(threadId: thread, turnId: turn, streamKind: .assistant, delta: "\n\nAnd the last line."))
+        tile.ingest(.turnCompleted(threadId: thread, turnId: turn, outcome: .completed, errorMessage: nil))
+        pump(0.5)
+        tile.restChromeIfIdle()
+        try expect(tile.isChromeResting, "the geometry tile did not rest")
+        let resting = try transcriptGeometry(tile)
+        try expect(resting.lines.count == 3 && resting.scrollOffset > 0,
+                   "the geometry fixture must overflow and lay out its anchors: \(resting)")
+        tile.wakeChrome()
+        window.displayIfNeeded()
+        let live = try transcriptGeometry(tile)
+        try expect(live == resting, "waking moved the transcript: resting \(resting); live \(live)")
+        tile.restChromeIfIdle()
+        window.displayIfNeeded()
+        let restedAgain = try transcriptGeometry(tile)
+        try expect(restedAgain == resting, "resting again moved the transcript: \(resting) -> \(restedAgain)")
+        let logical = tile.bounds
+        for zoom: CGFloat in [2, 0.5, 1] {
+            tile.setFrameSize(NSSize(width: logical.width * zoom, height: logical.height * zoom))
+            tile.bounds = logical
+            tile.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            let zoomed = try transcriptGeometry(tile)
+            try expect(zoomed == resting, "a zoom to \(zoom) moved the transcript: \(resting) -> \(zoomed)")
+        }
+        // A wake at a camera zoom lays the body out in a scaled tile, where AppKit
+        // rounds frames to that zoom's pixel grid; the transcript must not move.
+        for zoom: CGFloat in [0.37, 0.61, 1.43] {
+            tile.setFrameSize(NSSize(width: logical.width * zoom, height: logical.height * zoom))
+            tile.bounds = logical
+            tile.layoutSubtreeIfNeeded()
+            tile.wakeChrome()
+            window.displayIfNeeded()
+            let woken = try transcriptGeometry(tile)
+            try expect(woken == resting, "a wake at zoom \(zoom) moved the transcript: \(resting) -> \(woken)")
+            tile.restChromeIfIdle()
+            window.displayIfNeeded()
+            let rested = try transcriptGeometry(tile)
+            try expect(rested == resting, "a rest at zoom \(zoom) moved the transcript: \(resting) -> \(rested)")
+        }
+        tile.setFrameSize(logical.size)
+        tile.bounds = logical
+        tile.layoutSubtreeIfNeeded()
+        // The hold must not swallow a real change: a three-line draft grows the
+        // composer by points, and the transcript's bottom edge follows it, at rest
+        // and live alike.
+        tile.wakeChrome()
+        tile.qaSetComposerDraftForChecks("one\ntwo\nthree")
+        window.displayIfNeeded()
+        let drafted = try transcriptGeometry(tile)
+        try expect(drafted.frame.maxY < resting.frame.maxY - 10,
+                   "a three-line draft did not move the transcript's edge: \(resting.frame) -> \(drafted.frame)")
+        tile.restChromeIfIdle()
+        window.displayIfNeeded()
+        let draftedRest = try transcriptGeometry(tile)
+        try expect(draftedRest == drafted, "resting with a draft moved the transcript: \(drafted) -> \(draftedRest)")
+        // A streaming chunk that changes nothing the chrome shows must not redraw
+        // it: the turn snapshot republishes per chunk, and a full chrome redraw per
+        // chunk per streaming tile landed inside pan frames.
+        guard let chrome = tile.qaChromeCanvas else { throw Failure(description: "the geometry tile has no chrome canvas") }
+        tile.qaSetComposerDraftForChecks("")
+        tile.restChromeIfIdle()
+        window.displayIfNeeded()
+        tile.ingest(.turnStarted(threadId: thread, turnId: "s2"))
+        pump(0.3)
+        window.displayIfNeeded()
+        let streamDraws = chrome.qaDrawCount, streamWakes = tile.qaChromeWakeCount
+        for index in 0..<30 {
+            tile.ingest(.contentDelta(threadId: thread, turnId: "s2", streamKind: .assistant, delta: " word\(index)"))
+            pump(0.035)
+            window.displayIfNeeded()
+        }
+        let chunkDraws = chrome.qaDrawCount - streamDraws
+        try expect(tile.isChromeResting && tile.qaChromeWakeCount == streamWakes,
+                   "streaming woke a tile whose chrome shows nothing moving")
+        try expect(chunkDraws <= 2, "30 streamed chunks redrew the unchanged resting chrome \(chunkDraws) times")
+        try expect(chrome.qaUnchangedInvalidations > 0, "no invalidation was ever skipped; the assertion is vacuous")
+        print("tile chrome canvas: rest -> wake -> rest and zoom 2x/0.5x/1x and a wake/rest at zoom 0.37/0.61/1.43 kept the transcript at \(resting); "
+              + "30 streamed chunks redrew the resting chrome \(chunkDraws) time(s)")
     }
 
     // MARK: Fixture
@@ -393,6 +623,19 @@ enum TileChromeCanvasChecks {
     /// The window server's own composite of the tile, the pixels a screen
     /// shows — every comparison reads these, never a re-render of the views.
     static func render(_ tile: NSView) throws -> Pixels {
+        // The window server shows a frame some time after AppKit commits it, and a
+        // colour change fades in over 0.25 s; read until two captures agree, so a
+        // comparison is never between a settled tile and one still arriving.
+        var previous = try capture(tile)
+        for _ in 0..<8 {
+            let next = try capture(tile)
+            if next.bytes == previous.bytes { return next }
+            previous = next
+        }
+        throw Failure(description: "the tile's window never showed a still frame")
+    }
+
+    private static func capture(_ tile: NSView) throws -> Pixels {
         guard let window = tile.window, let host = window.contentView else { throw Failure(description: "the tile has no window") }
         tile.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
