@@ -474,6 +474,16 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         print("[canvas-motion] ready pid=\(ProcessInfo.processInfo.processIdentifier) output=\(output.path)")
         try await Task.sleep(for: .seconds(warmup))
         fixture.stripTilesIfRequested()
+        // CANVAS_MOTION_INTERACTIVE=1: a preview for a person, not a measurement. No
+        // scripted input; the chosen agents stream for up to ten minutes and the window
+        // stays until it is closed.
+        if env["CANVAS_MOTION_INTERACTIVE"] == "1" {
+            fixture.window.title = "Array — canvas preview (replayed workspace)"
+            fixture.startStreaming(delay: 0.1, tickLimit: streams ? Int(600_000 / Double(deltaMs)) : 0)
+            while fixture.window.isVisible { try await Task.sleep(for: .milliseconds(500)) }
+            fixture.stopStreaming()
+            return 0
+        }
         let baseline = fixture.snapshot()
         var visibilityErrors: [String] = []
         @MainActor func checkVisibility(_ snapshot: [String: Any], _ label: String) {
