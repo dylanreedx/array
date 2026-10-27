@@ -161,6 +161,17 @@ class TileNSView: NSView, TokenThemed {
     var titleBarUsesCustomOverflowForQA: Bool { titleBar?.usesCustomActionsForQA ?? false }
     var titleBarActionsFrameForQA: NSRect? { titleBar?.actionsFrameForQA.map { titleBar!.convert($0, to: self) } }
 
+    /// ARRAY_TRANSCRIPT_RENDERER=canvas: while true the title bar's controls are
+    /// detached and the bar draws them itself (`NativeViewVectorRenderer`). A
+    /// press on the bar while drawn goes to `onPress`, which wakes the real
+    /// controls and redelivers it; returning false lets the bar treat it as today.
+    func setTitleBarControlsDrawn(_ drawn: Bool, onPress: ((NSEvent) -> Bool)? = nil) {
+        titleBar?.onDrawnControlsPress = onPress
+        titleBar?.drawsControlsInline = drawn
+    }
+    var titleBarControlsAreDrawn: Bool { titleBar?.drawsControlsInline ?? false }
+    var qaTitleBarView: NSView? { titleBar }
+
     func setReferenceDragControl(_ control: NSControl) {
         titleBar?.setReferenceDragControl(control)
     }
@@ -1852,6 +1863,40 @@ private final class TitleBarView: NSView, TokenThemed {
 
     private var referenceDragControl: NSControl?
 
+    // MARK: - Drawn controls (ARRAY_TRANSCRIPT_RENDERER=canvas)
+
+    /// While true the bar's controls are detached from the window and drawn by
+    /// the bar itself, so a camera step re-displays one view instead of nine.
+    var drawsControlsInline = false {
+        didSet {
+            guard drawsControlsInline != oldValue else { return }
+            if drawsControlsInline { detachInlineControls() } else { reattachInlineControls() }
+            needsDisplay = true
+        }
+    }
+    var onDrawnControlsPress: ((NSEvent) -> Bool)?
+
+    /// In the order they were first added, which is their z-order when live.
+    private var inlineControls: [NSView] {
+        [providerMarkView, closeButton, actionsButton, referenceDragControl, faceToggle, sessionActionControl]
+            .compactMap { $0 }
+    }
+
+    private func detachInlineControls() {
+        for control in inlineControls where control.superview === self {
+            control.appearance = effectiveAppearance
+            control.removeFromSuperview()
+        }
+    }
+
+    private func reattachInlineControls() {
+        for control in inlineControls where control.superview == nil {
+            control.appearance = nil
+            addSubview(control)
+        }
+        layoutSubtreeIfNeeded()
+    }
+
     func setReferenceDragControl(_ control: NSControl) {
         referenceDragControl?.removeFromSuperview()
         referenceDragControl = control
@@ -2156,6 +2201,9 @@ private final class TitleBarView: NSView, TokenThemed {
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
+        if drawsControlsInline {
+            for control in inlineControls where control.superview == nil { control.appearance = effectiveAppearance }
+        }
         applyTokens()
     }
 
@@ -2232,6 +2280,8 @@ private final class TitleBarView: NSView, TokenThemed {
         let switchEdge = faceToggle.flatMap { $0.isHidden ? nil : $0.frame.minX }
         layoutSessionAction(trailingEdge: switchEdge
             ?? (actionsButton == nil ? min(trailingEdge, qaDragHandleLeadingX) : trailingEdge))
+        // A control added while drawn (⋯, the face switch) joins the drawn set.
+        if drawsControlsInline { detachInlineControls() }
     }
 
     /// QA: the close button's laid-out frame (world units) so the parent's
@@ -2333,6 +2383,8 @@ private final class TitleBarView: NSView, TokenThemed {
     /// after corner overlay + close button were added.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard bounds.contains(point) else { return nil }
+        // Drawn controls are not in the window; never hand one to AppKit.
+        if drawsControlsInline { return self }
         if closeButton.frame.contains(point) {
             return closeButton
         }
@@ -2368,6 +2420,7 @@ private final class TitleBarView: NSView, TokenThemed {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if drawsControlsInline, let onDrawnControlsPress, onDrawnControlsPress(event) { return }
         superview?.mouseDown(with: event)
     }
 
@@ -2516,6 +2569,13 @@ private final class TitleBarView: NSView, TokenThemed {
         // content inside a surface `borderStrong` has already delineated.
         LineToken.separator.color.nsColor(for: theme).setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+
+        if drawsControlsInline, let context = NSGraphicsContext.current?.cgContext {
+            for control in inlineControls where control.superview == nil {
+                control.layoutSubtreeIfNeeded()
+                NativeViewVectorRenderer.draw(control, in: context, parentIsFlipped: isFlipped)
+            }
+        }
     }
 
     // MARK: - Status pill geometry (P1.11)

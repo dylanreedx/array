@@ -131,6 +131,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// After `apply(_:)` replaced the draft. Presentation only; no draft value,
     /// so it cannot become a binding loop.
     var onDraftApplied: (() -> Void)?
+    /// The editor gained (true) or lost (false) first responder.
+    var onEditorFocusChange: ((Bool) -> Void)?
     /// Existing fire-and-forget seam retained until live-tile migration. It does
     /// not imply acceptance and therefore never clears a persisted draft.
     var onSubmitPrompt: ((String) -> Void)?
@@ -939,6 +941,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
 
     func composerFocusDidChange(_ textView: ComposerTextView, focused: Bool) {
         isEditorFocused = focused
+        defer { onEditorFocusChange?(focused) }
         // Leaving the editor keeps what was said, the same as ↩.
         if !focused { dictation.finish() }
         applyTokens()
