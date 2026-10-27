@@ -40,6 +40,7 @@ func runAgentPresenceChecks() async throws {
     if wants("n1") { summary.append(try await AgentPresenceChecks.checkUnsolicitedTurnAfterStopSettles()) }
     if wants("background") { summary.append(try await AgentPresenceChecks.checkMirroredBackgroundChildLifetime(originalPath: originalPath)) }
     if wants("codex-family") { summary.append(try await AgentPresenceChecks.checkCodexDescendantsEndWithSession()) }
+    if wants("restore") { summary.append(try await AgentPresenceChecks.checkProviderChildrenSettleOnRestore()) }
     if wants("activity") { summary.append(try AgentPresenceChecks.checkLastActivityMovesOnFrames()) }
     print("AgentPresenceChecks passed: " + summary.joined(separator: "; "))
 }
@@ -720,6 +721,51 @@ enum AgentPresenceChecks {
                    && supervisor.turnSnapshot(for: grandchild)?.state != .working,
                    "codex family: a grandchild whose session ended was left \(String(describing: supervisor.turnSnapshot(for: grandchild)?.state)) with outcome \(String(describing: supervisor.records[grandchild]?.latestTerminalEvent?.outcome))")
         return "a Codex descendant still open when its session ends settles interrupted; a finished one keeps its outcome"
+    }
+
+    /// `.plans/87` Step 3.5 — a Claude or Codex child that was mid-turn when the
+    /// app went away died with its parent's process; the restore says so.
+    static func checkProviderChildrenSettleOnRestore() async throws -> String {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-presence-restore-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var working: [AgentHarness: AgentID] = [:]
+        var finished: AgentID?
+        do {
+            let before = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root),
+                                         makeRunner: { _ in ScriptedAgentRunner(script: []) })
+            for (harness, model) in [(AgentHarness.claudeCode, "anthropic/claude-haiku-4-5-20251001"),
+                                     (.codex, "openai-codex/gpt-5.6-sol")] {
+                let parent = before.spawn(role: nil, prompt: nil, cwd: root, harness: harness, model: model, thinking: "low")
+                for key in ["open", "done"] where harness == .claudeCode || key == "open" {
+                    guard let child = before.handleSpawnRequest(SpawnRequest(
+                        role: nil, prompt: "restore witness", isolated: false,
+                        sourceItemID: "\(harness.rawValue)-\(key)", observedOnly: true), from: parent) else {
+                        throw Failure(description: "presence: restore: \(harness) child was not adopted")
+                    }
+                    before.qaDeliver(.turnStarted(threadId: "c", turnId: key), to: child)
+                    if key == "done" {
+                        before.qaDeliver(.turnCompleted(threadId: "c", turnId: key, outcome: .completed, errorMessage: nil), to: child)
+                        finished = child
+                    } else {
+                        working[harness] = child
+                    }
+                }
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let after = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root),
+                                    makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        _ = after.restore()
+        for (harness, child) in working {
+            try expect(after.records[child]?.latestTerminalEvent?.outcome == .interrupted
+                       && after.turnSnapshot(for: child)?.state != .working,
+                       "restore: a \(harness) child that died mid-turn came back with outcome \(String(describing: after.records[child]?.latestTerminalEvent?.outcome))")
+        }
+        try expect(working.count == 2, "restore: the witness needs a Claude and a Codex child")
+        try expect(finished.flatMap { after.records[$0]?.latestTerminalEvent?.outcome } == .succeeded,
+                   "restore: a child that had finished must keep its own outcome")
+        return "Claude and Codex children that died mid-turn come back interrupted; finished ones keep their outcome"
     }
 
     /// `.plans/87` Step 3.6 — one last-activity time per agent, owned by the

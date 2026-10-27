@@ -4649,6 +4649,24 @@ final class AgentSupervisor {
     /// the previous session. One `run.json` read per child, never `events.jsonl`,
     /// and no watcher.
     func reconcileObservedRunsAfterRestore() {
+        // Claude and Codex children run inside their parent's provider process,
+        // which never survives an app relaunch. One whose last turn started and
+        // never ended died mid-turn: say so, rather than showing it ready with
+        // no outcome.
+        for (childID, record) in records
+        where record.capabilities == .observedReadOnly
+            && (record.harness == .claudeCode || record.harness == .codex) {
+            guard let turnAt = record.latestTurnAt,
+                  record.latestTerminalEvent.map({ $0.endedAt < turnAt }) ?? true,
+                  observedRunsReconciled.insert(childID).inserted
+            else { continue }
+            deliver(.turnCompleted(
+                threadId: Self.threadId(for: childID),
+                turnId: "\(Self.threadId(for: childID))#restored",
+                outcome: .interrupted,
+                errorMessage: "This child was still running when the previous session ended."
+            ), to: childID)
+        }
         for (childID, record) in records
         where record.capabilities == .observedReadOnly && record.harness == .pi {
             guard let runId = record.providerSessionId,
