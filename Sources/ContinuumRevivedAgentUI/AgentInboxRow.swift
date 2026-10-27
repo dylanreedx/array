@@ -1211,6 +1211,15 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             identityColor: identityColor)
     }
 
+    /// Equal but for `elapsed`, when both rows carry the same live turn start: the
+    /// view's shared clock advances that number on the cell, so a push that only
+    /// moved it changes nothing to redraw (plan 87, Step 4).
+    public func matchesIgnoringLiveElapsed(_ other: AgentInboxRow) -> Bool {
+        guard elapsedStartedAt != nil, elapsedStartedAt == other.elapsedStartedAt,
+              let otherElapsed = other.elapsed else { return self == other }
+        return withUnconfirmed(isUnconfirmed, elapsed: otherElapsed) == other
+    }
+
     /// The status words the row may paint. Unconfirmed is a confidence modifier,
     /// not a replacement state, and therefore leaves `state` unchanged.
     public var presentationLabel: String? {

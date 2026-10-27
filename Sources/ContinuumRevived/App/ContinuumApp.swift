@@ -12204,9 +12204,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func buildWorkspaceSidebarTree() throws -> SidebarTree {
+    private func buildWorkspaceSidebarTree(inputs: SidebarModelInputs? = nil) throws -> SidebarTree {
         guard registryStore != nil else { return SidebarTree(workspaces: []) }
-        let inputs = currentSidebarModelInputs()
+        let inputs = inputs ?? currentSidebarModelInputs()
         return SidebarTreeBuilder.build(
             registry: inputs.registry,
             documents: inputs.documents,
@@ -12260,10 +12260,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     ///
     /// Read-state is layered on here rather than inside the fold, because
     /// `AgentSupervisor` owns it and Core cannot reach a supervisor (P3.3).
-    private func buildAgentInboxRows(now: Date = AgentElapsedClock.now()) -> [AgentInboxRow] {
+    private func buildAgentInboxRows(
+        now: Date = AgentElapsedClock.now(), inputs: SidebarModelInputs? = nil
+    ) -> [AgentInboxRow] {
         // In memory (R5): the inputs the last structural rebuild read, with the
         // live canvas over them. An agent event never opens a file.
-        let inputs = currentSidebarModelInputs()
+        let inputs = inputs ?? currentSidebarModelInputs()
         let registry = inputs.registry
         let documents = inputs.documents
         let projectCanvases = inputs.projectCanvases
@@ -12363,7 +12365,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         defer { if reloadsTopBar ?? rebuildAgentActivity { reloadWorkspaceTopBar() } }
         guard let sidebar = workspaceSidebarView else { return }
-        let registry = currentSidebarModelInputs().registry
+        // Plan 87: ONE overlay per push, shared by the rows and the tree.
+        let inputs = currentSidebarModelInputs()
+        let registry = inputs.registry
         // P3.6: the inbox is the sidebar's content, so it is fed on the same
         // reload. `applyInbox` and not `reloadInbox` — the change set says which
         // agents moved, and rebuilding every row for one streamed token is what
@@ -12391,10 +12395,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // and is populated only after readiness". `applyInbox([])` here would be the
         // "no agents" lie with a rendered empty state behind it.
         if agentActivity.isReconciled {
-            sidebar.applyInbox(rows: buildAgentInboxRows(), changed: agentActivity.lastChange)
+            sidebar.applyInbox(rows: buildAgentInboxRows(inputs: inputs), changed: agentActivity.lastChange)
         }
+        // The workspace tree is never shown (`isWorkspaceTreeVisibleForQA`) and an
+        // agent event cannot change its shape — only a structural reload rebuilds it.
+        guard rebuildAgentActivity || reloadsTopBar == true else { return }
         do {
-            let tree = try buildWorkspaceSidebarTree()
+            let tree = try buildWorkspaceSidebarTree(inputs: inputs)
             sidebar.reload(
                 tree: tree,
                 currentWorkspaceId: currentWorkspaceIdForSidebar(),
@@ -40501,6 +40508,7 @@ extension AppDelegate {
         let cardsBefore = inbox.cellBuildCountForQA
         let fullBefore = inbox.qaFullReloadCount
         let inputsBefore = app.qaSidebarInputsComputedCount
+        let treeBefore = sidebar.qaTreeReloadCount
         RunLoop.main.run(until: Date().addingTimeInterval(1.1))
         app.pushAgentSurfaces(notify: false)
         let cardsBuilt = inbox.cellBuildCountForQA - cardsBefore
@@ -40509,6 +40517,8 @@ extension AppDelegate {
         witness(cardsBuilt == 0, "3: a push with no state change rebuilt \(cardsBuilt) cards (6 working rows on screen)")
         witness(fullReloads == 0, "3: a push with no state change reloaded the whole table \(fullReloads) times")
         witness(inputsComputed == 1, "3: one push computed the sidebar inputs \(inputsComputed) times")
+        witness(sidebar.qaTreeReloadCount == treeBefore,
+                "3: an event push rebuilt the hidden workspace tree \(sidebar.qaTreeReloadCount - treeBefore) times")
         report.append("idle push: \(cardsBuilt) cards, \(fullReloads) full reloads, inputs computed \(inputsComputed)x")
 
         // 4 · The supervisor's activity stamp is the row's lastActiveAt.

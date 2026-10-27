@@ -2119,7 +2119,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let disclosureMoved = previousParents.symmetricDifference(parentsWithChildren)
         let previous = rows
         let valueChanged = Set(zip(previous, next.compactMap(\.agentRow))
-            .filter { $0.0 != $0.1 }
+            .filter { !$0.0.matchesIgnoringLiveElapsed($0.1) }
             .map { $0.1.id })
         // Hold an unaffected visible row as the user's visual anchor. A numeric
         // clip origin is not enough when a preceding row grows: AppKit must keep
@@ -2128,7 +2128,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             excluding: changed.touched.union(valueChanged))
         setItems(next)
         let indexes = IndexSet(rows.indices.filter {
-            changed.touched.contains(rows[$0].id) || rows[$0] != previous[$0]
+            changed.touched.contains(rows[$0].id) || !rows[$0].matchesIgnoringLiveElapsed(previous[$0])
                 || disclosureMoved.contains(rows[$0].id)
         }.compactMap(tableRow(forRowIndex:)))
         guard !indexes.isEmpty else { return }
