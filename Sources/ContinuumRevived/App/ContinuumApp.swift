@@ -11951,6 +11951,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // .plans/79: sessions from other apps are rows too, with "This Mac" to
         // see the quiet ones; a click watches, the hover buttons move or copy.
         sidebar.agentInbox.offersThisMacScope = true
+        // .plans/86: a colour picked from a workspace row's `…` is the registry's.
+        sidebar.agentInbox.onWorkspaceColourChange = { [weak self] workspaceId, colour in
+            self?.setWorkspaceColour(workspaceId: workspaceId, colour: colour)
+        }
         sidebar.agentInbox.onExternalSessionAction = { [weak self] action, rowId in
             self?.performExternalSessionAction(action, rowId: rowId)
         }
@@ -12317,6 +12321,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // do not mention.
         sidebar.setInboxOpenAgent(focusedInboxAgentId())
         sidebar.setInboxScopeCatalog(inboxScopeCatalog(registry: registry))
+        sidebar.agentInbox.workspaceColourNames = Dictionary(
+            registry.workspaces.map { ($0.id, $0.resolvedColour) }, uniquingKeysWith: { first, _ in first })
         // R6: the default scope is the workspace on screen.
         let onScreen = workspaceRuntime?.workspaceId ?? registry.lastActiveWorkspaceId
         let currentWorkspace = registry.workspaces.first { $0.id == onScreen }
