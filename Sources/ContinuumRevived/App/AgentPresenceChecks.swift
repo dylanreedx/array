@@ -605,7 +605,7 @@ enum AgentPresenceChecks {
         let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("ContinuumRevivedCoreChecks/Fixtures/claude-async-subagent.jsonl")
-        for mode in ["async-launch", "shell-job-holds-no-child", "shell-job-reaped"] {
+        for mode in ["async-launch", "shell-job-holds-no-child", "shell-job-keeps-session"] {
             let root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("array-presence-stream-\(mode)-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -619,7 +619,7 @@ enum AgentPresenceChecks {
             let supervisor = AgentSupervisor(
                 store: AgentStore(applicationSupportDirectory: root),
                 makeRunner: AgentSupervisor.productionRunner,
-                idleRunnerTimeout: mode == "shell-job-reaped" ? 0.3 : 60)
+                idleRunnerTimeout: mode == "shell-job-keeps-session" ? 0.1 : 60)
             defer { supervisor.stopAll() }
             let parent = supervisor.spawn(role: nil, prompt: nil, cwd: work,
                 harness: .claudeCode, model: "anthropic/claude-haiku-4-5-20251001", thinking: "low")
@@ -658,13 +658,15 @@ enum AgentPresenceChecks {
                     AgentSteeringQAFakes.backgroundPid(in: bin) != nil
                 }
                 let pid = AgentSteeringQAFakes.backgroundPid(in: bin)
-                try await eventually("\(mode): a shell job alone kept the idle session from the reaper", timeout: 4) {
-                    pid.map { kill($0, 0) != 0 } ?? false
-                }
+                try await eventually("\(mode): parent did not reach idle") { !supervisor.isRunning(parent) }
+                // Many reap intervals: a dev server is the user's, and outlives them all.
+                try await Task.sleep(for: .milliseconds(1200))
+                try expect(pid.map { kill($0, 0) == 0 } == true,
+                    "\(mode): the idle reaper ended a session whose shell job was still running")
             }
         }
         return try await checkMirroredChildSessionEnds()
-            + "; a background child stays working past its launch acknowledgement and the parent's result and settles on its own notification, and a shell job never holds a child or the session open"
+            + "; a background child stays working past its launch acknowledgement and the parent's result and settles on its own notification, and a shell job never holds a child open but keeps its idle session alive"
     }
 
     /// `.plans/87` Step 3.4 — a Codex child is running only while its session
