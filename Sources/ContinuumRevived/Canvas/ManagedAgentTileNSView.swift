@@ -146,7 +146,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private var streamingMarkupParseTimerScheduledDelay: TimeInterval?
     private var streamingMarkupParseTimerGeneration: UInt64 = 0
 
-    private let transcriptCollectionFixture: AgentTranscriptListView?
+    private let transcriptCollectionFixture: (any AgentTranscriptSurface)?
+    /// The row renderer when it is the one installed; list-only QA seams read it.
+    private var listTranscript: AgentTranscriptListView? { transcriptCollectionFixture as? AgentTranscriptListView }
     func prepareBoardTask(
         boardID: UUID,
         card: BoardCard,
@@ -578,8 +580,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// its own height changes (which move `surfaceContentRevision`), so the
     /// transcript is the one scroll owner a bake can disagree with.
     override var surfaceScrollOffsets: [CGPoint] {
-        guard let clip = transcriptCollectionFixture?.scrollView.contentView else { return [] }
-        return [clip.bounds.origin]
+        guard let transcript = transcriptCollectionFixture else { return [] }
+        return [transcript.transcriptScrollOrigin]
     }
 
     /// A transcript control's action, through the dispatch its renderer calls.
@@ -589,9 +591,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     /// Scroll the transcript from a witness without reaching into its privates.
     func qaScrollTranscript(toY y: CGFloat) {
-        guard let scrollView = transcriptCollectionFixture?.scrollView else { return }
-        scrollView.contentView.scroll(to: CGPoint(x: 0, y: y))
-        scrollView.reflectScrolledClipView(scrollView.contentView)
+        transcriptCollectionFixture?.scrollTranscript(toY: y)
     }
 
     override var surfaceContentRevision: UInt64? {
@@ -4386,13 +4386,13 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// The cards actually in the view hierarchy, so a reset can be asserted against
     /// the stack and not only against the model behind it.
     var qaRenderedCardCount: Int {
-        transcriptCollectionFixture?.qaSemanticRowCount ?? 0
+        listTranscript?.qaSemanticRowCount ?? 0
     }
-    var qaTranscriptCollectionFixture: AgentTranscriptListView? { transcriptCollectionFixture }
+    var qaTranscriptCollectionFixture: AgentTranscriptListView? { listTranscript }
     /// The compact row is exposed only as a deterministic geometry/AX witness;
     /// production updates it through `refreshCompactStatus` above.
     var qaCompactStatusRow: AgentCompactStatusRowView { compactStatusRow }
-    var qaThinkingIndicatorVisible: Bool { transcriptCollectionFixture?.qaThinkingIndicatorVisible == true }
+    var qaThinkingIndicatorVisible: Bool { listTranscript?.qaThinkingIndicatorVisible == true }
     // `.plans/45` S6 — deterministic seams for the optimistic-window witness.
     func qaBeginOptimisticSubmissionForChecks(_ text: String) {
         beginOptimisticSubmission(AgentPrompt(text))
@@ -4404,7 +4404,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     func qaRefreshThinkingIndicatorForChecks() {
         refreshTranscriptThinkingIndicator()
     }
-    var qaTranscriptForChecks: AgentTranscriptListView? { transcriptCollectionFixture }
+    var qaTranscriptForChecks: AgentTranscriptListView? { listTranscript }
 
     // MARK: - WS5 page-zoom QA seams
     //
@@ -4495,7 +4495,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
     var qaDocumentForChecks: AgentDocument { model.document }
     /// The strip the newest turn shows ("Worked 3s", "You stopped after 2s").
-    var qaNewestWorkStripText: String? { transcriptCollectionFixture?.qaNewestWorkStripModelForChecks?.text }
+    var qaNewestWorkStripText: String? { listTranscript?.qaNewestWorkStripModelForChecks?.text }
     /// Every session-boundary divider drawn now.
     var qaSessionBoundaryViews: [CompactionBoundaryView] {
         func walk(_ view: NSView) -> [CompactionBoundaryView] {
@@ -4634,7 +4634,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     var qaV2ActionEnabled: Bool { v2ActionButton?.presentation.isEnabled == true }
     @discardableResult
     func qaClickV2RequestChoice(requestID: String, value: String) -> Bool {
-        guard let transcriptCollectionFixture else { return false }
+        guard let transcriptCollectionFixture = listTranscript else { return false }
         transcriptCollectionFixture.layoutSubtreeIfNeeded()
         transcriptCollectionFixture.collectionView.layoutSubtreeIfNeeded()
         func find(in view: NSView) -> AgentRequestChoiceButton? {
@@ -4829,12 +4829,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // shell. Settle it, then count actual transcript layout passes while an
         // isolated timer tick and its resulting layout are processed.
         contentView?.layoutSubtreeIfNeeded()
-        let transcriptLayoutsBeforeTick = transcriptCollectionFixture?.transcriptLayout.preparePassCount ?? 0
+        let transcriptLayoutsBeforeTick = listTranscript?.transcriptLayout.preparePassCount ?? 0
         agentHeader.qaTick(now: Date(timeIntervalSince1970: 165))
         contentView?.layoutSubtreeIfNeeded()
         let timerActive = agentHeader.qaTimerIsActive
         let elapsedText = agentHeader.qaElapsed
-        let transcriptLayoutDelta = (transcriptCollectionFixture?.transcriptLayout.preparePassCount ?? 0) - transcriptLayoutsBeforeTick
+        let transcriptLayoutDelta = (listTranscript?.transcriptLayout.preparePassCount ?? 0) - transcriptLayoutsBeforeTick
         let workingTimerHolds = timerActive
             && elapsedText == "· 1m 5s"
             && transcriptLayoutDelta == 0
