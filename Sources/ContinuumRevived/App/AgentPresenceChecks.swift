@@ -39,6 +39,7 @@ func runAgentPresenceChecks() async throws {
     if wants("land") { summary.append(try await AgentPresenceChecks.checkOwnActionsVisiblyLand(originalPath: originalPath)) }
     if wants("n1") { summary.append(try await AgentPresenceChecks.checkUnsolicitedTurnAfterStopSettles()) }
     if wants("background") { summary.append(try await AgentPresenceChecks.checkMirroredBackgroundChildLifetime()) }
+    if wants("activity") { summary.append(try AgentPresenceChecks.checkLastActivityMovesOnFrames()) }
     print("AgentPresenceChecks passed: " + summary.joined(separator: "; "))
 }
 
@@ -589,6 +590,35 @@ enum AgentPresenceChecks {
         return "an unsolicited turn after a Stop that ended without a result settled as process-lost instead of Working forever"
     }
 
+
+    /// `.plans/87` Step 3.6 — one last-activity time per agent, owned by the
+    /// supervisor: every timeline frame and streamed delta moves it, at most
+    /// once a second, and a meter reading does not.
+    static func checkLastActivityMovesOnFrames() throws -> String {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-presence-activity-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root),
+                                         makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        let config = AgentModelConfig.resolvedFromDefaults()
+        let id = supervisor.spawn(role: nil, prompt: nil, cwd: root, model: config.model, thinking: config.thinking)
+        let t0 = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        try expect(supervisor.lastActivity(for: id) == nil, "activity: a fresh agent has no activity yet")
+        supervisor.qaDeliver(.turnStarted(threadId: "t", turnId: "a"), to: id, now: t0)
+        try expect(supervisor.lastActivity(for: id) == t0, "activity: a turn frame did not stamp last activity")
+        supervisor.qaDeliver(.contentDelta(threadId: "t", turnId: "a", streamKind: .assistant, delta: "x"),
+                             to: id, now: t0.addingTimeInterval(0.4))
+        try expect(supervisor.lastActivity(for: id) == t0, "activity: a delta inside the same second must be throttled")
+        supervisor.qaDeliver(.contentDelta(threadId: "t", turnId: "a", streamKind: .assistant, delta: "y"),
+                             to: id, now: t0.addingTimeInterval(1.2))
+        try expect(supervisor.lastActivity(for: id) == t0.addingTimeInterval(1.2),
+                   "activity: streaming a second later did not move last activity")
+        supervisor.qaDeliver(.tokenUsageUpdated(threadId: "t", snapshot: TokenUsageSnapshot(inputTokens: 1, outputTokens: 1, totalCostUsd: nil)),
+                             to: id, now: t0.addingTimeInterval(5))
+        try expect(supervisor.lastActivity(for: id) == t0.addingTimeInterval(1.2),
+                   "activity: a meter reading is not activity")
+        return "last activity moves on frames and streaming, once a second, and not on meter readings"
+    }
 
     /// A parent's result is a turn boundary, not the end of a persistent
     /// Claude session's background child. Exercise the real bound-runner path.

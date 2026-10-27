@@ -1529,6 +1529,7 @@ final class AgentSupervisor {
         var submittedAt: Date? { presence.isLive ? presence.submittedAt : nil }
     }
     private var turnFacts: [AgentID: TurnFacts] = [:]
+    private var liveActivityAt: [AgentID: Date] = [:]
     /// Return, as the composer saw it, for a prompt not yet accepted.
     private var pendingReturnStamps: [AgentID: Date] = [:]
     /// Latest provider-reported context-window telemetry per agent. The replay
@@ -8481,6 +8482,10 @@ final class AgentSupervisor {
         _ incomingEvent: AgentRuntimeEvent, to id: AgentID, now: Date = Date(), meterPublished: Bool = false
     ) {
         var event = incomingEvent
+        switch event {
+        case .tokenUsageUpdated, .contextWindowUpdated: break
+        default: noteActivity(id, now: now)
+        }
         event = withCompactionBeforeReading(event, for: id)
         if case .turnCompleted(_, _, .failed, let error) = event,
            error == AgentContextFullRecovery.canonicalErrorMessage {
@@ -9003,6 +9008,22 @@ final class AgentSupervisor {
             }
         }
     }
+
+    /// When this agent last did something: any timeline frame, a streamed
+    /// delta, or a child's progress report. Owned here so a headless child moves
+    /// it too, and kept apart from `AgentRecord.lastActivityAt`, which renames,
+    /// reads and restores also stamp. In memory only; nil until the agent does
+    /// something in this app session.
+    func lastActivity(for id: AgentID) -> Date? { liveActivityAt[id] }
+
+    /// Throttled to one stamp a second, so streaming cannot turn this into
+    /// per-token churn for whoever reads it.
+    private func noteActivity(_ id: AgentID, now: Date = AgentElapsedClock.now()) {
+        if let last = liveActivityAt[id], now.timeIntervalSince(last) < Self.activityStampInterval { return }
+        liveActivityAt[id] = now
+    }
+
+    static let activityStampInterval: TimeInterval = 1
 
     private func interruptWorkingClaudeMirroredChildren(of parentID: AgentID) {
         guard records[parentID]?.harness == .claudeCode else { return }
