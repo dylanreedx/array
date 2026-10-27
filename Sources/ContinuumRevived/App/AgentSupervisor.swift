@@ -8988,6 +8988,9 @@ final class AgentSupervisor {
                 // them on their own result or its actual exit. Codex is excluded: its provider
                 // children can drain after the parent turn completes.
                 interruptWorkingClaudeMirroredChildren(of: id)
+                // …but not after its session: every Codex descendant lives inside
+                // the one app-server process that has just ended.
+                interruptWorkingCodexDescendants(of: id)
                 // A steer the dead process never confirmed was never read.
                 returnDeliveringSteers(for: id)
             }
@@ -9049,6 +9052,27 @@ final class AgentSupervisor {
     }
 
     static let activityStampInterval: TimeInterval = 1
+
+    /// A Codex child is running only while its own session is: every provider
+    /// thread of a family lives in the root's app-server process. Called once
+    /// that process is gone, never at the parent's turn end, after which Codex
+    /// children may still drain.
+    private func interruptWorkingCodexDescendants(of rootID: AgentID) {
+        guard records[rootID]?.harness == .codex else { return }
+        var frontier = children(of: rootID)
+        while let childID = frontier.popLast() {
+            frontier += children(of: childID)
+            guard records[childID]?.capabilities == .observedReadOnly,
+                  records[childID]?.harness == .codex,
+                  turnFacts[childID]?.execution == .working else { continue }
+            deliver(.turnCompleted(
+                threadId: Self.threadId(for: childID),
+                turnId: "\(Self.threadId(for: childID))#codex-session-ended",
+                outcome: .interrupted,
+                errorMessage: "The Codex session ended before this child finished."
+            ), to: childID)
+        }
+    }
 
     private func interruptWorkingClaudeMirroredChildren(of parentID: AgentID) {
         guard records[parentID]?.harness == .claudeCode else { return }

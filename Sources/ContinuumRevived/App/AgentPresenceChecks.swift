@@ -39,6 +39,7 @@ func runAgentPresenceChecks() async throws {
     if wants("land") { summary.append(try await AgentPresenceChecks.checkOwnActionsVisiblyLand(originalPath: originalPath)) }
     if wants("n1") { summary.append(try await AgentPresenceChecks.checkUnsolicitedTurnAfterStopSettles()) }
     if wants("background") { summary.append(try await AgentPresenceChecks.checkMirroredBackgroundChildLifetime(originalPath: originalPath)) }
+    if wants("codex-family") { summary.append(try await AgentPresenceChecks.checkCodexDescendantsEndWithSession()) }
     if wants("activity") { summary.append(try AgentPresenceChecks.checkLastActivityMovesOnFrames()) }
     print("AgentPresenceChecks passed: " + summary.joined(separator: "; "))
 }
