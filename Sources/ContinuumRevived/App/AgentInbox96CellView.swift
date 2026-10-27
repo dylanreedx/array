@@ -625,6 +625,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private var onHoverSettle: (() -> Void)?
     private var hoverActionsShown = false
     private var hoverActionsHovered = false
+    /// .plans/87: a hidden session drawn in place while `Hidden (N)` is open —
+    /// everything dimmed but its Show pill, which is always there.
+    private(set) var isRevealedHidden = false
+    static let revealedHiddenAlpha: CGFloat = 0.38
     // Plan: .plans/79-session-handoff/README.md
     /// A session from another app offers these instead, on the bottom line beside
     /// the provider mark (mock 4). Clicking the row itself is Watch.
@@ -1312,13 +1316,16 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // Recession is the row's words, never its accent: `accentOpacity` paints the
         // state at full strength however far the row recedes, which is queue-94's
         // rule and not one to re-litigate here.
-        let alpha = CGFloat(shown.emphasis.textOpacity)
+        let alpha = CGFloat(shown.emphasis.textOpacity) * contentDim
         for label in [placementLabel, titleLabel, branchLabel, modelLabel] {
             label.alphaValue = alpha
         }
-        stateLabel.alphaValue = CGFloat(shown.emphasis.accentOpacity)
-        decorations.alphaValue = CGFloat(shown.emphasis.accentOpacity)
+        stateLabel.alphaValue = CGFloat(shown.emphasis.accentOpacity) * contentDim
+        decorations.alphaValue = CGFloat(shown.emphasis.accentOpacity) * contentDim
     }
+
+    /// What a revealed hidden row multiplies its words by (.plans/87).
+    private var contentDim: CGFloat { isRevealedHidden ? Self.revealedHiddenAlpha : 1 }
 
     /// One colour per meaning — with the two kinds of *asking* sharing one.
     ///
@@ -1765,6 +1772,32 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         setHoverActionsShown(hoverActionsHovered)
     }
 
+    /// Dim a revealed hidden row and turn its × into an eye `Show` pill, or put
+    /// both back. Touches nothing unless the state changes, so the peek's alpha
+    /// and the list's row motion keep theirs.
+    func setRevealedHidden(_ revealed: Bool) {
+        guard revealed != isRevealedHidden else { return }
+        isRevealedHidden = revealed
+        let metaSize = Typography.style(for: .label).size
+        hoverHide.image = NSImage(systemSymbolName: revealed ? "eye" : "xmark", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: metaSize - 2, weight: .semibold))
+        hoverHide.image?.isTemplate = true
+        hoverHide.title = revealed ? "Show" : ""
+        hoverHide.setAccessibilityLabel(revealed ? "Show" : "Hide")
+        let alpha = revealed ? Self.revealedHiddenAlpha : peekAlpha
+        for view in subviews where view !== card { view.alphaValue = alpha }
+        for view in card.subviews where view !== hoverHide { view.alphaValue = revealed ? alpha : 1 }
+        // The words carry the row's emphasis; re-derive them with the dim folded in.
+        if let emphasis = shown?.emphasis {
+            let text = CGFloat(emphasis.textOpacity) * contentDim
+            for label in [placementLabel, titleLabel, branchLabel, modelLabel] { label.alphaValue = text }
+            stateLabel.alphaValue = CGFloat(emphasis.accentOpacity) * contentDim
+            decorations.alphaValue = CGFloat(emphasis.accentOpacity) * contentDim
+        }
+        setHoverActionsShown(hoverActionsHovered)
+        needsLayout = true
+    }
+
     /// Presses the hover × through its own target/action.
     func clickHoverHideForQA() -> Bool {
         guard !hoverHide.isHidden else { return false }
@@ -1789,8 +1822,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let any = snoozeOn || settleOn
         let moveOn = shown && onHoverMoveHere != nil
         let copyOn = shown && onHoverCopy != nil
-        // The × stays on a selected row as well as a hovered one (.plans/87).
-        let hideOn = (shown || card.isSelected) && onHoverHide != nil
+        // The × stays on a selected row as well as a hovered one, and a revealed
+        // hidden row always shows its Show (.plans/87).
+        let hideOn = (shown || card.isSelected || isRevealedHidden) && onHoverHide != nil
         if hoverMoveHere.isHidden == moveOn || hoverCopy.isHidden == copyOn || hoverHide.isHidden == hideOn {
             hoverMoveHere.isHidden = !moveOn
             hoverCopy.isHidden = !copyOn
@@ -1870,9 +1904,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // hover crossfade that follows.
         let fades = !prefersReducedMotion() && window != nil
         for label in [placementLabel, titleLabel, branchLabel, modelLabel] {
-            Self.setAlpha(label, CGFloat(emphasis.textOpacity), fading: fades)
+            Self.setAlpha(label, CGFloat(emphasis.textOpacity) * contentDim, fading: fades)
         }
-        Self.setAlpha(decorations, CGFloat(emphasis.accentOpacity), fading: fades)
+        Self.setAlpha(decorations, CGFloat(emphasis.accentOpacity) * contentDim, fading: fades)
         return true
     }
 

@@ -1118,6 +1118,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var pillStripGap: NSLayoutConstraint?
     private let pillOverflowController = ChoicePopoverController()
     private var listBottomToView: NSLayoutConstraint?
+    /// `Hidden (N)`, pinned under the list (.plans/87).
+    let hiddenFooter = InboxHiddenFooter()
+    private var hiddenFooterHeight: NSLayoutConstraint?
+    /// The footer is open: hidden sessions are drawn in place, dimmed, each with Show.
+    private(set) var hiddenRevealed = false
+    /// How many hidden sessions the current filters would show: the footer's N.
+    private(set) var hiddenInScopeCount = 0
+    /// The ids of the rows drawn only because the footer is open.
+    private var revealedHiddenIds: Set<UUID> = []
     private var listBottomToToast: NSLayoutConstraint?
     private var toastAboveBar: NSLayoutConstraint?
     private var toastAtBottom: NSLayoutConstraint?
@@ -1464,6 +1473,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         addSubview(searchClearButton)
         addSubview(scrollView)
         addSubview(emptyLabel)
+        hiddenFooter.translatesAutoresizingMaskIntoConstraints = false
+        hiddenFooter.isHidden = true
+        hiddenFooter.onToggle = { [weak self] in self?.toggleHiddenRevealed() }
+        hiddenFooter.onShowAll = { [weak self] in self?.showAllHiddenExternalSessions() }
+        addSubview(hiddenFooter)
         // P3.11: added LAST, so it draws over the bottom of the list.
         addSubview(bulkBar)
         // P4.11: and the toast over the bar, which is the order they arrive in — a
@@ -1493,7 +1507,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         scopeButton.onFocusChange = { [weak self] id in self?.scopeFocusChanged(id) }
         scopeButton.onPopoverDismiss = { [weak self] in
             self?.colourEditingWorkspace = nil
-            self?.hiddenListShown = false
             self?.focusedScopeItemID = nil
             self?.setPeek(nil)
         }
@@ -1605,7 +1618,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // so nothing paints in any of them).
             bulkBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.s),
             bulkBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.s),
-            bulkBar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.s),
+            bulkBar.bottomAnchor.constraint(equalTo: hiddenFooter.topAnchor, constant: -Space.s),
 
             // P4.11: ABOVE THE BAR, not beside it and not under it. Both float over
             // the bottom of the same list and both can be up at once — a bulk settle
@@ -1620,10 +1633,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // .plans/87: the toast PUSHES THE LIST UP rather than floating over its last
         // row (Dylan, 2026-10-27: "never cover a row"). It stays above the bar while
         // the bar shows, and takes the bar's place at the bottom while it does not.
-        listBottomToView = scrollView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        // `Hidden (N)` is the floor of the stack; zero tall while nothing is hidden,
+        // so everything above sits exactly where it did without it.
+        let footerHeight = hiddenFooter.heightAnchor.constraint(equalToConstant: 0)
+        hiddenFooterHeight = footerHeight
+        NSLayoutConstraint.activate([
+            hiddenFooter.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hiddenFooter.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hiddenFooter.bottomAnchor.constraint(equalTo: bottomAnchor),
+            footerHeight,
+        ])
+        listBottomToView = scrollView.bottomAnchor.constraint(equalTo: hiddenFooter.topAnchor)
         listBottomToToast = scrollView.bottomAnchor.constraint(equalTo: undoToast.topAnchor, constant: -Space.xs)
         toastAboveBar = undoToast.bottomAnchor.constraint(equalTo: bulkBar.topAnchor, constant: -Space.xs)
-        toastAtBottom = undoToast.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.s)
+        toastAtBottom = undoToast.bottomAnchor.constraint(equalTo: hiddenFooter.topAnchor, constant: -Space.s)
         updateBottomStack()
 
         // Property observers do not run for a property's declaration-time value.
@@ -2218,13 +2241,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// that unfolding it does not produce.
     private func display(from newRows: [AgentInboxRow]) -> [InboxListItem] {
         let hiddenKeys = externalSessionHiding?.hiddenKeys ?? []
-        let unhidden = (hiddenKeys.isEmpty ? newRows : newRows.filter { row in
-            row.externalSession.map { !hiddenKeys.contains($0.sessionKey) } ?? true
-        }).filter { $0.id == openAgentId || !hiddenSources.contains(InboxSource.key(for: $0)) }
-        let scoped = InboxScope.filter(
-            rows: unhidden, scope: effectiveScope, openAgentId: openAgentId,
+        func isHidden(_ row: AgentInboxRow) -> Bool {
+            row.externalSession.map { hiddenKeys.contains($0.sessionKey) } ?? false
+        }
+        let sourced = newRows.filter { $0.id == openAgentId || !hiddenSources.contains(InboxSource.key(for: $0)) }
+        let scopedWithHidden = InboxScope.filter(
+            rows: sourced, scope: effectiveScope, openAgentId: openAgentId,
             currentWorkspace: currentWorkspaceName,
             currentWorkspaceId: currentWorkspaceId)
+        // .plans/87: `Hidden (N)` counts what opening it would bring back here; open,
+        // those rows are drawn in place, dimmed, each with Show.
+        let hiddenHere = hiddenKeys.isEmpty ? [] : scopedWithHidden.filter(isHidden)
+        hiddenInScopeCount = hiddenHere.count
+        if hiddenHere.isEmpty { hiddenRevealed = false }
+        revealedHiddenIds = hiddenRevealed ? Set(hiddenHere.map(\.id)) : []
+        updateHiddenFooter()
+        let scoped = hiddenRevealed || hiddenHere.isEmpty ? scopedWithHidden : scopedWithHidden.filter { !isHidden($0) }
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
         let searched = query.isEmpty ? scoped : scoped.filter { row in
             [row.title, row.projectName, row.workspaceName, row.model, row.branch, row.whereMarker?.text]
@@ -3178,20 +3210,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         var items = entries.enumerated().map { index, entry in
             choiceItem(for: entry, separatorBefore: index > 0 && entries[index - 1].section != entry.section)
         }
-        if hiddenListShown, let hiding = externalSessionHiding, !hiding.entries.isEmpty {
-            scopeButton.items = hiddenListItems(hiding.entries)
-            restoreScopeSelection()
-            return
-        }
-        hiddenListShown = false
-        if let count = externalSessionHiding?.entries.count, count > 0 {
-            var hidden = ChoiceItem(id: Self.hiddenListItemId, title: "Hidden from elsewhere",
-                                    icon: .system("eye.slash"))
-            hidden.trailing = "\(count)"
-            hidden.keepsOpen = true
-            hidden.separatorBefore = true
-            items.append(hidden)
-        }
         managementItems.removeAll()
         // Keep every management affordance visible. Unsupported actions are
         // disabled in place, rather than disappearing and making the menu's
@@ -3348,7 +3366,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private func choicePicked(_ item: ChoiceItem) {
-        if handleHiddenListChoice(item) { return }
         if item.id == "colour:back" {
             colourEditingWorkspace = nil
             updateScopeMenu()
@@ -3634,6 +3651,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             }
             if let card = cell as? AgentInbox96CellView {
                 card.configureHoverActions(snooze: nil, settle: nil)
+                if revealedHiddenIds.contains(id) {
+                    // Drawn only because `Hidden (N)` is open: dimmed, and its one
+                    // action is Show.
+                    let key = external.sessionKey
+                    card.configureExternalActions(moveHere: nil, copy: nil, hide: { [weak self] in
+                        self?.showHiddenExternalSessions([key])
+                    }, hideHelp: "Show in the sidebar")
+                    card.setRevealedHidden(true)
+                    return
+                }
+                card.setRevealedHidden(false)
                 card.configureExternalActions(
                     moveHere: external.canMoveHere ? perform(.moveHere) : nil,
                     copy: external.canCopy ? perform(.copy) : nil,
@@ -3642,6 +3670,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             return
         }
         if let card = cell as? AgentInbox96CellView {
+            card.setRevealedHidden(false)
             // .plans/87: the × IS the snooze on Array's own rows (three hours, or
             // until it needs you), so it takes the Snooze pill's place.
             let hide: (() -> Void)? = canHide(model) ? { [weak self] in self?.hideRows([id]) } : nil
@@ -4821,7 +4850,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     // MARK: - Hidden sessions from elsewhere
 
     static let hideItemId = "external:hide"
-    static let hiddenListItemId = "hidden:list"
     static let hiddenVerb = "Hidden"
 
     /// Where hidden sessions live; nil (checks, baselines) offers no Hide at all.
@@ -4831,7 +4859,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         didSet { if oldValue !== externalSessionHiding { refreshAfterHidingChange() } }
     }
     private var pendingHideUndo: Set<String>?
-    private var hiddenListShown = false
 
     func hideExternalRows(_ ids: [UUID]) { hideRows(ids) }
 
@@ -4922,7 +4949,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     func showAllHiddenExternalSessions() {
         externalSessionHiding?.showAll()
-        hiddenListShown = false
+        hiddenRevealed = false
         refreshAfterHidingChange()
     }
 
@@ -4931,37 +4958,26 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         render(display(from: allRows))
     }
 
-    /// The Hidden list, in place of the scopes, the way a workspace's colours are.
-    private func hiddenListItems(_ entries: [ExternalSessionHiding.Entry]) -> [ChoiceItem] {
-        var back = ChoiceItem(id: "hidden:back", title: "Hidden from elsewhere", icon: .system("chevron.left"))
-        back.keepsOpen = true
-        var all = ChoiceItem(id: "hidden:all", title: "Show all", icon: .system("eye"))
-        all.separatorBefore = true
-        return [back] + entries.enumerated().map { index, entry in
-            var item = ChoiceItem(id: "hidden:show:\(entry.sessionKey)", title: entry.title)
-            item.trailing = "Show"
-            item.keepsOpen = true
-            item.separatorBefore = index == 0
-            return item
-        } + [all]
+    /// Open or close `Hidden (N)`. A FULL RE-RENDER, like the shelf: rows appear
+    /// or go, so selection and hover are dropped and re-derived.
+    func toggleHiddenRevealed() {
+        guard hiddenInScopeCount > 0 || hiddenRevealed else { return }
+        hiddenRevealed.toggle()
+        tableView.deselectAll(nil)
+        selectedRowsForEmphasis = IndexSet()
+        hoveredAgentId = nil
+        keyboardFocusIntent = nil
+        render(display(from: allRows))
     }
 
-    private func handleHiddenListChoice(_ item: ChoiceItem) -> Bool {
-        switch item.id {
-        case Self.hiddenListItemId:
-            hiddenListShown = true
-            updateScopeMenu()
-        case "hidden:back":
-            hiddenListShown = false
-            updateScopeMenu()
-        case "hidden:all":
-            showAllHiddenExternalSessions()
-        case let id where id.hasPrefix("hidden:show:"):
-            showHiddenExternalSessions([String(id.dropFirst("hidden:show:".count))])
-        default:
-            return false
-        }
-        return true
+    /// The footer's words, and whether it takes any room at all.
+    private func updateHiddenFooter() {
+        let shows = hiddenInScopeCount > 0
+        hiddenFooter.apply(count: hiddenInScopeCount, expanded: hiddenRevealed)
+        guard hiddenFooter.isHidden == shows else { return }
+        hiddenFooter.isHidden = !shows
+        hiddenFooterHeight?.constant = shows ? InboxHiddenFooter.height : 0
+        needsLayout = true
     }
 
     /// ⌘Z on the list presses the toast's Undo while it is up.
@@ -6260,6 +6276,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var scopeTitlesForQA: [String] { scopeMenuEntries.map(\.title) }
     var scopeMenuEntriesForQA: [InboxScopeMenuEntry] { scopeMenuEntries }
     var scopeTriggerTitleForQA: String { scopeButton.qaRenderedTitle }
+    /// `Hidden (N)` as drawn, or nil while there is no footer.
+    var hiddenFooterTitleForQA: String? { hiddenFooter.isHidden ? nil : hiddenFooter.titleForQA }
+    var hiddenFooterFrameForQA: NSRect { hiddenFooter.frame }
+    /// Whether row `id` is drawn only because the footer is open, dimmed.
+    func isRevealedHiddenForQA(id: UUID) -> Bool {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return false }
+        return card.isRevealedHidden
+    }
+    /// The footer's Show all, through its own target/action.
+    func clickShowAllHiddenForQA() -> Bool {
+        guard let button = hiddenFooter.subviews.compactMap({ $0 as? NSButton })
+            .first(where: { $0.accessibilityIdentifier() == "ContinuumAgentInboxHiddenShowAll" && !$0.isHidden }) else { return false }
+        button.performClick(nil)
+        return true
+    }
     /// The list's scroll view, in this view's coordinates.
     var listFrameForQA: NSRect { scrollView.frame }
     /// The table, to make it first responder the way a click on a row does.
@@ -7312,11 +7345,14 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
         /// Settled agents and agents whose tile you closed — one section
         /// (.plans/05-close-to-history.md; decisions pass, "one history shelf").
         case history
+        /// .plans/87: sessions from elsewhere you hid, pinned under the list.
+        case hidden
 
         var word: String {
             switch self {
             case .snoozed: return "Snoozed"
             case .history: return "History"
+            case .hidden: return "Hidden"
             }
         }
 
@@ -7325,6 +7361,7 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
             switch self {
             case .snoozed: return "snoozed"
             case .history: return "in History"
+            case .hidden: return "hidden"
             }
         }
 
@@ -7332,6 +7369,7 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
             switch self {
             case .snoozed: return "Shows or hides snoozed agents"
             case .history: return "Shows or hides agents in History"
+            case .hidden: return "Shows hidden sessions in place, dimmed"
             }
         }
     }

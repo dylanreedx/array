@@ -86,6 +86,10 @@ enum QuickHideChecks {
         let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         window.contentView = sidebar
         window.orderFrontOffscreenForChecks()
+        // The app's key window is where `NSApp.sendEvent` delivers keys. Making it
+        // key inside this (inactive) app does not activate it or take the user's
+        // keyboard; a click would do the same.
+        window.makeKey()
         let appSupport = fixture.tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
         try delegate.reconciledManagedSessionSource.reconcile(
             registry: try RegistryStore(applicationSupportDirectory: appSupport).loadOrEmpty(),
@@ -402,6 +406,102 @@ enum QuickHideChecks {
             + "and hide an outside session; ⌘Z undoes both; the notice pushes the list up; a selected row keeps its ×"
     }
 
+    // MARK: - 3. Hidden (N)
+
+    /// The opacity a label inside the card is really drawn at.
+    static func drawnAlpha(of text: String, in card: NSView) -> CGFloat? {
+        guard let label = views(in: card, where: { ($0 as? NSTextField)?.stringValue == text }).first else { return nil }
+        var alpha: CGFloat = 1
+        var view: NSView? = label
+        while let current = view, current !== card.superview { alpha *= current.alphaValue; view = current.superview }
+        return alpha
+    }
+
+    static func showButton(_ id: UUID, in inbox: AgentInboxView) -> NSButton? {
+        guard let card = card(id, in: inbox) else { return nil }
+        return views(in: card) { $0 is NSButton && $0.accessibilityLabel() == "Show" && !$0.isHiddenOrHasHiddenAncestor }
+            .first as? NSButton
+    }
+
+    /// `--sidebar-hidden-footer-check`. `Hidden (N)` is pinned under the list and
+    /// counts what opening it brings back; a click draws the hidden rows in place,
+    /// dimmed, each with an eye Show pill, plus Show all; a second click folds them
+    /// away; Show and Show all bring sessions back; the scope popover no longer
+    /// carries a Hidden list.
+    static func runHiddenFooter() throws -> String {
+        let h = try makeHarness(name: "hidden-footer")
+        defer { h.tearDown() }
+        let inbox = h.inbox
+        inbox.setScope(.all)
+        inbox.undoToastDuration = 0.01
+        inbox.layoutForQA()
+        func footer() -> NSView? { view("ContinuumAgentInboxHiddenFooter", in: inbox) }
+        try expect(footer() == nil, "nothing hidden, no footer")
+
+        // Hide two sessions the user's way: ⌫ on one, the × on the other.
+        try expect(inbox.selectRowForQA(id: h.rowId("s-tmux")), "the tmux row must be selectable")
+        try pressDelete(inbox)
+        _ = inbox.hoverRowForQA(id: h.rowId("s-terminal"))
+        guard let x = hideButton(h.rowId("s-terminal"), in: inbox) else { throw Failure(description: "the Terminal row offers no ×") }
+        try click(x)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        inbox.layoutForQA()
+        try expect(!h.shown("s-tmux") && !h.shown("s-terminal"), "precondition: both sessions hidden — got \(inbox.titlesForQA)")
+        guard let pinned = footer() else { throw Failure(description: "two hidden sessions and no Hidden footer") }
+        try expect(inbox.hiddenFooterTitleForQA == "Hidden (2)", "the footer reads Hidden (2) — got '\(inbox.hiddenFooterTitleForQA ?? "none")'")
+        let footerFrame = inbox.hiddenFooterFrameForQA
+        try expect(abs(inbox.isFlipped ? footerFrame.maxY - inbox.bounds.height : footerFrame.minY) < 0.5
+                   && (inbox.isFlipped ? inbox.listFrameForQA.maxY <= footerFrame.minY + 0.5 : inbox.listFrameForQA.minY >= footerFrame.maxY - 0.5),
+                   "the footer is pinned under the list, not in it — footer \(footerFrame), list \(inbox.listFrameForQA)")
+        try expect(!inbox.scopeItemIdsForQA.contains("hidden:list"),
+                   "the footer replaces the scope menu's Hidden list — got \(inbox.scopeItemIdsForQA)")
+        photograph(inbox, "3-hidden-collapsed")
+
+        // Open: the hidden rows come back in place, dimmed, each with Show.
+        try click(pinned, at: NSPoint(x: 40, y: pinned.bounds.midY))
+        inbox.layoutForQA()
+        try expect(h.shown("s-tmux") && h.shown("s-terminal"), "open, the hidden rows are drawn — got \(inbox.titlesForQA)")
+        for id in ["s-tmux", "s-terminal"] {
+            guard let card = card(h.rowId(id), in: inbox) else { throw Failure(description: "\(id) drew no card") }
+            let alpha = drawnAlpha(of: h.session(id).title ?? "", in: card) ?? 1
+            try expect(alpha < 0.5, "\(id) is dimmed in place — its title draws at \(alpha)")
+            try expect(showButton(h.rowId(id), in: inbox) != nil, "\(id) carries an eye Show pill without hover")
+        }
+        let plain = drawnAlpha(of: h.session("s-cmux").title ?? "", in: try card(h.rowId("s-cmux"), in: inbox).orThrow("no cmux card")) ?? 0
+        try expect(plain > 0.8, "a row that was never hidden keeps its own emphasis, undimmed — draws at \(plain)")
+        guard let showAll = view("ContinuumAgentInboxHiddenShowAll", in: inbox) else {
+            throw Failure(description: "the open footer offers no Show all")
+        }
+        photograph(inbox, "3-hidden-expanded")
+
+        // Show one: it is a normal row again, and the footer counts one.
+        try click(try showButton(h.rowId("s-tmux"), in: inbox).orThrow("the tmux row lost its Show"))
+        inbox.layoutForQA()
+        try expect(h.shown("s-tmux") && !inbox.isRevealedHiddenForQA(id: h.rowId("s-tmux"))
+                   && !h.delegate.externalSessionHiding.isHidden(h.session("s-tmux").id),
+                   "Show brings the session back for good")
+        try expect(inbox.hiddenFooterTitleForQA == "Hidden (1)", "the footer counts one — got '\(inbox.hiddenFooterTitleForQA ?? "none")'")
+
+        // A second click on the footer folds the hidden rows away again.
+        try click(try footer().orThrow("the footer went away"), at: NSPoint(x: 40, y: InboxHiddenFooter.height / 2))
+        inbox.layoutForQA()
+        try expect(!h.shown("s-terminal") && view("ContinuumAgentInboxHiddenShowAll", in: inbox) == nil,
+                   "clicking again collapses — got \(inbox.titlesForQA)")
+        _ = showAll
+
+        // Open again and Show all: every session back, no footer.
+        try click(try footer().orThrow("the footer went away"), at: NSPoint(x: 40, y: InboxHiddenFooter.height / 2))
+        try click(try view("ContinuumAgentInboxHiddenShowAll", in: inbox).orThrow("no Show all after reopening"))
+        inbox.layoutForQA()
+        try expect(["s-tmux", "s-terminal", "s-cmux", "s-claude"].allSatisfy(h.shown) && footer() == nil
+                   && h.delegate.externalSessionHiding.entries.isEmpty,
+                   "Show all brings every session back and the footer goes — got \(inbox.titlesForQA)")
+        try expect(!inbox.isRevealedHiddenForQA(id: h.rowId("s-terminal")), "…undimmed")
+
+        return "QuickHide hidden-footer: Hidden (N) pinned under the list; open draws hidden rows in place, dimmed, with Show; "
+            + "Show and Show all bring sessions back; a second click folds them; the popover's Hidden list is gone"
+    }
+
     // MARK: - 1. Toggle pills
 
     /// `--sidebar-pills-check`. One pill per workspace and per outside source,
@@ -553,5 +653,12 @@ enum QuickHideChecks {
         return "QuickHide pills: workspaces then sources in a fixed order with top-level counts; click toggles the popover's own set, "
             + "Option-click solos; an off pill keeps its needs-you dot; +N folds the rest into a checklist that toggles and solos; "
             + "both dimensions persist and come back on a relaunch; the row needs two pills"
+    }
+}
+
+extension Optional {
+    func orThrow(_ message: String) throws -> Wrapped {
+        guard let value = self else { throw QuickHideChecks.Failure(description: message) }
+        return value
     }
 }

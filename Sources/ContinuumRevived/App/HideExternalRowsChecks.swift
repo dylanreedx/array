@@ -138,23 +138,27 @@ enum HideExternalRowsChecks {
         try expect(![cmux, ghostty, terminal].contains(where: shown),
                    "a hidden session stays hidden after a reload and when it turns live; got \(inbox.titlesForQA)")
 
-        // The scope menu's Hidden list: Show one, then Show all.
-        try expect(inbox.scopeItemIdsForQA.contains(AgentInboxView.hiddenListItemId),
-                   "the scope menu offers the Hidden list; got \(inbox.scopeItemIdsForQA)")
-        try expect(inbox.chooseScopeItemForQA(id: AgentInboxView.hiddenListItemId), "the Hidden entry must be pickable")
-        try expect(inbox.scopeItemIdsForQA.contains("hidden:show:\(terminal.id)") && inbox.scopeItemIdsForQA.contains("hidden:all"),
-                   "the Hidden list names each session and Show all; got \(inbox.scopeItemIdsForQA)")
-        if let sheetDirectory {
-            try writeSheet(sidebar: inbox.scopeChoiceListForQA(), window: window, inbox: inbox, name: "3-hidden-list", to: sheetDirectory)
-        }
-        try expect(inbox.chooseScopeItemForQA(id: "hidden:show:\(terminal.id)"), "Show must be pickable")
+        // .plans/87: `Hidden (N)` under the list is the way back (it replaced the
+        // scope menu's "Hidden from elsewhere" list): open it, Show one, Show all.
+        // Driven through real events in --sidebar-hidden-footer-check.
+        try expect(inbox.hiddenFooterTitleForQA == "Hidden (3)",
+                   "the footer counts the three hidden sessions; got '\(inbox.hiddenFooterTitleForQA ?? "none")'")
+        try expect(!inbox.scopeItemIdsForQA.contains("hidden:list"), "the scope menu no longer carries a Hidden list")
+        inbox.toggleHiddenRevealed()
         inbox.layoutForQA()
-        try expect(shown(terminal) && !shown(cmux), "Show brings back that one session only; got \(inbox.titlesForQA)")
-        try expect(inbox.chooseScopeItemForQA(id: "hidden:all"), "Show all must be pickable")
+        try expect([cmux, ghostty, terminal].allSatisfy(shown) && inbox.isRevealedHiddenForQA(id: rowId(terminal)),
+                   "open, the footer draws each hidden session in place, dimmed; got \(inbox.titlesForQA)")
+        if let sheetDirectory {
+            try writeSheet(sidebar: sidebar, window: window, inbox: inbox, name: "3-hidden-footer", to: sheetDirectory)
+        }
+        try expect(inbox.clickHoverHideForQA(id: rowId(terminal)), "a revealed row's Show must be pressable")
+        inbox.layoutForQA()
+        try expect(!inbox.isRevealedHiddenForQA(id: rowId(terminal)) && delegate.externalSessionHiding.hiddenKeys == [cmux.id, ghostty.id],
+                   "Show brings back that one session only; got \(delegate.externalSessionHiding.hiddenKeys)")
+        try expect(inbox.clickShowAllHiddenForQA(), "Show all must be pressable")
         inbox.layoutForQA()
         try expect([cmux, ghostty, terminal].allSatisfy(shown), "Show all brings every session back; got \(inbox.titlesForQA)")
-        try expect(!inbox.scopeItemIdsForQA.contains(AgentInboxView.hiddenListItemId),
-                   "with nothing hidden the scope menu has no Hidden entry")
+        try expect(inbox.hiddenFooterTitleForQA == nil, "with nothing hidden there is no footer")
 
         // A session discovery no longer reports is forgotten after a day.
         let ageing = ExternalSessionHiding(defaults: suite)
@@ -164,7 +168,7 @@ enum HideExternalRowsChecks {
         ageing.showAll()
 
         return "HideExternalRowsChecks: × and menu Hide remove a session's row, Undo and ⌘Z restore it, hidden survives a store reload "
-            + "and a live turn, the Hidden list shows one and Show all the rest, an Array agent's × snoozes and hides nothing"
+            + "and a live turn, Hidden (N) shows one and Show all the rest, an Array agent's × snoozes and hides nothing"
             + (sheetDirectory.map { " (sheet: \($0))" } ?? "")
     }
 
