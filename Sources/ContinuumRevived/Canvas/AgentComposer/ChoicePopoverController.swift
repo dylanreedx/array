@@ -377,6 +377,9 @@ final class ChoicePopoverController {
     nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
     private var anchorWindowObservation: NSKeyValueObservation?
     private var cancellationHandler: (() -> Void)?
+    /// Where an intrinsic panel of a given content size goes, kept from `present`
+    /// so a checklist that grows or shrinks while open stays on its anchor.
+    private var reframeIntrinsicPanel: ((NSSize) -> NSRect)?
 
     /// WS5: the page zoom the presented surface draws at.
     ///
@@ -410,7 +413,9 @@ final class ChoicePopoverController {
         accessibilityLabel customAccessibilityLabel: String? = nil,
         onSelection: @escaping (ChoiceItem) -> Void,
         focusReturnView: NSView? = nil,
-        onDismiss: (() -> Void)? = nil
+        onDismiss: (() -> Void)? = nil,
+        onAccessory: ((ChoiceItem, String) -> Void)? = nil,
+        onFocusChange: ((String?) -> Void)? = nil
     ) {
         dismiss()
         qaLastSelfDismissal = nil
@@ -511,13 +516,24 @@ final class ChoicePopoverController {
         let chrome = ChoicePanelShadowView(surface: contentView)
         panel.contentView = chrome
         let margin = ChoicePanelShadowView.margin
+        let region = Self.region(placementFrame, clearOf: obstacles, zoom: pageZoom)
+        let zoom = pageZoom
         panel.setFrame(Self.panelFrame(
             contentSize: contentSize,
             anchor: anchor,
             relativeTo: view,
-            visibleFrame: Self.region(placementFrame, clearOf: obstacles, zoom: pageZoom),
-            zoom: pageZoom
+            visibleFrame: region,
+            zoom: zoom
         ).insetBy(dx: -margin, dy: -margin), display: false)
+        // An anchor given as the view's whole bounds follows the view: a trigger
+        // whose label grows on a toggle re-anchors rather than pointing at the
+        // rect it used to be.
+        let tracksBounds = anchor == view.bounds
+        reframeIntrinsicPanel = layout == .intrinsic ? { [weak view] size in
+            guard let view else { return .zero }
+            return Self.panelFrame(contentSize: size, anchor: tracksBounds ? view.bounds : anchor,
+                                   relativeTo: view, visibleFrame: region, zoom: zoom)
+        } : nil
         chrome.layoutSubtreeIfNeeded()
 
         self.panel = panel
@@ -540,9 +556,12 @@ final class ChoicePopoverController {
         anchorWasPostingFrameChanges = view.postsFrameChangedNotifications
 
         list.onSelection = { [weak self] item in
-            self?.dismiss()
+            // A checkbox reports and stays: the owner answers with `update(items:)`.
+            if !item.keepsOpen { self?.dismiss() }
             onSelection(item)
         }
+        list.onAccessory = onAccessory
+        list.onFocusChange = onFocusChange
         list.onDismiss = { [weak self] in self?.dismissAsCancellation() }
 
         window.addChildWindow(panel, ordered: .above)
@@ -577,7 +596,44 @@ final class ChoicePopoverController {
         return true
     }
 
+    /// New items for the list that is showing — a checklist after a toggle. The
+    /// panel resizes about its anchor; a closed controller ignores this.
+    func update(items: [ChoiceItem]) {
+        guard isPresented, let listView else { return }
+        listView.replace(items: items)
+        reframeToContent()
+    }
+
+    private var reframeScheduled = false
+
+    private func scheduleReframe() {
+        guard !reframeScheduled else { return }
+        reframeScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.reframeScheduled = false
+            self?.reframeToContent()
+        }
+    }
+
+    private func reframeToContent() {
+        guard isPresented, let listView, let panel, let reframeIntrinsicPanel else { return }
+        let margin = ChoicePanelShadowView.margin
+        var frame = reframeIntrinsicPanel(listView.intrinsicContentSize).insetBy(dx: -margin, dy: -margin)
+        // An open checklist keeps the edge it opened at: its trigger's label grows
+        // and shrinks a few points with every toggle, and a menu that shuffled
+        // sideways under the pointer would be chasing it.
+        if listView.presentation == .checklist,
+           let screen = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame,
+           panel.frame.minX + frame.width - margin <= screen.maxX {
+            frame.origin.x = panel.frame.minX
+        }
+        guard frame != panel.frame else { return }
+        panel.setFrame(frame, display: true)
+        panel.contentView?.layoutSubtreeIfNeeded()
+    }
+
     func dismiss() {
+        reframeIntrinsicPanel = nil
         removeDismissalObservers()
         if let panel {
             parentWindow?.removeChildWindow(panel)
@@ -742,7 +798,21 @@ final class ChoicePopoverController {
         ) { [weak self] _ in MainActor.assumeIsolated { self?.dismissItself("resignActive") } })
         observers.append(center.addObserver(
             forName: NSView.frameDidChangeNotification, object: anchor, queue: .main
-        ) { [weak self] _ in MainActor.assumeIsolated { self?.dismissItself("anchorMoved") } })
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                // A checklist rewrites its own trigger's label on every toggle, so
+                // the trigger resizing is the list working, not the menu losing
+                // its anchor. It follows; every other menu still closes.
+                guard let self else { return }
+                if self.listView?.presentation == .checklist {
+                    // On the next turn: AppKit posts this mid-layout, with frames
+                    // the trigger passes through on its way to the final one.
+                    self.scheduleReframe()
+                } else {
+                    self.dismissItself("anchorMoved")
+                }
+            }
+        })
         anchor.postsFrameChangedNotifications = true
         anchorWindowObservation = anchor.observe(\.window, options: [.old, .new]) { [weak self] _, change in
             // `window` is optional, so KVO wraps both values in a second Optional.

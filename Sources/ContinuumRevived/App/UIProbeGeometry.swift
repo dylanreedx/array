@@ -4553,7 +4553,9 @@ enum UIProbeGeometry {
                 let renderedManagement = renderedItems.filter { $0.id.hasPrefix("management:") }
                 guard renderedManagement.map(\.title) == ["New Workspace…", "Rename Workspace…", "Delete Workspace…"],
                       renderedManagement.map(\.enabled) == [true, false, false],
-                      renderedItems.contains(where: { $0.id == "management-separator" && !$0.enabled }) else {
+                      // .plans/86: the checklist draws a real divider above the
+                      // first management row rather than listing a dash row.
+                      renderedManagement.first?.separatorBefore == true else {
                     throw fail("\(label): rendered management section lost visible-disabled rows or separator")
                 }
                 let scopeBeforeManagement = probe.inbox.selectedScopeTitleForQA
