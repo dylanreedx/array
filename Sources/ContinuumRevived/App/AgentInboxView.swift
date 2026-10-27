@@ -4607,7 +4607,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     /// Where hidden sessions live; nil (checks, baselines) offers no Hide at all.
     var externalSessionHiding: ExternalSessionHiding? {
-        didSet { refreshAfterHidingChange() }
+        // Re-installing the sidebar hands back the same store; a full render then
+        // would rebuild every cell for nothing.
+        didSet { if oldValue !== externalSessionHiding { refreshAfterHidingChange() } }
     }
     private var pendingHideUndo: Set<String>?
     private var hiddenListShown = false
