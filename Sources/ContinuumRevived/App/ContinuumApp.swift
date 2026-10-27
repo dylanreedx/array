@@ -12280,7 +12280,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // cannot reach a supervisor — the same reason read-state is layered on here.
         var turnSnapshots: [UUID: AgentTileTurnSnapshot] = [:]
         var lifecycleFacts: [UUID: AgentLifecycleFacts] = [:]
+        var lastActivity: [UUID: Date] = [:]
         for record in records {
+            if let stamp = agentSupervisor.lastActivity(for: record.id) {
+                lastActivity[record.id.rawValue] = stamp
+            }
             if let branch = agentSupervisor.branchContextCachedOnly(for: record.id)?.checkedOutBranch {
                 checkedOutBranches[record.id.rawValue] = branch
             }
@@ -12310,6 +12314,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             turnSnapshots: turnSnapshots, records: Dictionary(uniqueKeysWithValues: records.map { ($0.id.rawValue, $0) }),
             lifecycleFacts: lifecycleFacts,
             autoSettleAfter: AgentAutoSettleConfig.resolvedFromDefaults().window,
+            lastActivity: lastActivity,
             now: now
         )
         .filter { agentActivity.managedAgentIdentities.contains($0.id) }

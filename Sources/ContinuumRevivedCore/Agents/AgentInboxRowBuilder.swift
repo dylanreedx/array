@@ -101,6 +101,7 @@ public enum AgentInboxRowBuilder {
         records: [UUID: AgentRecord] = [:],
         lifecycleFacts: [UUID: AgentLifecycleFacts] = [:],
         autoSettleAfter: TimeInterval? = nil,
+        lastActivity: [UUID: Date] = [:],
         now: Date
     ) -> [AgentInboxRow] {
         let boardRows = AgentsBoardProjection.rows(from: snapshot, context: context)
@@ -128,6 +129,7 @@ public enum AgentInboxRowBuilder {
                 record: records[boardRow.agentId],
                 lifecycleFacts: facts,
                 autoSettleAfter: autoSettleAfter,
+                lastActivity: lastActivity[boardRow.agentId],
                 now: now
             )
         }
@@ -183,6 +185,7 @@ public enum AgentInboxRowBuilder {
         record: AgentRecord? = nil,
         lifecycleFacts: AgentLifecycleFacts = AgentLifecycleFacts(),
         autoSettleAfter: TimeInterval? = nil,
+        lastActivity: Date? = nil,
         now: Date
     ) -> AgentInboxRow {
         let context = boardRow.context
@@ -273,7 +276,9 @@ public enum AgentInboxRowBuilder {
             // P6.5 uses the board's canonical latest event stamp only to choose
             // which children survive a bounded inline fan-out. It never reaches
             // the desktop's global frozen comparator.
-            lastActiveAt: boardRow.updatedAt,
+            // Plan 87: the supervisor's throttled activity stamp moves on every
+            // frame and streamed token; the board stamp only on timeline events.
+            lastActiveAt: max(boardRow.updatedAt, lastActivity ?? .distantPast),
             // P2D.4 nests children under their parent, and assigns the depth in
             // `InboxSort` — depth is a property of the row's place in a LIST and
             // this fold sees one agent at a time. `parentId` below is the fact it
