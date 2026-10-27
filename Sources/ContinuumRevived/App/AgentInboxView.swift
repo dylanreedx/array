@@ -679,6 +679,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var wakeScheduleGeneration = 0
     private var scheduledWakeDelay: TimeInterval?
     private(set) var qaWakeRerenderCount = 0
+    /// Plan 87: whole-table reloads (cards built are `cellBuildCountForQA`).
+    private(set) var qaFullReloadCount = 0
     private static let wakeTimerMinimumDelay: TimeInterval = 0.05
     private static let wakeTimerMaximumDelay: TimeInterval = 24 * 60 * 60
     /// Production uses `Timer` when this is nil. The injected scheduler is a
@@ -2001,6 +2003,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // that list is being replaced. Any still fading are dropped here rather than
         // left to their timers — the row under them is a different agent now.
         cancelCrossfades()
+        qaFullReloadCount += 1
         setItems(visible)
         cellsByRow.removeAll()
         shelfHeaderCell = nil
@@ -5607,6 +5610,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     var rowIdsForQA: [UUID] { rows.map(\.id) }
+    /// The row the host last PUSHED for `id`, drawn or not (a folded child).
+    func pushedRowForQA(id: UUID) -> AgentInboxRow? { allRows.first { $0.id == id } }
     /// The block an agent is DRAWN in, read off the table's own items and the
     /// headings between them — `live`, `snoozed`, `history` — or nil
     /// when the table draws no row for it (scoped out, folded, or behind a shut

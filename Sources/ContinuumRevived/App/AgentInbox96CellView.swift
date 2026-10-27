@@ -570,6 +570,9 @@ enum BrandMark96 {
 /// same arithmetic `SidebarDensityProposal` reports and the two cannot drift.
 @MainActor
 final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
+    /// The folded parent's rollup shares this lane with the branch.
+    var branchLaneTextForQA: String { branchLabel.stringValue }
+
     static let statusSymbolsInUse = [
         "checkmark.circle.fill", "hand.raised.fill",
         "exclamationmark.triangle.fill", "stop.circle.fill", "xmark.circle.fill",

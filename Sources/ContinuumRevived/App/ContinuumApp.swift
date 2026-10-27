@@ -2352,6 +2352,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--sidebar-liveness-check") {
+            do {
+                _ = NSApplication.shared
+                print(try AppDelegate.runSidebarLivenessChecks())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--agent-incremental-refresh-check") {
             do {
                 _ = NSApplication.shared
@@ -5561,6 +5572,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Every STRUCTURAL sidebar reload (the ones that read disk) — the workspace-
     /// switch witness reads the delta across one switch.
     private(set) var qaStructuralSidebarReloadCount = 0
+    /// Plan 87: how many times a sidebar push overlaid its inputs.
+    private(set) var qaSidebarInputsComputedCount = 0
     /// A canvas model change is waiting for the next run-loop turn's reload.
     private var sidebarReloadPending = false
     /// What the last structural rebuild read from disk (`SidebarModelInputs`).
@@ -12188,6 +12201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// mounted document and every installed zone layer's live tiles laid over it
     /// (`SidebarModelInputs`). Reads disk only when nothing has been read yet.
     private func currentSidebarModelInputs() -> SidebarModelInputs {
+        qaSidebarInputsComputedCount += 1
         let fromDisk = sidebarModelInputsFromDisk ?? {
             let loaded = SidebarModelInputs.load(registryStore: registryStore)
             sidebarModelInputsFromDisk = loaded
@@ -40300,3 +40314,183 @@ extension AppDelegate {
     func filmHandleWorkspaceMCP(_ request: [String: Any]) -> [String: Any] { workspaceAPI.handleMCPRequest(request) }
 }
 #endif
+
+// Plan 87 (.plans/87-sidebar-liveness), Step 4. Gated on `--sidebar-liveness-check`.
+//
+// One fixture at real scale: 100 supervised agents, a 33-child group under an
+// IDLE parent, every child headless, and one tiled agent. Everything is driven
+// through production: `AgentSupervisor.qaDeliver` (the runner's own delivery
+// seam), the real `AgentInboxView` in an off-screen window, and the canvas
+// delegate. No row is re-derived here; every assertion reads what the sidebar
+// was pushed or what its table drew.
+extension AppDelegate {
+    static func runSidebarLivenessChecks() throws -> String {
+        struct Failure: Error, CustomStringConvertible { let description: String }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {
+            if !condition() { throw Failure(description: message()) }
+        }
+        // Each numbered witness records its failure and the run continues, so one
+        // RED run names every broken property, not just the first.
+        var failures: [String] = []
+        func witness(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) {
+            if !condition() { failures.append(message()) }
+        }
+        @discardableResult
+        func spin(timeout: TimeInterval, until done: () -> Bool) -> TimeInterval? {
+            let start = Date()
+            while Date().timeIntervalSince(start) < timeout {
+                if done() { return Date().timeIntervalSince(start) }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+            }
+            return done() ? Date().timeIntervalSince(start) : nil
+        }
+        func settle() { spin(timeout: 0.7) { false } }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory
+            .appendingPathComponent("continuum-sidebar-liveness-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+        let projectRoot = tempRoot.appendingPathComponent("Project", isDirectory: true)
+        for dir in [appSupport, agentsSupport, projectRoot] {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let now = Date()
+        let workspaceId = UUID()
+        let projectId = UUID()
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceId
+        registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Liveness", projectIds: [projectId], createdAt: now, updatedAt: now)]
+        registry.projects = [ProjectEntry(id: projectId, name: "Project", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
+        let supervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: agentsSupport),
+            makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        app.agentSupervisor = supervisor
+        app.installAgentAwarenessHooks()
+
+        let tiledTile = Tile(
+            id: UUID(), kind: .managedAgent, title: "Agent · Before", frame: TileFrame(x: 0, y: 0, width: 300, height: 200),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        canvas.delegate = app
+        app.canvasView = canvas
+        canvas.install(tileView: TileNSView(tile: tiledTile), for: tiledTile)
+
+        func spawn(_ name: String, parent: AgentID? = nil, tile: UUID? = nil) -> AgentID {
+            let id = supervisor.spawn(
+                role: nil, prompt: nil, cwd: projectRoot, model: "anthropic/claude-opus-5-5", thinking: "medium",
+                projectId: projectId, parentAgentID: parent, tileId: tile)
+            _ = supervisor.rename(agentID: id, to: name)
+            return id
+        }
+        let parent = spawn("Idle orchestrator")
+        let children = (0..<33).map { spawn("Child \($0)", parent: parent) }
+        let tiled = spawn("Tiled agent", tile: tiledTile.id)
+        let loose = (0..<65).map { spawn("Agent \($0)") }
+        try expect(supervisor.records.count == 100, "fixture: expected 100 agents, got \(supervisor.records.count)")
+
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 8000))
+        let window = NSWindow(contentRect: sidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = sidebar
+        window.orderFrontOffscreenForChecks()
+        defer { window.orderOut(nil) }
+        app.workspaceSidebarView = sidebar
+        let restoreShelves = WorkspaceSidebarConfig.qaIsolateShelves()
+        defer { restoreShelves() }
+        app.configureWorkspaceSidebar(sidebar)
+        sidebar.configureInboxScope(.all) { _ in }
+        app.refreshAgentSurfaces(notify: false)
+        sidebar.layoutSubtreeIfNeeded()
+        let inbox = sidebar.inboxForQA
+        try expect(inbox.pushedRowForQA(id: children[0].rawValue) != nil,
+                   "fixture: the headless child must be a pushed row")
+        try expect(inbox.onScreenCardForQA(id: parent.rawValue) != nil,
+                   "fixture: the parent's card must be on screen — drawn \(inbox.rowIdsForQA.count) rows, table \(inbox.tableRowCountForQA), parent drawn \(inbox.rowIdsForQA.firstIndex(of: parent.rawValue).map(String.init) ?? "no"), pushed \(String(describing: inbox.pushedRowForQA(id: parent.rawValue).map { "\($0.variant) \($0.lifecycle) \($0.state)" }))")
+        settle()
+
+        var report: [String] = []
+        let structuralBefore = app.qaStructuralSidebarReloadCount
+
+        // 1 · A headless child's turn start flips its row within one push (~50 ms).
+        let child = children[0]
+        supervisor.qaDeliver(.turnStarted(threadId: AgentSupervisor.threadId(for: child), turnId: "c0-1"), to: child)
+        let flip = spin(timeout: 1.0) { inbox.pushedRowForQA(id: child.rawValue)?.state == .working }
+        witness(flip != nil, "1: a headless child's turn start never reached its row within 1 s")
+        witness((flip ?? 1) < 0.25, "1: a headless child's turn start took \(Int((flip ?? 1) * 1000)) ms to reach its row (state changes push within ~50 ms)")
+        report.append("headless child working in \(Int((flip ?? 1) * 1000)) ms")
+
+        // 2 · An idle parent's folded rollup repaints when a child starts or finishes.
+        func parentLane() -> String { inbox.onScreenCardForQA(id: parent.rawValue)?.branchLaneTextForQA ?? "<no card>" }
+        witness(inbox.pushedRowForQA(id: parent.rawValue)?.state != .working,
+                   "2: fixture: the parent must stay idle")
+        let startedLane = spin(timeout: 1.0) { parentLane().contains("working") }
+        witness(startedLane != nil, "2: the idle parent's rollup did not show its working child — lane '\(parentLane())'")
+        supervisor.qaDeliver(.turnCompleted(threadId: AgentSupervisor.threadId(for: child), turnId: "c0-1", outcome: .completed, errorMessage: nil), to: child)
+        let finishedLane = spin(timeout: 1.0) { !parentLane().contains("working") }
+        witness(finishedLane != nil, "2: the idle parent's rollup still says working after its child finished — lane '\(parentLane())'")
+        witness(app.qaStructuralSidebarReloadCount == structuralBefore,
+                "2: two agent events ran \(app.qaStructuralSidebarReloadCount - structuralBefore) disk rebuilds")
+        report.append("parent rollup repainted on child start and finish, 0 disk rebuilds")
+
+        // 3 · Cards built per push with N working rows and no state change: 0.
+        for agent in loose.prefix(6) {
+            supervisor.qaDeliver(.turnStarted(threadId: AgentSupervisor.threadId(for: agent), turnId: "w"), to: agent)
+        }
+        // Setup, not the witness: a structural refresh draws the six working rows
+        // however the event path behaves.
+        app.refreshAgentSurfaces(notify: false)
+        settle()
+        let working = loose.prefix(6).filter { inbox.onScreenCardForQA(id: $0.rawValue) != nil && inbox.pushedRowForQA(id: $0.rawValue)?.state == .working }
+        try expect(working.count == 6, "3: fixture: six working cards must be on screen, got \(working.count)")
+        let cardsBefore = inbox.cellBuildCountForQA
+        let fullBefore = inbox.qaFullReloadCount
+        let inputsBefore = app.qaSidebarInputsComputedCount
+        RunLoop.main.run(until: Date().addingTimeInterval(1.1))
+        app.pushAgentSurfaces(notify: false)
+        let cardsBuilt = inbox.cellBuildCountForQA - cardsBefore
+        let fullReloads = inbox.qaFullReloadCount - fullBefore
+        let inputsComputed = app.qaSidebarInputsComputedCount - inputsBefore
+        witness(cardsBuilt == 0, "3: a push with no state change rebuilt \(cardsBuilt) cards (6 working rows on screen)")
+        witness(fullReloads == 0, "3: a push with no state change reloaded the whole table \(fullReloads) times")
+        witness(inputsComputed == 1, "3: one push computed the sidebar inputs \(inputsComputed) times")
+        report.append("idle push: \(cardsBuilt) cards, \(fullReloads) full reloads, inputs computed \(inputsComputed)x")
+
+        // 4 · The supervisor's activity stamp is the row's lastActiveAt.
+        // A streamed delta makes no timeline draft, so only the supervisor's
+        // throttled stamp can move the row.
+        supervisor.qaDeliver(.turnStarted(threadId: AgentSupervisor.threadId(for: tiled), turnId: "t1"), to: tiled)
+        settle()
+        RunLoop.main.run(until: Date().addingTimeInterval(1.1))
+        supervisor.qaDeliver(.contentDelta(threadId: AgentSupervisor.threadId(for: tiled), turnId: "t1", streamKind: .assistant, delta: "hi"), to: tiled)
+        app.pushAgentSurfaces(notify: false)
+        let stamp = supervisor.lastActivity(for: tiled)
+        witness(stamp != nil && inbox.pushedRowForQA(id: tiled.rawValue)?.lastActiveAt == stamp,
+                   "4: the row's lastActiveAt \(String(describing: inbox.pushedRowForQA(id: tiled.rawValue)?.lastActiveAt)) is not the supervisor's \(String(describing: stamp))")
+        report.append("lastActiveAt follows the supervisor")
+
+        // 5 · A retitle reaches the sidebar without a disk rebuild.
+        var renamed = tiledTile
+        renamed.title = "Agent · After"
+        let inputsBeforeTitle = app.qaSidebarInputsComputedCount
+        let structuralBeforeTitle = app.qaStructuralSidebarReloadCount
+        canvas.updateTile(renamed)
+        settle()
+        witness(app.qaSidebarInputsComputedCount > inputsBeforeTitle, "5: a retitle never re-rendered the sidebar")
+        witness(app.qaStructuralSidebarReloadCount == structuralBeforeTitle,
+                   "5: a retitle ran \(app.qaStructuralSidebarReloadCount - structuralBeforeTitle) disk rebuilds")
+        report.append("retitle: 0 disk rebuilds")
+
+        if !failures.isEmpty {
+            throw Failure(description: "SidebarLiveness RED:\n  " + failures.joined(separator: "\n  "))
+        }
+        return "SidebarLiveness: " + report.joined(separator: "; ")
+    }
+}

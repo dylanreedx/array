@@ -210,6 +210,7 @@ check --settle-closes-tile-check
 check --shell-open-as-agent-check
 check --shell-tool-row-check
 check --sidebar-lifecycle-check
+check --sidebar-liveness-check
 check --sidebar-production-corpus-check
 check --sidebar-push-coalescing-check
 check --sidebar-screenshot-check
@@ -350,6 +351,7 @@ leg run_app_check .build/debug/Array --agent-first-paint-check
 leg run_app_check .build/debug/Array --agent-identity-color-check
 leg run_app_check .build/debug/Array --agent-inbox-check
 leg run_app_check .build/debug/Array --agent-incremental-refresh-check
+leg run_app_check .build/debug/Array --sidebar-liveness-check
 leg run_app_check .build/debug/Array --agent-input-check
 leg run_app_check .build/debug/Array --agent-inventory-wiring-check
 leg run_app_check .build/debug/Array --agent-local-file-link-check
