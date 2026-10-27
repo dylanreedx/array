@@ -9110,6 +9110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let pointInContent = contentView.convert(locationInWindow, from: nil)
         guard let hitView = contentView.hitTest(pointInContent) else { return false }
         return hitView.hasAncestor(ofType: NSScrollView.self)
+            || hitView.hasAncestor(ofType: AgentTranscriptCanvasView.self)
             || hitView.hasAncestor(ofType: NSTextView.self)
             || hitView.hasAncestor(ofType: WKWebView.self)
             || hitView.hasAncestor(ofType: BrowserHostView.self)

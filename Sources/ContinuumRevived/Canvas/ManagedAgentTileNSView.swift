@@ -411,7 +411,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         self.providerSettings = providerSettings ?? AgentModelConfig.resolvedFromDefaults()
         // P5.5 acceptance: v2 IS the tile. The reversible construction seam and
         // the legacy view-only card path were removed at this supervised gate.
-        self.transcriptCollectionFixture = AgentTranscriptListView(toolDetailStore: toolDetailStore)
+        // ARRAY_TRANSCRIPT_RENDERER=canvas (or the `continuum.transcript.renderer`
+        // default) draws the transcript as one CoreText view; the row list stays
+        // the default until the canvas renderer covers every block.
+        self.transcriptCollectionFixture = AgentTranscriptCanvasView.isSelected
+            ? AgentTranscriptCanvasView(toolDetailStore: toolDetailStore)
+            : AgentTranscriptListView(toolDetailStore: toolDetailStore)
         self.v2Composer = AgentComposerView(frame: .zero, variant: .fullTurn)
         self.v2ActionButton = ComposerActionButton(
             presentation: .resolve(
@@ -4405,6 +4410,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         refreshTranscriptThinkingIndicator()
     }
     var qaTranscriptForChecks: AgentTranscriptListView? { listTranscript }
+    /// Whichever renderer this tile installed.
+    var qaTranscriptSurface: (any AgentTranscriptSurface)? { transcriptCollectionFixture }
 
     // MARK: - WS5 page-zoom QA seams
     //
