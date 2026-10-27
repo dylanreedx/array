@@ -343,11 +343,42 @@ final class AgentTileChromeCanvasView: NSView {
         placeTranscript()
     }
 
+    /// The transcript sits where the slot is, with each edge held still against
+    /// moves of under two device pixels (and under a point).
+    ///
+    /// Why the hold: a body laid out out of the window (resting) gets exact frames,
+    /// and the same body laid out in it (live) gets frames rounded to the device
+    /// pixel grid of the tile's CURRENT camera zoom — at zoom 0.37 the slot's
+    /// bottom edge landed 0.43 pt higher. A tail-following transcript keeps its
+    /// last line on that bottom edge, so every wake, rest, or live re-layout at a
+    /// new zoom moved every line by a fraction of a pixel: the 2-3 px shift between
+    /// a frame shown mid-zoom and the settled canvas. Rounding differs by a
+    /// pixel or so; anything the body really changes (a rail, a line of draft, a
+    /// banner) moves an edge by points, and is taken.
     private func placeTranscript() {
         // The slot is laid out in the body's space, and the body fills this view
         // at the origin with the same flippedness, so the rect carries over.
-        let rect = NativeViewVectorRenderer.convert(transcriptSlot.bounds, from: transcriptSlot, to: body)
-        if transcript.frame != rect { transcript.frame = rect }
+        let target = NativeViewVectorRenderer.convert(transcriptSlot.bounds, from: transcriptSlot, to: body)
+        let current = transcript.frame
+        guard current != .zero else {
+            transcript.frame = target
+            return
+        }
+        // Two pixels, and never under a point: the rounding compounds through the
+        // tile, this view, the body and the stack (1.43x measured 0.38 pt, past
+        // one 0.35 pt pixel).
+        let tolerance = max(2 * devicePixel, 1)
+        func hold(_ old: CGFloat, _ new: CGFloat) -> CGFloat { abs(new - old) < tolerance ? old : new }
+        let minX = hold(current.minX, target.minX), maxX = hold(current.maxX, target.maxX)
+        let minY = hold(current.minY, target.minY), maxY = hold(current.maxY, target.maxY)
+        let rect = NSRect(x: minX, y: minY, width: max(0, maxX - minX), height: max(0, maxY - minY))
+        if current != rect { transcript.frame = rect }
+    }
+
+    /// One device pixel in this view's units, at the camera zoom it is shown at.
+    private var devicePixel: CGFloat {
+        let backing = convertToBacking(NSSize(width: 1, height: 1))
+        return 1 / max(0.01, min(abs(backing.width), abs(backing.height)))
     }
 
     override func draw(_ dirtyRect: NSRect) {
