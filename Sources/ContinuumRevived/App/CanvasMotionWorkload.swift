@@ -66,6 +66,7 @@ final class CanvasMotionWorkload {
     private var residualZoom = 0.0
     private var pointerPanLocation: NSPoint?
     private var replaySummary: [String: Any]?
+    private var bareTiles: (stripped: Int, of: Int)?
     private(set) var replayWindowSize: NSSize?
 
     init(root: URL, support: URL, markdownCount: Int, agentCount: Int) throws {
@@ -327,6 +328,23 @@ final class CanvasMotionWorkload {
 
     /// Starts held offline runners and positions their real transcript views,
     /// without emitting provider chunks during static scene warmup.
+    /// `CANVAS_MOTION_BARE_TILES=1`, after warmup: every surfaced agent tile becomes
+    /// its one surface view, to measure the zoom ceiling with one view per tile.
+    func stripTilesIfRequested() {
+        guard ProcessInfo.processInfo.environment["CANVAS_MOTION_BARE_TILES"] == "1" else { return }
+        let agents = agentTileIDs.compactMap { canvas.tileView(for: $0) }
+        bareTiles = (stripped: agents.filter { $0.qaStripToSurfaceForMotionCeiling() }.count, of: agents.count)
+        // `CANVAS_MOTION_BARE_TILES_ALL=1`: also take every tile that is not a lone surface out of the plane,
+        // leaving only one view per remaining tile.
+        guard ProcessInfo.processInfo.environment["CANVAS_MOTION_BARE_TILES_ALL"] == "1" else { return }
+        for view in canvas.worldPlane.subviews.compactMap({ $0 as? TileNSView })
+        where view.surfaceResidency != .surfaced || view.subviews.count > 1 {
+            view.removeFromSuperview()
+            bareRemoved += 1
+        }
+    }
+    private(set) var bareRemoved = 0
+
     func prepareStreaming() {
         guard !closed else { return }
         if !sentPrompts {
@@ -556,6 +574,7 @@ final class CanvasMotionWorkload {
             "agentSurfaceResidency": canvas.surfaceResidencyEnabled,
             "farParking": canvas.farParkingEnabled,
             "replay": replaySummary as Any? ?? NSNull(),
+            "bareTiles": bareTiles.map { ["stripped": $0.stripped, "of": $0.of, "removed": bareRemoved] } as Any? ?? NSNull(),
             "streamingAgents": emitter.streamingCount ?? agentIDs.count,
             "farParkedTiles": canvas.qaFarParkedTileCount,
             "lastGestureReport": canvas.qaLastGestureReport?.summary as Any? ?? NSNull(),

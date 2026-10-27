@@ -577,6 +577,15 @@ class TileNSView: NSView, TokenThemed {
     }
 
     var qaSurfaceHostBackingCallbackCount: Int { surfaceHost?.qaBackingCallbackCount ?? 0 }
+
+    /// Motion benchmark only (`CANVAS_MOTION_BARE_TILES=1`): leave a surfaced tile as
+    /// its one surface view, to measure zoom when every tile is a single view.
+    @discardableResult
+    func qaStripToSurfaceForMotionCeiling() -> Bool {
+        guard surfaceResidency == .surfaced, let contentView else { return false }
+        for view in subviews where view !== contentView { view.removeFromSuperview() }
+        return true
+    }
     var qaSurfaceHostContentsScaleChangeCount: Int { surfaceHost?.qaContentsScaleChangeCount ?? 0 }
     var qaParkedBody: NSView? { parkedBody }
 

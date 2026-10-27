@@ -434,6 +434,7 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
             "workload": fixture.snapshot()], to: URL(fileURLWithPath: output.path + ".ready.json"))
         print("[canvas-motion] ready pid=\(ProcessInfo.processInfo.processIdentifier) output=\(output.path)")
         try await Task.sleep(for: .seconds(warmup))
+        fixture.stripTilesIfRequested()
         let baseline = fixture.snapshot()
         var visibilityErrors: [String] = []
         @MainActor func checkVisibility(_ snapshot: [String: Any], _ label: String) {

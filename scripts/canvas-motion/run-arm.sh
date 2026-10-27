@@ -4,7 +4,7 @@
 # root and store, samples the main thread across the motion phase, waits for exit.
 set -u
 label=$1; phase=$2; shift 2
-bundle="$HOME/array-scratch/apps/Array Motion.app"
+bundle="${BUNDLE:-$HOME/array-scratch/apps/Array Motion.app}"
 run="$HOME/array-scratch/motion-runs/$label"
 here=${0:A:h}
 rm -rf "$run"; mkdir -p "$run"
@@ -17,7 +17,7 @@ envargs=(--env "CONTINUUM_PROJECT_ROOT=$run/root" --env "CONTINUUM_APP_SUPPORT=$
 for kv in "$@"; do envargs+=(--env "$kv"); done
 open -n "${envargs[@]}" "$bundle" --args --canvas-motion-probe
 ready="$out.ready.json"
-for i in {1..200}; do
+for i in {1..600}; do
   [[ -f $ready ]] && grep -qE "warming-up|\"motion\"" "$ready" && break; sleep 0.1
 done
 pid=$(python3 -c "import json;print(json.load(open('$ready'))['pid'])" 2>/dev/null)
@@ -25,7 +25,7 @@ pid=$(python3 -c "import json;print(json.load(open('$ready'))['pid'])" 2>/dev/nu
 # Profiling pauses the app, so it is opt-in and never mixed into a timing arm.
 if [[ ${SAMPLE:-0} == 1 ]]; then
   for i in {1..400}; do grep -q '"stage" : "motion"' "$ready" && break; sleep 0.05; done
-  sample "$pid" $(( ${SECONDS_PHASE:-6} + 2 )) 1 -mayDie -file "$run/sample.txt" >/dev/null 2>&1
+  sample "$pid" ${SAMPLE_SECONDS:-$(( ${SECONDS_PHASE:-6} + 2 ))} 1 -mayDie -file "$run/sample.txt" >/dev/null 2>&1
   python3 "$here/xtab.py" "$run/sample.txt" > "$run/xtab.txt" 2>/dev/null
 fi
 while kill -0 "$pid" 2>/dev/null; do sleep 0.5; done
