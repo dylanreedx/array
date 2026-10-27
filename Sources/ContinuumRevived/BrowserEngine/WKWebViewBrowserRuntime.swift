@@ -180,7 +180,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     var onNewWindowRequest: ((URLRequest, WKWebViewConfiguration, WKNavigationAction, WKWindowFeatures) -> WKWebView?)?
 
     private var didNotifyContentProcessTerminated = false
-    private var isTerminated = false
+    private(set) var isTerminated = false
     private var faviconRequestGeneration = 0
 
     let webView: WKWebView
@@ -190,6 +190,17 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
     private var downloadsWithRecordedNetworkEvent: Set<ObjectIdentifier> = []
     private var consoleLogBuffer = BrowserConsoleLogBuffer()
+    /// Counts every console entry ever received, so a reader can ask for the
+    /// ones since a mark even after the ring buffer has wrapped.
+    private(set) var consoleEntrySequence = 0
+    private var automationEngine: BrowserAutomation?
+    /// The agent-driving engine for this tile, made on first use.
+    var automation: BrowserAutomation {
+        if let automationEngine { return automationEngine }
+        let engine = BrowserAutomation(runtime: self)
+        automationEngine = engine
+        return engine
+    }
     private var networkLiteEventBuffer = BrowserNetworkLiteEventBuffer()
     private var pendingMainFrameRequestURL: String?
     private var pendingMainFrameStatusCode: Int?
@@ -279,6 +290,17 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
               return original.apply(console, args);
             };
           }
+          function report(message) {
+            try { handler.postMessage({ level: 'error', args: message, href: location.href, ts: Date.now() }); } catch (_) {}
+          }
+          window.addEventListener('error', function(event) {
+            // WebKit's `stack` leaves out the message, so send both.
+            const stack = event.error && event.error.stack;
+            report('Uncaught ' + event.message + (stack ? '\\n' + stack : ''));
+          });
+          window.addEventListener('unhandledrejection', function(event) {
+            report('Unhandled promise rejection: ' + stringify(event.reason));
+          });
         })();
         """
     }
@@ -736,6 +758,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
             url: payload.href?.isEmpty == false ? payload.href : nil
         )
         consoleMessageHandlerEventCountForQA += 1
+        consoleEntrySequence += 1
         consoleLogBuffer.append(entry)
         onConsoleLogBufferChange?()
     }
@@ -771,6 +794,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         // half-torn-down runtime.
         if !isTerminated { Self.qaUnterminatedCount -= 1 }
         isTerminated = true
+        automationEngine?.detach()
         webView.stopLoading()
         cancelActiveDownloads()
         observers.forEach { $0.invalidate() }
@@ -1022,19 +1046,46 @@ extension WKWebViewBrowserRuntime {
 extension WKWebViewBrowserRuntime: WKUIDelegate {
     private var dialogWindow: NSWindow? { webView.window ?? hostView?.window }
 
+    // While an agent drives the tile, dialogs go to it instead of a sheet
+    // nobody is watching (`.plans/80-browser-computer-use`, S2): each is
+    // dismissed and reported in the agent's next reply.
+    private var engagedAutomation: BrowserAutomation? {
+        automationEngine?.isEngaged == true ? automationEngine : nil
+    }
+
     func handleJavaScriptAlert(message: String, completion: @escaping () -> Void) {
+        if let engine = engagedAutomation {
+            engine.noteDialog("alert", message: message, answer: "closed")
+            completion()
+            return
+        }
         uiDialogPresenter.presentJavaScriptAlert(message: message, window: dialogWindow, completion: completion)
     }
 
     func handleJavaScriptConfirm(message: String, completion: @escaping (Bool) -> Void) {
+        if let engine = engagedAutomation {
+            engine.noteDialog("confirm", message: message, answer: "cancelled")
+            completion(false)
+            return
+        }
         uiDialogPresenter.presentJavaScriptConfirm(message: message, window: dialogWindow, completion: completion)
     }
 
     func handleJavaScriptPrompt(prompt: String, defaultText: String?, completion: @escaping (String?) -> Void) {
+        if let engine = engagedAutomation {
+            engine.noteDialog("prompt", message: prompt, answer: "cancelled")
+            completion(nil)
+            return
+        }
         uiDialogPresenter.presentJavaScriptPrompt(prompt: prompt, defaultText: defaultText, window: dialogWindow, completion: completion)
     }
 
     func handleOpenPanel(allowsMultipleSelection: Bool, allowsDirectories: Bool, completion: @escaping ([URL]?) -> Void) {
+        if let engine = engagedAutomation {
+            engine.noteDialog("file chooser", message: "choose a file", answer: "refused; agents cannot upload files")
+            completion(nil)
+            return
+        }
         uiDialogPresenter.presentOpenPanel(
             allowsMultipleSelection: allowsMultipleSelection,
             allowsDirectories: allowsDirectories,
