@@ -298,6 +298,7 @@ final class CanvasMotionWorkload {
         emitter = events
         agentIDs = ids
         events.deltaIntervalMs = max(5, Int(env["CANVAS_MOTION_DELTA_MS"] ?? "") ?? 50)
+        events.turnDeltas = max(0, Int(env["CANVAS_MOTION_TURN_DELTAS"] ?? "") ?? 0)
         // CANVAS_MOTION_STREAMING_AGENTS=k: the k agents nearest the camera stream.
         if let count = Int(env["CANVAS_MOTION_STREAMING_AGENTS"] ?? ""), count < ids.count {
             let center = CGPoint(x: viewport.x + windowSize.width / 2 / viewport.zoom,
@@ -680,7 +681,7 @@ private final class CanvasMotionEmitter: @unchecked Sendable {
     private struct Entry {
         let runner: ScriptedAgentRunner
         let thread: String
-        let turn: String
+        var turn: String
         var started = false
         var deltas = 0
         var bytes = 0
@@ -701,6 +702,10 @@ private final class CanvasMotionEmitter: @unchecked Sendable {
     var streaming: Set<AgentID>?
     /// Milliseconds between deltas per streaming agent (`CANVAS_MOTION_DELTA_MS`).
     var deltaIntervalMs = 50
+    /// Deltas per turn before the turn completes and a new one starts; 0 keeps one
+    /// open turn (the measured arms). A preview uses real-sized turns, because one
+    /// endless message is re-parsed whole on every update.
+    var turnDeltas = 0
     private var lastTickUptime: TimeInterval?
 
     func runner(for id: AgentID) -> ScriptedAgentRunner {
@@ -788,6 +793,12 @@ private final class CanvasMotionEmitter: @unchecked Sendable {
                                                     streamKind: .assistant, delta: delta)) {
                     entry.deltas += 1
                     entry.bytes += delta.utf8.count
+                }
+                if turnDeltas > 0, entry.deltas % turnDeltas == 0,
+                   entry.runner.emit(.turnCompleted(threadId: entry.thread, turnId: entry.turn,
+                                                    outcome: .completed, errorMessage: nil)) {
+                    entry.turn = "live-\(id.rawValue.uuidString)-\(entry.deltas)"
+                    entry.started = false
                 }
                 entries[id] = entry
             }
