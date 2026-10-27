@@ -1241,6 +1241,21 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--workspace-filter-sheet-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let out = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                        .appendingPathComponent("qa-runs/workspace-filter-sheet", isDirectory: true)
+                    print(try await WorkspaceFilterSheet.run(outputDirectory: out))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("workspace-filter-sheet check failed: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
         if CommandLine.arguments.contains("--sidebar-motion-film-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -35080,10 +35095,19 @@ extension AppDelegate {
 
     // THE CONTROL, read off the rendered popup: the menu AppKit is showing, and the
     // entry it has ticked.
-    try expect(scoped.scopeTitlesForQA == InboxScope.entries(for: fixture).map(\.title),
+    // .plans/86: the checklist also offers `Unplaced` — right after `All agents` —
+    // whenever an agent has no workspace, and this fixture has a headless one.
+    func menuTitles(_ entries: [InboxScope], rows: [AgentInboxRow]) -> [String] {
+        var titles = entries.map(\.title)
+        if rows.contains(where: { $0.workspaceId == nil && $0.workspaceName == nil }) {
+            titles.insert(InboxWorkspaceFilter.unplacedTitle, at: min(1, titles.count))
+        }
+        return titles
+    }
+    try expect(scoped.scopeTitlesForQA == menuTitles(InboxScope.entries(for: fixture), rows: fixture),
                "the popup lists every scope the rows mention — got \(scoped.scopeTitlesForQA)")
-    try expect(scoped.scopeTitlesForQA.count == 5,
-               "this fixture spans 2 projects and 2 workspaces, so the menu is those 4 plus All agents — got \(scoped.scopeTitlesForQA)")
+    try expect(scoped.scopeTitlesForQA.count == 6,
+               "this fixture spans 2 projects and 2 workspaces and has a headless agent, so the menu is those 4 plus All agents and Unplaced — got \(scoped.scopeTitlesForQA)")
     try expect(scoped.selectedScopeTitleForQA == InboxScope.allTitle,
                "the list opens on every agent — got '\(scoped.selectedScopeTitleForQA)'")
     try expect(scoped.rowCountForQA == fixture.count,
@@ -35124,8 +35148,8 @@ extension AppDelegate {
     // project you are about to start your first agent in is pickable.
     scoped.scopeCatalog = [.project("quiet-project"), .workspace("Quiet")]
     scoped.layoutForQA()
-    try expect(scoped.scopeTitlesForQA == InboxScope.entries(
-                for: fixture, catalog: scoped.scopeCatalog, including: scoped.scope).map(\.title),
+    try expect(scoped.scopeTitlesForQA == menuTitles(InboxScope.entries(
+                for: fixture, catalog: scoped.scopeCatalog, including: scoped.scope), rows: fixture),
                "the catalog's scopes are in the menu — got \(scoped.scopeTitlesForQA)")
     try expect(scoped.scopeTitlesForQA.contains("quiet-project"),
                "…including one no row mentions — got \(scoped.scopeTitlesForQA)")
@@ -35178,7 +35202,7 @@ extension AppDelegate {
     }
     let collides = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
     collides.reload(rows: sameName)
-    try expect(collides.scopeTitlesForQA == InboxScope.entries(for: sameName).map(\.title),
+    try expect(collides.scopeTitlesForQA == menuTitles(InboxScope.entries(for: sameName), rows: sameName),
                "a shared name must still be two entries — got \(collides.scopeTitlesForQA)")
     try expect(collides.pickScopeForQA(.workspace("bannockburn")) && collides.selectedScopeTitleForQA == "bannockburn",
                "…and the second of them must be selectable")
@@ -36537,7 +36561,9 @@ extension AppDelegate {
     // workspace are both offered while the list is showing one row.
     // .plans/79: the shipped sidebar lists sessions from other apps, so it also
     // offers "This Mac" after "All agents".
-    try expect(sidebar.inboxForQA.scopeTitlesForQA == ["This workspace", "All agents", "This Mac", "Continuum", "Quiet", "Default"],
+    // .plans/86: workspaces are the checklist's own section, so they come before
+    // the project picks.
+    try expect(sidebar.inboxForQA.scopeTitlesForQA == ["This workspace", "All agents", "This Mac", "Default", "Continuum", "Quiet"],
                "the popup offers This Mac, the registry's projects and its workspace, including 'Quiet', which has no agent in it, and NOT the missing 'Gone' — got \(sidebar.inboxForQA.scopeTitlesForQA)")
     // Back to every agent for the assertions below, through the popup, and the pick
     // must have been written to defaults — that is the whole persistence loop.
