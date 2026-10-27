@@ -159,7 +159,7 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         qaDiffParsesForChecks = 0
     }
 
-    private static func parsedModel(blockID: AgentNodeID, revision: UInt64, text: String) -> GitDiffModel {
+    static func parsedModel(blockID: AgentNodeID, revision: UInt64, text: String) -> GitDiffModel {
         if let cached = parseCache[blockID], cached.revision == revision {
             return cached.model
         }
@@ -182,7 +182,7 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
     /// text so the inline preview and the full review tile share one painter.
     /// Cheap to redo per apply/measure once the parse itself is cached: it
     /// walks at most `bodyMaxLines` lines of output.
-    private static func truncatedBody(
+    static func truncatedBody(
         model: GitDiffModel, theme: TokenTheme
     ) -> (attributed: NSAttributedString, shown: Int, total: Int) {
         var shown = 0

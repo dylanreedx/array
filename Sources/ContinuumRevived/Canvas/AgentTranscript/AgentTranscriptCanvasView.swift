@@ -17,17 +17,19 @@ import ContinuumRevivedCore
 /// low-resolution stand-ins, and no visible change between moving and still. So
 /// this is the ONLY renderer, at rest and in motion: every block is laid out once
 /// at the view's width (`LaidBlock`, cached by identity + revision + width +
-/// context), and `draw(_:)` strokes the cached `CTLine`s that intersect the dirty
-/// rect at whatever scale AppKit hands it. A canvas zoom raises the layer's
-/// `contentsScale` and the same lines are drawn again, sharp, with no layout.
+/// context + presentation), and `draw(_:)` strokes the cached `CTLine`s,
+/// decorations and drawn controls that intersect the dirty rect at whatever scale
+/// AppKit hands it. A canvas zoom raises the layer's `contentsScale` and the same
+/// lines are drawn again, sharp, with no layout.
+///
+/// Controls (request choices, disclosure chevrons, Copy, Open Review, chips) are
+/// drawn rects with hover/pressed state that dispatch the same `AgentRenderAction`s
+/// the row renderers do. The only thing this view owns besides its own drawing is
+/// one small CALayer for the animated thinking gyro.
 ///
 /// Selected by `ARRAY_TRANSCRIPT_RENDERER=canvas` or the user default
 /// `continuum.transcript.renderer = canvas`, read once per tile. Off by default.
-///
-/// Slice 1 draws prose, user prompts, code, collapsed tool/command rows, session
-/// boundaries and the tail status natively; every other block draws its copy text
-/// in the secondary style so nothing disappears. Witness:
-/// `--transcript-canvas-check` (`TranscriptCanvasChecks`).
+/// Witness: `--transcript-canvas-check` (`TranscriptCanvasChecks`).
 @MainActor
 final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuItemValidation {
     // MARK: Switch
@@ -53,27 +55,137 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let ctLine: CTLine
         /// In the owning row's string.
         let range: NSRange
-        let x: CGFloat
-        let top: CGFloat
+        var x: CGFloat
+        var top: CGFloat
         let height: CGFloat
-        let baseline: CGFloat
+        var baseline: CGFloat
         let width: CGFloat
-        let fills: [(CGRect, CGColor)]
-        let underlines: [(CGRect, CGColor)]
+        var fills: [(CGRect, CGColor)]
+        var underlines: [(CGRect, CGColor)]
+
+        func shifted(dx: CGFloat, dy: CGFloat) -> Line {
+            var copy = self
+            copy.x += dx
+            copy.top += dy
+            copy.baseline += dy
+            copy.fills = fills.map { ($0.0.offsetBy(dx: dx, dy: dy), $0.1) }
+            copy.underlines = underlines.map { ($0.0.offsetBy(dx: dx, dy: dy), $0.1) }
+            return copy
+        }
     }
 
     /// One selectable run of text: a prose row, a code block, a tool title.
     struct TextRow {
         let string: NSAttributedString
-        let lines: [Line]
+        var lines: [Line]
         let links: [AgentTextStyleResolver.LinkRange]
+        /// The block's scroll region this row lives in (code, tool output).
+        var region: Int? = nil
+        /// The block that owns this row's links, when it is not the unit itself
+        /// (a block inside a reasoning disclosure).
+        var ownerID: AgentNodeID? = nil
     }
 
     enum Decoration {
         case fill(CGRect, CGColor, radius: CGFloat)
+        case stroke(CGRect, CGColor, radius: CGFloat, width: CGFloat)
         /// Non-selectable text (markers, labels, status), drawn at a baseline.
         case text(CTLine, CGPoint)
         case symbol(NSImage, CGRect)
+        /// An attachment drawn from its full-resolution source, or its state
+        /// label until that source arrives.
+        case image(AgentImageAttachmentID, CGRect, placeholder: CTLine?)
+
+        func shifted(dx: CGFloat, dy: CGFloat) -> Decoration {
+            switch self {
+            case let .fill(rect, color, radius): return .fill(rect.offsetBy(dx: dx, dy: dy), color, radius: radius)
+            case let .stroke(rect, color, radius, width):
+                return .stroke(rect.offsetBy(dx: dx, dy: dy), color, radius: radius, width: width)
+            case let .text(line, point): return .text(line, CGPoint(x: point.x + dx, y: point.y + dy))
+            case let .symbol(image, rect): return .symbol(image, rect.offsetBy(dx: dx, dy: dy))
+            case let .image(id, rect, placeholder): return .image(id, rect.offsetBy(dx: dx, dy: dy), placeholder: placeholder)
+            }
+        }
+    }
+
+    /// A clipped, independently scrolled part of a block: a code body or a tool's
+    /// output pane. Rows assigned to it draw translated by its offset.
+    struct ScrollRegion {
+        var viewport: CGRect
+        var contentSize: CGSize
+    }
+
+    enum ControlAction {
+        case perform(AgentRenderAction)
+        case toggle(AgentNodeID, expanded: Bool)
+        /// Writes `text` to the copy pasteboard, then reports `.copy(blockID:)`.
+        case copy(String, AgentNodeID)
+    }
+
+    enum ControlStyle {
+        /// A filled choice (request answers, error recovery): `AgentRequestChoiceButton`.
+        case choice
+        /// Borderless text: Copy, Open Review.
+        case text
+        /// The disclosure chevron: ▾ expanded, ▸ collapsed.
+        case chevron(expanded: Bool)
+        /// An invisible hit area over drawn content (a chip, an image, a sender);
+        /// hover paints `hoverFill` when one is given.
+        case region(hoverFill: CGColor?, pressedFill: CGColor?, radius: CGFloat)
+    }
+
+    struct Control {
+        var rect: CGRect
+        var title: String = ""
+        var style: ControlStyle
+        var action: ControlAction
+        var enabled = true
+        var font: NSFont? = nil
+        var tint: NSColor? = nil
+
+        func shifted(dx: CGFloat, dy: CGFloat) -> Control {
+            var copy = self
+            copy.rect = rect.offsetBy(dx: dx, dy: dy)
+            return copy
+        }
+    }
+
+    /// Everything one unit draws, assembled before it is frozen into a `LaidBlock`.
+    struct Builder {
+        var rows: [TextRow] = []
+        var decorations: [Decoration] = []
+        var controls: [Control] = []
+        var regions: [ScrollRegion] = []
+        var images: [AgentImageMenuTarget] = []
+        var containedIDs: Set<AgentNodeID> = []
+
+        /// Places a laid child at (dx, dy): a block inside a reasoning disclosure.
+        mutating func embed(_ child: LaidBlock, dx: CGFloat, dy: CGFloat) {
+            let regionBase = regions.count
+            regions += child.regions.map {
+                ScrollRegion(viewport: $0.viewport.offsetBy(dx: dx, dy: dy), contentSize: $0.contentSize)
+            }
+            for row in child.rows {
+                var moved = row
+                moved.lines = row.lines.map { $0.shifted(dx: dx, dy: dy) }
+                moved.region = row.region.map { $0 + regionBase }
+                moved.ownerID = row.ownerID ?? child.id
+                rows.append(moved)
+            }
+            decorations += child.decorations.map { $0.shifted(dx: dx, dy: dy) }
+            controls += child.controls.map { $0.shifted(dx: dx, dy: dy) }
+            images += child.images.map { AgentImageMenuTarget(rect: $0.rect.offsetBy(dx: dx, dy: dy), blockID: $0.blockID, attachmentID: $0.attachmentID, snapshot: $0.snapshot) }
+            containedIDs.insert(child.id)
+            containedIDs.formUnion(child.containedIDs)
+        }
+    }
+
+    /// An image hit area, for the click and the context menu.
+    struct AgentImageMenuTarget {
+        let rect: CGRect
+        let blockID: AgentNodeID
+        let attachmentID: AgentImageAttachmentID
+        let snapshot: AgentImageResourceSnapshot
     }
 
     final class LaidBlock {
@@ -82,9 +194,19 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let width: CGFloat
         let contextSignature: Int
         let role: AgentEntryRole
+        /// Everything outside the semantic revision that changes this layout:
+        /// disclosure state, live statuses, image snapshots, reasoning duration.
+        let variant: Int
+        /// The presented copy of a tool/diff block (host-local detail merged in);
+        /// compared because detail arrives without a revision.
+        let presented: AgentBlockPayload?
         let height: CGFloat
         let rows: [TextRow]
         let decorations: [Decoration]
+        let controls: [Control]
+        let regions: [ScrollRegion]
+        let images: [AgentImageMenuTarget]
+        let containedIDs: Set<AgentNodeID>
         let alpha: CGFloat
         let clipsToBounds: Bool
         /// Each row's offset in the block's text; every row is followed by one
@@ -93,21 +215,27 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let textLength: Int
 
         init(id: AgentNodeID, revision: UInt64, width: CGFloat, contextSignature: Int, role: AgentEntryRole,
-             height: CGFloat, rows: [TextRow], decorations: [Decoration], alpha: CGFloat = 1,
-             clipsToBounds: Bool = false) {
+             variant: Int = 0, presented: AgentBlockPayload? = nil,
+             height: CGFloat, builder: Builder, alpha: CGFloat = 1, clipsToBounds: Bool = false) {
             self.id = id
             self.revision = revision
             self.width = width
             self.contextSignature = contextSignature
             self.role = role
+            self.variant = variant
+            self.presented = presented
             self.height = height
-            self.rows = rows
-            self.decorations = decorations
+            self.rows = builder.rows
+            self.decorations = builder.decorations
+            self.controls = builder.controls
+            self.regions = builder.regions
+            self.images = builder.images
+            self.containedIDs = builder.containedIDs
             self.alpha = alpha
             self.clipsToBounds = clipsToBounds
             var offsets: [Int] = []
             var cursor = 0
-            for row in rows {
+            for row in builder.rows {
                 offsets.append(cursor)
                 cursor += row.string.length + 1
             }
@@ -124,10 +252,25 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let blockID: AgentNodeID
     }
 
+    struct ControlKey: Hashable {
+        let blockID: AgentNodeID
+        let index: Int
+    }
+
+    struct RegionKey: Hashable {
+        let blockID: AgentNodeID
+        let index: Int
+    }
+
     // MARK: State
 
-    private let toolDetailStore: AgentToolDetailStore?
-    private var renderContext = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+    let toolDetail: AgentTranscriptCanvasToolDetail
+    /// The tile's context with this transcript's own disclosure store wired in,
+    /// exactly as `AgentTranscriptListView.contextWithDisclosureState` does.
+    var renderContext = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+    private let disclosureStateStore = DisclosureStateStore()
+    private let disclosureOwnerID = AgentID(rawValue: UUID())
+    private let toolClockScope = AgentToolClockScope()
     private let updateScheduler = AgentTranscriptUpdateScheduler()
     private var latestEnqueuedVersion: UInt64?
     private var appliedVersion: UInt64?
@@ -137,6 +280,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     private var cache: [AgentNodeID: LaidBlock] = [:]
     private var placed: [Placed] = []
     private var contentHeight: CGFloat = 0
+    private var blocksBottom: CGFloat = 0
     private var laidWidth: CGFloat = -1
     private var scrollOffset: CGFloat = 0
     private let nearBottomThreshold = AgentTranscriptScrollController().nearBottomThreshold
@@ -146,6 +290,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     private var tailText = ""
     private var tailLine: (line: CTLine, top: CGFloat, baseline: CGFloat, x: CGFloat)?
     private var turnInFlight = false
+    private let gyro = AgentTranscriptCanvasGyroLayer()
 
     /// Selection in document text offsets: `anchor` is where the press began.
     private var selectionAnchor: Int?
@@ -155,15 +300,22 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     private var scrollIndicatorVisibleUntil: Date = .distantPast
     private var scrollIndicatorTimer: Timer?
 
-    // Tool detail: the store-facing half of the list's capture, without its
-    // presentation (output previews and durations come in slice 2).
-    private var toolDetailAgentID: AgentID?
-    private var activeRuntimeScope: AgentToolDetailScope?
-    private var runtimeIdentities: Set<AgentToolDetailKey> = []
-    private var toolDetailIdentityByEntryID: [AgentNodeID: AgentToolDetailKey] = [:]
+    private var hoveredControl: ControlKey?
+    private var pressedControl: ControlKey?
+    private var pressedInside = false
+    private var focusedControl: ControlKey?
+    private var trackingArea: NSTrackingArea?
+    private var regionOffsets: [RegionKey: CGPoint] = [:]
 
-    /// The pasteboard Cmd-C writes. Checks substitute a private one so a witness
-    /// never touches the user's clipboard.
+    /// Full-resolution image sources by attachment, drawn at whatever scale the
+    /// layer is shown. Never a downscaled copy.
+    var imageSources: [AgentImageAttachmentID: (revision: UInt64, image: NSImage)] = [:]
+    var imageRequests: [AgentImageAttachmentID: AgentImageThumbnailRequest] = [:]
+    var imageObservations: [AgentImageAttachmentID: AgentImageResourceObservation] = [:]
+    var statusSubscriptions: [UUID: UUID] = [:]
+
+    /// The pasteboard Cmd-C and drawn Copy buttons write. Checks substitute a
+    /// private one so a witness never touches the user's clipboard.
     var pasteboardForCopy: NSPasteboard = .general
 
     // MARK: QA counters
@@ -174,21 +326,30 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     private(set) var qaDrawCount = 0
     private(set) var qaLastDrawScale: CGFloat = 0
     private(set) var qaLastDrawnLineCount = 0
-    private(set) var qaRuntimeObservationCount = 0
+    private(set) var qaLastDrawnControlCount = 0
     var qaRenderingErrorDescription: String? { renderingError.map(String.init(describing:)) }
     var qaScrollOffset: CGFloat { scrollOffset }
     var qaMaximumScrollOffset: CGFloat { maximumScrollOffset }
     var qaContentHeight: CGFloat { contentHeight }
     var qaPlacedBlockIDs: [AgentNodeID] { placed.map(\.blockID) }
+    var qaGyroIsAnimating: Bool { gyro.isAnimating }
+    var qaGyroLayer: CALayer { gyro }
 
     // MARK: Init
 
     init(toolDetailStore: AgentToolDetailStore? = nil) {
-        self.toolDetailStore = toolDetailStore
+        toolDetail = AgentTranscriptCanvasToolDetail(store: toolDetailStore)
         super.init(frame: .zero)
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
+        layer?.addSublayer(gyro)
+        gyro.isHidden = true
         updateScheduler.isPresentable = { [weak self] in self?.isOnScreenForVisualUpdates ?? true }
+        toolDetail.onRefresh = { [weak self] in
+            guard let self else { return }
+            self.preservingTail { self.rebuild() }
+        }
+        renderContext = contextWithDisclosureState(renderContext)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Agent transcript")
@@ -209,6 +370,42 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow == nil { updateScheduler.flush() }
         super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        reconcileGyro()
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        reconcileGyro()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        reconcileGyro()
+    }
+
+    private func contextWithDisclosureState(_ context: AgentRenderContext) -> AgentRenderContext {
+        var context = context
+        context.toolClockScope = toolClockScope
+        context.actions = disclosureStateStore.renderActions(
+            for: disclosureOwnerID,
+            perform: context.actions.perform,
+            invalidatePresentation: { [weak self] id in self?.invalidatePresentation(of: id) }
+        )
+        return context
+    }
+
+    /// A disclosure toggled or a live source moved: re-lay out that unit only and
+    /// keep what the reader was looking at where it was.
+    func invalidatePresentation(of id: AgentNodeID) {
+        cache.removeValue(forKey: id)
+        for (key, block) in cache where block.containedIDs.contains(id) { cache.removeValue(forKey: key) }
+        rebuild()
+        scrollOffset = min(scrollOffset, maximumScrollOffset)
+        needsDisplay = true
     }
 
     // MARK: AgentTranscriptSurface
@@ -234,69 +431,38 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
 
     func jumpToLatest() {
         scrollOffset = maximumScrollOffset
+        positionGyro()
         needsDisplay = true
     }
 
     func updateRenderContext(_ context: AgentRenderContext) throws {
         let moved = Self.signature(of: context) != Self.signature(of: renderContext)
             || context.tokens != renderContext.tokens
-        renderContext = context
+        renderContext = contextWithDisclosureState(context)
+        gyro.apply(theme: context.appearance)
         guard moved else { return }
         cache.removeAll()
         preservingTail { rebuild() }
     }
 
     func bindToolDetailAgent(_ agentID: AgentID?) {
-        toolDetailAgentID = agentID
-        activeRuntimeScope = nil
-        runtimeIdentities.removeAll()
+        toolDetail.bind(agentID: agentID)
+        if let agentID {
+            gyro.phaseOffset = DualPlaneGyroTiltedThinkingIndicatorView.phaseOffset(for: agentID.rawValue)
+        }
     }
 
     func captureRuntimeObservation(_ observation: AgentRuntimeObservation) {
-        // Accepted and counted; slice 1 presents no tool detail from them.
-        qaRuntimeObservationCount += 1
+        toolDetail.captureRuntimeObservation(observation)
     }
 
     @discardableResult
     func captureRuntimeEvent(_ event: AgentRuntimeEvent) -> AgentToolDetailKey? {
-        guard let toolDetailStore else { return nil }
-        switch event {
-        case let .turnStarted(threadID, turnID):
-            activeRuntimeScope = toolDetailAgentID.flatMap {
-                AgentToolDetailScope(agentID: $0.rawValue.uuidString, threadID: threadID, turnID: turnID, provider: "runtime")
-            }
-            if let scope = activeRuntimeScope { runtimeIdentities = runtimeIdentities.filter { $0.scope == scope } }
-            return nil
-        case let .itemStarted(threadID, itemID, kind, title):
-            guard AgentToolDetailPolicy.carriesHostLocalDetail(kind),
-                  let providerID = AgentToolDetailID(itemID),
-                  let scope = activeRuntimeScope, scope.threadID == threadID else { return nil }
-            let identity = AgentToolDetailKey(scope: scope, providerItemID: providerID)
-            runtimeIdentities.insert(identity)
-            let start = AgentToolDetailStart(identity: identity, toolName: title ?? "Tool")
-            Task { _ = await toolDetailStore.recordStart(start) }
-            return identity
-        case let .itemCompleted(threadID, itemID, kind, status):
-            guard AgentToolDetailPolicy.carriesHostLocalDetail(kind),
-                  let providerID = AgentToolDetailID(itemID),
-                  let scope = activeRuntimeScope, scope.threadID == threadID else { return nil }
-            let identity = AgentToolDetailKey(scope: scope, providerItemID: providerID)
-            guard runtimeIdentities.contains(identity) else { return nil }
-            let mapped: AgentItemStatus = status == .failed ? .failed : (status == .declined ? .cancelled : .completed)
-            Task { _ = await toolDetailStore.recordEnd(AgentToolDetailEnd(identity: identity, status: mapped)) }
-            return nil
-        default:
-            return nil
-        }
+        toolDetail.captureRuntimeEvent(event)
     }
 
     func bindToolDetailIdentity(_ identity: AgentToolDetailKey, to entryID: AgentNodeID) -> Bool {
-        if let toolDetailAgentID, identity.scope.agentID != toolDetailAgentID.rawValue.uuidString { return false }
-        guard let existing = toolDetailIdentityByEntryID[entryID] else {
-            toolDetailIdentityByEntryID[entryID] = identity
-            return true
-        }
-        return existing == identity
+        toolDetail.bindIdentity(identity, to: entryID)
     }
 
     func setThinkingIndicatorVisible(_ visible: Bool) {
@@ -305,6 +471,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         tailVisible = visible
         if !visible { tailText = "" }
         if changed { preservingTail { placeTail() } }
+        reconcileGyro()
     }
 
     func setTurnInFlight(_ inFlight: Bool) { turnInFlight = inFlight }
@@ -328,6 +495,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             placeTail()
             needsDisplay = true
         }
+        reconcileGyro()
     }
 
     var qaTailStatusText: String { tailText }
@@ -336,14 +504,14 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
 
     func scrollTranscript(toY y: CGFloat) {
         scrollOffset = min(max(0, y), maximumScrollOffset)
+        positionGyro()
         needsDisplay = true
     }
 
     // MARK: Geometry
 
-    private var insets: NSEdgeInsets {
-        let zoom = renderContext.pageZoom
-        let value = CGFloat(zoom.scaled(12))
+    var insets: NSEdgeInsets {
+        let value = CGFloat(renderContext.pageZoom.scaled(12))
         return NSEdgeInsets(top: value, left: value, bottom: value, right: value)
     }
 
@@ -355,10 +523,11 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
 
     /// Runs a geometry change; a reader at the bottom stays at the bottom, anyone
     /// else keeps their offset (clamped).
-    private func preservingTail(_ change: () -> Void) {
+    func preservingTail(_ change: () -> Void) {
         let stick = isNearBottom
         change()
         scrollOffset = stick ? maximumScrollOffset : min(scrollOffset, maximumScrollOffset)
+        positionGyro()
         needsDisplay = true
     }
 
@@ -374,6 +543,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         if abs(newSize.width - oldSize.width) > 0.01 { needsLayout = true }
         if newSize.height != oldSize.height {
             scrollOffset = stick ? maximumScrollOffset : min(scrollOffset, maximumScrollOffset)
+            positionGyro()
             needsDisplay = true
         }
     }
@@ -388,16 +558,30 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
 
     // MARK: Build
 
-    private static func signature(of context: AgentRenderContext) -> Int {
+    static func signature(of context: AgentRenderContext) -> Int {
         var hasher = Hasher()
         hasher.combine(context.appearance.rawValue)
         hasher.combine(context.pageZoom.percent)
+        hasher.combine(context.canRespondToRequests)
         return hasher.finalize()
     }
 
-    /// Walk the document; lay out only blocks the cache cannot answer; place all.
+    /// One thing the transcript draws: a block, or a finished reasoning entry.
+    enum Unit {
+        case block(AgentBlock, AgentEntry)
+        case reasoning(AgentEntry, duration: TimeInterval?)
+
+        var id: AgentNodeID {
+            switch self {
+            case let .block(block, _): return block.id
+            case let .reasoning(entry, _): return entry.id
+            }
+        }
+    }
+
+    /// Walk the document; lay out only units the cache cannot answer; place all.
     /// Never called from `draw`.
-    private func rebuild() {
+    func rebuild() {
         guard bounds.width > 0 else { return }
         let width = (laidWidth > 0 && abs(columnWidth - laidWidth) <= Self.widthHysteresis) ? laidWidth : columnWidth
         if width != laidWidth { qaFullRelayoutCount += 1 }
@@ -412,30 +596,40 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         var result: [Placed] = []
         var y = insets.top
         var text = 0
-        var previousRole: AgentEntryRole?
-        for entry in document.entries {
-            // Open reasoning is shown by the tail status, as in the list.
-            if entry.role == .reasoning, entry.lifecycle != .finished { continue }
-            let blocks = entry.blocks
-            for (index, block) in blocks.enumerated() {
+        var previousEntryID: AgentNodeID?
+        let entries = document.entries
+        for (entryIndex, entry) in entries.enumerated() {
+            var units: [Unit] = []
+            if entry.role == .reasoning {
+                // Open reasoning is shown by the tail status, as in the list.
+                guard entry.lifecycle == .finished, !entry.blocks.isEmpty else { continue }
+                units = [.reasoning(entry, duration: Self.reasoningDuration(entries, at: entryIndex))]
+            } else {
+                units = entry.blocks.map { .block($0, entry) }
+            }
+            for unit in units {
+                let (revision, presented, variant) = identity(of: unit)
                 let laid: LaidBlock
-                if let cached = cache[block.id], cached.revision == block.revision, cached.width == width,
-                   cached.contextSignature == signature, cached.role == entry.role {
+                if let cached = cache[unit.id], cached.revision == revision, cached.width == width,
+                   cached.contextSignature == signature, cached.role == entry.role,
+                   cached.variant == variant, cached.presented == presented {
                     laid = cached
                 } else {
-                    laid = layoutBlock(block, role: entry.role, width: width, signature: signature)
-                    relaid.append(block.id)
+                    laid = layoutUnit(unit, width: width, signature: signature, variant: variant)
+                    relaid.append(unit.id)
                 }
-                next[block.id] = laid
+                next[unit.id] = laid
                 if !result.isEmpty {
-                    let startsTurn = index == 0 && entry.role == .user && previousRole != .user
+                    // A user prompt after anything else opens a turn (the list's
+                    // `startsTurn`): the wider gap.
+                    let startsTurn = entry.role == .user && previousEntryID != entry.id
                     y += startsTurn ? turnSpacing : rowSpacing
                 }
-                result.append(Placed(block: laid, y: y, textStart: text, blockID: block.id))
+                result.append(Placed(block: laid, y: y, textStart: text, blockID: unit.id))
                 y += laid.height
                 text += laid.textLength
+                previousEntryID = entry.id
             }
-            if !blocks.isEmpty { previousRole = entry.role }
         }
         cache = next
         placed = result
@@ -444,9 +638,37 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         qaLastRelaidBlockIDs = relaid
         placeTail()
         if let anchor = selectionAnchor, anchor > text { selectionAnchor = nil; selectionFocus = nil }
+        let liveBlocks = Set(next.keys)
+        regionOffsets = regionOffsets.filter { liveBlocks.contains($0.key.blockID) }
     }
 
-    private var blocksBottom: CGFloat = 0
+    /// The parts of a unit's identity the cache compares.
+    private func identity(of unit: Unit) -> (revision: UInt64, presented: AgentBlockPayload?, variant: Int) {
+        var hasher = Hasher()
+        hasher.combine(renderContext.actions.presentationRevision(blockID: unit.id))
+        switch unit {
+        case let .reasoning(entry, duration):
+            hasher.combine(duration.map { Int($0) } ?? -1)
+            for block in entry.blocks { hasher.combine(renderContext.actions.presentationRevision(blockID: block.id)) }
+            return (entry.revision, nil, hasher.finalize())
+        case let .block(block, entry):
+            let presented = toolDetail.presented(block, in: entry)
+            combineLiveVariant(of: presented, into: &hasher)
+            switch presented.payload {
+            case .toolCall, .diff: return (block.revision, presented.payload, hasher.finalize())
+            default: return (block.revision, nil, hasher.finalize())
+            }
+        }
+    }
+
+    /// The list's `reasoningDuration`: the next dated entry's start minus this
+    /// one's, when at least a second.
+    private static func reasoningDuration(_ entries: [AgentEntry], at index: Int) -> TimeInterval? {
+        guard let start = entries[index].createdAt else { return nil }
+        guard let next = entries[(index + 1)...].lazy.compactMap(\.createdAt).first else { return nil }
+        let duration = next.timeIntervalSince(start)
+        return duration >= 1 ? duration : nil
+    }
 
     private func placeTail() {
         let zoom = renderContext.pageZoom
@@ -465,365 +687,33 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             tailLine = nil
         }
         contentHeight = y + insets.bottom
+        positionGyro()
     }
 
-    // MARK: Block layout
+    // MARK: Gyro
 
-    private var theme: TokenTheme { renderContext.appearance }
-    private func color(_ token: TextToken) -> NSColor { token.color.nsColor(for: theme) }
-
-    private func layoutBlock(_ block: AgentBlock, role: AgentEntryRole, width: CGFloat, signature: Int) -> LaidBlock {
-        if role != .reasoning {
-            if AssistantProseRenderer.supportedKinds.contains(block.kind) {
-                return layoutProse(block, role: role, width: width, signature: signature)
-            }
-            switch block.payload {
-            case let .fencedCode(code):
-                return layoutCode(block, code: code, role: role, width: width, signature: signature)
-            case let .toolCall(tool):
-                return layoutTool(block, tool: tool, role: role, width: width, signature: signature)
-            case let .commandOutput(output):
-                return layoutCommandOutput(block, output: output, role: role, width: width, signature: signature)
-            case let .sessionBoundary(boundary):
-                return layoutBoundary(block, text: boundary.text, symbolName: boundary.symbolName,
-                                      role: role, width: width, signature: signature)
-            default:
-                break
-            }
-        }
-        return layoutPlain(block, role: role, width: width, signature: signature)
+    /// The tail's working gyro: animated only while a turn is working, the view is
+    /// in a window and not hidden. A settled tail keeps its words, not the gyro.
+    private func reconcileGyro() {
+        let animate = tailVisible && !tailSettled && window != nil && !isHiddenOrHasHiddenAncestor
+        gyro.isHidden = !animate
+        if animate { gyro.start() } else { gyro.stop() }
+        positionGyro()
     }
 
-    private func layoutProse(_ block: AgentBlock, role: AgentEntryRole, width: CGFloat, signature: Int) -> LaidBlock {
-        let zoom = renderContext.pageZoom
-        let isUser = role == .user
-        let leading = isUser ? UserPromptView.leadingInset(zoom: zoom) : 0
-        let vertical = isUser ? UserPromptView.verticalInset(zoom: zoom) : 0
-        let textWidth = max(1, width - leading)
-        var rows: [TextRow] = []
-        var decorations: [Decoration] = []
-        var y = vertical
-        let proseRows = AssistantProseView.rows(for: block, zoom: zoom)
-        for (index, row) in proseRows.enumerated() {
-            if index > 0 { y += AssistantProseView.blockSpacing(zoom: zoom) + row.spacingAbove }
-            let resolved = AgentTextStyleResolver.resolve(
-                row.runs, theme: theme, tokens: renderContext.tokens, textRole: row.textRole,
-                style: row.style, zoom: zoom)
-            let font = NSFont.token(row.textRole, zoom: zoom)
-            let set = Self.typeset(
-                resolved.attributedString, width: textWidth, originX: leading, top: y,
-                firstIndent: row.style.firstLineHeadIndent, headIndent: row.style.headIndent,
-                linePitch: row.style.linePitch, fallbackFont: font)
-            rows.append(TextRow(string: resolved.attributedString, lines: set.lines, links: resolved.links))
-            if !row.marker.isEmpty {
-                let marker = CTLineCreateWithAttributedString(Self.coreTextString(NSAttributedString(
-                    string: row.marker, attributes: [.font: font, .foregroundColor: color(renderContext.tokens.secondaryText)])))
-                let x = leading + row.style.firstLineHeadIndent - AssistantProseView.markerGutter(zoom: zoom)
-                let baseline = set.lines.first?.baseline ?? (y + font.ascender)
-                decorations.append(.text(marker, CGPoint(x: max(leading, x), y: baseline)))
-            }
-            y += set.height
-        }
-        let height = ceil(y + vertical)
-        if isUser {
-            decorations.insert(.fill(
-                CGRect(x: 0, y: 0, width: UserPromptView.ruleWidth(zoom: zoom), height: height),
-                AgentLineRole.authorship.color.cgColor(for: theme), radius: 0), at: 0)
-        }
-        return LaidBlock(id: block.id, revision: block.revision, width: width, contextSignature: signature,
-                         role: role, height: height, rows: rows, decorations: decorations)
-    }
-
-    private func layoutCode(_ block: AgentBlock, code: AgentCodePayload, role: AgentEntryRole,
-                            width: CGFloat, signature: Int) -> LaidBlock {
-        let zoom = renderContext.pageZoom
-        let header = CodeBlockView.headerHeight(zoom: zoom)
-        let inset = CodeTextView.containerInset(zoom: zoom)
-        let side = CGFloat(zoom.scaled(Space.l))
-        let mono = NSFont.token(.bodyMono, zoom: zoom)
-        let lineHeight = ceil(mono.ascender - mono.descender + mono.leading)
-        let string = NSAttributedString(string: code.code, attributes: [
-            .font: mono, .foregroundColor: color(renderContext.tokens.primaryText)])
-        let typesetter = CTTypesetterCreateWithAttributedString(Self.coreTextString(string))
-        var lines: [Line] = []
-        let ns = code.code as NSString
-        var location = 0
-        var top = header + inset.height
-        repeat {
-            let paragraph = ns.paragraphRange(for: NSRange(location: location, length: 0))
-            var visible = paragraph
-            while visible.length > 0, let scalar = UnicodeScalar(ns.character(at: NSMaxRange(visible) - 1)),
-                  CharacterSet.newlines.contains(scalar) {
-                visible.length -= 1
-            }
-            // Lines keep their offsets in the whole code string, so selection and
-            // hit testing index the row's text directly.
-            let line = CTTypesetterCreateLine(typesetter, CFRange(location: visible.location, length: visible.length))
-            let lineWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
-            lines.append(Line(ctLine: line, range: visible, x: inset.width, top: top, height: lineHeight,
-                              baseline: top + mono.ascender, width: lineWidth, fills: [], underlines: []))
-            top += lineHeight
-            location = NSMaxRange(paragraph)
-        } while location < ns.length
-        let codeHeight = max(CodeBlockView.minimumCodeHeight(zoom: zoom), CGFloat(lines.count) * lineHeight + inset.height * 2)
-        let height = ceil(header + codeHeight)
-        let labelFont = NSFont.token(.label, zoom: zoom)
-        let secondary = color(renderContext.tokens.secondaryText)
-        let language = code.language?.trimmingCharacters(in: .whitespacesAndNewlines)
-        var decorations: [Decoration] = [
-            .fill(CGRect(x: 0, y: 0, width: width, height: height),
-                  renderContext.tokens.codeSurface.color.cgColor(for: theme),
-                  radius: CGFloat(zoom.scaled(CornerRole.artifact.radius))),
-            .text(Self.line("\(language.flatMap { $0.isEmpty ? nil : $0 } ?? "Code")", font: labelFont, color: secondary),
-                  CGPoint(x: side, y: CGFloat(zoom.scaled(Space.m)) + labelFont.ascender)),
-        ]
-        if !code.isComplete {
-            let caption = NSFont.token(.caption, zoom: zoom)
-            let streaming = Self.line("Streaming", font: caption, color: secondary)
-            let streamingWidth = CGFloat(CTLineGetTypographicBounds(streaming, nil, nil, nil))
-            decorations.append(.text(streaming, CGPoint(x: width - side - streamingWidth,
-                                                        y: CGFloat(zoom.scaled(Space.m)) + caption.ascender)))
-        }
-        return LaidBlock(id: block.id, revision: block.revision, width: width, contextSignature: signature,
-                         role: role, height: height,
-                         rows: [TextRow(string: string, lines: lines, links: [])],
-                         decorations: decorations, clipsToBounds: true)
-    }
-
-    /// A collapsed tool row, in the same geometry `ToolCallView.layout()` uses:
-    /// disclosure column, icon, title, trailing status, and the one-line summary.
-    private func layoutTool(_ block: AgentBlock, tool: AgentToolCallPayload, role: AgentEntryRole,
-                            width: CGFloat, signature: Int) -> LaidBlock {
-        let shell = tool.presentedShell.flatMap { $0.command.isEmpty ? nil : $0 }
-        let title = ToolCallView.safeSingleLine(tool.name, fallback: "Tool")
-        let status = tool.presentedShell == nil
-            ? ToolCallView.statusText(status: tool.status, duration: tool.presentedTrailingDetailText)
-            : ToolCallView.shellStatusText(
-                status: ToolCallView.glyphStatus(tool.status, shell: tool.presentedShell),
-                duration: tool.presentedTrailingDetailText, badge: tool.presentedShell?.badgeText)
-        let needsAttention = tool.status == .failed || tool.presentedShell?.needsAttention == true
-        let summary = ToolCallView.presentedSummary(
-            title: title, summary: tool.summary, statusLabel: tool.status.agentToolStatusPresentation.label,
-            shell: shell, hasOutput: tool.presentedOutputText?.isEmpty == false).compactLine
-        let symbol = ToolCallView.symbolName(forToolNamed: tool.presentedToolNameText ?? tool.name)
-        let zoom = renderContext.pageZoom
-        return layoutHeaderRow(
-            block, role: role, width: width, signature: signature,
-            title: title, titleFont: shell == nil ? NSFont.token(.label, zoom: zoom) : ToolCallView.commandFont(zoom: zoom),
-            status: status, statusAttention: needsAttention, symbolName: symbol,
-            summary: summary, summaryFont: NSFont.token(shell == nil ? .body : .bodyMono, zoom: zoom),
-            alpha: tool.status.agentToolIsTerminal && !needsAttention ? CGFloat(Opacity.receded) : 1)
-    }
-
-    private func layoutCommandOutput(_ block: AgentBlock, output: AgentCommandOutputPayload, role: AgentEntryRole,
-                                     width: CGFloat, signature: Int) -> LaidBlock {
-        let presentation = output.status.agentToolStatusPresentation
-        let status = output.exitCode.map { "\(presentation.glyph) \(presentation.label), exit \($0)" }
-            ?? "\(presentation.glyph) \(presentation.label)"
-        return layoutHeaderRow(
-            block, role: role, width: width, signature: signature,
-            title: "Command output", titleFont: NSFont.token(.label, zoom: renderContext.pageZoom),
-            status: status, statusAttention: output.status == .failed, symbolName: "terminal",
-            summary: "", summaryFont: NSFont.token(.body, zoom: renderContext.pageZoom),
-            alpha: output.status.agentToolIsTerminal && output.status != .failed ? CGFloat(Opacity.receded) : 1)
-    }
-
-    private func layoutHeaderRow(
-        _ block: AgentBlock, role: AgentEntryRole, width: CGFloat, signature: Int,
-        title: String, titleFont: NSFont, status: String, statusAttention: Bool, symbolName: String,
-        summary: String, summaryFont: NSFont, alpha: CGFloat
-    ) -> LaidBlock {
-        let zoom = renderContext.pageZoom
-        let rowHeight = ToolCallView.rowHeight(zoom: zoom)
-        let inset = ToolCallView.horizontalInset(zoom: zoom)
-        let buttonSide = CGFloat(zoom.scaled(Space.xxl))
-        let primary = color(renderContext.tokens.primaryText)
-        let secondary = color(renderContext.tokens.secondaryText)
-        var decorations: [Decoration] = []
-
-        let iconX = inset + buttonSide + CGFloat(zoom.scaled(Space.s))
-        if let icon = Self.symbol(symbolName, pointSize: CGFloat(zoom.scaled(13)), color: secondary) {
-            let size = icon.size
-            decorations.append(.symbol(icon, CGRect(
-                x: iconX + (buttonSide - size.width) / 2, y: (rowHeight - size.height) / 2,
-                width: size.width, height: size.height)))
-        }
-        let captionFont = NSFont.token(.caption, zoom: zoom)
-        let statusLine = Self.line(status, font: captionFont,
-                                   color: statusAttention ? AgentLineRole.attention.color.nsColor(for: theme) : secondary)
-        let statusWidth = min(ceil(CGFloat(CTLineGetTypographicBounds(statusLine, nil, nil, nil))), width * 0.4)
-        let statusX = max(iconX + buttonSide, width - inset - statusWidth)
-        decorations.append(.text(statusLine, CGPoint(
-            x: statusX, y: Self.centredBaseline(font: captionFont, top: 0, height: rowHeight))))
-
-        let titleX = iconX + buttonSide + CGFloat(zoom.scaled(Space.m))
-        let titleWidth = max(1, statusX - titleX - CGFloat(zoom.scaled(Space.m)))
-        var rows: [TextRow] = []
-        let titleString = NSAttributedString(string: title, attributes: [.font: titleFont, .foregroundColor: primary])
-        rows.append(TextRow(string: titleString, lines: [Self.singleLine(
-            titleString, x: titleX, top: 0, height: rowHeight, maxWidth: titleWidth, font: titleFont)], links: []))
-        var height = rowHeight
-        if !summary.isEmpty {
-            let indent = ToolCallView.detailIndent(zoom: zoom)
-            let lineHeight = ceil(summaryFont.ascender - summaryFont.descender + summaryFont.leading)
-            let summaryString = NSAttributedString(string: summary, attributes: [.font: summaryFont, .foregroundColor: primary])
-            rows.append(TextRow(string: summaryString, lines: [Self.singleLine(
-                summaryString, x: indent, top: rowHeight, height: lineHeight,
-                maxWidth: max(1, width - indent - inset), font: summaryFont)], links: []))
-            height += lineHeight + ToolCallView.detailBottomInset(zoom: zoom)
-        }
-        return LaidBlock(id: block.id, revision: block.revision, width: width, contextSignature: signature,
-                         role: role, height: ceil(height), rows: rows, decorations: decorations, alpha: alpha)
-    }
-
-    private func layoutBoundary(_ block: AgentBlock, text: String, symbolName: String?, role: AgentEntryRole,
-                                width: CGFloat, signature: Int) -> LaidBlock {
-        let zoom = renderContext.pageZoom
-        let height = CGFloat(zoom.scaled(28))
-        let font = NSFont.systemFont(ofSize: CGFloat(zoom.scaled(11)), weight: .medium)
-        let secondary = color(renderContext.tokens.secondaryText)
-        let string = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: secondary])
-        let gap = CGFloat(zoom.scaled(Space.m))
-        let icon = symbolName.flatMap { Self.symbol($0, pointSize: font.pointSize, color: secondary) }
-        let glyphLead = icon.map { $0.size.width + CGFloat(zoom.scaled(Space.s)) } ?? 0
-        let measured = CTLineCreateWithAttributedString(Self.coreTextString(string))
-        let labelWidth = min(ceil(CGFloat(CTLineGetTypographicBounds(measured, nil, nil, nil))),
-                             max(0, width - 2 * gap - glyphLead))
-        let groupX = ((width - labelWidth - glyphLead) / 2).rounded()
-        var decorations: [Decoration] = []
-        let rule = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
-        let hairline = max(CGFloat(LineWidth.hairline), 0.5)
-        decorations.append(.fill(CGRect(x: 0, y: (height - hairline) / 2, width: max(0, groupX - gap), height: hairline), rule, radius: 0))
-        decorations.append(.fill(CGRect(x: groupX + glyphLead + labelWidth + gap, y: (height - hairline) / 2,
-                                        width: max(0, width - groupX - glyphLead - labelWidth - gap), height: hairline), rule, radius: 0))
-        if let icon {
-            decorations.append(.symbol(icon, CGRect(x: groupX, y: (height - icon.size.height) / 2,
-                                                    width: icon.size.width, height: icon.size.height)))
-        }
-        let line = Self.singleLine(string, x: groupX + glyphLead, top: 0, height: height, maxWidth: max(1, labelWidth), font: font)
-        return LaidBlock(id: block.id, revision: block.revision, width: width, contextSignature: signature,
-                         role: role, height: height, rows: [TextRow(string: string, lines: [line], links: [])],
-                         decorations: decorations)
-    }
-
-    /// Every block slice 1 does not draw natively: its copy text, secondary, so
-    /// nothing a provider sent ever disappears.
-    private func layoutPlain(_ block: AgentBlock, role: AgentEntryRole, width: CGFloat, signature: Int) -> LaidBlock {
-        let zoom = renderContext.pageZoom
-        let font = NSFont.token(.body, zoom: zoom)
-        let text = AgentTranscriptCopyController.plainText(for: [block])
-        let string = NSAttributedString(string: text, attributes: [
-            .font: font, .foregroundColor: color(renderContext.tokens.secondaryText)])
-        let set = Self.typeset(string, width: width, originX: 0, top: 0, firstIndent: 0, headIndent: 0,
-                               linePitch: AssistantProseView.bodyLinePitch(zoom: zoom), fallbackFont: font)
-        return LaidBlock(id: block.id, revision: block.revision, width: width, contextSignature: signature,
-                         role: role, height: ceil(set.height), rows: [TextRow(string: string, lines: set.lines, links: [])],
-                         decorations: [])
-    }
-
-    // MARK: CoreText helpers
-
-    /// CoreText reads its own colour key; AppKit's `.foregroundColor` is copied
-    /// across as a CGColor so CTLineDraw paints the token colour.
-    static func coreTextString(_ string: NSAttributedString) -> NSAttributedString {
-        let copy = NSMutableAttributedString(attributedString: string)
-        string.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: string.length)) { value, range, _ in
-            guard let color = value as? NSColor else { return }
-            copy.addAttribute(NSAttributedString.Key(kCTForegroundColorAttributeName as String), value: color.cgColor, range: range)
-        }
-        return copy
-    }
-
-    private static func line(_ text: String, font: NSFont, color: NSColor) -> CTLine {
-        CTLineCreateWithAttributedString(coreTextString(NSAttributedString(
-            string: text, attributes: [.font: font, .foregroundColor: color])))
-    }
-
-    private static func centredBaseline(font: NSFont, top: CGFloat, height: CGFloat) -> CGFloat {
-        top + ((height - (font.ascender - font.descender)) / 2).rounded() + font.ascender
-    }
-
-    /// A one-line row, truncated with an ellipsis to `maxWidth`.
-    private static func singleLine(_ string: NSAttributedString, x: CGFloat, top: CGFloat, height: CGFloat,
-                                   maxWidth: CGFloat, font: NSFont) -> Line {
-        let ct = coreTextString(string)
-        var line = CTLineCreateWithAttributedString(ct)
-        if CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil)) > maxWidth {
-            let token = CTLineCreateWithAttributedString(NSAttributedString(
-                string: "\u{2026}", attributes: ct.attributes(at: 0, effectiveRange: nil)))
-            line = CTLineCreateTruncatedLine(line, Double(maxWidth), .end, token) ?? line
-        }
-        return Line(ctLine: line, range: NSRange(location: 0, length: string.length), x: x, top: top,
-                    height: height, baseline: centredBaseline(font: font, top: top, height: height),
-                    width: CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil)), fills: [], underlines: [])
-    }
-
-    /// Wraps `string` into lines with the given indents and pitch. Inline code
-    /// fills and link underlines are resolved here, once, so draw only strokes.
-    static func typeset(
-        _ string: NSAttributedString, width: CGFloat, originX: CGFloat, top: CGFloat,
-        firstIndent: CGFloat, headIndent: CGFloat, linePitch: CGFloat, fallbackFont: NSFont
-    ) -> (lines: [Line], height: CGFloat) {
-        let naturalFallback = ceil(fallbackFont.ascender - fallbackFont.descender + fallbackFont.leading)
-        guard string.length > 0 else { return ([], max(naturalFallback, linePitch)) }
-        let ct = coreTextString(string)
-        let typesetter = CTTypesetterCreateWithAttributedString(ct)
-        var lines: [Line] = []
-        var start = 0
-        var y = top
-        while start < string.length {
-            let indent = lines.isEmpty ? firstIndent : headIndent
-            var count = CTTypesetterSuggestLineBreak(typesetter, start, Double(max(1, width - indent)))
-            if count <= 0 { count = 1 }
-            let ctLine = CTTypesetterCreateLine(typesetter, CFRange(location: start, length: count))
-            var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0
-            let lineWidth = CGFloat(CTLineGetTypographicBounds(ctLine, &ascent, &descent, &leading))
-            let natural = ceil(ascent + descent + leading)
-            let height = linePitch > 0 ? max(linePitch, ceil(ascent + descent)) : natural
-            let baseline = y + ((height - (ascent + descent)) / 2).rounded() + ascent
-            let x = originX + indent
-            var fills: [(CGRect, CGColor)] = []
-            var underlines: [(CGRect, CGColor)] = []
-            for run in (CTLineGetGlyphRuns(ctLine) as? [CTRun]) ?? [] {
-                let attributes = CTRunGetAttributes(run) as NSDictionary
-                let range = CTRunGetStringRange(run)
-                let x1 = CTLineGetOffsetForStringIndex(ctLine, range.location, nil)
-                let x2 = CTLineGetOffsetForStringIndex(ctLine, range.location + range.length, nil)
-                guard x2 > x1 else { continue }
-                if let background = attributes[NSAttributedString.Key.backgroundColor] as? NSColor {
-                    fills.append((CGRect(x: x + x1 - 2, y: baseline - ascent - 1, width: x2 - x1 + 4,
-                                         height: ascent + descent + 2), background.cgColor))
-                }
-                if let underline = attributes[NSAttributedString.Key.underlineStyle] as? Int, underline != 0 {
-                    let color = (attributes[NSAttributedString.Key.foregroundColor] as? NSColor)?.cgColor
-                        ?? NSColor.labelColor.cgColor
-                    underlines.append((CGRect(x: x + x1, y: baseline + 1.5, width: x2 - x1, height: 1), color))
-                }
-            }
-            lines.append(Line(ctLine: ctLine, range: NSRange(location: start, length: count), x: x, top: y,
-                              height: height, baseline: baseline, width: lineWidth, fills: fills, underlines: underlines))
-            y += height
-            start += count
-        }
-        return (lines, max(y - top, naturalFallback))
-    }
-
-    /// A vector SF Symbol in one colour. Drawn per frame, so it stays sharp at any
-    /// zoom (`CanvasSymbolImage` rasterizes, which a canvas zoom would scale).
-    private static var symbolCache: [String: NSImage] = [:]
-    private static func symbol(_ name: String, pointSize: CGFloat, color: NSColor) -> NSImage? {
-        let key = "\(name)|\(pointSize)|\(color.cgColor.components ?? [])"
-        if let cached = symbolCache[key] { return cached }
-        let base = NSImage(systemSymbolName: name, accessibilityDescription: nil)
-            ?? NSImage(systemSymbolName: ToolCallView.fallbackSymbolName, accessibilityDescription: nil)
-        let configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-        guard let image = base?.withSymbolConfiguration(configuration) else { return nil }
-        symbolCache[key] = image
-        return image
+    private func positionGyro() {
+        guard let tail = tailLine, !gyro.isHidden else { return }
+        let side = DualPlaneGyroIndicatorModel.side
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        gyro.frame = CGRect(x: insets.left, y: tail.top - scrollOffset, width: side, height: side)
+        CATransaction.commit()
     }
 
     // MARK: Drawing
+
+    var theme: TokenTheme { renderContext.appearance }
+    func color(_ token: TextToken) -> NSColor { token.color.nsColor(for: theme) }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
@@ -832,11 +722,13 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         // not, under Core Animation's drawing contexts).
         let device = context.userSpaceToDeviceSpaceTransform
         qaLastDrawScale = hypot(device.a, device.b)
+        gyro.matchContentsScale(qaLastDrawScale)
         let x0 = insets.left
         let visible = dirtyRect.offsetBy(dx: 0, dy: scrollOffset)
         let selection = selectedRange
         let highlight = NSColor.selectedTextBackgroundColor.cgColor
         var drawnLines = 0
+        var drawnControls = 0
         context.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         var index = firstPlaced(atOrBelow: visible.minY)
         while index < placed.count {
@@ -850,7 +742,8 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             if block.alpha < 1 { context.setAlpha(block.alpha) }
             let localVisible = visible.offsetBy(dx: -x0, dy: -item.y)
             for decoration in block.decorations {
-                if case let .fill(rect, color, radius) = decoration, rect.intersects(localVisible) {
+                switch decoration {
+                case let .fill(rect, color, radius) where rect.intersects(localVisible):
                     context.setFillColor(color)
                     if radius > 0 {
                         context.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
@@ -858,13 +751,33 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                     } else {
                         context.fill(rect)
                     }
+                case let .stroke(rect, color, radius, width) where rect.intersects(localVisible):
+                    context.setStrokeColor(color)
+                    context.setLineWidth(width)
+                    let inset = rect.insetBy(dx: width / 2, dy: width / 2)
+                    context.addPath(CGPath(roundedRect: inset, cornerWidth: max(0, radius - width / 2),
+                                           cornerHeight: max(0, radius - width / 2), transform: nil))
+                    context.strokePath()
+                default:
+                    continue
                 }
+            }
+            for (controlIndex, control) in block.controls.enumerated() where control.rect.intersects(localVisible) {
+                drawControlBackground(control, key: ControlKey(blockID: item.blockID, index: controlIndex), in: context)
             }
             if block.clipsToBounds { context.clip(to: CGRect(x: 0, y: 0, width: block.width, height: block.height)) }
             for (rowIndex, row) in block.rows.enumerated() {
                 let rowStart = item.textStart + block.rowOffsets[rowIndex]
+                var offset = CGPoint.zero
+                if let region = row.region, block.regions.indices.contains(region) {
+                    offset = regionOffsets[RegionKey(blockID: item.blockID, index: region)] ?? .zero
+                    context.saveGState()
+                    context.clip(to: block.regions[region].viewport)
+                    context.translateBy(x: -offset.x, y: -offset.y)
+                }
+                let rowVisible = localVisible.offsetBy(dx: offset.x, dy: offset.y)
                 for line in row.lines {
-                    guard line.top + line.height >= localVisible.minY, line.top <= localVisible.maxY else { continue }
+                    guard line.top + line.height >= rowVisible.minY, line.top <= rowVisible.maxY else { continue }
                     if let selection {
                         let lineStart = rowStart + line.range.location
                         let lineEnd = lineStart + line.range.length
@@ -893,17 +806,35 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                         context.fill(rect)
                     }
                 }
+                if row.region != nil { context.restoreGState() }
             }
             for decoration in block.decorations {
                 switch decoration {
-                case .fill: continue
+                case .fill, .stroke: continue
                 case let .text(line, origin):
                     context.textPosition = origin
                     CTLineDraw(line, context)
                 case let .symbol(image, rect):
                     guard rect.intersects(localVisible) else { continue }
                     image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                case let .image(attachmentID, rect, placeholder):
+                    guard rect.intersects(localVisible) else { continue }
+                    if let source = imageSources[attachmentID]?.image {
+                        context.saveGState()
+                        context.interpolationQuality = .high
+                        source.draw(in: Self.aspectFit(source.size, in: rect), from: .zero, operation: .sourceOver,
+                                    fraction: 1, respectFlipped: true, hints: nil)
+                        context.restoreGState()
+                    } else if let placeholder {
+                        let width = CGFloat(CTLineGetTypographicBounds(placeholder, nil, nil, nil))
+                        context.textPosition = CGPoint(x: rect.midX - width / 2, y: rect.midY + 4)
+                        CTLineDraw(placeholder, context)
+                    }
                 }
+            }
+            for (controlIndex, control) in block.controls.enumerated() where control.rect.intersects(localVisible) {
+                drawControlForeground(control, key: ControlKey(blockID: item.blockID, index: controlIndex), in: context)
+                drawnControls += 1
             }
             context.restoreGState()
         }
@@ -913,6 +844,65 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         }
         drawScrollIndicator(in: context)
         qaLastDrawnLineCount = drawnLines
+        qaLastDrawnControlCount = drawnControls
+    }
+
+    static func aspectFit(_ size: CGSize, in rect: CGRect) -> CGRect {
+        guard size.width > 0, size.height > 0 else { return rect }
+        let scale = min(rect.width / size.width, rect.height / size.height)
+        let fitted = CGSize(width: size.width * scale, height: size.height * scale)
+        return CGRect(x: rect.midX - fitted.width / 2, y: rect.midY - fitted.height / 2,
+                      width: fitted.width, height: fitted.height)
+    }
+
+    private func drawControlBackground(_ control: Control, key: ControlKey, in context: CGContext) {
+        let hovered = hoveredControl == key && control.enabled
+        let pressed = pressedControl == key && pressedInside && control.enabled
+        switch control.style {
+        case .choice:
+            // `AgentRequestChoiceButton`: every idle choice has equal emphasis;
+            // hover (and press) alone use the selected fill.
+            let surface = (hovered || pressed) ? AgentSurfaceRole.rowSelected.color : SurfaceToken.overlay.color
+            context.setFillColor(surface.cgColor(for: theme))
+            let radius = CGFloat(renderContext.pageZoom.scaled(CornerRole.card.radius))
+            context.addPath(CGPath(roundedRect: control.rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+            context.fillPath()
+        case let .region(hoverFill, pressedFill, radius):
+            guard let fill = pressed ? (pressedFill ?? hoverFill) : (hovered ? hoverFill : nil) else { return }
+            context.setFillColor(fill)
+            context.addPath(CGPath(roundedRect: control.rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+            context.fillPath()
+        case .text, .chevron:
+            return
+        }
+    }
+
+    private func drawControlForeground(_ control: Control, key: ControlKey, in context: CGContext) {
+        let pressed = pressedControl == key && pressedInside && control.enabled
+        let zoom = renderContext.pageZoom
+        let title: String
+        switch control.style {
+        case let .chevron(expanded): title = expanded ? "\u{25BE}" : "\u{25B8}"
+        case .choice, .text: title = control.title
+        case .region: title = ""
+        }
+        if !title.isEmpty {
+            let font = control.font ?? NSFont.token(.label, zoom: zoom)
+            var tint = control.tint ?? color(control.style.isChoice ? renderContext.tokens.primaryText : renderContext.tokens.secondaryText)
+            if !control.enabled { tint = tint.withAlphaComponent(0.4) } else if pressed { tint = tint.withAlphaComponent(0.6) }
+            let line = Self.line(title, font: font, color: tint)
+            let width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+            let x = control.rect.midX - width / 2
+            context.textPosition = CGPoint(x: x, y: Self.centredBaseline(font: font, top: control.rect.minY, height: control.rect.height))
+            CTLineDraw(line, context)
+        }
+        if focusedControl == key {
+            context.setStrokeColor(NSColor.keyboardFocusIndicatorColor.cgColor)
+            context.setLineWidth(2)
+            let ring = control.rect.insetBy(dx: -2, dy: -2)
+            context.addPath(CGPath(roundedRect: ring, cornerWidth: 5, cornerHeight: 5, transform: nil))
+            context.strokePath()
+        }
     }
 
     private func drawScrollIndicator(in context: CGContext) {
@@ -944,19 +934,81 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         return low
     }
 
+    // MARK: Hit testing
+
+    /// The placed block under a view point, with the point in its local space.
+    private func block(at point: NSPoint) -> (index: Int, local: CGPoint)? {
+        guard !placed.isEmpty else { return nil }
+        let docY = point.y + scrollOffset
+        let index = firstPlaced(atOrBelow: docY)
+        guard index < placed.count, docY >= placed[index].y else { return nil }
+        return (index, CGPoint(x: point.x - insets.left, y: docY - placed[index].y))
+    }
+
+    func control(at point: NSPoint) -> (key: ControlKey, control: Control)? {
+        guard let hit = block(at: point) else { return nil }
+        let item = placed[hit.index]
+        for (index, control) in item.block.controls.enumerated().reversed() where control.rect.contains(hit.local) {
+            return (ControlKey(blockID: item.blockID, index: index), control)
+        }
+        return nil
+    }
+
+    private func control(for key: ControlKey) -> Control? {
+        guard let item = placed.first(where: { $0.blockID == key.blockID }),
+              item.block.controls.indices.contains(key.index) else { return nil }
+        return item.block.controls[key.index]
+    }
+
+    private func region(at point: NSPoint) -> (key: RegionKey, region: ScrollRegion)? {
+        guard let hit = block(at: point) else { return nil }
+        let item = placed[hit.index]
+        for (index, region) in item.block.regions.enumerated() where region.viewport.contains(hit.local) {
+            return (RegionKey(blockID: item.blockID, index: index), region)
+        }
+        return nil
+    }
+
     // MARK: Scrolling
 
     override func scrollWheel(with event: NSEvent) {
+        let precise = event.hasPreciseScrollingDeltas
+        let dx = precise ? event.scrollingDeltaX : event.scrollingDeltaX * 16
+        let dy = precise ? event.scrollingDeltaY : event.scrollingDeltaY * 16
+        let point = convert(event.locationInWindow, from: nil)
+        // A code body or output pane scrolls on its own first: sideways whenever
+        // its lines are wider than it, vertically while it has room to move.
+        if let (key, region) = region(at: point) {
+            var offset = regionOffsets[key] ?? .zero
+            let maxX = max(0, region.contentSize.width - region.viewport.width)
+            let maxY = max(0, region.contentSize.height - region.viewport.height)
+            if abs(dx) > abs(dy), maxX > 0 {
+                offset.x = min(max(0, offset.x - dx), maxX)
+                regionOffsets[key] = offset
+                needsDisplay = true
+                return
+            }
+            if abs(dy) >= abs(dx), maxY > 0 {
+                let next = min(max(0, offset.y - dy), maxY)
+                if next != offset.y {
+                    offset.y = next
+                    regionOffsets[key] = offset
+                    needsDisplay = true
+                    return
+                }
+            }
+        }
         guard maximumScrollOffset > 0 else {
             super.scrollWheel(with: event)
             return
         }
-        let delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 16
-        scrollTranscript(toY: scrollOffset - delta)
+        scrollTranscript(toY: scrollOffset - dy)
         showScrollIndicator()
     }
 
-    // MARK: Hit testing and selection
+    var qaRegionOffsets: [RegionKey: CGPoint] { regionOffsets }
+
+    // MARK: Selection
 
     private var selectedRange: NSRange? {
         guard let anchor = selectionAnchor, let focus = selectionFocus, anchor != focus else { return nil }
@@ -973,15 +1025,17 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         }
         let item = placed[index]
         let local = CGPoint(x: point.x - insets.left, y: docY - item.y)
-        var best: (row: Int, line: Line, distance: CGFloat)?
+        var best: (row: Int, line: Line, offset: CGPoint, distance: CGFloat)?
         for (rowIndex, row) in item.block.rows.enumerated() {
+            let offset = row.region.map { regionOffsets[RegionKey(blockID: item.blockID, index: $0)] ?? .zero } ?? .zero
+            let y = local.y + offset.y
             for line in row.lines {
-                let distance = local.y < line.top ? line.top - local.y : max(0, local.y - (line.top + line.height))
-                if best == nil || distance < best!.distance { best = (rowIndex, line, distance) }
+                let distance = y < line.top ? line.top - y : max(0, y - (line.top + line.height))
+                if best == nil || distance < best!.distance { best = (rowIndex, line, offset, distance) }
             }
         }
         guard let best else { return item.textStart }
-        var offset = CTLineGetStringIndexForPosition(best.line.ctLine, CGPoint(x: local.x - best.line.x, y: 0))
+        var offset = CTLineGetStringIndexForPosition(best.line.ctLine, CGPoint(x: local.x + best.offset.x - best.line.x, y: 0))
         if offset == kCFNotFound { offset = best.line.range.location }
         offset = min(max(offset, best.line.range.location), NSMaxRange(best.line.range))
         return item.textStart + item.block.rowOffsets[best.row] + offset
@@ -1002,9 +1056,56 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         return nil
     }
 
+    // MARK: Mouse
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let hit = control(at: point)
+        let key = hit.flatMap { $0.control.enabled ? $0.key : nil }
+        if key != hoveredControl {
+            hoveredControl = key
+            needsDisplay = true
+        }
+        let overLink = key == nil && characterIndex(at: point).flatMap { link(at: $0) } != nil
+            && isPointOverText(point)
+        (key != nil || overLink ? NSCursor.pointingHand : NSCursor.arrow).set()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if hoveredControl != nil {
+            hoveredControl = nil
+            needsDisplay = true
+        }
+        NSCursor.arrow.set()
+    }
+
+    private func isPointOverText(_ point: NSPoint) -> Bool {
+        guard let index = characterIndex(at: point), let hit = row(containing: index) else { return false }
+        let row = hit.placed.block.rows[hit.row]
+        let local = CGPoint(x: point.x - insets.left, y: point.y + scrollOffset - hit.placed.y)
+        return row.lines.contains { CGRect(x: $0.x, y: $0.top, width: $0.width, height: $0.height).contains(local) }
+    }
+
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
+        if let hit = control(at: point), hit.control.enabled {
+            pressedControl = hit.key
+            pressedInside = true
+            focusedControl = nil
+            needsDisplay = true
+            return
+        }
+        focusedControl = nil
         let index = characterIndex(at: point)
         mouseDragged = false
         if event.modifierFlags.contains(.shift), selectionAnchor != nil, let index {
@@ -1019,8 +1120,16 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard selectionAnchor != nil else { return }
         let point = convert(event.locationInWindow, from: nil)
+        if let pressed = pressedControl {
+            let inside = control(at: point)?.key == pressed
+            if inside != pressedInside {
+                pressedInside = inside
+                needsDisplay = true
+            }
+            return
+        }
+        guard selectionAnchor != nil else { return }
         mouseDragged = true
         if point.y < bounds.minY { scrollTranscript(toY: scrollOffset - (bounds.minY - point.y)) }
         if point.y > bounds.maxY { scrollTranscript(toY: scrollOffset + (point.y - bounds.maxY)) }
@@ -1029,19 +1138,103 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     }
 
     override func mouseUp(with event: NSEvent) {
+        if let pressed = pressedControl {
+            let point = convert(event.locationInWindow, from: nil)
+            pressedControl = nil
+            needsDisplay = true
+            if control(at: point)?.key == pressed, let control = control(for: pressed) {
+                perform(control.action)
+            }
+            return
+        }
         defer { mouseDownIndex = nil }
         guard !mouseDragged, let index = mouseDownIndex else { return }
         selectionAnchor = nil
         selectionFocus = nil
         needsDisplay = true
-        _ = activateLink(at: index)
+        if isPointOverText(convert(event.locationInWindow, from: nil)) { _ = activateLink(at: index) }
     }
+
+    /// The one dispatch for every drawn control.
+    func perform(_ action: ControlAction) {
+        switch action {
+        case let .perform(renderAction):
+            renderContext.actions.perform(renderAction)
+        case let .toggle(id, expanded):
+            renderContext.actions.setExpanded(expanded, blockID: id)
+        case let .copy(text, blockID):
+            pasteboardForCopy.clearContents()
+            pasteboardForCopy.setString(text, forType: .string)
+            renderContext.actions.perform(.copy(blockID: blockID))
+        }
+    }
+
+    // MARK: Keyboard
+
+    /// Today's controls are NSButtons: reachable with Tab (under Full Keyboard
+    /// Access) and pressed with Space or Return. The drawn controls keep that:
+    /// Tab and Shift-Tab walk the enabled controls in document order with a focus
+    /// ring; past either end focus leaves the transcript as it would.
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 48: // Tab
+            if moveFocus(backward: event.modifierFlags.contains(.shift)) { return }
+        case 49, 36, 76: // Space, Return, Enter
+            if let key = focusedControl, let control = control(for: key), control.enabled {
+                perform(control.action)
+                return
+            }
+        case 53: // Escape
+            if focusedControl != nil || selectedRange != nil {
+                focusedControl = nil
+                selectionAnchor = nil
+                selectionFocus = nil
+                needsDisplay = true
+                return
+            }
+        default:
+            break
+        }
+        super.keyDown(with: event)
+    }
+
+    private var focusOrder: [ControlKey] {
+        placed.flatMap { item in
+            item.block.controls.enumerated().compactMap { index, control in
+                control.enabled ? ControlKey(blockID: item.blockID, index: index) : nil
+            }
+        }
+    }
+
+    @discardableResult
+    func moveFocus(backward: Bool) -> Bool {
+        let order = focusOrder
+        guard !order.isEmpty else { return false }
+        let next: Int
+        if let current = focusedControl, let position = order.firstIndex(of: current) {
+            next = backward ? position - 1 : position + 1
+        } else {
+            next = backward ? order.count - 1 : 0
+        }
+        guard order.indices.contains(next) else {
+            focusedControl = nil
+            needsDisplay = true
+            return false
+        }
+        focusedControl = order[next]
+        needsDisplay = true
+        return true
+    }
+
+    var qaFocusedControlTitle: String? { focusedControl.flatMap { control(for: $0)?.title } }
+
+    // MARK: Links
 
     private func link(at index: Int) -> (blockID: AgentNodeID, link: AgentTextStyleResolver.LinkRange)? {
         guard let hit = row(containing: index) else { return nil }
         let row = hit.placed.block.rows[hit.row]
         guard let link = row.links.first(where: { NSLocationInRange(hit.local, $0.range) }) else { return nil }
-        return (hit.placed.blockID, link)
+        return (row.ownerID ?? hit.placed.blockID, link)
     }
 
     /// The same policy `RichInlineTextView.activateLink` applies, re-evaluated at
@@ -1068,6 +1261,8 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         renderContext.actions.perform(.activateLink(blockID: blockID, url: url, target: target))
         return true
     }
+
+    // MARK: Copy
 
     /// The selected text, rows joined by newlines.
     var selectedText: String? {
@@ -1114,18 +1309,49 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         activateLink(at: index)
     }
 
+    @objc private func performImageAction(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? ImageActionBox else { return }
+        renderContext.actions.perform(box.action)
+    }
+
+    private final class ImageActionBox: NSObject {
+        let action: AgentRenderAction
+        init(_ action: AgentRenderAction) { self.action = action }
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(copy(_:)) { return selectedRange != nil }
-        return true
+        return menuItem.isEnabled
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu(title: "Transcript")
+        menu.autoenablesItems = false
+        let point = convert(event.locationInWindow, from: nil)
+        if let hit = block(at: point),
+           let image = placed[hit.index].block.images.first(where: { $0.rect.contains(hit.local) }) {
+            // `AgentImageCellView`'s menu: each item enabled by what the host can do.
+            let available = image.snapshot.state == .available
+            let items: [(String, AgentRenderAction, Bool)] = [
+                ("Preview", .previewImage(blockID: image.blockID, attachmentID: image.attachmentID), available && image.snapshot.canPreview),
+                ("Copy Image", .copyImage(blockID: image.blockID, attachmentID: image.attachmentID), available && image.snapshot.canCopy),
+                ("Save As…", .saveImageAs(blockID: image.blockID, attachmentID: image.attachmentID), available && image.snapshot.canSave),
+                ("Reveal in Finder", .revealImage(blockID: image.blockID, attachmentID: image.attachmentID), available && image.snapshot.canReveal),
+            ]
+            for (title, action, enabled) in items {
+                let item = NSMenuItem(title: title, action: #selector(performImageAction(_:)), keyEquivalent: "")
+                item.representedObject = ImageActionBox(action)
+                item.target = self
+                item.isEnabled = enabled
+                menu.addItem(item)
+            }
+            return menu
+        }
         let copy = NSMenuItem(title: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
         copy.target = self
+        copy.isEnabled = selectedRange != nil
         menu.addItem(copy)
-        let point = convert(event.locationInWindow, from: nil)
-        if let index = characterIndex(at: point), let link = link(at: index)?.link {
+        if let index = characterIndex(at: point), isPointOverText(point), let link = link(at: index)?.link {
             menu.addItem(.separator())
             let copyLink = NSMenuItem(title: "Copy Link", action: #selector(copyLinkFromMenu(_:)), keyEquivalent: "")
             copyLink.representedObject = link.destination
@@ -1151,8 +1377,39 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         guard let hit = row(containing: index) else { return nil }
         let row = hit.placed.block.rows[hit.row]
         guard let line = row.lines.last(where: { $0.range.location <= hit.local }) ?? row.lines.first else { return nil }
+        let offset = row.region.map { regionOffsets[RegionKey(blockID: hit.placed.blockID, index: $0)] ?? .zero } ?? .zero
         let x = CTLineGetOffsetForStringIndex(line.ctLine, hit.local, nil)
-        return NSPoint(x: insets.left + line.x + x + 0.5,
-                       y: hit.placed.y + line.top + line.height / 2 - scrollOffset)
+        return NSPoint(x: insets.left + line.x + x + 0.5 - offset.x,
+                       y: hit.placed.y + line.top + line.height / 2 - scrollOffset - offset.y)
     }
+
+    /// Every drawn control as (block, title, style name, centre point in view
+    /// coordinates), so a witness can press one through the window.
+    var qaControls: [(blockID: AgentNodeID, title: String, kind: String, center: NSPoint)] {
+        placed.flatMap { item in
+            item.block.controls.map { control in
+                let kind: String
+                switch control.style {
+                case .choice: kind = "choice"
+                case .text: kind = "text"
+                case let .chevron(expanded): kind = expanded ? "chevron.expanded" : "chevron.collapsed"
+                case .region: kind = "region"
+                }
+                return (item.blockID, control.title, kind,
+                        NSPoint(x: insets.left + control.rect.midX, y: item.y + control.rect.midY - scrollOffset))
+            }
+        }
+    }
+
+    /// Scrolls so the given block's top is in view.
+    func qaReveal(blockID: AgentNodeID) {
+        guard let item = placed.first(where: { $0.blockID == blockID }) else { return }
+        scrollTranscript(toY: item.y - insets.top)
+    }
+
+    func qaHeight(of blockID: AgentNodeID) -> CGFloat? { placed.first { $0.blockID == blockID }?.block.height }
+}
+
+extension AgentTranscriptCanvasView.ControlStyle {
+    var isChoice: Bool { if case .choice = self { return true }; return false }
 }
