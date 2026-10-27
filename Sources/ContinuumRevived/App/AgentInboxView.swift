@@ -275,6 +275,8 @@ private final class AgentInboxTableView: NSTableView {
         // range-selection and modifier semantics remain intact. The inbox only
         // owns the two activation keys and the post-traversal visibility guarantee.
         if contextHandler?.handleTableActivationKey(event) == true { return }
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers == "z", contextHandler?.undoFromKeyboard() == true { return }
         super.keyDown(with: event)
         contextHandler?.didTraverseWithKeyboard(event)
     }
@@ -1459,6 +1461,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         scopeButton.onFocusChange = { [weak self] id in self?.scopeFocusChanged(id) }
         scopeButton.onPopoverDismiss = { [weak self] in
             self?.colourEditingWorkspace = nil
+            self?.hiddenListShown = false
             self?.focusedScopeItemID = nil
             self?.setPeek(nil)
         }
@@ -1913,6 +1916,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // arrived, and by the time `render` returns nobody can tell what that was.
         let selectionOnEntry = selectedRows.map(\.id)
         allRows = newRows
+        externalSessionHiding?.noteDiscovered(Set(newRows.compactMap(\.externalSession?.sessionKey)))
         updateScopeMenu()
         render(display(from: newRows))
         completePendingAdvance(selectionOnEntry: selectionOnEntry)
@@ -2099,6 +2103,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // updated either way, so a new project appears in the dropdown on the push
         // that first mentions it.
         allRows = newRows
+        externalSessionHiding?.noteDiscovered(Set(newRows.compactMap(\.externalSession?.sessionKey)))
         updateScopeMenu()
         scheduleWakeRerender()
         // P2D.4: the disclosure is VIEW state, so it is not in `AgentInboxRow` and
@@ -2163,8 +2168,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// already hidden under its parent, and the header would say it is holding a row
     /// that unfolding it does not produce.
     private func display(from newRows: [AgentInboxRow]) -> [InboxListItem] {
+        let hiddenKeys = externalSessionHiding?.hiddenKeys ?? []
+        let unhidden = hiddenKeys.isEmpty ? newRows : newRows.filter { row in
+            row.externalSession.map { !hiddenKeys.contains($0.sessionKey) } ?? true
+        }
         let scoped = InboxScope.filter(
-            rows: newRows, scope: effectiveScope, openAgentId: openAgentId,
+            rows: unhidden, scope: effectiveScope, openAgentId: openAgentId,
             currentWorkspace: currentWorkspaceName,
             currentWorkspaceId: currentWorkspaceId)
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
@@ -2956,6 +2965,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         var items = entries.enumerated().map { index, entry in
             choiceItem(for: entry, separatorBefore: index > 0 && entries[index - 1].section != entry.section)
         }
+        if hiddenListShown, let hiding = externalSessionHiding, !hiding.entries.isEmpty {
+            scopeButton.items = hiddenListItems(hiding.entries)
+            restoreScopeSelection()
+            return
+        }
+        hiddenListShown = false
+        if let count = externalSessionHiding?.entries.count, count > 0 {
+            var hidden = ChoiceItem(id: Self.hiddenListItemId, title: "Hidden from elsewhere",
+                                    icon: .system("eye.slash"))
+            hidden.trailing = "\(count)"
+            hidden.keepsOpen = true
+            hidden.separatorBefore = true
+            items.append(hidden)
+        }
         managementItems.removeAll()
         // Keep every management affordance visible. Unsupported actions are
         // disabled in place, rather than disappearing and making the menu's
@@ -3112,6 +3135,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private func choicePicked(_ item: ChoiceItem) {
+        if handleHiddenListChoice(item) { return }
         if item.id == "colour:back" {
             colourEditingWorkspace = nil
             updateScopeMenu()
@@ -3399,13 +3423,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 card.configureHoverActions(snooze: nil, settle: nil)
                 card.configureExternalActions(
                     moveHere: external.canMoveHere ? perform(.moveHere) : nil,
-                    copy: external.canCopy ? perform(.copy) : nil)
+                    copy: external.canCopy ? perform(.copy) : nil,
+                    hide: externalSessionHiding == nil ? nil : { [weak self] in self?.hideExternalRows([id]) })
             }
             return
         }
         if let card = cell as? AgentInbox96CellView {
             card.configureHoverActions(snooze: action(.snooze), settle: action(.settle))
-            card.configureExternalActions(moveHere: nil, copy: nil)
+            card.configureExternalActions(moveHere: nil, copy: nil, hide: nil)
         } else if let slim = cell as? AgentInboxSlimCellView {
             if model.closingSince != nil {
                 slim.configureBackgroundActions(
@@ -3461,6 +3486,28 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         card.layoutSubtreeIfNeeded()
         return card.qaMetadataInkGeometry
     }
+
+    /// Press a hovered row's × through its own button.
+    func clickHoverHideForQA(id: UUID) -> Bool {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return false }
+        card.layoutSubtreeIfNeeded()
+        return card.clickHoverHideForQA()
+    }
+
+    /// ⌘Z delivered to the list's own table.
+    func pressCommandZForQA() {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+            windowNumber: window?.windowNumber ?? 0, context: nil,
+            characters: "z", charactersIgnoringModifiers: "z", isARepeat: false, keyCode: 6) else { return }
+        tableView.keyDown(with: event)
+    }
+
+    /// Pick a row of the scope popover by id, through the production selection path.
+    func chooseScopeItemForQA(id: String) -> Bool { scopeButton.chooseForQA(id: id) }
+    var scopeItemIdsForQA: [String] { scopeButton.items.map(\.id) }
 
     /// Hover row `id` the way the pointer does, then press one of its external actions.
     func clickExternalActionForQA(id: UUID, _ action: InboxExternalSessionAction) -> Bool {
@@ -4199,10 +4246,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // Another app's session has none of an agent's verbs; its own are on
         // the row (click to watch) and its hover buttons.
         guard !targets.contains(where: { $0.externalSession != nil }) else {
-            rowChoiceController.dismiss()
-            qaChoiceListForQA = nil
             rowChoiceTargetIds.removeAll()
-            return false
+            guard externalSessionHiding != nil, targets.allSatisfy({ $0.externalSession != nil }) else {
+                rowChoiceController.dismiss()
+                qaChoiceListForQA = nil
+                return false
+            }
+            // Hide is the one verb a session from elsewhere has here.
+            let ids = targets.map(\.id)
+            let hide = ChoiceItem(id: Self.hideItemId,
+                                  title: targets.count > 1 ? "Hide \(targets.count)" : "Hide",
+                                  icon: .system("eye.slash"))
+            return presentRowChoices([hide], anchor: anchor) { [weak self] _ in self?.hideExternalRows(ids) }
         }
         let actions = InboxRowAction.menuItems(
             for: targets,
@@ -4226,10 +4281,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 destructive: action == .delete || action == .archive
             )
         }
-        let onSelection: (ChoiceItem) -> Void = { [weak self] item in
+        return presentRowChoices(items, anchor: anchor) { [weak self] item in
             guard let self, let action = InboxRowAction(rawValue: item.id) else { return }
             self.performRowAction(action)
         }
+    }
+
+    private func presentRowChoices(
+        _ items: [ChoiceItem], anchor: NSRect, onSelection: @escaping (ChoiceItem) -> Void
+    ) -> Bool {
         if tableView.window == nil {
             // Headless checks retain the same ChoiceListView the controller presents;
             // only the AppKit panel is unavailable without a window.
@@ -4539,6 +4599,89 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         restartUndoToastTimer()
     }
 
+    // MARK: - Hidden sessions from elsewhere
+
+    static let hideItemId = "external:hide"
+    static let hiddenListItemId = "hidden:list"
+    static let hiddenVerb = "Hidden"
+
+    /// Where hidden sessions live; nil (checks, baselines) offers no Hide at all.
+    var externalSessionHiding: ExternalSessionHiding? {
+        didSet { refreshAfterHidingChange() }
+    }
+    private var pendingHideUndo: Set<String>?
+    private var hiddenListShown = false
+
+    func hideExternalRows(_ ids: [UUID]) {
+        guard let hiding = externalSessionHiding else { return }
+        let sessions = ids.compactMap { id in allRows.first { $0.id == id } }
+            .compactMap { row in row.externalSession.map { (key: $0.sessionKey, title: row.title) } }
+            .filter { !hiding.isHidden($0.key) }
+        guard !sessions.isEmpty else { return }
+        hiding.hide(sessions)
+        refreshAfterHidingChange()
+        dismissUndoToast()
+        pendingHideUndo = Set(sessions.map(\.key))
+        undoToast.show(InboxUndoToast.message(verb: Self.hiddenVerb, count: sessions.count, snoozedUntil: nil))
+        restartUndoToastTimer()
+    }
+
+    func showHiddenExternalSessions(_ keys: Set<String>) {
+        externalSessionHiding?.show(keys)
+        refreshAfterHidingChange()
+    }
+
+    func showAllHiddenExternalSessions() {
+        externalSessionHiding?.showAll()
+        hiddenListShown = false
+        refreshAfterHidingChange()
+    }
+
+    private func refreshAfterHidingChange() {
+        updateScopeMenu()
+        render(display(from: allRows))
+    }
+
+    /// The Hidden list, in place of the scopes, the way a workspace's colours are.
+    private func hiddenListItems(_ entries: [ExternalSessionHiding.Entry]) -> [ChoiceItem] {
+        var back = ChoiceItem(id: "hidden:back", title: "Hidden from elsewhere", icon: .system("chevron.left"))
+        back.keepsOpen = true
+        var all = ChoiceItem(id: "hidden:all", title: "Show all", icon: .system("eye"))
+        all.separatorBefore = true
+        return [back] + entries.enumerated().map { index, entry in
+            var item = ChoiceItem(id: "hidden:show:\(entry.sessionKey)", title: entry.title)
+            item.trailing = "Show"
+            item.keepsOpen = true
+            item.separatorBefore = index == 0
+            return item
+        } + [all]
+    }
+
+    private func handleHiddenListChoice(_ item: ChoiceItem) -> Bool {
+        switch item.id {
+        case Self.hiddenListItemId:
+            hiddenListShown = true
+            updateScopeMenu()
+        case "hidden:back":
+            hiddenListShown = false
+            updateScopeMenu()
+        case "hidden:all":
+            showAllHiddenExternalSessions()
+        case let id where id.hasPrefix("hidden:show:"):
+            showHiddenExternalSessions([String(id.dropFirst("hidden:show:".count))])
+        default:
+            return false
+        }
+        return true
+    }
+
+    /// ⌘Z on the list presses the toast's Undo while it is up.
+    fileprivate func undoFromKeyboard() -> Bool {
+        guard !undoToast.isHidden, pendingHideUndo != nil || pendingUndo != nil else { return false }
+        performUndo()
+        return true
+    }
+
     private func restartUndoToastTimer() {
         undoToastTimer?.invalidate()
         undoToastTimer = Timer.scheduledTimer(
@@ -4552,6 +4695,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         undoToastTimer?.invalidate()
         undoToastTimer = nil
         pendingUndo = nil
+        pendingHideUndo = nil
         undoToast.hide()
     }
 
@@ -4563,6 +4707,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// arriving from the re-render could spend on facts this restore has already put
     /// back.
     private func performUndo() {
+        if let keys = pendingHideUndo {
+            dismissUndoToast()
+            showHiddenExternalSessions(keys)
+            return
+        }
         guard let restoring = pendingUndo else { return }
         dismissUndoToast()
         onUndoLifecycle?(restoring)
@@ -6443,6 +6592,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard let list = activeChoiceListForQA else { return false }
         list.perform(command)
         return true
+    }
+
+    @discardableResult
+    func pickRowMenuItemForQA(id: String) -> Bool {
+        guard let list = activeChoiceListForQA,
+              list.qaItems.contains(where: { $0.id == id && $0.enabled }) else { return false }
+        list.choose(id: id)
+        return true
+    }
+
+    /// The scope popover's list as its rows would draw it, for a review sheet.
+    func scopeChoiceListForQA() -> ChoiceListView {
+        ChoiceListView(items: scopeButton.items, selectedID: nil, presentation: .checklist)
     }
 
     @discardableResult

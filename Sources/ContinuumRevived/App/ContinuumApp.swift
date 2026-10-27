@@ -816,6 +816,19 @@ enum ContinuumApp {
         // it, and stops — through the boot mount's tracker and a real process.
         // .plans/79: sessions from other apps are rows of the production
         // sidebar; Copy forks one into a managed agent in its project.
+        if let index = CommandLine.arguments.firstIndex(of: "--hide-external-rows-check") {
+            _ = NSApplication.shared
+            let next = CommandLine.arguments.dropFirst(index + 1).first
+            MainActor.assumeIsolated {
+                do {
+                    print(try HideExternalRowsChecks.run(sheetDirectory: next.flatMap { $0.hasPrefix("-") ? nil : $0 }))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--external-sessions-sidebar-check") {
             _ = NSApplication.shared
             let next = CommandLine.arguments.dropFirst(index + 1).first
@@ -5341,6 +5354,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `.plans/79` — every Claude and Codex session on this Mac, for the sidebar.
     /// Started on a real launch only.
     lazy var externalSessionMonitor = ExternalSessionMonitor()
+    /// Sessions from elsewhere the user hid from the sidebar, in the app's own
+    /// (channel-split) defaults. A check never writes the standard domain.
+    lazy var externalSessionHiding = ExternalSessionHiding(
+        defaults: CommandLine.arguments.contains { $0.hasSuffix("-check") }
+            ? UserDefaults(suiteName: "dev.arrayapp.qa.hidden-external-sessions") ?? .standard
+            : .standard)
     /// QA: overrides which face an agent tile shows. Production reads the
     /// tile itself (`agentFace(for:)`).
     var agentFaceProvider: ((AgentID) -> AgentTileFace)?
@@ -12006,6 +12025,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.agentInbox.onWorkspaceColourChange = { [weak self] workspaceId, colour in
             self?.setWorkspaceColour(workspaceId: workspaceId, colour: colour)
         }
+        sidebar.agentInbox.externalSessionHiding = externalSessionHiding
         sidebar.agentInbox.onExternalSessionAction = { [weak self] action, rowId in
             self?.performExternalSessionAction(action, rowId: rowId)
         }

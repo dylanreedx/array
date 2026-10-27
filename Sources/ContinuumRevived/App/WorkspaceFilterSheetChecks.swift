@@ -24,9 +24,9 @@ enum WorkspaceFilterSheet {
 
     nonisolated static let now = Date(timeIntervalSince1970: 1_900_600_000)
     nonisolated static let array = Workspace(id: uuid(0x701), name: "Array", colour: "blue")
-    nonisolated static let film = Workspace(id: uuid(0x702), name: "Film", colour: "orange")
+    nonisolated static let studio = Workspace(id: uuid(0x702), name: "Film", colour: "orange")
     nonisolated static let website = Workspace(id: uuid(0x703), name: "Website", colour: "purple")
-    nonisolated static let workspaces = [array, film, website]
+    nonisolated static let workspaces = [array, studio, website]
 
     nonisolated private static func uuid(_ n: Int) -> UUID {
         UUID(uuidString: String(format: "00000000-0000-0000-0000-%012X", n))!
@@ -49,10 +49,10 @@ enum WorkspaceFilterSheet {
                 colour: "teal", minutes: 50),
             row(0x511, "Sidebar: fold button", array, "Array", .working, elapsed: 2_400, depth: 1, parent: 0x501, minutes: 49),
             row(0x512, "Sidebar: project icons", array, "Array", .ready, depth: 1, parent: 0x501, minutes: 48),
-            row(0x502, "Retime the hero loop to the beat", film, "film", .approval, attention: .unread, minutes: 45),
+            row(0x502, "Retime the hero loop to the beat", studio, "film", .approval, attention: .unread, minutes: 45),
             row(0x503, "Fix zoom choppiness on pinch", array, "Array", .working, harness: "Codex", elapsed: 1_260, minutes: 40),
             row(0x504, "Ship the pricing page copy", website, "website", .ready, minutes: 35),
-            row(0x505, "Render the dictation film master", film, "film", .working, harness: "Codex", elapsed: 620, minutes: 30),
+            row(0x505, "Render the dictation film master", studio, "film", .working, harness: "Codex", elapsed: 620, minutes: 30),
             row(0x506, "Fix the appcast link on mobile", website, "website", .working, elapsed: 300, minutes: 25),
             row(0x507, "Draft release notes for 0.7.32", array, "Array", .ready, minutes: 20),
             row(0x508, "Summarise overnight CI failures", nil, "Array", .ready, minutes: 15),
@@ -112,7 +112,7 @@ enum WorkspaceFilterSheet {
         var all = rows()
         inbox.reload(rows: all)
         inbox.layoutForQA()
-        let filmID = InboxScope.workspaceID(film.id, "").storageValue
+        let filmID = InboxScope.workspaceID(studio.id, "").storageValue
 
         // 1. Surviving cards keep their cell OBJECT across a toggle.
         func cells() -> [UUID: ObjectIdentifier] {
@@ -132,16 +132,16 @@ enum WorkspaceFilterSheet {
 
         // 2. With the checklist open, a push updates a workspace's counts in place.
         try expect(trigger.qaIsPopoverPresented, "liveness: the checklist closed on a toggle")
-        func filmDetail() -> String? { trigger.qaPresentedList?.qaItems.first { $0.id == filmID }?.detail }
-        let detailBefore = filmDetail()
+        func checklistCounts() -> String? { trigger.qaPresentedList?.qaItems.first { $0.id == filmID }?.detail }
+        let detailBefore = checklistCounts()
         let arrival = AgentInboxRow(
             id: uuid(0x5F0), title: "Grade the launch reel", projectName: "film", projectId: uuid(0x804),
-            workspaceName: film.name, workspaceId: film.id, state: .approval, attention: .unread,
+            workspaceName: studio.name, workspaceId: studio.id, state: .approval, attention: .unread,
             model: "claude-opus-5-5", branch: "main", elapsed: nil, depth: 0, createdAt: now,
             parentId: nil, harness: "Claude Code", identityColor: nil)
         all.append(arrival)
         inbox.apply(rows: all, changed: AgentsBoardChangeSet(added: [arrival.id], updated: [], removed: []))
-        let detailAfter = filmDetail()
+        let detailAfter = checklistCounts()
         try expect(detailAfter != nil && detailAfter != detailBefore,
                    "liveness: the open checklist kept Film's counts at '\(detailBefore ?? "nil")' after a push added a Film agent")
         trigger.dismissPopoverForQA()
@@ -152,7 +152,7 @@ enum WorkspaceFilterSheet {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let ghost = uuid(0x7FF)
-        let stored = InboxScope.normalized(InboxWorkspaceFilter(mode: .include, workspaces: [film.id, website.id, ghost],
+        let stored = InboxScope.normalized(InboxWorkspaceFilter(mode: .include, workspaces: [studio.id, website.id, ghost],
                                                                 showsUnplaced: false))
         try expect(stored.storageValue.hasPrefix("workspaces:include:"), "liveness: the fixture is not an include set — \(stored.storageValue)")
         defaults.set(stored.storageValue, forKey: WorkspaceSidebarConfig.scopeKey)
@@ -167,7 +167,7 @@ enum WorkspaceFilterSheet {
         restored.layoutForQA()
         let shown = Set(restored.rowIdsForQA.compactMap { id in all.first { $0.id == id }.map(\.workspaceId) })
         try expect(restored.scope == stored, "liveness: the stored include set came back as \(restored.scope.storageValue)")
-        try expect(shown == [film.id, website.id], "liveness: the restored set shows Film and Website only — got \(shown)")
+        try expect(shown == [studio.id, website.id], "liveness: the restored set shows Film and Website only — got \(shown)")
         try expect(writes == 0, "liveness: restoring the scope wrote it back \(writes) times")
 
         // 4. A deleted workspace left in the set: ignored for the title and the
@@ -240,7 +240,7 @@ enum WorkspaceFilterSheet {
         func choose(_ id: String) throws {
             try expect(trigger.choosePresentedItemForQA(id: id), "\(tag): '\(id)' is not a row of the open checklist")
         }
-        let filmID = InboxScope.workspaceID(film.id, "").storageValue
+        let filmID = InboxScope.workspaceID(studio.id, "").storageValue
         let websiteID = InboxScope.workspaceID(website.id, "").storageValue
 
         // 1. Today: This workspace.
@@ -253,7 +253,7 @@ enum WorkspaceFilterSheet {
         try present()
         try choose(filmID)
         try expect(trigger.qaIsPopoverPresented, "\(tag): checking a box must leave the popover open")
-        try expect(shownWorkspaces() == [array.id, film.id], "\(tag): Array + Film shows both — got \(shownWorkspaces())")
+        try expect(shownWorkspaces() == [array.id, studio.id], "\(tag): Array + Film shows both — got \(shownWorkspaces())")
         try expect(inbox.scopeTriggerTitleForQA == "Array + Film" && inbox.scopeTriggerSwatchCountForQA == 2,
                    "\(tag): the trigger reads '\(inbox.scopeTriggerTitleForQA)' with \(inbox.scopeTriggerSwatchCountForQA) dots")
         try expect(reported.last.map { InboxScope(storageValue: $0.storageValue) == $0 } == true,
@@ -270,15 +270,15 @@ enum WorkspaceFilterSheet {
         }
         list.perform(.first)
         for _ in 0..<filmIndex { list.perform(.next) }
-        try expect(inbox.peekWorkspace == film.id, "\(tag): focusing Film's row peeks Film")
+        try expect(inbox.peekWorkspace == studio.id, "\(tag): focusing Film's row peeks Film")
         try expect(inbox.marksWorkspacesForQA, "\(tag): a list spanning two workspaces carries edge marks")
         inbox.layoutForQA()
         var marked = 0, dimmed = 0
         for case let cell as AgentInbox96CellView in inbox.qaMaterializedRowCells {
             guard let id = cell.qaAgentID, let row = all.first(where: { $0.id == id }) else { continue }
             if cell.qaWorkspaceMarkFrame != nil { marked += 1 }
-            if row.workspaceId != film.id && cell.peekAlpha < 0.5 { dimmed += 1 }
-            if row.workspaceId == film.id && cell.peekAlpha < 1 {
+            if row.workspaceId != studio.id && cell.peekAlpha < 0.5 { dimmed += 1 }
+            if row.workspaceId == studio.id && cell.peekAlpha < 1 {
                 throw Failure(description: "\(tag): the peeked workspace's own card '\(row.title)' was dimmed")
             }
         }
@@ -359,7 +359,7 @@ enum WorkspaceFilterSheet {
             try await Task.sleep(nanoseconds: 300_000_000)
             trigger.presentPopover()
             trigger.qaPresentedPanel?.level = window.level
-            let filmID = InboxScope.workspaceID(film.id, "").storageValue
+            let filmID = InboxScope.workspaceID(studio.id, "").storageValue
             func scene(_ name: String, _ action: () throws -> Void) async throws {
                 var frames: [(TimeInterval, CGImage)] = []
                 let start = ProcessInfo.processInfo.systemUptime

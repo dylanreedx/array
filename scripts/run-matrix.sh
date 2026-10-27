@@ -363,6 +363,9 @@ run_ios_build() {
     -scheme Continuum
     -sdk iphonesimulator
     -destination 'generic/platform=iOS Simulator'
+    # Keep Xcode's build cache inside this checkout's .build, so it goes when
+    # the bench goes; the default DerivedData path leaked ~2GB per worktree.
+    -derivedDataPath .build/ios-derived-data
     build
   )
 
@@ -1090,6 +1093,7 @@ run_app_check .build/debug/Array --agent-process-tracker-check
 # by session, marked where they live, scoped by "This Mac", never doubled; Copy
 # forks one into a managed Claude agent in its project.
 run_app_check .build/debug/Array --external-sessions-sidebar-check
+run_app_check .build/debug/Array --hide-external-rows-check
 # The sidebar's project icon: `.array/icon.*` beats a shipped favicon; static/,
 # website/public/, Packaging/*.icns and an xcassets AppIcon resolve; a miss is
 # cached, and an added override or an edited winning file still shows.
