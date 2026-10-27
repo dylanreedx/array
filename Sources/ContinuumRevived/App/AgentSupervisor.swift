@@ -7432,6 +7432,30 @@ final class AgentSupervisor {
         }
     }
 
+    /// Every delivered event, for EVERY agent, once, on the main actor — the app's
+    /// one subscription for the sidebar and the activity timeline (plan 87, Step 4).
+    /// Not `events(for:)`: that replays history on attach, so a consumer per tile
+    /// recorded each replayed event again, and an agent with no tile was never heard.
+    private var deliveredEventObservers: [UUID: (AgentID, AgentRuntimeEvent) -> Void] = [:]
+
+    @discardableResult
+    func addDeliveredEventObserver(_ observe: @escaping (AgentID, AgentRuntimeEvent) -> Void) -> UUID {
+        let token = UUID()
+        deliveredEventObservers[token] = observe
+        return token
+    }
+
+    func removeDeliveredEventObserver(_ token: UUID) {
+        deliveredEventObservers[token] = nil
+    }
+
+    /// The status a tile would derive from this agent's stream, derived from the
+    /// supervisor's own buffer — so a headless agent gets the same answer.
+    func derivedStreamStatus(for id: AgentID) -> AgentStatus {
+        deriveAgentStatus(signals: deriveStatusSignals(
+            from: history[id] ?? [], threadId: Self.threadId(for: id), engineStatus: .idle))
+    }
+
     func subscriberCount(for id: AgentID) -> Int {
         subscribers[id]?.count ?? 0
     }
@@ -8761,6 +8785,7 @@ final class AgentSupervisor {
         for continuation in (subscribers[id] ?? [:]).values {
             continuation.yield(event)
         }
+        for observe in deliveredEventObservers.values { observe(id, event) }
 
         // T1 — an IN-TURN compaction (claude's `status: compacting`, pi's
         // `compaction_start`) has no operation of its own to finish it; only a

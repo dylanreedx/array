@@ -6951,6 +6951,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `installAcceptedTileFocusHook` so no boot path or fixture can wire the
     /// focus bridge and forget the awareness one.
     func installAgentAwarenessHooks() {
+        installAgentActivityObserver()
         agentSupervisor.activeViewFactsProvider = { [weak self] agentID in
             self?.activeViewFacts(forAgent: agentID) ?? .away
         }
@@ -6959,6 +6960,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard decision.clearsLiveSignal || decision.acknowledgesVisually else { return }
             self.pendingWatchedArrivalsByTile[tileID] = decision
         }
+    }
+
+    private var agentActivityObserverToken: (supervisor: ObjectIdentifier, token: UUID)?
+
+    /// Plan 87, Step 4: THE sidebar's one status feed. Every event the supervisor
+    /// delivers, for every agent — headless children included — reaches the
+    /// activity timeline here, once. It used to come from each tile's ingest, so
+    /// an agent with no tile never moved its row.
+    func installAgentActivityObserver() {
+        if let installed = agentActivityObserverToken,
+           installed.supervisor == ObjectIdentifier(agentSupervisor) { return }
+        let token = agentSupervisor.addDeliveredEventObserver { [weak self] id, event in
+            guard let self else { return }
+            if case let .childAgentSpawned(_, childID, _, _, _, _, _) = event {
+                self.agentActivity.managedAgentIdentities.insert(childID)
+                self.agentActivity.agentIdentities.insert(childID)
+            }
+            self.recordManagedActivity(
+                agentId: id, tileId: self.agentSupervisor.records[id]?.tileId, event: event,
+                status: self.agentSupervisor.derivedStreamStatus(for: id))
+        }
+        agentActivityObserverToken = (ObjectIdentifier(agentSupervisor), token)
     }
 
     /// The live half, run once the signal for a watched arrival has been
@@ -16955,10 +16978,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // here is the app's own interest in the stream — mirroring each event onto
         // the syncable activity timeline so the phone sees it (88.4c), with the
         // status the tile derived from that same event.
-        view.onIngestedEvent = { [weak self, weak view] event in
-            guard let view else { return }
-            self?.recordManagedActivity(agentId: agentId, tileId: tileId, event: event, status: view.currentAgentStatus)
-        }
+        // Plan 87: activity is recorded from the supervisor for every agent
+        // (`installAgentActivityObserver`), not here. This hook replayed the
+        // agent's buffered history on every attach and so recorded it again.
+        view.onIngestedEvent = nil
         view.onAcceptedBoardTask = { [weak self] acceptedAgentID, context in
             self?.advanceAcceptedBoardTask(agentID: acceptedAgentID, context: context)
         }
@@ -17449,26 +17472,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Records a managed-agent runtime event onto the per-agent syncable
     /// timeline and nudges a companion publish so the phone updates (88.4c).
     /// `tileId` rides along as the optional view hint only (P2A.8).
-    private func recordManagedActivity(agentId: AgentID, tileId: UUID?, event: AgentRuntimeEvent, status: AgentStatus) {
+    private func recordManagedActivity(agentId: AgentID, tileId: UUID?, event: AgentRuntimeEvent, status: @autoclosure () -> AgentStatus) {
         if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }),
            case .turnStarted = event, !onboardingProgressStore.load().startedAgentIDs.contains(agentId.rawValue) {
             onboardingProgressStore.update { $0.demonstrateAgentStarted(agentId.rawValue) }
             refreshGettingStartedTasks()
         }
-        let overrides = tileId.flatMap { id in
-            canvasView?.allWorkspaceTiles().first(where: { $0.id == id })?.metadata.agentSoundOverrides
+        // Sounds and banners stay what they were when this was fed by the tile:
+        // an agent with a tile signals, a headless child does not.
+        if let tileId {
+            let overrides = canvasView?.allWorkspaceTiles().first(where: { $0.id == tileId })?.metadata.agentSoundOverrides
+            _ = agentSignalCenter.ingest(
+                event: event,
+                agentID: agentId,
+                tileID: tileId,
+                overrides: overrides
+            )
+            // WS4: the live half of a watched arrival, run here because this is the
+            // first moment the signal for it exists.
+            applyPendingWatchedArrival(tileID: tileId)
         }
-        _ = agentSignalCenter.ingest(
-            event: event,
-            agentID: agentId,
-            tileID: tileId,
-            overrides: overrides
-        )
-        // WS4: the live half of a watched arrival, run here because this is the
-        // first moment the signal for it exists.
-        if let tileId { applyPendingWatchedArrival(tileID: tileId) }
-        guard let draft = ManagedAgentActivityBridge.draft(
-            for: event, agentId: agentId.rawValue, tileId: tileId, status: status, now: AgentElapsedClock.now()
+        // Streamed deltas make no draft; the status (a fold over the agent's
+        // buffered stream) is derived only for the events that do.
+        guard ManagedAgentActivityBridge.draft(
+            for: event, agentId: agentId.rawValue, tileId: tileId, status: .idle, now: .distantPast
+        ) != nil, let draft = ManagedAgentActivityBridge.draft(
+            for: event, agentId: agentId.rawValue, tileId: tileId, status: status(), now: AgentElapsedClock.now()
         ) else { return }
         var buffer = managedAgentActivityByAgent[agentId.rawValue] ?? []
         buffer.append(draft)
@@ -17485,7 +17514,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // streamed token. Only the PUSH at the surfaces is debounced, on the same 0.5s
         // as the publish.
         ingestAgentActivityIncrementally(draft: draft)
-        scheduleAgentSurfacePush(debounce: 0.5)
+        // Plan 87: a STATE change (turn start/end, approval, input, failure, spawn)
+        // reaches the sidebar within a frame or three; only tool chatter waits.
+        scheduleAgentSurfacePush(debounce: Self.isSidebarStateChange(event) ? 0.05 : 0.5)
+    }
+
+    static func isSidebarStateChange(_ event: AgentRuntimeEvent) -> Bool {
+        switch event {
+        case .turnStarted, .turnCompleted, .requestOpened, .requestResolved,
+             .userInputRequested, .userInputResolved, .runtimeError, .childAgentSpawned:
+            return true
+        default:
+            return false
+        }
     }
 
     private func spawnBrowserDefault() {
@@ -40447,9 +40488,16 @@ extension AppDelegate {
         // Setup, not the witness: a structural refresh draws the six working rows
         // however the event path behaves.
         app.refreshAgentSurfaces(notify: false)
+        // A rebuild re-marks runner-less agents unobserved; a working agent keeps
+        // talking, and that is what makes its row live again.
+        for agent in loose.prefix(6) {
+            supervisor.qaDeliver(.itemStarted(threadId: AgentSupervisor.threadId(for: agent), itemId: "w-tool", kind: .commandExecution, title: "bash"), to: agent)
+        }
         settle()
         let working = loose.prefix(6).filter { inbox.onScreenCardForQA(id: $0.rawValue) != nil && inbox.pushedRowForQA(id: $0.rawValue)?.state == .working }
         try expect(working.count == 6, "3: fixture: six working cards must be on screen, got \(working.count)")
+        witness(working.allSatisfy { inbox.pushedRowForQA(id: $0.rawValue)?.elapsedStartedAt != nil },
+                "3: the working rows' elapsed is frozen (unconfirmed), so this push measures nothing")
         let cardsBefore = inbox.cellBuildCountForQA
         let fullBefore = inbox.qaFullReloadCount
         let inputsBefore = app.qaSidebarInputsComputedCount
