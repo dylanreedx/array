@@ -147,6 +147,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private var streamingMarkupParseTimerGeneration: UInt64 = 0
 
     private let transcriptCollectionFixture: (any AgentTranscriptSurface)?
+    /// ARRAY_TRANSCRIPT_RENDERER=canvas: the body rests detached and one view
+    /// draws it (`AgentTileChromeCanvasView`). Read once, with the transcript.
+    private let drawsRestingChrome: Bool
+    private var chromeCanvas: AgentTileChromeCanvasView?
+    private var chromeRestWork: DispatchWorkItem?
     /// The row renderer when it is the one installed; list-only QA seams read it.
     private var listTranscript: AgentTranscriptListView? { transcriptCollectionFixture as? AgentTranscriptListView }
     func prepareBoardTask(
@@ -414,7 +419,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // ARRAY_TRANSCRIPT_RENDERER=canvas (or the `continuum.transcript.renderer`
         // default) draws the transcript as one CoreText view; the row list stays
         // the default until the canvas renderer covers every block.
-        self.transcriptCollectionFixture = AgentTranscriptCanvasView.isSelected
+        let canvasRenderer = AgentTranscriptCanvasView.isSelected
+        self.drawsRestingChrome = canvasRenderer
+        self.transcriptCollectionFixture = canvasRenderer
             ? AgentTranscriptCanvasView(toolDetailStore: toolDetailStore)
             : AgentTranscriptListView(toolDetailStore: toolDetailStore)
         self.v2Composer = AgentComposerView(frame: .zero, variant: .fullTurn)
@@ -527,11 +534,15 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             guard let composer = self?.v2Composer else { return }
             composer.composerRequestedSend(composer.textView, modifier: modifier)
         }
+        v2Composer?.onEditorFocusChange = { [weak self] focused in
+            if !focused { self?.scheduleChromeRest() }
+        }
         setContentView(makeV2ContentView())
         applyHeader(status: self.descriptor.status)
         applyUnknownCompactStatus()
         refreshTranscriptThinkingIndicator()
         synchronizeV2Transcript(final: true)
+        restChromeIfIdle()
     }
 
     func acceptCurrentSendIntent() {
@@ -567,7 +578,20 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// `contentBackdrop` and not `contentView`: once surfaced, `contentView` IS the
     /// surface host, and returning that would let a tile bake a picture of a
     /// picture.
-    override var surfaceableBody: NSView? { terminalFaceSession == nil ? contentBackdrop : nil }
+    override var surfaceableBody: NSView? {
+        // The drawn chrome exists so that nothing is ever shown as a picture.
+        guard !drawsRestingChrome else { return nil }
+        return terminalFaceSession == nil ? contentBackdrop : nil
+    }
+
+    /// Far parking takes no picture, so the drawn body may still park.
+    override var farParkableBody: NSView? {
+        guard let chromeCanvas else { return surfaceableBody }
+        return terminalFaceSession == nil ? chromeCanvas : nil
+    }
+
+    /// The Array face's body: the drawn chrome when it is in use.
+    private var arrayFaceBody: NSView { chromeCanvas ?? contentBackdrop }
 
     /// **A fingerprint of everything this body renders, not just its transcript.**
     ///
@@ -940,7 +964,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        handleAgentReference(sender.draggingPasteboard, commit: false) ? .copy : []
+        wakeChrome()
+        return handleAgentReference(sender.draggingPasteboard, commit: false) ? .copy : []
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -969,6 +994,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     func applyAwarenessSignal(_ signal: AgentSignal?) {
+        defer { chromeDidChange() }
         awarenessBadge.apply(signal)
         awarenessBorder.apply(signal)
         needsLayout = true
@@ -1033,6 +1059,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     func applyCornerStyle() { applyPageZoomToContent() }
 
     private func applyPageZoomToContent() {
+        defer { chromeDidChange() }
         let zoom = pageZoom
         agentHeaderHeight?.constant = AgentTileHeaderView.preferredHeight(zoom: zoom)
         compactStatusRowHeight?.constant = AgentCompactStatusRowView.preferredHeight(zoom: zoom)
@@ -1432,7 +1459,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         terminalFaceReattachments = 0
         terminalFaceSession?.detachSurface()
         terminalFaceSession = nil
-        setContentView(contentBackdrop)
+        setContentView(arrayFaceBody)
         persistTerminalFace(nil)
         // Edge case 12: the picker shows what the terminal actually ran.
         if let agentID = attachedAgentID, let selection = agentSource?.launchSelection(for: agentID) {
@@ -1500,7 +1527,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             agentSource?.finishTerminalFace(for: watch.agentID)
         }
         persistTerminalFace(nil)
-        setContentView(contentBackdrop)
+        setContentView(arrayFaceBody)
         super.handleCloseRequest()
     }
 
@@ -1524,6 +1551,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private(set) var sessionHandoffState: AgentSessionHandoffState?
 
     func applySessionHandoff(_ state: AgentSessionHandoffState?, status: AgentStatus? = nil) {
+        defer { chromeDidChange() }
         sessionHandoffState = state
         if let state { sessionHandoffBanner.apply(state) }
         sessionHandoffBanner.isHidden = state == nil
@@ -1706,6 +1734,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// With no colour this is exactly the shipped rest state: no title-bar wash and a
     /// zero-width outline. The style is read only when there is something to draw.
     private func applyIdentityChrome() {
+        defer { chromeDidChange() }
         let theme = effectiveTokenTheme
         let style = identityColor == nil ? nil : AgentIdentityColorConfig.style(defaults: identityStyleDefaults)
         if let tint = identityColor, style == .border {
@@ -1938,6 +1967,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     /// The chip reads the tracker; the tracker says when to.
     private func refreshBackgroundJobs() {
+        defer { chromeDidChange() }
         guard let agentID = attachedAgentID, let tracker = agentSource?.processTracker else {
             compactStatusRow.applyBackgroundJobs(value: nil, detail: "", spoken: "")
             return
@@ -2200,6 +2230,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // Before the composer is targeted, not after: while surfaced, that text view
         // is inside the parked body, and AppKit would focus it there.
         promoteForIncomingFocus()
+        wakeChrome()
         if let composer = v2Composer {
             window?.makeFirstResponder(composer.textView)
             return true
@@ -2728,6 +2759,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// `now` defaults to `AgentElapsedClock` (`Date()` outside the film build), the
     /// clock the header's own elapsed readout uses, so the two never disagree.
     private func refreshCompactStatus(at now: Date = AgentElapsedClock.now(), location: AgentLocationSnapshot? = nil) {
+        defer { chromeDidChange() }
         // Turn cards: the newest turn's work strip reads the same presence the
         // row does, on the same tick.
         transcriptCollectionFixture?.setTurnPresence(currentPresence)
@@ -2944,6 +2976,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     private func applyUnknownCompactStatus() {
+        defer { chromeDidChange() }
         lastLocationPresentation = nil
         compactStatusResolution = .unknown
         compactStatusRow.apply(presentationWithoutThinkingIndicator(AgentCompactStatusPresentation(
@@ -3202,6 +3235,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// last draft and the debounced sweep wrote over every surface. The projection
     /// derivation remains the compatibility path's, untouched.
     private func refreshV2TurnSnapshot() {
+        defer { chromeDidChange() }
         evaluatePendingTerminalFlip()
         refreshFaceSwitch()
         if let agentID = attachedAgentID,
@@ -3376,8 +3410,24 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         faceFlipBanner.onCancel = { [weak self] in self?.cancelPendingTerminalFlip() }
         sessionHandoffBanner.isHidden = true
         sessionHandoffBanner.onAction = { [weak self] action in self?.onSessionHandoffAction?(action) }
+        // With the drawn chrome, a slot holds the transcript's place in the stack
+        // and the transcript itself lives on the chrome view, so it can stay in
+        // the window while the rest of the body rests detached.
+        let slot: AgentTileChromeCanvasView.TranscriptSlotView? = drawsRestingChrome ? {
+            let slot = AgentTileChromeCanvasView.TranscriptSlotView()
+            slot.identifier = NSUserInterfaceItemIdentifier("agentTile.transcriptSlot")
+            slot.translatesAutoresizingMaskIntoConstraints = false
+            for axis in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
+                slot.setContentHuggingPriority(transcript.contentHuggingPriority(for: axis), for: axis)
+                slot.setContentCompressionResistancePriority(
+                    transcript.contentCompressionResistancePriority(for: axis), for: axis)
+            }
+            return slot
+        }() : nil
+        let transcriptInStack: NSView = slot ?? transcript
         let layout = NSStackView(views: [
-            agentHeader, locationStatus, transcript, pendingDock, faceFlipBanner, sessionHandoffBanner, composeBackdrop,
+            agentHeader, locationStatus, transcriptInStack, pendingDock, faceFlipBanner, sessionHandoffBanner,
+            composeBackdrop,
         ])
         layout.orientation = .vertical
         layout.spacing = 0
@@ -3418,7 +3468,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             headerHeight,
             agentHeader.widthAnchor.constraint(equalTo: layout.widthAnchor),
             locationStatus.widthAnchor.constraint(equalTo: layout.widthAnchor),
-            transcript.widthAnchor.constraint(equalTo: layout.widthAnchor),
+            transcriptInStack.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeBackdrop.widthAnchor.constraint(equalTo: layout.widthAnchor),
             faceFlipBanner.widthAnchor.constraint(equalTo: layout.widthAnchor),
             sessionHandoffBanner.widthAnchor.constraint(equalTo: layout.widthAnchor),
@@ -3436,6 +3486,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         composeBackdrop.setContentHuggingPriority(.required, for: .vertical)
         composeBackdrop.setContentCompressionResistancePriority(.required, for: .vertical)
         composer.layer?.borderColor = AgentLineRole.controlBoundary.color.cgColor(for: effectiveTokenTheme)
+        if let slot {
+            let chrome = AgentTileChromeCanvasView(body: root, transcript: transcript, transcriptSlot: slot)
+            chrome.onRestingPress = { [weak self] event in self?.redeliverRestingPress(event) }
+            chromeCanvas = chrome
+            return chrome
+        }
         return root
     }
 
@@ -4099,6 +4155,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     private func dictationStateDidChange(_ state: DictationState) {
+        defer { chromeDidChange() }
         v2DictationButton.apply(state)
         switch state {
         case .preparing, .listening:
@@ -4124,6 +4181,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     private func updateDictationAvailability() {
+        defer { chromeDidChange() }
         let offered = ComposerDictationController.isOffered
         if !offered { v2Composer?.cancelDictation() }
         let shown = offered && dictationFitsFooter
@@ -4181,6 +4239,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     private func updateV2ComposerPresentation() {
+        defer { chromeDidChange() }
         guard let button = v2ActionButton else { return }
         // One source of truth: the supervisor's live snapshot, not the cached copy
         // — the cache is exactly what latched "Unavailable" in the P5.5 live
@@ -4250,6 +4309,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// Show these values. Called at construction with the global default and again
     /// on `attach` with the agent's own. Off-catalog values remain visible.
     func applyProviderSettings(_ settings: AgentModelConfig.Resolution) {
+        defer { chromeDidChange() }
         providerSettings = settings
         providerFooter.apply(settings)
         refreshTitleBarIdentity()
@@ -4312,6 +4372,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     private func applyAgentHeader(status: AgentStatus) {
+        defer { chromeDidChange() }
         if let shown = agentStatusOverride {
             // Another app's session decides it (`.plans/79` phase 2).
             agentHeader.apply(AgentTileStatePresenter.present(
@@ -4361,6 +4422,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     private func refreshLocationStatus(at now: Date = AgentElapsedClock.now()) {
+        defer { chromeDidChange() }
         qaLocationRefreshCount += 1
         chunkStatusTimer?.invalidate()
         chunkStatusTimer = nil
@@ -4887,3 +4949,143 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         model.cards.last { $0.title == "assistant" }?.body
     }
 }
+
+// MARK: - Resting chrome (ARRAY_TRANSCRIPT_RENDERER=canvas)
+//
+// A resting tile is six views, each of which draws: the tile, the chrome canvas,
+// the transcript canvas, the title bar (drawing its own controls), the corner
+// overlay and the awareness border. Everything else is real and current but
+// detached; see `AgentTileChromeCanvasView`. With the switch off every hook here
+// is a no-op: `chromeCanvas` is nil.
+extension ManagedAgentTileNSView {
+    var isChromeResting: Bool { chromeCanvas?.isResting == true }
+    var qaChromeCanvas: AgentTileChromeCanvasView? { chromeCanvas }
+    var qaProviderFooterForChecks: AgentComposerFooterView { providerFooter }
+    var qaChromeBody: NSView { contentBackdrop }
+
+    /// The hardware's pressed buttons. Injectable: a check must not read the
+    /// user's own mouse, which they may be holding while it runs.
+    static var chromePressedMouseButtons: () -> Int = { NSEvent.pressedMouseButtons }
+
+    /// Presses wake the chrome; scroll, magnify and hover routing do not.
+    private static let chromeWakingEvents: Set<NSEvent.EventType> = [
+        .leftMouseDown, .rightMouseDown, .otherMouseDown,
+    ]
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if let chromeCanvas, chromeCanvas.isResting, contentView === chromeCanvas,
+           let type = NSApp.currentEvent?.type, Self.chromeWakingEvents.contains(type) {
+            let local = superview.map { convert(point, from: $0) } ?? point
+            let transcript = chromeCanvas.convert(chromeCanvas.transcriptFrame, to: self)
+            if bounds.contains(local), !transcript.contains(local) { wakeChrome() }
+        }
+        return super.hitTest(point)
+    }
+
+    /// A press that reached the tile itself while its title-bar controls were
+    /// drawn (the hit-test wake did not run): wake, then route it again.
+    override func mouseDown(with event: NSEvent) {
+        if titleBarControlsAreDrawn, redeliverRestingPress(event) { return }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        cancelChromeRest()
+        wakeChrome()
+        super.mouseEntered(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        scheduleChromeRest()
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        if isChromeResting, TileNSView.assistiveClientActive() { wakeChrome() }
+        return super.accessibilityChildren()
+    }
+
+    /// Put the real controls back. Idempotent and cheap when already live.
+    func wakeChrome() {
+        cancelChromeRest()
+        guard let chromeCanvas, chromeCanvas.isResting else { return }
+        chromeCanvas.wake()
+        setTitleBarControlsDrawn(false)
+    }
+
+    /// Rest once nothing needs the real controls: no pointer over the tile, no
+    /// focus or popover inside it, no press in progress, nothing animating.
+    @discardableResult
+    func restChromeIfIdle() -> Bool {
+        guard let chromeCanvas, !chromeCanvas.isResting, contentView === chromeCanvas,
+              terminalFaceSession == nil, !chromeIsAnimating else { return false }
+        if let window {
+            if Self.chromePressedMouseButtons() != 0 { return false }
+            let pointer = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            if window.isVisible, bounds.contains(pointer) { return false }
+            if let responder = window.firstResponder as? NSView, responder !== self,
+               responder.isDescendant(of: contentBackdrop) || (qaTitleBarView.map(responder.isDescendant(of:)) ?? false) {
+                return false
+            }
+        }
+        if Self.presentsChoices(contentBackdrop) { return false }
+        chromeCanvas.rest()
+        setTitleBarControlsDrawn(true) { [weak self] event in
+            self?.redeliverRestingPress(event) ?? false
+        }
+        return true
+    }
+
+    func scheduleChromeRest() {
+        guard chromeCanvas?.isResting == false else { return }
+        chromeRestWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.chromeRestWork = nil
+            self?.restChromeIfIdle()
+        }
+        chromeRestWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+
+    private func cancelChromeRest() {
+        chromeRestWork?.cancel()
+        chromeRestWork = nil
+    }
+
+    /// A press that arrived at a drawn control without passing the hit-test wake
+    /// (a direct `NSWindow.sendEvent`): wake, then deliver the same press again,
+    /// now to the real view under it.
+    @discardableResult
+    fileprivate func redeliverRestingPress(_ event: NSEvent) -> Bool {
+        wakeChrome()
+        // Only once the real views are back; anything else would deliver the
+        // press to the drawn chrome again.
+        guard let window, !isChromeResting, !titleBarControlsAreDrawn else { return false }
+        window.sendEvent(event)
+        return true
+    }
+
+    /// The live gyro and the dictation pill move on their own clocks; drawing
+    /// them would freeze them, so a tile showing one stays live.
+    private var chromeIsAnimating: Bool {
+        compactStatusRow.qaThinkingSlotVisible || !v2DictationPill.isHidden
+    }
+
+    /// Something the body shows moved. A resting body is redrawn; a live one
+    /// redraws itself and may now be able to rest.
+    func chromeDidChange() {
+        guard let chromeCanvas else { return }
+        if chromeIsAnimating { wakeChrome(); return }
+        if chromeCanvas.isResting {
+            chromeCanvas.invalidateRestingChrome()
+        } else if chromeRestWork == nil {
+            scheduleChromeRest()
+        }
+    }
+
+    private static func presentsChoices(_ view: NSView) -> Bool {
+        if let button = view as? ChoiceButton, button.presentedPopoverIsVisible { return true }
+        return view.subviews.contains(where: presentsChoices)
+    }
+}
+
