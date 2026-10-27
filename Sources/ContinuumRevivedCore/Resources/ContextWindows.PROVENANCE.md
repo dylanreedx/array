@@ -17,7 +17,10 @@ Additional exact provider observation:
 | anthropic/claude-opus-5-5 | 1000000 | `ContinuumRevivedCoreChecks/Fixtures/claude-2.1.291-opus-turn.jsonl`, `result.modelUsage[claude-opus-5-5].contextWindow` |
 
 Live stated windows always supersede this file, and are remembered by harness
-and exact model. No prefix, fuzzy match, inferred model-family value or guessed
+and exact model. The window each harness's own CLI publishes (Codex's
+`models_cache.json`, pi's `models-store.json`) also supersedes it: this file
+is a dated copy of those, so a model the CLI ships later must not read as
+unknown. No prefix, fuzzy match, inferred model-family value or guessed
 capacity is used. Missing entries remain visibly unknown and fail the offered
 model gate.
 

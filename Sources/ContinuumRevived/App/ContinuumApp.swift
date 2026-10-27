@@ -20314,7 +20314,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let resolver = contextWindowResolver else { return }
         for harness in AgentHarness.allCases {
             let catalog = AgentModelCatalog.shared.snapshot(for: harness)
-            for model in catalog.models where resolver.resolve(harness: harness, model: model, piStore: catalog.contextWindows[model]).tokens == nil {
+            for model in catalog.models where resolver.resolve(harness: harness, model: model, catalog: catalog.contextWindows[model]).tokens == nil {
                 guard resolver.shouldReportUnknown(harness: harness, model: model) else { continue }
                 let message = "Context window unknown for \(model). Prompt tokens remain visible."
                 fputs(message + "\n", stderr)

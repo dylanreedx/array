@@ -6295,7 +6295,7 @@ final class AgentSupervisor {
             // No `stated` and no `legacyRemembered`: `resolve` writes nothing.
             var resolution = contextWindowResolver.resolve(
                 harness: harness, model: model,
-                piStore: harness == .pi ? AgentModelCatalog.shared.contextWindow(for: model, harness: .pi) : nil)
+                catalog: AgentModelCatalog.shared.contextWindow(for: model, harness: harness))
             if resolution.tokens == nil, let legacy = record.providerContextWindows[model], legacy > 0 {
                 resolution = AgentContextWindowResolution(tokens: legacy, source: .remembered, model: model)
             }
@@ -6311,7 +6311,7 @@ final class AgentSupervisor {
             freshness: .live)
     }
 
-    /// Provider → shared remembered exact model → bundled → pi-only store → unknown.
+    /// Provider → shared remembered exact model → own CLI catalogue → bundled → unknown.
     private func contextWindowResolution(for id: AgentID, stated: Int?) -> AgentContextWindowResolution {
         guard var record = records[id], let harness = record.harness else {
             return AgentContextWindowResolution(tokens: nil, source: .unknown, model: "unknown")
@@ -6320,7 +6320,7 @@ final class AgentSupervisor {
         let resolution = contextWindowResolver.resolve(
             harness: harness, model: model, stated: stated,
             legacyRemembered: record.providerContextWindows[model],
-            piStore: record.harness == .pi ? AgentModelCatalog.shared.contextWindow(for: model, harness: .pi) : nil)
+            catalog: AgentModelCatalog.shared.contextWindow(for: model, harness: harness))
         if resolution.source == .provider, let value = resolution.tokens,
            record.providerContextWindows[model] != value {
             record.providerContextWindows[model] = value

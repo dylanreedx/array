@@ -1,7 +1,9 @@
 import Foundation
 
 public enum AgentContextWindowResolutionSource: String, Codable, Sendable {
-    case provider, remembered, bundled, piStore, unknown
+    case provider, remembered, catalog, bundled, unknown
+    /// Persisted readings from before every harness had the catalogue rung.
+    case piStore
 }
 
 public struct AgentContextWindowResolution: Equatable, Sendable {
@@ -15,6 +17,12 @@ public struct AgentContextWindowResolution: Equatable, Sendable {
 
 /// One denominator ladder for every harness. Remembered provider answers are
 /// app-scoped and keyed by harness and exact model, never a family guess.
+/// `catalog` is the window the harness's OWN CLI publishes for the model
+/// (Codex's models_cache.json, pi's models-store.json). It ranks above the
+/// bundled table: that table is a dated copy of those same files, so a model
+/// the CLI ships after the table was cut (gpt-6.1-terra) would otherwise read
+/// as unknown, and a window the CLI raised (gpt-6.1-sol, 272K → 500K) would
+/// read stale. Callers pass only the record's own harness's catalogue.
 public final class AgentContextWindowResolver: @unchecked Sendable {
     private final class SharedMemory: @unchecked Sendable {
         let lock = NSLock()
@@ -42,7 +50,7 @@ public final class AgentContextWindowResolver: @unchecked Sendable {
     }
 
     public func resolve(harness: AgentHarness, model: String, stated: Int? = nil,
-                        legacyRemembered: Int? = nil, piStore: Int? = nil) -> AgentContextWindowResolution {
+                        legacyRemembered: Int? = nil, catalog: Int? = nil) -> AgentContextWindowResolution {
         lock.withLock {
             let key = harness.rawValue + ":" + model
             func result(_ value: Int?, _ source: AgentContextWindowResolutionSource) -> AgentContextWindowResolution {
@@ -77,8 +85,8 @@ public final class AgentContextWindowResolver: @unchecked Sendable {
                 remember(value)
                 return result(value, .remembered)
             }
+            if let value = catalog, value > 0 { return result(value, .catalog) }
             if let value = bundled[model], value > 0 { return result(value, .bundled) }
-            if harness == .pi, let value = piStore, value > 0 { return result(value, .piStore) }
             return result(nil, .unknown)
         }
     }
@@ -88,7 +96,7 @@ public final class AgentContextWindowResolver: @unchecked Sendable {
         catalogs.flatMap { catalog in
             catalog.models.compactMap { model in
                 resolve(harness: catalog.harness, model: model,
-                        piStore: catalog.contextWindows[model]).tokens == nil
+                        catalog: catalog.contextWindows[model]).tokens == nil
                     ? "\(catalog.harness.rawValue):\(model)" : nil
             }
         }

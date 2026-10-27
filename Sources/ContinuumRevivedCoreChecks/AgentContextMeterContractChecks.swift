@@ -31,22 +31,41 @@ func runAgentContextMeterContractChecks() {
     defer { try? FileManager.default.removeItem(at: root) }
     let model = "provider/model-exact"
     let resolver = AgentContextWindowResolver(applicationSupportDirectory: root, bundledWindows: [model: 300])
-    expect(resolver.resolve(harness: .claudeCode, model: model, stated: 500, piStore: 900).source == .provider,
+    expect(resolver.resolve(harness: .claudeCode, model: model, stated: 500, catalog: 900).source == .provider,
            "provider window must win the ladder")
     let another = AgentContextWindowResolver(applicationSupportDirectory: root, bundledWindows: [model: 300])
     expect(another.resolve(harness: .claudeCode, model: model).tokens == 500,
            "provider window must be remembered across agents and relaunch")
-    expect(another.resolve(harness: .codex, model: model, piStore: 900).tokens == 300,
-           "remembered values must be harness scoped; bundled window precedes pi")
+    expect(another.resolve(harness: .claudeCode, model: model, catalog: 900).tokens == 500,
+           "a remembered provider window must outrank the CLI catalogue")
+    expect(another.resolve(harness: .codex, model: model).tokens == 300,
+           "remembered values must be harness scoped")
+    expect(another.resolve(harness: .codex, model: model, catalog: 900).source == .catalog,
+           "the CLI's own catalogue must outrank the bundled table, which is a dated copy of it")
     let empty = AgentContextWindowResolver(bundledWindows: [:])
-    expect(empty.resolve(harness: .claudeCode, model: model, piStore: 900).source == .unknown,
-           "Claude must never borrow pi's store")
-    expect(empty.resolve(harness: .codex, model: model, piStore: 900).source == .unknown,
-           "Codex must never borrow pi's store")
-    expect(empty.resolve(harness: .pi, model: model, piStore: 900).source == .piStore,
-           "pi may use its own store after the bundled ladder")
-    expect(empty.resolve(harness: .pi, model: model, stated: 0, piStore: -1).tokens == nil,
+    for harness in AgentHarness.allCases {
+        expect(empty.resolve(harness: harness, model: model, catalog: 900).source == .catalog,
+               "\(harness.rawValue) must resolve from its own CLI catalogue")
+        expect(empty.resolve(harness: harness, model: model).source == .unknown,
+               "\(harness.rawValue) without any window must stay unknown")
+    }
+    expect(empty.resolve(harness: .pi, model: model, stated: 0, catalog: -1).tokens == nil,
            "invalid windows must remain unknown")
+    // A model the CLI ships after ContextWindows.json was cut. Codex 0.163
+    // offered gpt-6.1-terra and published its window in models_cache.json, and
+    // Array still bannered "Context window unknown" at launch because only pi's
+    // catalogue reached the resolver.
+    let newRelease = Data(#"{"models":[{"slug":"gpt-9-future","visibility":"list","context_window":500000}]}"#.utf8)
+    if let codexLater = AgentModelCatalog.parseCodexModelsCache(newRelease) {
+        expect(empty.unresolvedModels(in: [codexLater]).isEmpty,
+               "a Codex model newer than the bundled table must resolve from Codex's own catalogue")
+        let piOnly = AgentHarnessCatalogSnapshot(harness: .pi, readiness: .ready,
+            models: [], contextWindows: ["openai-codex/gpt-9-other": 400_000])
+        let isolated = AgentModelCatalog()
+        isolated.resetForQA(snapshot: piOnly)
+        expect(isolated.contextWindow(for: "openai-codex/gpt-9-other", harness: .codex) == nil,
+               "Codex must never borrow pi's catalogue window")
+    } else { expect(false, "the Codex models_cache shape must parse") }
     expect(empty.shouldReportUnknown(harness: .pi, model: model), "first unknown must report")
     expect(!empty.shouldReportUnknown(harness: .pi, model: model), "unknown notices must not repeat")
     expect(resolver.shouldReportUnknown(harness: .claudeCode, model: "provider/unknown"),
@@ -101,5 +120,5 @@ func runAgentContextMeterContractChecks() {
     expect(AgentContextFullRecovery.isContextFull(provider: "pi", candidates: ["Your input exceeds the context window of this model"]),
            "Pi upstream context-window wording must be recognized")
     runAgentCompactionChecks()
-    print("PASS: context-meter-contract — provider/remembered/bundled/pi-only/unknown ladder, shared persistence, every offered model")
+    print("PASS: context-meter-contract — provider/remembered/catalogue/bundled/unknown ladder, shared persistence, every offered model")
 }

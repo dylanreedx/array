@@ -179,7 +179,7 @@ func runAgentContextRealRunnerChecks() {
                "context live: Codex occupancy must come from last token usage")
         let resolved = resolver.resolve(
             harness: .codex, model: codexModel, stated: codexReading.maxTokens,
-            piStore: codexCatalog.contextWindows[codexModel])
+            catalog: codexCatalog.contextWindows[codexModel])
         let meter = AgentContextOccupancy.withDerivedOccupancy(codexReading, contextWindow: resolved.tokens)
         expect(resolved.source == .provider && (resolved.tokens ?? 0) > 0,
                "context live: Codex app-server must state a positive modelContextWindow; got \(String(describing: resolved.tokens))")
@@ -201,7 +201,7 @@ func runAgentContextRealRunnerChecks() {
         expect(piReading.source == .piMessageUsage,
                "context live: Pi occupancy must come from its provider message usage")
         let resolved = resolver.resolve(
-            harness: .pi, model: piModel, piStore: piStoreWindow)
+            harness: .pi, model: piModel, catalog: piStoreWindow)
         let meter = AgentContextOccupancy.withDerivedOccupancy(piReading, contextWindow: resolved.tokens)
         expect(resolved.tokens == piStoreWindow && (resolved.tokens ?? 0) > 0,
                "context live: Pi denominator must match its actual live catalogue window")

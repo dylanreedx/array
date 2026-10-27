@@ -401,32 +401,32 @@ func runAgentContextMeterChecks(root: URL) async throws {
     let (piID, piTile) = spawnWithTile(piSupervisor, harness: .pi, model: piModel)
     guard piSupervisor.send("one", to: piID) else { throw Failure(description: "(d) send refused") }
     try await expectEventually("(d) first pi turn must read 50k/200k with the 160k policy tick — \(meter(piTile))") {
-        near(piTile.qaCompactStatusRow.qaContextFraction, 50_000.0 / 272_000)
-            && near(piTile.qaCompactStatusRow.qaContextThresholdFraction, 160_000.0 / 272_000)
+        near(piTile.qaCompactStatusRow.qaContextFraction, 50_000.0 / 200_000)
+            && near(piTile.qaCompactStatusRow.qaContextThresholdFraction, 160_000.0 / 200_000)
             && piRunner.finishedRunCount == 1 && !piSupervisor.isRunning(piID)
     }
     guard piSupervisor.send("two", to: piID) else { throw Failure(description: "(d) second send refused") }
     try await expectEventually("(d) second turn never started") { piRunner.isPaused }
     try await expectEventually("(d) the turn-start settings snapshot must not blank the ring — \(meter(piTile))") {
-        near(piTile.qaCompactStatusRow.qaContextFraction, 50_000.0 / 272_000)
-            && near(piTile.qaCompactStatusRow.qaContextThresholdFraction, 160_000.0 / 272_000)
+        near(piTile.qaCompactStatusRow.qaContextFraction, 50_000.0 / 200_000)
+            && near(piTile.qaCompactStatusRow.qaContextThresholdFraction, 160_000.0 / 200_000)
     }
     piRunner.resume()
     try await expectEventually("(d) the next usage snapshot must keep the policy tick — \(meter(piTile))") {
-        near(piTile.qaCompactStatusRow.qaContextFraction, 60_000.0 / 272_000)
-            && near(piTile.qaCompactStatusRow.qaContextThresholdFraction, 160_000.0 / 272_000)
+        near(piTile.qaCompactStatusRow.qaContextFraction, 60_000.0 / 200_000)
+            && near(piTile.qaCompactStatusRow.qaContextThresholdFraction, 160_000.0 / 200_000)
             && piRunner.finishedRunCount == 2 && !piSupervisor.isRunning(piID)
     }
     guard piSupervisor.send("three", to: piID) else { throw Failure(description: "(e) send refused") }
     try await expectEventually("(e) compaction never started") { piRunner.isPaused }
     try await expectEventually("(e) while pi compacts the ring keeps 30%, dimmed — \(meter(piTile))") {
-        piTile.qaCompactStatusRow.qaContextText == "22%"
+        piTile.qaCompactStatusRow.qaContextText == "30%"
             && piTile.qaCompactStatusRow.qaContextState == .stale
     }
     piRunner.resume()
     try await expectEventually("(e) compaction_end must move the ring to the estimated 12k, marked ≈ — \(meter(piTile))") {
-        near(piTile.qaCompactStatusRow.qaContextFraction, 12_000.0 / 272_000)
-            && piTile.qaCompactStatusRow.qaContextText == "≈4%"
+        near(piTile.qaCompactStatusRow.qaContextFraction, 12_000.0 / 200_000)
+            && piTile.qaCompactStatusRow.qaContextText == "≈6%"
     }
 
     // (f) an in-turn compaction whose provider never reports a terminal: the
