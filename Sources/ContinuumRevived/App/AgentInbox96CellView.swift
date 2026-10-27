@@ -580,6 +580,31 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     let anatomy: SidebarRowAnatomy
 
     private let card = AgentInboxCardView()
+    // Plan: .plans/86-workspace-filter/README.md
+    /// The workspace's colour as a short bar in the sidebar's leading gutter, set
+    /// by the list only while it shows more than one workspace.
+    private let workspaceMark = ChoiceDotView()
+    var workspaceMarkColour: NSColor? {
+        get { workspaceMark.colour }
+        set {
+            workspaceMark.colour = newValue
+            workspaceMark.isHidden = newValue == nil
+            needsLayout = true
+        }
+    }
+    var qaWorkspaceMarkFrame: NSRect? { workspaceMark.isHidden ? nil : workspaceMark.frame }
+
+    /// The sidebar peek's dimming, on this cell's CONTENTS rather than on the cell:
+    /// the cell's own opacity belongs to the list's row motion, which hides a live
+    /// cell under its photograph and restores the opacity it found when it ends.
+    private(set) var peekAlpha: CGFloat = 1
+    func setPeekAlpha(_ alpha: CGFloat, animated: Bool) {
+        guard alpha != peekAlpha else { return }
+        peekAlpha = alpha
+        for view in subviews {
+            if animated { view.animator().alphaValue = alpha } else { view.alphaValue = alpha }
+        }
+    }
     private let groupBackground = InboxGroupBackgroundView()
     // Ticket: .plans/0721-subagents-handoff.md
     /// The tree connector, in the indent gutters to the left of the card.
@@ -834,6 +859,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
         addSubview(groupBackground)
         addSubview(card)
+        workspaceMark.isHidden = true
+        workspaceMark.isRounded = true
+        addSubview(workspaceMark)
         // ABOVE the card: a parent's descender crosses its own card's leading
         // inset, and the card paints a fill while hovered, selected or active.
         addSubview(spine)
@@ -1406,6 +1434,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             width: max(0, bounds.width - gutter * 2 - CGFloat(indent)),
             height: max(0, bounds.height - gap - groupEndGap))
         decorations.frame = card.bounds
+        // Three points in from the SIDEBAR's edge, whatever this cell's own inset
+        // and the row's indent are: every workspace's marks line up in one column.
+        // Placed only while shown: a hidden mark's frame would follow whether the
+        // cell has found its scroll view yet, and move under every relayout.
+        if !workspaceMark.isHidden {
+            let markX = enclosingScrollView.map { convert(NSPoint(x: 3, y: 0), from: $0).x } ?? 0
+            workspaceMark.frame = NSRect(x: markX, y: card.frame.minY + 10, width: 3, height: max(10, card.frame.height - 20))
+        }
         // THE CONNECTOR BLEEDS INTO THE INTERCELL SPACING, by half of it at each
         // end, so the lanes of two stacked rows meet exactly. A cell owns its own
         // height and nothing between it and the next one; a lane confined to the

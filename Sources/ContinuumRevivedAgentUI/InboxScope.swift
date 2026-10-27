@@ -30,6 +30,9 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     /// All locally discovered sessions, including idle sessions and folders
     /// that have not been added as projects. Retained as an explicit Mac scope.
     case thisMac
+    /// Any set of workspaces (`InboxWorkspaceFilter`) other than the two above
+    /// that have their own case. Built only through `normalized`.
+    case workspaces(InboxWorkspaceFilter)
 
     /// The word on the popup entry. A project or workspace shows its own NAME and
     /// nothing else — no "Project: " prefix — because the two kinds never collide
@@ -40,6 +43,8 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         case .currentWorkspace: return InboxScope.currentWorkspaceTitle
         case .thisMac: return InboxScope.thisMacTitle
         case .project(let name), .workspace(let name), .workspaceID(_, let name): return name
+        // Without the registry's names; the sidebar titles a set itself.
+        case .workspaces(let filter): return filter.title(names: [:], current: nil)
         }
     }
 
@@ -59,6 +64,7 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         case .project(let name): return "project:\(name)"
         case .workspace(let name): return "workspace:\(name)"
         case .workspaceID(let id, _): return "workspace-id:\(id.uuidString.lowercased())"
+        case .workspaces(let filter): return "workspaces:\(filter.storageBody)"
         }
     }
 
@@ -88,6 +94,9 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         case "workspace-id":
             guard let id = UUID(uuidString: name) else { return nil }
             self = .workspaceID(id, id.uuidString)
+        case "workspaces":
+            guard let filter = InboxWorkspaceFilter(storageBody: name) else { return nil }
+            self = InboxScope.normalized(filter)
         default: return nil
         }
     }
@@ -105,6 +114,7 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         case .project(let name): return row.projectName == name
         case .workspace(let name): return row.workspaceName == name
         case .workspaceID(let id, _): return row.workspaceId == id
+        case .workspaces(let filter): return filter.matches(row, current: nil)
         }
     }
 
@@ -159,7 +169,7 @@ public enum InboxScope: Equatable, Hashable, Sendable {
             case .project(let name): projectNames.append(name)
             case .workspace(let name): workspaceNames.append(name)
             case .workspaceID(let id, let name): workspacesById[id] = name
-            case .all, .currentWorkspace, .thisMac: break
+            case .all, .currentWorkspace, .thisMac, .workspaces: break
             }
         }
         // "This workspace" leads when the host knows which one is on screen.
@@ -207,6 +217,9 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         // Scope selects location, independently of activity. An open idle
         // session remains discoverable; attention/ranking belongs to InboxSort.
         guard scope != .thisMac else { return rows }
+        if case .workspaces(let filter) = scope {
+            return rows.filter { $0.id == openAgentId || filter.matches($0, current: currentWorkspaceId) }
+        }
         let resolved: InboxScope
         if scope == .currentWorkspace {
             if let currentWorkspaceId {
