@@ -2307,6 +2307,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--tile-chrome-canvas-check") {
+            do {
+                _ = NSApplication.shared
+                try TileChromeCanvasChecks.run()
+                print("TileChromeCanvasChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--canvas-render-probe") {
             do { try CanvasRenderProbe.run(); Foundation.exit(0) }
             catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }

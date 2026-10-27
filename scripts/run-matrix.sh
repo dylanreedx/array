@@ -1380,6 +1380,11 @@ run_app_check .build/debug/Array --streaming-ingest-check
 # through a real agent tile: a delta re-lays out only its block, tail follow,
 # selection + Cmd-C, link click, and a redraw at 2x/4x zoom with no layout.
 run_app_check .build/debug/Array --transcript-canvas-check
+# The resting agent tile behind the same switch: its chrome detached and drawn by
+# one view, at most 6 views at rest, resting and live window-server pictures equal
+# within 0.03% of pixels, and presses on the drawn composer, picker, ⋯ and × reach
+# the real controls through NSApp.sendEvent.
+run_app_check .build/debug/Array --tile-chrome-canvas-check
 # The correctness oracle for the incremental row index, and the reason the cheap
 # path is allowed to exist. transcript.delta measures what a delta COSTS and is
 # structurally blind to a fast path that is cheap and WRONG — every count budget

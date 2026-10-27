@@ -241,6 +241,7 @@ check --terminal-tmux-persistence-check
 check --throbber-timeline-check
 check --ticket-queue-tile-check
 check --tile-action-check
+check --tile-chrome-canvas-check
 check --tile-chrome-scale-check
 check --tile-drag-grab-check
 check --tile-insert-slide-check
@@ -549,6 +550,7 @@ leg run_app_check .build/debug/Array --terminal-tmux-persistence-check
 leg run_app_check .build/debug/Array --throbber-timeline-check
 leg run_app_check .build/debug/Array --ticket-queue-tile-check
 leg run_app_check .build/debug/Array --tile-action-check
+leg run_app_check .build/debug/Array --tile-chrome-canvas-check
 leg run_app_check .build/debug/Array --tile-chrome-scale-check
 leg run_app_check .build/debug/Array --tile-drag-grab-check
 leg run_app_check .build/debug/Array --tile-insert-slide-check
