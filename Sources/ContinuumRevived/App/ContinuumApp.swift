@@ -816,6 +816,20 @@ enum ContinuumApp {
         // it, and stops — through the boot mount's tracker and a real process.
         // .plans/79: sessions from other apps are rows of the production
         // sidebar; Copy forks one into a managed agent in its project.
+        // .plans/87 (quick hide/show): the sidebar's toggle pills, driven through
+        // real events on the production sidebar.
+        if CommandLine.arguments.contains("--sidebar-pills-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try QuickHideChecks.runPills())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--hide-external-rows-check") {
             _ = NSApplication.shared
             let next = CommandLine.arguments.dropFirst(index + 1).first
@@ -12005,8 +12019,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // P3.8: the inbox scope survives a relaunch, and it is persisted here beside
         // the sidebar's width and visibility rather than inside the view — the view
         // is rendered by committed baselines and must not read anyone's defaults.
-        sidebar.configureInboxScope(WorkspaceSidebarConfig.resolveScope()) { scope in
-            WorkspaceSidebarConfig.setScope(scope)
+        // In the settings defaults, like the shelves and folds: the same domain in
+        // the app, and a check's own suite under a check.
+        sidebar.configureInboxScope(WorkspaceSidebarConfig.resolveScope(defaults: settingsDefaults)) { [weak self] scope in
+            guard let self else { return }
+            WorkspaceSidebarConfig.setScope(scope, defaults: self.settingsDefaults)
+        }
+        // .plans/87: the pills' second dimension, persisted beside the scope.
+        sidebar.agentInbox.setHiddenSources(WorkspaceSidebarConfig.hiddenSources(defaults: settingsDefaults))
+        sidebar.agentInbox.onHiddenSourcesChange = { [weak self] sources in
+            guard let self else { return }
+            WorkspaceSidebarConfig.setHiddenSources(sources, defaults: self.settingsDefaults)
         }
         // P3.9: the inbox is triage, the canvas is depth — a clicked row lands you on
         // the work.
@@ -36611,26 +36634,11 @@ extension AppDelegate {
 
     let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 640))
     app.workspaceSidebarView = sidebar
-    // P3.8: the WIRING, which no isolated `UserDefaults` can witness —
-    // `configureWorkspaceSidebar` is where the persisted scope is read and where a
-    // picked one is written, and it reads `.standard`. The stored value is saved and
-    // put back, the way `--workspace-sidebar-shell-check` already does for the
-    // sidebar's width and visibility.
+    // P3.8: the WIRING — `configureWorkspaceSidebar` is where the persisted scope
+    // is read and where a picked one is written. Since .plans/87 it goes through
+    // the app's settings defaults, like the shelves and folds below: the same
+    // domain in the app, a private suite here, never `.standard`.
     let standardDefaults = UserDefaults.standard
-    let storedScope = standardDefaults.object(forKey: WorkspaceSidebarConfig.scopeKey)
-    defer {
-        if let storedScope {
-            standardDefaults.set(storedScope, forKey: WorkspaceSidebarConfig.scopeKey)
-        } else {
-            standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.scopeKey)
-        }
-    }
-    // A scope that BITES: the headless agent has no tile, so it is in no workspace
-    // and a workspace scope must not claim it (`InboxScope.matches`). Scoping to the
-    // project instead would leave both rows in and prove only that nothing crashed.
-    WorkspaceSidebarConfig.setScope(.workspace("Default"), defaults: standardDefaults)
-    let restoreScopeSectionShelves = WorkspaceSidebarConfig.qaIsolateShelves(defaults: standardDefaults)
-    defer { restoreScopeSectionShelves() }
     // Launch polish, item Q: the shipped sidebar starts a group folded and
     // persists a fold through the app's settings defaults — a private suite
     // here, never `.standard`.
@@ -36638,6 +36646,12 @@ extension AppDelegate {
         throw CheckError.failed("setup: no isolated defaults suite for the fold choices")
     }
     defer { foldDefaults.removePersistentDomain(forName: foldDefaults.suiteDomainName) }
+    // A scope that BITES: the headless agent has no tile, so it is in no workspace
+    // and a workspace scope must not claim it (`InboxScope.matches`). Scoping to the
+    // project instead would leave both rows in and prove only that nothing crashed.
+    WorkspaceSidebarConfig.setScope(.workspace("Default"), defaults: foldDefaults)
+    let restoreScopeSectionShelves = WorkspaceSidebarConfig.qaIsolateShelves(defaults: standardDefaults)
+    defer { restoreScopeSectionShelves() }
     app.qaSettingsDefaults = foldDefaults
     app.configureWorkspaceSidebar(sidebar)
     app.refreshAgentSurfaces(notify: false)
@@ -36671,8 +36685,8 @@ extension AppDelegate {
     // Back to every agent for the assertions below, through the popup, and the pick
     // must have been written to defaults — that is the whole persistence loop.
     try expect(sidebar.inboxForQA.pickScopeForQA(.all), "All agents must be pickable")
-    try expect(WorkspaceSidebarConfig.resolveScope(defaults: standardDefaults) == .all,
-               "a scope picked from the popup must be persisted — got \(WorkspaceSidebarConfig.resolveScope(defaults: standardDefaults))")
+    try expect(WorkspaceSidebarConfig.resolveScope(defaults: foldDefaults) == .all,
+               "a scope picked from the popup must be persisted — got \(WorkspaceSidebarConfig.resolveScope(defaults: foldDefaults))")
     app.refreshAgentSurfaces(notify: false)
     let sidebarWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 300, height: 640),

@@ -382,6 +382,11 @@ enum UIProbeAppearance {
                 LabCatalog.makeTranscriptReviewSurface(
                     state: .compactionBoundary, size: NSSize(width: 480, height: 720), theme: .dark)
             }),
+            // .plans/87 (quick hide/show): the toggle pills under the search
+            // field — on pills paint `rowSelected`, an off one paints nothing.
+            ("appearance.agentInboxPills", NSSize(width: 320, height: 400), {
+                AgentInboxView.pillsPreviewForProbe()
+            }),
             ("appearance.inboxHoverCard", NSSize(width: 360, height: 220), {
                 let card = InboxHoverCardView(frame: .zero)
                 card.apply(
@@ -983,6 +988,9 @@ enum UIProbeAppearance {
         // fill, which is what made the first version vanish into the row. It
         // is always filled while shown; hidden, it paints its resting step.
         "InboxSettleNudgeButton",
+        // .plans/87: the sidebar's toggle pills. On paints `rowSelected`, a press
+        // the control ladder's `pressed` step, and off paints nil (never `.clear`).
+        "InboxFilterPill",
         // The fold button's swarm glyph: its dots are TEXT tokens painted as
         // layer fills (secondary at rest, primary under the pointer), the lead
         // dot may take the agent's identity palette colour, its press chip is the
@@ -1202,6 +1210,9 @@ enum UIProbeAppearance {
             for role in [AgentSurfaceRole.codeSubdued, .rowSelected] {
                 values.insert(hex(role.color.cgColor(for: theme)))
             }
+        case "InboxFilterPill":
+            values.insert(hex(AgentSurfaceRole.rowSelected.color.cgColor(for: theme)))
+            values.insert(hex(SidebarControlRole.pressed.color.cgColor(for: theme)))
         case "InboxSettleNudgeButton":
             for role in SidebarControlRole.allCases {
                 values.insert(hex(role.color.cgColor(for: theme)))
@@ -1868,6 +1879,9 @@ enum UIProbeAppearance {
                     root.layoutSubtreeIfNeeded()
                 }
             ),
+            AdoptedSurface(id: "inboxPills", size: NSSize(width: 320, height: 400), make: {
+                AgentInboxView.pillsPreviewForProbe()
+            }),
             AdoptedSurface(
                 id: "topBar", size: NSSize(width: 900, height: 44),
                 make: {

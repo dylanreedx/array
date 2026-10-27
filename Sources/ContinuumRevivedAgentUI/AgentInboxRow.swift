@@ -788,12 +788,17 @@ public struct InboxExternalSession: Equatable, Sendable {
     public let isProminent: Bool
     public let canMoveHere: Bool
     public let canCopy: Bool
+    /// The app it lives in, as the sidebar's source pills group it (`Terminal`
+    /// for tmux and Terminal alike, `Claude app`, `cmux`). nil reads the where
+    /// marker instead (`InboxSource.key(for:)`).
+    public let source: String?
 
-    public init(sessionKey: String, isProminent: Bool, canMoveHere: Bool, canCopy: Bool) {
+    public init(sessionKey: String, isProminent: Bool, canMoveHere: Bool, canCopy: Bool, source: String? = nil) {
         self.sessionKey = sessionKey
         self.isProminent = isProminent
         self.canMoveHere = canMoveHere
         self.canCopy = canCopy
+        self.source = source
     }
 }
 

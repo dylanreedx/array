@@ -1101,6 +1101,21 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// persists it. Not called for a programmatic `setScope` — restoring a scope at
     /// launch must not write the value back.
     var onScopeChange: ((InboxScope) -> Void)?
+    // Plan: .plans/87-sidebar-liveness/README.md (quick hide/show)
+    /// The filter's second dimension: outside sources (`InboxSource`) the pills
+    /// turned off, plus `array` while an outside source is soloed. Empty at birth
+    /// for the reason `scope` is `.all`; the host restores and persists it.
+    private(set) var hiddenSources: Set<String> = []
+    /// The user changed the hidden sources (a pill). Not called for a restore.
+    var onHiddenSourcesChange: ((Set<String>) -> Void)?
+    /// The toggle pills under the search field.
+    let pillStrip = InboxFilterPillStrip()
+    private var pillStripHeight: NSLayoutConstraint?
+    private var pillStripGap: NSLayoutConstraint?
+    private let pillOverflowController = ChoicePopoverController()
+    /// QA: the `+N` checklist opens inside the (offscreen) window rather than on
+    /// a screen, and without taking the keyboard.
+    var presentsPillOverflowOffscreenForQA = false
     // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
     /// A workspace verb was picked from the scope menu. WHICH workspace it lands on
     /// is not this view's business — it holds a scope, not a workspace id — so the
@@ -1405,6 +1420,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
         addSubview(scopeButton)
         addSubview(searchField)
+        pillStrip.translatesAutoresizingMaskIntoConstraints = false
+        pillStrip.setAccessibilityElement(true)
+        pillStrip.setAccessibilityRole(.group)
+        pillStrip.setAccessibilityLabel("Show or hide workspaces and apps")
+        pillStrip.setAccessibilityIdentifier("ContinuumAgentInboxPills")
+        pillStrip.isHidden = true
+        pillStrip.onPress = { [weak self] pill, flags in self?.pillPressed(pill.id, flags: flags) }
+        pillStrip.onMore = { [weak self] rect in self?.presentPillOverflow(anchor: rect) }
+        addSubview(pillStrip)
         newAgentButton.translatesAutoresizingMaskIntoConstraints = false
         newAgentButton.target = self
         newAgentButton.action = #selector(newAgentPressed)
@@ -1488,7 +1512,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
             searchField.centerYAnchor.constraint(equalTo: scopeButton.centerYAnchor),
             searchField.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
+            pillStrip.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
         ]
 
         // Program 96's stacked header: search owns the top row at full width, the
@@ -1503,7 +1527,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             scopeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
             scopeButton.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
             scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
+            pillStrip.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
         ]
         // T3 nightly's one row: [search ………][scope][+]. The scope control sizes
         // to its title and search takes the rest, down to the room its glyph and a
@@ -1529,9 +1553,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             newAgentButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             newAgentButton.widthAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
             newAgentButton.heightAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
-            scrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
+            pillStrip.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
         ]
         NSLayoutConstraint.activate(defaultHeaderConstraints)
+        // The pills take no room until there are two of them: height and gap are
+        // both zero, so the list starts exactly where it did without them.
+        let stripHeight = pillStrip.heightAnchor.constraint(equalToConstant: 0)
+        let stripGap = scrollView.topAnchor.constraint(equalTo: pillStrip.bottomAnchor, constant: 0)
+        pillStripHeight = stripHeight
+        pillStripGap = stripGap
+        NSLayoutConstraint.activate([
+            pillStrip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
+            pillStrip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
+            stripHeight, stripGap,
+        ])
 
         NSLayoutConstraint.activate([
             searchIcon.leadingAnchor.constraint(equalTo: searchField.leadingAnchor, constant: CGFloat(Space.s)),
@@ -2169,9 +2204,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// that unfolding it does not produce.
     private func display(from newRows: [AgentInboxRow]) -> [InboxListItem] {
         let hiddenKeys = externalSessionHiding?.hiddenKeys ?? []
-        let unhidden = hiddenKeys.isEmpty ? newRows : newRows.filter { row in
+        let unhidden = (hiddenKeys.isEmpty ? newRows : newRows.filter { row in
             row.externalSession.map { !hiddenKeys.contains($0.sessionKey) } ?? true
-        }
+        }).filter { $0.id == openAgentId || !hiddenSources.contains(InboxSource.key(for: $0)) }
         let scoped = InboxScope.filter(
             rows: unhidden, scope: effectiveScope, openAgentId: openAgentId,
             currentWorkspace: currentWorkspaceName,
@@ -2298,6 +2333,154 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
         return result
     }
+
+    // MARK: - Toggle pills (.plans/87, quick hide/show)
+
+    /// The rows the pills count: every row but sessions hidden one by one.
+    private var pillRows: [AgentInboxRow] {
+        let hiddenKeys = externalSessionHiding?.hiddenKeys ?? []
+        guard !hiddenKeys.isEmpty else { return allRows }
+        return allRows.filter { row in row.externalSession.map { !hiddenKeys.contains($0.sessionKey) } ?? true }
+    }
+
+    /// Whether the WORKSPACE dimension keeps this workspace's rows.
+    private func workspaceDimensionShows(_ id: UUID, rows: [AgentInboxRow]) -> Bool {
+        let scope = effectiveScope
+        if scope == .thisMac || scope == .all { return true }
+        if let filter = scope.workspaceFilter { return filter.shows(workspace: id, current: currentWorkspaceId) }
+        // A pick (a project): on while any of its rows survives the pick.
+        return !InboxScope.filter(
+            rows: rows.filter { $0.workspaceId == id }, scope: scope,
+            currentWorkspace: currentWorkspaceName, currentWorkspaceId: currentWorkspaceId).isEmpty
+    }
+
+    /// The pills, in their fixed order: workspaces by name, then the outside
+    /// sources (`InboxSource.ordered`). A workspace pill is on while its
+    /// workspace is in the set AND Array's own agents are not soloed away.
+    func pillModels() -> [InboxFilterPillModel] {
+        let rows = pillRows
+        let shown = Set(InboxScope.filter(
+            rows: rows, scope: effectiveScope, currentWorkspace: currentWorkspaceName,
+            currentWorkspaceId: currentWorkspaceId)
+            .filter { !hiddenSources.contains(InboxSource.key(for: $0)) }.map(\.id))
+        func attention(_ rows: [AgentInboxRow]) -> Bool {
+            rows.contains { $0.lifecycle == .active && InboxTally.needsYou($0) && !shown.contains($0.id) }
+        }
+        let names = workspaceNamesById
+        let workspaceIds = names.keys.sorted { left, right in
+            let order = (names[left] ?? "").localizedCaseInsensitiveCompare(names[right] ?? "")
+            return order == .orderedSame ? left.uuidString < right.uuidString : order == .orderedAscending
+        }
+        let arrayShown = !hiddenSources.contains(InboxSource.arrayAgents)
+        var models = workspaceIds.map { id -> InboxFilterPillModel in
+            let mine = rows.filter { $0.workspaceId == id }
+            let on = arrayShown && workspaceDimensionShows(id, rows: rows)
+            return InboxFilterPillModel(
+                kind: .workspace(id), title: names[id] ?? "Workspace", swatch: workspaceColour(id), symbol: nil,
+                count: InboxTally.count(mine).agents, isOn: on, attention: !on && attention(mine))
+        }
+        var bySource: [String: [AgentInboxRow]] = [:]
+        for row in rows where row.externalSession != nil { bySource[InboxSource.key(for: row), default: []].append(row) }
+        for key in InboxSource.ordered(Set(bySource.keys)) {
+            let mine = bySource[key] ?? []
+            let on = !hiddenSources.contains(key)
+            models.append(InboxFilterPillModel(
+                kind: .source(key), title: key, swatch: nil, symbol: mine.first?.whereMarker?.symbol ?? "terminal",
+                count: InboxTally.count(mine).agents, isOn: on, attention: !on && attention(mine)))
+        }
+        return models
+    }
+
+    /// Repaint the pills, and show the row only when there are two or more.
+    private func updatePills() {
+        let models = pillModels()
+        let shows = models.count >= 2
+        pillStrip.pills = shows ? models : []
+        if pillStrip.isHidden == shows {
+            pillStrip.isHidden = !shows
+            pillStripHeight?.constant = shows ? InboxFilterPill.height : 0
+            pillStripGap?.constant = shows ? Space.xs : 0
+            needsLayout = true
+        }
+        if pillOverflowController.isPresented {
+            pillStrip.layoutSubtreeIfNeeded()
+            pillOverflowController.listView?.replace(items: pillOverflowItems())
+        }
+    }
+
+    /// A pill was pressed: a click toggles it, Option solos it. Workspace pills
+    /// write the scope's own set (`InboxScopeMenu.choose`, the popover's path);
+    /// source pills write `hiddenSources`.
+    private func pillPressed(_ id: String, flags: NSEvent.ModifierFlags) {
+        guard let pill = pillModels().first(where: { $0.id == id }) else { return }
+        let solo = flags.contains(.option)
+        let outside = Set(pillRows.filter { $0.externalSession != nil }.map(InboxSource.key(for:)))
+        let arrayKey = InboxSource.arrayAgents
+        switch pill.kind {
+        case .workspace(let workspace):
+            if solo {
+                // This workspace's agents and nothing else: every source goes off.
+                let next = InboxScopeMenu.choose(.workspace(workspace), from: scope, current: currentWorkspaceId, only: true)
+                setFilters(scope: next ?? scope, hiddenSources: outside, notify: true)
+            } else if hiddenSources.contains(arrayKey) {
+                // An outside source is soloed, so every workspace pill reads off:
+                // turning this one on brings back its agents, and only its.
+                setFilters(scope: InboxScope.normalized(.only(workspace, current: currentWorkspaceId)),
+                           hiddenSources: hiddenSources.subtracting([arrayKey]), notify: true)
+            } else {
+                // `This Mac` already shows every workspace: a click turns one off.
+                let base = scope == .thisMac ? InboxScope.all : scope
+                guard let next = InboxScopeMenu.choose(.workspace(workspace), from: base, current: currentWorkspaceId)
+                else { updatePills(); return }
+                setFilters(scope: next, hiddenSources: hiddenSources, notify: true)
+            }
+        case .source(let key):
+            if solo {
+                setFilters(scope: scope, hiddenSources: outside.subtracting([key]).union([arrayKey]), notify: true)
+            } else {
+                var next = hiddenSources
+                if next.contains(key) { next.remove(key) } else { next.insert(key) }
+                setFilters(scope: scope, hiddenSources: next, notify: true)
+            }
+        }
+    }
+
+    /// `+N`'s checklist: the pills that did not fit, as the shared checklist's
+    /// rows — a box, the dot or glyph, the count, `Only` on hover.
+    private func pillOverflowItems() -> [ChoiceItem] {
+        pillStrip.overflowed.map { pill in
+            var item = ChoiceItem(id: pill.id, title: pill.title, icon: pill.symbol.map { .system($0) })
+            item.check = pill.isOn ? .on : .off
+            item.swatch = pill.swatch
+            item.trailing = pill.attention ? nil : "\(pill.count)"
+            item.attention = pill.attention
+            item.keepsOpen = true
+            item.accessories = [ChoiceAccessory(id: "only", title: "Only", symbol: nil,
+                                                accessibilityLabel: "Show only \(pill.title)")]
+            item.optionAccessoryID = "only"
+            return item
+        }
+    }
+
+    private func presentPillOverflow(anchor: NSRect) {
+        let items = pillOverflowItems()
+        guard !items.isEmpty else { return }
+        let offscreen = presentsPillOverflowOffscreenForQA
+        pillOverflowController.present(
+            items: items, selectedID: nil, presentation: .checklist, anchor: anchor, relativeTo: pillStrip,
+            placementFrame: offscreen ? window?.frame : nil, takesFocus: !offscreen,
+            accessibilityLabel: "More workspaces and apps",
+            onSelection: { [weak self] item in self?.pillPressed(item.id, flags: []) },
+            focusReturnView: tableView,
+            onAccessory: { [weak self] item, _ in self?.pillPressed(item.id, flags: .option) })
+    }
+
+    /// QA: the open `+N` checklist, if any.
+    var pillOverflowListForQA: ChoiceListView? {
+        pillOverflowController.isPresented || presentsPillOverflowOffscreenForQA ? pillOverflowController.listView : nil
+    }
+
+    func dismissPillOverflowForQA() { pillOverflowController.dismiss() }
 
     // MARK: - The settled tail (P4.8)
 
@@ -2759,8 +2942,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// after the flip goes red, which is the witness quoted at
     /// `runAgentInboxChecks`.
     func setScope(_ next: InboxScope, notify: Bool = false) {
-        guard next != scope else { return }
+        setFilters(scope: next, hiddenSources: hiddenSources, notify: notify)
+    }
+
+    /// Restore the hidden sources the host persisted. Never calls back.
+    func setHiddenSources(_ next: Set<String>, notify: Bool = false) {
+        setFilters(scope: scope, hiddenSources: next, notify: notify)
+    }
+
+    /// Both dimensions at once, so a solo (a workspace AND every source) is one
+    /// reflow and one write of each, never two lists in a row.
+    func setFilters(scope next: InboxScope, hiddenSources nextSources: Set<String>, notify: Bool) {
+        guard next != scope || nextSources != hiddenSources else { return }
+        let scopeChanged = next != scope
+        let sourcesChanged = nextSources != hiddenSources
         scope = next
+        hiddenSources = nextSources
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         // P1.2: hover and the focus ring are dropped and then RE-DERIVED from
@@ -2807,7 +3004,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             if !applyScopeIncrementally(shown, previousRollups: previousRollups) { render(shown) }
             settlePeekForNewScope()
         }
-        if notify { onScopeChange?(next) }
+        if notify, scopeChanged { onScopeChange?(next) }
+        if notify, sourcesChanged { onHiddenSourcesChange?(nextSources) }
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -2939,6 +3137,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the wrong scope. The tag carries the index instead of the position, so the
     /// separator between the two blocks costs nothing.
     private func updateScopeMenu() {
+        updatePills()
         var workspaces: [InboxScopeMenu.Workspace] = []
         var projects: [String] = []
         var legacyWorkspaces: [String] = []
@@ -5974,6 +6173,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var scopeTitlesForQA: [String] { scopeMenuEntries.map(\.title) }
     var scopeMenuEntriesForQA: [InboxScopeMenuEntry] { scopeMenuEntries }
     var scopeTriggerTitleForQA: String { scopeButton.qaRenderedTitle }
+    /// How far below the view's top edge the list starts.
+    var listTopInsetForQA: CGFloat {
+        let frame = scrollView.frame
+        return isFlipped ? frame.minY : bounds.height - frame.maxY
+    }
     var scopeTriggerSwatchCountForQA: Int { scopeButton.leadingSwatches.count }
     var marksWorkspacesForQA: Bool { marksWorkspaces }
     var selectedScopeTitleForQA: String { scope.title }
