@@ -363,6 +363,9 @@ run_ios_build() {
     -scheme Continuum
     -sdk iphonesimulator
     -destination 'generic/platform=iOS Simulator'
+    # Keep Xcode's build cache inside this checkout's .build, so it goes when
+    # the bench goes; the default DerivedData path leaked ~2GB per worktree.
+    -derivedDataPath .build/ios-derived-data
     build
   )
 
