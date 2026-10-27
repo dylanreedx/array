@@ -8158,6 +8158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     ///   2. the live canvas tile view, for a tile that is rendering;
     ///   3. `observedAgentStatuses`, the runtime observer's map.
     private func rebuildAgentActivitySnapshot(now: Date = Date()) {
+        WorkspaceSwitchCounters.activitySnapshotRebuilds += 1
         // THE ONE DISK READ of the sidebar's inputs (confidence pass, R5): a
         // structural rebuild refreshes them, and every push between two rebuilds
         // derives from this plus the live canvas — no file is opened for an event.

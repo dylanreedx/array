@@ -3858,7 +3858,9 @@ final class CanvasNSView: NSView, TokenThemed {
          "markdownPasses": FileMarkdownDocumentView.qaTotalMeasurePasses,
          "zoneInstalls": qaZoneLayerInstallCount,
          "transcriptApplies": AgentTranscriptUpdateScheduler.qaTotalVisualApplies,
-         "transcriptLayouts": AgentTranscriptListView.qaTotalLayoutPasses]
+         "transcriptLayouts": AgentTranscriptListView.qaTotalLayoutPasses,
+         "sidebarReloads": WorkspaceSwitchCounters.sidebarReloads,
+         "activityRebuilds": WorkspaceSwitchCounters.activitySnapshotRebuilds]
     }
 
     func setViewport(_ viewport: CanvasViewport) {
