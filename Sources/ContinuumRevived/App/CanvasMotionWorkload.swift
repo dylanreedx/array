@@ -574,6 +574,7 @@ final class CanvasMotionWorkload {
             "agentSurfaceResidency": canvas.surfaceResidencyEnabled,
             "farParking": canvas.farParkingEnabled,
             "replay": replaySummary as Any? ?? NSNull(),
+            "viewCensus": ProcessInfo.processInfo.environment["CANVAS_MOTION_CENSUS"] == "1" ? viewCensus() : NSNull(),
             "bareTiles": bareTiles.map { ["stripped": $0.stripped, "of": $0.of, "removed": bareRemoved] } as Any? ?? NSNull(),
             "streamingAgents": emitter.streamingCount ?? agentIDs.count,
             "farParkedTiles": canvas.qaFarParkedTileCount,
@@ -606,6 +607,17 @@ final class CanvasMotionWorkload {
             "backingScale": window.backingScaleFactor,
             "screenMaximumFPS": window.screen?.maximumFramesPerSecond ?? 0
         ]
+    }
+
+    /// Every view under the world plane, counted by class (`CANVAS_MOTION_CENSUS=1`).
+    func viewCensus() -> [String: Int] {
+        var counts: [String: Int] = [:]
+        func walk(_ view: NSView) {
+            counts[String(describing: type(of: view)), default: 0] += 1
+            view.subviews.forEach(walk)
+        }
+        walk(canvas.worldPlane)
+        return counts
     }
 
     func close() {
@@ -847,6 +859,11 @@ struct CanvasMotionReplay {
         var document = try decoder.decode(WorkspaceDocument.self,
                                           from: JSONSerialization.data(withJSONObject: documentJSON))
         for index in document.zones.indices { document.zones[index].projectId = projectID }
+        // CANVAS_MOTION_PIN_ZONES=1: every zone hydrated up front, as after the first
+        // zoom-out, so a run measures steady motion rather than a first hydration.
+        if ProcessInfo.processInfo.environment["CANVAS_MOTION_PIN_ZONES"] == "1" {
+            for index in document.zones.indices { document.zones[index].hydrationPolicy = .pinnedLive }
+        }
         let files = spec["files"] as? [String: String] ?? [:]
         var tiles: [Tile] = []
         for json in tilesJSON {
