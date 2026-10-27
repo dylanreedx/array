@@ -23,7 +23,8 @@ import Foundation
 //               lists it under `still_queued` and runs it as its next turn
 //               unless the interrupt asks `cancel_queued`)
 //   BACKGROUND  (claude) starts a `sleep` job in the process group, writes its
-//               pid to bg.pid and reports one background task
+//               pid to bg.pid, reports one background task and holds the turn
+//               1 s more
 //   PLAIN       0.6 s of text generation with no tool boundary
 //   LONG        up to 10 s of text generation with no tool boundary, for an
 //               interrupt — a steer sent meanwhile stays held by Array
@@ -280,6 +281,7 @@ def run_turn(msg):
         with open(os.path.join(HERE, "bg.pid"), "w") as f:
             f.write(str(job.pid))
         out({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "bg-1", "description": "sleep"}]})
+        time.sleep(1.0)
     if kind in ("TOOL", "SLOW"):
         interrupted.clear()
         out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_fake", "name": "Bash", "input": {"command": "true"}}]}, "parent_tool_use_id": None, "session_id": SID})

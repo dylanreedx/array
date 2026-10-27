@@ -151,8 +151,16 @@ protocol AgentSteeringRunning: AgentRunning {
     /// The provider's receipt for each accepted steer, on the runner's queue.
     func observeSteerDispositions(_ handler: @escaping @Sendable (UUID, AgentSteerDisposition) -> Void)
     /// Work the provider runs between turns (claude background jobs and
-    /// subagents). The idle reaper leaves such a session alone.
+    /// subagents).
     var hasBackgroundWork: Bool { get }
+    /// Provider-owned children still running inside this session. Only these
+    /// keep an idle session from the reaper and keep mirrored children open
+    /// past the parent's result; a shell job never does.
+    var hasRunningSubagents: Bool { get }
+}
+
+extension AgentSteeringRunning {
+    var hasRunningSubagents: Bool { false }
 }
 
 /// T5 — a session that can start a turn Array did not send (claude promoting a
@@ -8377,7 +8385,7 @@ final class AgentSupervisor {
         idleReapTokens[id] = token
         DispatchQueue.main.asyncAfter(deadline: .now() + idleRunnerTimeout) { [weak self] in
             guard let self, self.idleReapTokens[id] == token, self.idleSessionRunners[id] === runner else { return }
-            if (runner as? AgentSteeringRunning)?.hasBackgroundWork == true {
+            if (runner as? AgentSteeringRunning)?.hasRunningSubagents == true {
                 self.scheduleIdleReap(for: id, runner: runner)
                 return
             }
@@ -8483,8 +8491,9 @@ final class AgentSupervisor {
             openToolItems[id] = nil
             // A persistent Claude session can keep its mirrored children running
             // after the parent's result. Their own result or the session's actual
-            // exit closes them; a result with no background work closes orphans.
-            if (runner as? AgentSteeringRunning)?.hasBackgroundWork != true {
+            // exit closes them; a result with no running child closes orphans. A
+            // shell job is not a child and holds none of them open.
+            if (runner as? AgentSteeringRunning)?.hasRunningSubagents != true {
                 interruptWorkingClaudeMirroredChildren(of: id)
             }
         default:

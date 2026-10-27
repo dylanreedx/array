@@ -603,7 +603,7 @@ enum AgentPresenceChecks {
         let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("ContinuumRevivedCoreChecks/Fixtures/claude-async-subagent.jsonl")
-        for mode in ["async-launch"] {
+        for mode in ["async-launch", "shell-job-holds-no-child", "shell-job-reaped"] {
             let root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("array-presence-stream-\(mode)-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -617,7 +617,7 @@ enum AgentPresenceChecks {
             let supervisor = AgentSupervisor(
                 store: AgentStore(applicationSupportDirectory: root),
                 makeRunner: AgentSupervisor.productionRunner,
-                idleRunnerTimeout: 60)
+                idleRunnerTimeout: mode == "shell-job-reaped" ? 0.3 : 60)
             defer { supervisor.stopAll() }
             let parent = supervisor.spawn(role: nil, prompt: nil, cwd: work,
                 harness: .claudeCode, model: "anthropic/claude-haiku-4-5-20251001", thinking: "low")
@@ -638,12 +638,31 @@ enum AgentPresenceChecks {
                 }
                 try expect(supervisor.lastActivity(for: child) != nil,
                     "\(mode): the headless child's frames did not move its last activity")
+            case "shell-job-holds-no-child":
+                try expect(supervisor.send("BACKGROUND job", to: parent), "\(mode): parent refused")
+                try await eventually("\(mode): parent did not start") { supervisor.isRunning(parent) }
+                guard let child = supervisor.handleSpawnRequest(SpawnRequest(
+                    role: "general-purpose", prompt: "foreground child", isolated: false,
+                    sourceItemID: "toolu_never_answered", observedOnly: true), from: parent) else {
+                    throw Failure(description: "presence: \(mode): child was not adopted")
+                }
+                supervisor.qaDeliver(.turnStarted(threadId: "child", turnId: "c"), to: child)
+                try await eventually("\(mode): a parent with only a shell job running left its unanswered child working") {
+                    supervisor.records[child]?.latestTerminalEvent?.outcome == .interrupted
+                }
             default:
-                break
+                try expect(supervisor.send("BACKGROUND job", to: parent), "\(mode): parent refused")
+                try await eventually("\(mode): the shell job never started") {
+                    AgentSteeringQAFakes.backgroundPid(in: bin) != nil
+                }
+                let pid = AgentSteeringQAFakes.backgroundPid(in: bin)
+                try await eventually("\(mode): a shell job alone kept the idle session from the reaper", timeout: 4) {
+                    pid.map { kill($0, 0) != 0 } ?? false
+                }
             }
         }
         return try await checkMirroredChildSessionEnds()
-            + "; a background child stays working past its launch acknowledgement and the parent's result and settles on its own notification"
+            + "; a background child stays working past its launch acknowledgement and the parent's result and settles on its own notification, and a shell job never holds a child or the session open"
     }
 
     /// `.plans/87` Step 3.4 — a Codex child is running only while its session
@@ -742,6 +761,7 @@ enum AgentPresenceChecks {
             private var idleExitHandler: (@Sendable (Int32, String?, Bool) -> Void)?
             var acceptsSteerNow: Bool { false }
             var hasBackgroundWork: Bool { lock.withLock { background } }
+            var hasRunningSubagents: Bool { lock.withLock { background } }
             var keepsSessionAliveBetweenTurns: Bool { true }
             var canAcceptAnotherTurn: Bool { lock.withLock { alive } }
             var commandCapabilities: AgentSessionCommandCapabilities { ScriptedAgentRunner(script: []).commandCapabilities }
