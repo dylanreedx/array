@@ -1096,6 +1096,7 @@ run_app_check .build/debug/Array --external-sessions-sidebar-check
 run_app_check .build/debug/Array --hide-external-rows-check
 # .plans/87 (quick hide/show): the sidebar's toggle pills, the hide × and ⌫, the Hidden footer, bulk hide from a host label and the scope popover fixes, each driven through real events on the production sidebar.
 run_app_check .build/debug/Array --sidebar-pills-check
+run_app_check .build/debug/Array --sidebar-hide-any-row-check
 # The sidebar's project icon: `.array/icon.*` beats a shipped favicon; static/,
 # website/public/, Packaging/*.icns and an xcassets AppIcon resolve; a miss is
 # cached, and an added override or an edited winning file still shows.

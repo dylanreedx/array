@@ -269,6 +269,139 @@ enum QuickHideChecks {
         pills(inbox).first { $0.id == id }?.value
     }
 
+    // MARK: - Rows
+
+    static func card(_ id: UUID, in inbox: AgentInboxView) -> AgentInbox96CellView? {
+        inbox.layoutForQA()
+        return inbox.qaMaterializedRowCells.compactMap { $0 as? AgentInbox96CellView }.first { $0.qaAgentID == id }
+    }
+
+    /// The row's × as drawn: the visible button labelled Hide.
+    static func hideButton(_ id: UUID, in inbox: AgentInboxView) -> NSButton? {
+        guard let card = card(id, in: inbox) else { return nil }
+        return views(in: card) { $0 is NSButton && $0.accessibilityLabel() == "Hide" && !$0.isHiddenOrHasHiddenAncestor }
+            .first as? NSButton
+    }
+
+    /// No row the list draws lies under the undo notice: every card, clipped to
+    /// the list's visible area, misses the toast's frame.
+    static func toastCoversNoRow(_ inbox: AgentInboxView) -> (Bool, String) {
+        let toast = inbox.undoToastFrameForQA
+        let list = inbox.listFrameForQA
+        for cell in inbox.qaMaterializedRowCells {
+            guard let view = cell as? NSView, !view.isHiddenOrHasHiddenAncestor else { continue }
+            let visible = view.convert(view.bounds, to: inbox).intersection(list)
+            if !visible.isNull, !visible.isEmpty, visible.intersects(toast) {
+                return (false, "row \(cell.qaAgentID?.uuidString.prefix(8) ?? "?") at \(visible) under the toast \(toast)")
+            }
+        }
+        let clear = inbox.isFlipped ? list.maxY <= toast.minY + 0.5 : list.minY >= toast.maxY - 0.5
+        return (clear, "list \(list) toast \(toast)")
+    }
+
+    static func pressDelete(_ inbox: AgentInboxView) throws {
+        inbox.window?.makeFirstResponder(inbox.tableForQA)
+        try key(51, "\u{7F}", in: inbox.window!)
+        inbox.layoutForQA()
+    }
+
+    static func pressUndo(_ inbox: AgentInboxView) throws {
+        inbox.window?.makeFirstResponder(inbox.tableForQA)
+        try key(6, "z", flags: .command, in: inbox.window!)
+        inbox.layoutForQA()
+    }
+
+    // MARK: - 2. Hide any row
+
+    /// `--sidebar-hide-any-row-check`. The × on any row and ⌫ on a selected one:
+    /// a session from elsewhere hides, an Array agent snoozes for three hours or
+    /// until it needs you (and comes back the moment it does); ⌘Z undoes either;
+    /// the notice pushes the list up rather than covering a row; a selected row
+    /// keeps its ×.
+    static func runHideAnyRow() throws -> String {
+        let h = try makeHarness(name: "hide-any-row")
+        defer { h.tearDown() }
+        let inbox = h.inbox
+        let supervisor = h.delegate.qaAgentSupervisor
+        inbox.setScope(.all)
+        inbox.layoutForQA()
+        try expect(inbox.rowIdsForQA.contains(h.agentRow), "precondition: the fixture agent is a row; got \(inbox.titlesForQA)")
+
+        // Array agent: the hover × takes the Snooze pill's place.
+        _ = inbox.hoverRowForQA(id: h.agentRow)
+        guard let agentX = hideButton(h.agentRow, in: inbox) else {
+            throw Failure(description: "an Array agent's row offers no × on hover; actions \(inbox.hoverActionsForQA(id: h.agentRow)?.titles ?? [])")
+        }
+        try expect(!(inbox.hoverActionsForQA(id: h.agentRow)?.titles ?? []).contains("Snooze"),
+                   "the × replaces the Snooze pill — got \(inbox.hoverActionsForQA(id: h.agentRow)?.titles ?? [])")
+        photograph(inbox, "2-hide-hover-agent")
+        let before = Date()
+        try click(agentX)
+        inbox.layoutForQA()
+        let until = supervisor.records[h.fixture.agentId]?.snoozedUntil
+        try expect(until.map { abs($0.timeIntervalSince(before) - 3 * 3600) < 120 } == true,
+                   "the × snoozes for three hours — snoozedUntil \(String(describing: until))")
+        try expect(!inbox.rowIdsForQA.contains(h.agentRow), "the snoozed agent leaves the list — got \(inbox.titlesForQA)")
+        let clock = DateFormatter()
+        clock.locale = Locale(identifier: "en_US_POSIX")
+        clock.dateFormat = "HH:mm"
+        let wanted = "Snoozed until \(clock.string(from: until ?? before)) · or when it needs you · Undo"
+        try expect(inbox.undoToastTextForQA == wanted, "the notice reads '\(wanted)' — got '\(inbox.undoToastTextForQA)'")
+        let (clear, detail) = toastCoversNoRow(inbox)
+        try expect(clear, "the notice pushes the list up and covers no row — \(detail)")
+        photograph(inbox, "2-hide-snoozed-toast")
+        try pressUndo(inbox)
+        try expect(inbox.rowIdsForQA.contains(h.agentRow) && supervisor.records[h.fixture.agentId]?.snoozedUntil == nil,
+                   "⌘Z wakes the agent and brings its row back — got \(inbox.titlesForQA)")
+        try expect(inbox.undoToastTextForQA.isEmpty, "⌘Z takes the notice down")
+        let listAfter = inbox.listFrameForQA
+        try expect(inbox.isFlipped ? abs(listAfter.maxY - inbox.bounds.height) < 0.5 : listAfter.minY < 0.5,
+                   "with the notice gone the list reaches the bottom again — list \(listAfter) in \(inbox.bounds)")
+
+        // A selected row keeps its ×, without the pointer on it.
+        try expect(inbox.selectRowForQA(id: h.agentRow), "the agent's row must be selectable")
+        _ = inbox.hoverRowForQA(id: nil)
+        try expect(hideButton(h.agentRow, in: inbox) != nil, "a selected row keeps its × with the pointer elsewhere")
+        photograph(inbox, "2-hide-selected")
+
+        // ⌫ on the selected agent: snoozed again, the same notice.
+        try pressDelete(inbox)
+        try expect(supervisor.records[h.fixture.agentId]?.snoozedUntil != nil && !inbox.rowIdsForQA.contains(h.agentRow),
+                   "⌫ snoozes the selected agent — got \(inbox.titlesForQA)")
+        try expect(inbox.undoToastTextForQA.hasSuffix("· or when it needs you · Undo"),
+                   "⌫ raises the same notice — got '\(inbox.undoToastTextForQA)'")
+
+        // Outside sessions: the × hides, ⌘Z restores; ⌫ hides, ⌘Z restores.
+        _ = inbox.hoverRowForQA(id: h.rowId("s-tmux"))
+        guard let tmuxX = hideButton(h.rowId("s-tmux"), in: inbox) else { throw Failure(description: "the tmux row offers no ×") }
+        try click(tmuxX)
+        inbox.layoutForQA()
+        try expect(!h.shown("s-tmux") && inbox.undoToastTextForQA == "Hidden · Undo",
+                   "the × hides an outside session — got \(inbox.titlesForQA), '\(inbox.undoToastTextForQA)'")
+        try expect(toastCoversNoRow(inbox).0, "the Hidden notice covers no row — \(toastCoversNoRow(inbox).1)")
+        photograph(inbox, "2-hide-outside-toast")
+        try pressUndo(inbox)
+        try expect(h.shown("s-tmux"), "⌘Z brings the session back — got \(inbox.titlesForQA)")
+        try expect(inbox.selectRowForQA(id: h.rowId("s-cmux")), "the cmux row must be selectable")
+        try pressDelete(inbox)
+        try expect(!h.shown("s-cmux") && h.delegate.externalSessionHiding.isHidden(h.session("s-cmux").id),
+                   "⌫ hides the selected session — got \(inbox.titlesForQA)")
+        try pressUndo(inbox)
+        try expect(h.shown("s-cmux"), "⌘Z brings it back — got \(inbox.titlesForQA)")
+
+        // "…or when it needs you": the snoozed agent asks a question and is back.
+        supervisor.qaDeliver(.userInputRequested(threadId: "quick-hide", requestId: "qh-1", questions: []),
+                             to: h.fixture.agentId)
+        h.delegate.qaRefreshAgentSurfaces()
+        inbox.layoutForQA()
+        try expect(inbox.rowIdsForQA.contains(h.agentRow), "a snoozed agent that needs you is back in the list — got \(inbox.titlesForQA)")
+        try expect(supervisor.records[h.fixture.agentId]?.snoozedUntil != nil,
+                   "…by the raised hand, with the snooze itself left in place")
+
+        return "QuickHide hide-any-row: the × and ⌫ snooze an Array agent for 3h or until it needs you (it came back on a question) "
+            + "and hide an outside session; ⌘Z undoes both; the notice pushes the list up; a selected row keeps its ×"
+    }
+
     // MARK: - 1. Toggle pills
 
     /// `--sidebar-pills-check`. One pill per workspace and per outside source,

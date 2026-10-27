@@ -624,6 +624,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private var onHoverSnooze: (() -> Void)?
     private var onHoverSettle: (() -> Void)?
     private var hoverActionsShown = false
+    private var hoverActionsHovered = false
     // Plan: .plans/79-session-handoff/README.md
     /// A session from another app offers these instead, on the bottom line beside
     /// the provider mark (mock 4). Clicking the row itself is Watch.
@@ -1754,10 +1755,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     @objc private func hoverHideClicked() { onHoverHide?() }
 
     /// A session from another app's hover actions; nil hides one.
-    func configureExternalActions(moveHere: (() -> Void)?, copy: (() -> Void)?, hide: (() -> Void)?) {
+    func configureExternalActions(moveHere: (() -> Void)?, copy: (() -> Void)?, hide: (() -> Void)?,
+                                  hideHelp: String = "Hide from the sidebar") {
         onHoverMoveHere = moveHere
         onHoverCopy = copy
         onHoverHide = hide
+        hoverHide.toolTip = hideHelp
+        // A selected row keeps its × (.plans/87), so a change of action repaints it.
+        setHoverActionsShown(hoverActionsHovered)
     }
 
     /// Presses the hover × through its own target/action.
@@ -1784,7 +1789,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let any = snoozeOn || settleOn
         let moveOn = shown && onHoverMoveHere != nil
         let copyOn = shown && onHoverCopy != nil
-        let hideOn = shown && onHoverHide != nil
+        // The × stays on a selected row as well as a hovered one (.plans/87).
+        let hideOn = (shown || card.isSelected) && onHoverHide != nil
         if hoverMoveHere.isHidden == moveOn || hoverCopy.isHidden == copyOn || hoverHide.isHidden == hideOn {
             hoverMoveHere.isHidden = !moveOn
             hoverCopy.isHidden = !copyOn
@@ -1886,6 +1892,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
+        hoverActionsHovered = interaction.isHovered
         setHoverActionsShown(interaction.isHovered)
         if interaction.isHovered != deckHovered {
             deckHovered = interaction.isHovered

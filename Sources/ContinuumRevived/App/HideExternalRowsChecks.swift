@@ -78,10 +78,19 @@ enum HideExternalRowsChecks {
         func shown(_ session: ExternalAgentSession) -> Bool { inbox.rowIdsForQA.contains(rowId(session)) }
         try expect([cmux, ghostty, terminal].allSatisfy(shown), "precondition: every session is a row; got \(inbox.titlesForQA)")
 
-        // Array's own agent has no ×; it has settle and close.
+        // Array's own agent: its × SNOOZES (.plans/87, --sidebar-hide-any-row-check),
+        // and never touches the hidden-sessions store.
         _ = inbox.hoverRowForQA(id: agentRow)
         inbox.layoutForQA()
-        try expect(!inbox.clickHoverHideForQA(id: agentRow), "an Array agent's row must not offer the hide ×")
+        try expect(inbox.hoverActionsForQA(id: agentRow)?.titles.contains("Hide") == true,
+                   "an Array agent's row offers the × that snoozes it; got \(inbox.hoverActionsForQA(id: agentRow)?.titles ?? [])")
+        try expect(inbox.clickHoverHideForQA(id: agentRow), "the agent's × must be pressable")
+        inbox.layoutForQA()
+        try expect(delegate.externalSessionHiding.entries.isEmpty,
+                   "an Array agent's × snoozes; it hides nothing — got \(delegate.externalSessionHiding.entries.map(\.title))")
+        try expect(inbox.clickUndoForQA(), "the snooze's Undo must be pressable")
+        inbox.layoutForQA()
+        try expect(inbox.rowIdsForQA.contains(agentRow), "Undo brings the agent back; got \(inbox.titlesForQA)")
 
         // The hover × hides, and the toast's Undo brings it back.
         try expect(inbox.hoverRowForQA(id: rowId(cmux)), "the cmux row must be hoverable")
@@ -155,7 +164,7 @@ enum HideExternalRowsChecks {
         ageing.showAll()
 
         return "HideExternalRowsChecks: × and menu Hide remove a session's row, Undo and ⌘Z restore it, hidden survives a store reload "
-            + "and a live turn, the Hidden list shows one and Show all the rest, Array agents offer no ×"
+            + "and a live turn, the Hidden list shows one and Show all the rest, an Array agent's × snoozes and hides nothing"
             + (sheetDirectory.map { " (sheet: \($0))" } ?? "")
     }
 

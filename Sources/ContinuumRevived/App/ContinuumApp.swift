@@ -818,6 +818,18 @@ enum ContinuumApp {
         // sidebar; Copy forks one into a managed agent in its project.
         // .plans/87 (quick hide/show): the sidebar's toggle pills, driven through
         // real events on the production sidebar.
+        if CommandLine.arguments.contains("--sidebar-hide-any-row-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try QuickHideChecks.runHideAnyRow())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if CommandLine.arguments.contains("--sidebar-pills-check") {
             _ = NSApplication.shared
             MainActor.assumeIsolated {
@@ -39398,13 +39410,26 @@ extension AppDelegate {
     undoStacked.layoutForQA()
     try expect(!undoStacked.undoToastTextForQA.isEmpty, "setup: the toast must be up")
     try expect(!undoStacked.isBulkBarVisibleForQA, "the outside click retargets and dismisses the bulk bar")
+    // .plans/87 (Dylan, 2026-10-27: the notice "must push the list up, never cover
+    // a row"). With the bar gone the toast takes its place at the bottom, and the
+    // list ENDS above the toast instead of running under it.
+    try expect(undoStacked.bounds.contains(undoStacked.undoToastFrameForQA),
+               "the card stays inside the list — toast \(undoStacked.undoToastFrameForQA) in \(undoStacked.bounds)")
+    try expect(undoStacked.listFrameForQA.minY >= undoStacked.undoToastFrameForQA.maxY,
+               "…and pushes the list up: list \(undoStacked.listFrameForQA) over toast \(undoStacked.undoToastFrameForQA)")
+    let undoToastText = undoStacked.undoToastTextForQA
+    // With the bar BACK while the toast is up, the toast clears it by sitting above
+    // it — the order they arrive in — and the list still ends above both.
+    try expect(undoStacked.selectRowsForQA(ids: undoOtherPair), "the pair must be selectable again")
+    undoStacked.layoutForQA()
+    try expect(undoStacked.isBulkBarVisibleForQA && undoStacked.undoToastTextForQA == undoToastText,
+               "setup: the bar is back and the toast still up")
     try expect(!undoStacked.undoToastFrameForQA.intersects(undoStacked.bulkBarFrameForQA),
                "the toast must clear the bulk bar — toast \(undoStacked.undoToastFrameForQA) over bar \(undoStacked.bulkBarFrameForQA)")
     try expect(undoStacked.undoToastFrameForQA.minY >= undoStacked.bulkBarFrameForQA.maxY,
                "…by sitting above it, which is the order they arrive in")
-    try expect(undoStacked.bounds.contains(undoStacked.undoToastFrameForQA),
-               "…and the card stays inside the list — toast \(undoStacked.undoToastFrameForQA) in \(undoStacked.bounds)")
-    let undoToastText = undoStacked.undoToastTextForQA
+    try expect(undoStacked.listFrameForQA.minY >= undoStacked.undoToastFrameForQA.maxY,
+               "…and the list still ends above the toast — list \(undoStacked.listFrameForQA)")
 
     // K10 · A LIFECYCLE ACTION THAT EARNS NO TOAST STILL TAKES THE OLD ONE DOWN — the
     // case a replace-on-show rule gets wrong (raised in cross-review). Snooze a row, then

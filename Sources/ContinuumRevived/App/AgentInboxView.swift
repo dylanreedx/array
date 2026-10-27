@@ -277,6 +277,10 @@ private final class AgentInboxTableView: NSTableView {
         if contextHandler?.handleTableActivationKey(event) == true { return }
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
            event.charactersIgnoringModifiers == "z", contextHandler?.undoFromKeyboard() == true { return }
+        // .plans/87: ⌫ (or ⌦) hides the selected rows, with nothing held.
+        if [51, 117].contains(event.keyCode),
+           event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+           contextHandler?.hideSelectedRows() == true { return }
         super.keyDown(with: event)
         contextHandler?.didTraverseWithKeyboard(event)
     }
@@ -1113,6 +1117,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var pillStripHeight: NSLayoutConstraint?
     private var pillStripGap: NSLayoutConstraint?
     private let pillOverflowController = ChoicePopoverController()
+    private var listBottomToView: NSLayoutConstraint?
+    private var listBottomToToast: NSLayoutConstraint?
+    private var toastAboveBar: NSLayoutConstraint?
+    private var toastAtBottom: NSLayoutConstraint?
     /// QA: the `+N` checklist opens inside the (offscreen) window rather than on
     /// a screen, and without taking the keyboard.
     var presentsPillOverflowOffscreenForQA = false
@@ -1582,7 +1590,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             emptyLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.l),
             emptyLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.l),
@@ -1609,8 +1616,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // toast sits in one place whether the bar is showing or not.
             undoToast.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.s),
             undoToast.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.s),
-            undoToast.bottomAnchor.constraint(equalTo: bulkBar.topAnchor, constant: -Space.xs),
         ])
+        // .plans/87: the toast PUSHES THE LIST UP rather than floating over its last
+        // row (Dylan, 2026-10-27: "never cover a row"). It stays above the bar while
+        // the bar shows, and takes the bar's place at the bottom while it does not.
+        listBottomToView = scrollView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        listBottomToToast = scrollView.bottomAnchor.constraint(equalTo: undoToast.topAnchor, constant: -Space.xs)
+        toastAboveBar = undoToast.bottomAnchor.constraint(equalTo: bulkBar.topAnchor, constant: -Space.xs)
+        toastAtBottom = undoToast.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.s)
+        updateBottomStack()
 
         // Property observers do not run for a property's declaration-time value.
         // Production is born with the 96 header override already installed, so
@@ -3628,8 +3642,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             return
         }
         if let card = cell as? AgentInbox96CellView {
-            card.configureHoverActions(snooze: action(.snooze), settle: action(.settle))
-            card.configureExternalActions(moveHere: nil, copy: nil, hide: nil)
+            // .plans/87: the × IS the snooze on Array's own rows (three hours, or
+            // until it needs you), so it takes the Snooze pill's place.
+            let hide: (() -> Void)? = canHide(model) ? { [weak self] in self?.hideRows([id]) } : nil
+            card.configureHoverActions(snooze: hide == nil ? action(.snooze) : nil, settle: action(.settle))
+            card.configureExternalActions(moveHere: nil, copy: nil, hide: hide,
+                                          hideHelp: "Snooze for 3 hours, or until it needs you")
         } else if let slim = cell as? AgentInboxSlimCellView {
             if model.closingSince != nil {
                 slim.configureBackgroundActions(
@@ -4200,6 +4218,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Show, hide and re-populate the bar for the current selection.
     private func updateBulkBar() {
         let selected = selectedRows
+        defer { updateBottomStack() }
         guard selected.count >= AgentInboxView.minimumBulkSelection else {
             bulkBar.hide()
             updateAccessibilityHierarchy()
@@ -4795,6 +4814,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // the verb and the host resolves the date, P4.5), so the only place the hour
             // exists is the record the action wrote.
             snoozedUntil: reversible.first?.now.snoozedUntil))
+        updateBottomStack()
         restartUndoToastTimer()
     }
 
@@ -4813,18 +4833,86 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var pendingHideUndo: Set<String>?
     private var hiddenListShown = false
 
-    func hideExternalRows(_ ids: [UUID]) {
-        guard let hiding = externalSessionHiding else { return }
-        let sessions = ids.compactMap { id in allRows.first { $0.id == id } }
-            .compactMap { row in row.externalSession.map { (key: $0.sessionKey, title: row.title) } }
-            .filter { !hiding.isHidden($0.key) }
-        guard !sessions.isEmpty else { return }
-        hiding.hide(sessions)
-        refreshAfterHidingChange()
+    func hideExternalRows(_ ids: [UUID]) { hideRows(ids) }
+
+    // .plans/87 (quick hide/show)
+    /// How long the × and ⌫ snooze an Array agent: it comes back then, or sooner
+    /// the moment it needs you (P4.6's raised hand).
+    static let quickSnoozeInterval: TimeInterval = 3 * 3600
+    static let quickSnoozeSuffix = "or when it needs you"
+
+    /// Whether the × and ⌫ can take this row off the list: a session from
+    /// elsewhere hides; an Array agent snoozes, when it may.
+    func canHide(_ row: AgentInboxRow) -> Bool {
+        if row.externalSession != nil { return externalSessionHiding != nil }
+        return onSnoozeSelection != nil && isWired(.snooze)
+            && InboxRowAction.snooze.isAvailable(for: row, rollups: rollupsByParent)
+    }
+
+    /// Take these rows off the list, ONE undo for the lot: sessions from elsewhere
+    /// are hidden (`ExternalSessionHiding`), Array agents snoozed for three hours
+    /// or until they need you. `message` overrides the notice's words for a
+    /// batch that names its own (`Hid 2 from tmux`).
+    func hideRows(_ ids: [UUID], message: String? = nil) {
+        let targets = ids.compactMap { id in allRows.first { $0.id == id } }.filter(canHide)
+        let sessions = targets.compactMap { row in row.externalSession.map { (key: $0.sessionKey, title: row.title) } }
+            .filter { externalSessionHiding?.isHidden($0.key) == false }
+        let agents = targets.filter { $0.externalSession == nil }.map(\.id)
+        guard !sessions.isEmpty || !agents.isEmpty else { return }
         dismissUndoToast()
-        pendingHideUndo = Set(sessions.map(\.key))
-        undoToast.show(InboxUndoToast.message(verb: Self.hiddenVerb, count: sessions.count, snoozedUntil: nil))
+        if !agents.isEmpty, AgentInboxView.advancesSelection(InboxRowAction.snooze) { armAdvance(targetIds: agents) }
+        if !sessions.isEmpty { externalSessionHiding?.hide(sessions) }
+        // Captured before the host writes, read back after: only what really moved
+        // is offered back (`offerUndo`'s rule).
+        let captured = captureLifecycle(agents)
+        if !agents.isEmpty { onSnoozeSelection?(agents, clock().addingTimeInterval(Self.quickSnoozeInterval)) }
+        pendingAdvance = nil
+        if !sessions.isEmpty { refreshAfterHidingChange() }
+        var snoozed: [(id: UUID, facts: InboxLifecycleSnapshot, now: InboxLifecycleSnapshot)] = []
+        if let reader = lifecycleFacts {
+            snoozed = captured.compactMap { target in
+                guard let now = reader(target.id), now != target.facts else { return nil }
+                return (id: target.id, facts: target.facts, now: now)
+            }
+        }
+        pendingHideUndo = sessions.isEmpty ? nil : Set(sessions.map(\.key))
+        pendingUndo = snoozed.isEmpty ? nil : Dictionary(uniqueKeysWithValues: snoozed.map { ($0.id, $0.facts) })
+        guard pendingHideUndo != nil || pendingUndo != nil else { return }
+        var words: [String] = []
+        if !sessions.isEmpty {
+            words.append(message ?? InboxUndoToast.message(verb: Self.hiddenVerb, count: sessions.count, snoozedUntil: nil))
+        }
+        if !snoozed.isEmpty {
+            let snooze = InboxUndoToast.message(verb: InboxUndoToast.snoozedVerb, count: snoozed.count,
+                                                snoozedUntil: snoozed.first?.now.snoozedUntil)
+            words.append(sessions.isEmpty ? snooze : snooze.lowercased())
+            words.append(snoozed.count == 1 ? Self.quickSnoozeSuffix : "or when one needs you")
+        }
+        undoToast.show(words.joined(separator: " \(InboxUndoToast.separator) "))
+        updateBottomStack()
         restartUndoToastTimer()
+    }
+
+    /// ⌫ on the list: hide what is selected.
+    fileprivate func hideSelectedRows() -> Bool {
+        let ids = selectedRows.filter(canHide).map(\.id)
+        guard !ids.isEmpty else { return false }
+        hideRows(ids)
+        return true
+    }
+
+    /// The list, the toast and the bar, bottom up. See the constraints' comment.
+    private func updateBottomStack() {
+        guard let listBottomToView, let listBottomToToast, let toastAboveBar, let toastAtBottom else { return }
+        let toastShown = !undoToast.isHidden
+        let barShown = !bulkBar.isHidden
+        let wanted = [toastShown ? listBottomToToast : listBottomToView, barShown ? toastAboveBar : toastAtBottom]
+        // Only a real change touches the constraints: re-seating the list on every
+        // selection change would re-tile the table for nothing.
+        guard !wanted.allSatisfy(\.isActive) else { return }
+        NSLayoutConstraint.deactivate([listBottomToView, listBottomToToast, toastAboveBar, toastAtBottom])
+        NSLayoutConstraint.activate(wanted)
+        needsLayout = true
     }
 
     func showHiddenExternalSessions(_ keys: Set<String>) {
@@ -4898,6 +4986,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         pendingUndo = nil
         pendingHideUndo = nil
         undoToast.hide()
+        updateBottomStack()
     }
 
     /// Hand the host back exactly what was captured.
@@ -4908,14 +4997,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// arriving from the re-render could spend on facts this restore has already put
     /// back.
     private func performUndo() {
-        if let keys = pendingHideUndo {
-            dismissUndoToast()
-            showHiddenExternalSessions(keys)
-            return
-        }
-        guard let restoring = pendingUndo else { return }
+        // One press puts back the whole batch: the hidden sessions and the snoozes.
+        let keys = pendingHideUndo, restoring = pendingUndo
+        guard keys != nil || restoring != nil else { return }
         dismissUndoToast()
-        onUndoLifecycle?(restoring)
+        if let keys { showHiddenExternalSessions(keys) }
+        if let restoring { onUndoLifecycle?(restoring) }
     }
 
     /// P3.5's `isInteracting`: hover, selection, or keyboard-active. The last two
@@ -6173,6 +6260,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var scopeTitlesForQA: [String] { scopeMenuEntries.map(\.title) }
     var scopeMenuEntriesForQA: [InboxScopeMenuEntry] { scopeMenuEntries }
     var scopeTriggerTitleForQA: String { scopeButton.qaRenderedTitle }
+    /// The list's scroll view, in this view's coordinates.
+    var listFrameForQA: NSRect { scrollView.frame }
+    /// The table, to make it first responder the way a click on a row does.
+    var tableForQA: NSTableView { tableView }
     /// How far below the view's top edge the list starts.
     var listTopInsetForQA: CGFloat {
         let frame = scrollView.frame
