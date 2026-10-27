@@ -3959,6 +3959,9 @@ final class CanvasNSView: NSView, TokenThemed {
     var isCameraDriverStepInFlight: Bool { cameraDriver.isApplying }
 
     private func cameraGestureDidSettle() {
+        // Agent chrome the pointer reached only because tiles slid under it waited
+        // for this edge (`ManagedAgentTileNSView.mouseEntered`).
+        wakeAgentChromeUnderPointer()
         // Selection cursor rects were deferred while the driver moved the camera.
         tileSelection.updatePresentation()
         discardCursorRects()
@@ -6307,6 +6310,34 @@ final class CanvasNSView: NSView, TokenThemed {
 
     var isPointerPanActive: Bool { pointerPanActive }
 
+    /// The camera is moving: a driver burst that has not settled, a step being
+    /// applied, or a pointer pan. A resting agent tile's chrome never wakes for a
+    /// pointer that only "entered" because the canvas moved under it; waking costs
+    /// 7-15 ms and landed mid-gesture (pan with three agents streaming, 56 -> 34/s).
+    var isCameraInMotion: Bool { pointerPanActive || cameraDriver.isApplying || !cameraDriver.isSettled }
+
+    /// At a settle (or a pointer pan's end): the one agent tile actually under the
+    /// pointer wakes, if it is resting. Every other tile the camera slid under the
+    /// pointer stays drawn.
+    func wakeAgentChromeUnderPointer() {
+        guard let window, let root = window.contentView else { return }
+        let pointer: NSPoint?
+        if let residencyPointerProvider {
+            pointer = residencyPointerProvider()
+        } else {
+            pointer = window.mouseLocationOutsideOfEventStream
+        }
+        guard let pointer, root.frame.contains(pointer) else { return }
+        var view = root.hitTest(pointer)
+        while let current = view {
+            if let agent = current as? ManagedAgentTileNSView {
+                agent.wakeChromeAfterCameraMotion()
+                return
+            }
+            view = current.superview
+        }
+    }
+
     /// Start the shared pointer-pan lifecycle. Canvas background gestures and
     /// Cmd/Space drags whose AppKit target is tile chrome both delegate here so
     /// camera math, cursor ownership, and release handling cannot diverge.
@@ -6338,6 +6369,7 @@ final class CanvasNSView: NSView, TokenThemed {
             NSCursor.pop() // deferred open hand after a mid-drag Space release
             spaceCursorPushed = false
         }
+        if !isCameraInMotion { wakeAgentChromeUnderPointer() }
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {

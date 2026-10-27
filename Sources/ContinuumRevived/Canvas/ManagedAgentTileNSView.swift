@@ -152,6 +152,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private let drawsRestingChrome: Bool
     private var chromeCanvas: AgentTileChromeCanvasView?
     private var chromeRestWork: DispatchWorkItem?
+    private(set) var qaChromeWakeCount = 0
+    private(set) var qaChromeSettleWakeCount = 0
     /// The row renderer when it is the one installed; list-only QA seams read it.
     private var listTranscript: AgentTranscriptListView? { transcriptCollectionFixture as? AgentTranscriptListView }
     func prepareBoardTask(
@@ -4989,10 +4991,20 @@ extension ManagedAgentTileNSView {
         super.mouseDown(with: event)
     }
 
+    /// The pointer entering wakes the chrome — unless the camera is moving, in
+    /// which case the tile most likely slid under a still pointer; the canvas
+    /// wakes the one tile under the pointer at the settle instead.
     override func mouseEntered(with event: NSEvent) {
         cancelChromeRest()
-        wakeChrome()
+        if canvas?.isCameraInMotion != true { wakeChrome() }
         super.mouseEntered(with: event)
+    }
+
+    /// The canvas's settle edge found this tile under the pointer.
+    func wakeChromeAfterCameraMotion() {
+        guard isChromeResting else { return }
+        qaChromeSettleWakeCount += 1
+        wakeChrome()
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -5009,6 +5021,7 @@ extension ManagedAgentTileNSView {
     func wakeChrome() {
         cancelChromeRest()
         guard let chromeCanvas, chromeCanvas.isResting else { return }
+        qaChromeWakeCount += 1
         chromeCanvas.wake()
         setTitleBarControlsDrawn(false)
     }
@@ -5019,6 +5032,11 @@ extension ManagedAgentTileNSView {
     func restChromeIfIdle() -> Bool {
         guard let chromeCanvas, !chromeCanvas.isResting, contentView === chromeCanvas,
               terminalFaceSession == nil, !chromeIsAnimating else { return false }
+        // Never re-parent ~230 views while the camera moves; the rest waits.
+        if canvas?.isCameraInMotion == true {
+            scheduleChromeRest()
+            return false
+        }
         if let window {
             if Self.chromePressedMouseButtons() != 0 { return false }
             let pointer = convert(window.mouseLocationOutsideOfEventStream, from: nil)
