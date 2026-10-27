@@ -38,7 +38,10 @@ func runAgentPresenceChecks() async throws {
     }
     if wants("land") { summary.append(try await AgentPresenceChecks.checkOwnActionsVisiblyLand(originalPath: originalPath)) }
     if wants("n1") { summary.append(try await AgentPresenceChecks.checkUnsolicitedTurnAfterStopSettles()) }
-    if wants("background") { summary.append(try await AgentPresenceChecks.checkMirroredBackgroundChildLifetime()) }
+    if wants("background") { summary.append(try await AgentPresenceChecks.checkMirroredBackgroundChildLifetime(originalPath: originalPath)) }
+    if wants("codex-family") { summary.append(try await AgentPresenceChecks.checkCodexDescendantsEndWithSession()) }
+    if wants("restore") { summary.append(try await AgentPresenceChecks.checkProviderChildrenSettleOnRestore()) }
+    if wants("activity") { summary.append(try AgentPresenceChecks.checkLastActivityMovesOnFrames()) }
     print("AgentPresenceChecks passed: " + summary.joined(separator: "; "))
 }
 
@@ -591,8 +594,212 @@ enum AgentPresenceChecks {
 
 
     /// A parent's result is a turn boundary, not the end of a persistent
-    /// Claude session's background child. Exercise the real bound-runner path.
-    static func checkMirroredBackgroundChildLifetime() async throws -> String {
+    /// Claude session's background child.
+    ///
+    /// The first three sections run the PRODUCTION runner and translator
+    /// against the fake claude: whether a child is still running is claude's
+    /// own stream to decide (`Fixtures/claude-async-subagent.jsonl`, replayed),
+    /// never a flag a test runner sets. The scripted runner after them only
+    /// drives the supervisor's session-ending paths, which no stream can reach.
+    static func checkMirroredBackgroundChildLifetime(originalPath: String) async throws -> String {
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("ContinuumRevivedCoreChecks/Fixtures/claude-async-subagent.jsonl")
+        for mode in ["async-launch", "shell-job-holds-no-child", "shell-job-reaped"] {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("array-presence-stream-\(mode)-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let bin = root.appendingPathComponent("bin", isDirectory: true)
+            try AgentSteeringQAFakes.install(.claude, in: bin)
+            try FileManager.default.copyItem(at: fixture, to: bin.appendingPathComponent("replay.jsonl"))
+            let work = root.appendingPathComponent("work", isDirectory: true)
+            try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+            setenv("PATH", "\(bin.path):\(originalPath)", 1)
+            defer { setenv("PATH", originalPath, 1) }
+            let supervisor = AgentSupervisor(
+                store: AgentStore(applicationSupportDirectory: root),
+                makeRunner: AgentSupervisor.productionRunner,
+                idleRunnerTimeout: mode == "shell-job-reaped" ? 0.3 : 60)
+            defer { supervisor.stopAll() }
+            let parent = supervisor.spawn(role: nil, prompt: nil, cwd: work,
+                harness: .claudeCode, model: "anthropic/claude-haiku-4-5-20251001", thinking: "low")
+            switch mode {
+            case "async-launch":
+                try expect(supervisor.send("REPLAY", to: parent), "\(mode): parent refused")
+                let child = AgentID(rawValue: AgentRecord.observedChildID(
+                    parentAgentID: parent.rawValue, toolUseID: "toolu_0164hvbb7oKHD8HqnBRJVh8E"))
+                try await eventually("\(mode): the background child was never adopted") { supervisor.records[child] != nil }
+                try await eventually("\(mode): the parent's launching turn never ended") {
+                    supervisor.records[parent]?.latestTerminalEvent != nil
+                }
+                try expect(supervisor.records[child]?.latestTerminalEvent == nil
+                           && supervisor.turnSnapshot(for: child)?.state == .working,
+                    "\(mode): the async_launched acknowledgement settled the background child at launch (\(String(describing: supervisor.records[child]?.latestTerminalEvent?.outcome)))")
+                try await eventually("\(mode): the child's own notification, after the parent's result, never settled it") {
+                    supervisor.records[child]?.latestTerminalEvent?.outcome == .succeeded
+                }
+                try expect(supervisor.lastActivity(for: child) != nil,
+                    "\(mode): the headless child's frames did not move its last activity")
+            case "shell-job-holds-no-child":
+                try expect(supervisor.send("BACKGROUND job", to: parent), "\(mode): parent refused")
+                try await eventually("\(mode): parent did not start") { supervisor.isRunning(parent) }
+                guard let child = supervisor.handleSpawnRequest(SpawnRequest(
+                    role: "general-purpose", prompt: "foreground child", isolated: false,
+                    sourceItemID: "toolu_never_answered", observedOnly: true), from: parent) else {
+                    throw Failure(description: "presence: \(mode): child was not adopted")
+                }
+                supervisor.qaDeliver(.turnStarted(threadId: "child", turnId: "c"), to: child)
+                try await eventually("\(mode): a parent with only a shell job running left its unanswered child working") {
+                    supervisor.records[child]?.latestTerminalEvent?.outcome == .interrupted
+                }
+            default:
+                try expect(supervisor.send("BACKGROUND job", to: parent), "\(mode): parent refused")
+                try await eventually("\(mode): the shell job never started") {
+                    AgentSteeringQAFakes.backgroundPid(in: bin) != nil
+                }
+                let pid = AgentSteeringQAFakes.backgroundPid(in: bin)
+                try await eventually("\(mode): a shell job alone kept the idle session from the reaper", timeout: 4) {
+                    pid.map { kill($0, 0) != 0 } ?? false
+                }
+            }
+        }
+        return try await checkMirroredChildSessionEnds()
+            + "; a background child stays working past its launch acknowledgement and the parent's result and settles on its own notification, and a shell job never holds a child or the session open"
+    }
+
+    /// `.plans/87` Step 3.4 — a Codex child is running only while its session
+    /// is. The runner here is the provider's whole family in one process, and
+    /// the process ends with a grandchild's turn still open and no word about
+    /// it, as a crash leaves things.
+    static func checkCodexDescendantsEndWithSession() async throws -> String {
+        final class FamilyRunner: AgentRunning, ProviderSubagentActivityObserving, @unchecked Sendable {
+            private let lock = NSLock()
+            private var activity: (@Sendable (ProviderSubagentActivity) -> Void)?
+            var keepsSessionAliveBetweenTurns: Bool { false }
+            var canAcceptAnotherTurn: Bool { true }
+            var commandCapabilities: AgentSessionCommandCapabilities { ScriptedAgentRunner(script: []).commandCapabilities }
+            func observeProviderSubagentActivity(_ handler: @escaping @Sendable (ProviderSubagentActivity) -> Void) {
+                lock.withLock { activity = handler }
+            }
+            func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+                let send = lock.withLock { activity }
+                onEvent(.turnStarted(threadId: "root", turnId: "root-turn"))
+                send?(.primaryThread(providerThreadID: "root"))
+                send?(.childAnnounced(parentProviderThreadID: "root", childProviderThreadID: "child",
+                                      sourceItemID: "call-child", displayLabel: "child"))
+                send?(.threadEvent(providerThreadID: "child", event: .turnStarted(threadId: "child", turnId: "c")))
+                send?(.childAnnounced(parentProviderThreadID: "child", childProviderThreadID: "grandchild",
+                                      sourceItemID: "call-grandchild", displayLabel: "grandchild"))
+                send?(.threadEvent(providerThreadID: "grandchild", event: .turnStarted(threadId: "grandchild", turnId: "g")))
+                send?(.threadEvent(providerThreadID: "child", event: .turnCompleted(threadId: "child", turnId: "c", outcome: .completed, errorMessage: nil)))
+                Thread.sleep(forTimeInterval: 0.2)
+                onEvent(.turnCompleted(threadId: "root", turnId: "root-turn", outcome: .completed, errorMessage: nil))
+            }
+            func stop() {}
+            func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+            func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-presence-codex-family-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root),
+                                         makeRunner: { _ in FamilyRunner() })
+        defer { supervisor.stopAll() }
+        let parent = supervisor.spawn(role: nil, prompt: nil, cwd: root,
+            harness: .codex, model: "openai-codex/gpt-5.6-sol", thinking: "low")
+        try expect(supervisor.send("delegate", to: parent), "codex family: parent refused")
+        let child = AgentID(rawValue: AgentRecord.observedChildID(parentAgentID: parent.rawValue, toolUseID: "call-child"))
+        let grandchild = AgentID(rawValue: AgentRecord.observedChildID(parentAgentID: child.rawValue, toolUseID: "call-grandchild"))
+        try await eventually("codex family: the grandchild was never adopted") { supervisor.records[grandchild] != nil }
+        try await eventually("codex family: the session never ended") {
+            !supervisor.isRunning(parent) && supervisor.records[parent]?.latestTerminalEvent != nil
+        }
+        try await Task.sleep(for: .milliseconds(80))
+        try expect(supervisor.records[child]?.latestTerminalEvent?.outcome == .succeeded,
+                   "codex family: the child's own completion must stand, got \(String(describing: supervisor.records[child]?.latestTerminalEvent?.outcome))")
+        try expect(supervisor.records[grandchild]?.latestTerminalEvent?.outcome == .interrupted
+                   && supervisor.turnSnapshot(for: grandchild)?.state != .working,
+                   "codex family: a grandchild whose session ended was left \(String(describing: supervisor.turnSnapshot(for: grandchild)?.state)) with outcome \(String(describing: supervisor.records[grandchild]?.latestTerminalEvent?.outcome))")
+        return "a Codex descendant still open when its session ends settles interrupted; a finished one keeps its outcome"
+    }
+
+    /// `.plans/87` Step 3.5 — a Claude or Codex child that was mid-turn when the
+    /// app went away died with its parent's process; the restore says so.
+    static func checkProviderChildrenSettleOnRestore() async throws -> String {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-presence-restore-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var working: [AgentHarness: AgentID] = [:]
+        var finished: AgentID?
+        do {
+            let before = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root),
+                                         makeRunner: { _ in ScriptedAgentRunner(script: []) })
+            for (harness, model) in [(AgentHarness.claudeCode, "anthropic/claude-haiku-4-5-20251001"),
+                                     (.codex, "openai-codex/gpt-5.6-sol")] {
+                let parent = before.spawn(role: nil, prompt: nil, cwd: root, harness: harness, model: model, thinking: "low")
+                for key in ["open", "done"] where harness == .claudeCode || key == "open" {
+                    guard let child = before.handleSpawnRequest(SpawnRequest(
+                        role: nil, prompt: "restore witness", isolated: false,
+                        sourceItemID: "\(harness.rawValue)-\(key)", observedOnly: true), from: parent) else {
+                        throw Failure(description: "presence: restore: \(harness) child was not adopted")
+                    }
+                    before.qaDeliver(.turnStarted(threadId: "c", turnId: key), to: child)
+                    if key == "done" {
+                        before.qaDeliver(.turnCompleted(threadId: "c", turnId: key, outcome: .completed, errorMessage: nil), to: child)
+                        finished = child
+                    } else {
+                        working[harness] = child
+                    }
+                }
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let after = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root),
+                                    makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        _ = after.restore()
+        for (harness, child) in working {
+            try expect(after.records[child]?.latestTerminalEvent?.outcome == .interrupted
+                       && after.turnSnapshot(for: child)?.state != .working,
+                       "restore: a \(harness) child that died mid-turn came back with outcome \(String(describing: after.records[child]?.latestTerminalEvent?.outcome))")
+        }
+        try expect(working.count == 2, "restore: the witness needs a Claude and a Codex child")
+        try expect(finished.flatMap { after.records[$0]?.latestTerminalEvent?.outcome } == .succeeded,
+                   "restore: a child that had finished must keep its own outcome")
+        return "Claude and Codex children that died mid-turn come back interrupted; finished ones keep their outcome"
+    }
+
+    /// `.plans/87` Step 3.6 — one last-activity time per agent, owned by the
+    /// supervisor: every timeline frame and streamed delta moves it, at most
+    /// once a second, and a meter reading does not.
+    static func checkLastActivityMovesOnFrames() throws -> String {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-presence-activity-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root),
+                                         makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        let config = AgentModelConfig.resolvedFromDefaults()
+        let id = supervisor.spawn(role: nil, prompt: nil, cwd: root, model: config.model, thinking: config.thinking)
+        let t0 = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        try expect(supervisor.lastActivity(for: id) == nil, "activity: a fresh agent has no activity yet")
+        supervisor.qaDeliver(.turnStarted(threadId: "t", turnId: "a"), to: id, now: t0)
+        try expect(supervisor.lastActivity(for: id) == t0, "activity: a turn frame did not stamp last activity")
+        supervisor.qaDeliver(.contentDelta(threadId: "t", turnId: "a", streamKind: .assistant, delta: "x"),
+                             to: id, now: t0.addingTimeInterval(0.4))
+        try expect(supervisor.lastActivity(for: id) == t0, "activity: a delta inside the same second must be throttled")
+        supervisor.qaDeliver(.contentDelta(threadId: "t", turnId: "a", streamKind: .assistant, delta: "y"),
+                             to: id, now: t0.addingTimeInterval(1.2))
+        try expect(supervisor.lastActivity(for: id) == t0.addingTimeInterval(1.2),
+                   "activity: streaming a second later did not move last activity")
+        supervisor.qaDeliver(.tokenUsageUpdated(threadId: "t", snapshot: TokenUsageSnapshot(inputTokens: 1, outputTokens: 1, totalCostUsd: nil)),
+                             to: id, now: t0.addingTimeInterval(5))
+        try expect(supervisor.lastActivity(for: id) == t0.addingTimeInterval(1.2),
+                   "activity: a meter reading is not activity")
+        return "last activity moves on frames and streaming, once a second, and not on meter readings"
+    }
+
+    /// The supervisor's session-ending paths, which settle children no stream
+    /// can: exit, reap, settings, /clear, dead reuse and stopAll.
+    private static func checkMirroredChildSessionEnds() async throws -> String {
         final class BackgroundRunner: AgentSteeringRunning, AgentIdleExitReporting, @unchecked Sendable {
             private let lock = NSLock()
             private let gate = DispatchSemaphore(value: 0)
@@ -601,6 +808,7 @@ enum AgentPresenceChecks {
             private var idleExitHandler: (@Sendable (Int32, String?, Bool) -> Void)?
             var acceptsSteerNow: Bool { false }
             var hasBackgroundWork: Bool { lock.withLock { background } }
+            var hasRunningSubagents: Bool { lock.withLock { background } }
             var keepsSessionAliveBetweenTurns: Bool { true }
             var canAcceptAnotherTurn: Bool { lock.withLock { alive } }
             var commandCapabilities: AgentSessionCommandCapabilities { ScriptedAgentRunner(script: []).commandCapabilities }

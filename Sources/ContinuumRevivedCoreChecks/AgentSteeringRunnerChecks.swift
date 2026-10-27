@@ -12,6 +12,7 @@ import Foundation
 func runAgentSteeringRunnerChecks() {
     #if os(macOS)
     runClaudeSessionRunnerChecks()
+    runClaudeBackgroundSubagentChecks()
     runPiSteeringRunnerChecks()
     runCodexSteeringRunnerChecks()
     print("Agent steering runner checks passed: claude is one stream-json process for many turns with the exact argv and stdin frames, steers land at the tool boundary and are confirmed by replay, interrupt keeps the process, a background job survives the result frame, a promoted steer is an adoptable unsolicited turn, the session-mode retry and crash paths hold, /compact rides stdin; pi steers and confirms through queue_update and returns unread steers on abort; codex steers with expectedTurnId and interrupts without killing; an interrupt cancels a claude steer handed over but not consumed and hands it back, and an unapplied codex steer dies with its app-server")
@@ -19,6 +20,88 @@ func runAgentSteeringRunnerChecks() {
 }
 
 #if os(macOS)
+
+/// `.plans/87` Step 3 — a background Claude child's real lifetime, through the
+/// production runner and translator. `Fixtures/claude-async-subagent.jsonl` is
+/// the committed 2.1.241 capture (`claude-subagent-turn.jsonl`) re-ordered the
+/// way a background launch arrives: the Agent call is answered at once by the
+/// `async_launched` acknowledgement (shape copied from a real 2.1.310 session
+/// log), the parent's result follows, and the child's frames, progress and
+/// `task_notification` arrive after it, inside claude's own next turn (a fresh
+/// `init`, so a fresh per-turn translator).
+private func runClaudeBackgroundSubagentChecks() {
+    let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/claude-async-subagent.jsonl")
+    let toolUseID = "toolu_0164hvbb7oKHD8HqnBRJVh8E"
+    func isChildClose(_ pair: (String, AgentRuntimeEvent)) -> TurnOutcome? {
+        if pair.0 == toolUseID, case let .turnCompleted(_, _, outcome, _) = pair.1 { return outcome }
+        return nil
+    }
+
+    // 1. The runner: open on launch, alive past the parent's result and past a
+    //    new init, closed by its own notification.
+    do {
+        let root = steeringFakeRoot(.claude)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try? FileManager.default.copyItem(at: fixture, to: root.appendingPathComponent("replay.jsonl"))
+        withFakeOnPath(root) {
+            let runner = ClaudeAgentRunner(config: .init(
+                model: "fake-model", effort: "high", cwd: root,
+                sessionId: "00000000-0000-4000-8000-000000000001", conversationMayExist: false))
+            let child = SteeringBox<[(String, AgentRuntimeEvent)]>([])
+            let progress = SteeringBox<[String]>([])
+            runner.observeSubagentEvents { id, event in child.value.append((id, event)) }
+            runner.observeSubagentProgress { progress.value.append($0) }
+            let parent = SteeringBox<[AgentRuntimeEvent]>([])
+            do { try runner.run(prompt: AgentPrompt("REPLAY")) { parent.value.append($0) } } catch {
+                expect(false, "claude async child: the launching turn must not throw: \(error)")
+            }
+            expect(outcomes(parent.value) == [.completed],
+                   "claude async child: the launching turn must close on its own result, got \(outcomes(parent.value))")
+            expect(child.value.compactMap(isChildClose).isEmpty,
+                   "claude async child: the async_launched acknowledgement closed the child at launch: \(child.value.compactMap(isChildClose))")
+            expect(runner.hasRunningSubagents,
+                   "claude async child: a launched background child must hold the session open after the parent's result")
+            expect(waitUntil(5) { !child.value.compactMap(isChildClose).isEmpty },
+                   "claude async child: the child never closed — its frames after the next init were lost")
+            expect(child.value.compactMap(isChildClose) == [.completed],
+                   "claude async child: task_notification(completed) must close the child exactly once, got \(child.value.compactMap(isChildClose))")
+            expect(child.value.contains { $0.0 == toolUseID && { if case .contentDelta = $0 { return true }; return false }($0.1) },
+                   "claude async child: the child's own answer, sent after the parent's result, must reach the child channel")
+            expect(progress.value.contains(toolUseID),
+                   "claude async child: task_progress must report the child's activity")
+            expect(!runner.hasRunningSubagents,
+                   "claude async child: a closed child must stop holding the session open")
+            runner.stop()
+        }
+    }
+
+    // 2. The translator alone: a roster that empties BEFORE the notification
+    //    releases the session, and the notification still decides the outcome.
+    //    A shell job in the roster never holds a child open.
+    do {
+        let lines = ((try? String(contentsOf: fixture, encoding: .utf8)) ?? "")
+            .split(separator: "\n").map(String.init)
+        expect(lines.count > 30, "claude async child: the fixture looks truncated at \(lines.count) lines")
+        let child = SteeringBox<[(String, AgentRuntimeEvent)]>([])
+        var translator = ClaudeEventTranslator(runToken: "r")
+        translator.onSubagentEvent = { id, event in child.value.append((id, event)) }
+        let launchEnd = lines.firstIndex { $0.contains("\"type\": \"result\"") } ?? 0
+        _ = translator.translate(stream: Array(lines[...launchEnd]))
+        expect(translator.subagents.hasRunningChildren, "claude roster: the launched child must be running")
+        _ = translator.translate(line: #"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"shell-1","description":"npm run dev"}]}"#)
+        expect(!translator.subagents.hasRunningChildren,
+               "claude roster: once claude's roster drops the child, only a shell job is left and it must not count as a running child")
+        expect(child.value.compactMap(isChildClose).isEmpty,
+               "claude roster: the roster alone must not invent an outcome")
+        _ = translator.translate(line: #"{"type":"system","subtype":"task_notification","task_id":"a9e8aa2b2ab55ecf5","tool_use_id":"toolu_0164hvbb7oKHD8HqnBRJVh8E","status":"failed"}"#)
+        expect(child.value.compactMap(isChildClose) == [.failed],
+               "claude roster: a failed notification after the roster emptied must close the child failed, got \(child.value.compactMap(isChildClose))")
+        _ = translator.translate(line: #"{"type":"system","subtype":"task_notification","task_id":"shell-1","status":"completed"}"#)
+        expect(child.value.compactMap(isChildClose) == [.failed],
+               "claude roster: a shell job's notification must not touch any child")
+    }
+}
 
 private final class SteeringBox<T>: @unchecked Sendable {
     private let lock = NSLock()

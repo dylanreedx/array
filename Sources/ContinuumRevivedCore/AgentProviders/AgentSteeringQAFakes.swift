@@ -23,7 +23,8 @@ import Foundation
 //               lists it under `still_queued` and runs it as its next turn
 //               unless the interrupt asks `cancel_queued`)
 //   BACKGROUND  (claude) starts a `sleep` job in the process group, writes its
-//               pid to bg.pid and reports one background task
+//               pid to bg.pid, reports one background task and holds the turn
+//               1 s more
 //   PLAIN       0.6 s of text generation with no tool boundary
 //   LONG        up to 10 s of text generation with no tool boundary, for an
 //               interrupt — a steer sent meanwhile stays held by Array
@@ -45,6 +46,10 @@ import Foundation
 //               check can sample the spawn window production really crosses
 //               (codex: thread/started before turn/started; pi: the session
 //               header before agent_start; claude: before system/init)
+//   REPLAY      (claude) plays `replay.jsonl` beside the fake verbatim: every
+//               line up to its first `result` as this turn, then, 0.3 s later
+//               and unprompted, the rest — the way claude carries on by itself
+//               when a background child it launched reports back
 //   anything else: a short text reply
 // `reject-resume` beside the fake makes claude fail `--resume` the way the real
 // CLI does for a conversation that does not exist yet. `clear-queue-delay`
@@ -153,7 +158,7 @@ def delay_start(text):
         time.sleep(1.2)
 
 def shape(text):
-    for word in ("TOOLFAIL", "TOOL", "SLOW", "HOLD", "BACKGROUND", "PLAIN", "CRASH", "LONG", "APIERROR", "VANISH", "RETRY", "EXITIDLE"):
+    for word in ("TOOLFAIL", "TOOL", "SLOW", "HOLD", "BACKGROUND", "PLAIN", "CRASH", "LONG", "APIERROR", "VANISH", "RETRY", "EXITIDLE", "REPLAY"):
         if word in text:
             return word
     return "TEXT"
@@ -229,6 +234,18 @@ def say(text):
 
 def run_turn(msg):
     text = text_of(msg)
+    if shape(text) == "REPLAY":
+        with open(os.path.join(HERE, "replay.jsonl")) as f:
+            lines = [l for l in f if l.strip()]
+        cut = next(i for i, l in enumerate(lines) if json.loads(l).get("type") == "result") + 1
+        for l in lines[:cut]:
+            out(json.loads(l))
+        def later():
+            time.sleep(0.3)
+            for l in lines[cut:]:
+                out(json.loads(l))
+        threading.Thread(target=later, daemon=True).start()
+        return
     delay_start(text)
     out({"type": "system", "subtype": "init", "session_id": SID, "cwd": os.getcwd(), "model": "fake-claude", "slash_commands": ["compact"]})
     replay(msg)
@@ -264,6 +281,7 @@ def run_turn(msg):
         with open(os.path.join(HERE, "bg.pid"), "w") as f:
             f.write(str(job.pid))
         out({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "bg-1", "description": "sleep"}]})
+        time.sleep(1.0)
     if kind in ("TOOL", "SLOW"):
         interrupted.clear()
         out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_fake", "name": "Bash", "input": {"command": "true"}}]}, "parent_tool_use_id": None, "session_id": SID})
