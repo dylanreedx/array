@@ -172,6 +172,69 @@ enum NativeViewVectorRenderer {
         }
     }
 
+    /// Everything `draw` would read from a detached tree, folded into one value,
+    /// so an update that changes nothing on screen costs a walk and no redraw.
+    ///
+    /// Why: a streaming agent republishes its turn snapshot on every chunk, and
+    /// each republish re-applies the same labels and colours. Redrawing the whole
+    /// resting chrome for each one was 34 full redraws for 30 chunks — per tile,
+    /// inside whatever camera frame they land in. Values read here are the ones the
+    /// renderer draws (frames, visibility, alpha, layer fills and borders, label
+    /// text and colour, images and tints, control state); a view that draws itself
+    /// contributes its own `needsDisplay`, which `draw` clears.
+    static func fingerprint(_ root: NSView, skipping skip: ((NSView) -> Bool)? = nil) -> Int {
+        var hasher = Hasher()
+        func visit(_ view: NSView) {
+            guard !view.isHidden, view.alphaValue > 0.001 else { hasher.combine(0); return }
+            if let skip, skip(view) { return }
+            hasher.combine(ObjectIdentifier(view))
+            for value in [view.frame.minX, view.frame.minY, view.frame.width, view.frame.height,
+                          view.bounds.minX, view.bounds.minY, view.alphaValue] { hasher.combine(value) }
+            if let layer = view.layer {
+                hasher.combine(layer.opacity)
+                hasher.combine(layer.backgroundColor)
+                hasher.combine(layer.borderWidth)
+                hasher.combine(layer.borderColor)
+                hasher.combine(layer.cornerRadius)
+            }
+            switch view {
+            case let field as NSTextField:
+                hasher.combine(field.stringValue)
+                hasher.combine(field.placeholderString)
+                hasher.combine(field.textColor)
+                hasher.combine(field.font)
+                hasher.combine(field.isEnabled)
+                return
+            case let imageView as NSImageView:
+                hasher.combine(imageView.image.map(ObjectIdentifier.init))
+                hasher.combine(imageView.contentTintColor)
+                hasher.combine(imageView.subviews.first?.frame.minX)
+                hasher.combine(imageView.subviews.first?.frame.minY)
+                hasher.combine(imageView.subviews.first?.frame.width)
+                return
+            case let button as NSButton:
+                hasher.combine(button.title)
+                hasher.combine(button.state.rawValue)
+                hasher.combine(button.isEnabled)
+                hasher.combine(button.image.map(ObjectIdentifier.init))
+                return
+            default:
+                if let control = view as? NSControl { hasher.combine(control.isEnabled) }
+                if let text = view as? NSTextView { hasher.combine(text.string) }
+                if overridesDraw(view) { hasher.combine(view.needsDisplay) }
+            }
+            view.subviews.forEach(visit)
+        }
+        visit(root)
+        return hasher.finalize()
+    }
+
+    /// After a draw: the views that draw themselves have been drawn.
+    static func markDrawn(_ root: NSView) {
+        if root.needsDisplay { root.needsDisplay = false }
+        root.subviews.forEach(markDrawn)
+    }
+
     /// `rect` in `view`'s bounds, expressed in `ancestor`'s bounds, by frame
     /// arithmetic. `NSView.convert` needs a shared window, which a detached
     /// tree does not have.
@@ -300,6 +363,7 @@ final class AgentTileChromeCanvasView: NSView {
         qaRestCount += 1
         // Detached views resolve colours against the app's appearance unless told.
         body.appearance = effectiveAppearance
+        drawnFingerprint = nil
         body.removeFromSuperview()
         body.frame = bounds
         body.layoutSubtreeIfNeeded()
@@ -323,14 +387,25 @@ final class AgentTileChromeCanvasView: NSView {
     /// be told; a live one invalidates itself.
     func invalidateRestingChrome() {
         guard isResting else { return }
-        needsLayout = true
+        body.layoutSubtreeIfNeeded()
+        placeTranscript()
+        let slot = transcriptSlot
+        guard NativeViewVectorRenderer.fingerprint(body, skipping: { $0 === slot }) != drawnFingerprint else {
+            qaUnchangedInvalidations += 1
+            return
+        }
         needsDisplay = true
     }
+
+    /// What the last resting draw showed; nil forces the next invalidation through.
+    private var drawnFingerprint: Int?
+    private(set) var qaUnchangedInvalidations = 0
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         if isResting {
             body.appearance = effectiveAppearance
+            drawnFingerprint = nil
             needsDisplay = true
         }
     }
@@ -390,6 +465,8 @@ final class AgentTileChromeCanvasView: NSView {
         context.saveGState()
         NativeViewVectorRenderer.draw(body, in: context, parentIsFlipped: isFlipped, skipping: { $0 === slot })
         context.restoreGState()
+        NativeViewVectorRenderer.markDrawn(body)
+        drawnFingerprint = NativeViewVectorRenderer.fingerprint(body, skipping: { $0 === slot })
     }
 
     /// A press that reached this view while resting (a path that bypassed the
