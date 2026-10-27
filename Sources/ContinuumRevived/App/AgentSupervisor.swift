@@ -154,8 +154,8 @@ protocol AgentSteeringRunning: AgentRunning {
     /// subagents).
     var hasBackgroundWork: Bool { get }
     /// Provider-owned children still running inside this session. Only these
-    /// keep an idle session from the reaper and keep mirrored children open
-    /// past the parent's result; a shell job never does.
+    /// keep mirrored children open past the parent's result; a shell job never
+    /// does (though it does keep the idle session alive).
     var hasRunningSubagents: Bool { get }
 }
 
@@ -8403,7 +8403,9 @@ final class AgentSupervisor {
         idleReapTokens[id] = token
         DispatchQueue.main.asyncAfter(deadline: .now() + idleRunnerTimeout) { [weak self] in
             guard let self, self.idleReapTokens[id] == token, self.idleSessionRunners[id] === runner else { return }
-            if (runner as? AgentSteeringRunning)?.hasRunningSubagents == true {
+            // A running shell job (a dev server) or child keeps the session;
+            // only children, never shell jobs, decide when children close.
+            if (runner as? AgentSteeringRunning)?.hasBackgroundWork == true {
                 self.scheduleIdleReap(for: id, runner: runner)
                 return
             }
