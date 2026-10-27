@@ -269,6 +269,9 @@ final class CanvasMotionWorkload {
                                                installsGlobalEventMonitors: true)
         for (index, tileID) in managedTileIDs.enumerated() {
             guard let view = scene.tileView(for: tileID) as? ManagedAgentTileNSView else {
+                // A replayed zone below the live hydration tier installs no tiles at
+                // boot, exactly as in the app; its agents run tile-less.
+                if replay != nil { continue }
                 throw Failure(description: "production mount did not install agent tile \(index)")
             }
             if view.attachedAgentID != ids[index] { delegate.wireManagedAgentTile(tileID, agentID: ids[index]) }
@@ -276,7 +279,7 @@ final class CanvasMotionWorkload {
                 throw Failure(description: "production mount did not attach agent \(index)")
             }
         }
-        guard fileIDs.allSatisfy({ scene.tileView(for: $0) is FileTileNSView }) else {
+        guard replay != nil || fileIDs.allSatisfy({ scene.tileView(for: $0) is FileTileNSView }) else {
             throw Failure(description: "production mount did not install every Markdown tile")
         }
         let host = delegate.makeWorkspaceWindow(canvasView: scene, title: "Array Dev — live canvas performance")
@@ -323,7 +326,8 @@ final class CanvasMotionWorkload {
     func prepareStreaming() {
         guard !closed else { return }
         if !sentPrompts {
-            for (id, tileID) in zip(agentIDs, agentTileIDs) {
+            let streaming = emitter.streamingIDs
+            for (id, tileID) in zip(agentIDs, agentTileIDs) where streaming?.contains(id) ?? true {
                 if !supervisor.send("Continue reviewing the canvas rendering path and show the next implementation detail.", to: id) {
                     rejectedInputCount += 1
                 }
@@ -367,7 +371,8 @@ final class CanvasMotionWorkload {
             guard let range = text.range(of: prefix, options: .backwards) else { return -1 }
             return Int(text[range.upperBound...].prefix(while: { $0.isNumber })) ?? -1
         }
-        return zip(agentIDs, agentTileIDs).map { id, tileID in
+        let streaming = emitter.streamingIDs
+        return zip(agentIDs, agentTileIDs).filter { streaming?.contains($0.0) ?? true }.map { id, tileID in
             let tile = canvas.tileView(for: tileID) as? ManagedAgentTileNSView
             let local = latestAssistant(tile?.qaDocumentForChecks)
             let durable = latestAssistant(supervisor.transcriptDocumentProjection(for: id))
@@ -714,6 +719,7 @@ private final class CanvasMotionEmitter: @unchecked Sendable {
     }
 
     var streamingCount: Int? { lock.withLock { streaming?.count } }
+    var streamingIDs: Set<AgentID>? { lock.withLock { streaming } }
 
     func deliveryProgress() -> [AgentID: (deltas: Int, finalMarker: Int?)] {
         lock.withLock { entries.mapValues { (deltas: $0.deltas, finalMarker: $0.finalMarker) } }

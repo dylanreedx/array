@@ -1695,9 +1695,12 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// real zoom names this method directly (~960 samples), so the tile body owns
     /// a real share of the traversal, not just AppKit's recursion around it.
     private(set) var qaLayoutPassCount = 0
+    /// Every list's layout passes, read per frame by the motion benchmark.
+    static private(set) var qaTotalLayoutPasses = 0
 
     override func layout() {
         qaLayoutPassCount += 1
+        Self.qaTotalLayoutPasses += 1
         super.layout()
         let clipSize = scrollView.contentView.bounds.size
         if abs(collectionView.frame.width - clipSize.width) > 0.5 {
