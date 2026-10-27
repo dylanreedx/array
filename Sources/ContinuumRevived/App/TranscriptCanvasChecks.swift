@@ -17,8 +17,17 @@ import Foundation
 /// `contentsScale` redraws the same lines at 2x and 4x with no layout at all —
 /// the property a canvas zoom depends on.
 ///
-/// `TRANSCRIPT_CANVAS_PNG_DIR=<dir>` also writes a light and a dark review render
-/// of a tile with a realistic transcript. The matrix does not set it.
+/// Slice 2a, the drawn controls: through the PRODUCTION wiring (AppDelegate,
+/// supervisor, a runner that can respond), a press on a drawn approval choice
+/// reaches the transport exactly once with its decision; a drawn chevron expands
+/// a tool row to its output and the state persists across a full re-layout; a
+/// drawn code Copy copies the block; a capped code block scrolls sideways under a
+/// horizontal wheel; the working gyro animates on a sublayer only while a turn
+/// works; and the view still has no subviews.
+///
+/// `TRANSCRIPT_CANVAS_PNG_DIR=<dir>` also writes light and dark review renders of
+/// both renderers on one transcript (approval, expanded failed tool, file-change
+/// card). The matrix does not set it.
 @MainActor
 enum TranscriptCanvasChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
@@ -41,6 +50,8 @@ enum TranscriptCanvasChecks {
         try runDefaultIsTheRowList()
         setenv(key, "canvas", 1)
         try runCanvasRendererInTheTile()
+        try runDrawnControlsInTheTile()
+        try runApprovalPressReachesTheTransport()
         if let directory = ProcessInfo.processInfo.environment["TRANSCRIPT_CANVAS_PNG_DIR"] {
             let url = URL(fileURLWithPath: directory, isDirectory: true)
             try writeReviewRenders(to: url, renderer: "canvas")
@@ -247,61 +258,285 @@ enum TranscriptCanvasChecks {
               + "link opened; redrew at 2x and 4x with 0 layouts")
     }
 
+    // MARK: Slice 2a: drawn controls
+
+    private static func mouse(_ type: NSEvent.EventType, at point: NSPoint, in view: NSView, window: NSWindow) -> NSEvent {
+        NSEvent.mouseEvent(with: type, location: view.convert(point, to: nil), modifierFlags: [],
+                           timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                           context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)!
+    }
+
+    /// A press and release on a drawn control, through the window's event path.
+    private static func click(_ point: NSPoint, on view: NSView, window: NSWindow) {
+        window.sendEvent(mouse(.leftMouseDown, at: point, in: view, window: window))
+        window.sendEvent(mouse(.leftMouseUp, at: point, in: view, window: window))
+    }
+
+    private static func waitFor(_ seconds: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if condition() { return true }
+            pump(0.03)
+        }
+        return condition()
+    }
+
+    private static func runDrawnControlsInTheTile() throws {
+        let (tile, window) = makeTile(width: 460, height: 640)
+        defer { window.orderOut(nil) }
+        guard let surface = tile.qaTranscriptSurface as? AgentTranscriptCanvasView else {
+            throw Failure(description: "the canvas switch did not install the canvas transcript")
+        }
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("array.transcript-canvas-check.\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        surface.pasteboardForCopy = pasteboard
+        surface.bindToolDetailAgent(AgentID(rawValue: UUID()))
+        let thread = "canvas", turn = "t2"
+        tile.ingest(.turnStarted(threadId: thread, turnId: turn))
+        surface.setTurnInFlight(true)
+        surface.setThinkingIndicatorVisible(true)
+        try expect(surface.qaGyroIsAnimating && surface.qaGyroLayer.superlayer === surface.layer
+                   && !(surface.qaGyroLayer.sublayers ?? []).compactMap({ $0.animationKeys() }).flatMap({ $0 }).isEmpty,
+                   "a working tail must animate its gyro on a sublayer of the transcript's own layer")
+
+        // A failed tool with output: a drawn chevron, which expands to the output.
+        tile.ingest(.itemStarted(threadId: thread, itemId: "cmd-1", kind: .commandExecution, title: "swift test"))
+        surface.captureRuntimeObservation(.toolDetail(itemId: "cmd-1", detail: AgentToolDetailObservation(
+            phase: .ended, toolName: "Bash", fields: [(key: "command", value: "swift test")],
+            outputPreview: "Executed 14 tests, with 1 failure\nXCTAssertEqual failed: (3) is not equal to (2)",
+            exitCode: 1, observedAt: Date())))
+        tile.ingest(.itemCompleted(threadId: thread, itemId: "cmd-1", kind: .commandExecution, status: .completed))
+        settle(tile, surface)
+        guard let toolID = tile.qaDocumentForChecks.entries.flatMap(\.blocks).first(where: { $0.kind == .toolCall })?.id else {
+            throw Failure(description: "the tool item produced no tool block")
+        }
+        try expect(waitFor { surface.qaControls.contains { $0.blockID == toolID && $0.kind == "chevron.collapsed" } },
+                   "a completed tool with output must draw a collapsed disclosure chevron; controls \(surface.qaControls.map(\.kind))")
+        let collapsedHeight = surface.qaHeight(of: toolID) ?? 0
+        surface.qaReveal(blockID: toolID)
+        guard let chevron = surface.qaControls.first(where: { $0.blockID == toolID && $0.kind.hasPrefix("chevron") }) else {
+            throw Failure(description: "no chevron to press")
+        }
+        click(chevron.center, on: surface, window: window)
+        tile.layoutSubtreeIfNeeded()
+        try expect(surface.qaControls.contains { $0.blockID == toolID && $0.kind == "chevron.expanded" }
+                   && (surface.qaHeight(of: toolID) ?? 0) > collapsedHeight + 40
+                   && surface.qaLaidOutText.contains("XCTAssertEqual failed"),
+                   "pressing the chevron must expand the tool row to its output: height \(collapsedHeight) -> "
+                   + "\(surface.qaHeight(of: toolID) ?? 0), controls \(surface.qaControls.filter { $0.blockID == toolID }.map(\.kind))")
+        // Persists: a theme flip makes the tile push a new context, which drops
+        // every cached layout; the row must come back open.
+        let layoutsBeforeFlip = surface.qaBlockLayoutCount
+        window.appearance = NSAppearance(named: window.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .aqua : .darkAqua)
+        _ = waitFor(2) { tile.layoutSubtreeIfNeeded(); return surface.qaBlockLayoutCount > layoutsBeforeFlip }
+        try expect(surface.qaBlockLayoutCount > layoutsBeforeFlip
+                   && surface.qaControls.contains { $0.blockID == toolID && $0.kind == "chevron.expanded" },
+                   "the expanded tool row must stay expanded across a full re-layout (re-laid \(surface.qaBlockLayoutCount - layoutsBeforeFlip) blocks)")
+
+        // A code block past today's 320pt cap, with one long line.
+        let longLine = "let value = " + String(repeating: "alpha + beta + ", count: 30) + "omega"
+        let code = (0..<40).map { "line \($0)" }.joined(separator: "\n") + "\n" + longLine
+        tile.ingest(.contentDelta(threadId: thread, turnId: turn, streamKind: .assistant, delta: "Here:\n\n```swift\n\(code)\n```\n"))
+        tile.ingest(.turnCompleted(threadId: thread, turnId: turn, outcome: .completed, errorMessage: nil))
+        settle(tile, surface)
+        guard let codeBlock = tile.qaDocumentForChecks.entries.flatMap(\.blocks).first(where: { $0.kind == .fencedCode }),
+              case let .fencedCode(payload) = codeBlock.payload else {
+            throw Failure(description: "the fenced code produced no code block")
+        }
+        let cap = CodeBlockView.maximumExpandedHeight(zoom: .default)
+        try expect(abs((surface.qaHeight(of: codeBlock.id) ?? 0) - cap) < 1,
+                   "a long code block must stop at today's \(cap)pt cap, is \(surface.qaHeight(of: codeBlock.id) ?? 0)")
+        surface.qaReveal(blockID: codeBlock.id)
+        guard let copy = surface.qaControls.first(where: { $0.blockID == codeBlock.id && $0.title == "Copy" }) else {
+            throw Failure(description: "the code block drew no Copy control")
+        }
+        click(copy.center, on: surface, window: window)
+        try expect(pasteboard.string(forType: .string) == payload.code,
+                   "the drawn code Copy must copy the whole block, got \(String(describing: pasteboard.string(forType: .string)?.prefix(40)))")
+        // Sideways scroll over the code body moves only that block.
+        let inside = NSPoint(x: copy.center.x - 100, y: copy.center.y + 60)
+        let offsetBefore = surface.qaScrollOffset
+        if let cgEvent = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 0, wheel2: -60, wheel3: 0) {
+            // A synthesized wheel has no window, so its locationInWindow is the
+            // CG location flipped into Cocoa space: aim that at the window point.
+            let target = surface.convert(inside, to: nil)
+            cgEvent.location = CGPoint(x: target.x, y: (NSScreen.screens.first?.frame.height ?? 0) - target.y)
+            if let wheel = NSEvent(cgEvent: cgEvent) { surface.scrollWheel(with: wheel) }
+        }
+        let codeOffset = surface.qaRegionOffsets.first { $0.key.blockID == codeBlock.id }?.value ?? .zero
+        try expect(codeOffset.x > 0 && surface.qaScrollOffset == offsetBefore,
+                   "a horizontal wheel over a wide code block must scroll the block sideways, not the transcript: "
+                   + "block offset \(codeOffset), transcript \(offsetBefore) -> \(surface.qaScrollOffset)")
+
+        surface.setThinkingIndicatorVisible(false)
+        try expect(!surface.qaGyroIsAnimating, "the gyro must stop when the tail is no longer working")
+        try expect(surface.subviews.isEmpty, "the canvas transcript grew subviews: \(surface.subviews)")
+        print("transcript canvas 2a: chevron expanded a tool row to its output and it survived a re-layout; "
+              + "code capped at \(Int(cap))pt, Copy copied \(payload.code.count) characters, a sideways wheel scrolled "
+              + "the block only; the gyro animated on a sublayer and stopped; still 0 subviews")
+    }
+
+    // MARK: Production wiring
+
+    private struct Wired {
+        let delegate: AppDelegate
+        let supervisor: AgentSupervisor
+        let tile: ManagedAgentTileNSView
+        let window: NSWindow
+        let agentID: AgentID
+        let temporary: URL
+    }
+
+    /// `ProviderRequestResponseChecks`' fixture: a real delegate, canvas,
+    /// supervisor and tile joined by `wireManagedAgentTile`, parked off screen.
+    /// `firstPrompt` is sent BEFORE the tile is wired: the tile reads the runner's
+    /// response capability into its render context when it attaches, and does
+    /// not re-push it when the capability later appears, so a request block only
+    /// draws its choices if the runner was live at attach.
+    private static func makeWired(runner: ProviderRequestResponseChecks.RespondingRunner, firstPrompt: String,
+                                  width: Double = 520, height: Double = 420) throws -> Wired {
+        let fm = FileManager.default
+        let temporary = fm.temporaryDirectory.appendingPathComponent("array-transcript-canvas-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = temporary.appendingPathComponent("support", isDirectory: true)
+        let agentsSupport = temporary.appendingPathComponent("agents", isDirectory: true)
+        let projectRoot = temporary.appendingPathComponent("project", isDirectory: true)
+        for dir in [appSupport, agentsSupport, projectRoot] { try fm.createDirectory(at: dir, withIntermediateDirectories: true) }
+        let now = Date()
+        let tileID = UUID()
+        let agentID = AgentID(rawValue: UUID())
+        let store = AgentStore(applicationSupportDirectory: agentsSupport)
+        try store.upsert(AgentRecord(id: agentID, displayName: "canvas agent", role: "reviewer",
+                                     model: "openai-codex/gpt-5.6-sol", thinking: "medium", cwd: projectRoot.path,
+                                     projectId: UUID(), createdAt: now, lastActivityAt: now, tileId: tileID))
+        let tile = Tile(id: tileID, kind: .managedAgent, title: "canvas agent",
+                        frame: TileFrame(x: 0, y: 0, width: width, height: height),
+                        zPosition: .fromLegacyRank(1), runtimeRef: nil,
+                        metadata: TileMetadata(launchProfileId: "managed-agent", projectRelativeCwd: "."))
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile],
+                                                           groups: [], lastActiveTileId: nil))
+        canvas.frame = NSRect(x: 0, y: 0, width: width + 80, height: height + 80)
+        let delegate = AppDelegate()
+        canvas.focusBroker = delegate.focusBroker
+        canvas.occlusionVisibilityProvider = { true }
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontOffscreenForChecks()
+        let tileView = ManagedAgentTileNSView(tile: tile)
+        canvas.install(tileView: tileView, for: tile)
+        canvas.layoutSubtreeIfNeeded()
+        delegate.canvasView = canvas
+        delegate.registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        delegate.agentSupervisor = AgentSupervisor(store: store, makeRunner: { _ in runner })
+        delegate.agentSupervisor.restore()
+        _ = delegate.agentSupervisor.send(firstPrompt, to: agentID)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        delegate.installAcceptedTileFocusHook()
+        delegate.wireManagedAgentTile(tileID, agentID: agentID)
+        return Wired(delegate: delegate, supervisor: delegate.agentSupervisor, tile: tileView, window: window,
+                     agentID: agentID, temporary: temporary)
+    }
+
+    private static func runApprovalPressReachesTheTransport() throws {
+        let runner = ProviderRequestResponseChecks.RespondingRunner()
+        let wired = try makeWired(runner: runner, firstPrompt: "open a request")
+        defer {
+            wired.window.orderOut(nil)
+            try? FileManager.default.removeItem(at: wired.temporary)
+        }
+        guard let surface = wired.tile.qaTranscriptSurface as? AgentTranscriptCanvasView else {
+            throw Failure(description: "the wired tile did not install the canvas transcript")
+        }
+        let thread = AgentSupervisor.threadId(for: wired.agentID)
+        wired.supervisor.qaDeliver(.requestOpened(threadId: thread, requestId: "req-canvas", kind: .commandExecutionApproval),
+                                   to: wired.agentID)
+        let declineTitle = ApprovalDecision.displayTitle(forChoice: ApprovalDecision.decline.rawValue)
+        let drawn = waitFor {
+            surface.flushPendingVisualUpdate()
+            wired.tile.layoutSubtreeIfNeeded()
+            return surface.qaControls.contains { $0.kind == "choice" && $0.title == declineTitle }
+        }
+        try expect(drawn, "the approval row drew no '\(declineTitle)' choice; controls \(surface.qaControls.map { "\($0.kind):\($0.title)" }), "
+                   + "requests \(wired.tile.qaV2RequestIDs), placed \(surface.qaPlacedBlockIDs.count), bounds \(surface.bounds), "
+                   + "can respond \(wired.supervisor.turnSnapshot(for: wired.agentID)?.capabilities.canRespondToRequests == true), "
+                   + "error \(surface.qaRenderingErrorDescription ?? "-"), entries \(wired.tile.qaDocumentForChecks.entries.map { "\($0.role):\($0.blocks.map(\.kind.rawValue))" }), "
+                   + "laid \(surface.qaLaidOutText.debugDescription)")
+        surface.jumpToLatest()
+        guard let decline = surface.qaControls.first(where: { $0.kind == "choice" && $0.title == declineTitle }) else {
+            throw Failure(description: "the decline choice vanished")
+        }
+        click(decline.center, on: surface, window: wired.window)
+        try expect(waitFor { runner.delivered.count == 1 },
+                   "a press on the drawn decline choice never reached the transport (delivered \(runner.delivered))")
+        try expect(runner.delivered[0].0 == "req-canvas" && runner.delivered[0].1 == .decline,
+                   "the press delivered \(runner.delivered), expected req-canvas/decline")
+        try expect(wired.tile.qaV2RequestResponseState("req-canvas") == .submitting,
+                   "the dispatched response left no in-flight state on the request")
+        try expect(surface.subviews.isEmpty, "the canvas transcript grew subviews: \(surface.subviews)")
+        print("transcript canvas 2a: a press on the drawn decline choice reached the transport once (req-canvas/decline)")
+    }
+
     // MARK: Review renders
 
     private static func writeReviewRenders(to directory: URL, renderer: String) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-            let (tile, window) = makeTile(width: 460, height: 860)
-            defer { window.orderOut(nil) }
-            window.appearance = NSAppearance(named: appearance)
-            guard let surface = tile.qaTranscriptSurface else { continue }
-            let thread = "canvas"
-            tile.appendUserPrompt("Can you find why the zoom stutters on my canvas and fix it? The agent tiles seem to be the slow part.")
-            tile.ingest(.turnStarted(threadId: thread, turnId: "r1"))
-            tile.ingest(.contentDelta(threadId: thread, turnId: "r1", streamKind: .assistant, delta: """
-            I'll profile a real pinch first, then look at what each tile pays per frame.
-
-            """))
-            tile.ingest(.itemStarted(threadId: thread, itemId: "read-1", kind: .fileChange, title: "Read CanvasNSView.swift"))
-            tile.ingest(.itemCompleted(threadId: thread, itemId: "read-1", kind: .fileChange, status: .completed))
-            tile.ingest(.itemStarted(threadId: thread, itemId: "cmd-1", kind: .commandExecution, title: "swift build --product Array"))
-            tile.ingest(.itemCompleted(threadId: thread, itemId: "cmd-1", kind: .commandExecution, status: .completed))
-            tile.ingest(.contentDelta(threadId: thread, turnId: "r1", streamKind: .assistant, delta: """
-
-            ## What the profile shows
-
-            Array's own code is about **2%** of a zoom frame. The rest is *AppKit* re-laying out every view in every tile:
-
-            - each agent tile is hundreds of views (`NSCollectionView`, cells, text views)
-            - every zoom step re-rasterizes all of them
-            - one view per tile reached 60-101 camera updates/s
-
-            The fix draws the transcript in a single view, see [the plan](https://arrayapp.dev/plans/canvas):
-
-            ```swift
-            override func draw(_ dirtyRect: NSRect) {
-                for line in visibleLines(in: dirtyRect) {
-                    CTLineDraw(line.ctLine, context)
-                }
+            let runner = ProviderRequestResponseChecks.RespondingRunner()
+            let wired = try makeWired(runner: runner, firstPrompt: "Run the parser tests and fix the failing one.",
+                                      width: 460, height: 900)
+            defer {
+                wired.window.orderOut(nil)
+                try? FileManager.default.removeItem(at: wired.temporary)
             }
-            ```
-
-            1. Lay out each block once at the view's width.
-            2. Draw only the lines inside the dirty rect.
-            """))
-            tile.ingest(.turnCompleted(threadId: thread, turnId: "r1", outcome: .completed, errorMessage: nil))
-            settle(tile, surface)
-            tile.layoutSubtreeIfNeeded()
+            wired.window.appearance = NSAppearance(named: appearance)
+            guard let surface = wired.tile.qaTranscriptSurface else { continue }
+            let deliver = { (event: AgentRuntimeEvent) in wired.supervisor.qaDeliver(event, to: wired.agentID) }
+            let thread = AgentSupervisor.threadId(for: wired.agentID)
+            // Tool items go straight to the tile, as the bare-tile assertions
+            // drive them, so the host-local detail (output, files) binds to the
+            // rows the same way in both renderers. The prompt went out before the tile was wired; show it the way a
+            // live send does.
+            wired.tile.appendUserPrompt("Run the parser tests and fix the failing one.")
+            deliver(.turnStarted(threadId: thread, turnId: "r1"))
+            let tileThread = wired.tile.qaThreadIdForChecks
+            wired.tile.ingest(.turnStarted(threadId: tileThread, turnId: "r1"))
+            deliver(.contentDelta(threadId: thread, turnId: "r1", streamKind: .assistant,
+                                  delta: "I'll run the **parser** tests first.\n\n"))
+            wired.tile.ingest(.itemStarted(threadId: tileThread, itemId: "cmd-1", kind: .commandExecution, title: "swift test --filter Parser"))
+            surface.captureRuntimeObservation(.toolDetail(itemId: "cmd-1", detail: AgentToolDetailObservation(
+                phase: .started, toolName: "Bash", fields: [(key: "command", value: "swift test --filter Parser")],
+                observedAt: Date())))
+            surface.captureRuntimeObservation(.toolDetail(itemId: "cmd-1", detail: AgentToolDetailObservation(
+                phase: .ended, toolName: "Bash",
+                outputPreview: "Test Suite 'ParserTests' started\n✗ testNestedLists (0.012s)\n  XCTAssertEqual failed: (\"3\") is not equal to (\"2\")\nExecuted 14 tests, with 1 failure",
+                exitCode: 1, observedAt: Date())))
+            wired.tile.ingest(.itemCompleted(threadId: tileThread, itemId: "cmd-1", kind: .commandExecution, status: .failed))
+            wired.tile.ingest(.itemStarted(threadId: tileThread, itemId: "edit-1", kind: .fileChange, title: "Edit MarkdownParser.swift"))
+            surface.captureRuntimeObservation(.toolDetail(itemId: "edit-1", detail: AgentToolDetailObservation(
+                phase: .ended, toolName: "Edit",
+                fileChanges: [.init(action: .edit, path: "Sources/Parser/MarkdownParser.swift", addedLines: 4, removedLines: 1)],
+                observedAt: Date())))
+            wired.tile.ingest(.itemCompleted(threadId: tileThread, itemId: "edit-1", kind: .fileChange, status: .completed))
+            deliver(.contentDelta(threadId: thread, turnId: "r1", streamKind: .assistant,
+                                  delta: "The nested list case counted its marker twice; `MarkdownParser` now skips it. "
+                                    + "I'd like to run the full suite to confirm."))
+            deliver(.requestOpened(threadId: thread, requestId: "req-1", kind: .commandExecutionApproval))
+            _ = waitFor(3) {
+                surface.flushPendingVisualUpdate()
+                wired.tile.layoutSubtreeIfNeeded()
+                return wired.tile.qaV2RequestIDs.contains("req-1")
+            }
+            pump(0.5)
+            surface.flushPendingVisualUpdate()
+            wired.tile.layoutSubtreeIfNeeded()
             surface.scrollTranscript(toY: 0)
-            tile.displayIfNeeded()
+            wired.tile.displayIfNeeded()
             let scale: CGFloat = 2
             guard let rep = NSBitmapImageRep(
-                bitmapDataPlanes: nil, pixelsWide: Int(tile.bounds.width * scale), pixelsHigh: Int(tile.bounds.height * scale),
+                bitmapDataPlanes: nil, pixelsWide: Int(wired.tile.bounds.width * scale), pixelsHigh: Int(wired.tile.bounds.height * scale),
                 bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
                 bytesPerRow: 0, bitsPerPixel: 0) else { continue }
-            rep.size = tile.bounds.size
-            tile.cacheDisplay(in: tile.bounds, to: rep)
+            rep.size = wired.tile.bounds.size
+            wired.tile.cacheDisplay(in: wired.tile.bounds, to: rep)
             guard let png = rep.representation(using: .png, properties: [:]) else { continue }
             let url = directory.appendingPathComponent("transcript-\(renderer)-\(name).png")
             try png.write(to: url)
