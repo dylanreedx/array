@@ -350,6 +350,7 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         let captureEnabled = env["CANVAS_MOTION_CAPTURE"] != "0"
         // Fidelity gate: full-resolution capture, so it is never mixed into a timing arm.
         let fidelity = env["CANVAS_MOTION_FIDELITY"] == "1"
+        var fidelityWindowSize: NSSize?
         let selectedPhase = env["CANVAS_MOTION_PHASE"] ?? "zoom"
         guard ["pan", "zoom", "mixed"].contains(selectedPhase) else {
             throw Failure(description: "CANVAS_MOTION_PHASE must be pan, zoom or mixed")
@@ -496,6 +497,7 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         for phase in [selectedPhase] {
             state.phase = phase
             receiver?.setKeeping(true)
+            if fidelityWindowSize == nil { fidelityWindowSize = fixture.window.frame.size }
             let before = fixture.snapshot()
             checkVisibility(before, phase + "-before")
             let beginMach = mach_absolute_time() + MotionClock.ticks(0.1)
@@ -564,6 +566,7 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         var fidelityResults: [[String: Any]] = []
         if fidelity, let filter = screenshotFilter, let kept = receiver?.keptFrames() {
             fidelityResults = try await MotionFidelityGate.run(kept: kept, commits: state.commits, canvas: fixture.canvas,
+                expectedWindowSize: fidelityWindowSize ?? fixture.window.frame.size,
                 filter: filter, directory: output.deletingLastPathComponent(),
                 excludeTopPixels: Int(80 * fixture.window.backingScaleFactor))
         }
@@ -775,7 +778,7 @@ enum MotionFidelityGate {
     static let minSharpnessRatio = 0.97
 
     static func run(kept: [(serial: Int, image: CGImage)], commits: [[String: Any]], canvas: CanvasNSView,
-                    filter: SCContentFilter, directory: URL, excludeTopPixels: Int) async throws -> [[String: Any]] {
+                    expectedWindowSize: NSSize, filter: SCContentFilter, directory: URL, excludeTopPixels: Int) async throws -> [[String: Any]] {
         var results: [[String: Any]] = []
         for (index, frame) in kept.enumerated() {
             guard let commit = commits.first(where: { $0["serial"] as? Int == frame.serial }),
@@ -790,6 +793,14 @@ enum MotionFidelityGate {
             config.ignoreShadowsSingleWindow = true
             config.colorSpaceName = CGColorSpace.sRGB
             let still = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            // A window that was moved, resized or covered between the two captures
+            // makes the pair meaningless: report it invalid, never a renderer fail.
+            if let window = canvas.window, window.frame.size != expectedWindowSize
+                || window.occlusionState.contains(.visible) == false {
+                results.append(["serial": frame.serial, "zoom": zoom, "pass": false, "invalid": true,
+                                "error": "window changed between captures"])
+                continue
+            }
             var result = compare(moving: frame.image, still: still, excludeTopPixels: excludeTopPixels)
             result["serial"] = frame.serial
             result["zoom"] = zoom
