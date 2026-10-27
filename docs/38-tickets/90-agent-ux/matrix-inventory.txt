@@ -132,6 +132,7 @@ check --focus-broker-activation-check
 check --focus-mode-check
 check --focus-scope-dispatch-check
 check --fresh-install-check
+check --hide-external-rows-check
 check --inbox-parent-fold-check
 check --inbox-reveal-project-check
 check --input-gate-check
@@ -448,6 +449,7 @@ leg run_app_check .build/debug/Array --focus-broker-activation-check
 leg run_app_check .build/debug/Array --focus-mode-check
 leg run_app_check .build/debug/Array --focus-scope-dispatch-check
 leg run_app_check .build/debug/Array --fresh-install-check
+leg run_app_check .build/debug/Array --hide-external-rows-check
 leg run_app_check .build/debug/Array --inbox-parent-fold-check
 leg run_app_check .build/debug/Array --inbox-reveal-project-check
 leg run_app_check .build/debug/Array --input-gate-check

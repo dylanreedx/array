@@ -161,11 +161,11 @@ enum ExternalSessionsSidebarChecks {
         try expect(inbox.row(forAgentId: rowId(codexApp))?.whereMarker?.text == "Codex app · 4m ago",
                    "a Codex app thread reads 'Codex app · 4m ago'; got \(String(describing: inbox.row(forAgentId: rowId(codexApp))?.whereMarker))")
 
-        // Hover: Move here and Copy, and no Copy for Codex.
+        // Hover: Move here, Copy and the hide ×, and no Copy for Codex.
         try expect(inbox.hoverRowForQA(id: rowId(cmux)), "the cmux row must be hoverable")
         inbox.layoutForQA()
-        try expect(inbox.hoverActionsForQA(id: rowId(cmux))?.titles == ["Move here", "Copy"],
-                   "hovering a Claude session offers Move here and Copy; got \(String(describing: inbox.hoverActionsForQA(id: rowId(cmux))))")
+        try expect(inbox.hoverActionsForQA(id: rowId(cmux))?.titles == ["Move here", "Copy", "Hide"],
+                   "hovering a Claude session offers Move here, Copy and Hide; got \(String(describing: inbox.hoverActionsForQA(id: rowId(cmux))))")
         if let pngPath {
             try writePNG(of: sidebar, to: URL(fileURLWithPath: pngPath))
         }
@@ -207,8 +207,8 @@ enum ExternalSessionsSidebarChecks {
         try expect(inbox.hoverRowForQA(id: rowId(codexApp)), "the Codex row must be hoverable")
         // Nor Move here: the Codex app runs every thread in one server, so a
         // thread's close cannot be seen, and Move here waits for exactly that.
-        try expect(inbox.hoverActionsForQA(id: rowId(codexApp))?.titles.isEmpty ?? true,
-                   "a Codex app thread offers neither Copy nor Move here; got \(String(describing: inbox.hoverActionsForQA(id: rowId(codexApp))))")
+        try expect(inbox.hoverActionsForQA(id: rowId(codexApp))?.titles ?? [] == ["Hide"],
+                   "a Codex app thread offers neither Copy nor Move here, only Hide; got \(String(describing: inbox.hoverActionsForQA(id: rowId(codexApp))))")
         try expect(inbox.hoverRowForQA(id: fixture.agentId.rawValue)
                    && !(inbox.hoverActionsForQA(id: fixture.agentId.rawValue)?.titles.contains("Copy") ?? false),
                    "an Array agent's row never offers an external session's buttons")

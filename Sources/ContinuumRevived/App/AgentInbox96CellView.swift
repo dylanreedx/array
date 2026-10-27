@@ -626,8 +626,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// the provider mark (mock 4). Clicking the row itself is Watch.
     private let hoverMoveHere = InboxSettleNudgeButton(frame: .zero)
     private let hoverCopy = InboxSettleNudgeButton(frame: .zero)
+    private let hoverHide = InboxSettleNudgeButton(frame: .zero)
     private var onHoverMoveHere: (() -> Void)?
     private var onHoverCopy: (() -> Void)?
+    private var onHoverHide: (() -> Void)?
     /// Where the session lives (`· cmux`), after the project name.
     private let whereDot = NSTextField(labelWithString: "·")
     private let whereIcon = NSImageView(frame: .zero)
@@ -923,6 +925,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         for (button, title, symbol) in [
             (hoverMoveHere, InboxExternalSessionAction.moveHere.title, "arrow.down.right.square"),
             (hoverCopy, InboxExternalSessionAction.copy.title, "plus.square.on.square"),
+            (hoverHide, "", "xmark"),
         ] {
             button.title = title
             button.font = .systemFont(ofSize: metaSize, weight: .medium)
@@ -937,6 +940,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         hoverMoveHere.action = #selector(hoverMoveHereClicked)
         hoverCopy.action = #selector(hoverCopyClicked)
+        hoverHide.action = #selector(hoverHideClicked)
+        hoverHide.setAccessibilityLabel("Hide")
+        hoverHide.toolTip = "Hide from the sidebar"
         for label in [whereDot, whereLabel] {
             label.font = .token(.caption)
             label.lineBreakMode = .byTruncatingTail
@@ -1280,6 +1286,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         whereIcon.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         hoverMoveHere.applyTokens()
         hoverCopy.applyTokens()
+        hoverHide.applyTokens()
         titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         branchLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         modelLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
@@ -1652,7 +1659,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // An external row's hover actions sit left of the mark, and the branch
         // ends where they begin.
         var actionRight = textRight - trailing - 6
-        for button in [hoverCopy, hoverMoveHere] where !button.isHidden {
+        for button in [hoverHide, hoverCopy, hoverMoveHere] where !button.isHidden {
             let size = button.intrinsicContentSize
             let top = snapped(detailLine - size.height / 2)
             button.opticalCentreY = detailLine - top
@@ -1741,11 +1748,20 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     @objc private func hoverSettleClicked() { onHoverSettle?() }
     @objc private func hoverMoveHereClicked() { onHoverMoveHere?() }
     @objc private func hoverCopyClicked() { onHoverCopy?() }
+    @objc private func hoverHideClicked() { onHoverHide?() }
 
     /// A session from another app's hover actions; nil hides one.
-    func configureExternalActions(moveHere: (() -> Void)?, copy: (() -> Void)?) {
+    func configureExternalActions(moveHere: (() -> Void)?, copy: (() -> Void)?, hide: (() -> Void)?) {
         onHoverMoveHere = moveHere
         onHoverCopy = copy
+        onHoverHide = hide
+    }
+
+    /// Presses the hover × through its own target/action.
+    func clickHoverHideForQA() -> Bool {
+        guard !hoverHide.isHidden else { return false }
+        hoverHide.performClick(nil)
+        return true
     }
 
     /// Which hover actions this row offers; nil hides one. Set by the list, which
@@ -1765,12 +1781,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let any = snoozeOn || settleOn
         let moveOn = shown && onHoverMoveHere != nil
         let copyOn = shown && onHoverCopy != nil
-        if hoverMoveHere.isHidden == moveOn || hoverCopy.isHidden == copyOn {
+        let hideOn = shown && onHoverHide != nil
+        if hoverMoveHere.isHidden == moveOn || hoverCopy.isHidden == copyOn || hoverHide.isHidden == hideOn {
             hoverMoveHere.isHidden = !moveOn
             hoverCopy.isHidden = !copyOn
+            hoverHide.isHidden = !hideOn
             needsLayout = true
         }
-        hoverActionsShown = any || moveOn || copyOn
+        hoverActionsShown = any || moveOn || copyOn || hideOn
         let wasShown = !hoverSnooze.isHidden || !hoverSettle.isHidden
         // Shown before fading in; hidden only once faded out, so a leaving
         // pointer never blinks the corner empty.
@@ -1918,7 +1936,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Whether the hover actions are what the status slot shows right now.
     var qaHoverActionsShown: Bool { hoverActionsShown }
     var qaHoverActionTitles: [String] {
-        [hoverSnooze, hoverSettle, hoverMoveHere, hoverCopy].filter { !$0.isHidden }
+        [hoverSnooze, hoverSettle, hoverMoveHere, hoverCopy, hoverHide].filter { !$0.isHidden }
             .compactMap { $0.accessibilityLabel() }
     }
     /// The where marker as drawn: its text, and whether it sits clear of the
