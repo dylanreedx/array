@@ -172,24 +172,24 @@ enum NativeViewVectorRenderer {
         }
     }
 
-    /// Everything `draw` would read from a detached tree, folded into one value,
-    /// so an update that changes nothing on screen costs a walk and no redraw.
+    /// The values a detached tree's picture and layout derive from, folded into
+    /// one number — read straight from the views, with NO layout pass.
     ///
-    /// Why: a streaming agent republishes its turn snapshot on every chunk, and
-    /// each republish re-applies the same labels and colours. Redrawing the whole
-    /// resting chrome for each one was 34 full redraws for 30 chunks — per tile,
-    /// inside whatever camera frame they land in. Values read here are the ones the
-    /// renderer draws (frames, visibility, alpha, layer fills and borders, label
-    /// text and colour, images and tints, control state); a view that draws itself
-    /// contributes its own `needsDisplay`, which `draw` clears.
+    /// Why: a streaming agent republishes its turn snapshot on every chunk and
+    /// re-applies the same labels and colours, which dirties the detached tree's
+    /// Auto Layout engine without changing anything. Laying it out to find that
+    /// out cost 11 ms per chunk per resting tile (two thirds of a streaming pan's
+    /// main thread). Values hashed: visibility, alpha, layer fills and borders,
+    /// label text, colour and font, images and tints, control state, text-view
+    /// strings. Frames are a function of these and the body's size, except for
+    /// constraint constants, whose one writer (page zoom) forces a settle.
     static func fingerprint(_ root: NSView, skipping skip: ((NSView) -> Bool)? = nil) -> Int {
         var hasher = Hasher()
         func visit(_ view: NSView) {
             guard !view.isHidden, view.alphaValue > 0.001 else { hasher.combine(0); return }
             if let skip, skip(view) { return }
             hasher.combine(ObjectIdentifier(view))
-            for value in [view.frame.minX, view.frame.minY, view.frame.width, view.frame.height,
-                          view.bounds.minX, view.bounds.minY, view.alphaValue] { hasher.combine(value) }
+            hasher.combine(view.alphaValue)
             if let layer = view.layer {
                 hasher.combine(layer.opacity)
                 hasher.combine(layer.backgroundColor)
@@ -208,9 +208,6 @@ enum NativeViewVectorRenderer {
             case let imageView as NSImageView:
                 hasher.combine(imageView.image.map(ObjectIdentifier.init))
                 hasher.combine(imageView.contentTintColor)
-                hasher.combine(imageView.subviews.first?.frame.minX)
-                hasher.combine(imageView.subviews.first?.frame.minY)
-                hasher.combine(imageView.subviews.first?.frame.width)
                 return
             case let button as NSButton:
                 hasher.combine(button.title)
@@ -221,12 +218,21 @@ enum NativeViewVectorRenderer {
             default:
                 if let control = view as? NSControl { hasher.combine(control.isEnabled) }
                 if let text = view as? NSTextView { hasher.combine(text.string) }
-                if overridesDraw(view) { hasher.combine(view.needsDisplay) }
             }
             view.subviews.forEach(visit)
         }
         visit(root)
         return hasher.finalize()
+    }
+
+    /// Whether a view that draws itself has asked to be drawn again since the
+    /// last `markDrawn` — its content is its own, so its own flag is the signal.
+    static func selfDrawnNeedsDisplay(_ root: NSView, skipping skip: ((NSView) -> Bool)? = nil) -> Bool {
+        guard !root.isHidden else { return false }
+        if let skip, skip(root) { return false }
+        if root is NSTextField || root is NSImageView || root is NSButton { return false }
+        if root.needsDisplay, overridesDraw(root) { return true }
+        return root.subviews.contains { selfDrawnNeedsDisplay($0, skipping: skip) }
     }
 
     /// After a draw: the views that draw themselves have been drawn.
@@ -363,11 +369,10 @@ final class AgentTileChromeCanvasView: NSView {
         qaRestCount += 1
         // Detached views resolve colours against the app's appearance unless told.
         body.appearance = effectiveAppearance
-        drawnFingerprint = nil
         body.removeFromSuperview()
         body.frame = bounds
-        body.layoutSubtreeIfNeeded()
-        placeTranscript()
+        layOutRestingBody()
+        drawnFingerprint = nil
         needsDisplay = true
     }
 
@@ -383,38 +388,83 @@ final class AgentTileChromeCanvasView: NSView {
         needsDisplay = true
     }
 
-    /// The tile changed something the body shows. Only a resting body needs to
-    /// be told; a live one invalidates itself.
+    /// The tile changed something the body may show. Marking only: however many
+    /// chunks arrive in a frame, the resting body is checked once, in this view's
+    /// `layout()` in the next display cycle — and laid out and redrawn only if
+    /// what it shows changed. A live body invalidates itself.
     func invalidateRestingChrome() {
         guard isResting else { return }
-        body.layoutSubtreeIfNeeded()
-        placeTranscript()
-        let slot = transcriptSlot
-        guard NativeViewVectorRenderer.fingerprint(body, skipping: { $0 === slot }) != drawnFingerprint else {
-            qaUnchangedInvalidations += 1
-            return
-        }
-        needsDisplay = true
+        restingDirty = true
+        needsLayout = true
     }
 
-    /// What the last resting draw showed; nil forces the next invalidation through.
+    /// Something the fingerprint cannot see changed (an appearance, a page-zoom
+    /// constant): lay out and redraw at the next display cycle regardless.
+    func forceRestingRedraw() {
+        guard isResting else { return }
+        laidOutFingerprint = nil
+        drawnFingerprint = nil
+        restingDirty = true
+        needsLayout = true
+    }
+
+    private var restingDirty = false
+    /// The values the body was last laid out for, and last drawn with; nil forces.
+    private var laidOutFingerprint: Int?
     private var drawnFingerprint: Int?
     private(set) var qaUnchangedInvalidations = 0
+    private(set) var qaBodyLayoutCount = 0
+    private(set) var qaSettleCount = 0
+
+    private func layOutRestingBody() {
+        qaBodyLayoutCount += 1
+        body.layoutSubtreeIfNeeded()
+        // After the pass: a layout may itself hide a control (the mic that does
+        // not fit), and the fingerprint is of what was laid out.
+        laidOutFingerprint = currentFingerprint
+        placeTranscript()
+    }
+
+    private var currentFingerprint: Int {
+        let slot = transcriptSlot
+        var hasher = Hasher()
+        hasher.combine(bounds.width)
+        hasher.combine(bounds.height)
+        hasher.combine(NativeViewVectorRenderer.fingerprint(body, skipping: { $0 === slot }))
+        return hasher.finalize()
+    }
+
+    /// Once per display cycle at most, from `layout()`.
+    private func settleRestingBody() {
+        restingDirty = false
+        qaSettleCount += 1
+        let values = currentFingerprint
+        if values != laidOutFingerprint { layOutRestingBody() }
+        let slot = transcriptSlot
+        if laidOutFingerprint != drawnFingerprint
+            || NativeViewVectorRenderer.selfDrawnNeedsDisplay(body, skipping: { $0 === slot }) {
+            needsDisplay = true
+        } else {
+            qaUnchangedInvalidations += 1
+        }
+    }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         if isResting {
             body.appearance = effectiveAppearance
-            drawnFingerprint = nil
-            needsDisplay = true
+            forceRestingRedraw()
         }
     }
 
     override func layout() {
         qaLayoutCount += 1
         super.layout()
-        if body.frame != bounds { body.frame = bounds }
-        if isResting { body.layoutSubtreeIfNeeded() }
+        if body.frame != bounds {
+            body.frame = bounds
+            if isResting { restingDirty = true }
+        }
+        if isResting, restingDirty { settleRestingBody() }
         placeTranscript()
     }
 
@@ -460,13 +510,14 @@ final class AgentTileChromeCanvasView: NSView {
         guard isResting, let context = NSGraphicsContext.current?.cgContext else { return }
         qaDrawCount += 1
         qaLastDrawScale = layer?.contentsScale ?? 0
-        body.layoutSubtreeIfNeeded()
+        // No layout here: a camera step redraws at a new scale and nothing else,
+        // and the frames are the ones `settleRestingBody` laid out for these values.
         let slot = transcriptSlot
         context.saveGState()
         NativeViewVectorRenderer.draw(body, in: context, parentIsFlipped: isFlipped, skipping: { $0 === slot })
         context.restoreGState()
         NativeViewVectorRenderer.markDrawn(body)
-        drawnFingerprint = NativeViewVectorRenderer.fingerprint(body, skipping: { $0 === slot })
+        drawnFingerprint = laidOutFingerprint
     }
 
     /// A press that reached this view while resting (a path that bypassed the

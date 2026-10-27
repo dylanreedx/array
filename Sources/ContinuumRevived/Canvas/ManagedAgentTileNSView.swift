@@ -1061,7 +1061,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     func applyCornerStyle() { applyPageZoomToContent() }
 
     private func applyPageZoomToContent() {
-        defer { chromeDidChange() }
+        // Constraint constants move here, which the resting fingerprint cannot see.
+        defer { chromeCanvas?.forceRestingRedraw(); chromeDidChange() }
         let zoom = pageZoom
         agentHeaderHeight?.constant = AgentTileHeaderView.preferredHeight(zoom: zoom)
         compactStatusRowHeight?.constant = AgentCompactStatusRowView.preferredHeight(zoom: zoom)
