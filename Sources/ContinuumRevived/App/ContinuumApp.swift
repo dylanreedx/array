@@ -21146,6 +21146,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// Plan 87, Step 4.5: a retitle or a zone move is described by the live canvas
+    /// the sidebar inputs already overlay, so it re-renders from memory and opens
+    /// no file. A pending structural reload covers it.
+    func canvasSidebarLabelsDidChange(_ canvas: CanvasNSView) {
+        guard !sidebarReloadPending, !sidebarLabelsReloadPending else { return }
+        sidebarLabelsReloadPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.sidebarLabelsReloadPending else { return }
+            self.sidebarLabelsReloadPending = false
+            guard !self.sidebarReloadPending else { return }
+            self.reloadWorkspaceSidebar(rebuildAgentActivity: false)
+        }
+    }
+
+    private var sidebarLabelsReloadPending = false
+
     private var lastReconciledViewport: CanvasViewport?
 
     private func scheduleBrowserSave() {

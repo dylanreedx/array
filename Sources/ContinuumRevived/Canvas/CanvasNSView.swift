@@ -2182,7 +2182,7 @@ final class CanvasNSView: NSView, TokenThemed {
         if let view { destination.tileViews[tileId] = view }
         tileZoneMembership[tileId] = zoneId
         _layoutLayerTile(record, in: destination)
-        delegate?.canvasSidebarModelDidChange(self)
+        delegate?.canvasSidebarLabelsDidChange(self)
         return true
     }
 
@@ -2339,8 +2339,10 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         }
         reorderTileSubviewsByZIndex()
-        if previousTile == nil || previousTile?.title != tile.title || previousTile?.kind != tile.kind {
+        if previousTile == nil || previousTile?.kind != tile.kind {
             delegate?.canvasSidebarModelDidChange(self)
+        } else if previousTile?.title != tile.title {
+            delegate?.canvasSidebarLabelsDidChange(self)
         }
     }
 
@@ -3001,8 +3003,10 @@ final class CanvasNSView: NSView, TokenThemed {
         if !CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) { layoutAllTiles(onlyChangedTiles: true) }
         layoutZoneChromeViews()
         updateContextualAgentLineageGeometry()
-        if previousTile.title != tile.title || previousTile.kind != tile.kind {
+        if previousTile.kind != tile.kind {
             delegate?.canvasSidebarModelDidChange(self)
+        } else if previousTile.title != tile.title {
+            delegate?.canvasSidebarLabelsDidChange(self)
         }
         if notifyChange { delegate?.canvasDidChange(self, tileId: tile.id) }
     }
@@ -13124,11 +13128,15 @@ protocol CanvasNSViewDelegate: AnyObject {
     /// not necessarily the armed zone's.
     func canvasDidChange(_ canvas: CanvasNSView, tileId: UUID)
     func canvasSidebarModelDidChange(_ canvas: CanvasNSView)
+    /// A tile was retitled or moved between zones: the live canvas already holds
+    /// the answer, so the sidebar re-renders WITHOUT re-reading any store (plan 87).
+    func canvasSidebarLabelsDidChange(_ canvas: CanvasNSView)
 }
 
 extension CanvasNSViewDelegate {
     func canvasDidChange(_ canvas: CanvasNSView, tileId: UUID) { canvasDidChange(canvas) }
     func canvasSidebarModelDidChange(_ canvas: CanvasNSView) {}
+    func canvasSidebarLabelsDidChange(_ canvas: CanvasNSView) {}
 }
 
 @MainActor
