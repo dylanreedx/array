@@ -3381,9 +3381,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let composeViews: [NSView]
         switch statusRowPlacement {
         case .aboveComposer:
-            composeViews = [agentHeader, compactStatusRow, composer, footerRow]
+            composeViews = [compactStatusRow, composer, footerRow]
         case .belowComposer:
-            composeViews = [agentHeader, composer, compactStatusRow, statusSpacer, footerRow]
+            composeViews = [composer, compactStatusRow, statusSpacer, footerRow]
             let spacerHeight = statusSpacer.heightAnchor.constraint(
                 equalToConstant: CGFloat(pageZoom.scaled(Space.l)))
             spacerHeight.isActive = true
@@ -3429,7 +3429,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         }() : nil
         let transcriptInStack: NSView = slot ?? transcript
         let layout = NSStackView(views: [
-            locationStatus, transcriptInStack, pendingDock, faceFlipBanner, sessionHandoffBanner,
+            agentHeader, locationStatus, transcriptInStack, pendingDock, faceFlipBanner, sessionHandoffBanner,
             composeBackdrop,
         ])
         layout.orientation = .vertical
@@ -3469,7 +3469,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             layout.topAnchor.constraint(equalTo: root.topAnchor),
             layout.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             headerHeight,
-            agentHeader.widthAnchor.constraint(equalTo: compactStatusRow.widthAnchor),
+            agentHeader.widthAnchor.constraint(equalTo: layout.widthAnchor),
             locationStatus.widthAnchor.constraint(equalTo: layout.widthAnchor),
             transcriptInStack.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeBackdrop.widthAnchor.constraint(equalTo: layout.widthAnchor),
@@ -4938,10 +4938,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         onClose = savedClose
         guard stopCount == 1, detachCount == 1 else { return false }
 
-        // The context strip is installed beside the composer and owns no live
-        // timer. The compact status row is the sole elapsed/activity surface.
+        // The context strip sits under the title bar, clear of the composer, and
+        // owns no live timer. The compact status row is the sole elapsed/activity surface.
         qaV2ContractDetail = "callbacks=\(stopCount)/\(detachCount) contextByComposer=\(agentHeader.isDescendant(of: composeBackdrop))"
-        return agentHeader.isDescendant(of: composeBackdrop)
+        return !agentHeader.isDescendant(of: composeBackdrop)
             && !agentHeader.qaTimerIsActive && agentHeader.qaNameFrame == nil
 
     }

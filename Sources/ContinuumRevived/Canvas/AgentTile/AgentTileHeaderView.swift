@@ -2,7 +2,7 @@ import AppKit
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
-/// Session context beside the composer: branch, checkout warnings and awareness.
+/// Session context under the title bar: branch, checkout warnings and awareness.
 /// The legacy type name is retained for existing zoom/theme probes. Identity and
 /// operational status belong to the tile bar; live elapsed time belongs to the
 /// compact activity row. Standalone probes can still exercise the elapsed lane.
@@ -67,7 +67,7 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         elapsedLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
 
-        let row = NSStackView(views: [branchChip, NSView(), elapsedLabel])
+        let row = NSStackView(views: [elapsedLabel, NSView(), branchChip])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = CGFloat(pageZoom.scaled(Space.m))
@@ -114,8 +114,9 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     }
 
     private var contextInsets: NSEdgeInsets {
-        NSEdgeInsets(top: CGFloat(pageZoom.scaled(4)), left: 0,
-                     bottom: CGFloat(pageZoom.scaled(4)), right: 0)
+        let row = NSEdgeInsets(Inset.row, zoom: pageZoom)
+        return NSEdgeInsets(top: CGFloat(pageZoom.scaled(4)), left: row.left,
+                            bottom: CGFloat(pageZoom.scaled(4)), right: row.right)
     }
 
     /// Re-derives every metric this header owns from `zoom`. Same contract as

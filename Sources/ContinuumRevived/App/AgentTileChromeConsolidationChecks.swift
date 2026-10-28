@@ -43,8 +43,20 @@ enum AgentTileChromeConsolidationChecks {
                     tile.layoutSubtreeIfNeeded()
                     let context = tile.qaPageZoomHeaderView
                     let label = "\(renderer) \(appearance.rawValue) \(width)pt"
-                    if !context.isDescendant(of: tile.qaPageZoomComposeBackdrop) {
-                        failures.append("\(label): session context is still above the transcript")
+                    if context.isDescendant(of: tile.qaPageZoomComposeBackdrop) {
+                        failures.append("\(label): session context is crowding the composer")
+                    }
+                    let root = tile.qaPageZoomContentRoot
+                    let contextFrame = context.convert(context.bounds, to: root)
+                    let composerFrame = tile.qaPageZoomComposeBackdrop.convert(
+                        tile.qaPageZoomComposeBackdrop.bounds, to: root)
+                    let contextAboveComposer = root.isFlipped
+                        ? contextFrame.maxY <= composerFrame.minY : contextFrame.minY >= composerFrame.maxY
+                    if !contextAboveComposer {
+                        failures.append("\(label): session context is not under the title bar: \(contextFrame) vs composer \(composerFrame)")
+                    }
+                    if context.qaBranchFrame.midX <= context.bounds.midX {
+                        failures.append("\(label): branch is not on the right: \(context.qaBranchFrame) in \(context.bounds)")
                     }
                     let fields = textFields(in: tile.qaPageZoomContentRoot)
                     if fields.contains(where: { $0.stringValue == tile.qaAgentHeaderName || $0.stringValue == "Configuring" }) {
@@ -91,7 +103,7 @@ enum AgentTileChromeConsolidationChecks {
             }
         }
         try expect(failures.isEmpty, failures.joined(separator: "\n"))
-        print("agent chrome consolidation: \(cases) renderer/appearance/width cases; one identity/status, checkout context by composer")
+        print("agent chrome consolidation: \(cases) renderer/appearance/width cases; one identity/status, checkout context under the title bar")
     }
 
     private static func textFields(in view: NSView) -> [NSTextField] {
