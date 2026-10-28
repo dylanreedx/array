@@ -5192,6 +5192,18 @@ extension ManagedAgentTileNSView {
         return listTranscript?.qaDisplayedRowIDsForChecks ?? []
     }
 
+    /// The session-boundary dividers as drawn: label, whether the glyph shows,
+    /// and whether a rule is painted beside the label.
+    var qaSessionBoundaries: [(text: String, glyphVisible: Bool, ruled: Bool)] {
+        if let canvas = qaCanvasTranscript {
+            let boundaries = Set(model.document.entries.flatMap(\.blocks).filter { $0.kind == .sessionBoundary }.map(\.id))
+            return canvas.qaPlacedBlockIDs.filter(boundaries.contains).compactMap(canvas.qaBoundary(for:)).map {
+                ($0.text, !$0.symbolRects.isEmpty, $0.ruleRects.contains { $0.height <= 3 && $0.width >= 16 })
+            }
+        }
+        return qaSessionBoundaryViews.map { ($0.qaLabelText, $0.qaGlyphVisible, true) }
+    }
+
     /// The presented tool block for a document block, as the transcript drew it.
     func qaPresentedToolBlock(for blockID: AgentNodeID) -> AgentBlock? {
         if let canvas = qaCanvasTranscript {

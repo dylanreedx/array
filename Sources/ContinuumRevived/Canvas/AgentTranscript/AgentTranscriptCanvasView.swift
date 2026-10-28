@@ -1467,6 +1467,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let neededWidth: CGFloat
         let width: CGFloat
         let ruleRects: [CGRect]
+        let symbolRects: [CGRect]
     }
 
     /// A tool row's header as drawn, in view coordinates: the block's frame and
@@ -1525,8 +1526,12 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             if case let .fill(rect, _, _) = $0, rect.width > 0, rect.height > 0 { return rect }
             return nil
         }
+        let symbols: [CGRect] = item.block.decorations.compactMap {
+            if case let .symbol(_, rect) = $0, rect.width > 0, rect.height > 0 { return rect }
+            return nil
+        }
         return QABoundary(text: row.string.string, drawnWidth: line.width, neededWidth: needed,
-                          width: item.block.width, ruleRects: rules)
+                          width: item.block.width, ruleRects: rules, symbolRects: symbols)
     }
 }
 
