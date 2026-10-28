@@ -387,7 +387,7 @@ private func runCodexRunnerArgvChecks() {
         "exec",
         "--json", "--skip-git-repo-check",
         "-c", "approval_policy=never",
-        "-c", "sandbox_mode=workspace-write",
+        "-c", "sandbox_mode=danger-full-access",
         "-m", "gpt-5.6-sol",
         "-c", "model_reasoning_effort=high",
         "-C", "/tmp/work",
@@ -417,7 +417,7 @@ private func runCodexRunnerArgvChecks() {
         "exec", "resume", codexTID,
         "--json", "--skip-git-repo-check",
         "-c", "approval_policy=never",
-        "-c", "sandbox_mode=workspace-write",
+        "-c", "sandbox_mode=danger-full-access",
         "-m", "gpt-5.6-sol",
         "-c", "model_reasoning_effort=xhigh",
         "--extra",
@@ -428,11 +428,11 @@ private func runCodexRunnerArgvChecks() {
     let appServer = CodexCLIBackend.appServerArguments(extraArgs: [])
     expect(appServer == [
         "-c", "approval_policy=never",
-        "-c", "sandbox_mode=workspace-write",
+        "-c", "sandbox_mode=danger-full-access",
     ] + computerUseOff + ["app-server"], "CodexCLIBackend app-server argv drifted: \(appServer)")
 
-    expect(CodexCLIBackend.sandboxMode == "workspace-write",
-           "CodexCLIBackend: the pinned sandbox posture must be workspace-write")
+    expect(CodexCLIBackend.sandboxMode == "danger-full-access",
+           "CodexCLIBackend: managed Codex must have full access for local developer tools")
 
     #if os(macOS)
     // Executable resolution mirrors pi's/claude's GUI-thin-PATH strategy.

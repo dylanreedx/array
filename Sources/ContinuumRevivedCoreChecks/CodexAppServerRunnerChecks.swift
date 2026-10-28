@@ -152,6 +152,8 @@ for action in scenario:
         if not line:
             break
         obj = json.loads(line)
+        with open(os.path.join(scenario_dir, "requests.log"), "a") as f:
+            f.write(json.dumps(obj) + "\n")
         log_received(obj.get("method", ""), (obj.get("params") or {}).get("threadId"))
         if kind == "expect_request":
             reply = {"id": obj.get("id")}
@@ -412,6 +414,48 @@ private final class ProviderActivityCollector: @unchecked Sendable {
     }
 }
 
+/// Read the arguments received by the actual spawned stand-in, rather than
+/// inspecting source or re-deriving the production argument builder.
+private func expectFullAccessLaunches(in root: URL, count: Int, label: String) {
+    let log = (try? String(contentsOf: root.appendingPathComponent("argv.log"), encoding: .utf8)) ?? ""
+    let launches = log.split(separator: "\n").compactMap { line in
+        try? JSONDecoder().decode([String].self, from: Data(line.utf8))
+    }
+    expect(launches.count == count, "\(label): expected \(count) recorded Codex launches, got \(launches.count)")
+    for argv in launches {
+        let overrides = argv.indices.compactMap { index -> String? in
+            guard argv[index] == "-c", index + 1 < argv.count else { return nil }
+            return argv[index + 1]
+        }
+        expect(overrides.contains("sandbox_mode=danger-full-access"),
+               "\(label): spawned Codex must receive Full Access, got \(argv)")
+        expect(overrides.contains("approval_policy=never"),
+               "\(label): spawned Codex must run without shell approval prompts, got \(argv)")
+        expect(!overrides.contains("sandbox_mode=workspace-write"),
+               "\(label): spawned Codex must not retain the restrictive workspace sandbox")
+    }
+    let requestsLog = (try? String(contentsOf: root.appendingPathComponent("requests.log"), encoding: .utf8)) ?? ""
+    let requests = requestsLog.split(separator: "\n").compactMap { line in
+        (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
+    }
+    let threadRequests = requests.filter { ["thread/start", "thread/resume"].contains($0["method"] as? String ?? "") }
+    expect(threadRequests.count == count, "\(label): each launch must explicitly start or resume its thread")
+    for request in threadRequests {
+        let params = request["params"] as? [String: Any] ?? [:]
+        expect(params["sandbox"] as? String == "danger-full-access" && params["approvalPolicy"] as? String == "never",
+               "\(label): thread/start and thread/resume must override persisted restrictive permissions")
+    }
+    let turns = requests.filter { $0["method"] as? String == "turn/start" }
+    expect(!turns.isEmpty, "\(label): at least one turn must run")
+    for request in turns {
+        let params = request["params"] as? [String: Any] ?? [:]
+        let policy = params["sandboxPolicy"] as? [String: Any] ?? [:]
+        expect(policy["type"] as? String == "dangerFullAccess" && params["approvalPolicy"] as? String == "never",
+               "\(label): turn/start must explicitly apply Full Access to existing conversations")
+    }
+    print("Codex Full Access launch witnessed: \(label), \(count) process(es)")
+}
+
 private func runCodexAgentRunnerAppServerChecks() {
     let cwd = FileManager.default.temporaryDirectory
         .appendingPathComponent("continuum-codex-appserver-runner-\(UUID().uuidString)", isDirectory: true)
@@ -465,6 +509,7 @@ private func runCodexAgentRunnerAppServerChecks() {
             expect(events.contains { if case .turnCompleted(_, let turnId, let outcome, _) = $0 { return turnId == "fixture-fresh-turn" && outcome == .completed } else { return false } },
                    "runner (fresh, app-server): turn/completed must forward as a .completed outcome")
         }
+        expectFullAccessLaunches(in: fakeRoot, count: 1, label: "fresh")
         try? FileManager.default.removeItem(at: fakeRoot)
     }
 
@@ -573,6 +618,7 @@ private func runCodexAgentRunnerAppServerChecks() {
             expect(events.contains { if case .turnCompleted(_, "fixture-resume-turn", .completed, _) = $0 { return true } else { return false } },
                    "runner (resume, app-server): the resumed turn must still complete normally")
         }
+        expectFullAccessLaunches(in: fakeRoot, count: 1, label: "resume")
         try? FileManager.default.removeItem(at: fakeRoot)
     }
 
@@ -626,6 +672,7 @@ private func runCodexAgentRunnerAppServerChecks() {
             expect(events.contains { if case .turnCompleted(_, "fixture-healed-turn", .completed, _) = $0 { return true } else { return false } },
                    "runner (self-heal, app-server): the healed fresh turn must still reach the caller")
         }
+        expectFullAccessLaunches(in: fakeRoot, count: 2, label: "stale resume recovery")
         try? FileManager.default.removeItem(at: fakeRoot)
     }
 

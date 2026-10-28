@@ -19,9 +19,11 @@ import Foundation
 // <thread_id>`; a stale id fails and the runner self-heals to a fresh `exec`.
 
 public enum CodexCLIBackend {
-    /// The sandbox posture Array pins for every managed codex turn. The config
-    /// override works for both exec and app-server transports.
-    public static let sandboxMode = "workspace-write"
+    /// Managed Codex has Full Access so local developer tools (including Xcode
+    /// and CoreSimulator) can use services and caches outside the project root.
+    /// Applied to fresh/resumed exec and every app-server process; approval
+    /// policy remains `never`. Workspace API grants are controlled separately.
+    public static let sandboxMode = "danger-full-access"
 
     /// `provider/model` catalogue id → the codex `-m` argument. Codex takes the
     /// bare slug (`gpt-5.6-sol`); the `openai-codex/` prefix is Array's
@@ -144,8 +146,9 @@ public enum CodexCLIBackend {
     ]
 
     /// codex args for the `app-server` subprocess. Same `-c` overrides as
-    /// `processArguments` (`approval_policy=never`, `sandbox_mode`) since those
-    /// are process-level flags either way; there is no per-thread equivalent.
+    /// `processArguments` (`approval_policy=never`, `sandbox_mode`). Thread and
+    /// turn requests also pin these policies so resumed conversations cannot
+    /// restore restrictive permissions from an older rollout.
     /// `extraArgs` is always `[]` in production today (`codexRunnerConfig`
     /// never sets it — that field only carries pi's role `--tools` args) but
     /// is threaded through for the same reason `processArguments` threads it:
@@ -525,7 +528,10 @@ public final class CodexAgentRunner: @unchecked Sendable {
         }
         _ = try transport.sendRequest(
             method: "thread/resume",
-            params: ["threadId": threadId, "model": config.model],
+            params: [
+                "threadId": threadId, "model": config.model,
+                "sandbox": CodexCLIBackend.sandboxMode, "approvalPolicy": "never",
+            ],
             timeout: 30)
         _ = try transport.sendRequest(
             method: "thread/compact/start",
@@ -764,6 +770,8 @@ public final class CodexAgentRunner: @unchecked Sendable {
                 params: [
                     "cwd": config.cwd.path,
                     "model": config.model,
+                    "sandbox": CodexCLIBackend.sandboxMode,
+                    "approvalPolicy": "never",
                     "skipGitRepoCheck": true,
                     "multiAgentMode": "explicitRequestOnly",
                 ],
@@ -775,7 +783,10 @@ public final class CodexAgentRunner: @unchecked Sendable {
             let id = threadId ?? ""
             _ = try transport.sendRequest(
                 method: "thread/resume",
-                params: ["threadId": id, "model": config.model],
+                params: [
+                    "threadId": id, "model": config.model,
+                    "sandbox": CodexCLIBackend.sandboxMode, "approvalPolicy": "never",
+                ],
                 timeout: 30)
             resolvedThreadId = id
             // Measured 2026-08-24: unlike a fresh `thread/start`, a successful
@@ -801,6 +812,8 @@ public final class CodexAgentRunner: @unchecked Sendable {
         var turnParams: [String: Any] = [
             "threadId": resolvedThreadId,
             "input": [["type": "text", "text": CodexCLIBackend.promptArgument(prompt)]],
+            "sandboxPolicy": ["type": "dangerFullAccess"],
+            "approvalPolicy": "never",
         ]
         if let effort = config.effort { turnParams["effort"] = effort }
         let turnResult = try transport.sendRequest(method: "turn/start", params: turnParams, timeout: 15)
