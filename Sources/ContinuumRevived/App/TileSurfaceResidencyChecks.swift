@@ -786,19 +786,35 @@ enum TileSurfaceResidencyChecks {
         try runSelectionDefersCursorRectsWhileTheCameraMoves()
     }
 
-    /// With a tile selected, every camera step invalidated the selection overlay's
+    /// With tiles selected, every camera step invalidated the selection overlay's
     /// cursor rects, which walks the whole window (155 samples a minute live,
     /// 2026-10-24 22:42). A driver step defers it; the settle edge does it once.
+    ///
+    /// The selection is a GROUP: since `e990a629` one selected tile draws no
+    /// overlay (the focus ants mark it), so it has no cursor rects to defer and
+    /// a single selection would witness nothing.
     private static func runSelectionDefersCursorRectsWhileTheCameraMoves() throws {
         let world = World(tileCount: 4)
         defer { world.teardown() }
         let canvas = world.canvas
         canvas.surfaceResidencyEnabled = false
-        canvas.tileSelection.selectOnly(world.tiles[0].id)
-        canvas.tileSelection.refresh()
+        let selection = canvas.tileSelection
+        selection.selectOnly(world.tiles[0].id)
+        // Shift on a header adds to the selection: the user's own path to a group.
+        guard let second = world.agentViews[world.tiles[1].id],
+              let shiftDown = NSEvent.mouseEvent(
+                with: .leftMouseDown, location: .zero, modifierFlags: [.shift],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: world.window.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 1, pressure: 1) else {
+            throw Failure(message: "could not build the shift-click that adds a second tile")
+        }
+        _ = selection.mouseDown(on: second, event: shiftDown, isHeader: true, isResize: false)
         world.pump()
         world.settle()
-        let selection = canvas.tileSelection
+        try expect(selection.ids == [world.tiles[0].id, world.tiles[1].id]
+                   && selection.qaOverlay?.isHidden == false && selection.qaOverlay?.rects.count == 2,
+                   "a two-tile selection must show the group overlay; ids \(selection.ids.count), overlay rects \(selection.qaOverlay?.rects.count ?? 0)")
         let before = selection.qaCursorInvalidations
         let deferredBefore = selection.qaDeferredCursorInvalidations
         for step in 1...6 {
