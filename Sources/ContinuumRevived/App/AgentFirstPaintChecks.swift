@@ -851,6 +851,10 @@ extension AgentFirstPaintChecks {
             tile.ingest(.turnCompleted(
                 threadId: thread, turnId: "turn-\(turn)", outcome: .completed, errorMessage: nil))
         }
+        if let canvas = tile.qaTranscriptSurface as? AgentTranscriptCanvasView {
+            try checkStreamingLocalityOnCanvas(tile: tile, canvas: canvas, thread: thread)
+            return
+        }
         guard let transcript = tile.qaTranscriptForChecks else {
             throw fail("streaming locality: the tile has no transcript to measure")
         }
@@ -966,6 +970,113 @@ extension AgentFirstPaintChecks {
             throw fail(
                 "streaming locality: the streamed answer never became a row — "
                 + "\(transcript.qaSemanticRowCount) rows for \(history) of history"
+            )
+        }
+    }
+
+    /// The same contract on the drawn transcript, read from what it actually
+    /// re-laid. The canvas has no row index to flatten: every update walks the
+    /// document's units and answers each from its layout cache, and the cost a
+    /// token must not scale with history is LAYOUT — CoreText typesetting of a
+    /// block. So a chunk inside an open answer must re-lay that answer's block
+    /// and nothing else, never trigger a whole-transcript relayout, and leave a
+    /// placement identical to laying the document out from scratch.
+    @MainActor
+    private static func checkStreamingLocalityOnCanvas(
+        tile: ManagedAgentTileNSView, canvas: AgentTranscriptCanvasView, thread: String
+    ) throws {
+        func present() {
+            tile.qaFlushStreamingMarkupForChecks()
+            canvas.flushPendingVisualUpdate()
+        }
+        // The canvas lays out only at a real width: give the tile a window,
+        // parked off every display.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = tile
+        window.orderFrontOffscreenForChecks()
+        window.layoutIfNeeded()
+        tile.layoutSubtreeIfNeeded()
+        present()
+        canvas.layoutSubtreeIfNeeded()
+        let history = canvas.qaPlacedBlockIDs.count
+        guard history >= 40 else {
+            throw fail(
+                "streaming locality: the fixture placed only \(history) blocks, so a whole-history "
+                + "relayout would be indistinguishable from a local one"
+            )
+        }
+        // The first chunk of a turn is structural: it begins the entry.
+        tile.ingest(.turnStarted(threadId: thread, turnId: "turn-live"))
+        tile.ingest(.contentDelta(
+            threadId: thread, turnId: "turn-live", streamKind: .assistant, delta: "opening "))
+        present()
+        let appliesBefore = canvas.qaVisualApplyCount
+        let fullRelayoutsBefore = canvas.qaFullRelayoutCount
+        let chunks = 12
+        for chunk in 0..<chunks {
+            tile.ingest(.contentDelta(
+                threadId: thread, turnId: "turn-live", streamKind: .assistant, delta: "chunk \(chunk) "))
+            let layoutsBefore = canvas.qaBlockLayoutCount
+            present()
+            let relaid = canvas.qaBlockLayoutCount - layoutsBefore
+            guard let answer = canvas.qaPlacedBlockIDs.last,
+                  relaid == 1, canvas.qaLastRelaidBlockIDs == [answer] else {
+                throw fail(
+                    "streaming locality: chunk \(chunk) inside an already-open answer re-laid \(relaid) "
+                    + "block(s) \(canvas.qaLastRelaidBlockIDs.map(\.rawValue)) over \(history) blocks of history "
+                    + "— a token must re-lay the answer it grows and nothing else"
+                )
+            }
+        }
+        // POSITIVE CONTROL: every budget above is met by a transcript that
+        // presented nothing.
+        let presented = canvas.qaVisualApplyCount - appliesBefore
+        guard presented >= chunks else {
+            throw fail(
+                "streaming locality: \(chunks) chunks produced only \(presented) presentations, so the "
+                + "counts above measure an empty queue rather than a cheap one"
+            )
+        }
+        guard canvas.qaFullRelayoutCount == fullRelayoutsBefore else {
+            throw fail(
+                "streaming locality: streaming chunks caused \(canvas.qaFullRelayoutCount - fullRelayoutsBefore) "
+                + "whole-transcript relayouts"
+            )
+        }
+        if let mismatch = canvas.qaFreshLayoutMismatch() {
+            throw fail("streaming locality: the incremental placement diverged from a fresh layout — \(mismatch)")
+        }
+        // Per turn: opening and closing an entry is structural; per token is not.
+        let turnLayoutsBefore = canvas.qaBlockLayoutCount
+        var steps = 0
+        for turn in 100..<104 {
+            tile.ingest(.turnStarted(threadId: thread, turnId: "turn-\(turn)"))
+            for chunk in 0..<8 {
+                tile.ingest(.contentDelta(
+                    threadId: thread, turnId: "turn-\(turn)", streamKind: .assistant, delta: "chunk \(chunk) "))
+                present()
+                steps += 1
+            }
+            tile.ingest(.turnCompleted(
+                threadId: thread, turnId: "turn-\(turn)", outcome: .completed, errorMessage: nil))
+            present()
+            steps += 1
+        }
+        let turnLayouts = canvas.qaBlockLayoutCount - turnLayoutsBefore
+        guard turnLayouts <= 2 * steps, canvas.qaFullRelayoutCount == fullRelayoutsBefore else {
+            throw fail(
+                "streaming locality: 4 turns of 8 chunks re-laid \(turnLayouts) blocks over \(steps) presented "
+                + "steps and \(history) blocks of history — a block or two per step is the answer growing, "
+                + "history per step is the regression"
+            )
+        }
+        guard canvas.qaPlacedBlockIDs.count > history else {
+            throw fail(
+                "streaming locality: the streamed answers never became blocks — "
+                + "\(canvas.qaPlacedBlockIDs.count) placed for \(history) of history"
             )
         }
     }

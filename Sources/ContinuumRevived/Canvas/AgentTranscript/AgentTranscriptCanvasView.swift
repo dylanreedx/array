@@ -326,6 +326,9 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     private(set) var qaLastRelaidBlockIDs: [AgentNodeID] = []
     private(set) var qaFullRelayoutCount = 0
     private(set) var qaDrawCount = 0
+    /// Documents applied (each a rebuild): the positive control for a witness
+    /// that asserts how little each one re-laid.
+    private(set) var qaVisualApplyCount = 0
     private(set) var qaLastDrawScale: CGFloat = 0
     private(set) var qaLastDrawnLineCount = 0
     private(set) var qaLastDrawnControlCount = 0
@@ -433,6 +436,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             guard let self else { return }
             self.document = document
             self.appliedVersion = document.version
+            self.qaVisualApplyCount += 1
             self.preservingTail { self.rebuild() }
         }, final: final)
     }
@@ -1686,6 +1690,23 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             return QAChipRun(leaderID: item.blockID, origin: CGPoint(x: insets.left, y: item.y - scrollOffset),
                              size: CGSize(width: block.width, height: block.height), chips: chips)
         }
+    }
+
+    /// Nil when the incremental placement equals a from-scratch layout of the
+    /// same document at the same width; otherwise what differs. Cheap and WRONG
+    /// is the failure a cost witness cannot see.
+    func qaFreshLayoutMismatch() -> String? {
+        let incremental = placed.map { ($0.blockID, $0.y, $0.block.height, $0.textStart) }
+        cache.removeAll()
+        rebuild()
+        let fresh = placed.map { ($0.blockID, $0.y, $0.block.height, $0.textStart) }
+        guard incremental.count == fresh.count else {
+            return "\(incremental.count) placed blocks incrementally, \(fresh.count) from scratch"
+        }
+        for (a, b) in zip(incremental, fresh) where a.0 != b.0 || abs(a.1 - b.1) > 0.01 || abs(a.2 - b.2) > 0.01 || a.3 != b.3 {
+            return "block \(a.0.rawValue) at y \(a.1) h \(a.2) text \(a.3) incrementally, \(b.0.rawValue) at y \(b.1) h \(b.2) text \(b.3) from scratch"
+        }
+        return nil
     }
 
     /// Every semantic link laid out on a drawn line, in document order, with
