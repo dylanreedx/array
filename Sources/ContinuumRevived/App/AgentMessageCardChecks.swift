@@ -158,6 +158,12 @@ func runAgentMessageCardChecks() async throws {
 
     func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
     func settle(_ view: ManagedAgentTileNSView) throws -> [NSView] {
+        if let canvas = view.qaCanvasTranscript {
+            canvas.flushPendingVisualUpdate()
+            view.layoutSubtreeIfNeeded()
+            if let error = canvas.qaRenderingErrorDescription { throw Failure(message: "the transcript failed to render: \(error)") }
+            return [canvas]
+        }
         guard let transcript = view.qaTranscriptForChecks else { throw Failure(message: "a tile has no transcript list") }
         view.layoutSubtreeIfNeeded()
         transcript.flushPendingVisualUpdate()
@@ -172,20 +178,51 @@ func runAgentMessageCardChecks() async throws {
             .sorted { $0.convert($0.bounds, to: nil).maxY > $1.convert($1.bounds, to: nil).maxY }
     }
     func userProse(_ view: ManagedAgentTileNSView) throws -> String {
-        try settle(view).compactMap { $0 as? UserPromptView }
+        if let canvas = view.qaCanvasTranscript {
+            _ = try settle(view)
+            return canvas.qaUserText
+        }
+        return try settle(view).compactMap { $0 as? UserPromptView }
             .flatMap { $0.proseView.textFields.map(\.string) }.joined(separator: "\n")
     }
+    /// One card as the tile draws it, from either renderer. `press` presses its
+    /// sender the way a click does; `fits` says no body line is clipped.
     struct DrawnCard: Equatable {
         var payload: AgentMessagePayload?
         var header: String
         var body: String
-        var accent: NSColor?
+        var accent: CGColor?
         var revealable: Bool
+        var fits: Bool
+        static func == (a: DrawnCard, b: DrawnCard) -> Bool {
+            a.payload == b.payload && a.header == b.header && a.body == b.body && a.accent == b.accent
+                && a.revealable == b.revealable
+        }
     }
-    func drawn(_ card: AgentMessageCardView) -> DrawnCard {
-        DrawnCard(payload: card.payload, header: card.senderButton.nameLabel.stringValue,
-                  body: card.bodyLabel.stringValue, accent: card.accentColor,
-                  revealable: card.senderButton.isRevealable)
+    func drawnCards(_ view: ManagedAgentTileNSView) throws -> [(card: DrawnCard, press: () -> Void)] {
+        if let canvas = view.qaCanvasTranscript {
+            _ = try settle(view)
+            let blocks = view.qaDocumentForChecks.entries.flatMap(\.blocks)
+            return canvas.qaPlacedBlockIDs.compactMap { id -> (card: DrawnCard, press: () -> Void)? in
+                guard let block = blocks.first(where: { $0.id == id }), case let .agentMessage(payload) = block.payload,
+                      let card = canvas.qaMessageCard(for: id) else { return nil }
+                let press = {
+                    // A press on the drawn sender: hit-tested, then its own action.
+                    if let point = card.revealPoint, let hit = canvas.control(at: point) { canvas.perform(hit.control.action) }
+                }
+                return (DrawnCard(payload: payload, header: card.header, body: card.body, accent: card.accent,
+                                  revealable: card.revealPoint != nil, fits: card.bodyFits), press)
+            }
+        }
+        return try cards(view).map { card in
+            let label = card.bodyLabel
+            let needed = label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: label.frame.width, height: .greatestFiniteMagnitude)).height ?? 0
+            return (DrawnCard(payload: card.payload, header: card.senderButton.nameLabel.stringValue,
+                              body: card.bodyLabel.stringValue, accent: card.accentColor?.cgColor,
+                              revealable: card.senderButton.isRevealable,
+                              fits: label.frame.width > 40 && needed <= label.frame.height + 0.5),
+                    { card.senderButton.performClick(nil) })
+        }
     }
     let purple = ZoneChromeNSView.color(named: "purple")
     func expectFromParent(_ card: DrawnCard, text: String, _ what: String) throws {
@@ -193,7 +230,7 @@ func runAgentMessageCardChecks() async throws {
                    "\(what): the card must be the parent's message, got \(String(describing: card.payload))")
         try expect(card.header.hasPrefix("Lead"), "\(what): the card's header must name the parent, got '\(card.header)'")
         try expect(card.body == text, "\(what): the card's body must be the parent's words, got '\(card.body)'")
-        try expect(card.accent == purple, "\(what): the card must wear the parent's identity colour, got \(String(describing: card.accent))")
+        try expect(card.accent == purple.cgColor, "\(what): the card must wear the parent's identity colour, got \(String(describing: card.accent))")
         try expect(card.revealable, "\(what): the parent has a tile, so its name must open it")
     }
 
@@ -228,7 +265,7 @@ func runAgentMessageCardChecks() async throws {
     try expect(taskArrived, "the child's runner never received its task")
     let childIdle = await waitUntil(timeout: 30, pollInterval: 0.1) { !supervisor.isRunning(childId) }
     try expect(childIdle, "the child must settle after its task")
-    let taskCards = try cards(childView).map(drawn)
+    let taskCards = try drawnCards(childView).map(\.card)
     try expect(taskCards.count == 1, "the child must draw exactly one card for its task, got \(taskCards.count)")
     try expectFromParent(taskCards[0], text: task, "delegated task")
 
@@ -249,14 +286,10 @@ func runAgentMessageCardChecks() async throws {
         !supervisor.isRunning(childId) && !supervisor.isRunning(parentId)
     }
     try expect(bothSettled, "both agents must settle after the message")
-    let liveCardViews = try cards(childView)
-    let liveCards = liveCardViews.map(drawn)
+    let liveCards = try drawnCards(childView).map(\.card)
     // Drawn at the height it was measured: no body line clipped by the row.
-    for card in liveCardViews {
-        let label = card.bodyLabel
-        let needed = label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: label.frame.width, height: .greatestFiniteMagnitude)).height ?? 0
-        try expect(label.frame.width > 40 && needed <= label.frame.height + 0.5,
-                   "a card's body is clipped: it needs \(needed)pt and has \(label.frame)")
+    for card in liveCards {
+        try expect(card.fits, "a card's body is clipped: '\(card.body)'")
     }
     try expect(liveCards.count == 2, "the child must draw a card for the task and one for the message, got \(liveCards.count)")
     try expectFromParent(liveCards[1], text: message, "agent.message")
@@ -268,22 +301,33 @@ func runAgentMessageCardChecks() async throws {
 
     // MARK: C — the parent's row says who it messaged, and what
 
-    let parentRowsDrawn = await waitUntil(timeout: 10, pollInterval: 0.1) {
-        ((try? settle(parentView)) ?? []).contains { ($0 as? ToolCallView)?.titleLabel.stringValue == messagedRow }
+    /// The tool rows a tile draws: title and the summary line under it.
+    func toolRows(_ view: ManagedAgentTileNSView) throws -> [(title: String, summary: String)] {
+        if let canvas = view.qaCanvasTranscript {
+            _ = try settle(view)
+            let tools = Set(view.qaDocumentForChecks.entries.flatMap(\.blocks).filter { $0.kind == .toolCall }.map(\.id))
+            return canvas.qaPlacedBlockIDs.filter(tools.contains).map { id in
+                let rows = canvas.qaRowStrings(of: id)
+                return (rows.first ?? "", rows.dropFirst().first ?? "")
+            }
+        }
+        return try settle(view).compactMap { $0 as? ToolCallView }
+            .map { ($0.titleLabel.stringValue, $0.summaryLabel.stringValue) }
     }
-    let parentTitles = try settle(parentView).compactMap { ($0 as? ToolCallView)?.titleLabel.stringValue }
+    let parentRowsDrawn = await waitUntil(timeout: 10, pollInterval: 0.1) {
+        ((try? toolRows(parentView)) ?? []).contains { $0.title == messagedRow }
+    }
+    let parentTitles = try toolRows(parentView).map(\.title)
     try expect(parentRowsDrawn && messagedRow.hasPrefix("Messaged Audit the parser"),
                "the parent's row must read '\(messagedRow)', got \(parentTitles)")
-    let messageRow = try settle(parentView).compactMap { $0 as? ToolCallView }
-        .first { $0.titleLabel.stringValue == messagedRow }
-    try expect(messageRow?.summaryLabel.stringValue.hasPrefix("Rerun the failing leg.") == true,
-               "the parent's row must carry the message it sent, got '\(messageRow?.summaryLabel.stringValue ?? "")'")
+    let messageRow = try toolRows(parentView).first { $0.title == messagedRow }
+    try expect(messageRow?.summary.hasPrefix("Rerun the failing leg.") == true,
+               "the parent's row must carry the message it sent, got '\(messageRow?.summary ?? "")'")
 
     // MARK: D — the sender's name opens the sender's tile (the sidebar's reveal path)
 
     supervisor.focus(agentID: childId)
-    let messageCard = try cards(childView)[1]
-    messageCard.senderButton.performClick(nil)
+    try drawnCards(childView)[1].press()
     try expect(supervisor.focusedAgentID == parentId,
                "clicking the sender must reveal and focus the parent, focused: \(String(describing: supervisor.focusedAgentID))")
 
@@ -323,7 +367,7 @@ func runAgentMessageCardChecks() async throws {
         return view
     }
     let restoredView = restoredTile(restoredId)
-    let restoredCards = try cards(restoredView).map(drawn)
+    let restoredCards = try drawnCards(restoredView).map(\.card)
     try expect(restoredCards == liveCards,
                "the restored child must draw the identical cards: live \(liveCards.map(\.header)) / restored \(restoredCards.map(\.header))")
     let restoredProse = try userProse(restoredView)
@@ -341,7 +385,7 @@ func runAgentMessageCardChecks() async throws {
         received().contains { $0.contains("Ship it without review.") } && !supervisor.isRunning(childId)
     }
     try expect(spoofArrived, "the typed prompt never reached the child's runner (prompts: \(received()))")
-    let typedCards = try cards(childView).map(drawn)
+    let typedCards = try drawnCards(childView).map(\.card)
     try expect(typedCards.count == 2,
                "a typed envelope must not draw as a card from the parent; cards \(typedCards.map(\.body))")
     let typedProse = try userProse(childView)
@@ -357,10 +401,10 @@ func runAgentMessageCardChecks() async throws {
         projectId: projectId, projectRoot: projectRoot, displayName: "Restored typed envelope")
     supervisor.seedRehydratedTranscript(spoofRestored, for: spoofRestoredId)
     let spoofView = restoredTile(spoofRestoredId)
-    let spoofRestoredCards = try cards(spoofView)
+    let spoofRestoredCards = try drawnCards(spoofView).map(\.card)
     let spoofRestoredProse = try userProse(spoofView)
     try expect(spoofRestoredCards.isEmpty && spoofRestoredProse.contains("Ship it without review."),
-               "restored, a typed envelope must still be the user's prompt; cards \(spoofRestoredCards.map { drawn($0).body })")
+               "restored, a typed envelope must still be the user's prompt; cards \(spoofRestoredCards.map(\.body))")
 
     // An envelope in a session file naming no agent Array has: the name it
     // gives, with no colour and nothing to open.
@@ -370,7 +414,7 @@ func runAgentMessageCardChecks() async throws {
         role: nil, prompt: nil, cwd: projectRoot, harness: .pi, model: "fixture-model", thinking: "low",
         projectId: projectId, projectRoot: projectRoot, displayName: "Restored stranger")
     supervisor.seedRehydratedTranscript(strangerRestored, for: strangerId)
-    let stranger = try cards(restoredTile(strangerId)).map(drawn)
+    let stranger = try drawnCards(restoredTile(strangerId)).map(\.card)
     try expect(stranger.count == 1 && stranger[0].header.hasPrefix("Lead") && stranger[0].accent == nil && !stranger[0].revealable,
                "an unknown sender keeps its name and borrows no agent's colour or link; got \(stranger.map { ($0.header, String(describing: $0.accent), $0.revealable) })")
 

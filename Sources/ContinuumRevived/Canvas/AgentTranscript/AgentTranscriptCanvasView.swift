@@ -1518,6 +1518,54 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             iconRect: icon, statusRect: status?.0, statusFont: status?.1)
     }
 
+    /// The rows a laid-out unit draws, as strings, in order.
+    func qaRowStrings(of blockID: AgentNodeID) -> [String] {
+        placed.first { $0.blockID == blockID }?.block.rows.map(\.string.string) ?? []
+    }
+
+    /// Every row the user's own prompts draw (prose laid out as a user prompt,
+    /// as `UserPromptView` shows it), joined by newlines.
+    var qaUserText: String {
+        let prose = Set(document.entries.filter { $0.role == .user }.flatMap(\.blocks)
+            .filter { AssistantProseRenderer.supportedKinds.contains($0.kind) }.map(\.id))
+        return placed.filter { prose.contains($0.blockID) }.flatMap { $0.block.rows.map(\.string.string) }
+            .joined(separator: "\n")
+    }
+
+    /// An agent-message card as drawn: its header and body rows, whether every
+    /// body line sits inside the card, the colour of its accent bar (nil when it
+    /// wears no agent's colour, only the decorative line), and the centre of
+    /// its reveal control, if it drew one.
+    struct QAMessageCard {
+        let blockID: AgentNodeID
+        let header: String
+        let body: String
+        let bodyFits: Bool
+        let accent: CGColor?
+        let revealPoint: NSPoint?
+    }
+
+    func qaMessageCard(for blockID: AgentNodeID) -> QAMessageCard? {
+        guard let item = placed.first(where: { $0.blockID == blockID }), item.block.rows.count >= 2 else { return nil }
+        let fills: [(CGRect, CGColor)] = item.block.decorations.compactMap {
+            if case let .fill(rect, color, _) = $0 { return (rect, color) }
+            return nil
+        }
+        guard let card = fills.first?.0 else { return nil }
+        let plain = renderContext.tokens.decorativeLine.color.nsColor(for: theme).cgColor
+        let bar = fills.dropFirst().first?.1
+        let bodyRow = item.block.rows[1]
+        let fits = bodyRow.lines.allSatisfy { card.contains(CGRect(x: $0.x, y: $0.top, width: $0.width, height: $0.height)) }
+        let reveal = item.block.controls.first { control in
+            if case .perform(.revealMessageSender) = control.action { return true }
+            return false
+        }
+        return QAMessageCard(
+            blockID: blockID, header: item.block.rows[0].string.string, body: bodyRow.string.string, bodyFits: fits,
+            accent: bar == plain ? nil : bar,
+            revealPoint: reveal.map { NSPoint(x: insets.left + $0.rect.midX, y: item.y + $0.rect.midY - scrollOffset) })
+    }
+
     func qaBoundary(for blockID: AgentNodeID) -> QABoundary? {
         guard let item = placed.first(where: { $0.blockID == blockID }),
               let row = item.block.rows.first, let line = row.lines.first else { return nil }
