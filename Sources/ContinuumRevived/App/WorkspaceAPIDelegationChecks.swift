@@ -865,8 +865,12 @@ func runWorkspaceAPIDelegationChecks() async throws {
     }
     let mcpWorld = CGRect(x: mcpSnapshot.worldFrame.x, y: mcpSnapshot.worldFrame.y,
                           width: mcpSnapshot.worldFrame.width, height: mcpSnapshot.worldFrame.height)
-    try expect(canvas.zoneId(containing: mcpTile) == zoneB && zoneBRect.contains(mcpWorld),
-               "the MCP child's WORLD frame \(mcpWorld) must sit inside the parent's zone \(zoneBRect)")
+    // Read the zone AFTER the spawn: under auto layout a new tile docks where the
+    // camera looks and the zone grows around it in any direction (`962ccd07`), so
+    // the rect taken before this delegation no longer bounds the parent's zone.
+    let zoneBAfterMCP = try zoneWorldRect(zoneB)
+    try expect(canvas.zoneId(containing: mcpTile) == zoneB && zoneBAfterMCP.contains(mcpWorld),
+               "the MCP child's WORLD frame \(mcpWorld) must sit inside the parent's zone \(zoneBAfterMCP)")
     let mcpChildCwd = URL(fileURLWithPath: supervisor.records[mcpChild]?.cwd ?? pbRoot.path, isDirectory: true)
     func mcpChildLog() -> String {
         (try? String(contentsOf: mcpChildCwd.appendingPathComponent("prompts.log"), encoding: .utf8)) ?? ""
