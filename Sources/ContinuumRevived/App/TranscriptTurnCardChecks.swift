@@ -40,6 +40,17 @@ enum TranscriptTurnCardChecks {
         let previousStyle = AgentTranscriptPresentationStyle.current
         AgentTranscriptPresentationStyle.current = .turnCards
         defer { AgentTranscriptPresentationStyle.current = previousStyle }
+        // Turn cards are a presentation of the ROW LIST only: the drawn transcript
+        // (the default renderer since 0.7.32) has no turn-card grammar and draws
+        // rows whatever this switch says, and `.rows` is what ships. So this leg,
+        // which witnesses the turn-card grammar itself, pins the list for its run
+        // (`ARRAY_TRANSCRIPT_RENDERER=list`, still selectable). The shipped row
+        // grammar on the drawn transcript is `--transcript-canvas-check`
+        // (`TranscriptCanvasChecks.runCanvasRendererInTheTile`).
+        let rendererKey = AgentTranscriptCanvasView.rendererEnvironmentKey
+        let previousRenderer = ProcessInfo.processInfo.environment[rendererKey]
+        setenv(rendererKey, "list", 1)
+        defer { if let previousRenderer { setenv(rendererKey, previousRenderer, 1) } else { unsetenv(rendererKey) } }
         if wants("card") { summary.append(try await checkTheTileReadsAsTurnCards(artifacts: artifacts)) }
         if wants("honesty") { summary.append(try await checkTheStripIsNeverSilent()) }
         if wants("restore-timing") { summary.append(try checkRestoredProviderTimes()) }
