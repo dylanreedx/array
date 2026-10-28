@@ -6119,7 +6119,7 @@ enum UIProbeGeometry {
                 guard let tile = probe.view as? ManagedAgentTileNSView,
                       tile.qaUsesV2Tile,
                       tile.qaUsesFullTurnComposer,
-                      let transcript = tile.qaTranscriptCollectionFixture else {
+                      let transcript = tile.qaTranscriptSurface else {
                     throw fail("\(label): v2 constructor did not install semantic transcript/full-turn composer")
                 }
                 tile.layoutSubtreeIfNeeded()
@@ -6136,7 +6136,7 @@ enum UIProbeGeometry {
                           && (tile.qaCompactStatusAccessibilityLabel.contains("What")
                               || tile.qaCompactStatusAccessibilityLabel.contains("Activity")),
                       tile.qaV2RenderError == nil,
-                      transcript.qaSemanticRowCount >= 4 else {
+                      tile.qaRenderedCardCount >= 4 else {
                     throw fail("\(label): v2 tile retained legacy UI or failed semantic rendering")
                 }
                 guard tile.qaLocationText
@@ -6174,12 +6174,24 @@ enum UIProbeGeometry {
                 // view's default background is `windowBackgroundColor`, which only
                 // shows its wallpaper tint on a live desktop, never in the blessed
                 // offscreen renders.
-                guard transcript.collectionView.backgroundColors == [.clear] else {
-                    throw fail("\(label): the transcript collection view paints its own background (\(transcript.collectionView.backgroundColors)) over the tile's tileBody backdrop")
+                if let list = transcript as? AgentTranscriptListView {
+                    guard list.collectionView.backgroundColors == [.clear] else {
+                        throw fail("\(label): the transcript collection view paints its own background (\(list.collectionView.backgroundColors)) over the tile's tileBody backdrop")
+                    }
+                } else {
+                    // The drawn transcript: not opaque, and no layer fill of its own
+                    // (its `draw` paints blocks, never a background).
+                    guard !transcript.isOpaque, (transcript.layer?.backgroundColor?.alpha ?? 0) == 0 else {
+                        throw fail("\(label): the drawn transcript paints its own background over the tile's tileBody backdrop")
+                    }
                 }
-                try expectNoZeroSizeViews(tile, label: label)
-                try expectNoClipping(tile, label: label)
-                try expectNoBrokenRequiredSizeConstraints(tile, label: label)
+                // Every tree the tile's picture is made of: a resting tile draws
+                // its body and title-bar controls from outside its own subtree.
+                for root in tile.qaPresentedViewRoots {
+                    try expectNoZeroSizeViews(root, label: label)
+                    try expectNoClipping(root, label: label)
+                    try expectNoBrokenRequiredSizeConstraints(root, label: label)
+                }
                 // P5.5 defect 4 / Wave 1 footer sizing: text truncation is invisible
                 // to the frame-only checks above — a label ellipsizing inside its own
                 // well-contained frame passes every one of them. Whenever the footer's

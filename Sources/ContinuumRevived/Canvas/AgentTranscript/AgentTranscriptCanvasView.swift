@@ -1427,8 +1427,14 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     /// the presented rows.
     func qaWaitForToolDetailRefresh() async { await toolDetail.qaWaitForRefresh() }
 
-    /// The working gyro is on screen: shown, animating, at the tail.
-    var qaTailGyroVisible: Bool { tailLine != nil && !gyro.isHidden && gyro.isAnimating }
+    /// The tail carries the working gyro: a placed, unsettled tail row, and —
+    /// once the view is in a window, where it can animate — the gyro layer
+    /// shown and animating there. (The row list's indicator reads the same
+    /// way: its tail row, whether or not a window is there to show it.)
+    var qaTailGyroVisible: Bool {
+        guard tailLine != nil, !tailSettled else { return false }
+        return window == nil || isHiddenOrHasHiddenAncestor || (!gyro.isHidden && gyro.isAnimating)
+    }
 
     /// Every selectable text line drawn inside the view's bounds right now: its
     /// string and its rect in view coordinates (lines clipped by a scroll region's
