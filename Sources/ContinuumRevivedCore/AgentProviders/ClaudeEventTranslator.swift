@@ -40,18 +40,11 @@ public struct ClaudeEventTranslator {
     /// and outcome. `itemKinds` cannot say: every unknown tool is
     /// `.commandExecution` there.
     private var shellToolUseIDs = Set<String>()
-    /// Provider-owned Claude children currently inside their one mirrored turn,
-    /// keyed by the announcing Agent/Task tool-use id. Store the synthetic turn
-    /// id at announcement time so the matching result cannot accidentally derive
-    /// a different id from later translator state.
-    private var activeSubagentTurnIDs: [String: String] = [:]
-    /// Claude may forward a child's first frame before flushing the complete
-    /// Agent/Task tool-use block. Hold those events until the announcement can
-    /// put `.turnStarted` in front of them.
-    private var pendingSubagentEvents: [String: [AgentRuntimeEvent]] = [:]
-    /// A repeated/late provider frame cannot reopen a child after its matching
-    /// top-level result already supplied the terminal boundary.
-    private var completedSubagentToolUseIDs = Set<String>()
+    /// Every Claude child this SESSION has opened and not yet closed. Owned by
+    /// the runner, not by one turn: a background child outlives the result
+    /// that launched it, and the runner builds a fresh translator on every
+    /// `init`, so it hands this roster from one translator to the next.
+    public var subagents = ClaudeSubagentRoster()
     /// B6.2 — a compaction boundary has no tool_use id of its own, so this
     /// mints a stable-enough one for the item's begin/finish pair.
     private var compactionCounter: Int = 0
@@ -97,6 +90,10 @@ public struct ClaudeEventTranslator {
     /// test-pinned. The events themselves are ordinary runtime events; only
     /// their destination is unusual.
     public var onSubagentEvent: (@Sendable (String, AgentRuntimeEvent) -> Void)?
+
+    /// A child's `task_progress`: activity with no transcript content, keyed
+    /// like `onSubagentEvent` by the announcing tool-use id.
+    public var onSubagentProgress: (@Sendable (String) -> Void)?
 
     public init(
         workingDirectory: URL? = nil,
@@ -147,6 +144,10 @@ public struct ClaudeEventTranslator {
                 onRuntimeObservation?(.providerRetry(AgentTurnPresence.Retry(
                     attempt: attempt, maxAttempts: maximum,
                     delay: delayMs.map { $0 / 1000 }, observedAt: now())))
+                return []
+            }
+            if let subtype, subtype.hasPrefix("task_") || subtype == "background_tasks_changed" {
+                translateTaskFrame(subtype, object)
                 return []
             }
             guard subtype == "init" else { return [] }
@@ -294,9 +295,9 @@ public struct ClaudeEventTranslator {
         _ events: [AgentRuntimeEvent], for parentToolUseID: String
     ) {
         guard !events.isEmpty,
-              !completedSubagentToolUseIDs.contains(parentToolUseID) else { return }
-        guard activeSubagentTurnIDs[parentToolUseID] != nil else {
-            pendingSubagentEvents[parentToolUseID, default: []].append(contentsOf: events)
+              !subagents.closedToolUseIDs.contains(parentToolUseID) else { return }
+        guard subagents.openTurnIDs[parentToolUseID] != nil else {
+            subagents.pendingEvents[parentToolUseID, default: []].append(contentsOf: events)
             return
         }
         emitSubagentEvents(events, for: parentToolUseID)
@@ -418,15 +419,15 @@ public struct ClaudeEventTranslator {
                 toolUseID: id
             ) {
                 onSpawnRequest?(request)
-                if activeSubagentTurnIDs[id] == nil,
-                   !completedSubagentToolUseIDs.contains(id) {
+                if subagents.openTurnIDs[id] == nil,
+                   !subagents.closedToolUseIDs.contains(id) {
                     let turnID = subagentTurnID(for: id)
-                    activeSubagentTurnIDs[id] = turnID
+                    subagents.openTurnIDs[id] = turnID
                     emitSubagentEvents([.turnStarted(
                         threadId: threadId,
                         turnId: turnID
                     )], for: id)
-                    let pending = pendingSubagentEvents.removeValue(forKey: id) ?? []
+                    let pending = subagents.pendingEvents.removeValue(forKey: id) ?? []
                     emitSubagentEvents(pending, for: id)
                 }
             }
@@ -503,10 +504,18 @@ public struct ClaudeEventTranslator {
                 kind: kind,
                 status: isError ? .failed : .completed
             ))
-            if !isSubagent,
-               let turnID = activeSubagentTurnIDs.removeValue(forKey: toolUseId) {
-                completedSubagentToolUseIDs.insert(toolUseId)
-                pendingSubagentEvents.removeValue(forKey: toolUseId)
+            // A background Agent call answers at once with an acknowledgement
+            // ("Async agent launched"), not with the child's result. Closing on
+            // it marked every background child done the moment it started; its
+            // own `task_notification` closes it instead.
+            if !isSubagent, subagents.openTurnIDs[toolUseId] != nil,
+               let ack = toolUseResult as? [String: Any],
+               (ack["status"] as? String) == "async_launched" || (ack["isAsync"] as? Bool) == true {
+                if let taskID = ack["agentId"] as? String { subagents.toolUseIDsByTaskID[taskID] = toolUseId }
+            } else if !isSubagent,
+               let turnID = subagents.openTurnIDs.removeValue(forKey: toolUseId) {
+                subagents.closedToolUseIDs.insert(toolUseId)
+                subagents.pendingEvents.removeValue(forKey: toolUseId)
                 emitSubagentEvents([.turnCompleted(
                     threadId: threadId,
                     turnId: turnID,
@@ -522,6 +531,50 @@ public struct ClaudeEventTranslator {
             }
         }
         return events
+    }
+
+    /// Claude's own task lifecycle, keyed by `task_id`. Only the `Agent`
+    /// tasks this roster opened are acted on; a shell job is a task too, and it
+    /// never opens, holds or closes a child.
+    private mutating func translateTaskFrame(_ subtype: String, _ object: [String: Any]) {
+        let taskID = object["task_id"] as? String
+        if let taskID, let toolUseID = object["tool_use_id"] as? String,
+           subagents.openTurnIDs[toolUseID] != nil {
+            subagents.toolUseIDsByTaskID[taskID] = toolUseID
+        }
+        switch subtype {
+        case "task_progress":
+            guard let taskID, let toolUseID = subagents.toolUseIDsByTaskID[taskID],
+                  subagents.openTurnIDs[toolUseID] != nil else { return }
+            onSubagentProgress?(toolUseID)
+        case "task_notification":
+            guard let taskID, let toolUseID = subagents.toolUseIDsByTaskID[taskID] else { return }
+            let outcome: TurnOutcome
+            switch (object["status"] as? String)?.lowercased() {
+            case "failed", "error": outcome = .failed
+            case "stopped", "killed", "cancelled", "interrupted": outcome = .interrupted
+            default: outcome = .completed
+            }
+            closeSubagent(toolUseID, outcome: outcome)
+        case "background_tasks_changed":
+            // The roster is claude's statement of what is still running. It can
+            // arrive before or after a task's notification: the notification
+            // closes the child with its real outcome; the roster only says the
+            // task no longer holds the session open.
+            let live = Set(((object["tasks"] as? [[String: Any]]) ?? []).compactMap { $0["task_id"] as? String })
+            subagents.leftRosterTaskIDs = Set(subagents.toolUseIDsByTaskID.keys).subtracting(live)
+        default:
+            break
+        }
+    }
+
+    private mutating func closeSubagent(_ toolUseID: String, outcome: TurnOutcome) {
+        guard let turnID = subagents.openTurnIDs.removeValue(forKey: toolUseID) else { return }
+        subagents.closedToolUseIDs.insert(toolUseID)
+        subagents.pendingEvents.removeValue(forKey: toolUseID)
+        emitSubagentEvents([.turnCompleted(
+            threadId: threadId, turnId: turnID, outcome: outcome, errorMessage: nil
+        )], for: toolUseID)
     }
 
     private func subagentTurnID(for toolUseID: String) -> String {
@@ -969,5 +1022,29 @@ public struct ClaudeEventTranslator {
         default:
             return .commandExecution
         }
+    }
+}
+
+/// The Claude children one session has open, carried by the runner across the
+/// per-turn translators. A child is keyed by the tool-use id of the `Agent` call
+/// that announced it; claude's own task frames name it by `task_id`.
+public struct ClaudeSubagentRoster: Sendable {
+    /// Open children, keyed by announcing tool-use id → their mirrored turn id.
+    var openTurnIDs: [String: String] = [:]
+    /// Child frames that arrived before their announcement.
+    var pendingEvents: [String: [AgentRuntimeEvent]] = [:]
+    /// Children already closed; a late frame cannot reopen one.
+    var closedToolUseIDs = Set<String>()
+    var toolUseIDsByTaskID: [String: String] = [:]
+    /// Tasks claude's latest `background_tasks_changed` no longer lists.
+    var leftRosterTaskIDs = Set<String>()
+
+    public init() {}
+
+    /// Children still open that claude has not said have stopped running. Only
+    /// these keep a session alive; a shell job never does.
+    public var hasRunningChildren: Bool {
+        let gone = Set(leftRosterTaskIDs.compactMap { toolUseIDsByTaskID[$0] })
+        return openTurnIDs.keys.contains { !gone.contains($0) }
     }
 }

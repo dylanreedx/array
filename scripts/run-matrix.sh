@@ -708,6 +708,7 @@ run_app_check .build/debug/Array --observer-sweep-badge-check
 # fixture is DELETED from disk before the event is fed, and the bystander agent
 # survives untouched — while the change-set names exactly the agents that moved.
 run_app_check .build/debug/Array --agent-incremental-refresh-check
+run_app_check .build/debug/Array --sidebar-liveness-check
 # P2B.8: with no ZoneRuntimeController and no canvas, every agent is still listed
 # from disk with its persisted status and marked as unobserved; a live view or
 # observer status overrides the file and clears the mark.
@@ -926,6 +927,8 @@ run_app_check .build/debug/Array --sidebar-ux-check
 run_app_check .build/debug/Array --sidebar-production-corpus-check
 run_app_check .build/debug/Array --sidebar-screenshot-check
 run_app_check .build/debug/Array --workspace-sidebar-shell-check
+# .plans/86: the multi-workspace checklist driven through the real popover.
+run_app_check .build/debug/Array --workspace-filter-sheet-check
 run_app_check .build/debug/Array --workspace-sidebar-default-visible-check
 run_app_check .build/debug/Array --workspace-sidebar-actions-check
 run_app_check .build/debug/Array --workspace-sidebar-live-status-check
@@ -1090,6 +1093,13 @@ run_app_check .build/debug/Array --agent-process-tracker-check
 # by session, marked where they live, scoped by "This Mac", never doubled; Copy
 # forks one into a managed Claude agent in its project.
 run_app_check .build/debug/Array --external-sessions-sidebar-check
+run_app_check .build/debug/Array --hide-external-rows-check
+# .plans/87 (quick hide/show): the sidebar's toggle pills, the hide × and ⌫, the Hidden footer, bulk hide from a host label and the scope popover fixes, each driven through real events on the production sidebar.
+run_app_check .build/debug/Array --sidebar-pills-check
+run_app_check .build/debug/Array --sidebar-hide-any-row-check
+run_app_check .build/debug/Array --sidebar-hidden-footer-check
+run_app_check .build/debug/Array --sidebar-bulk-hide-check
+run_app_check .build/debug/Array --sidebar-scope-popover-check
 # The sidebar's project icon: `.array/icon.*` beats a shipped favicon; static/,
 # website/public/, Packaging/*.icns and an xcassets AppIcon resolve; a miss is
 # cached, and an added override or an edited winning file still shows.

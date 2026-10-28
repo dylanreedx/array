@@ -570,6 +570,9 @@ enum BrandMark96 {
 /// same arithmetic `SidebarDensityProposal` reports and the two cannot drift.
 @MainActor
 final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
+    /// The folded parent's rollup shares this lane with the branch.
+    var branchLaneTextForQA: String { branchLabel.stringValue }
+
     static let statusSymbolsInUse = [
         "checkmark.circle.fill", "hand.raised.fill",
         "exclamationmark.triangle.fill", "stop.circle.fill", "xmark.circle.fill",
@@ -580,6 +583,31 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     let anatomy: SidebarRowAnatomy
 
     private let card = AgentInboxCardView()
+    // Plan: .plans/86-workspace-filter/README.md
+    /// The workspace's colour as a short bar in the sidebar's leading gutter, set
+    /// by the list only while it shows more than one workspace.
+    private let workspaceMark = ChoiceDotView()
+    var workspaceMarkColour: NSColor? {
+        get { workspaceMark.colour }
+        set {
+            workspaceMark.colour = newValue
+            workspaceMark.isHidden = newValue == nil
+            needsLayout = true
+        }
+    }
+    var qaWorkspaceMarkFrame: NSRect? { workspaceMark.isHidden ? nil : workspaceMark.frame }
+
+    /// The sidebar peek's dimming, on this cell's CONTENTS rather than on the cell:
+    /// the cell's own opacity belongs to the list's row motion, which hides a live
+    /// cell under its photograph and restores the opacity it found when it ends.
+    private(set) var peekAlpha: CGFloat = 1
+    func setPeekAlpha(_ alpha: CGFloat, animated: Bool) {
+        guard alpha != peekAlpha else { return }
+        peekAlpha = alpha
+        for view in subviews {
+            if animated { view.animator().alphaValue = alpha } else { view.alphaValue = alpha }
+        }
+    }
     private let groupBackground = InboxGroupBackgroundView()
     // Ticket: .plans/0721-subagents-handoff.md
     /// The tree connector, in the indent gutters to the left of the card.
@@ -596,13 +624,20 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private var onHoverSnooze: (() -> Void)?
     private var onHoverSettle: (() -> Void)?
     private var hoverActionsShown = false
+    private var hoverActionsHovered = false
+    /// .plans/87: a hidden session drawn in place while `Hidden (N)` is open —
+    /// everything dimmed but its Show pill, which is always there.
+    private(set) var isRevealedHidden = false
+    static let revealedHiddenAlpha: CGFloat = 0.38
     // Plan: .plans/79-session-handoff/README.md
     /// A session from another app offers these instead, on the bottom line beside
     /// the provider mark (mock 4). Clicking the row itself is Watch.
     private let hoverMoveHere = InboxSettleNudgeButton(frame: .zero)
     private let hoverCopy = InboxSettleNudgeButton(frame: .zero)
+    private let hoverHide = InboxSettleNudgeButton(frame: .zero)
     private var onHoverMoveHere: (() -> Void)?
     private var onHoverCopy: (() -> Void)?
+    private var onHoverHide: (() -> Void)?
     /// Where the session lives (`· cmux`), after the project name.
     private let whereDot = NSTextField(labelWithString: "·")
     private let whereIcon = NSImageView(frame: .zero)
@@ -834,6 +869,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
         addSubview(groupBackground)
         addSubview(card)
+        workspaceMark.isHidden = true
+        workspaceMark.isRounded = true
+        addSubview(workspaceMark)
         // ABOVE the card: a parent's descender crosses its own card's leading
         // inset, and the card paints a fill while hovered, selected or active.
         addSubview(spine)
@@ -895,6 +933,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         for (button, title, symbol) in [
             (hoverMoveHere, InboxExternalSessionAction.moveHere.title, "arrow.down.right.square"),
             (hoverCopy, InboxExternalSessionAction.copy.title, "plus.square.on.square"),
+            (hoverHide, "", "xmark"),
         ] {
             button.title = title
             button.font = .systemFont(ofSize: metaSize, weight: .medium)
@@ -909,6 +948,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         hoverMoveHere.action = #selector(hoverMoveHereClicked)
         hoverCopy.action = #selector(hoverCopyClicked)
+        hoverHide.action = #selector(hoverHideClicked)
+        hoverHide.setAccessibilityLabel("Hide")
+        hoverHide.toolTip = "Hide from the sidebar"
         for label in [whereDot, whereLabel] {
             label.font = .token(.caption)
             label.lineBreakMode = .byTruncatingTail
@@ -1252,6 +1294,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         whereIcon.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         hoverMoveHere.applyTokens()
         hoverCopy.applyTokens()
+        hoverHide.applyTokens()
         titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         branchLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         modelLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
@@ -1273,13 +1316,16 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // Recession is the row's words, never its accent: `accentOpacity` paints the
         // state at full strength however far the row recedes, which is queue-94's
         // rule and not one to re-litigate here.
-        let alpha = CGFloat(shown.emphasis.textOpacity)
+        let alpha = CGFloat(shown.emphasis.textOpacity) * contentDim
         for label in [placementLabel, titleLabel, branchLabel, modelLabel] {
             label.alphaValue = alpha
         }
-        stateLabel.alphaValue = CGFloat(shown.emphasis.accentOpacity)
-        decorations.alphaValue = CGFloat(shown.emphasis.accentOpacity)
+        stateLabel.alphaValue = CGFloat(shown.emphasis.accentOpacity) * contentDim
+        decorations.alphaValue = CGFloat(shown.emphasis.accentOpacity) * contentDim
     }
+
+    /// What a revealed hidden row multiplies its words by (.plans/87).
+    private var contentDim: CGFloat { isRevealedHidden ? Self.revealedHiddenAlpha : 1 }
 
     /// One colour per meaning — with the two kinds of *asking* sharing one.
     ///
@@ -1406,6 +1452,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             width: max(0, bounds.width - gutter * 2 - CGFloat(indent)),
             height: max(0, bounds.height - gap - groupEndGap))
         decorations.frame = card.bounds
+        // Three points in from the SIDEBAR's edge, whatever this cell's own inset
+        // and the row's indent are: every workspace's marks line up in one column.
+        // Placed only while shown: a hidden mark's frame would follow whether the
+        // cell has found its scroll view yet, and move under every relayout.
+        if !workspaceMark.isHidden {
+            let markX = enclosingScrollView.map { convert(NSPoint(x: 3, y: 0), from: $0).x } ?? 0
+            workspaceMark.frame = NSRect(x: markX, y: card.frame.minY + 10, width: 3, height: max(10, card.frame.height - 20))
+        }
         // THE CONNECTOR BLEEDS INTO THE INTERCELL SPACING, by half of it at each
         // end, so the lanes of two stacked rows meet exactly. A cell owns its own
         // height and nothing between it and the next one; a lane confined to the
@@ -1616,7 +1670,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // An external row's hover actions sit left of the mark, and the branch
         // ends where they begin.
         var actionRight = textRight - trailing - 6
-        for button in [hoverCopy, hoverMoveHere] where !button.isHidden {
+        for button in [hoverHide, hoverCopy, hoverMoveHere] where !button.isHidden {
             let size = button.intrinsicContentSize
             let top = snapped(detailLine - size.height / 2)
             button.opticalCentreY = detailLine - top
@@ -1700,16 +1754,61 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return whereIcon.convert(whereIcon.bounds, to: self).union(whereLabel.convert(whereLabel.bounds, to: self))
     }
     #endif
+    /// The host label and its glyph (`⌸ tmux`), in this cell's coordinates: a
+    /// right-click there opens the host's menu (.plans/87). nil without one.
+    var whereMarkerRect: NSRect? {
+        guard !whereLabel.isHidden, !whereLabel.stringValue.isEmpty else { return nil }
+        return whereIcon.convert(whereIcon.bounds, to: self).union(whereLabel.convert(whereLabel.bounds, to: self))
+    }
     var settleNudgeTitleForQA: String { settleNudge.title }
     @objc private func hoverSnoozeClicked() { onHoverSnooze?() }
     @objc private func hoverSettleClicked() { onHoverSettle?() }
     @objc private func hoverMoveHereClicked() { onHoverMoveHere?() }
     @objc private func hoverCopyClicked() { onHoverCopy?() }
+    @objc private func hoverHideClicked() { onHoverHide?() }
 
     /// A session from another app's hover actions; nil hides one.
-    func configureExternalActions(moveHere: (() -> Void)?, copy: (() -> Void)?) {
+    func configureExternalActions(moveHere: (() -> Void)?, copy: (() -> Void)?, hide: (() -> Void)?,
+                                  hideHelp: String = "Hide from the sidebar") {
         onHoverMoveHere = moveHere
         onHoverCopy = copy
+        onHoverHide = hide
+        hoverHide.toolTip = hideHelp
+        // A selected row keeps its × (.plans/87), so a change of action repaints it.
+        setHoverActionsShown(hoverActionsHovered)
+    }
+
+    /// Dim a revealed hidden row and turn its × into an eye `Show` pill, or put
+    /// both back. Touches nothing unless the state changes, so the peek's alpha
+    /// and the list's row motion keep theirs.
+    func setRevealedHidden(_ revealed: Bool) {
+        guard revealed != isRevealedHidden else { return }
+        isRevealedHidden = revealed
+        let metaSize = Typography.style(for: .label).size
+        hoverHide.image = NSImage(systemSymbolName: revealed ? "eye" : "xmark", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: metaSize - 2, weight: .semibold))
+        hoverHide.image?.isTemplate = true
+        hoverHide.title = revealed ? "Show" : ""
+        hoverHide.setAccessibilityLabel(revealed ? "Show" : "Hide")
+        let alpha = revealed ? Self.revealedHiddenAlpha : peekAlpha
+        for view in subviews where view !== card { view.alphaValue = alpha }
+        for view in card.subviews where view !== hoverHide { view.alphaValue = revealed ? alpha : 1 }
+        // The words carry the row's emphasis; re-derive them with the dim folded in.
+        if let emphasis = shown?.emphasis {
+            let text = CGFloat(emphasis.textOpacity) * contentDim
+            for label in [placementLabel, titleLabel, branchLabel, modelLabel] { label.alphaValue = text }
+            stateLabel.alphaValue = CGFloat(emphasis.accentOpacity) * contentDim
+            decorations.alphaValue = CGFloat(emphasis.accentOpacity) * contentDim
+        }
+        setHoverActionsShown(hoverActionsHovered)
+        needsLayout = true
+    }
+
+    /// Presses the hover × through its own target/action.
+    func clickHoverHideForQA() -> Bool {
+        guard !hoverHide.isHidden else { return false }
+        hoverHide.performClick(nil)
+        return true
     }
 
     /// Which hover actions this row offers; nil hides one. Set by the list, which
@@ -1729,12 +1828,16 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let any = snoozeOn || settleOn
         let moveOn = shown && onHoverMoveHere != nil
         let copyOn = shown && onHoverCopy != nil
-        if hoverMoveHere.isHidden == moveOn || hoverCopy.isHidden == copyOn {
+        // The × stays on a selected row as well as a hovered one, and a revealed
+        // hidden row always shows its Show (.plans/87).
+        let hideOn = (shown || card.isSelected || isRevealedHidden) && onHoverHide != nil
+        if hoverMoveHere.isHidden == moveOn || hoverCopy.isHidden == copyOn || hoverHide.isHidden == hideOn {
             hoverMoveHere.isHidden = !moveOn
             hoverCopy.isHidden = !copyOn
+            hoverHide.isHidden = !hideOn
             needsLayout = true
         }
-        hoverActionsShown = any || moveOn || copyOn
+        hoverActionsShown = any || moveOn || copyOn || hideOn
         let wasShown = !hoverSnooze.isHidden || !hoverSettle.isHidden
         // Shown before fading in; hidden only once faded out, so a leaving
         // pointer never blinks the corner empty.
@@ -1807,9 +1910,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // hover crossfade that follows.
         let fades = !prefersReducedMotion() && window != nil
         for label in [placementLabel, titleLabel, branchLabel, modelLabel] {
-            Self.setAlpha(label, CGFloat(emphasis.textOpacity), fading: fades)
+            Self.setAlpha(label, CGFloat(emphasis.textOpacity) * contentDim, fading: fades)
         }
-        Self.setAlpha(decorations, CGFloat(emphasis.accentOpacity), fading: fades)
+        Self.setAlpha(decorations, CGFloat(emphasis.accentOpacity) * contentDim, fading: fades)
         return true
     }
 
@@ -1829,6 +1932,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
+        hoverActionsHovered = interaction.isHovered
         setHoverActionsShown(interaction.isHovered)
         if interaction.isHovered != deckHovered {
             deckHovered = interaction.isHovered
@@ -1882,7 +1986,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Whether the hover actions are what the status slot shows right now.
     var qaHoverActionsShown: Bool { hoverActionsShown }
     var qaHoverActionTitles: [String] {
-        [hoverSnooze, hoverSettle, hoverMoveHere, hoverCopy].filter { !$0.isHidden }
+        [hoverSnooze, hoverSettle, hoverMoveHere, hoverCopy, hoverHide].filter { !$0.isHidden }
             .compactMap { $0.accessibilityLabel() }
     }
     /// The where marker as drawn: its text, and whether it sits clear of the

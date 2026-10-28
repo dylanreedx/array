@@ -132,6 +132,7 @@ check --focus-broker-activation-check
 check --focus-mode-check
 check --focus-scope-dispatch-check
 check --fresh-install-check
+check --hide-external-rows-check
 check --inbox-parent-fold-check
 check --inbox-reveal-project-check
 check --input-gate-check
@@ -209,9 +210,15 @@ check --settings-search-check
 check --settle-closes-tile-check
 check --shell-open-as-agent-check
 check --shell-tool-row-check
+check --sidebar-bulk-hide-check
+check --sidebar-hidden-footer-check
+check --sidebar-hide-any-row-check
 check --sidebar-lifecycle-check
+check --sidebar-liveness-check
+check --sidebar-pills-check
 check --sidebar-production-corpus-check
 check --sidebar-push-coalescing-check
+check --sidebar-scope-popover-check
 check --sidebar-screenshot-check
 check --sidebar-truth-check
 check --sidebar-ux-check
@@ -282,6 +289,7 @@ check --workspace-api-pi-bridge-check
 check --workspace-boot-persistence-check
 check --workspace-chrome-polish-check
 check --workspace-delete-failure-check
+check --workspace-filter-sheet-check
 check --workspace-invariants-check
 check --workspace-lifecycle-check
 check --workspace-management-polish-check
@@ -349,6 +357,7 @@ leg run_app_check .build/debug/Array --agent-first-paint-check
 leg run_app_check .build/debug/Array --agent-identity-color-check
 leg run_app_check .build/debug/Array --agent-inbox-check
 leg run_app_check .build/debug/Array --agent-incremental-refresh-check
+leg run_app_check .build/debug/Array --sidebar-liveness-check
 leg run_app_check .build/debug/Array --agent-input-check
 leg run_app_check .build/debug/Array --agent-inventory-wiring-check
 leg run_app_check .build/debug/Array --agent-local-file-link-check
@@ -447,6 +456,7 @@ leg run_app_check .build/debug/Array --focus-broker-activation-check
 leg run_app_check .build/debug/Array --focus-mode-check
 leg run_app_check .build/debug/Array --focus-scope-dispatch-check
 leg run_app_check .build/debug/Array --fresh-install-check
+leg run_app_check .build/debug/Array --hide-external-rows-check
 leg run_app_check .build/debug/Array --inbox-parent-fold-check
 leg run_app_check .build/debug/Array --inbox-reveal-project-check
 leg run_app_check .build/debug/Array --input-gate-check
@@ -516,8 +526,13 @@ leg run_app_check .build/debug/Array --settings-search-check
 leg run_app_check .build/debug/Array --settle-closes-tile-check
 leg run_app_check .build/debug/Array --shell-open-as-agent-check
 leg run_app_check .build/debug/Array --shell-tool-row-check
+leg run_app_check .build/debug/Array --sidebar-bulk-hide-check
+leg run_app_check .build/debug/Array --sidebar-hidden-footer-check
+leg run_app_check .build/debug/Array --sidebar-hide-any-row-check
+leg run_app_check .build/debug/Array --sidebar-pills-check
 leg run_app_check .build/debug/Array --sidebar-production-corpus-check
 leg run_app_check .build/debug/Array --sidebar-push-coalescing-check
+leg run_app_check .build/debug/Array --sidebar-scope-popover-check
 leg run_app_check .build/debug/Array --sidebar-screenshot-check
 leg run_app_check .build/debug/Array --sidebar-truth-check
 leg run_app_check .build/debug/Array --sidebar-ux-check
@@ -584,6 +599,7 @@ leg run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 leg run_app_check .build/debug/Array --workspace-boot-persistence-check
 leg run_app_check .build/debug/Array --workspace-chrome-polish-check
 leg run_app_check .build/debug/Array --workspace-delete-failure-check
+leg run_app_check .build/debug/Array --workspace-filter-sheet-check
 leg run_app_check .build/debug/Array --workspace-invariants-check
 leg run_app_check .build/debug/Array --workspace-lifecycle-check
 leg run_app_check .build/debug/Array --workspace-management-polish-check
@@ -698,7 +714,7 @@ bundle-check --palette-duplicate-root-check
 bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
-count ContinuumRevivedAgentUIChecks 20
+count ContinuumRevivedAgentUIChecks 21
 count ContinuumRevivedCoreChecks 188
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0

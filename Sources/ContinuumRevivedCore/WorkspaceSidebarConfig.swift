@@ -99,6 +99,24 @@ public enum WorkspaceSidebarConfig {
         defaults.set(scope.storageValue, forKey: scopeKey)
     }
 
+    // Plan: .plans/87-sidebar-liveness/README.md (quick hide/show)
+    /// The outside sources the sidebar's pills turned off (`InboxSource` keys),
+    /// beside the scope they filter with. Absent means every source shows, which
+    /// is also what an unreadable value reads as: a filter never fails closed.
+    public static let hiddenSourcesKey = "continuum.workspaceSidebar.hiddenSources"
+
+    public static func hiddenSources(defaults: UserDefaults = .standard) -> Set<String> {
+        Set(defaults.stringArray(forKey: hiddenSourcesKey) ?? [])
+    }
+
+    public static func setHiddenSources(_ sources: Set<String>, defaults: UserDefaults = .standard) {
+        if sources.isEmpty {
+            defaults.removeObject(forKey: hiddenSourcesKey)
+        } else {
+            defaults.set(sources.sorted(), forKey: hiddenSourcesKey)
+        }
+    }
+
     // Confidence pass (sidebar stream): whether each counted shelf was left open.
     // Collapsed is the default (absent key); T3 nightly persists the same fact.
     // Decisions pass: settled and closed agents share ONE History shelf, so the

@@ -805,7 +805,7 @@ enum SidebarTruthChecks {
         try hoverActionsSettle(world, id)
     }
 
-    // MARK: - Hover: the status slot becomes [Snooze] [Settle]
+    // MARK: - Hover: the status slot becomes [Settle], beside the × that snoozes
 
     static func hoverActionsSettle(_ world: World, _ agent: AgentID) throws {
         let inbox = world.inbox
@@ -814,8 +814,10 @@ enum SidebarTruthChecks {
                    "control: a row nobody is pointing at shows its status, not its actions")
         try expect(inbox.hoverRowForQA(id: agent.rawValue), "the new agent's row must be hoverable")
         let hovered = inbox.hoverActionsForQA(id: agent.rawValue)
-        try expect(hovered?.shown == true && hovered?.titles == ["Snooze", "Settle"],
-                   "hovering an idle card cross-fades its status slot to [Snooze] [Settle] — got \(String(describing: hovered))")
+        // .plans/87: the × snoozes an Array agent (three hours, or until it needs
+        // you), so it takes the Snooze pill's place (--sidebar-hide-any-row-check).
+        try expect(hovered?.shown == true && hovered?.titles == ["Settle", "Hide"],
+                   "hovering an idle card cross-fades its status slot to [Settle] and shows the × — got \(String(describing: hovered))")
         try expect(inbox.clickHoverSettleForQA(id: agent.rawValue), "the hover Settle must be clickable")
         try expect(world.supervisor.records[agent]?.settledOverride == .settled,
                    "the hover Settle settles the agent — got \(String(describing: world.supervisor.records[agent]?.settledOverride))")

@@ -341,6 +341,8 @@ public final class CodexAgentRunner: @unchecked Sendable {
     private var appServerLiveChildThreads: Set<String> = []
     private var appServerTurnAccepted = false
     private var providerSubagentActivityHandler: (@Sendable (ProviderSubagentActivity) -> Void)?
+    /// Child threads with a turn open, by provider thread id → turn id.
+    private var appServerChildTurns: [String: String] = [:]
     private var steerDispositionHandler: (@Sendable (UUID, AgentSteerDisposition) -> Void)?
 
     public init(config: Config) {
@@ -618,6 +620,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
             appServerTranslator.onRuntimeObservation = runtimeObservationHandler
             appServerPrimaryThreadID = nil
             appServerLiveChildThreads.removeAll()
+            appServerChildTurns.removeAll()
             appServerTurnAccepted = false
             appServerTurnOutcome = nil
             appServerTranslator.onSubagentAnnouncement = { [weak self] parent, child, item, label in
@@ -670,6 +673,25 @@ public final class CodexAgentRunner: @unchecked Sendable {
                     if let providerThreadID,
                        let primary = self.appServerPrimaryThreadID,
                        providerThreadID != primary {
+                        switch event {
+                        case let .turnStarted(_, childTurnId):
+                            self.appServerChildTurns[providerThreadID] = childTurnId
+                            // A child that starts after Stop was asked for is
+                            // stopped on arrival. Off this queue: the reply is
+                            // read by the transport thread that called us.
+                            if self.stopRequested, let transport = self.appServerTransport {
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    _ = try? transport.sendRequest(
+                                        method: "turn/interrupt",
+                                        params: ["threadId": providerThreadID, "turnId": childTurnId],
+                                        timeout: 2.0)
+                                }
+                            }
+                        case .turnCompleted:
+                            self.appServerChildTurns[providerThreadID] = nil
+                        default:
+                            break
+                        }
                         self.providerSubagentActivityHandler?(.threadEvent(
                             providerThreadID: providerThreadID,
                             event: event
@@ -691,6 +713,20 @@ public final class CodexAgentRunner: @unchecked Sendable {
             spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.harness)
             spawned.standardError.readabilityHandler = nil
             queue.sync {
+                // Every descendant lives inside this one app-server process, so
+                // none outlives it: a child still open here was cut off by Stop
+                // or a crash and is settled now, not left "working".
+                let cutOff = self.appServerLiveChildThreads.union(self.appServerChildTurns.keys)
+                for thread in cutOff.sorted() {
+                    self.providerSubagentActivityHandler?(.threadEvent(
+                        providerThreadID: thread,
+                        event: .turnCompleted(
+                            threadId: thread,
+                            turnId: self.appServerChildTurns[thread] ?? "\(thread)#app-server-exited",
+                            outcome: .interrupted,
+                            errorMessage: "The Codex session ended before this child finished.")))
+                }
+                self.appServerChildTurns.removeAll()
                 self.child = nil
                 self.appServerTransport = nil
                 self.appServerActiveTurn = nil
@@ -826,10 +862,20 @@ public final class CodexAgentRunner: @unchecked Sendable {
     }
 
     public func stop() {
-        let (running, transport, activeTurn) = queue.sync {
-            () -> (ProcessGroupChild?, CodexAppServerTransport?, (threadId: String, turnId: String)?) in
+        let (running, transport, activeTurn, childTurns) = queue.sync {
+            () -> (ProcessGroupChild?, CodexAppServerTransport?, (threadId: String, turnId: String)?, [(String, String)]) in
             stopRequested = true
-            return (child, appServerTransport, appServerActiveTurn)
+            return (child, appServerTransport, appServerActiveTurn, appServerChildTurns.map { ($0.key, $0.value) })
+        }
+        // Stop is for the whole family: interrupting the parent alone left every
+        // child thread running, and "working" in the sidebar, until it finished.
+        if let transport, !childTurns.isEmpty {
+            DispatchQueue.concurrentPerform(iterations: childTurns.count) { index in
+                _ = try? transport.sendRequest(
+                    method: "turn/interrupt",
+                    params: ["threadId": childTurns[index].0, "turnId": childTurns[index].1],
+                    timeout: 2.0)
+            }
         }
         // app-server only: ask for a graceful interrupt over the live
         // connection first (M7 item 4 — the analogue of `turn/interrupt`).

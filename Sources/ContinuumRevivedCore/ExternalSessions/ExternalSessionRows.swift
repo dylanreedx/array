@@ -105,8 +105,22 @@ public enum ExternalSessionRows {
                         // thread has no process of its own to watch exit.
                         canMoveHere: session.pid != nil,
                         // Claude forks with `--fork-session`; Codex has no fork Array drives yet.
-                        canCopy: session.provider == .claude && session.transcriptURL != nil))
+                        canCopy: session.provider == .claude && session.transcriptURL != nil,
+                        source: source(of: session.host)))
             }
+    }
+
+    /// The source pill a session belongs to: one per app, with tmux under
+    /// Terminal (Dylan, 2026-10-27: "Terminal/tmux"), and every Array shell under
+    /// one `Shell` rather than a pill per tile.
+    public static func source(of host: ExternalSessionHost) -> String {
+        switch host {
+        case let .app(name): return name
+        case .tmux: return "Terminal"
+        case .arrayShellTile: return "Shell"
+        case .arrayTerminalFace, .arrayManaged: return "Array"
+        case .unknown: return "Elsewhere"
+        }
     }
 
     /// `cmux`, `Claude app`, `tmux`, `Shell 2`, `Codex app · 4m ago`.

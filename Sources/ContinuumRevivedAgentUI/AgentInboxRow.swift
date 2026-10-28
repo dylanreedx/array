@@ -788,12 +788,17 @@ public struct InboxExternalSession: Equatable, Sendable {
     public let isProminent: Bool
     public let canMoveHere: Bool
     public let canCopy: Bool
+    /// The app it lives in, as the sidebar's source pills group it (`Terminal`
+    /// for tmux and Terminal alike, `Claude app`, `cmux`). nil reads the where
+    /// marker instead (`InboxSource.key(for:)`).
+    public let source: String?
 
-    public init(sessionKey: String, isProminent: Bool, canMoveHere: Bool, canCopy: Bool) {
+    public init(sessionKey: String, isProminent: Bool, canMoveHere: Bool, canCopy: Bool, source: String? = nil) {
         self.sessionKey = sessionKey
         self.isProminent = isProminent
         self.canMoveHere = canMoveHere
         self.canCopy = canCopy
+        self.source = source
     }
 }
 
@@ -1209,6 +1214,15 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
             closingSince: closingSince, hasLiveRunner: hasLiveRunner,
             identityColor: identityColor)
+    }
+
+    /// Equal but for `elapsed`, when both rows carry the same live turn start: the
+    /// view's shared clock advances that number on the cell, so a push that only
+    /// moved it changes nothing to redraw (plan 87, Step 4).
+    public func matchesIgnoringLiveElapsed(_ other: AgentInboxRow) -> Bool {
+        guard elapsedStartedAt != nil, elapsedStartedAt == other.elapsedStartedAt,
+              let otherElapsed = other.elapsed else { return self == other }
+        return withUnconfirmed(isUnconfirmed, elapsed: otherElapsed) == other
     }
 
     /// The status words the row may paint. Unconfirmed is a confidence modifier,

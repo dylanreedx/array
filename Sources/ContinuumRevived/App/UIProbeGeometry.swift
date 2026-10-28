@@ -4530,6 +4530,12 @@ enum UIProbeGeometry {
                     throw fail("\(label): could not materialize the scope keyboard path")
                 }
                 scopeButton.keyDown(with: returnKey)
+                // .plans/87: the projects sit behind `Projects ›`; open it through the
+                // open list, and hold the drill-in to the same no-ellipsis rule.
+                guard probe.inbox.isScopePopoverPresentedForQA,
+                      scopeButton.choosePresentedItemForQA(id: AgentInboxView.projectsItemId) else {
+                    throw fail("\(label): the open scope popover offered no Projects › row")
+                }
                 let keyboardItems = probe.inbox.scopePopoverItemsForQA
                 guard probe.inbox.isScopePopoverPresentedForQA,
                       scopeButton.qaTruncatedPresentedRowTitles == [],
@@ -4553,7 +4559,9 @@ enum UIProbeGeometry {
                 let renderedManagement = renderedItems.filter { $0.id.hasPrefix("management:") }
                 guard renderedManagement.map(\.title) == ["New Workspace…", "Rename Workspace…", "Delete Workspace…"],
                       renderedManagement.map(\.enabled) == [true, false, false],
-                      renderedItems.contains(where: { $0.id == "management-separator" && !$0.enabled }) else {
+                      // .plans/86: the checklist draws a real divider above the
+                      // first management row rather than listing a dash row.
+                      renderedManagement.first?.separatorBefore == true else {
                     throw fail("\(label): rendered management section lost visible-disabled rows or separator")
                 }
                 let scopeBeforeManagement = probe.inbox.selectedScopeTitleForQA

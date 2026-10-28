@@ -275,6 +275,12 @@ private final class AgentInboxTableView: NSTableView {
         // range-selection and modifier semantics remain intact. The inbox only
         // owns the two activation keys and the post-traversal visibility guarantee.
         if contextHandler?.handleTableActivationKey(event) == true { return }
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers == "z", contextHandler?.undoFromKeyboard() == true { return }
+        // .plans/87: ⌫ (or ⌦) hides the selected rows, with nothing held.
+        if [51, 117].contains(event.keyCode),
+           event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+           contextHandler?.hideSelectedRows() == true { return }
         super.keyDown(with: event)
         contextHandler?.didTraverseWithKeyboard(event)
     }
@@ -679,6 +685,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var wakeScheduleGeneration = 0
     private var scheduledWakeDelay: TimeInterval?
     private(set) var qaWakeRerenderCount = 0
+    /// Plan 87: whole-table reloads (cards built are `cellBuildCountForQA`).
+    private(set) var qaFullReloadCount = 0
     private static let wakeTimerMinimumDelay: TimeInterval = 0.05
     private static let wakeTimerMaximumDelay: TimeInterval = 24 * 60 * 60
     /// Production uses `Timer` when this is nil. The injected scheduler is a
@@ -717,7 +725,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// for a surface that has to say what the row says (the ⌥ jump badges).
     func row(forAgentId id: UUID) -> AgentInboxRow? { allRows.first { $0.id == id } }
     /// The entries in the popup, parallel to the menu items' tags.
-    private var scopeEntries: [InboxScope] = []
+    // Plan: .plans/86-workspace-filter/README.md
+    /// The checklist as last built — what each row is, what its box shows, and what
+    /// clicking it does (`InboxScopeMenu`).
+    private var scopeMenuEntries: [InboxScopeMenuEntry] = []
+    /// The workspace whose colour the popover is choosing, while it shows the
+    /// palette instead of the scopes.
+    private var colourEditingWorkspace: UUID?
+    /// The workspace whose cards stay lit while its popover row is hovered.
+    private(set) var peekWorkspace: UUID?
+    /// Whether the list on screen spans more than one workspace, which is when its
+    /// cards carry their workspace's edge mark.
+    private var marksWorkspaces = false
     /// Search is view-local filter state. It never participates in ordering or persistence.
     private var searchQuery = ""
     // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
@@ -1086,6 +1105,34 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// persists it. Not called for a programmatic `setScope` — restoring a scope at
     /// launch must not write the value back.
     var onScopeChange: ((InboxScope) -> Void)?
+    // Plan: .plans/87-sidebar-liveness/README.md (quick hide/show)
+    /// The filter's second dimension: outside sources (`InboxSource`) the pills
+    /// turned off, plus `array` while an outside source is soloed. Empty at birth
+    /// for the reason `scope` is `.all`; the host restores and persists it.
+    private(set) var hiddenSources: Set<String> = []
+    /// The user changed the hidden sources (a pill). Not called for a restore.
+    var onHiddenSourcesChange: ((Set<String>) -> Void)?
+    /// The toggle pills under the search field.
+    let pillStrip = InboxFilterPillStrip()
+    private var pillStripHeight: NSLayoutConstraint?
+    private var pillStripGap: NSLayoutConstraint?
+    private let pillOverflowController = ChoicePopoverController()
+    private var listBottomToView: NSLayoutConstraint?
+    /// `Hidden (N)`, pinned under the list (.plans/87).
+    let hiddenFooter = InboxHiddenFooter()
+    private var hiddenFooterHeight: NSLayoutConstraint?
+    /// The footer is open: hidden sessions are drawn in place, dimmed, each with Show.
+    private(set) var hiddenRevealed = false
+    /// How many hidden sessions the current filters would show: the footer's N.
+    private(set) var hiddenInScopeCount = 0
+    /// The ids of the rows drawn only because the footer is open.
+    private var revealedHiddenIds: Set<UUID> = []
+    private var listBottomToToast: NSLayoutConstraint?
+    private var toastAboveBar: NSLayoutConstraint?
+    private var toastAtBottom: NSLayoutConstraint?
+    /// QA: the `+N` checklist and the row menus open inside the (offscreen)
+    /// window rather than on a screen, and without taking the keyboard.
+    var presentsPopoversOffscreenForQA = false
     // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
     /// A workspace verb was picked from the scope menu. WHICH workspace it lands on
     /// is not this view's business — it holds a scope, not a workspace id — so the
@@ -1229,6 +1276,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             updateScopeMenu()
         }
     }
+    /// Each workspace's colour (`WorkspaceEntry.resolvedColour`), from the host's
+    /// registry. A change repaints the dots and the cards' edge marks.
+    var workspaceColourNames: [UUID: String] = [:] {
+        didSet {
+            guard workspaceColourNames != oldValue else { return }
+            updateScopeMenu()
+            if marksWorkspaces { reload(rows: allRows) }
+        }
+    }
+    /// A colour was chosen for a workspace from its `…`. The registry is the
+    /// host's; the new colour arrives back through `workspaceColourNames`.
+    var onWorkspaceColourChange: ((UUID, String) -> Void)?
     /// The workspace on screen, from the host — what `.currentWorkspace` (the
     /// default scope) resolves to. A change re-filters: a workspace switch moves
     /// the list with it.
@@ -1378,6 +1437,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
         addSubview(scopeButton)
         addSubview(searchField)
+        pillStrip.translatesAutoresizingMaskIntoConstraints = false
+        pillStrip.setAccessibilityElement(true)
+        pillStrip.setAccessibilityRole(.group)
+        pillStrip.setAccessibilityLabel("Show or hide workspaces and apps")
+        pillStrip.setAccessibilityIdentifier("ContinuumAgentInboxPills")
+        pillStrip.isHidden = true
+        pillStrip.onPress = { [weak self] pill, flags in self?.pillPressed(pill.id, flags: flags) }
+        pillStrip.onMore = { [weak self] rect in self?.presentPillOverflow(anchor: rect) }
+        addSubview(pillStrip)
         newAgentButton.translatesAutoresizingMaskIntoConstraints = false
         newAgentButton.target = self
         newAgentButton.action = #selector(newAgentPressed)
@@ -1405,6 +1473,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         addSubview(searchClearButton)
         addSubview(scrollView)
         addSubview(emptyLabel)
+        hiddenFooter.translatesAutoresizingMaskIntoConstraints = false
+        hiddenFooter.isHidden = true
+        hiddenFooter.onToggle = { [weak self] in self?.toggleHiddenRevealed() }
+        hiddenFooter.onShowAll = { [weak self] in self?.showAllHiddenExternalSessions() }
+        addSubview(hiddenFooter)
         // P3.11: added LAST, so it draws over the bottom of the list.
         addSubview(bulkBar)
         // P4.11: and the toast over the bar, which is the order they arrive in — a
@@ -1425,8 +1498,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // that is the same idempotent reveal a second single click makes.
         tableView.doubleAction = #selector(rowDoubleClicked(_:))
         searchField.delegate = self
-        scopeButton.keepsSelectionForItem = { $0.id.hasPrefix("management:") }
+        // The trigger's label is always the scope's own title (`applyScopeTrigger`),
+        // so no row the checklist reports may replace it.
+        scopeButton.keepsSelectionForItem = { _ in true }
+        scopeButton.popoverPresentation = .checklist
         scopeButton.onSelection = { [weak self] item in self?.choicePicked(item) }
+        scopeButton.onAccessory = { [weak self] item, accessory in self?.scopeAccessoryPressed(item, accessory) }
+        scopeButton.onFocusChange = { [weak self] id in self?.scopeFocusChanged(id) }
+        scopeButton.onPopoverDismiss = { [weak self] in
+            self?.colourEditingWorkspace = nil
+            // Closed inside Projects ›: the next open starts at the top level.
+            if self?.projectsDrilled == true {
+                self?.projectsDrilled = false
+                self?.updateScopeMenu()
+            }
+            self?.focusedScopeItemID = nil
+            self?.setPeek(nil)
+        }
         updateScopeMenu()
         // P3.11: the bar reports the action; resolving WHICH agents it lands on is the
         // list's, because only the list knows the selection.
@@ -1450,7 +1538,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
             searchField.centerYAnchor.constraint(equalTo: scopeButton.centerYAnchor),
             searchField.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
+            pillStrip.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
         ]
 
         // Program 96's stacked header: search owns the top row at full width, the
@@ -1465,7 +1553,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             scopeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
             scopeButton.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
             scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
+            pillStrip.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
         ]
         // T3 nightly's one row: [search ………][scope][+]. The scope control sizes
         // to its title and search takes the rest, down to the room its glyph and a
@@ -1491,9 +1579,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             newAgentButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             newAgentButton.widthAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
             newAgentButton.heightAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
-            scrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
+            pillStrip.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
         ]
         NSLayoutConstraint.activate(defaultHeaderConstraints)
+        // The pills take no room until there are two of them: height and gap are
+        // both zero, so the list starts exactly where it did without them.
+        let stripHeight = pillStrip.heightAnchor.constraint(equalToConstant: 0)
+        let stripGap = scrollView.topAnchor.constraint(equalTo: pillStrip.bottomAnchor, constant: 0)
+        pillStripHeight = stripHeight
+        pillStripGap = stripGap
+        NSLayoutConstraint.activate([
+            pillStrip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
+            pillStrip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
+            stripHeight, stripGap,
+        ])
 
         NSLayoutConstraint.activate([
             searchIcon.leadingAnchor.constraint(equalTo: searchField.leadingAnchor, constant: CGFloat(Space.s)),
@@ -1509,7 +1608,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             emptyLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.l),
             emptyLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.l),
@@ -1525,7 +1623,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // so nothing paints in any of them).
             bulkBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.s),
             bulkBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.s),
-            bulkBar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.s),
+            bulkBar.bottomAnchor.constraint(equalTo: hiddenFooter.topAnchor, constant: -Space.s),
 
             // P4.11: ABOVE THE BAR, not beside it and not under it. Both float over
             // the bottom of the same list and both can be up at once — a bulk settle
@@ -1536,8 +1634,25 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // toast sits in one place whether the bar is showing or not.
             undoToast.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.s),
             undoToast.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.s),
-            undoToast.bottomAnchor.constraint(equalTo: bulkBar.topAnchor, constant: -Space.xs),
         ])
+        // .plans/87: the toast PUSHES THE LIST UP rather than floating over its last
+        // row (Dylan, 2026-10-27: "never cover a row"). It stays above the bar while
+        // the bar shows, and takes the bar's place at the bottom while it does not.
+        // `Hidden (N)` is the floor of the stack; zero tall while nothing is hidden,
+        // so everything above sits exactly where it did without it.
+        let footerHeight = hiddenFooter.heightAnchor.constraint(equalToConstant: 0)
+        hiddenFooterHeight = footerHeight
+        NSLayoutConstraint.activate([
+            hiddenFooter.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hiddenFooter.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hiddenFooter.bottomAnchor.constraint(equalTo: bottomAnchor),
+            footerHeight,
+        ])
+        listBottomToView = scrollView.bottomAnchor.constraint(equalTo: hiddenFooter.topAnchor)
+        listBottomToToast = scrollView.bottomAnchor.constraint(equalTo: undoToast.topAnchor, constant: -Space.xs)
+        toastAboveBar = undoToast.bottomAnchor.constraint(equalTo: bulkBar.topAnchor, constant: -Space.xs)
+        toastAtBottom = undoToast.bottomAnchor.constraint(equalTo: hiddenFooter.topAnchor, constant: -Space.s)
+        updateBottomStack()
 
         // Property observers do not run for a property's declaration-time value.
         // Production is born with the 96 header override already installed, so
@@ -1878,6 +1993,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // arrived, and by the time `render` returns nobody can tell what that was.
         let selectionOnEntry = selectedRows.map(\.id)
         allRows = newRows
+        externalSessionHiding?.noteDiscovered(Set(newRows.compactMap(\.externalSession?.sessionKey)))
         updateScopeMenu()
         render(display(from: newRows))
         completePendingAdvance(selectionOnEntry: selectionOnEntry)
@@ -1968,6 +2084,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // that list is being replaced. Any still fading are dropped here rather than
         // left to their timers — the row under them is a different agent now.
         cancelCrossfades()
+        qaFullReloadCount += 1
         setItems(visible)
         cellsByRow.removeAll()
         shelfHeaderCell = nil
@@ -1989,6 +2106,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // and the agent under the mouse may now be a different one.
         refreshHoverFromPointer()
         scheduleWakeRerender()
+        if peekWorkspace != nil { applyPeek(animated: false) }
     }
 
     /// Apply a new set of rows knowing WHICH agents moved (P2B.7's change set).
@@ -2062,6 +2180,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // updated either way, so a new project appears in the dropdown on the push
         // that first mentions it.
         allRows = newRows
+        externalSessionHiding?.noteDiscovered(Set(newRows.compactMap(\.externalSession?.sessionKey)))
         updateScopeMenu()
         scheduleWakeRerender()
         // P2D.4: the disclosure is VIEW state, so it is not in `AgentInboxRow` and
@@ -2082,7 +2201,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let disclosureMoved = previousParents.symmetricDifference(parentsWithChildren)
         let previous = rows
         let valueChanged = Set(zip(previous, next.compactMap(\.agentRow))
-            .filter { $0.0 != $0.1 }
+            .filter { !$0.0.matchesIgnoringLiveElapsed($0.1) }
             .map { $0.1.id })
         // Hold an unaffected visible row as the user's visual anchor. A numeric
         // clip origin is not enough when a preceding row grows: AppKit must keep
@@ -2091,7 +2210,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             excluding: changed.touched.union(valueChanged))
         setItems(next)
         let indexes = IndexSet(rows.indices.filter {
-            changed.touched.contains(rows[$0].id) || rows[$0] != previous[$0]
+            changed.touched.contains(rows[$0].id) || !rows[$0].matchesIgnoringLiveElapsed(previous[$0])
                 || disclosureMoved.contains(rows[$0].id)
         }.compactMap(tableRow(forRowIndex:)))
         guard !indexes.isEmpty else { return }
@@ -2126,10 +2245,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// already hidden under its parent, and the header would say it is holding a row
     /// that unfolding it does not produce.
     private func display(from newRows: [AgentInboxRow]) -> [InboxListItem] {
-        let scoped = InboxScope.filter(
-            rows: newRows, scope: scope, openAgentId: openAgentId,
+        let hiddenKeys = externalSessionHiding?.hiddenKeys ?? []
+        func isHidden(_ row: AgentInboxRow) -> Bool {
+            row.externalSession.map { hiddenKeys.contains($0.sessionKey) } ?? false
+        }
+        let sourced = newRows.filter { $0.id == openAgentId || !hiddenSources.contains(InboxSource.key(for: $0)) }
+        let scopedWithHidden = InboxScope.filter(
+            rows: sourced, scope: effectiveScope, openAgentId: openAgentId,
             currentWorkspace: currentWorkspaceName,
             currentWorkspaceId: currentWorkspaceId)
+        // .plans/87: `Hidden (N)` counts what opening it would bring back here; open,
+        // those rows are drawn in place, dimmed, each with Show.
+        let hiddenHere = hiddenKeys.isEmpty ? [] : scopedWithHidden.filter(isHidden)
+        hiddenInScopeCount = hiddenHere.count
+        if hiddenHere.isEmpty { hiddenRevealed = false }
+        revealedHiddenIds = hiddenRevealed ? Set(hiddenHere.map(\.id)) : []
+        updateHiddenFooter()
+        let scoped = hiddenRevealed || hiddenHere.isEmpty ? scopedWithHidden : scopedWithHidden.filter { !isHidden($0) }
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
         let searched = query.isEmpty ? scoped : scoped.filter { row in
             [row.title, row.projectName, row.workspaceName, row.model, row.branch, row.whereMarker?.text]
@@ -2137,6 +2269,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 .contains { $0.localizedCaseInsensitiveContains(query) }
         }
         let sorted = InboxSort.sortForInbox(rows: searched)
+        marksWorkspaces = Set(sorted.compactMap(\.workspaceId)).count > 1
         // P2D.4/P2D.5 must read the FULL sorted list. Capping or folding before
         // these derivations would make a hidden child's disclosure, rollup and
         // lifecycle blocker disappear together.
@@ -2251,6 +2384,154 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
         return result
     }
+
+    // MARK: - Toggle pills (.plans/87, quick hide/show)
+
+    /// The rows the pills count: every row but sessions hidden one by one.
+    private var pillRows: [AgentInboxRow] {
+        let hiddenKeys = externalSessionHiding?.hiddenKeys ?? []
+        guard !hiddenKeys.isEmpty else { return allRows }
+        return allRows.filter { row in row.externalSession.map { !hiddenKeys.contains($0.sessionKey) } ?? true }
+    }
+
+    /// Whether the WORKSPACE dimension keeps this workspace's rows.
+    private func workspaceDimensionShows(_ id: UUID, rows: [AgentInboxRow]) -> Bool {
+        let scope = effectiveScope
+        if scope == .thisMac || scope == .all { return true }
+        if let filter = scope.workspaceFilter { return filter.shows(workspace: id, current: currentWorkspaceId) }
+        // A pick (a project): on while any of its rows survives the pick.
+        return !InboxScope.filter(
+            rows: rows.filter { $0.workspaceId == id }, scope: scope,
+            currentWorkspace: currentWorkspaceName, currentWorkspaceId: currentWorkspaceId).isEmpty
+    }
+
+    /// The pills, in their fixed order: workspaces by name, then the outside
+    /// sources (`InboxSource.ordered`). A workspace pill is on while its
+    /// workspace is in the set AND Array's own agents are not soloed away.
+    func pillModels() -> [InboxFilterPillModel] {
+        let rows = pillRows
+        let shown = Set(InboxScope.filter(
+            rows: rows, scope: effectiveScope, currentWorkspace: currentWorkspaceName,
+            currentWorkspaceId: currentWorkspaceId)
+            .filter { !hiddenSources.contains(InboxSource.key(for: $0)) }.map(\.id))
+        func attention(_ rows: [AgentInboxRow]) -> Bool {
+            rows.contains { $0.lifecycle == .active && InboxTally.needsYou($0) && !shown.contains($0.id) }
+        }
+        let names = workspaceNamesById
+        let workspaceIds = names.keys.sorted { left, right in
+            let order = (names[left] ?? "").localizedCaseInsensitiveCompare(names[right] ?? "")
+            return order == .orderedSame ? left.uuidString < right.uuidString : order == .orderedAscending
+        }
+        let arrayShown = !hiddenSources.contains(InboxSource.arrayAgents)
+        var models = workspaceIds.map { id -> InboxFilterPillModel in
+            let mine = rows.filter { $0.workspaceId == id }
+            let on = arrayShown && workspaceDimensionShows(id, rows: rows)
+            return InboxFilterPillModel(
+                kind: .workspace(id), title: names[id] ?? "Workspace", swatch: workspaceColour(id), symbol: nil,
+                count: InboxTally.count(mine).agents, isOn: on, attention: !on && attention(mine))
+        }
+        var bySource: [String: [AgentInboxRow]] = [:]
+        for row in rows where row.externalSession != nil { bySource[InboxSource.key(for: row), default: []].append(row) }
+        for key in InboxSource.ordered(Set(bySource.keys)) {
+            let mine = bySource[key] ?? []
+            let on = !hiddenSources.contains(key)
+            models.append(InboxFilterPillModel(
+                kind: .source(key), title: key, swatch: nil, symbol: mine.first?.whereMarker?.symbol ?? "terminal",
+                count: InboxTally.count(mine).agents, isOn: on, attention: !on && attention(mine)))
+        }
+        return models
+    }
+
+    /// Repaint the pills, and show the row only when there are two or more.
+    private func updatePills() {
+        let models = pillModels()
+        let shows = models.count >= 2
+        pillStrip.pills = shows ? models : []
+        if pillStrip.isHidden == shows {
+            pillStrip.isHidden = !shows
+            pillStripHeight?.constant = shows ? InboxFilterPill.height : 0
+            pillStripGap?.constant = shows ? Space.xs : 0
+            needsLayout = true
+        }
+        if pillOverflowController.isPresented {
+            pillStrip.layoutSubtreeIfNeeded()
+            pillOverflowController.listView?.replace(items: pillOverflowItems())
+        }
+    }
+
+    /// A pill was pressed: a click toggles it, Option solos it. Workspace pills
+    /// write the scope's own set (`InboxScopeMenu.choose`, the popover's path);
+    /// source pills write `hiddenSources`.
+    private func pillPressed(_ id: String, flags: NSEvent.ModifierFlags) {
+        guard let pill = pillModels().first(where: { $0.id == id }) else { return }
+        let solo = flags.contains(.option)
+        let outside = Set(pillRows.filter { $0.externalSession != nil }.map(InboxSource.key(for:)))
+        let arrayKey = InboxSource.arrayAgents
+        switch pill.kind {
+        case .workspace(let workspace):
+            if solo {
+                // This workspace's agents and nothing else: every source goes off.
+                let next = InboxScopeMenu.choose(.workspace(workspace), from: scope, current: currentWorkspaceId, only: true)
+                setFilters(scope: next ?? scope, hiddenSources: outside, notify: true)
+            } else if hiddenSources.contains(arrayKey) {
+                // An outside source is soloed, so every workspace pill reads off:
+                // turning this one on brings back its agents, and only its.
+                setFilters(scope: InboxScope.normalized(.only(workspace, current: currentWorkspaceId)),
+                           hiddenSources: hiddenSources.subtracting([arrayKey]), notify: true)
+            } else {
+                // `This Mac` already shows every workspace: a click turns one off.
+                let base = scope == .thisMac ? InboxScope.all : scope
+                guard let next = InboxScopeMenu.choose(.workspace(workspace), from: base, current: currentWorkspaceId)
+                else { updatePills(); return }
+                setFilters(scope: next, hiddenSources: hiddenSources, notify: true)
+            }
+        case .source(let key):
+            if solo {
+                setFilters(scope: scope, hiddenSources: outside.subtracting([key]).union([arrayKey]), notify: true)
+            } else {
+                var next = hiddenSources
+                if next.contains(key) { next.remove(key) } else { next.insert(key) }
+                setFilters(scope: scope, hiddenSources: next, notify: true)
+            }
+        }
+    }
+
+    /// `+N`'s checklist: the pills that did not fit, as the shared checklist's
+    /// rows — a box, the dot or glyph, the count, `Only` on hover.
+    private func pillOverflowItems() -> [ChoiceItem] {
+        pillStrip.overflowed.map { pill in
+            var item = ChoiceItem(id: pill.id, title: pill.title, icon: pill.symbol.map { .system($0) })
+            item.check = pill.isOn ? .on : .off
+            item.swatch = pill.swatch
+            item.trailing = pill.attention ? nil : "\(pill.count)"
+            item.attention = pill.attention
+            item.keepsOpen = true
+            item.accessories = [ChoiceAccessory(id: "only", title: "Only", symbol: nil,
+                                                accessibilityLabel: "Show only \(pill.title)")]
+            item.optionAccessoryID = "only"
+            return item
+        }
+    }
+
+    private func presentPillOverflow(anchor: NSRect) {
+        let items = pillOverflowItems()
+        guard !items.isEmpty else { return }
+        let offscreen = presentsPopoversOffscreenForQA
+        pillOverflowController.present(
+            items: items, selectedID: nil, presentation: .checklist, anchor: anchor, relativeTo: pillStrip,
+            placementFrame: offscreen ? window?.frame : nil, takesFocus: !offscreen,
+            accessibilityLabel: "More workspaces and apps",
+            onSelection: { [weak self] item in self?.pillPressed(item.id, flags: []) },
+            focusReturnView: tableView,
+            onAccessory: { [weak self] item, _ in self?.pillPressed(item.id, flags: .option) })
+    }
+
+    /// QA: the open `+N` checklist, if any.
+    var pillOverflowListForQA: ChoiceListView? {
+        pillOverflowController.isPresented || presentsPopoversOffscreenForQA ? pillOverflowController.listView : nil
+    }
+
+    func dismissPillOverflowForQA() { pillOverflowController.dismiss() }
 
     // MARK: - The settled tail (P4.8)
 
@@ -2553,6 +2834,74 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return true
     }
 
+    // Plan: .plans/86-workspace-filter/README.md
+    /// A scope change by removing the rows that left and inserting the ones that
+    /// arrived, keeping every surviving cell. A filter never reorders (P3.8), so the
+    /// rows both lists share appear in the same order in each; when they do not,
+    /// this answers false, touches nothing, and the caller renders whole.
+    ///
+    /// The checklist made this matter: one pick used to change the scope, and now a
+    /// person clicks three boxes in a row, each of which rebuilt every card.
+    private func applyScopeIncrementally(_ next: [InboxListItem], previousRollups: [UUID: ChildRollup]) -> Bool {
+        let old = items.map(\.identity), new = next.map(\.identity)
+        let oldSet = Set(old), newSet = Set(new)
+        guard oldSet.count == old.count, newSet.count == new.count,
+              old.filter(newSet.contains) == new.filter(oldSet.contains) else { return false }
+        let removed = IndexSet(old.indices.filter { !newSet.contains(old[$0]) })
+        let inserted = IndexSet(new.indices.filter { !oldSet.contains(new[$0]) })
+        let oldNesting = Dictionary(zip(old, nestingByTableRow)) { first, _ in first }
+        let renderNow = clock()
+        let oldNudge = settleNudgeTargetID(now: renderNow)
+        endRename(commit: true)
+        cancelCrossfades()
+        setItems(next)
+        tableView.beginUpdates()
+        if !removed.isEmpty { tableView.removeRows(at: removed, withAnimation: []) }
+        if !inserted.isEmpty { tableView.insertRows(at: inserted, withAnimation: []) }
+        tableView.endUpdates()
+        cellsByRow.removeAll()
+        for row in 0..<tableView.numberOfRows {
+            if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
+                cellsByRow[row] = cell
+            }
+        }
+        // A survivor is redrawn when what it draws from its neighbours changed: its
+        // place in the tree, its rollup (a child in another workspace left), or the
+        // settle nudge moving to or from it.
+        let nudges: Set<UUID> = Set([oldNudge, settleNudgeTargetID(now: renderNow)].compactMap { $0 })
+        var stale = IndexSet(new.indices.filter { row in
+            guard !inserted.contains(row) else { return false }
+            if let id = next[row].agentRow?.id {
+                if nudges.contains(id) || previousRollups[id] != rollupsByParent[id] { return true }
+            }
+            return oldNesting[new[row]] != nestingByTableRow[row]
+        })
+        if jumpHintsVisible {
+            stale.formUnion(IndexSet((0..<InboxJump.maximumRows).compactMap(tableRow(forRowIndex:))))
+        }
+        tableView.noteHeightOfRows(withIndexesChanged: stale)
+        tableView.reloadData(forRowIndexes: stale, columnIndexes: IndexSet(integer: 0))
+        applyWorkspaceMarksInPlace()
+        updateShelfSpacerHeight()
+        updateEmptyState()
+        updateBulkBar()
+        updateAccessibilityHierarchy()
+        refreshHoverFromPointer()
+        scheduleWakeRerender()
+        return true
+    }
+
+    /// The edge mark on every drawn card, for a list that just started or stopped
+    /// spanning more than one workspace without rebuilding its cells.
+    private func applyWorkspaceMarksInPlace() {
+        for row in 0..<tableView.numberOfRows {
+            guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInbox96CellView,
+                  let model = item(at: row)?.agentRow else { continue }
+            cell.workspaceMarkColour = marksWorkspaces
+                ? model.workspaceId.map { workspaceColour($0).withAlphaComponent(0.85) } : nil
+        }
+    }
+
     /// What one fold photograph holds: native geometry for every row, pixels
     /// for the visible materialized ones, and the cell each image came from.
     private struct FoldCapture {
@@ -2644,8 +2993,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// after the flip goes red, which is the witness quoted at
     /// `runAgentInboxChecks`.
     func setScope(_ next: InboxScope, notify: Bool = false) {
-        guard next != scope else { return }
+        setFilters(scope: next, hiddenSources: hiddenSources, notify: notify)
+    }
+
+    /// Restore the hidden sources the host persisted. Never calls back.
+    func setHiddenSources(_ next: Set<String>, notify: Bool = false) {
+        setFilters(scope: scope, hiddenSources: next, notify: notify)
+    }
+
+    /// Both dimensions at once, so a solo (a workspace AND every source) is one
+    /// reflow and one write of each, never two lists in a row.
+    func setFilters(scope next: InboxScope, hiddenSources nextSources: Set<String>, notify: Bool) {
+        guard next != scope || nextSources != hiddenSources else { return }
+        let scopeChanged = next != scope
+        let sourcesChanged = nextSources != hiddenSources
         scope = next
+        hiddenSources = nextSources
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         // P1.2: hover and the focus ring are dropped and then RE-DERIVED from
@@ -2656,8 +3019,44 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         hoveredAgentId = nil
         keyboardFocusIntent = nil
         updateScopeMenu()
-        render(display(from: allRows))
-        if notify { onScopeChange?(next) }
+        // Plan: .plans/86-workspace-filter/README.md — a scope change REFLOWS: the
+        // rows that stay slide to their new places instead of jumping, while
+        // arrivals and departures fade where they land and where they stood.
+        //
+        // Only the rows that LEAVE are photographed. Survivors are the same live cells
+        // (`applyScopeIncrementally`) and slide from where they were; arrivals are
+        // live cells fading up. A photograph of every card cost a toggle half its time.
+        if window != nil, !prefersReducedMotion() {
+            foldMotion.cancel()
+            for card in deckCells.allObjects { card.restDeck() }
+            let previousIds = Set(rows.map(\.id))
+            var previousY: [UUID: CGFloat] = [:]
+            for (index, row) in rows.enumerated() {
+                if let tableRow = tableRow(forRowIndex: index) { previousY[row.id] = tableView.rect(ofRow: tableRow).minY }
+            }
+            let previousRollups = rollupsByParent
+            let shown = display(from: allRows)
+            let nextIds = Set(shown.compactMap { $0.agentRow?.id })
+            let ghosts = shown.count <= Self.rowMotionRowLimit
+                ? liftExitGhosts(leaving: previousIds.subtracting(nextIds)) : []
+            if !applyScopeIncrementally(shown, previousRollups: previousRollups) {
+                render(shown, animateRows: false)
+            }
+            layoutSubtreeIfNeeded()
+            tableView.layoutSubtreeIfNeeded()
+            settlePeekForNewScope()
+            if shown.count <= Self.rowMotionRowLimit {
+                startRowMotion(exits: ghosts, entering: nextIds.subtracting(previousIds))
+                slideSurvivors(from: previousY)
+            }
+        } else {
+            let previousRollups = rollupsByParent
+            let shown = display(from: allRows)
+            if !applyScopeIncrementally(shown, previousRollups: previousRollups) { render(shown) }
+            settlePeekForNewScope()
+        }
+        if notify, scopeChanged { onScopeChange?(next) }
+        if notify, sourcesChanged { onHiddenSourcesChange?(nextSources) }
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -2731,8 +3130,58 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private func restoreScopeSelection() {
-        let id = scope.storageValue
-        scopeButton.selectedID = id
+        applyScopeTrigger()
+    }
+
+    private var workspaceNamesById: [UUID: String] {
+        var names: [UUID: String] = [:]
+        for row in allRows { if let id = row.workspaceId, let name = row.workspaceName { names[id] = name } }
+        for case .workspaceID(let id, let name) in scopeCatalog { names[id] = name }
+        return names
+    }
+
+    /// The scope as the title and the match read it: a stored set ignores any
+    /// workspace the catalog no longer holds (a deleted one) without forgetting it.
+    /// With no catalog yet, nothing is known to be gone.
+    private var effectiveScope: InboxScope {
+        guard case .workspaces(let filter) = scope else { return scope }
+        var known = Set<UUID>()
+        for case .workspaceID(let id, _) in scopeCatalog { known.insert(id) }
+        guard !known.isEmpty else { return scope }
+        return InboxScope.normalized(filter.ignoringWorkspaces(notIn: known))
+    }
+
+    func workspaceColour(_ id: UUID) -> NSColor {
+        ZoneChromeNSView.color(named: workspaceColourNames[id] ?? WorkspaceEntry.defaultColour(for: id))
+    }
+
+    /// The trigger shows the scope's title and, for a set of several workspaces,
+    /// their dots. Its `selectedID` rests on `All agents` — a row every menu has —
+    /// so a menu rebuilt under it never resets the label to its first row.
+    private func applyScopeTrigger() {
+        let names = workspaceNamesById
+        var title = InboxScopeMenu.title(for: effectiveScope, names: names, current: currentWorkspaceId)
+        // .plans/87: a set that ticks every workspace there is says so, rather than
+        // "3 workspaces" or "Array + Film".
+        if case .workspaces(let filter) = effectiveScope, names.count > 1,
+           names.keys.allSatisfy({ filter.shows(workspace: $0, current: currentWorkspaceId) }) {
+            title = Self.allWorkspacesTitle
+        }
+        scopeButton.selectedTitleOverride = title
+        scopeButton.selectedID = InboxScope.all.storageValue
+        scopeButton.setAccessibilityValue(title)
+        var dots: [UUID] = []
+        if case .workspaces(let filter) = scope {
+            let known = Array(names.keys)
+            dots = known.filter { filter.shows(workspace: $0, current: currentWorkspaceId) }
+                .sorted { left, right in
+                    if left == currentWorkspaceId { return true }
+                    if right == currentWorkspaceId { return false }
+                    return (names[left] ?? "").localizedCaseInsensitiveCompare(names[right] ?? "") == .orderedAscending
+                }
+            if dots.count < 2 { dots = [] }
+        }
+        scopeButton.leadingSwatches = dots.prefix(3).map(workspaceColour)
     }
 
     /// Rebuild the popup's menu when the set of scopes changed, and point it at the
@@ -2745,18 +3194,56 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the wrong scope. The tag carries the index instead of the position, so the
     /// separator between the two blocks costs nothing.
     private func updateScopeMenu() {
-        let entries = InboxScope.entries(
-            for: allRows, catalog: scopeCatalog, including: scope,
-            currentWorkspace: currentWorkspaceName,
-            currentWorkspaceId: currentWorkspaceId,
+        updatePills()
+        var workspaces: [InboxScopeMenu.Workspace] = []
+        var projects: [String] = []
+        var legacyWorkspaces: [String] = []
+        for entry in scopeCatalog {
+            switch entry {
+            case .workspaceID(let id, let name): workspaces.append(.init(id: id, name: name))
+            case .project(let name): projects.append(name)
+            case .workspace(let name): legacyWorkspaces.append(name)
+            default: break
+            }
+        }
+        let entries = InboxScopeMenu.entries(
+            scope: scope, workspaces: workspaces, projects: projects, legacyWorkspaces: legacyWorkspaces,
+            rows: allRows, current: currentWorkspaceId,
+            offersCurrent: currentWorkspaceId != nil || currentWorkspaceName != nil,
             offersThisMac: offersThisMacScope)
-        scopeEntries = entries
-        var items = entries.map { ChoiceItem(id: $0.storageValue, title: $0.title) }
+        scopeMenuEntries = entries
+        if let editing = colourEditingWorkspace,
+           let workspace = entries.first(where: { $0.kind == .workspace(editing) }) {
+            scopeButton.items = colourItems(for: editing, name: workspace.title)
+            restoreScopeSelection()
+            return
+        }
+        var items = entries.enumerated().map { index, entry in
+            choiceItem(for: entry, separatorBefore: index > 0 && entries[index - 1].section != entry.section)
+        }
+        // .plans/87: the project picks live behind one `Projects ›` row.
+        let projectEntries = entries.filter { if case .project = $0.kind { return true } else { return false } }
+        if projectsDrilled, !projectEntries.isEmpty {
+            scopeButton.items = projectDrillItems(projectEntries)
+            restoreScopeSelection()
+            return
+        }
+        projectsDrilled = false
+        if let first = items.firstIndex(where: { id in projectEntries.contains { $0.id == id.id } }) {
+            let projectIds = Set(projectEntries.map(\.id))
+            items.removeAll { projectIds.contains($0.id) }
+            var drill = ChoiceItem(id: Self.projectsItemId, title: "Projects", icon: .system("folder"))
+            drill.trailing = "\(projectEntries.count) ›"
+            drill.keepsOpen = true
+            drill.separatorBefore = true
+            items.insert(drill, at: min(first, items.count))
+            if items.indices.contains(first + 1) { items[first + 1].separatorBefore = true }
+        }
         managementItems.removeAll()
         // Keep every management affordance visible. Unsupported actions are
         // disabled in place, rather than disappearing and making the menu's
-        // contract depend on the current workspace count.
-        items.append(ChoiceItem(id: "management-separator", title: "────────", enabled: false))
+        // contract depend on the current workspace count. The checklist draws
+        // the divider above them.
         for action in WorkspaceManagementAction.allCases {
             let enabled = action == .create || (action == .rename ? canRenameWorkspace : canDeleteWorkspace)
             // The id keeps the bare title, so every existing lookup still resolves.
@@ -2764,8 +3251,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             if action == .delete, !enabled, let reason = workspaceDeleteDisabledReason, !reason.isEmpty {
                 title = "\(action.title) — \(reason)"
             }
-            let item = ChoiceItem(id: "management:\(action.title)", title: title,
+            var item = ChoiceItem(id: "management:\(action.title)", title: title,
                                   enabled: enabled)
+            item.separatorBefore = action == WorkspaceManagementAction.allCases.first
             managementItems[action] = item
             items.append(item)
         }
@@ -2773,9 +3261,192 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         restoreScopeSelection()
     }
 
+    static let allWorkspacesTitle = "All workspaces"
+    static let projectsItemId = "projects:open"
+    static let projectsBackItemId = "projects:back"
+
+    private func choiceItem(for entry: InboxScopeMenuEntry, separatorBefore: Bool) -> ChoiceItem {
+        // Checkboxes combine; picks replace, so a pick wears the old menu's
+        // checkmark instead of a box. `All agents` is the set's select-all.
+        // `This Mac` is a checkbox since .plans/87.
+        let isPick: Bool
+        switch entry.kind {
+        case .project, .legacyWorkspace: isPick = true
+        default: isPick = false
+        }
+        var item = ChoiceItem(id: entry.id, title: entry.title, detail: entry.detail,
+                              icon: isPick && entry.check == .on ? .system("checkmark") : nil)
+        if !isPick {
+            switch entry.check {
+            case .on: item.check = .on
+            case .off: item.check = .off
+            case .mixed: item.check = .mixed
+            // ONE tick for "the workspace on screen": This workspace carries it, and
+            // the workspace's own row does not repeat it in grey (.plans/87).
+            case .following: item.check = .off
+            }
+        }
+        item.trailing = entry.trailing
+        item.attention = entry.needsYou
+        item.separatorBefore = separatorBefore
+        item.keepsOpen = entry.isToggle
+        let only = ChoiceAccessory(id: "only", title: "Only", symbol: nil,
+                                   accessibilityLabel: "Show only \(entry.title)")
+        switch entry.kind {
+        case .workspace(let id):
+            item.swatch = workspaceColour(id)
+            // Trailing edge first: `…` outermost, `Only` beside it.
+            item.accessories = [
+                ChoiceAccessory(id: "colour", title: nil, symbol: "ellipsis",
+                                accessibilityLabel: "Colour for \(entry.title)"),
+                only,
+            ]
+            item.optionAccessoryID = only.id
+        case .unplaced:
+            item.accessories = [only]
+            item.optionAccessoryID = only.id
+        default:
+            break
+        }
+        return item
+    }
+
+    /// The projects, in place of the scopes: each a pick with its top-level count
+    /// and who needs you, behind a Back row.
+    private func projectDrillItems(_ entries: [InboxScopeMenuEntry]) -> [ChoiceItem] {
+        var back = ChoiceItem(id: Self.projectsBackItemId, title: "Projects", icon: .system("chevron.left"))
+        back.keepsOpen = true
+        return [back] + entries.enumerated().map { index, entry in
+            guard case .project(let name) = entry.kind else { return choiceItem(for: entry, separatorBefore: false) }
+            let count = InboxTally.count(allRows.filter { $0.projectName == name })
+            var item = ChoiceItem(id: entry.id, title: entry.title, detail: InboxTally.detail(count),
+                                  icon: .system(entry.check == .on ? "checkmark" : "folder"))
+            item.attention = count.needsYou > 0
+            item.separatorBefore = index == 0
+            return item
+        }
+    }
+
+    /// The palette, in place of the scopes, for one workspace. Choosing a colour
+    /// (or Back) returns to the scopes without closing the popover.
+    private func colourItems(for workspace: UUID, name: String) -> [ChoiceItem] {
+        let chosen = workspaceColourNames[workspace] ?? WorkspaceEntry.defaultColour(for: workspace)
+        var back = ChoiceItem(id: "colour:back", title: name, icon: .system("chevron.left"))
+        back.keepsOpen = true
+        return [back] + ZoneColorConfig.palette.enumerated().map { index, colour in
+            var item = ChoiceItem(id: "colour:\(colour)", title: colour.capitalized,
+                                  icon: colour == chosen ? .system("checkmark") : nil)
+            item.swatch = ZoneChromeNSView.color(named: colour)
+            item.keepsOpen = true
+            item.separatorBefore = index == 0
+            return item
+        }
+    }
+
+    private func scopeAccessoryPressed(_ item: ChoiceItem, _ accessory: String) {
+        guard let entry = scopeMenuEntries.first(where: { $0.id == item.id }) else { return }
+        switch accessory {
+        case "only":
+            guard let next = InboxScopeMenu.choose(entry.kind, from: scope, current: currentWorkspaceId, only: true)
+            else { return }
+            setScope(next, notify: true)
+        case "colour":
+            guard case .workspace(let id) = entry.kind else { return }
+            colourEditingWorkspace = id
+            setPeek(nil)
+            updateScopeMenu()
+        default:
+            break
+        }
+    }
+
+    /// Hovering a workspace that is on screen peeks it: every other workspace's
+    /// cards sink. Only while the list spans several — one workspace has nothing
+    /// to sink.
+    private func scopeFocusChanged(_ id: String?) {
+        focusedScopeItemID = id
+        setPeek(peekTarget(forScopeItem: id))
+    }
+
+    /// The popover row under the pointer or the keyboard, kept so a toggle can
+    /// settle the peek for the list it produces.
+    private var focusedScopeItemID: String?
+    /// The popover is showing the projects behind `Projects ›`.
+    private var projectsDrilled = false
+
+    private func peekTarget(forScopeItem id: String?) -> UUID? {
+        guard colourEditingWorkspace == nil, marksWorkspaces, let id,
+              let entry = scopeMenuEntries.first(where: { $0.id == id }),
+              case .workspace(let workspace) = entry.kind,
+              entry.check == .on || entry.check == .following
+        else { return nil }
+        return workspace
+    }
+
+    /// After a scope change, before anything photographs the new list: the row
+    /// still under the pointer peeks what it now shows, or nothing.
+    private func settlePeekForNewScope() {
+        guard focusedScopeItemID != nil || peekWorkspace != nil else { return }
+        peekWorkspace = peekTarget(forScopeItem: focusedScopeItemID)
+        applyPeek(animated: false)
+    }
+
+    static let peekDimmedAlpha: CGFloat = 0.32
+    static let peekDuration: TimeInterval = 0.12
+
+    private func setPeek(_ workspace: UUID?) {
+        guard workspace != peekWorkspace else { return }
+        peekWorkspace = workspace
+        applyPeek(animated: true)
+    }
+
+    /// The peek's alpha on every drawn agent cell. Re-applied after a render, which
+    /// builds new cells at full alpha.
+    private func applyPeek(animated: Bool) {
+        let animates = animated && !prefersReducedMotion()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = animates ? Self.peekDuration : 0
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            for row in 0..<tableView.numberOfRows {
+                guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
+                        as? AgentInbox96CellView else { continue }
+                var alpha: CGFloat = 1
+                if let peekWorkspace, let model = item(at: row)?.agentRow, model.workspaceId != peekWorkspace {
+                    alpha = Self.peekDimmedAlpha
+                }
+                cell.setPeekAlpha(alpha, animated: animates)
+            }
+        }
+    }
+
     private func choicePicked(_ item: ChoiceItem) {
-        if let entry = scopeEntries.first(where: { $0.storageValue == item.id }) {
-            setScope(entry, notify: true)
+        if item.id == Self.projectsItemId || item.id == Self.projectsBackItemId {
+            projectsDrilled = item.id == Self.projectsItemId
+            setPeek(nil)
+            updateScopeMenu()
+            return
+        }
+        if item.id.hasPrefix("project:") { projectsDrilled = false }
+        if item.id == "colour:back" {
+            colourEditingWorkspace = nil
+            updateScopeMenu()
+            return
+        }
+        if item.id.hasPrefix("colour:"), let workspace = colourEditingWorkspace {
+            colourEditingWorkspace = nil
+            onWorkspaceColourChange?(workspace, String(item.id.dropFirst("colour:".count)))
+            updateScopeMenu()
+            return
+        }
+        if let entry = scopeMenuEntries.first(where: { $0.id == item.id }) {
+            if !entry.isToggle { setPeek(nil) }
+            guard let next = InboxScopeMenu.choose(entry.kind, from: scope, current: currentWorkspaceId) else {
+                // A refused uncheck or a re-picked pick: the menu still has to show
+                // the boxes the scope really has.
+                updateScopeMenu()
+                return
+            }
+            setScope(next, notify: true)
             return
         }
         guard let action = WorkspaceManagementAction.allCases.first(where: { item.id == "management:\($0.title)" }) else { return }
@@ -2973,6 +3644,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         configureHoverActions(on: cell, for: model)
         if let redesigned = cell as? AgentInbox96CellView {
             redesigned.reducesHoverMotion = { [weak self] in self?.prefersReducedMotion() ?? false }
+            redesigned.workspaceMarkColour = marksWorkspaces
+                ? model.workspaceId.map { workspaceColour($0).withAlphaComponent(0.85) } : nil
+            if let peekWorkspace, model.workspaceId != peekWorkspace {
+                redesigned.setPeekAlpha(Self.peekDimmedAlpha, animated: false)
+            }
             // The tree connector. Set from the LIST, which is the only thing that
             // knows what is drawn above and below this row.
             redesigned.setNesting(nesting(atTableRow: row))
@@ -3036,15 +3712,32 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             }
             if let card = cell as? AgentInbox96CellView {
                 card.configureHoverActions(snooze: nil, settle: nil)
+                if revealedHiddenIds.contains(id) {
+                    // Drawn only because `Hidden (N)` is open: dimmed, and its one
+                    // action is Show.
+                    let key = external.sessionKey
+                    card.configureExternalActions(moveHere: nil, copy: nil, hide: { [weak self] in
+                        self?.showHiddenExternalSessions([key])
+                    }, hideHelp: "Show in the sidebar")
+                    card.setRevealedHidden(true)
+                    return
+                }
+                card.setRevealedHidden(false)
                 card.configureExternalActions(
                     moveHere: external.canMoveHere ? perform(.moveHere) : nil,
-                    copy: external.canCopy ? perform(.copy) : nil)
+                    copy: external.canCopy ? perform(.copy) : nil,
+                    hide: externalSessionHiding == nil ? nil : { [weak self] in self?.hideExternalRows([id]) })
             }
             return
         }
         if let card = cell as? AgentInbox96CellView {
-            card.configureHoverActions(snooze: action(.snooze), settle: action(.settle))
-            card.configureExternalActions(moveHere: nil, copy: nil)
+            card.setRevealedHidden(false)
+            // .plans/87: the × IS the snooze on Array's own rows (three hours, or
+            // until it needs you), so it takes the Snooze pill's place.
+            let hide: (() -> Void)? = canHide(model) ? { [weak self] in self?.hideRows([id]) } : nil
+            card.configureHoverActions(snooze: hide == nil ? action(.snooze) : nil, settle: action(.settle))
+            card.configureExternalActions(moveHere: nil, copy: nil, hide: hide,
+                                          hideHelp: "Snooze for 3 hours, or until it needs you")
         } else if let slim = cell as? AgentInboxSlimCellView {
             if model.closingSince != nil {
                 slim.configureBackgroundActions(
@@ -3100,6 +3793,28 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         card.layoutSubtreeIfNeeded()
         return card.qaMetadataInkGeometry
     }
+
+    /// Press a hovered row's × through its own button.
+    func clickHoverHideForQA(id: UUID) -> Bool {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return false }
+        card.layoutSubtreeIfNeeded()
+        return card.clickHoverHideForQA()
+    }
+
+    /// ⌘Z delivered to the list's own table.
+    func pressCommandZForQA() {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+            windowNumber: window?.windowNumber ?? 0, context: nil,
+            characters: "z", charactersIgnoringModifiers: "z", isARepeat: false, keyCode: 6) else { return }
+        tableView.keyDown(with: event)
+    }
+
+    /// Pick a row of the scope popover by id, through the production selection path.
+    func chooseScopeItemForQA(id: String) -> Bool { scopeButton.chooseForQA(id: id) }
+    var scopeItemIdsForQA: [String] { scopeButton.items.map(\.id) }
 
     /// Hover row `id` the way the pointer does, then press one of its external actions.
     func clickExternalActionForQA(id: UUID, _ action: InboxExternalSessionAction) -> Bool {
@@ -3593,6 +4308,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Show, hide and re-populate the bar for the current selection.
     private func updateBulkBar() {
         let selected = selectedRows
+        defer { updateBottomStack() }
         guard selected.count >= AgentInboxView.minimumBulkSelection else {
             bulkBar.hide()
             updateAccessibilityHierarchy()
@@ -3818,7 +4534,70 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Selection changes only when the pointer is outside an existing multi-selection.
     fileprivate func presentContextMenu(for event: NSEvent) {
         let point = tableView.convert(event.locationInWindow, from: nil)
-        presentContextMenu(atTableRow: tableView.row(at: point), anchor: NSRect(origin: point, size: .zero))
+        let tableRow = tableView.row(at: point)
+        if presentHostMenu(atTableRow: tableRow, windowPoint: event.locationInWindow) { return }
+        presentContextMenu(atTableRow: tableRow, anchor: NSRect(origin: point, size: .zero))
+    }
+
+    // MARK: - Bulk hide from a host label (.plans/87)
+
+    static let hideAllFromHostItemId = "host:hide-all"
+    static let hideThisSessionItemId = "host:hide-one"
+    static let showOnlyHostItemId = "host:show-only"
+
+    /// The host a session's label names (`tmux`, `cmux`, `Claude app`), without
+    /// the "· 4m ago" an unknown status adds.
+    static func hostLabel(of row: AgentInboxRow) -> String? {
+        guard row.externalSession != nil, let text = row.whereMarker?.text else { return nil }
+        return text.components(separatedBy: " · ").first ?? text
+    }
+
+    /// A right-click ON a session's host label opens the host's menu: hide every
+    /// session the list shows from that host, hide this one, or show only that
+    /// host. Anywhere else on the row keeps the row menu.
+    private func presentHostMenu(atTableRow tableRow: Int, windowPoint: NSPoint) -> Bool {
+        guard tableRow >= 0, let model = item(at: tableRow)?.agentRow, let host = Self.hostLabel(of: model),
+              externalSessionHiding != nil,
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView,
+              let marker = card.whereMarkerRect,
+              marker.insetBy(dx: -2, dy: -2).contains(card.convert(windowPoint, from: nil))
+        else { return false }
+        if tableView.selectedRowIndexes != IndexSet(integer: tableRow) {
+            tableView.selectRowIndexes(IndexSet(integer: tableRow), byExtendingSelection: false)
+        }
+        let sameHost = rows.filter { Self.hostLabel(of: $0) == host && canHide($0) }.map(\.id)
+        let source = InboxSource.key(for: model)
+        let sourceRows = pillRows.filter { $0.externalSession != nil && InboxSource.key(for: $0) == source }
+        // "Show only tmux" while every session of the pill is tmux; the pill's own
+        // name once it gathers more than one host (Terminal holds tmux too).
+        let onlyName = sourceRows.allSatisfy { Self.hostLabel(of: $0) == host } ? host : source
+        var items: [ChoiceItem] = []
+        items.append(ChoiceItem(id: Self.hideAllFromHostItemId,
+                                title: "Hide all \(sameHost.count) from \(host)", icon: .system("eye.slash")))
+        items.append(ChoiceItem(id: Self.hideThisSessionItemId, title: "Hide this session", icon: .system("xmark")))
+        var only = ChoiceItem(id: Self.showOnlyHostItemId, title: "Show only \(onlyName)",
+                              icon: .system(model.whereMarker?.symbol ?? "terminal"))
+        only.separatorBefore = true
+        items.append(only)
+        rowChoiceTargetIds.removeAll()
+        let rowId = model.id
+        let anchor = card.convert(marker, to: tableView)
+        return presentRowChoices(items, anchor: anchor) { [weak self] item in
+            guard let self else { return }
+            switch item.id {
+            case Self.hideAllFromHostItemId:
+                self.hideRows(sameHost, message: "Hid \(sameHost.count) from \(host)")
+            case Self.hideThisSessionItemId:
+                self.hideRows([rowId])
+            case Self.showOnlyHostItemId:
+                let outside = Set(self.pillRows.filter { $0.externalSession != nil }.map(InboxSource.key(for:)))
+                self.setFilters(scope: self.scope,
+                                hiddenSources: outside.subtracting([source]).union([InboxSource.arrayAgents]),
+                                notify: true)
+            default:
+                break
+            }
+        }
     }
 
     @discardableResult
@@ -3838,10 +4617,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // Another app's session has none of an agent's verbs; its own are on
         // the row (click to watch) and its hover buttons.
         guard !targets.contains(where: { $0.externalSession != nil }) else {
-            rowChoiceController.dismiss()
-            qaChoiceListForQA = nil
             rowChoiceTargetIds.removeAll()
-            return false
+            guard externalSessionHiding != nil, targets.allSatisfy({ $0.externalSession != nil }) else {
+                rowChoiceController.dismiss()
+                qaChoiceListForQA = nil
+                return false
+            }
+            // Hide is the one verb a session from elsewhere has here.
+            let ids = targets.map(\.id)
+            let hide = ChoiceItem(id: Self.hideItemId,
+                                  title: targets.count > 1 ? "Hide \(targets.count)" : "Hide",
+                                  icon: .system("eye.slash"))
+            return presentRowChoices([hide], anchor: anchor) { [weak self] _ in self?.hideExternalRows(ids) }
         }
         let actions = InboxRowAction.menuItems(
             for: targets,
@@ -3865,10 +4652,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 destructive: action == .delete || action == .archive
             )
         }
-        let onSelection: (ChoiceItem) -> Void = { [weak self] item in
+        return presentRowChoices(items, anchor: anchor) { [weak self] item in
             guard let self, let action = InboxRowAction(rawValue: item.id) else { return }
             self.performRowAction(action)
         }
+    }
+
+    private func presentRowChoices(
+        _ items: [ChoiceItem], anchor: NSRect, onSelection: @escaping (ChoiceItem) -> Void
+    ) -> Bool {
         if tableView.window == nil {
             // Headless checks retain the same ChoiceListView the controller presents;
             // only the AppKit panel is unavailable without a window.
@@ -3879,9 +4671,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             return true
         }
         qaChoiceListForQA = nil
+        let offscreen = presentsPopoversOffscreenForQA
         rowChoiceController.present(
             items: items, selectedID: nil, presentation: .commands, anchor: anchor,
-            relativeTo: tableView,
+            relativeTo: tableView, placementFrame: offscreen ? window?.frame : nil, takesFocus: !offscreen,
             onSelection: onSelection, focusReturnView: tableView
         )
         // The controller owns the production list even when AppKit cannot make the
@@ -4175,7 +4968,148 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // the verb and the host resolves the date, P4.5), so the only place the hour
             // exists is the record the action wrote.
             snoozedUntil: reversible.first?.now.snoozedUntil))
+        updateBottomStack()
         restartUndoToastTimer()
+    }
+
+    // MARK: - Hidden sessions from elsewhere
+
+    static let hideItemId = "external:hide"
+    static let hiddenVerb = "Hidden"
+
+    /// Where hidden sessions live; nil (checks, baselines) offers no Hide at all.
+    var externalSessionHiding: ExternalSessionHiding? {
+        // Re-installing the sidebar hands back the same store; a full render then
+        // would rebuild every cell for nothing.
+        didSet { if oldValue !== externalSessionHiding { refreshAfterHidingChange() } }
+    }
+    private var pendingHideUndo: Set<String>?
+
+    func hideExternalRows(_ ids: [UUID]) { hideRows(ids) }
+
+    // .plans/87 (quick hide/show)
+    /// How long the × and ⌫ snooze an Array agent: it comes back then, or sooner
+    /// the moment it needs you (P4.6's raised hand).
+    static let quickSnoozeInterval: TimeInterval = 3 * 3600
+    static let quickSnoozeSuffix = "or when it needs you"
+
+    /// Whether the × and ⌫ can take this row off the list: a session from
+    /// elsewhere hides; an Array agent snoozes, when it may.
+    func canHide(_ row: AgentInboxRow) -> Bool {
+        if row.externalSession != nil { return externalSessionHiding != nil }
+        return onSnoozeSelection != nil && isWired(.snooze)
+            && InboxRowAction.snooze.isAvailable(for: row, rollups: rollupsByParent)
+    }
+
+    /// Take these rows off the list, ONE undo for the lot: sessions from elsewhere
+    /// are hidden (`ExternalSessionHiding`), Array agents snoozed for three hours
+    /// or until they need you. `message` overrides the notice's words for a
+    /// batch that names its own (`Hid 2 from tmux`).
+    func hideRows(_ ids: [UUID], message: String? = nil) {
+        let targets = ids.compactMap { id in allRows.first { $0.id == id } }.filter(canHide)
+        let sessions = targets.compactMap { row in row.externalSession.map { (key: $0.sessionKey, title: row.title) } }
+            .filter { externalSessionHiding?.isHidden($0.key) == false }
+        let agents = targets.filter { $0.externalSession == nil }.map(\.id)
+        guard !sessions.isEmpty || !agents.isEmpty else { return }
+        dismissUndoToast()
+        if !agents.isEmpty, AgentInboxView.advancesSelection(InboxRowAction.snooze) { armAdvance(targetIds: agents) }
+        if !sessions.isEmpty { externalSessionHiding?.hide(sessions) }
+        // Captured before the host writes, read back after: only what really moved
+        // is offered back (`offerUndo`'s rule).
+        let captured = captureLifecycle(agents)
+        if !agents.isEmpty { onSnoozeSelection?(agents, clock().addingTimeInterval(Self.quickSnoozeInterval)) }
+        pendingAdvance = nil
+        if !sessions.isEmpty { refreshAfterHidingChange() }
+        var snoozed: [(id: UUID, facts: InboxLifecycleSnapshot, now: InboxLifecycleSnapshot)] = []
+        if let reader = lifecycleFacts {
+            snoozed = captured.compactMap { target in
+                guard let now = reader(target.id), now != target.facts else { return nil }
+                return (id: target.id, facts: target.facts, now: now)
+            }
+        }
+        pendingHideUndo = sessions.isEmpty ? nil : Set(sessions.map(\.key))
+        pendingUndo = snoozed.isEmpty ? nil : Dictionary(uniqueKeysWithValues: snoozed.map { ($0.id, $0.facts) })
+        guard pendingHideUndo != nil || pendingUndo != nil else { return }
+        var words: [String] = []
+        if !sessions.isEmpty {
+            words.append(message ?? InboxUndoToast.message(verb: Self.hiddenVerb, count: sessions.count, snoozedUntil: nil))
+        }
+        if !snoozed.isEmpty {
+            let snooze = InboxUndoToast.message(verb: InboxUndoToast.snoozedVerb, count: snoozed.count,
+                                                snoozedUntil: snoozed.first?.now.snoozedUntil)
+            words.append(sessions.isEmpty ? snooze : snooze.lowercased())
+            words.append(snoozed.count == 1 ? Self.quickSnoozeSuffix : "or when one needs you")
+        }
+        undoToast.show(words.joined(separator: " \(InboxUndoToast.separator) "))
+        updateBottomStack()
+        restartUndoToastTimer()
+    }
+
+    /// ⌫ on the list: hide what is selected.
+    fileprivate func hideSelectedRows() -> Bool {
+        let ids = selectedRows.filter(canHide).map(\.id)
+        guard !ids.isEmpty else { return false }
+        hideRows(ids)
+        return true
+    }
+
+    /// The list, the toast and the bar, bottom up. See the constraints' comment.
+    private func updateBottomStack() {
+        guard let listBottomToView, let listBottomToToast, let toastAboveBar, let toastAtBottom else { return }
+        let toastShown = !undoToast.isHidden
+        let barShown = !bulkBar.isHidden
+        let wanted = [toastShown ? listBottomToToast : listBottomToView, barShown ? toastAboveBar : toastAtBottom]
+        // Only a real change touches the constraints: re-seating the list on every
+        // selection change would re-tile the table for nothing.
+        guard !wanted.allSatisfy(\.isActive) else { return }
+        NSLayoutConstraint.deactivate([listBottomToView, listBottomToToast, toastAboveBar, toastAtBottom])
+        NSLayoutConstraint.activate(wanted)
+        needsLayout = true
+    }
+
+    func showHiddenExternalSessions(_ keys: Set<String>) {
+        externalSessionHiding?.show(keys)
+        refreshAfterHidingChange()
+    }
+
+    func showAllHiddenExternalSessions() {
+        externalSessionHiding?.showAll()
+        hiddenRevealed = false
+        refreshAfterHidingChange()
+    }
+
+    private func refreshAfterHidingChange() {
+        updateScopeMenu()
+        render(display(from: allRows))
+    }
+
+    /// Open or close `Hidden (N)`. A FULL RE-RENDER, like the shelf: rows appear
+    /// or go, so selection and hover are dropped and re-derived.
+    func toggleHiddenRevealed() {
+        guard hiddenInScopeCount > 0 || hiddenRevealed else { return }
+        hiddenRevealed.toggle()
+        tableView.deselectAll(nil)
+        selectedRowsForEmphasis = IndexSet()
+        hoveredAgentId = nil
+        keyboardFocusIntent = nil
+        render(display(from: allRows))
+    }
+
+    /// The footer's words, and whether it takes any room at all.
+    private func updateHiddenFooter() {
+        let shows = hiddenInScopeCount > 0
+        hiddenFooter.apply(count: hiddenInScopeCount, expanded: hiddenRevealed)
+        guard hiddenFooter.isHidden == shows else { return }
+        hiddenFooter.isHidden = !shows
+        hiddenFooterHeight?.constant = shows ? InboxHiddenFooter.height : 0
+        needsLayout = true
+    }
+
+    /// ⌘Z on the list presses the toast's Undo while it is up.
+    fileprivate func undoFromKeyboard() -> Bool {
+        guard !undoToast.isHidden, pendingHideUndo != nil || pendingUndo != nil else { return false }
+        performUndo()
+        return true
     }
 
     private func restartUndoToastTimer() {
@@ -4191,7 +5125,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         undoToastTimer?.invalidate()
         undoToastTimer = nil
         pendingUndo = nil
+        pendingHideUndo = nil
         undoToast.hide()
+        updateBottomStack()
     }
 
     /// Hand the host back exactly what was captured.
@@ -4202,9 +5138,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// arriving from the re-render could spend on facts this restore has already put
     /// back.
     private func performUndo() {
-        guard let restoring = pendingUndo else { return }
+        // One press puts back the whole batch: the hidden sessions and the snoozes.
+        let keys = pendingHideUndo, restoring = pendingUndo
+        guard keys != nil || restoring != nil else { return }
         dismissUndoToast()
-        onUndoLifecycle?(restoring)
+        if let keys { showHiddenExternalSessions(keys) }
+        if let restoring { onUndoLifecycle?(restoring) }
     }
 
     /// P3.5's `isInteracting`: hover, selection, or keyboard-active. The last two
@@ -4333,6 +5272,30 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             for view in arriving { view.alphaValue = 1 }
             for view in ghostViews { view.removeFromSuperview() }
             self?.exitGhostViews.removeAll { ghost in ghostViews.contains { $0 === ghost } }
+            if self?.peekWorkspace != nil { self?.applyPeek(animated: false) }
+        }
+    }
+
+    static let reflowDuration: TimeInterval = 0.18
+
+    /// Each surviving card glides from the row it held to the row it holds now —
+    /// a presentation-only offset on its layer, so the table's frames, hit-testing
+    /// and accessibility are already final.
+    private func slideSurvivors(from previousY: [UUID: CGFloat]) {
+        for (index, row) in rows.enumerated() {
+            guard let oldY = previousY[row.id], let tableRow = tableRow(forRowIndex: index),
+                  let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false),
+                  let layer = cell.layer else { continue }
+            let delta = oldY - tableView.rect(ofRow: tableRow).minY
+            guard abs(delta) > 0.5 else { continue }
+            let slide = CABasicAnimation(keyPath: "transform.translation.y")
+            // In the table's own flipped space: a cell's layer offset follows its
+            // view's coordinates (filmed — the opposite sign rose into place).
+            slide.fromValue = delta
+            slide.toValue = 0
+            slide.duration = Self.reflowDuration
+            slide.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
+            layer.add(slide, forKey: "scopeReflow")
         }
     }
 
@@ -5225,6 +6188,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     var rowIdsForQA: [UUID] { rows.map(\.id) }
+    /// The row the host last PUSHED for `id`, drawn or not (a folded child).
+    func pushedRowForQA(id: UUID) -> AgentInboxRow? { allRows.first { $0.id == id } }
     /// The block an agent is DRAWN in, read off the table's own items and the
     /// headings between them — `live`, `snoozed`, `history` — or nil
     /// when the table draws no row for it (scoped out, folded, or behind a shut
@@ -5433,7 +6398,37 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the verbs have `workspaceManagementTitlesForQA`. Filtered by tag rather than
     /// by position, for the same reason the tags exist at all: a workspace and a
     /// project may share a title.
-    var scopeTitlesForQA: [String] { scopeEntries.map(\.title) }
+    var scopeTitlesForQA: [String] { scopeMenuEntries.map(\.title) }
+    var scopeMenuEntriesForQA: [InboxScopeMenuEntry] { scopeMenuEntries }
+    var scopeTriggerTitleForQA: String { scopeButton.qaRenderedTitle }
+    /// `Hidden (N)` as drawn, or nil while there is no footer.
+    var hiddenFooterTitleForQA: String? { hiddenFooter.isHidden ? nil : hiddenFooter.titleForQA }
+    var hiddenFooterFrameForQA: NSRect { hiddenFooter.frame }
+    /// Whether row `id` is drawn only because the footer is open, dimmed.
+    func isRevealedHiddenForQA(id: UUID) -> Bool {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return false }
+        return card.isRevealedHidden
+    }
+    /// The footer's Show all, through its own target/action.
+    func clickShowAllHiddenForQA() -> Bool {
+        guard let button = hiddenFooter.subviews.compactMap({ $0 as? NSButton })
+            .first(where: { $0.accessibilityIdentifier() == "ContinuumAgentInboxHiddenShowAll" && !$0.isHidden }) else { return false }
+        button.performClick(nil)
+        return true
+    }
+    /// The list's scroll view, in this view's coordinates.
+    var listFrameForQA: NSRect { scrollView.frame }
+    /// The table, to make it first responder the way a click on a row does.
+    var tableForQA: NSTableView { tableView }
+    /// How far below the view's top edge the list starts.
+    var listTopInsetForQA: CGFloat {
+        let frame = scrollView.frame
+        return isFlipped ? frame.minY : bounds.height - frame.maxY
+    }
+    var scopeTriggerSwatchCountForQA: Int { scopeButton.leadingSwatches.count }
+    var marksWorkspacesForQA: Bool { marksWorkspaces }
     var selectedScopeTitleForQA: String { scope.title }
     var searchQueryForQA: String { searchQuery }
     var searchResultCountForQA: Int { rows.count }
@@ -5474,7 +6469,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// check exercises the target/action wiring and not just `setScope`.
     @discardableResult
     func pickScopeForQA(_ scope: InboxScope) -> Bool {
-        guard scopeEntries.contains(scope) else { return false }
+        guard scopeMenuEntries.contains(where: { $0.id == scope.storageValue }) else { return false }
+        // A project sits behind `Projects ›` (.plans/87): reach it the way a person
+        // does, through the drill-in.
+        if case .project = scope, !scopeButton.items.contains(where: { $0.id == scope.storageValue }) {
+            guard scopeButton.chooseForQA(id: Self.projectsItemId) else { return false }
+        }
         return scopeButton.chooseForQA(id: scope.storageValue)
     }
 
@@ -5534,8 +6534,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     /// Whether the separator really sits between the scopes and the verbs — the
     /// packet's "separated section", asserted on the menu rather than by eye.
+    /// The verbs follow every scope row, and the checklist draws its divider above
+    /// the first of them (.plans/86).
     var isWorkspaceManagementSeparatedForQA: Bool {
-        scopeButton.items.contains(where: { $0.id == "management-separator" && !$0.enabled })
+        let items = scopeButton.items
+        guard let first = items.firstIndex(where: { $0.id.hasPrefix("management:") }) else { return false }
+        return items[first].separatorBefore
+            && items[first...].allSatisfy { $0.id.hasPrefix("management:") }
     }
 
     /// Pick a workspace verb through the same ChoiceButton selection path as production.
@@ -6019,6 +7024,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     private var activeChoiceListForQA: ChoiceListView? { rowChoiceController.listView ?? qaChoiceListForQA }
     var rowMenuTitlesForQA: [String] { activeChoiceListForQA?.qaItems.map(\.title) ?? [] }
+    /// The open row menu's list, for a picture.
+    var rowMenuListForQA: ChoiceListView? { rowChoiceController.listView }
+    /// Whether the row menu on screen is the shared choice popover's panel.
+    var isRowMenuChoicePopoverForQA: Bool { rowChoiceController.isPresented && rowChoiceController.listView != nil }
+    func dismissRowMenuForQA() { rowChoiceController.dismiss() }
     var rowMenuEnabledForQA: [Bool] { activeChoiceListForQA?.qaItems.map(\.enabled) ?? [] }
     var rowMenuTooltipsForQA: [String] { activeChoiceListForQA?.qaItems.map { $0.detail ?? "" } ?? [] }
     var rowMenuFocusedTitleForQA: String? {
@@ -6047,6 +7057,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard let list = activeChoiceListForQA else { return false }
         list.perform(command)
         return true
+    }
+
+    @discardableResult
+    func pickRowMenuItemForQA(id: String) -> Bool {
+        guard let list = activeChoiceListForQA,
+              list.qaItems.contains(where: { $0.id == id && $0.enabled }) else { return false }
+        list.choose(id: id)
+        return true
+    }
+
+    /// The scope popover's list as its rows would draw it, for a review sheet.
+    func scopeChoiceListForQA() -> ChoiceListView {
+        ChoiceListView(items: scopeButton.items, selectedID: nil, presentation: .checklist)
     }
 
     @discardableResult
@@ -6457,11 +7480,14 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
         /// Settled agents and agents whose tile you closed — one section
         /// (.plans/05-close-to-history.md; decisions pass, "one history shelf").
         case history
+        /// .plans/87: sessions from elsewhere you hid, pinned under the list.
+        case hidden
 
         var word: String {
             switch self {
             case .snoozed: return "Snoozed"
             case .history: return "History"
+            case .hidden: return "Hidden"
             }
         }
 
@@ -6470,6 +7496,7 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
             switch self {
             case .snoozed: return "snoozed"
             case .history: return "in History"
+            case .hidden: return "hidden"
             }
         }
 
@@ -6477,6 +7504,7 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
             switch self {
             case .snoozed: return "Shows or hides snoozed agents"
             case .history: return "Shows or hides agents in History"
+            case .hidden: return "Shows hidden sessions in place, dimmed"
             }
         }
     }

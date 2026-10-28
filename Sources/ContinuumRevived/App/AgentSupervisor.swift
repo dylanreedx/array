@@ -151,8 +151,16 @@ protocol AgentSteeringRunning: AgentRunning {
     /// The provider's receipt for each accepted steer, on the runner's queue.
     func observeSteerDispositions(_ handler: @escaping @Sendable (UUID, AgentSteerDisposition) -> Void)
     /// Work the provider runs between turns (claude background jobs and
-    /// subagents). The idle reaper leaves such a session alone.
+    /// subagents).
     var hasBackgroundWork: Bool { get }
+    /// Provider-owned children still running inside this session. Only these
+    /// keep mirrored children open past the parent's result; a shell job never
+    /// does (though it does keep the idle session alive).
+    var hasRunningSubagents: Bool { get }
+}
+
+extension AgentSteeringRunning {
+    var hasRunningSubagents: Bool { false }
 }
 
 /// T5 — a session that can start a turn Array did not send (claude promoting a
@@ -1529,6 +1537,7 @@ final class AgentSupervisor {
         var submittedAt: Date? { presence.isLive ? presence.submittedAt : nil }
     }
     private var turnFacts: [AgentID: TurnFacts] = [:]
+    private var liveActivityAt: [AgentID: Date] = [:]
     /// Return, as the composer saw it, for a prompt not yet accepted.
     private var pendingReturnStamps: [AgentID: Date] = [:]
     /// Latest provider-reported context-window telemetry per agent. The replay
@@ -3057,12 +3066,28 @@ final class AgentSupervisor {
         // for every other harness — including pi, whose delegation Dylan was
         // actually using.
         if let observing = runner as? SubagentEventObserving {
+            // A background child keeps working after the parent's result, while
+            // the session sits in the idle pool or runs a turn claude began on
+            // its own. Its children belong to the SESSION, so the owner test is
+            // the runner's identity, not the turn's generation: adopting that
+            // next turn mints a new generation while this one's frames are
+            // already queued behind it.
             observing.observeSubagentEvents { [weak self] toolUseID, event in
                 DispatchQueue.main.async {
                     guard let self,
-                          self.runnerGenerationTokens[id] == runnerGeneration,
-                          self.runners[id] === runner else { return }
+                          self.runners[id] === runner || self.idleSessionRunners[id] === runner
+                    else { return }
                     self.deliverSubagentEvent(event, parent: id, toolUseID: toolUseID)
+                }
+            }
+            observing.observeSubagentProgress { [weak self] toolUseID in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.runners[id] === runner || self.idleSessionRunners[id] === runner
+                    else { return }
+                    let childID = AgentID(rawValue: AgentRecord.observedChildID(
+                        parentAgentID: id.rawValue, toolUseID: toolUseID))
+                    self.noteActivity(childID)
                 }
             }
         }
@@ -4624,6 +4649,24 @@ final class AgentSupervisor {
     /// the previous session. One `run.json` read per child, never `events.jsonl`,
     /// and no watcher.
     func reconcileObservedRunsAfterRestore() {
+        // Claude and Codex children run inside their parent's provider process,
+        // which never survives an app relaunch. One whose last turn started and
+        // never ended died mid-turn: say so, rather than showing it ready with
+        // no outcome.
+        for (childID, record) in records
+        where record.capabilities == .observedReadOnly
+            && (record.harness == .claudeCode || record.harness == .codex) {
+            guard let turnAt = record.latestTurnAt,
+                  record.latestTerminalEvent.map({ $0.endedAt < turnAt }) ?? true,
+                  observedRunsReconciled.insert(childID).inserted
+            else { continue }
+            deliver(.turnCompleted(
+                threadId: Self.threadId(for: childID),
+                turnId: "\(Self.threadId(for: childID))#restored",
+                outcome: .interrupted,
+                errorMessage: "This child was still running when the previous session ended."
+            ), to: childID)
+        }
         for (childID, record) in records
         where record.capabilities == .observedReadOnly && record.harness == .pi {
             guard let runId = record.providerSessionId,
@@ -7389,6 +7432,30 @@ final class AgentSupervisor {
         }
     }
 
+    /// Every delivered event, for EVERY agent, once, on the main actor — the app's
+    /// one subscription for the sidebar and the activity timeline (plan 87, Step 4).
+    /// Not `events(for:)`: that replays history on attach, so a consumer per tile
+    /// recorded each replayed event again, and an agent with no tile was never heard.
+    private var deliveredEventObservers: [UUID: (AgentID, AgentRuntimeEvent) -> Void] = [:]
+
+    @discardableResult
+    func addDeliveredEventObserver(_ observe: @escaping (AgentID, AgentRuntimeEvent) -> Void) -> UUID {
+        let token = UUID()
+        deliveredEventObservers[token] = observe
+        return token
+    }
+
+    func removeDeliveredEventObserver(_ token: UUID) {
+        deliveredEventObservers[token] = nil
+    }
+
+    /// The status a tile would derive from this agent's stream, derived from the
+    /// supervisor's own buffer — so a headless agent gets the same answer.
+    func derivedStreamStatus(for id: AgentID) -> AgentStatus {
+        deriveAgentStatus(signals: deriveStatusSignals(
+            from: history[id] ?? [], threadId: Self.threadId(for: id), engineStatus: .idle))
+    }
+
     func subscriberCount(for id: AgentID) -> Int {
         subscribers[id]?.count ?? 0
     }
@@ -8360,6 +8427,8 @@ final class AgentSupervisor {
         idleReapTokens[id] = token
         DispatchQueue.main.asyncAfter(deadline: .now() + idleRunnerTimeout) { [weak self] in
             guard let self, self.idleReapTokens[id] == token, self.idleSessionRunners[id] === runner else { return }
+            // A running shell job (a dev server) or child keeps the session;
+            // only children, never shell jobs, decide when children close.
             if (runner as? AgentSteeringRunning)?.hasBackgroundWork == true {
                 self.scheduleIdleReap(for: id, runner: runner)
                 return
@@ -8466,8 +8535,9 @@ final class AgentSupervisor {
             openToolItems[id] = nil
             // A persistent Claude session can keep its mirrored children running
             // after the parent's result. Their own result or the session's actual
-            // exit closes them; a result with no background work closes orphans.
-            if (runner as? AgentSteeringRunning)?.hasBackgroundWork != true {
+            // exit closes them; a result with no running child closes orphans. A
+            // shell job is not a child and holds none of them open.
+            if (runner as? AgentSteeringRunning)?.hasRunningSubagents != true {
                 interruptWorkingClaudeMirroredChildren(of: id)
             }
         default:
@@ -8481,6 +8551,10 @@ final class AgentSupervisor {
         _ incomingEvent: AgentRuntimeEvent, to id: AgentID, now: Date = Date(), meterPublished: Bool = false
     ) {
         var event = incomingEvent
+        switch event {
+        case .tokenUsageUpdated, .contextWindowUpdated: break
+        default: noteActivity(id, now: now)
+        }
         event = withCompactionBeforeReading(event, for: id)
         if case .turnCompleted(_, _, .failed, let error) = event,
            error == AgentContextFullRecovery.canonicalErrorMessage {
@@ -8713,6 +8787,7 @@ final class AgentSupervisor {
         for continuation in (subscribers[id] ?? [:]).values {
             continuation.yield(event)
         }
+        for observe in deliveredEventObservers.values { observe(id, event) }
 
         // T1 — an IN-TURN compaction (claude's `status: compacting`, pi's
         // `compaction_start`) has no operation of its own to finish it; only a
@@ -8958,6 +9033,9 @@ final class AgentSupervisor {
                 // them on their own result or its actual exit. Codex is excluded: its provider
                 // children can drain after the parent turn completes.
                 interruptWorkingClaudeMirroredChildren(of: id)
+                // …but not after its session: every Codex descendant lives inside
+                // the one app-server process that has just ended.
+                interruptWorkingCodexDescendants(of: id)
                 // A steer the dead process never confirmed was never read.
                 returnDeliveringSteers(for: id)
             }
@@ -9001,6 +9079,43 @@ final class AgentSupervisor {
             if let outcome {
                 handleQueueOnTurnCompleted(outcome: outcome, for: id)
             }
+        }
+    }
+
+    /// When this agent last did something: any timeline frame, a streamed
+    /// delta, or a child's progress report. Owned here so a headless child moves
+    /// it too, and kept apart from `AgentRecord.lastActivityAt`, which renames,
+    /// reads and restores also stamp. In memory only; nil until the agent does
+    /// something in this app session.
+    func lastActivity(for id: AgentID) -> Date? { liveActivityAt[id] }
+
+    /// Throttled to one stamp a second, so streaming cannot turn this into
+    /// per-token churn for whoever reads it.
+    private func noteActivity(_ id: AgentID, now: Date = AgentElapsedClock.now()) {
+        if let last = liveActivityAt[id], now.timeIntervalSince(last) < Self.activityStampInterval { return }
+        liveActivityAt[id] = now
+    }
+
+    static let activityStampInterval: TimeInterval = 1
+
+    /// A Codex child is running only while its own session is: every provider
+    /// thread of a family lives in the root's app-server process. Called once
+    /// that process is gone, never at the parent's turn end, after which Codex
+    /// children may still drain.
+    private func interruptWorkingCodexDescendants(of rootID: AgentID) {
+        guard records[rootID]?.harness == .codex else { return }
+        var frontier = children(of: rootID)
+        while let childID = frontier.popLast() {
+            frontier += children(of: childID)
+            guard records[childID]?.capabilities == .observedReadOnly,
+                  records[childID]?.harness == .codex,
+                  turnFacts[childID]?.execution == .working else { continue }
+            deliver(.turnCompleted(
+                threadId: Self.threadId(for: childID),
+                turnId: "\(Self.threadId(for: childID))#codex-session-ended",
+                outcome: .interrupted,
+                errorMessage: "The Codex session ended before this child finished."
+            ), to: childID)
         }
     }
 

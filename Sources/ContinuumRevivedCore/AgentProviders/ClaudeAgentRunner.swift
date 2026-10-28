@@ -506,6 +506,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     private var spawnHandler: (@Sendable (SpawnRequest) -> Void)?
     private var observationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
     private var subagentHandler: (@Sendable (String, AgentRuntimeEvent) -> Void)?
+    private var subagentProgressHandler: (@Sendable (String) -> Void)?
     private var steerDispositionHandler: (@Sendable (UUID, AgentSteerDisposition) -> Void)?
     private var unsolicitedTurnHandler: (@Sendable () -> Void)?
 
@@ -536,6 +537,17 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// The idle reaper keeps a session alive while this is true.
     public var hasBackgroundWork: Bool {
         queue.sync { backgroundTaskCount > 0 }
+    }
+
+    /// Claude children this session opened that are still running. Unlike
+    /// `hasBackgroundWork` a shell job never counts: only a child holds the
+    /// session open for the idle reaper.
+    public var hasRunningSubagents: Bool {
+        queue.sync { child != nil && translator.subagents.hasRunningChildren }
+    }
+
+    public func observeSubagentProgress(_ handler: @escaping @Sendable (String) -> Void) {
+        queue.sync { subagentProgressHandler = handler; translator.onSubagentProgress = handler }
     }
 
     /// A turn claude began on its own is buffered and waiting to be adopted.
@@ -915,6 +927,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         }
         child = nil
         backgroundTaskCount = 0
+        // Every child dies with the process; the supervisor settles them.
+        translator.subagents = ClaudeSubagentRoster()
         interruptRequested = false
         for (id, control) in pendingControls where control.success == nil {
             pendingControls[id] = (control.semaphore, false)
@@ -966,6 +980,10 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         fresh.onSpawnRequest = spawnHandler
         fresh.onRuntimeObservation = observationHandler
         fresh.onSubagentEvent = subagentHandler
+        fresh.onSubagentProgress = subagentProgressHandler
+        // Open children belong to the session, not to the turn that launched
+        // them: a background child keeps working after its parent's result.
+        fresh.subagents = translator.subagents
         return fresh
     }
 

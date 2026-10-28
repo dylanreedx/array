@@ -453,7 +453,11 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         applyTokens()
     }
 
+    /// Plan 87: how many times the (hidden) workspace tree was rebuilt.
+    private(set) var qaTreeReloadCount = 0
+
     func reload(tree: SidebarTree, currentWorkspaceId: UUID?, selectedZoneId: UUID? = nil, selectedTileId: UUID? = nil) {
+        qaTreeReloadCount += 1
         self.tree = tree
         self.currentWorkspaceId = currentWorkspaceId
         rebuildItems()

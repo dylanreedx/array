@@ -141,9 +141,9 @@ replies_path = os.path.join(scenario_dir, "replies.log")
 with open(os.path.join(scenario_dir, "argv.log"), "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")
 
-def log_received(method):
+def log_received(method, thread=None):
     with open(progress_path, "a") as f:
-        f.write(method + "\n")
+        f.write(method + (" " + thread if thread else "") + "\n")
 
 for action in scenario:
     kind = action["kind"]
@@ -152,7 +152,7 @@ for action in scenario:
         if not line:
             break
         obj = json.loads(line)
-        log_received(obj.get("method", ""))
+        log_received(obj.get("method", ""), (obj.get("params") or {}).get("threadId"))
         if kind == "expect_request":
             reply = {"id": obj.get("id")}
             if action.get("error") is not None:
@@ -778,6 +778,67 @@ private func runCodexAgentRunnerAppServerChecks() {
                 if case .contentDelta(let threadId, _, _, "late child result") = $0 { return threadId == childThread }
                 return false
             }, "runner (delegation drain): a child frame must never leak into the parent transcript stream")
+        }
+        try? FileManager.default.removeItem(at: fakeRoot)
+    }
+
+    // 2g. Stop is for the whole family (`.plans/87` Step 3.4). A child thread
+    // with a turn open is interrupted with its parent, and a child the process
+    // took down with it is settled as interrupted, never left working.
+    do {
+        let parentThread = "fixture-stop-parent-thread"
+        let childThread = "fixture-stop-child-thread"
+        let (script, fakeRoot) = try! makeFakeAppServer(
+            scenario: [
+                .expectRequest(result: [:]),
+                .expectNotification,
+                .expectRequest(result: [:]),
+                .expectRequest(result: ["thread": ["id": parentThread]]),
+                .expectRequest(result: ["turn": ["id": "fixture-stop-parent-turn"]]),
+                .emit(method: "turn/started",
+                      params: ["threadId": parentThread, "turn": ["id": "fixture-stop-parent-turn"]]),
+                .emit(method: "item/started",
+                      params: [
+                        "threadId": parentThread, "turnId": "fixture-stop-parent-turn",
+                        "item": ["id": "fixture-stop-call", "type": "subAgentActivity", "kind": "started",
+                                 "agentPath": "/root/stopped_child", "agentThreadId": childThread],
+                      ]),
+                .emit(method: "turn/started",
+                      params: ["threadId": childThread, "turn": ["id": "fixture-stop-child-turn"]]),
+                .expectRequest(result: [:]),          // turn/interrupt
+                .expectRequest(result: [:]),          // turn/interrupt
+                .emit(method: "turn/completed",
+                      params: ["threadId": parentThread,
+                               "turn": ["id": "fixture-stop-parent-turn", "status": "interrupted"]],
+                      delayMs: 10),
+            ],
+            asExecutableNamed: "codex")
+        let fakeDir = script.deletingLastPathComponent()
+        withEnvironmentOverride([
+            "CONTINUUM_CODEX_TRANSPORT": "app-server",
+            "PATH": "\(fakeDir.path):\(ProcessInfo.processInfo.environment["PATH"] ?? "")",
+        ]) {
+            let runner = CodexAgentRunner(config: .init(model: "gpt-5.6-sol", cwd: cwd, threadId: nil))
+            let activities = ProviderActivityCollector()
+            runner.observeProviderSubagentActivity { activities.append($0) }
+            let thread = Thread { try? runner.run(prompt: "delegate then stop") { _ in } }
+            thread.start()
+            let started = Date().addingTimeInterval(10)
+            while Date() < started, !activities.snapshot().contains(where: {
+                if case .threadEvent(childThread, .turnStarted) = $0 { return true }; return false
+            }) { Thread.sleep(forTimeInterval: 0.02) }
+            Thread.sleep(forTimeInterval: 0.05)
+            runner.stop()
+            let deadline = Date().addingTimeInterval(10)
+            while thread.isExecuting, Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+            expect(!thread.isExecuting, "runner (family stop): run() must return after Stop")
+            let progress = (try? String(contentsOf: fakeRoot.appendingPathComponent("progress.log"), encoding: .utf8)) ?? ""
+            expect(progress.contains("turn/interrupt \(childThread)"),
+                   "runner (family stop): Stop interrupted only the parent; the open child thread was never sent turn/interrupt. fake saw: \(progress)")
+            expect(activities.snapshot().contains {
+                if case .threadEvent(childThread, .turnCompleted(_, _, .interrupted, _)) = $0 { return true }
+                return false
+            }, "runner (family stop): a child the session ended under must be settled interrupted, not left working")
         }
         try? FileManager.default.removeItem(at: fakeRoot)
     }

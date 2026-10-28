@@ -64,6 +64,7 @@ runInboxSortChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
 runInboxScopeChecks()
+runInboxWorkspaceFilterChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P4.1-lifecycle-state.md
 runAgentLifecycleChecks()

@@ -15,7 +15,25 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     var selectedIcon: ChoiceIcon? {
         didSet { leadingIcon.image = selectedIcon?.image(); leadingIcon.isHidden = selectedIcon == nil; invalidateIntrinsicContentSize(); needsLayout = true }
     }
-    private var iconWidth: CGFloat { selectedIcon == nil ? 0 : CGFloat(pageZoom.scaled(22)) }
+    // Plan: .plans/86-workspace-filter/README.md
+    /// Overlapping colour dots in the leading slot — the workspaces a sidebar set
+    /// shows. Empty hides them; they take the icon's place when both are set.
+    var leadingSwatches: [NSColor] = [] {
+        didSet {
+            guard leadingSwatches != oldValue else { return }
+            swatchStack.colours = leadingSwatches
+            swatchStack.isHidden = leadingSwatches.isEmpty
+            invalidateIntrinsicContentSize()
+            needsLayout = true
+        }
+    }
+    private let swatchStack = ChoiceDotStackView()
+    private var iconWidth: CGFloat {
+        if !leadingSwatches.isEmpty {
+            return ChoiceDotStackView.width(count: leadingSwatches.count, zoom: pageZoom) + CGFloat(pageZoom.scaled(6))
+        }
+        return selectedIcon == nil ? 0 : CGFloat(pageZoom.scaled(22))
+    }
     private let popoverController = ChoicePopoverController()
     private var isHovered = false
     private var isPressed = false
@@ -31,6 +49,10 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
             } else {
                 updatePresentation()
             }
+            // An open checklist shows the new boxes and counts in place.
+            if popoverPresentation == .checklist, items != oldValue {
+                popoverController.update(items: items)
+            }
         }
     }
     var selectedID: String? {
@@ -42,11 +64,18 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
         didSet { updatePresentation() }
     }
     var onSelection: ((ChoiceItem) -> Void)?
+    /// A checklist row's accessory (`Only`, `…`) was pressed.
+    var onAccessory: ((ChoiceItem, String) -> Void)?
+    /// The focused row of the open list changed; nil when the pointer leaves it.
+    var onFocusChange: ((String?) -> Void)?
+    /// The open list closed without a choice: Escape, a click outside, focus lost.
+    var onPopoverDismiss: (() -> Void)?
     /// Restore the trigger's neutral label after a transient action/confirmation.
     /// This keeps the visible control title owned by the custom button rather than
     /// leaking a stock menu's selected-item state into the sidebar.
     func setPresentationTitle(_ title: String) {
         selectedID = nil
+        fadeTitle(to: title)
         titleLabel.stringValue = title
         setAccessibilityLabel(title)
         setAccessibilityValue(title)
@@ -88,6 +117,9 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
         leadingIcon.imageScaling = .scaleProportionallyDown
         leadingIcon.isHidden = true
         addSubview(leadingIcon)
+        swatchStack.isHidden = true
+        addSubview(swatchStack)
+        titleLabel.wantsLayer = true
         addSubview(titleLabel)
         addSubview(chevronView)
         setAccessibilityRole(.popUpButton)
@@ -152,6 +184,12 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
             height: chevronSize
         )
         leadingIcon.frame = NSRect(x: scaledHorizontalPadding, y: (bounds.height - CGFloat(pageZoom.scaled(14))) / 2, width: CGFloat(pageZoom.scaled(14)), height: CGFloat(pageZoom.scaled(14)))
+        let dotsHeight = ChoiceDotStackView.height(zoom: pageZoom)
+        swatchStack.frame = NSRect(
+            x: scaledHorizontalPadding, y: floor((bounds.height - dotsHeight) / 2),
+            width: ChoiceDotStackView.width(count: leadingSwatches.count, zoom: pageZoom), height: dotsHeight)
+        swatchStack.zoom = pageZoom
+        leadingIcon.isHidden = selectedIcon == nil || !leadingSwatches.isEmpty
         let titleHeight = scaledTitleHeight
         // A canvas zoom snaps frames to device pixels, so a stack can hand this
         // button a fraction of a point under its intrinsic width with the row full
@@ -198,7 +236,13 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     /// The presentation seam a subclass overrides together with
     /// `presentPopover()` so toggle/escape/token accents track ITS surface.
     var presentedPopoverIsVisible: Bool { popoverController.isPresented }
-    func dismissPresentedPopover() { popoverController.dismiss() }
+    func dismissPresentedPopover() {
+        let wasPresented = popoverController.isPresented
+        popoverController.dismiss()
+        // Closed from the trigger (a second click, Escape on the button): the
+        // owner hears it like any other close without a choice.
+        if wasPresented { onPopoverDismiss?() }
+    }
 
     override func accessibilityPerformPress() -> Bool {
         guard isEnabled, items.contains(where: \.enabled) else { return false }
@@ -252,6 +296,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
             ? AgentSurfaceRole.rowHover.color
             : AgentSurfaceRole.composer.color
         layer?.backgroundColor = background.cgColor(for: theme)
+        swatchStack.ringColour = background.nsColor(for: theme)
         layer?.borderWidth = accented ? Self.focusBorderWidth : 0
         layer?.borderColor = AgentLineRole.focusRing.color.cgColor(for: theme)
         layer?.masksToBounds = false
@@ -299,13 +344,36 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
         popoverController.present(
             items: items, selectedID: selectedID,
             presentation: popoverPresentation,
-            anchor: bounds, relativeTo: self
-        ) { [weak self] item in
-            guard let self else { return }
-            self.handleSelection(item)
-            _ = self.sendAction(self.action, to: self.target)
-        }
+            anchor: bounds, relativeTo: self,
+            placementFrame: presentsOffscreenForQA ? window?.frame : nil,
+            takesFocus: !presentsWithoutFocusForQA && !presentsOffscreenForQA,
+            onSelection: { [weak self] item in
+                guard let self else { return }
+                self.handleSelection(item)
+                _ = self.sendAction(self.action, to: self.target)
+            },
+            onDismiss: { [weak self] in self?.onPopoverDismiss?() },
+            onAccessory: { [weak self] item, accessory in self?.onAccessory?(item, accessory) },
+            onFocusChange: { [weak self] id in self?.onFocusChange?(id) }
+        )
     }
+
+    /// Press a presented row's accessory the way a click does.
+    @discardableResult
+    func pressPresentedAccessoryForQA(itemID: String, accessoryID: String) -> Bool {
+        guard let list = popoverController.listView else { return false }
+        list.pressAccessory(itemID: itemID, accessoryID: accessoryID)
+        return true
+    }
+    var qaPresentedList: ChoiceListView? { popoverController.listView }
+    var qaPresentedPanel: NSWindow? { popoverController.panel }
+    /// A check that renders the open list on the user's screen must not take
+    /// their keyboard: a key panel receives what they type in another app.
+    var presentsWithoutFocusForQA = false
+    /// A check driving the real trigger: the popover opens inside the (offscreen)
+    /// check window instead of on a screen, and without the keyboard.
+    var presentsOffscreenForQA = false
+    var qaPresentedSurfaceFrame: NSRect? { popoverController.surfaceFrame }
 
     func handleSelection(_ item: ChoiceItem) {
         if keepsSelectionForItem?(item) != true {
@@ -325,7 +393,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     var qaPopoverWidth: CGFloat? { popoverController.surfaceFrame?.width }
     var qaTruncatedPresentedRowTitles: [String]? { popoverController.listView?.qaTruncatedRowTitles }
     var qaIsPopoverPresented: Bool { popoverController.isPresented }
-    func dismissPopoverForQA() { popoverController.dismiss(); applyTokens() }
+    func dismissPopoverForQA() { dismissPresentedPopover(); applyTokens() }
     @discardableResult
     func choosePresentedItemForQA(id: String) -> Bool {
         guard popoverController.isPresented,
@@ -346,8 +414,20 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
         titleLabel.frame.width + 0.5 >= qaTitleDrawingWidth
     }
 
+    /// A label that CHANGES under an on-screen trigger crossfades rather than
+    /// snapping: the sidebar's checklist rewrites it on every toggle.
+    private func fadeTitle(to title: String) {
+        guard titleLabel.stringValue != title, window != nil,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, let layer = titleLabel.layer else { return }
+        let fade = CATransition()
+        fade.type = .fade
+        fade.duration = 0.14
+        layer.add(fade, forKey: "titleFade")
+    }
+
     private func updatePresentation() {
         if let item = items.first(where: { $0.id == selectedID }) {
+            fadeTitle(to: selectedTitleOverride ?? item.title)
             titleLabel.stringValue = selectedTitleOverride ?? item.title
             setAccessibilityValue(item.title)
         }
@@ -355,5 +435,34 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
         invalidateIntrinsicContentSize()
         needsLayout = true
         applyTokens()
+    }
+}
+
+/// Overlapping filled circles, each knocked out of the one before by a ring in
+/// the trigger's own fill — the workspaces a sidebar set shows.
+@MainActor
+final class ChoiceDotStackView: NSView {
+    var colours: [NSColor] = [] { didSet { needsDisplay = true } }
+    var ringColour: NSColor? { didSet { needsDisplay = true } }
+    var zoom: AgentPageZoom = .default { didSet { needsDisplay = true } }
+
+    static func side(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(8)) }
+    static func step(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(5)) }
+    static func height(zoom: AgentPageZoom) -> CGFloat { side(zoom: zoom) + 3 }
+    static func width(count: Int, zoom: AgentPageZoom) -> CGFloat {
+        count == 0 ? 0 : side(zoom: zoom) + CGFloat(count - 1) * step(zoom: zoom) + 3
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let side = Self.side(zoom: zoom), step = Self.step(zoom: zoom)
+        for (index, colour) in colours.enumerated() {
+            let dot = NSRect(x: 1.5 + CGFloat(index) * step, y: (bounds.height - side) / 2, width: side, height: side)
+            if index > 0, let ringColour {
+                ringColour.setFill()
+                NSBezierPath(ovalIn: dot.insetBy(dx: -1.5, dy: -1.5)).fill()
+            }
+            colour.setFill()
+            NSBezierPath(ovalIn: dot).fill()
+        }
     }
 }
