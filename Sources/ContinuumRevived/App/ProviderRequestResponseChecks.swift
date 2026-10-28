@@ -236,6 +236,15 @@ enum ProviderRequestResponseChecks {
         )
 
         tile.layoutSubtreeIfNeeded()
+        // The choices are on screen. The runner bound after the tile attached,
+        // and that moves the capability with no runtime event: a transcript still
+        // holding the context from before would draw this request with none.
+        let offered = tile.qaV2RequestChoiceTitles("req-live")
+        try expect(
+            offered.contains(ApprovalDecision.displayTitle(forChoice: ApprovalDecision.decline.rawValue)),
+            "TR-06 W3: an answerable request presented choices \(offered) — the transcript never "
+            + "learned the runner can respond, so the user has nothing to press"
+        )
         _ = tile.qaClickV2RequestChoice(
             requestID: "req-live", value: ApprovalDecision.decline.rawValue)
         try await settle(tile) { _ in runner.delivered.count == 1 }

@@ -1446,6 +1446,16 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         }
     }
 
+    /// The titles of the choices drawn for `requestID`, in order.
+    func qaRequestChoiceTitles(requestID: String) -> [String] {
+        placed.flatMap { item in
+            item.block.controls.compactMap { control -> String? in
+                guard case let .perform(.submitResponse(id, _)) = control.action, id == requestID else { return nil }
+                return control.title
+            }
+        }
+    }
+
     /// Scrolls so the given block's top is in view.
     func qaReveal(blockID: AgentNodeID) {
         guard let item = placed.first(where: { $0.blockID == blockID }) else { return }
