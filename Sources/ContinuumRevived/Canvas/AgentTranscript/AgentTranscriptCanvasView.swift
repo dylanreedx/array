@@ -1520,7 +1520,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     func qaBoundary(for blockID: AgentNodeID) -> QABoundary? {
         guard let item = placed.first(where: { $0.blockID == blockID }),
               let row = item.block.rows.first, let line = row.lines.first else { return nil }
-        let needed = ceil(Self.width(of: CTLineCreateWithAttributedString(Self.coreTextString(row.string))))
+        let needed = Self.width(of: CTLineCreateWithAttributedString(Self.coreTextString(row.string)))
         let rules: [CGRect] = item.block.decorations.compactMap {
             if case let .fill(rect, _, _) = $0, rect.width > 0, rect.height > 0 { return rect }
             return nil
