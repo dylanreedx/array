@@ -36,6 +36,8 @@ protocol AgentTranscriptSurface: NSView {
     var qaThinkingIndicatorVisible: Bool { get }
     /// The working indicator has motion installed on the compositor right now.
     var qaThinkingIndicatorAnimating: Bool { get }
+    /// The reader is at the live edge (within the follow threshold).
+    var qaIsNearBottom: Bool { get }
 }
 
 extension AgentTranscriptListView: AgentTranscriptSurface {

@@ -1102,13 +1102,13 @@ enum AgentPresenceChecks {
             bench.window.layoutIfNeeded()
             bench.tile.layoutSubtreeIfNeeded()
             bench.tile.qaScrollTranscript(toY: 0)
-            guard bench.tile.qaTranscriptForChecks?.qaIsNearBottom == false else {
+            guard bench.tile.qaTranscriptSurface?.qaIsNearBottom == false else {
                 throw Failure(description: "presence: \(kind): the filler did not make the transcript scrollable — the scroll witness would pass vacuously")
             }
             var completed = bench.turnCompletedCount
             try bench.pressReturn("PLAIN hello")
             bench.window.layoutIfNeeded()
-            if bench.tile.qaTranscriptForChecks?.qaIsNearBottom != true {
+            if bench.tile.qaTranscriptSurface?.qaIsNearBottom != true {
                 violations.append("\(kind) scroll: Return left the reader scrolled up, away from their own message")
             }
             try await eventually("\(kind): the PLAIN turn never ended") {
