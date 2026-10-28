@@ -2253,14 +2253,31 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         refreshLocationStatus()
     }
 
-    /// Re-read the agent's branch state and repaint. Drops the cached read first:
-    /// the TTL is short but a fast turn can finish inside it, and the whole point of
-    /// refreshing at a turn boundary is to see what that turn did.
+    /// Re-read the agent's branch state and repaint, at a turn boundary: the whole
+    /// point is to see what that turn did, so the read is fresh, never the cache's.
+    ///
+    /// Off the main thread. Reading a branch is a `git` launch, and run here it
+    /// held the canvas still for tens of milliseconds every time any agent finished
+    /// a turn — the periodic hitch under a pan or zoom (one per agent per turn on the
+    /// motion benchmark). The chip keeps the branch it shows until the read lands.
     private func refreshBranchContext() {
-        guard let agentSource, let agentID = projectedAgentID else { return }
-        agentSource.invalidateCheckedOutBranches()
-        applyBranchContext(agentSource.branchContext(for: agentID))
+        guard let agentSource, let agentID = projectedAgentID,
+              let repo = agentSource.checkoutRoot(for: agentID) else { return }
+        branchRefreshGeneration &+= 1
+        let generation = branchRefreshGeneration
+        Task { [weak self] in
+            let branch = await Task.detached(priority: .utility) {
+                (try? WorktreeManager().currentBranch(repo: repo)) ?? nil
+            }.value
+            guard let self, self.branchRefreshGeneration == generation,
+                  self.projectedAgentID == agentID, let source = self.agentSource else { return }
+            source.storeCheckedOutBranch(branch, repo: repo)
+            self.applyBranchContext(source.branchContextCachedOnly(for: agentID))
+            self.qaBranchRefreshesLanded += 1
+        }
     }
+    private var branchRefreshGeneration = 0
+    private(set) var qaBranchRefreshesLanded = 0
 
     /// Drop the local projection so a replay renders exactly the agent it came from.
     private func resetProjection() {

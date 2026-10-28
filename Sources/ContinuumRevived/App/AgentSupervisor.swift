@@ -6832,6 +6832,11 @@ final class AgentSupervisor {
         )
     }
 
+    /// The working directory whose branch `id`'s chip shows.
+    func checkoutRoot(for id: AgentID) -> URL? {
+        records[id].map { URL(fileURLWithPath: $0.checkoutRoot, isDirectory: true) }
+    }
+
     /// Every distinct working directory a warm pass should read, each once.
     func warmCheckedOutBranchTargets() -> [URL] {
         var seen = Set<String>()
@@ -19458,12 +19463,23 @@ private func checkBranchChip(
     // that invalidated and re-applied by hand would pass over a tile that never
     // refreshes at all (the cross-review's finding).
     try runIsolatedSpawnGit(["checkout", "-q", "-b", "wandered-off"], in: URL(fileURLWithPath: isolated.cwd))
+    let readsBeforeTurn = supervisor.qaBranchGitReads
+    let landedBeforeTurn = isolatedTile.qaBranchRefreshesLanded
     isolatedTile.ingest(.turnCompleted(
         threadId: AgentSupervisor.threadId(for: isolatedId),
         turnId: "branch-chip-turn",
         outcome: .completed,
         errorMessage: nil
     ))
+    // The read is a `git` launch; on the main thread it hitched the canvas every
+    // time an agent finished a turn. It happens off main, and lands after.
+    guard supervisor.qaBranchGitReads == readsBeforeTurn else {
+        throw fail("a turn ending ran git on the main thread (\(supervisor.qaBranchGitReads - readsBeforeTurn) read(s)) — every finished turn hitches the canvas")
+    }
+    let deadline = Date().addingTimeInterval(5)
+    while isolatedTile.qaBranchRefreshesLanded == landedBeforeTurn, Date() < deadline {
+        try await Task.sleep(for: .milliseconds(20))
+    }
     guard isolatedTile.qaBranchChipIsWarning else {
         throw fail(
             "the agent's checkout moved to wandered-off and the tile still reads "
