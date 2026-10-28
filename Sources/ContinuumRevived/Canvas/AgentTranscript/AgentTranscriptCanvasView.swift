@@ -1469,6 +1469,54 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let ruleRects: [CGRect]
     }
 
+    /// A tool row's header as drawn, in view coordinates: the block's frame and
+    /// its gaps to its neighbours, the title (string and fonts) and its line
+    /// rect, the icon's rect, and the status line's rect and font.
+    struct QAToolHeader {
+        let frame: NSRect
+        let gapAbove: CGFloat?
+        let gapBelow: CGFloat?
+        let title: NSAttributedString
+        let titleRect: NSRect
+        let iconRect: NSRect?
+        let statusRect: NSRect?
+        let statusFont: NSFont?
+    }
+
+    func qaToolHeader(for blockID: AgentNodeID) -> QAToolHeader? {
+        guard let index = placed.firstIndex(where: { $0.blockID == blockID }) else { return nil }
+        let item = placed[index]
+        guard let row = item.block.rows.first, let line = row.lines.first else { return nil }
+        let origin = CGPoint(x: insets.left, y: item.y - scrollOffset)
+        let frame = NSRect(x: origin.x, y: origin.y, width: item.block.width, height: item.block.height)
+        let gapAbove = index > 0 ? item.y - (placed[index - 1].y + placed[index - 1].block.height) : nil
+        let gapBelow = index + 1 < placed.count ? placed[index + 1].y - (item.y + item.block.height) : nil
+        var icon: NSRect?
+        var status: (NSRect, NSFont?)?
+        for decoration in item.block.decorations {
+            switch decoration {
+            case let .symbol(_, rect) where icon == nil:
+                icon = rect.offsetBy(dx: origin.x, dy: origin.y)
+            case let .text(ctLine, baseline) where status == nil:
+                var ascent: CGFloat = 0, descent: CGFloat = 0
+                let width = CGFloat(CTLineGetTypographicBounds(ctLine, &ascent, &descent, nil))
+                let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] ?? []
+                let font = runs.first.flatMap {
+                    (CTRunGetAttributes($0) as NSDictionary)[kCTFontAttributeName as String] as? NSFont
+                }
+                status = (NSRect(x: origin.x + baseline.x, y: origin.y + baseline.y - ascent,
+                                 width: width, height: ascent + descent), font)
+            default:
+                continue
+            }
+        }
+        return QAToolHeader(
+            frame: frame, gapAbove: gapAbove, gapBelow: gapBelow,
+            title: row.string.attributedSubstring(from: line.range),
+            titleRect: NSRect(x: origin.x + line.x, y: origin.y + line.top, width: line.width, height: line.height),
+            iconRect: icon, statusRect: status?.0, statusFont: status?.1)
+    }
+
     func qaBoundary(for blockID: AgentNodeID) -> QABoundary? {
         guard let item = placed.first(where: { $0.blockID == blockID }),
               let row = item.block.rows.first, let line = row.lines.first else { return nil }
