@@ -937,6 +937,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             return false
         }
         promoteForIncomingFocus()
+        // A header drag reaches the recipient with no pointer-enter (tracking
+        // areas sleep through a drag), so an idle recipient is still resting:
+        // its composer is in the hidden host. Wake it before highlighting or
+        // focusing that composer, or both land on views nobody can see.
+        wakeChrome()
         guard commit else { composer.setReferenceDropHighlight(true); return true }
         composer.setReferenceDropHighlight(false)
         // Resolve the display snapshot from the trusted record, never the

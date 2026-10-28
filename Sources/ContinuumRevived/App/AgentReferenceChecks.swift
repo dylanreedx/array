@@ -85,6 +85,12 @@ enum AgentReferenceChecks {
         try TileInsertSlideChecks.expect(composer.draft.agentReferences.map(\.displayName) == ["Same name"],
             "the chip must name the source from its record, never the caller's label")
         try TileInsertSlideChecks.expect(composer.draft.agentReferences.map(\.agentID) == [agents[0]], "duplicate names must resolve by exact identity and repeated drops deduplicate")
+        // A drop hands the recipient's composer the keyboard. The recipient was
+        // idle — its chrome resting, drawn, its composer in the hidden host — so
+        // the drop has to wake it into the canvas window first.
+        try TileInsertSlideChecks.expect(!target.isChromeResting && composer.textView.window === window
+            && window.firstResponder === composer.textView,
+            "a reference drop must wake the recipient and focus its composer in the canvas window; resting \(target.isChromeResting), composer in canvas window \(composer.textView.window === window), first responder \(String(describing: window.firstResponder))")
         try TileInsertSlideChecks.expect(composer.draft.text == "Compare your changes with theirs" && sink.prompts.isEmpty, "drop preserves text and never sends")
         try TileInsertSlideChecks.expect(canvas.allTilesInWorldFrames() == before && mounted.runtime.document == documentBefore,
             "reference drop must change no world frames, ordering, membership or zones")
