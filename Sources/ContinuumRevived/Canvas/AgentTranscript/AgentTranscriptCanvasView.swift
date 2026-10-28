@@ -443,7 +443,22 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         gyro.apply(theme: context.appearance)
         guard moved else { return }
         cache.removeAll()
+        // A reader scrolled up keeps the row they were reading under the
+        // viewport top, at the same share of its height, as the row list does:
+        // a rung or appearance change re-lays out every block, and a kept pixel
+        // offset would land them somewhere else in the document.
+        let anchor: (id: AgentNodeID, fraction: CGFloat)? = isNearBottom ? nil : {
+            let index = firstPlaced(atOrBelow: scrollOffset)
+            guard index < placed.count else { return nil }
+            let item = placed[index]
+            return (item.blockID, item.block.height > 0 ? (scrollOffset - item.y) / item.block.height : 0)
+        }()
         preservingTail { rebuild() }
+        if let anchor, let item = placed.first(where: { $0.blockID == anchor.id }) {
+            scrollOffset = min(max(0, item.y + anchor.fraction * item.block.height), maximumScrollOffset)
+            positionGyro()
+            needsDisplay = true
+        }
     }
 
     func bindToolDetailAgent(_ agentID: AgentID?) {
@@ -1531,6 +1546,44 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             let top = item.y - scrollOffset
             return top < bounds.height && top + item.block.height > 0
         }.map { $0.block.rows.map(\.string.string).joined(separator: " ") }
+    }
+
+    var qaAppliedVersion: UInt64 { latestEnqueuedVersion ?? appliedVersion ?? 0 }
+    var qaPageZoomPercent: Int { renderContext.pageZoom.percent }
+    /// The disclosure state the transcript holds for a block (default closed).
+    func qaIsExpanded(_ blockID: AgentNodeID) -> Bool { renderContext.actions.isExpanded(blockID: blockID, default: false) }
+    var qaIsNearBottom: Bool { isNearBottom }
+
+    /// The unit under the viewport's top edge, and how far into it the edge is.
+    var qaTopBlock: (id: AgentNodeID, offset: CGFloat)? {
+        let index = firstPlaced(atOrBelow: scrollOffset)
+        guard index < placed.count else { return nil }
+        return (placed[index].blockID, scrollOffset - placed[index].y)
+    }
+
+    /// How far the widest laid line's glyphs reach past the column's right edge
+    /// (0 or less when every line fits). Lines in a scroll region (code, output) are
+    /// left out: those panes scroll sideways by design.
+    var qaWidestLineOverflow: CGFloat {
+        var worst = -CGFloat.greatestFiniteMagnitude
+        for item in placed {
+            for row in item.block.rows where row.region == nil {
+                for line in row.lines {
+                    // Trailing whitespace is measured but never drawn.
+                    let inked = line.width - CGFloat(CTLineGetTrailingWhitespaceWidth(line.ctLine))
+                    worst = max(worst, line.x + inked - item.block.width)
+                }
+            }
+        }
+        return worst
+    }
+
+    /// The point size of the first laid line's first run in a unit.
+    func qaFirstLineFontSize(of blockID: AgentNodeID) -> CGFloat? {
+        guard let row = placed.first(where: { $0.blockID == blockID })?.block.rows.first,
+              let font = row.string.length > 0 ? row.string.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil
+        else { return nil }
+        return font.pointSize
     }
 
     /// The rows a laid-out unit draws, as strings, in order.
