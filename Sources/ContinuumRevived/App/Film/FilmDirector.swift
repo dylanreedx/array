@@ -540,14 +540,14 @@ final class FilmDirector {
         // witnesses were recorded against.
         let keys = scene.settleToolDetails == true ? agents.keys.sorted() : []
         for _ in 0..<(keys.isEmpty ? 0 : 3) {
-            for key in keys { await agentView(key)?.qaTranscriptForChecks?.qaWaitForToolDetailRefresh() }
+            for key in keys { await agentView(key)?.qaWaitForToolDetailRefresh() }
             try? await Task.sleep(nanoseconds: 2_000_000)
             for _ in 0..<4 { await Task.yield() }
         }
         for key in agents.keys {
             guard let view = agentView(key) else { continue }
             view.qaFlushStreamingMarkupForChecks()
-            view.qaTranscriptForChecks?.flushPendingVisualUpdate()
+            view.qaTranscriptSurface?.flushPendingVisualUpdate()
         }
     }
 
@@ -1000,6 +1000,14 @@ final class FilmDirector {
     /// The chip a parent's transcript shows for the subagent its `Agent` tool_use
     /// `toolUseId` spawned (`AgentReferenceChipView`, identified by the child id).
     func chipPoint(toolUseId: String) -> CGPoint? {
+        // The drawn transcript draws the chip itself: its reveal control.
+        for (key, handle) in agents {
+            let child = AgentRecord.observedChildID(parentAgentID: handle.agentId.rawValue, toolUseID: toolUseId)
+            guard let canvas = agentView(key)?.qaCanvasTranscript, canvas.window != nil,
+                  let drawn = canvas.qaRevealAgentControlRect(agentID: child) else { continue }
+            let rect = topLeftRect(of: canvas, drawn)
+            return CGPoint(x: rect.midX, y: rect.midY)
+        }
         guard let chip = chipView(toolUseId: toolUseId) else { return nil }
         let rect = topLeftRect(of: chip, chip.bounds)
         return CGPoint(x: rect.midX, y: rect.midY)

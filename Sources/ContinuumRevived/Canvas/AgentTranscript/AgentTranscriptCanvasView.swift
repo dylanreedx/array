@@ -1586,6 +1586,19 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         return font.pointSize
     }
 
+    /// The drawn control that opens `agentID`'s tile (a subagent reference
+    /// chip), in view coordinates; nil when none is laid out inside the bounds.
+    func qaRevealAgentControlRect(agentID: UUID) -> NSRect? {
+        for item in placed {
+            for control in item.block.controls {
+                guard case let .perform(.revealAgent(_, target, _)) = control.action, target == agentID else { continue }
+                let rect = control.rect.offsetBy(dx: insets.left, dy: item.y - scrollOffset)
+                return bounds.intersects(rect) ? rect : nil
+            }
+        }
+        return nil
+    }
+
     /// The rows a laid-out unit draws, as strings, in order.
     func qaRowStrings(of blockID: AgentNodeID) -> [String] {
         placed.first { $0.blockID == blockID }?.block.rows.map(\.string.string) ?? []

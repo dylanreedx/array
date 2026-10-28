@@ -368,7 +368,7 @@ enum FilmSceneCheck {
             maxTranscriptCards = max(maxTranscriptCards,
                                      director.agents.keys.reduce(0) { $0 + (director.agentView($1)?.transcriptCardCount ?? 0) })
             for tool in namedTools {
-                if let title = director.agentView(tool.agent)?.qaTranscriptForChecks?.qaPresentedToolTitle(forProviderItemID: tool.id) {
+                if let title = director.agentView(tool.agent)?.qaPresentedToolTitle(forProviderItemID: tool.id) {
                     seenToolTitles[tool.agent + "/" + tool.id] = title
                 }
             }
@@ -1337,7 +1337,7 @@ enum FilmSceneCheck {
                     local.append("open \(open.as): production presented no camera reveal (\(record.result.presentationEffects.camera))")
                 }
                 // The agent's transcript: production's row for the claude MCP call.
-                let list = director.agentView(agentKey)?.qaTranscriptForChecks
+                let list = director.agentView(agentKey)
                 await list?.qaWaitForToolDetailRefresh()
                 let title = list?.qaPresentedToolTitle(forProviderItemID: open.toolId) ?? seenToolTitles[agentKey + "/" + open.toolId]
                 let basename = URL(fileURLWithPath: open.path).lastPathComponent
@@ -1355,7 +1355,7 @@ enum FilmSceneCheck {
             for action in take.actions {
                 guard let tool = action.tool, let name = tool.name, let agentKey = action.agent,
                       let workspaceTool = ArrayWorkspaceTool(toolName: name) else { continue }
-                let list = director.agentView(agentKey)?.qaTranscriptForChecks
+                let list = director.agentView(agentKey)
                 await list?.qaWaitForToolDetailRefresh()
                 // The tile may have closed since (Settle): its row as last seen.
                 let title = list?.qaPresentedToolTitle(forProviderItemID: tool.id) ?? seenToolTitles[agentKey + "/" + tool.id]

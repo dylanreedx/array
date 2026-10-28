@@ -237,7 +237,11 @@ extension FilmSceneCheck {
                sidebarTouches.allSatisfy({ $0 <= last }),
                (starts[key]?.filter { $0 > last } ?? []).isEmpty, let current = row(key), current.lifecycle == .active {
                 expect(AgentInbox96CellView.isUnseen(current), "\(key): never clicked since it finished, but the row is seen")
-                let badge = director.agentView(key).flatMap { FilmDirector.descendants(of: $0, AgentSignalBadgeView.self).first { !$0.isHidden } }
+                // Every tree the tile draws: a resting tile's header is in its body.
+                let badge = director.agentView(key).flatMap { view in
+                    view.qaPresentedViewRoots.lazy.flatMap { FilmDirector.descendants(of: $0, AgentSignalBadgeView.self) }
+                        .first { !$0.isHidden }
+                }
                 expect(badge?.signal?.kind == .completed, "\(key): unseen, but its tile badge is \(badge?.signal?.kind.rawValue ?? "hidden"), want completed")
             }
         }

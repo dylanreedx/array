@@ -5211,6 +5211,25 @@ extension ManagedAgentTileNSView {
         return listTranscript?.qaVisibleAccessibilityText ?? []
     }
 
+    /// The presented title of the tool row a provider item (a runner's tool_use
+    /// id) produced, as the transcript drew it.
+    func qaPresentedToolTitle(forProviderItemID itemID: String) -> String? {
+        if qaCanvasTranscript != nil {
+            for entry in model.document.entries {
+                guard case let .providerItem(_, id?) = entry.provenance, id == itemID else { continue }
+                for block in entry.blocks where block.kind == .toolCall {
+                    if case let .toolCall(payload)? = qaPresentedToolBlock(for: block.id)?.payload { return payload.name }
+                }
+            }
+            return nil
+        }
+        #if ARRAY_FILM
+        return listTranscript?.qaPresentedToolTitle(forProviderItemID: itemID)
+        #else
+        return nil
+        #endif
+    }
+
     /// The presented tool block for a document block, as the transcript drew it.
     func qaPresentedToolBlock(for blockID: AgentNodeID) -> AgentBlock? {
         if let canvas = qaCanvasTranscript {
