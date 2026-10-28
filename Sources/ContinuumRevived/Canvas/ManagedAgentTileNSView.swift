@@ -4435,16 +4435,21 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     // sidebar it meant *stale*) and they had drifted from the board's hues.
     // Everything now comes from `StatusChipPresenter`.
 
-    /// The cards actually in the view hierarchy, so a reset can be asserted against
-    /// the stack and not only against the model behind it.
+    /// The cards actually rendered, so a reset can be asserted against what is on
+    /// screen and not only against the model behind it: the list's semantic rows,
+    /// or the units the drawn transcript laid out (one per row the list makes).
     var qaRenderedCardCount: Int {
-        listTranscript?.qaSemanticRowCount ?? 0
+        if let canvas = qaCanvasTranscript { return canvas.qaPlacedBlockIDs.count }
+        return listTranscript?.qaSemanticRowCount ?? 0
     }
     var qaTranscriptCollectionFixture: AgentTranscriptListView? { listTranscript }
     /// The compact row is exposed only as a deterministic geometry/AX witness;
     /// production updates it through `refreshCompactStatus` above.
     var qaCompactStatusRow: AgentCompactStatusRowView { compactStatusRow }
-    var qaThinkingIndicatorVisible: Bool { listTranscript?.qaThinkingIndicatorVisible == true }
+    var qaThinkingIndicatorVisible: Bool {
+        if let canvas = qaCanvasTranscript { return canvas.qaTailGyroVisible }
+        return listTranscript?.qaThinkingIndicatorVisible == true
+    }
     // `.plans/45` S6 — deterministic seams for the optimistic-window witness.
     func qaBeginOptimisticSubmissionForChecks(_ text: String) {
         beginOptimisticSubmission(AgentPrompt(text))
@@ -4688,6 +4693,29 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     var qaV2ActionEnabled: Bool { v2ActionButton?.presentation.isEnabled == true }
     @discardableResult
     func qaClickV2RequestChoice(requestID: String, value: String) -> Bool {
+        if let canvas = qaCanvasTranscript {
+            // The drawn choice: hit-tested at its own centre, as a press is, and
+            // its own action performed.
+            canvas.layoutSubtreeIfNeeded()
+            let blocks = Set(model.document.entries.flatMap(\.blocks).filter { block in
+                switch block.payload {
+                case .approval(let payload), .question(let payload): return payload.requestID == requestID
+                default: return false
+                }
+            }.map(\.id))
+            let title = ApprovalDecision.displayTitle(forChoice: value)
+            if let drawn = canvas.qaControls.first(where: { blocks.contains($0.blockID) && $0.title == title && $0.kind == "choice" }),
+               let hit = canvas.control(at: drawn.center), hit.control.enabled,
+               case .perform(.submitResponse(requestID, value)) = hit.control.action {
+                canvas.perform(hit.control.action)
+                return true
+            }
+            // No drawn control (the runner offers no response transport): the
+            // same semantic fallback the list takes below.
+            guard v2RequestPayload(requestID)?.choices.contains(value) == true else { return false }
+            performV2RenderAction(.submitResponse(requestID: requestID, value: value))
+            return true
+        }
         guard let transcriptCollectionFixture = listTranscript else { return false }
         transcriptCollectionFixture.layoutSubtreeIfNeeded()
         transcriptCollectionFixture.collectionView.layoutSubtreeIfNeeded()
@@ -5113,3 +5141,77 @@ extension ManagedAgentTileNSView {
     }
 }
 
+// MARK: - Renderer-agnostic QA readbacks
+//
+// What the tile shows, whichever transcript renderer it installed and whether
+// its chrome is live or resting: the drawn transcript's own layout, and the
+// detached views a resting tile draws, mapped to where they are drawn.
+extension ManagedAgentTileNSView {
+    var qaCanvasTranscript: AgentTranscriptCanvasView? { qaTranscriptSurface as? AgentTranscriptCanvasView }
+
+    /// The view trees this tile's picture is made of right now: the tile and,
+    /// while it rests, the detached body and title-bar controls it draws.
+    var qaPresentedViewRoots: [NSView] {
+        var roots: [NSView] = [self]
+        if isChromeResting { roots.append(contentBackdrop) }
+        return roots + qaDrawnTitleBarControls
+    }
+
+    /// Where `rect` (default: the bounds) of `view` is drawn, in the tile's own
+    /// coordinates — through the resting chrome or the drawn title bar when the
+    /// view is detached. nil for a view the tile does not present.
+    func qaPresentedRect(of view: NSView, _ rect: NSRect? = nil) -> NSRect? {
+        let rect = rect ?? view.bounds
+        if view === self || view.isDescendant(of: self) { return view.convert(rect, to: self) }
+        if isChromeResting, let chromeCanvas,
+           view === contentBackdrop || view.isDescendant(of: contentBackdrop) {
+            // The resting body fills the chrome canvas at its origin.
+            return chromeCanvas.convert(NativeViewVectorRenderer.convert(rect, from: view, to: contentBackdrop), to: self)
+        }
+        guard let bar = qaTitleBarView else { return nil }
+        for control in qaDrawnTitleBarControls where view === control || view.isDescendant(of: control) {
+            // The bar draws a detached control at its frame, as when attached.
+            let local = NativeViewVectorRenderer.convert(rect, from: view, to: control)
+            var y = local.minY - control.bounds.minY
+            if control.isFlipped != bar.isFlipped { y = control.bounds.height - y - local.height }
+            return bar.convert(NSRect(x: control.frame.minX + local.minX - control.bounds.minX,
+                                      y: control.frame.minY + y, width: local.width, height: local.height), to: self)
+        }
+        return nil
+    }
+
+    /// The blocks the transcript shows as rows, in order: the list's displayed
+    /// rows (after clustering), or the units the drawn transcript laid out.
+    var qaDisplayedBlockIDs: [AgentNodeID] {
+        if let canvas = qaCanvasTranscript { return canvas.qaPlacedBlockIDs }
+        return listTranscript?.qaDisplayedRowIDsForChecks ?? []
+    }
+
+    /// The presented tool block for a document block, as the transcript drew it.
+    func qaPresentedToolBlock(for blockID: AgentNodeID) -> AgentBlock? {
+        if let canvas = qaCanvasTranscript {
+            guard let block = canvas.qaPresentedBlock(for: blockID), case .toolCall = block.payload else { return nil }
+            return block
+        }
+        return listTranscript?.qaPresentedToolBlock(for: blockID)
+    }
+
+    /// The presented diff payload for a document block, as the transcript drew it.
+    func qaPresentedDiffPayload(for blockID: AgentNodeID) -> AgentDiffPayload? {
+        if let canvas = qaCanvasTranscript {
+            guard case let .diff(payload)? = canvas.qaPresentedBlock(for: blockID)?.payload else { return nil }
+            return payload
+        }
+        return listTranscript?.qaPresentedDiffPayload(for: blockID)
+    }
+
+    /// Waits for the tool-detail snapshot in flight in whichever transcript.
+    func qaWaitForToolDetailRefresh() async {
+        if let canvas = qaCanvasTranscript { await canvas.qaWaitForToolDetailRefresh() }
+        await listTranscript?.qaWaitForToolDetailRefresh()
+    }
+
+    /// Everything the tile's host-local tool-detail store holds (shared by both
+    /// renderers).
+    func qaToolDetailRecords() async -> [AgentToolDetailRecord] { await toolDetailStore.allDetails() }
+}

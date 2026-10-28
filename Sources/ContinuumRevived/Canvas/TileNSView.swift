@@ -167,6 +167,9 @@ class TileNSView: NSView, TokenThemed {
     }
     var titleBarControlsAreDrawn: Bool { titleBar?.drawsControlsInline ?? false }
     var qaTitleBarView: NSView? { titleBar }
+    /// The bar's controls while it draws them itself: detached, each still laid
+    /// out at its frame in the bar.
+    var qaDrawnTitleBarControls: [NSView] { titleBar?.qaDetachedInlineControls ?? [] }
 
 
     func setTitleBarAccessory(_ accessory: NSView?) {
@@ -1887,6 +1890,10 @@ private final class TitleBarView: NSView, TokenThemed {
     private var inlineControls: [NSView] {
         [providerMarkView, closeButton, actionsButton, faceToggle, sessionActionControl]
             .compactMap { $0 }
+    }
+
+    var qaDetachedInlineControls: [NSView] {
+        drawsControlsInline ? inlineControls.filter { $0.superview == nil } : []
     }
 
     private func detachInlineControls() {

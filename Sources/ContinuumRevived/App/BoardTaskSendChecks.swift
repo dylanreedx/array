@@ -122,12 +122,13 @@ func checkTaskOnlySendKeepsItsTurn(
               entries[userIndex].blocks.map(\.kind) == [.taskReference] else {
             throw fail("task-only send/\(harness.rawValue): no task turn before the reply; entries \(shape)")
         }
-        guard let transcript = tile.qaTranscriptForChecks else {
+        guard let transcript = tile.qaTranscriptSurface else {
             throw fail("task-only send/\(harness.rawValue): the tile has no transcript")
         }
         tile.qaFlushStreamingMarkupForChecks()
         transcript.flushPendingVisualUpdate()
-        guard transcript.qaDisplayedRowIDsForChecks.contains(entries[userIndex].blocks[0].id) else {
+        tile.layoutSubtreeIfNeeded()
+        guard tile.qaDisplayedBlockIDs.contains(entries[userIndex].blocks[0].id) else {
             throw fail("task-only send/\(harness.rawValue): the task turn is not among the displayed rows; entries \(shape)")
         }
         checked.append(harness.rawValue)

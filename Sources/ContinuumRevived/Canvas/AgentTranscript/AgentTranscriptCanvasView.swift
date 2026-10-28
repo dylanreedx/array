@@ -1409,6 +1409,77 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     }
 
     func qaHeight(of blockID: AgentNodeID) -> CGFloat? { placed.first { $0.blockID == blockID }?.block.height }
+
+    // Renderer-agnostic readbacks for `ManagedAgentTileNSView`'s QA seams: what
+    // this view laid out and draws, never what the document says it should.
+
+    /// The block exactly as it was laid out: a tool or diff block carries the
+    /// presented payload (host-local detail) its drawing was made from. nil when
+    /// the block is not laid out.
+    func qaPresentedBlock(for blockID: AgentNodeID) -> AgentBlock? {
+        guard let item = placed.first(where: { $0.blockID == blockID }),
+              var block = document.entries.lazy.flatMap(\.blocks).first(where: { $0.id == blockID }) else { return nil }
+        if let presented = item.block.presented { block.payload = presented }
+        return block
+    }
+
+    /// Waits for the tool-detail snapshot in flight, whose landing re-lays out
+    /// the presented rows.
+    func qaWaitForToolDetailRefresh() async { await toolDetail.qaWaitForRefresh() }
+
+    /// The working gyro is on screen: shown, animating, at the tail.
+    var qaTailGyroVisible: Bool { tailLine != nil && !gyro.isHidden && gyro.isAnimating }
+
+    /// Every selectable text line drawn inside the view's bounds right now: its
+    /// string and its rect in view coordinates (lines clipped by a scroll region's
+    /// viewport or the view's edge are left out).
+    var qaVisibleTextLines: [(text: String, rect: NSRect)] {
+        var result: [(String, NSRect)] = []
+        for item in placed {
+            let top = item.y - scrollOffset
+            guard top + item.block.height > 0, top < bounds.height else { continue }
+            for row in item.block.rows {
+                var offset = CGPoint.zero
+                var clip = CGRect(x: 0, y: 0, width: item.block.width, height: item.block.height)
+                if let region = row.region, item.block.regions.indices.contains(region) {
+                    offset = regionOffsets[RegionKey(blockID: item.blockID, index: region)] ?? .zero
+                    clip = item.block.regions[region].viewport
+                }
+                for line in row.lines {
+                    let local = CGRect(x: line.x - offset.x, y: line.top - offset.y, width: line.width, height: line.height)
+                    guard clip.contains(local) else { continue }
+                    let rect = local.offsetBy(dx: insets.left, dy: top)
+                    guard bounds.contains(rect) else { continue }
+                    let text = (row.string.string as NSString).substring(with: line.range)
+                    result.append((text, rect))
+                }
+            }
+        }
+        return result
+    }
+
+    /// A one-line boundary block (session boundary, compaction) as drawn: its
+    /// label, the width the label was drawn at and the width it needs, the
+    /// block's width, and the rules painted beside it.
+    struct QABoundary {
+        let text: String
+        let drawnWidth: CGFloat
+        let neededWidth: CGFloat
+        let width: CGFloat
+        let ruleRects: [CGRect]
+    }
+
+    func qaBoundary(for blockID: AgentNodeID) -> QABoundary? {
+        guard let item = placed.first(where: { $0.blockID == blockID }),
+              let row = item.block.rows.first, let line = row.lines.first else { return nil }
+        let needed = ceil(Self.width(of: CTLineCreateWithAttributedString(Self.coreTextString(row.string))))
+        let rules: [CGRect] = item.block.decorations.compactMap {
+            if case let .fill(rect, _, _) = $0, rect.width > 0, rect.height > 0 { return rect }
+            return nil
+        }
+        return QABoundary(text: row.string.string, drawnWidth: line.width, neededWidth: needed,
+                          width: item.block.width, ruleRects: rules)
+    }
 }
 
 extension AgentTranscriptCanvasView.ControlStyle {
