@@ -230,6 +230,7 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
 final class AgentTileOverflowButton: NSControl, TokenThemed, AgentPageZoomScalable {
     private let imageView = NSImageView(frame: .zero)
     private var isPressed = false
+    private var isMenuPresented = false
     private var chromeGlyphWidth: CGFloat = 13
 
     // SF Symbols include transparent side bearings. Measure this one cached
@@ -307,11 +308,22 @@ final class AgentTileOverflowButton: NSControl, TokenThemed, AgentPageZoomScalab
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 36 || event.keyCode == 49 {
+        if [36, 49, 125].contains(event.keyCode) {
             _ = sendAction(action, to: target)
         } else {
             super.keyDown(with: event)
         }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
+        return sendAction(action, to: target)
+    }
+
+    func setMenuPresented(_ presented: Bool) {
+        guard isMenuPresented != presented else { return }
+        isMenuPresented = presented
+        applyTokens()
     }
 
     // Keyboard focus is the SYSTEM focus ring, drawn by AppKit around this
@@ -328,7 +340,7 @@ final class AgentTileOverflowButton: NSControl, TokenThemed, AgentPageZoomScalab
     func applyTokens() {
         let theme = effectiveTokenTheme
         imageView.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
-        alphaValue = isPressed ? 0.72 : 1
+        alphaValue = isPressed || isMenuPresented ? 0.72 : 1
         needsDisplay = true
     }
 

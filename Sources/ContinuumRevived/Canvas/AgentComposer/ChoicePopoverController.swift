@@ -333,6 +333,45 @@ final class CommandPopoverContentView: NSView, TokenThemed, AgentPageZoomScalabl
     }
 }
 
+/// A cascade's panels share dismissal while retaining independent list focus.
+/// Ordinary choice panels never join a group and retain their existing lifecycle.
+@MainActor
+final class ChoicePopoverGroup {
+    private final class Member {
+        weak var controller: ChoicePopoverController?
+        init(_ controller: ChoicePopoverController) { self.controller = controller }
+    }
+    private var members: [Member] = []
+    var onDismiss: (() -> Void)?
+    private var dismissing = false
+
+    fileprivate func add(_ controller: ChoicePopoverController) {
+        members.removeAll { $0.controller == nil || $0.controller === controller }
+        members.append(Member(controller))
+    }
+    fileprivate func remove(_ controller: ChoicePopoverController) {
+        members.removeAll { $0.controller == nil || $0.controller === controller }
+    }
+    func contains(window: NSWindow?) -> Bool {
+        guard let window else { return false }
+        return members.contains { $0.controller?.panel === window }
+    }
+
+    fileprivate func consumesAnchorClick(_ event: NSEvent, originatingWindow: NSWindow?) -> Bool {
+        members.contains { $0.controller?.isClosingAnchorClick(event, originatingWindow: originatingWindow) == true }
+    }
+
+    func dismiss() {
+        guard !dismissing else { return }
+        dismissing = true
+        // Children close first so the root restores the original focus last.
+        let presented = members.reversed().compactMap { $0.controller }
+        presented.forEach { $0.dismiss() }
+        onDismiss?()
+        dismissing = false
+    }
+}
+
 /// Owns the anchored panel and all dismissal observers. Closures capture the
 /// controller weakly so presenting a choice never extends a tile's lifetime.
 @MainActor
@@ -393,6 +432,8 @@ final class ChoicePopoverController {
     var isPresented: Bool { panel?.isVisible == true }
     /// Toggle triggers consume their closing click before it can reopen the menu.
     var dismissesOnAnchorClick = false
+    /// Optional ownership group for a cascading menu. Assign before presenting.
+    var cascadeGroup: ChoicePopoverGroup?
     /// Why the panel last closed ITSELF, cleared on each present: a check can
     /// then tell the window or app losing focus (outside its control) from a
     /// close the owner caused.
@@ -414,6 +455,7 @@ final class ChoicePopoverController {
         relativeTo view: NSView,
         placementFrame: NSRect? = nil,
         takesFocus: Bool = true,
+        submenu: Bool = false,
         accessibilityLabel customAccessibilityLabel: String? = nil,
         onSelection: @escaping (ChoiceItem) -> Void,
         focusReturnView: NSView? = nil,
@@ -529,7 +571,7 @@ final class ChoicePopoverController {
             anchor: anchor,
             relativeTo: view,
             visibleFrame: region,
-            zoom: zoom
+            zoom: zoom, submenu: submenu
         ).insetBy(dx: -margin, dy: -margin), display: false)
         // An anchor given as the view's whole bounds follows the view: a trigger
         // whose label grows on a toggle re-anchors rather than pointing at the
@@ -538,11 +580,12 @@ final class ChoicePopoverController {
         reframeIntrinsicPanel = layout == .intrinsic ? { [weak view] size in
             guard let view else { return .zero }
             return Self.panelFrame(contentSize: size, anchor: tracksBounds ? view.bounds : anchor,
-                                   relativeTo: view, visibleFrame: region, zoom: zoom)
+                                   relativeTo: view, visibleFrame: region, zoom: zoom, submenu: submenu)
         } : nil
         chrome.layoutSubtreeIfNeeded()
 
         self.panel = panel
+        cascadeGroup?.add(self)
         surfaceView = contentView
         listView = list
         anchorView = view
@@ -594,6 +637,13 @@ final class ChoicePopoverController {
             userInfo: [.announcement: announcement])
     }
 
+    /// Return keyboard navigation to this level after closing a child.
+    func focus() {
+        guard let panel, let listView else { return }
+        panel.makeKey()
+        panel.makeFirstResponder(listView)
+    }
+
     /// Passive completion panels keep the editor first responder and forward its
     /// unmodified navigation commands through the same enabled-row selection path.
     @discardableResult
@@ -640,6 +690,7 @@ final class ChoicePopoverController {
     }
 
     func dismiss() {
+        cascadeGroup?.remove(self)
         let onClose = closeHandler
         closeHandler = nil
         reframeIntrinsicPanel = nil
@@ -666,7 +717,7 @@ final class ChoicePopoverController {
 
     private func dismissItself(_ reason: String) {
         if isPresented { qaLastSelfDismissal = reason }
-        dismissAsCancellation()
+        if let cascadeGroup { cascadeGroup.dismiss() } else { dismissAsCancellation() }
     }
 
     private func dismissAsCancellation() {
@@ -705,12 +756,22 @@ final class ChoicePopoverController {
         anchor: NSRect,
         relativeTo view: NSView,
         visibleFrame: NSRect,
-        zoom: AgentPageZoom = .default
+        zoom: AgentPageZoom = .default,
+        submenu: Bool = false
     ) -> NSRect {
         guard let window = view.window else { return NSRect(origin: .zero, size: contentSize) }
         let windowAnchor = view.convert(anchor, to: nil)
         let screenAnchor = window.convertToScreen(windowAnchor)
         let gap = CGFloat(zoom.scaled(Space.s))
+        if submenu {
+            let right = screenAnchor.maxX + 2
+            let left = screenAnchor.minX - contentSize.width - 2
+            let x = right + contentSize.width <= visibleFrame.maxX ? right : left
+            let y = screenAnchor.maxY + ChoiceListView.verticalPadding(zoom: zoom) - contentSize.height
+            return NSRect(x: min(max(x, visibleFrame.minX), max(visibleFrame.minX, visibleFrame.maxX - contentSize.width)),
+                          y: min(max(y, visibleFrame.minY), max(visibleFrame.minY, visibleFrame.maxY - contentSize.height)),
+                          width: contentSize.width, height: contentSize.height)
+        }
         let roomBelow = screenAnchor.minY - visibleFrame.minY
         let roomAbove = visibleFrame.maxY - screenAnchor.maxY
         let placeBelow = roomBelow >= contentSize.height + gap || roomBelow >= roomAbove
@@ -798,7 +859,18 @@ final class ChoicePopoverController {
             // completion panels leave the editor's parent key and observe it.
             observers.append(center.addObserver(
                 forName: NSWindow.didResignKeyNotification, object: resignationOwner, queue: .main
-            ) { [weak self] _ in MainActor.assumeIsolated { self?.dismissItself("resignKey") } })
+            ) { [weak self] _ in MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.cascadeGroup != nil {
+                    // AppKit posts resignation before publishing the new key panel.
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.isPresented else { return }
+                        if self.cascadeGroup?.contains(window: NSApp.keyWindow) != true {
+                            self.dismissItself("resignKey")
+                        }
+                    }
+                } else { self.dismissItself("resignKey") }
+            } })
         }
         observers.append(center.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
@@ -850,12 +922,18 @@ final class ChoicePopoverController {
     /// The local monitor and deterministic event witness share this dispatch path.
     func filterPointerEvent(_ event: NSEvent, originatingWindow: NSWindow?) -> NSEvent? {
         guard isPresented, originatingWindow !== panel else { return event }
-        let closesTrigger = dismissesOnAnchorClick && anchorView.map { anchor in
+        if cascadeGroup?.contains(window: originatingWindow) == true { return event }
+        let closesTrigger = cascadeGroup?.consumesAnchorClick(event, originatingWindow: originatingWindow)
+            ?? isClosingAnchorClick(event, originatingWindow: originatingWindow)
+        dismissItself("outsideClick")
+        return closesTrigger ? nil : event
+    }
+
+    fileprivate func isClosingAnchorClick(_ event: NSEvent, originatingWindow: NSWindow?) -> Bool {
+        dismissesOnAnchorClick && anchorView.map { anchor in
             originatingWindow === anchor.window
                 && anchor.bounds.contains(anchor.convert(event.locationInWindow, from: nil))
         } == true
-        dismissItself("outsideClick")
-        return closesTrigger ? nil : event
     }
 
     private func removeDismissalObservers() {

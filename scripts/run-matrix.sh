@@ -540,6 +540,9 @@ if [[ "$AGENT_TILE_MENU_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --agent-identity-color-check
   run_app_check .build/debug/Array --location-action-surface-check
   run_app_check .build/debug/Array --camera-chrome-redraw-check
+  run_app_check .build/debug/Array --choice-geometry-check
+  run_app_check .build/debug/Array --workspace-selector-check
+  run_app_check .build/debug/Array --ui-probe-check
   matrix_report 'Agent tile menu matrix (targeted)'
   exit $?
 fi

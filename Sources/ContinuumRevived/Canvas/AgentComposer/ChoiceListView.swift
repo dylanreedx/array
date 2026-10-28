@@ -46,6 +46,8 @@ struct ChoiceItem: Identifiable, Equatable {
     // Plan: .plans/86-workspace-filter/README.md — the `.checklist` anatomy.
     /// The row's checkbox. Only a checklist draws it.
     var check: ChoiceCheck? = nil
+    /// Opens a cascading menu rather than performing a leaf action.
+    var hasSubmenu = false
     /// A colour dot before the title (a workspace's colour).
     var swatch: NSColor? = nil
     /// A right-aligned caption ("Array", "1 headless").
@@ -97,6 +99,8 @@ enum ChoiceListPresentation {
     case choices
     /// Compact checked rows for window-chrome menus, with section dividers.
     case compactChoices
+    /// Cascading command menus, with independent checks, shortcuts and arrows.
+    case menu
     case commands
     /// Prompt commands carry explanatory copy, unlike compact sidebar menus.
     case slashCommands
@@ -130,6 +134,8 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     private(set) var focusedID: String?
     var onSelection: ((ChoiceItem) -> Void)?
     var onDismiss: (() -> Void)?
+    var onOpenSubmenu: ((ChoiceItem) -> Void)?
+    var onCloseSubmenu: (() -> Void)?
     /// A row's hover accessory was pressed, or Option-click pressed its option accessory.
     var onAccessory: ((ChoiceItem, String) -> Void)?
     /// The focused row changed under the pointer or the keyboard; nil when the
@@ -191,7 +197,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
         destructiveSeparator.wantsLayer = true
         destructiveSeparator.isHidden = true
         addSubview(destructiveSeparator)
-        setAccessibilityRole(.list)
+        setAccessibilityRole(presentation == .menu ? .menu : .list)
         setAccessibilityElement(true)
         setAccessibilityLabel("Choices")
         rebuildRows()
@@ -201,7 +207,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override var acceptsFirstResponder: Bool { items.contains(where: \.enabled) }
+    override var acceptsFirstResponder: Bool { presentation == .menu || items.contains(where: \.enabled) }
 
     override var intrinsicContentSize: NSSize {
         // What a row's LABEL needs, measured the way a label draws (the cell's own
@@ -212,13 +218,13 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
             let detail = item.detail.map {
                 ChoiceLabelMetrics.labelWidth(for: $0, font: .token(.caption, zoom: pageZoom))
             } ?? 0
-            guard presentation == .checklist else { return max(title, detail) }
+            guard presentation == .checklist || presentation == .menu else { return max(title, detail) }
             return max(title + ChoiceRowView.swatchReserve(item, zoom: pageZoom), detail)
                 + ChoiceRowView.trailingReserve(item, zoom: pageZoom)
         }.max() ?? 0
         let minimumWidth = presentation == .commands
             ? CGFloat(pageZoom.scaled(184)) : Self.minimumWidth(zoom: pageZoom)
-        let height = [.checklist, .compactChoices].contains(presentation)
+        let height = [.checklist, .compactChoices, .menu].contains(presentation)
             ? items.map(rowHeight(for:)).reduce(0, +) + CGFloat(separatorIndices.count) * sectionGap
             : CGFloat(items.count) * renderedRowHeight + destructiveSeparatorGap
         return NSSize(
@@ -235,7 +241,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
 
     /// Rows a sectioned list draws a divider above.
     private var separatorIndices: [Int] {
-        guard [.checklist, .compactChoices].contains(presentation) else { return [] }
+        guard [.checklist, .compactChoices, .menu].contains(presentation) else { return [] }
         return items.indices.filter { $0 > 0 && items[$0].separatorBefore }
     }
 
@@ -248,17 +254,18 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     /// title, so every row ellipsized at every panel width.
     private var rowChromeWidth: CGFloat {
         renderedRowInset * 2
-            + ChoiceRowView.textInset(reservesLeadingSlot: reservesLeadingSlot, zoom: pageZoom)
+            + ChoiceRowView.textInset(reservesLeadingSlot: reservesLeadingSlot, zoom: pageZoom, menu: presentation == .menu)
             + ChoiceRowView.trailingInset(zoom: pageZoom)
     }
 
     private var reservesLeadingSlot: Bool {
-        ![.commands, .slashCommands].contains(presentation) || items.contains { $0.icon != nil }
+        if presentation == .menu { return items.contains { $0.icon != nil } }
+        return ![.commands, .slashCommands].contains(presentation) || items.contains { $0.icon != nil }
     }
 
     override func layout() {
         super.layout()
-        if [.checklist, .compactChoices].contains(presentation) {
+        if [.checklist, .compactChoices, .menu].contains(presentation) {
             layoutSectionedRows()
             return
         }
@@ -308,7 +315,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
 
     private var renderedRowHeight: CGFloat {
         switch presentation {
-        case .commands, .compactChoices:
+        case .commands, .compactChoices, .menu:
             // A command row that carries a subtitle needs the two-line height.
             // Every row of the list takes it, so a menu never mixes 30pt and 40pt
             // rows; at 30pt the title and subtitle of the zone cancel menu's
@@ -349,6 +356,8 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
         case 119: perform(.last)
         case 36, 76: perform(.accept)
         case 49 where presentation == .checklist: perform(.accept)
+        case 124 where onOpenSubmenu != nil: perform(.open)
+        case 123 where onCloseSubmenu != nil: perform(.ascend)
         case 53: perform(.cancel)
         default:
             guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
@@ -379,15 +388,23 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
             updateRows()
             scrollFocusedRowToVisible()
             announceFocusedChoice()
+            onFocusChange?(focusedID)
         case .last:
             focusedID = enabled.last?.id
             updateRows()
             scrollFocusedRowToVisible()
             announceFocusedChoice()
+            onFocusChange?(focusedID)
         case .accept, .open:
             guard let item = items.first(where: { $0.id == focusedID && $0.enabled }) else { return }
-            choose(item)
-        case .ascend, .deleteBackward:
+            if command == .open, let onOpenSubmenu {
+                if item.hasSubmenu { onOpenSubmenu(item) }
+            } else {
+                choose(item)
+            }
+        case .ascend:
+            onCloseSubmenu?()
+        case .deleteBackward:
             break
         case .cancel:
             onDismiss?()
@@ -437,6 +454,16 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
         return scrollView.documentVisibleRect.contains(row.frame)
     }
 
+    /// Production row anchor used by cascading menu panels.
+    func rowView(id: String) -> NSView? { rows.first { $0.item.id == id } }
+
+    func focus(id: String) {
+        guard items.contains(where: { $0.id == id && $0.enabled }) else { return }
+        focusedID = id
+        updateRows()
+        scrollFocusedRowToVisible()
+    }
+
     func scrollFocusedRowToVisible() {
         guard let focusedID,
               let row = rows.first(where: { $0.item.id == focusedID }) else { return }
@@ -484,7 +511,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     private func choose(_ item: ChoiceItem) {
         // A checklist's state is its checkboxes; a selected fill would be a second,
         // contradicting answer to "what is chosen".
-        if presentation != .checklist { selectedID = item.id }
+        if presentation != .checklist && presentation != .menu { selectedID = item.id }
         focusedID = item.id
         updateRows()
         onSelection?(item)
@@ -542,6 +569,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
             updateRows()
             scrollFocusedRowToVisible()
             announceFocusedChoice()
+            onFocusChange?(focusedID)
         }
     }
 
@@ -572,7 +600,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
                 self.focusedID = id
                 self.updateRows()
                 self.scrollFocusedRowToVisible()
-                if changed || self.presentation == .checklist { self.onFocusChange?(id) }
+                if changed || self.presentation == .checklist || self.presentation == .menu { self.onFocusChange?(id) }
             }
             row.onAccessory = { [weak self] id, accessory in self?.pressAccessory(itemID: id, accessoryID: accessory) }
             row.applyPageZoom(pageZoom)
@@ -609,6 +637,8 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
     var onAccessory: ((String, String) -> Void)?
 
     private let leadingImageView = NSImageView(frame: .zero)
+    private let menuCheckView = NSImageView(frame: .zero)
+    private let submenuImageView = NSImageView(frame: .zero)
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
     // `.checklist` only. Dots are drawn, not layer fills: a palette colour is
@@ -617,6 +647,8 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
     private let attentionDot = ChoiceDotView()
     private let trailingLabel = NSTextField(labelWithString: "")
     private var accessoryButtons: [ChoiceAccessoryButton] = []
+    /// Measured only when menu content or typography changes, never in layout.
+    private var menuTrailingReserve: CGFloat = 0
     private var selected = false
     private var focused = false
     private var trackingArea: NSTrackingArea?
@@ -625,7 +657,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
 
     var qaSelected: Bool { selected }
     var qaFocused: Bool { focused }
-    var qaCheckHidden: Bool { !presentation.showsSelectionCheckmark || leadingImageView.isHidden }
+    var qaCheckHidden: Bool { presentation == .menu ? menuCheckView.isHidden : (!presentation.showsSelectionCheckmark || leadingImageView.isHidden) }
     var qaLeadingImageHidden: Bool { leadingImageView.isHidden }
     var qaTitleFrame: NSRect { titleLabel.frame }
     var qaTitleDrawsWhole: Bool {
@@ -659,6 +691,18 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         addSubview(leadingImageView)
         addSubview(titleLabel)
         addSubview(detailLabel)
+        if presentation == .menu {
+            menuCheckView.imageScaling = .scaleProportionallyDown
+            menuCheckView.setAccessibilityElement(false)
+            submenuImageView.image = CanvasSymbolImage.image(named: "chevron.right")
+            submenuImageView.imageScaling = .scaleProportionallyDown
+            submenuImageView.setAccessibilityElement(false)
+            trailingLabel.stringValue = item.trailing ?? ""
+            trailingLabel.font = .token(.caption, zoom: pageZoom)
+            trailingLabel.alignment = .right
+            trailingLabel.setAccessibilityElement(false)
+            [menuCheckView, submenuImageView, trailingLabel].forEach(addSubview)
+        }
         if presentation == .checklist {
             swatchDot.isHidden = item.swatch == nil
             attentionDot.isHidden = !item.attention
@@ -679,10 +723,10 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
             [swatchDot, attentionDot, trailingLabel].forEach(addSubview)
             accessoryButtons.forEach(addSubview)
         }
-        setAccessibilityRole(.row)
+        setAccessibilityRole(presentation == .menu ? .menuItem : .row)
         setAccessibilityElement(true)
         setAccessibilityLabel([item.title, item.detail, item.trailing].compactMap { $0 }.joined(separator: ", "))
-        if let check = item.check {
+        if let check = item.check, presentation != .menu {
             setAccessibilityRole(.checkBox)
             setAccessibilityValue(check == .off ? 0 : (check == .mixed ? 2 : 1))
         }
@@ -691,7 +735,12 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         let help = item.toolTip.map { [detailHelp, $0].compactMap { $0 }.joined(separator: "\n") } ?? detailHelp
         setAccessibilityHelp(help)
         setAccessibilityEnabled(item.enabled)
-        setAccessibilitySelected(selected)
+        setAccessibilitySelected(presentation == .menu ? item.check == .on : selected)
+        if presentation == .menu, let check = item.check {
+            setAccessibilityValue(check == .off ? 0 : (check == .mixed ? 2 : 1))
+        }
+        if item.hasSubmenu { setAccessibilityHelp("Opens submenu") }
+        refreshMenuTrailingReserve()
         applyTokens()
     }
 
@@ -700,8 +749,9 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
 
     /// The row's leading text inset. Static so the LIST can size its panel from
     /// the same number the row lays its label out with.
-    static func textInset(reservesLeadingSlot: Bool, zoom: AgentPageZoom) -> CGFloat {
-        reservesLeadingSlot ? CGFloat(zoom.scaled(30)) : CGFloat(zoom.scaled(10))
+    static func textInset(reservesLeadingSlot: Bool, zoom: AgentPageZoom, menu: Bool = false) -> CGFloat {
+        if menu { return CGFloat(zoom.scaled(reservesLeadingSlot ? 46 : 26)) }
+        return reservesLeadingSlot ? CGFloat(zoom.scaled(30)) : CGFloat(zoom.scaled(10))
     }
 
     static func trailingInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(8)) }
@@ -717,13 +767,14 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
     /// caption, or the accessories that replace it on hover.
     static func trailingReserve(_ item: ChoiceItem, zoom: AgentPageZoom) -> CGFloat {
         let gap = CGFloat(zoom.scaled(Space.m))
+        let submenu = item.hasSubmenu ? CGFloat(zoom.scaled(18)) : 0
         let caption = item.trailing.map {
             ChoiceLabelMetrics.labelWidth(for: $0, font: .token(.caption, zoom: zoom)) + gap
         } ?? (item.attention ? CGFloat(zoom.scaled(14)) : 0)
         let accessories = item.accessories.reduce(CGFloat(0)) {
             $0 + ChoiceAccessoryButton.width(for: $1, zoom: zoom) + CGFloat(zoom.scaled(4))
         }
-        return max(caption, accessories == 0 ? 0 : accessories + gap)
+        return max(caption, accessories == 0 ? 0 : accessories + gap) + submenu
     }
 
     override func viewDidMoveToWindow() {
@@ -739,16 +790,25 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
     override func layout() {
         super.layout()
         let glyphSide = CGFloat(pageZoom.scaled(14))
-        let leadingX = CGFloat(pageZoom.scaled(8))
+        let leadingX = CGFloat(pageZoom.scaled(presentation == .menu ? 26 : 8))
         leadingImageView.frame = NSRect(
             x: leadingX, y: floor((bounds.height - glyphSide) / 2), width: glyphSide, height: glyphSide)
-        let textX = Self.textInset(reservesLeadingSlot: reservesLeadingSlot, zoom: pageZoom)
+        let textX = Self.textInset(reservesLeadingSlot: reservesLeadingSlot, zoom: pageZoom, menu: presentation == .menu)
         let trailingInset = Self.trailingInset(zoom: pageZoom)
         if presentation == .checklist {
             layoutChecklist(textX: textX, trailingInset: trailingInset)
             return
         }
-        let textWidth = max(0, bounds.width - textX - trailingInset)
+        if presentation == .menu {
+            let side = CGFloat(pageZoom.scaled(12))
+            menuCheckView.frame = NSRect(x: CGFloat(pageZoom.scaled(8)), y: (bounds.height - side) / 2, width: side, height: side)
+            submenuImageView.frame = NSRect(x: bounds.width - trailingInset - side, y: (bounds.height - side) / 2, width: side, height: side)
+            let arrowReserve = item.hasSubmenu ? CGFloat(pageZoom.scaled(18)) : 0
+            trailingLabel.frame = NSRect(x: textX, y: (bounds.height - CGFloat(pageZoom.scaled(20))) / 2,
+                width: max(0, bounds.width - textX - trailingInset - arrowReserve), height: CGFloat(pageZoom.scaled(20)))
+        }
+        let reserve = presentation == .menu ? menuTrailingReserve : 0
+        let textWidth = max(0, bounds.width - textX - trailingInset - reserve)
         if detailLabel.isHidden {
             let singleHeight = CGFloat(pageZoom.scaled(20))
             titleLabel.frame = NSRect(x: textX, y: floor((bounds.height - singleHeight) / 2), width: textWidth, height: singleHeight)
@@ -836,14 +896,20 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         detailLabel.font = .token(.caption, zoom: pageZoom)
         trailingLabel.font = .token(.caption, zoom: pageZoom)
         accessoryButtons.forEach { $0.pageZoom = zoom }
+        refreshMenuTrailingReserve()
         invalidateIntrinsicContentSize()
         needsLayout = true
+    }
+
+    private func refreshMenuTrailingReserve() {
+        guard presentation == .menu else { return }
+        menuTrailingReserve = Self.trailingReserve(item, zoom: pageZoom)
     }
 
     func update(selected: Bool, focused: Bool) {
         self.selected = selected
         self.focused = focused && item.enabled
-        setAccessibilitySelected(selected)
+        setAccessibilitySelected(presentation == .menu ? item.check == .on : selected)
         applyTokens()
     }
 
@@ -854,7 +920,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         // fill plus checkmark — selected fill, soft hover/keyboard-focus fill,
         // muted text for disabled. The focus cue moves with the fill and vanishes
         // on dismiss, so it never becomes a permanent grey box.
-        if selected && presentation != .checklist {
+        if selected && presentation != .checklist && presentation != .menu {
             layer?.backgroundColor = AgentSurfaceRole.rowSelected.color.cgColor(for: theme)
         } else if focused {
             layer?.backgroundColor = AgentSurfaceRole.rowHover.color.cgColor(for: theme)
@@ -867,6 +933,16 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         layer?.borderWidth = 0
         leadingImageView.isHidden = presentation.showsSelectionCheckmark ? (item.icon == nil && !selected) : item.icon == nil
         if presentation == .checklist { applyChecklistTokens(theme: theme) }
+        if presentation == .menu {
+            let symbol = item.check == .mixed ? "minus" : "checkmark"
+            menuCheckView.image = CanvasSymbolImage.image(named: symbol)
+            menuCheckView.isHidden = item.check == nil || item.check == .off
+            menuCheckView.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
+            submenuImageView.isHidden = !item.hasSubmenu
+            submenuImageView.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
+            trailingLabel.isHidden = item.trailing == nil
+            trailingLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
+        }
         // A destructive command reads as one in its title and its icon: the
         // failure accent, which is the app's destructive colour. The row's FILL
         // stays the ordinary hover ladder, so nothing alarms before it is chosen.
@@ -922,13 +998,15 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         guard next.id == item.id, next.enabled == item.enabled, next.destructive == item.destructive,
               (next.detail == nil) == (item.detail == nil), (next.trailing == nil) == (item.trailing == nil),
               (next.swatch == nil) == (item.swatch == nil), (next.check == nil) == (item.check == nil),
-              next.accessories == item.accessories, next.separatorBefore == item.separatorBefore
+              next.accessories == item.accessories, next.separatorBefore == item.separatorBefore,
+              next.hasSubmenu == item.hasSubmenu
         else { return false }
         guard next != item else { return true }
         item = next
         titleLabel.stringValue = next.title
         detailLabel.stringValue = next.detail ?? ""
         trailingLabel.stringValue = next.trailing ?? ""
+        refreshMenuTrailingReserve()
         setAccessibilityLabel([next.title, next.detail, next.trailing].compactMap { $0 }.joined(separator: ", "))
         if let check = next.check { setAccessibilityValue(check == .off ? 0 : (check == .mixed ? 2 : 1)) }
         toolTip = next.toolTip

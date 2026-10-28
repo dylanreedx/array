@@ -84,6 +84,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         return view
     }()
 
+    override func titleBarActionsPresentationChanged(_ presented: Bool) {
+        if presented { wakeChrome() } else { scheduleChromeRest() }
+    }
+
     // MARK: - WS5 page zoom
     //
     // The scale boundary is `contentBackdrop` and everything below it. That is
@@ -5091,7 +5095,7 @@ extension ManagedAgentTileNSView {
                 return false
             }
         }
-        if Self.presentsChoices(contentBackdrop) { return false }
+        if titleBarActionsMenuIsPresented || Self.presentsChoices(contentBackdrop) { return false }
         if forCameraMotion { qaChromeMotionRestCount += 1 }
         chromeCanvas.rest()
         setTitleBarControlsDrawn(true) { [weak self] event in

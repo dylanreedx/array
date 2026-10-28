@@ -165,6 +165,9 @@ class TileNSView: NSView, TokenThemed {
     }
 
     func enableTitleBarActions() { titleBar?.enableActions() }
+    var titleBarActionsMenuIsPresented: Bool { titleBar?.actionsMenuIsPresented == true }
+    func titleBarActionsPresentationChanged(_ presented: Bool) {}
+    var qaActionsMenuController: ChoiceMenuController? { titleBar?.actionsMenuControllerForQA }
     var titleBarActionsButtonForQA: NSView? { titleBar?.actionsButtonForQA }
     var titleBarUsesCustomOverflowForQA: Bool { titleBar?.usesCustomActionsForQA ?? false }
     var titleBarActionsFrameForQA: NSRect? { titleBar?.actionsFrameForQA.map { titleBar!.convert($0, to: self) } }
@@ -242,8 +245,8 @@ class TileNSView: NSView, TokenThemed {
     /// its Terminal face confirms first when claude is busy.
     func handleCloseRequest() { onClose?() }
 
-    /// QA: presents a band menu instead of `NSMenu.popUp`, whose modal tracking
-    /// would block a check. Only checks set it.
+    /// Legacy command-model capture for checks. Presentation witnesses leave
+    /// this unset and drive the actual shared Choice panels.
     static var qaMenuPresenter: ((NSMenu) -> Void)?
 
     /// QA: every band control on screen now, in this view's coordinates.
@@ -327,6 +330,11 @@ class TileNSView: NSView, TokenThemed {
     override func rightMouseDown(with event: NSEvent) {
         if let present = Self.qaMenuPresenter, let menu = menu(for: event), menu.title == "Tile" {
             present(menu)
+            return
+        }
+        let local = convert(event.locationInWindow, from: nil)
+        if tile.kind == .managedAgent, local.y >= 0, local.y < grabHeightInLocalCoordinates, let titleBar {
+            titleBar.showStyledContextActions(at: titleBar.convert(event.locationInWindow, from: nil))
             return
         }
         super.rightMouseDown(with: event)
@@ -448,7 +456,10 @@ class TileNSView: NSView, TokenThemed {
     /// wrong answer here costs a few frames of compositing, never a frozen tile.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard window != nil else { return }
+        guard window != nil else {
+            titleBar?.dismissActionsMenu()
+            return
+        }
         windowOcclusionChanged(visible: canvas?.windowOcclusionVisible ?? true)
     }
 
@@ -674,6 +685,9 @@ class TileNSView: NSView, TokenThemed {
         bar.onSessionActionPressed = { [weak self] in self?.sessionActionRequested() }
         bar.onStopRunRequested = { [weak self] in self?.onStopRun?() }
         bar.additionalMenuItemsProvider = { [weak self] in self?.makeAdditionalTitleBarMenuItems() ?? [] }
+        bar.onActionsMenuPresentationChange = { [weak self] presented in
+            self?.titleBarActionsPresentationChanged(presented)
+        }
         addSubview(bar)
         self.titleBar = bar
 
@@ -1942,6 +1956,10 @@ private final class TitleBarView: NSView, TokenThemed {
         layoutSubtreeIfNeeded()
     }
 
+    private var actionsMenuController: ChoiceMenuController?
+    var actionsMenuControllerForQA: ChoiceMenuController? { actionsMenuController }
+    var actionsMenuIsPresented: Bool { actionsMenuController?.isPresented == true }
+    var onActionsMenuPresentationChange: ((Bool) -> Void)?
     private var actionsButton: AgentTileOverflowButton?
     var actionsButtonForQA: NSView? { actionsButton }
     var usesCustomActionsForQA: Bool { actionsButton.map { $0.subviews.allSatisfy { !($0 is NSButton) } } ?? false }
@@ -1964,10 +1982,32 @@ private final class TitleBarView: NSView, TokenThemed {
     }
 
     @objc private func showTileActions(_ sender: AgentTileOverflowButton) {
+        if actionsMenuController?.isPresented == true { dismissActionsMenu(); return }
         let menu = makeTileContextMenu()
         if let present = TileNSView.qaMenuPresenter { present(menu); return }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY), in: sender)
+        // The cached renderer can retain the control outside the view tree.
+        // Wake it before anchoring; the header remains a valid fallback anchor.
+        onActionsMenuPresentationChange?(true)
+        let anchor: NSView = sender.window == nil ? self : sender
+        presentStyledActions(menu, anchor: anchor, rect: anchor === sender ? sender.bounds : sender.frame)
     }
+
+    func showStyledContextActions(at point: NSPoint) {
+        onActionsMenuPresentationChange?(true)
+        presentStyledActions(makeTileContextMenu(), anchor: self, rect: NSRect(origin: point, size: NSSize(width: 1, height: 1)))
+    }
+
+    private func presentStyledActions(_ menu: NSMenu, anchor: NSView, rect: NSRect) {
+        if actionsMenuController == nil { actionsMenuController = ChoiceMenuController() }
+        actionsButton?.setMenuPresented(true)
+        actionsMenuController?.present(menu: menu, relativeTo: anchor, anchorRect: rect) { [weak self] in
+            self?.actionsButton?.setMenuPresented(false)
+            self?.onActionsMenuPresentationChange?(false)
+        }
+        if actionsMenuController?.isPresented != true { dismissActionsMenu() }
+    }
+
+    func dismissActionsMenu() { actionsMenuController?.dismiss() }
 
     // MARK: - Face switch (.plans/79-session-handoff)
     //
@@ -2466,6 +2506,10 @@ private final class TitleBarView: NSView, TokenThemed {
     override func rightMouseDown(with event: NSEvent) {
         if let present = TileNSView.qaMenuPresenter {
             present(makeTileContextMenu())
+            return
+        }
+        if tile.kind == .managedAgent {
+            showStyledContextActions(at: convert(event.locationInWindow, from: nil))
             return
         }
         super.rightMouseDown(with: event)
