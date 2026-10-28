@@ -860,7 +860,7 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     /// Whether a settle of `zoneId` will actually run (the engine's own gate).
-    private func isAutoLayoutActive(inZone zoneId: UUID) -> Bool {
+    func isAutoLayoutActive(inZone zoneId: UUID) -> Bool {
         guard isAutoLayoutEnabled,
               let zone = autoLayoutScene().zones.first(where: { $0.zoneId == zoneId }) else { return false }
         return !zone.collapsed && zone.autoLayoutMode.resolves(globalEnabled: true)
@@ -868,25 +868,29 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// `spawnedTileId` is the tile just installed. It settles LAST, as the anchor,
     /// so the composition already in the zone stays put and the new tile docks
-    /// onto it — growing the zone right/down when no slot is free inside.
+    /// onto it. The placement already docked it where the camera is looking, so
+    /// a free docked tile stays exactly there; one that found no free slot on
+    /// screen takes the contact slot most visible in the camera. The zone then
+    /// grows around it in whichever direction that is.
     ///
-    /// Without that, the settle had no mover: a new tile placed above the others
-    /// seeded the cluster, and a sibling it covered found no slot inside a zone too
-    /// small for all of them and was left OVERLAPPING it (`absorb`'s fallback). The
-    /// zone was too small because growing it up/left to take the new tile can be
-    /// refused outright: `growZone` and `expandZoneToContainMembers` need an origin
-    /// that keeps every member's world frame bit-exact, and with the float dust a
-    /// real pointer drag leaves in those frames, an origin in a coarser binade has
-    /// none. Growing right/down keeps the origin, so it can never be refused.
-    /// `--zone-arming-check` §9.
+    /// Without a mover, a new tile placed above the others seeded the cluster, and
+    /// a sibling it covered found no slot inside a zone too small for all of them
+    /// and was left OVERLAPPING it (`absorb`'s fallback). `--zone-arming-check` §9.
     ///
-    /// For the same reason, a spawn into an auto-layout zone never grows the zone
-    /// toward the tile's raw placement (`installProjectTile` skips `growZone`, and
-    /// the pre-settle expansion is skipped here): placement is camera-driven and
-    /// often lands left of or above the zone, and growing there ran a drawn zone
-    /// across its neighbour. When that right/down growth runs into another zone
-    /// (or a bare tile), the zone that grew takes priority and pushes it away, as
-    /// a dragged zone does (`CanvasAutoLayoutEngine.pushPeers(ofGrownZone:)`,
+    /// 0.7.30 grew the zone right/down only, because growing up/left moves the
+    /// origin, and `growZone`/`expandZoneToContainMembers` refuse an origin that
+    /// cannot keep every member's world frame bit-exact — which, with the float
+    /// dust a pointer drag leaves at a small magnitude, an origin in a coarser
+    /// binade cannot. That sent the new tile to the zone's far edge, off screen,
+    /// whenever the camera was on the near one. The spawn's growth now rounds the
+    /// zone's members to a 1/64 pt grid when, and only when, the exact origin does
+    /// not exist (`--zone-arming-check` §10b).
+    ///
+    /// A spawn never grows the zone toward the tile's RAW placement
+    /// (`installProjectTile` skips `growZone`, and the pre-settle expansion is
+    /// skipped here), only toward where it settles. When that growth runs into
+    /// another zone (or a bare tile), the zone that grew takes priority and pushes
+    /// it away, as a dragged zone does (`CanvasAutoLayoutEngine.pushPeers(ofGrownZone:)`,
     /// `--zone-arming-check` §10).
     func arrangeAutoLayoutAfterSpawn(zoneId: UUID?, spawnedTileId: UUID? = nil) {
         guard isAutoLayoutEnabled else { return }
@@ -904,10 +908,13 @@ final class CanvasNSView: NSView, TokenThemed {
             let anchor = spawnedTileId.flatMap { tile in
                 autoLayoutScene().tiles.contains { $0.id == tile && $0.zoneId == id } ? tile : nil
             }
-            applyAutoLayout(.settle(zoneId: id, anchor: anchor, pin: false, grow: anchor != nil),
+            let zoom = viewport.zoom.isFinite && viewport.zoom > 0 ? viewport.zoom : 1
+            let view = TileFrame(x: viewport.x, y: viewport.y,
+                                 width: Double(bounds.width) / zoom, height: Double(bounds.height) / zoom)
+            applyAutoLayout(.settle(zoneId: id, anchor: anchor, pin: false, grow: anchor != nil, view: view),
                             baseline: autoLayoutScene())
             if anchor != nil, let before = liveZones.first(where: { $0.zoneId == id }) {
-                expandZoneToContainMembers(id)
+                expandZoneToContainMembers(id, roundingWhenInexact: true)
                 let push = CanvasAutoLayoutEngine.pushPeers(
                     ofGrownZone: id, from: before, scene: autoLayoutScene(),
                     gap: TileGapResolver.resolvedGap(defaults: autoLayoutDefaults))
@@ -920,30 +927,51 @@ final class CanvasNSView: NSView, TokenThemed {
         _ = commitGeometryEdit()
     }
 
-    private func expandZoneToContainMembers(_ zoneId: UUID) {
+    /// `roundingWhenInexact`: when no origin keeps every member's world frame
+    /// bit-exact (float dust at a small magnitude, growing up/left into a coarser
+    /// binade), round the members and the origin to a 1/64 pt grid, on which every
+    /// sum is exact, instead of refusing the growth. Each member moves by at most
+    /// 1/128 pt. A spawn asks for it; everything else keeps the strict refusal.
+    private func expandZoneToContainMembers(_ zoneId: UUID, roundingWhenInexact: Bool = false) {
         let scene = autoLayoutScene()
         guard var zone = scene.zones.first(where: { $0.zoneId == zoneId }) else { return }
-        let members = scene.tiles.filter { $0.zoneId == zoneId }
+        var members = scene.tiles.filter { $0.zoneId == zoneId }
         guard !members.isEmpty else { return }
         let padding = ZoneBoundsConfig.padding(defaults: autoLayoutDefaults)
         let header = Double(ZoneChromeNSView.headerHeight)
-        let minX = members.map(\.frame.x).min()!
-        let minY = members.map(\.frame.y).min()!
-        let maxX = members.map { $0.frame.x + $0.frame.width }.max()!
-        let maxY = members.map { $0.frame.y + $0.frame.height }.max()!
-        let newX = min(zone.origin.x, minX - padding)
-        let newY = min(zone.origin.y, minY - header - padding)
-        let newRight = max(zone.origin.x + zone.size.width, maxX + padding)
-        let newBottom = max(zone.origin.y + zone.size.height, maxY + padding)
-        let expanded = ZonePlacement(
-            zoneId: zone.zoneId, projectId: zone.projectId,
-            homeRelativePath: zone.homeRelativePath,
-            origin: ZonePoint(x: newX, y: newY),
-            size: ZoneSize(width: newRight - newX, height: newBottom - newY),
-            color: zone.color, collapsed: zone.collapsed,
-            hydrationPolicy: zone.hydrationPolicy, autoLayoutMode: zone.autoLayoutMode,
-            name: zone.name, navKey: zone.navKey, zPosition: zone.zPosition)
+        func expandedPlacement() -> ZonePlacement {
+            let minX = members.map(\.frame.x).min()!
+            let minY = members.map(\.frame.y).min()!
+            let maxX = members.map { $0.frame.x + $0.frame.width }.max()!
+            let maxY = members.map { $0.frame.y + $0.frame.height }.max()!
+            let newX = min(zone.origin.x, minX - padding)
+            let newY = min(zone.origin.y, minY - header - padding)
+            let newRight = max(zone.origin.x + zone.size.width, maxX + padding)
+            let newBottom = max(zone.origin.y + zone.size.height, maxY + padding)
+            return ZonePlacement(
+                zoneId: zone.zoneId, projectId: zone.projectId,
+                homeRelativePath: zone.homeRelativePath,
+                origin: ZonePoint(x: newX, y: newY),
+                size: ZoneSize(width: newRight - newX, height: newBottom - newY),
+                color: zone.color, collapsed: zone.collapsed,
+                hydrationPolicy: zone.hydrationPolicy, autoLayoutMode: zone.autoLayoutMode,
+                name: zone.name, navKey: zone.navKey, zPosition: zone.zPosition)
+        }
+        var expanded = expandedPlacement()
         guard expanded != zone else { return }
+        if roundingWhenInexact, CanvasEngine.exactRebaseOriginIfPossible(
+            near: expanded.origin, preserving: members.map(\.frame)) == nil {
+            func round64(_ value: Double) -> Double { (value * 64).rounded() / 64 }
+            func floor64(_ value: Double) -> Double { (value * 64).rounded(.down) / 64 }
+            for index in members.indices {
+                members[index].frame.x = round64(members[index].frame.x)
+                members[index].frame.y = round64(members[index].frame.y)
+            }
+            let right = zone.origin.x + zone.size.width, bottom = zone.origin.y + zone.size.height
+            zone.origin = ZonePoint(x: floor64(zone.origin.x), y: floor64(zone.origin.y))
+            zone.size = ZoneSize(width: right - zone.origin.x, height: bottom - zone.origin.y)
+            expanded = expandedPlacement()
+        }
         zone = expanded
         applyLayoutTransaction(CanvasLayoutTransaction(
             tileFrames: firstWinsDictionary(members.map { ($0.id, $0.frame) }),
