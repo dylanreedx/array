@@ -86,11 +86,8 @@ enum TileChromeCanvasChecks {
         let key = AgentTranscriptCanvasView.rendererEnvironmentKey
         let previous = ProcessInfo.processInfo.environment[key]
         defer { if let previous { setenv(key, previous, 1) } else { unsetenv(key) } }
-        guard UserDefaults.standard.string(forKey: AgentTranscriptCanvasView.rendererDefaultsKey) != "canvas" else {
-            throw Failure(description: "the renderer default is set to canvas in this domain; the comparison needs today's tile")
-        }
-
-        unsetenv(key)
+        // "Today" is the row list, which ARRAY_TRANSCRIPT_RENDERER=list still selects.
+        setenv(key, "list", 1)
         let (today, todayWindow) = makeTile()
         defer { todayWindow.orderOut(nil) }
         try expect(today.qaChromeCanvas == nil && today.contentView === today.qaChromeBody,
@@ -321,7 +318,7 @@ enum TileChromeCanvasChecks {
         let key = AgentTranscriptCanvasView.rendererEnvironmentKey
         var results: [String] = []
         for renderer in ["today", "drawn"] {
-            if renderer == "drawn" { setenv(key, "canvas", 1) } else { unsetenv(key) }
+            setenv(key, renderer == "drawn" ? "canvas" : "list", 1)
             let (tile, window) = makeTile()
             defer { window.orderOut(nil) }
             tile.ingest(.turnStarted(threadId: "chrome", turnId: "cost"))
@@ -815,7 +812,7 @@ enum TileChromeCanvasChecks {
         let key = AgentTranscriptCanvasView.rendererEnvironmentKey
         for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
             for renderer in ["today", "drawn"] {
-                if renderer == "drawn" { setenv(key, "canvas", 1) } else { unsetenv(key) }
+                setenv(key, renderer == "drawn" ? "canvas" : "list", 1)
                 let (tile, window) = makeTile(appearance: appearance)
                 defer { window.orderOut(nil) }
                 tile.setTitleBarIdentity(title: "Riley", providerModel: "anthropic/claude-opus-4")

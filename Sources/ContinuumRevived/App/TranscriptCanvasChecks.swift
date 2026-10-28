@@ -47,7 +47,10 @@ enum TranscriptCanvasChecks {
             if let previous { setenv(key, previous, 1) } else { unsetenv(key) }
         }
         unsetenv(key)
-        try runDefaultIsTheRowList()
+        try runDefaultIsTheCanvas()
+        setenv(key, "list", 1)
+        try runListIsSelectable()
+        unsetenv(key)
         setenv(key, "canvas", 1)
         try runCanvasRendererInTheTile()
         try runDrawnControlsInTheTile()
@@ -86,15 +89,24 @@ enum TranscriptCanvasChecks {
         tile.layoutSubtreeIfNeeded()
     }
 
-    private static func runDefaultIsTheRowList() throws {
-        guard UserDefaults.standard.string(forKey: AgentTranscriptCanvasView.rendererDefaultsKey) != "canvas" else {
-            print("transcript canvas: the renderer default is set to canvas here; default-renderer assertion skipped")
+    /// Since 0.7.32 the drawn transcript is the default.
+    private static func runDefaultIsTheCanvas() throws {
+        guard UserDefaults.standard.string(forKey: AgentTranscriptCanvasView.rendererDefaultsKey) == nil else {
+            print("transcript canvas: a renderer default is set in this domain; default-renderer assertion skipped")
             return
         }
         let (tile, window) = makeTile(width: 420, height: 400)
         defer { window.orderOut(nil) }
+        try expect(tile.qaTranscriptSurface is AgentTranscriptCanvasView,
+                   "with no switch set the tile must draw its transcript, got \(String(describing: tile.qaTranscriptSurface))")
+    }
+
+    /// `ARRAY_TRANSCRIPT_RENDERER=list` still brings back the row list.
+    private static func runListIsSelectable() throws {
+        let (tile, window) = makeTile(width: 420, height: 400)
+        defer { window.orderOut(nil) }
         try expect(tile.qaTranscriptSurface is AgentTranscriptListView,
-                   "with the switch off the tile must keep the row list, got \(String(describing: tile.qaTranscriptSurface))")
+                   "with ARRAY_TRANSCRIPT_RENDERER=list the tile must keep the row list, got \(String(describing: tile.qaTranscriptSurface))")
     }
 
     private static func runCanvasRendererInTheTile() throws {

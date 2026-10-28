@@ -27,8 +27,9 @@ import ContinuumRevivedCore
 /// the row renderers do. The only thing this view owns besides its own drawing is
 /// one small CALayer for the animated thinking gyro.
 ///
-/// Selected by `ARRAY_TRANSCRIPT_RENDERER=canvas` or the user default
-/// `continuum.transcript.renderer = canvas`, read once per tile. Off by default.
+/// The default renderer since 0.7.32. `ARRAY_TRANSCRIPT_RENDERER=list` or the
+/// user default `continuum.transcript.renderer = list` selects the row list
+/// instead, read once per tile.
 /// Witness: `--transcript-canvas-check` (`TranscriptCanvasChecks`).
 @MainActor
 final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuItemValidation {
@@ -39,8 +40,8 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
 
     /// Read by the tile once, at construction.
     static var isSelected: Bool {
-        if ProcessInfo.processInfo.environment[rendererEnvironmentKey] == "canvas" { return true }
-        return UserDefaults.standard.string(forKey: rendererDefaultsKey) == "canvas"
+        if let value = ProcessInfo.processInfo.environment[rendererEnvironmentKey] { return value != "list" }
+        return UserDefaults.standard.string(forKey: rendererDefaultsKey) != "list"
     }
 
     enum UpdateError: Error, Equatable {
