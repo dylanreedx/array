@@ -7,7 +7,7 @@ import ContinuumRevivedAgentUI
 /// zero-length progress arc. Warning and critical states carry text/glyph markers
 /// as well as colour so the state does not depend on hue alone.
 @MainActor
-final class AgentRadialContextMeterView: NSView, TokenThemed, AgentPageZoomScalable {
+final class AgentRadialContextMeterView: NSView, TokenThemed, AgentPageZoomScalable, NativeVectorDrawnContent {
     /// The meter's fixed drawn size. Not private: the compact row pins the view
     /// to it so priority arbitration can never collapse the glyph.
     static let side: CGFloat = 20
@@ -49,12 +49,28 @@ final class AgentRadialContextMeterView: NSView, TokenThemed, AgentPageZoomScala
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func apply(_ next: AgentRadialContextMeterPresentation) {
+        // A streaming tile re-applies the meter on every chunk; only a change to
+        // what is drawn is worth a redraw.
+        let changed = next.state != presentation.state || next.fraction != presentation.fraction
+            || next.providerThresholdFraction != presentation.providerThresholdFraction
         presentation = next
         toolTip = next.detailText
         setAccessibilityLabel(next.accessibilityLabel)
         setAccessibilityHelp(next.detailText)
         setAccessibilityValue(next.label)
-        needsDisplay = true
+        if changed { needsDisplay = true }
+    }
+
+    /// What `draw(_:)` reads — not the tooltip or accessibility text, which change
+    /// as tokens stream and are never drawn — for the resting chrome's fingerprint.
+    /// Colours come from the appearance, whose change forces a resting redraw.
+    var drawnContentFingerprint: Int {
+        var hasher = Hasher()
+        hasher.combine(presentation.state)
+        hasher.combine(presentation.fraction)
+        hasher.combine(presentation.providerThresholdFraction)
+        hasher.combine(pageZoom)
+        return hasher.finalize()
     }
 
     func applyTokens() {

@@ -111,7 +111,11 @@ enum TileChromeCanvasChecks {
         try expect(resting.total <= restingViewBudget,
                    "a resting tile must be at most \(restingViewBudget) views, has \(resting.total): "
                    + resting.classes.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
-        try expect(tile.qaChromeBody.window == nil, "the resting body must be out of the window")
+        // Out of the canvas's window, so no camera step reaches it; it lives in the
+        // hidden host, whose window keeps its Auto Layout engine between layouts.
+        try expect(tile.qaChromeBody.window != nil && tile.qaChromeBody.window !== tile.window
+                   && tile.qaChromeBody.window?.isVisible == false,
+                   "the resting body must be out of the canvas window, in the hidden host")
 
         // Pixels: resting vs live, same tile; resting vs today.
         let restPixels = try render(tile)

@@ -9,7 +9,7 @@ import ObjectiveC
 /// zoom makes AppKit re-lay out and re-display every one of them per camera
 /// step. The chrome tree stays fully alive — the tile keeps writing its labels,
 /// pickers and buttons exactly as before — but while the tile rests it is
-/// detached from the window, so no camera step reaches it. One view then draws
+/// out of the canvas's window (in a hidden one), so no camera step reaches it. One view then draws
 /// the whole tree, by asking each view to draw itself into that one view's
 /// backing store. A zoom raises that store's `contentsScale` and the same calls
 /// run again, sharp: text through `NSCell`/CoreText, SF Symbols through their
@@ -22,6 +22,15 @@ import ObjectiveC
 /// overrides it. Views whose content lives only in hand-built sublayers are
 /// drawn through `CALayer.render(in:)`, which for shape and text layers is
 /// vector too.
+/// A view that draws itself and says what its picture is made of. Its value
+/// joins the fingerprint, and its `needsDisplay` is not read: in the resting
+/// host's window a view with its own layer keeps that flag set however often it
+/// is cleared, which redrew the whole resting chrome on every streamed chunk.
+@MainActor
+protocol NativeVectorDrawnContent: NSView {
+    var drawnContentFingerprint: Int { get }
+}
+
 @MainActor
 enum NativeViewVectorRenderer {
     /// Draws `view`, placed by its frame, into `context`, whose user space is
@@ -190,13 +199,15 @@ enum NativeViewVectorRenderer {
             if let skip, skip(view) { return }
             hasher.combine(ObjectIdentifier(view))
             hasher.combine(view.alphaValue)
-            if let layer = view.layer {
-                hasher.combine(layer.opacity)
-                hasher.combine(layer.backgroundColor)
-                hasher.combine(layer.borderWidth)
-                hasher.combine(layer.borderColor)
-                hasher.combine(layer.cornerRadius)
-            }
+            // A missing layer hashes as a default one: in the resting host's window
+            // AppKit gives views their backing layers at the next commit, and that
+            // draws nothing new. A border colour shows only with a border.
+            let layer = view.layer
+            hasher.combine(layer?.opacity ?? 1)
+            hasher.combine(layer?.backgroundColor)
+            hasher.combine(layer?.borderWidth ?? 0)
+            if let layer, layer.borderWidth > 0 { hasher.combine(layer.borderColor) }
+            hasher.combine(layer?.cornerRadius ?? 0)
             switch view {
             case let field as NSTextField:
                 hasher.combine(field.stringValue)
@@ -216,6 +227,16 @@ enum NativeViewVectorRenderer {
                 hasher.combine(button.image.map(ObjectIdentifier.init))
                 return
             default:
+                if let drawn = view as? NativeVectorDrawnContent { hasher.combine(drawn.drawnContentFingerprint) }
+                if let scroll = view as? NSScrollView {
+                    hasher.combine(scroll.drawsBackground)
+                    hasher.combine(scroll.backgroundColor)
+                    hasher.combine(scroll.borderType.rawValue)
+                }
+                if let clip = view as? NSClipView {
+                    hasher.combine(clip.drawsBackground)
+                    hasher.combine(clip.backgroundColor)
+                }
                 if let control = view as? NSControl { hasher.combine(control.isEnabled) }
                 if let text = view as? NSTextView { hasher.combine(text.string) }
             }
@@ -231,7 +252,12 @@ enum NativeViewVectorRenderer {
         guard !root.isHidden else { return false }
         if let skip, skip(root) { return false }
         if root is NSTextField || root is NSImageView || root is NSButton { return false }
-        if root.needsDisplay, overridesDraw(root) { return true }
+        if root is NativeVectorDrawnContent { return false }
+        // Only Array's own drawing views are read by their flag. AppKit's (clip and
+        // scroll view backgrounds, text views) draw from properties the fingerprint
+        // holds, and in the resting host's window their flags stay set however
+        // often they are cleared — which redrew the chrome on every streamed chunk.
+        if root.needsDisplay, overridesDraw(root), drawsWithOwnCode(root) { return true }
         return root.subviews.contains { selfDrawnNeedsDisplay($0, skipping: skip) }
     }
 
@@ -256,6 +282,24 @@ enum NativeViewVectorRenderer {
             current = parent
         }
         return rect
+    }
+
+    /// Whether `draw(_:)` is Array's code rather than inherited from an AppKit class
+    /// (a `ComposerTextView` draws as the `NSTextView` it is).
+    private static var ownDrawCache: [ObjectIdentifier: Bool] = [:]
+    private static func drawsWithOwnCode(_ view: NSView) -> Bool {
+        let cls: AnyClass = type(of: view)
+        let key = ObjectIdentifier(cls)
+        if let cached = ownDrawCache[key] { return cached }
+        let appKit = Bundle(for: NSView.self)
+        var ancestor: AnyClass? = cls
+        while let current = ancestor, Bundle(for: current) != appKit { ancestor = class_getSuperclass(current) }
+        let selector = #selector(NSView.draw(_:))
+        let own = ancestor.map {
+            class_getMethodImplementation(cls, selector) != class_getMethodImplementation($0, selector)
+        } ?? true
+        ownDrawCache[key] = own
+        return own
     }
 
     private static let baseDraw = class_getMethodImplementation(NSView.self, #selector(NSView.draw(_:)))
@@ -304,7 +348,7 @@ enum NativeViewVectorRenderer {
 /// Two states, one picture:
 ///
 /// - **Resting.** The tile's real body (`body`: header, status row, composer,
-///   rails, pickers, footer) is detached from the window and this view draws it
+///   rails, pickers, footer) is in the hidden resting host and this view draws it
 ///   with `NativeViewVectorRenderer`. The transcript canvas is this view's only
 ///   subview, framed to the slot the body's stack gives it.
 /// - **Live.** The body is installed under the transcript, at the same frame,
@@ -367,9 +411,10 @@ final class AgentTileChromeCanvasView: NSView {
         guard !isResting else { return }
         isResting = true
         qaRestCount += 1
-        // Detached views resolve colours against the app's appearance unless told.
+        // The host window's appearance is the app's; the body takes the tile's.
         body.appearance = effectiveAppearance
         body.removeFromSuperview()
+        Self.restingHost.contentView?.addSubview(body)
         body.frame = bounds
         layOutRestingBody()
         drawnFingerprint = nil
@@ -407,6 +452,23 @@ final class AgentTileChromeCanvasView: NSView {
         restingDirty = true
         needsLayout = true
     }
+
+    /// Where every resting body lives: one borderless window that is never
+    /// shown, so nothing in it is displayed, hit or composited.
+    ///
+    /// Why a window and not nowhere: a view tree outside any window has no Auto
+    /// Layout engine of its own, so each `layoutSubtreeIfNeeded` built a temporary
+    /// one and added every constraint of the ~230-view body again — two thirds of
+    /// a resting layout, run whenever a streaming agent's labels changed and at
+    /// every turn end. In a window the engine persists and a changed label is an
+    /// incremental update.
+    static let restingHost: NSWindow = {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 4096, height: 4096),
+                              styleMask: .borderless, backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 4096, height: 4096))
+        return window
+    }()
 
     private var restingDirty = false
     /// The values the body was last laid out for, and last drawn with; nil forces.
