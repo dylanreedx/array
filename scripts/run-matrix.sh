@@ -30,11 +30,28 @@ export TMUX_TMPDIR="$MATRIX_TMUX_TMPDIR"
 unset TMUX TMUX_PANE
 trap 'rm -rf "$MATRIX_TMUX_TMPDIR"' EXIT
 
+SIDEBAR_REFINEMENTS_ONLY=0
 FAST=0
+CODEX_PERMISSIONS_ONLY=0
 TILE_SELECTION_ONLY=0
 AGENT_REFERENCE_ONLY=0
+WORKSPACE_SELECTOR_ONLY=0
+AGENT_TILE_MENU_ONLY=0
+TRANSCRIPT_VIEWPORT_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    --sidebar-refinements)
+      SIDEBAR_REFINEMENTS_ONLY=1
+      shift
+      ;;
+    --workspace-selector)
+      WORKSPACE_SELECTOR_ONLY=1
+      shift
+      ;;
+    --codex-permissions)
+      CODEX_PERMISSIONS_ONLY=1
+      shift
+      ;;
     --fast)
       FAST=1
       shift
@@ -47,9 +64,17 @@ if [[ $# -gt 0 ]]; then
       AGENT_REFERENCE_ONLY=1
       shift
       ;;
+    --agent-tile-menu)
+      AGENT_TILE_MENU_ONLY=1
+      shift
+      ;;
+    --transcript-viewport)
+      TRANSCRIPT_VIEWPORT_ONLY=1
+      shift
+      ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--fast | --tile-selection | --agent-reference]
+Usage: scripts/run-matrix.sh [--fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions]
 
 Runs the project verification matrix. --fast skips the slower packaging bundle
 probe and keeps the build/check/app-flag/git hygiene gates used by the opt-in
@@ -60,6 +85,19 @@ targeted development gate, not the full release matrix.
 --agent-reference rebuilds app/CoreChecks and reports reference transport,
 draft/transcript contracts and group-selection coexistence. It is also a
 targeted development gate; full release verification remains required.
+--transcript-viewport rebuilds the app and reports transcript containment,
+consolidated chrome, turn presence, page zoom, and resting/live chrome parity. It is a targeted
+development gate; full release verification remains required.
+--sidebar-refinements rebuilds the app and reports sidebar rendering, alignment,
+filter recovery and row-action checks. Full release verification remains required.
+--workspace-selector rebuilds the app and reports dropdown, titlebar, workspace
+management, shared choice geometry and appearance gates. Full release verification
+remains required.
+--agent-tile-menu rebuilds the app and reports native agent menus, chrome
+scaling, page zoom, face switching, identity color and location actions.
+It is a targeted development gate, not the full release matrix.
+--codex-permissions rebuilds CoreChecks and verifies Full Access launch arguments
+for fresh/resumed exec and production app-server runs using an offline stand-in.
 USAGE
       exit 0
       ;;
@@ -400,8 +438,74 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+if [[ "$CODEX_PERMISSIONS_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+  run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-runner-check
+  matrix_report 'Codex permissions matrix (targeted)'
+  exit $?
+fi
+if [[ "$SIDEBAR_REFINEMENTS_ONLY" -eq 1 ]]; then
+  run_leg scripts/check-color-hygiene.sh
+  run swift build --disable-sandbox --skip-update --product Array
+  run_app_check .build/debug/Array --sidebar-workspace-treatment-check
+  run_app_check .build/debug/Array --inbox-parent-fold-check
+  run_app_check .build/debug/Array --sidebar-ux-check
+  run_app_check .build/debug/Array --sidebar-pills-check
+  run_app_check .build/debug/Array --sidebar-hide-any-row-check
+  run_app_check .build/debug/Array --sidebar-hidden-footer-check
+  run_app_check .build/debug/Array --sidebar-bulk-hide-check
+  run_app_check .build/debug/Array --sidebar-scope-popover-check
+  run_app_check .build/debug/Array --hide-external-rows-check
+  run_app_check .build/debug/Array --sidebar-truth-check
+  matrix_report 'Sidebar refinements matrix (targeted)'
+  exit $?
+fi
+# Isolated dropdown pickup: use the same accounting and state isolation as full runs.
+if [[ "$WORKSPACE_SELECTOR_ONLY" -eq 1 ]]; then
+  run_leg scripts/check-color-hygiene.sh
+  run swift build --disable-sandbox --skip-update --product Array
+  run_app_check .build/debug/Array --workspace-selector-check
+  run_app_check .build/debug/Array --top-bar-icons-check
+  run_app_check .build/debug/Array --workspace-top-bar-check
+  run_app_check .build/debug/Array --workspace-management-polish-check
+  run_app_check .build/debug/Array --workspace-delete-failure-check
+  run_app_check .build/debug/Array --workspace-switch-confidence-check
+  run_app_check .build/debug/Array --choice-geometry-check
+  run_app_check .build/debug/Array --workspace-filter-sheet-check
+  run_app_check .build/debug/Array --ui-probe-check
+  run_app_check .build/debug/Array --window-chrome-check
+  matrix_report 'Workspace selector matrix (targeted)'
+  exit $?
+fi
+
 # The executable-prefix structural guards already ran above. The scoped
 # reference gate leaves their lengthy mutation self-tests to the full matrix.
+if [[ "$AGENT_TILE_MENU_ONLY" -eq 1 ]]; then
+  run_leg scripts/check-color-hygiene.sh
+  run swift build --product Array
+  run_app_check .build/debug/Array --tile-chrome-scale-check
+  run_app_check .build/debug/Array --agent-native-menu-check
+  run_app_check .build/debug/Array --managed-agent-page-zoom-check
+  run_app_check .build/debug/Array --agent-face-switch-check
+  run_app_check .build/debug/Array --agent-identity-color-check
+  run_app_check .build/debug/Array --location-action-surface-check
+  run_app_check .build/debug/Array --camera-chrome-redraw-check
+  matrix_report 'Agent tile menu matrix (targeted)'
+  exit $?
+fi
+if [[ "$TRANSCRIPT_VIEWPORT_ONLY" -eq 1 ]]; then
+  run_leg scripts/check-color-hygiene.sh
+  run swift build --product Array
+  run_app_check .build/debug/Array --transcript-viewport-clipping-check
+  run_app_check .build/debug/Array --agent-tile-chrome-consolidation-check
+  run_app_check .build/debug/Array --agent-presence-check
+  run_app_check .build/debug/Array --managed-agent-page-zoom-check
+  run_app_check .build/debug/Array --transcript-canvas-check
+  run_app_check .build/debug/Array --tile-chrome-canvas-check
+  matrix_report 'Transcript viewport matrix (targeted)'
+  exit $?
+fi
 if [[ "$AGENT_REFERENCE_ONLY" -eq 1 ]]; then
   run_leg scripts/check-color-hygiene.sh
   run swift build --product Array
@@ -925,6 +1029,7 @@ run_app_check .build/debug/Array --sidebar-truth-check
 # Queue 94 P0.2: offscreen sidebar probe — per-label drawable-vs-needed width at
 # 220/280/320 pt in both appearances, materialized before rows are applied.
 run_app_check .build/debug/Array --sidebar-ux-check
+run_app_check .build/debug/Array --sidebar-workspace-treatment-check
 # Program 96 P0.1/P0.2. The corpus drives real writers and reads rendered cells; the
 # screenshot leg asserts only mechanics (files written, manifest parity, nothing blank,
 # appearances differ) and never on taste. The LIVE capture is deliberately absent — it
@@ -949,6 +1054,7 @@ run_app_check .build/debug/Array --workspace-delete-failure-check
 # and the workspace name clear of the traffic lights.
 run_app_check .build/debug/Array --window-chrome-check
 run_app_check .build/debug/Array --top-bar-icons-check
+run_app_check .build/debug/Array --workspace-selector-check
 run_app_check .build/debug/Array --browser-profile-persistence-check
 # Hidden note autosave plus Preview/Edit and same-identity Save-as-Markdown conversion.
 run_app_check .build/debug/Array --note-file-tile-spawn-check
@@ -1016,6 +1122,8 @@ run_app_check .build/debug/Array --agent-tile-binding-check
 # Full border swaps it for a muted outline; None restores the zero-perimeter rest
 # state; the sidebar row menu's Color › sets it too, with a dot before the name.
 run_app_check .build/debug/Array --agent-identity-color-check
+# Native AppKit validation and dispatch through the production agent tile menus.
+run_app_check .build/debug/Array --agent-native-menu-check
 # .plans/67 ARC-4a: replacing the view of an existing tile is not a spawn.
 # Budget eviction, panning a zone out and back, terminal restart, file-tree
 # restore, hydration on switch and remount, and note conversion (and its
@@ -1403,6 +1511,10 @@ run_app_check .build/debug/Array --streaming-ingest-check
 # through a real agent tile: a delta re-lays out only its block, tail follow,
 # selection + Cmd-C, link click, and a redraw at 2x/4x zoom with no layout.
 run_app_check .build/debug/Array --transcript-canvas-check
+# Pixels outside the transcript remain unchanged while prose, code and cards
+# scroll across either edge (screen composite, or offline production drawing).
+run_app_check .build/debug/Array --transcript-viewport-clipping-check
+run_app_check .build/debug/Array --agent-tile-chrome-consolidation-check
 # The resting agent tile behind the same switch: its chrome detached and drawn by
 # one view, at most 6 views at rest, resting and live window-server pictures equal
 # within 0.03% of pixels, and presses on the drawn composer, picker, ⋯ and × reach

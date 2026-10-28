@@ -261,18 +261,6 @@ enum QuickHideChecks {
                     ($0.accessibilityValue() as? String) ?? "", $0.accessibilityLabel() ?? "") }
     }
 
-    static func pill(_ id: String, in inbox: AgentInboxView) throws -> NSView {
-        inbox.layoutForQA()
-        guard let view = view("ContinuumAgentInboxPill:\(id)", in: inbox) else {
-            throw Failure(description: "no pill '\(id)' on screen; pills: \(pills(inbox).map(\.id))")
-        }
-        return view
-    }
-
-    static func value(_ id: String, _ inbox: AgentInboxView) -> String? {
-        pills(inbox).first { $0.id == id }?.value
-    }
-
     // MARK: - Rows
 
     static func card(_ id: UUID, in inbox: AgentInboxView) -> AgentInbox96CellView? {
@@ -284,6 +272,12 @@ enum QuickHideChecks {
     static func hideButton(_ id: UUID, in inbox: AgentInboxView) -> NSButton? {
         guard let card = card(id, in: inbox) else { return nil }
         return views(in: card) { $0 is NSButton && $0.accessibilityLabel() == "Hide" && !$0.isHiddenOrHasHiddenAncestor }
+            .first as? NSButton
+    }
+
+    static func snoozeButton(_ id: UUID, in inbox: AgentInboxView) -> NSButton? {
+        guard let card = card(id, in: inbox) else { return nil }
+        return views(in: card) { $0 is NSButton && $0.accessibilityLabel() == "Snooze" && !$0.isHiddenOrHasHiddenAncestor }
             .first as? NSButton
     }
 
@@ -321,7 +315,7 @@ enum QuickHideChecks {
     /// a session from elsewhere hides, an Array agent snoozes for three hours or
     /// until it needs you (and comes back the moment it does); ⌘Z undoes either;
     /// the notice pushes the list up rather than covering a row; a selected row
-    /// keeps its ×.
+    /// keeps its quick action.
     static func runHideAnyRow() throws -> String {
         let h = try makeHarness(name: "hide-any-row")
         defer { h.tearDown() }
@@ -331,20 +325,20 @@ enum QuickHideChecks {
         inbox.layoutForQA()
         try expect(inbox.rowIdsForQA.contains(h.agentRow), "precondition: the fixture agent is a row; got \(inbox.titlesForQA)")
 
-        // Array agent: the hover × takes the Snooze pill's place.
+        // Array agent: the clock retains the quick snooze behavior.
         _ = inbox.hoverRowForQA(id: h.agentRow)
-        guard let agentX = hideButton(h.agentRow, in: inbox) else {
-            throw Failure(description: "an Array agent's row offers no × on hover; actions \(inbox.hoverActionsForQA(id: h.agentRow)?.titles ?? [])")
+        guard let agentClock = snoozeButton(h.agentRow, in: inbox) else {
+            throw Failure(description: "an Array agent's row offers no clock on hover; actions \(inbox.hoverActionsForQA(id: h.agentRow)?.titles ?? [])")
         }
-        try expect(!(inbox.hoverActionsForQA(id: h.agentRow)?.titles ?? []).contains("Snooze"),
-                   "the × replaces the Snooze pill — got \(inbox.hoverActionsForQA(id: h.agentRow)?.titles ?? [])")
+        try expect((inbox.hoverActionsForQA(id: h.agentRow)?.titles ?? []).contains("Snooze"),
+                   "the clock offers Snooze — got \(inbox.hoverActionsForQA(id: h.agentRow)?.titles ?? [])")
         photograph(inbox, "2-hide-hover-agent")
         let before = Date()
-        try click(agentX)
+        try click(agentClock)
         inbox.layoutForQA()
         let until = supervisor.records[h.fixture.agentId]?.snoozedUntil
         try expect(until.map { abs($0.timeIntervalSince(before) - 3 * 3600) < 120 } == true,
-                   "the × snoozes for three hours — snoozedUntil \(String(describing: until))")
+                   "the clock snoozes for three hours — snoozedUntil \(String(describing: until))")
         try expect(!inbox.rowIdsForQA.contains(h.agentRow), "the snoozed agent leaves the list — got \(inbox.titlesForQA)")
         let clock = DateFormatter()
         clock.locale = Locale(identifier: "en_US_POSIX")
@@ -362,10 +356,10 @@ enum QuickHideChecks {
         try expect(inbox.isFlipped ? abs(listAfter.maxY - inbox.bounds.height) < 0.5 : listAfter.minY < 0.5,
                    "with the notice gone the list reaches the bottom again — list \(listAfter) in \(inbox.bounds)")
 
-        // A selected row keeps its ×, without the pointer on it.
+        // A selected row keeps its clock, without the pointer on it.
         try expect(inbox.selectRowForQA(id: h.agentRow), "the agent's row must be selectable")
         _ = inbox.hoverRowForQA(id: nil)
-        try expect(hideButton(h.agentRow, in: inbox) != nil, "a selected row keeps its × with the pointer elsewhere")
+        try expect(snoozeButton(h.agentRow, in: inbox) != nil, "a selected row keeps its clock with the pointer elsewhere")
         photograph(inbox, "2-hide-selected")
 
         // ⌫ on the selected agent: snoozed again, the same notice.
@@ -569,8 +563,8 @@ enum QuickHideChecks {
         inbox.layoutForQA()
         try expect(Set(inbox.rowIdsForQA) == Set(tmux + [h.rowId("s-terminal")]),
                    "Show only shows the Terminal pill's sessions alone — got \(inbox.titlesForQA)")
-        try expect(value("source:Terminal", inbox) == "on" && value("source:cmux", inbox) == "off",
-                   "…by soloing its pill — got \(pills(inbox).map { "\($0.id)=\($0.value)" })")
+        try expect(!inbox.hiddenSources.contains("Terminal") && inbox.hiddenSources.contains("cmux"),
+                   "Show only preserves a recoverable source filter — got \(inbox.hiddenSources)")
         inbox.setHiddenSources([])
 
         // Anywhere else on the row: the row's own menu.
@@ -666,158 +660,92 @@ enum QuickHideChecks {
             + "needs-you dots, top-level workspace counts, All workspaces when every workspace is ticked"
     }
 
-    // MARK: - 1. Toggle pills
-
-    /// `--sidebar-pills-check`. One pill per workspace and per outside source,
-    /// in a fixed order, counting top-level agents; a click toggles and is the
-    /// scope popover's own set; Option-click solos; an off pill keeps a dot for
-    /// what it hides that needs you; the row shows only with two or more pills;
-    /// what does not fit folds into `+N`, whose checklist toggles and solos too;
-    /// and both dimensions persist and come back through the boot path.
+    // The existing registered gate now proves that counters consume no header
+    // space and every persisted source filter remains recoverable in the dropdown.
     static func runPills() throws -> String {
-        var h = try makeHarness(name: "pills")
+        let h = try makeHarness(name: "sources-without-pills")
         defer { h.tearDown() }
         let inbox = h.inbox
-        // A subagent under the fixture agent: a workspace pill counts its parent once.
-        let child = h.delegate.qaAgentSupervisor.spawn(
-            role: "Explore", prompt: nil, cwd: h.fixture.pbRoot, harness: .pi,
-            model: "openai-codex/gpt-5.6-sol", thinking: "high",
-            projectId: h.fixture.projectPb, projectRoot: h.fixture.pbRoot, parentAgentID: h.fixture.agentId)
-        h.delegate.qaRefreshAgentSurfaces()
-        inbox.setScope(.all)
         inbox.layoutForQA()
-        try expect(inbox.rowIdsForQA.contains(h.agentRow) && ["s-tmux", "s-cmux", "s-claude", "s-terminal"].allSatisfy(h.shown),
-                   "precondition: every agent and session is a row; got \(inbox.titlesForQA)")
+        let originalTop = inbox.listTopInsetForQA
+        try expect(pills(inbox).isEmpty, "the sidebar must not render workspace or source pills")
+        let trigger = inbox.scopeButtonForQA
+        trigger.presentsOffscreenForQA = true
+        defer { trigger.dismissPopoverForQA() }
+        try expect(trigger.accessibilityPerformPress(), "the scope trigger accepts its accessibility press")
+        try expect(trigger.choosePresentedItemForQA(id: InboxScope.all.storageValue),
+                   "All agents is reachable through the production checklist")
+        try expect(inbox.scope == .all && WorkspaceSidebarConfig.resolveScope(defaults: h.suite) == .all,
+                   "selecting All agents persists the workspace dimension before source filtering")
+        trigger.dismissPopoverForQA()
+        try expect(trigger.accessibilityPerformPress(), "the scope trigger reopens for source selection")
+        try expect(trigger.choosePresentedItemForQA(id: AgentInboxView.sourcesItemId),
+                   "Sources must be reachable through the existing scope dropdown; presented=\(trigger.qaIsPopoverPresented), items=\(trigger.qaPresentedItems.map(\.id)), available=\(inbox.scopeItemIdsForQA), rows=\(inbox.titlesForQA)")
+        try expect(trigger.qaPresentedItems.first?.id == AgentInboxView.sourcesBackItemId,
+                   "Sources opens its checklist")
+        try expect(trigger.choosePresentedItemForQA(id: "source:Terminal"), "Terminal must be toggleable")
+        inbox.layoutForQA()
+        try expect(!h.shown("s-tmux") && !h.shown("s-terminal") && h.shown("s-cmux"),
+                   "unchecking Terminal removes only its sessions — got \(inbox.titlesForQA)")
+        try expect(trigger.qaPresentedItems.first { $0.id == "source:Terminal" }?.check == .off,
+                   "the open checklist follows its filter")
+        try expect(WorkspaceSidebarConfig.hiddenSources(defaults: h.suite) == ["Terminal"],
+                   "source filtering persists through the app's own settings writer")
+        try expect(abs(inbox.listTopInsetForQA - originalTop) < 0.5 && pills(inbox).isEmpty,
+                   "source filtering must consume no additional header height")
+        photograph(inbox, "1-sources-in-dropdown", panel: trigger.qaPresentedList)
+        trigger.dismissPopoverForQA()
 
-        let a = "workspace:\(h.workspaceA.uuidString.lowercased())"
-        let b = "workspace:\(h.workspaceB.uuidString.lowercased())"
-        let order = [a, b, "source:Terminal", "source:Claude app", "source:cmux"]
-        try expect(pills(inbox).map(\.id) == order,
-                   "pills: one per workspace by name, then Terminal, Claude app, cmux — got \(pills(inbox).map(\.id))")
-        try expect(pills(inbox).allSatisfy { $0.value == "on" }, "every pill starts on — got \(pills(inbox).map(\.value))")
-        photograph(inbox, "1-pills-all-on")
-        let labels = Dictionary(uniqueKeysWithValues: pills(inbox).map { ($0.id, $0.label) })
-        try expect(labels[a] == "A, 3 agents" && labels[b] == "B, 2 agents",
-                   "workspace pills count top-level agents (A: the agent, not its subagent, + tmux + cmux) — got \(labels)")
-        try expect(labels["source:Terminal"] == "Terminal, 2 agents" && labels["source:cmux"] == "cmux, 1 agent",
-                   "Terminal holds tmux and Terminal; cmux one — got \(labels)")
-        _ = child
-
-        // Click B: its rows go, its pill keeps a dot for the Claude app session waiting on you.
-        try click(try pill(b, in: inbox))
-        inbox.layoutForQA()
-        try expect(!h.shown("s-claude") && !h.shown("s-terminal") && h.shown("s-tmux"),
-                   "B off hides its rows only — got \(inbox.titlesForQA)")
-        try expect(value(b, inbox) == "off, needs you", "an off pill keeps a needs-you dot — got \(value(b, inbox) ?? "nil")")
-        photograph(inbox, "1-pills-b-off")
-        let excludeB = InboxScope.normalized(InboxWorkspaceFilter(mode: .exclude, workspaces: [h.workspaceB], showsUnplaced: true))
-        try expect(inbox.scope == excludeB, "the pill IS the popover's set: All but B — got \(inbox.scope.storageValue)")
-        try expect(inbox.scopeTriggerTitleForQA == "All but B", "the trigger names the same set — got '\(inbox.scopeTriggerTitleForQA)'")
-        try expect(WorkspaceSidebarConfig.resolveScope(defaults: h.suite) == excludeB,
-                   "the pill's set is persisted like the scope — got \(WorkspaceSidebarConfig.resolveScope(defaults: h.suite).storageValue)")
-        try click(try pill(b, in: inbox))
-        inbox.layoutForQA()
-        try expect(inbox.scope == .all && h.shown("s-claude"), "clicking B again shows it — got \(inbox.scope.storageValue)")
-
-        // Option-click A: A alone, every source off.
-        try click(try pill(a, in: inbox), flags: .option)
-        inbox.layoutForQA()
-        try expect(inbox.scope == .currentWorkspace, "Option-click solos A (the workspace on screen) — got \(inbox.scope.storageValue)")
-        try expect(inbox.rowIdsForQA == [h.agentRow], "solo A shows A's own agents only — got \(inbox.titlesForQA)")
-        try expect(pills(inbox).map(\.value) == ["on", "off, needs you", "off", "off, needs you", "off"],
-                   "solo: A on, B and every source off, the Claude app's waiting session dotting both — got \(pills(inbox).map(\.value))")
-        photograph(inbox, "1-pills-solo-a")
-        try expect(Set(h.suite.stringArray(forKey: "continuum.workspaceSidebar.hiddenSources") ?? [])
-                   == ["Terminal", "Claude app", "cmux"],
-                   "hidden sources persist beside the scope — got \(h.suite.stringArray(forKey: "continuum.workspaceSidebar.hiddenSources") ?? [])")
-
-        // A source back on: its session in A returns.
-        try click(try pill("source:cmux", in: inbox))
-        inbox.layoutForQA()
-        try expect(h.shown("s-cmux") && !h.shown("s-tmux"), "cmux on brings back its row in A — got \(inbox.titlesForQA)")
-
-        // Option-click Terminal: only tmux among everything in the workspace set.
-        try click(try pill("source:Terminal", in: inbox), flags: .option)
-        inbox.layoutForQA()
-        try expect(inbox.rowIdsForQA == [h.rowId("s-tmux")],
-                   "solo Terminal shows its sessions only, Array's agents included out — got \(inbox.titlesForQA)")
-        try expect(value(a, inbox) == "off" && value("source:Terminal", inbox) == "on",
-                   "soloing a source turns the workspace pills off — got \(pills(inbox).map(\.value))")
-        // A workspace pill brings Array's agents back, for that workspace.
-        try click(try pill(a, in: inbox))
-        inbox.layoutForQA()
-        try expect(Set(inbox.rowIdsForQA) == [h.agentRow, h.rowId("s-tmux")] && value(a, inbox) == "on",
-                   "A on after a source solo shows A's agents and the soloed source — got \(inbox.titlesForQA)")
-
-        // Back to everything: the popover's All agents, then the sources.
-        try expect(inbox.chooseScopeItemForQA(id: InboxScope.all.storageValue), "All agents must be pickable")
-        for source in ["source:Claude app", "source:cmux"] where value(source, inbox)?.hasPrefix("off") == true {
-            try click(try pill(source, in: inbox))
-        }
-        inbox.layoutForQA()
-        try expect(pills(inbox).allSatisfy { $0.value == "on" } && h.suite.stringArray(forKey: "continuum.workspaceSidebar.hiddenSources") == nil,
-                   "everything on again, nothing stored — got \(pills(inbox).map(\.value))")
-
-        // Narrow: what does not fit folds into +N, on one line, order kept.
-        h.window.setContentSize(NSSize(width: 260, height: 900))
-        h.sidebar.frame = NSRect(x: 0, y: 0, width: 260, height: 900)
-        inbox.layoutForQA()
-        let narrow = pills(inbox).map(\.id)
-        try expect(narrow.last == "more" && narrow.count < order.count + 1 && Array(order.prefix(narrow.count - 1)) == narrow.dropLast(),
-                   "at 260pt the pills that do not fit fold into +N, in order — got \(narrow)")
-        let tops = Set(views(in: inbox) { $0.accessibilityIdentifier().hasPrefix("ContinuumAgentInboxPill:") && !$0.isHiddenOrHasHiddenAncestor }
-            .map { Int($0.convert($0.bounds, to: nil).minY) })
-        try expect(tops.count == 1, "the pills stay on one line — got rows at \(tops)")
-        inbox.presentsPopoversOffscreenForQA = true
-        defer { inbox.dismissPillOverflowForQA() }
-        try click(try pill("more", in: inbox))
-        guard let list = inbox.pillOverflowListForQA else { throw Failure(description: "+N opened no checklist") }
-        photograph(inbox, "1-pills-overflow", panel: list)
-        let rest = Array(order.dropFirst(narrow.count - 1))
-        try expect(list.qaItems.map(\.id) == rest, "+N lists the rest, in order — got \(list.qaItems.map(\.id)), wanted \(rest)")
-        list.choose(id: "source:Claude app")
-        inbox.layoutForQA()
-        try expect(!h.shown("s-claude"), "unchecking Claude app in +N hides it — got \(inbox.titlesForQA)")
-        try expect(value("more", inbox) == "on, needs you", "a hidden needs-you rides on +N — got \(value("more", inbox) ?? "nil")")
-        try expect(inbox.pillOverflowListForQA?.qaItems.first { $0.id == "source:Claude app" }?.check == .off,
-                   "the open checklist follows the toggle")
-        list.pressAccessory(itemID: "source:cmux", accessoryID: "only")
-        inbox.layoutForQA()
-        try expect(inbox.rowIdsForQA == [h.rowId("s-cmux")], "Only in +N solos cmux — got \(inbox.titlesForQA)")
-        inbox.dismissPillOverflowForQA()
-
-        // A relaunch restores both dimensions through the boot path.
-        let stored = Set(h.suite.stringArray(forKey: "continuum.workspaceSidebar.hiddenSources") ?? [])
+        // Restoring a previous filter must leave a visible way to recover its rows.
         let relaunched = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 480, height: 900))
         h.window.contentView = relaunched
         h.delegate.qaInstallWorkspaceSidebar(relaunched)
         h.delegate.qaRefreshAgentSurfaces()
-        relaunched.inboxForQA.layoutForQA()
-        try expect(relaunched.inboxForQA.hiddenSources == stored && relaunched.inboxForQA.rowIdsForQA == [h.rowId("s-cmux")],
-                   "a relaunch restores the hidden sources \(stored) — got \(relaunched.inboxForQA.hiddenSources), rows \(relaunched.inboxForQA.titlesForQA)")
+        let restored = relaunched.inboxForQA
+        restored.layoutForQA()
+        try expect(restored.scope == .all && restored.hiddenSources == ["Terminal"]
+                   && !restored.rowIdsForQA.contains(h.rowId("s-tmux")),
+                   "boot restores both the global workspace scope and the persisted source filter")
+        let restoredTrigger = restored.scopeButtonForQA
+        restoredTrigger.presentsOffscreenForQA = true
+        defer { restoredTrigger.dismissPopoverForQA() }
+        try expect(restoredTrigger.accessibilityPerformPress(), "the restored scope trigger accepts its accessibility press")
+        try expect(restoredTrigger.choosePresentedItemForQA(id: AgentInboxView.sourcesItemId), "Sources remains reachable after boot")
+        try expect(restoredTrigger.choosePresentedItemForQA(id: AgentInboxView.allSourcesItemId), "Show all sources remains reachable")
+        restored.layoutForQA()
+        try expect(restored.hiddenSources.isEmpty && ["s-tmux", "s-cmux", "s-claude", "s-terminal"].allSatisfy {
+            restored.rowIdsForQA.contains(h.rowId($0))
+        }, "Show all sources restores every source's rows")
+        try expect(WorkspaceSidebarConfig.hiddenSources(defaults: h.suite).isEmpty,
+                   "clearing filters persists through the production writer")
+        restoredTrigger.dismissPopoverForQA()
 
-        // Two or more pills, or no row at all.
+        // Workspace count and pane width never manufacture a second header row.
         let bare = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 400))
-        let bareWindow = NSWindow(contentRect: bare.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        bareWindow.contentView = bare
-        bareWindow.orderFrontOffscreenForChecks()
-        defer { bareWindow.orderOut(nil) }
+        let window = NSWindow(contentRect: bare.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = bare
+        window.orderFrontOffscreenForChecks()
+        defer { window.orderOut(nil) }
         let one = UUID(), two = UUID()
         bare.scopeCatalog = [.workspaceID(one, "Solo")]
         bare.reload(rows: [AgentInboxRow(id: UUID(), title: "Only one", projectName: "p", workspaceName: "Solo",
                                          workspaceId: one, state: .ready, createdAt: Date())])
         bare.layoutForQA()
-        let listTopAlone = bare.listTopInsetForQA
-        try expect(pills(bare).isEmpty, "one pill draws no pill row — got \(pills(bare).map(\.id))")
+        let singleTop = bare.listTopInsetForQA
         bare.scopeCatalog = [.workspaceID(one, "Solo"), .workspaceID(two, "Second")]
         bare.layoutForQA()
-        try expect(pills(bare).count == 2 && bare.listTopInsetForQA > listTopAlone,
-                   "two pills draw the row, and the list starts below it — got \(pills(bare).map(\.id))")
-
-        return "QuickHide pills: workspaces then sources in a fixed order with top-level counts; click toggles the popover's own set, "
-            + "Option-click solos; an off pill keeps its needs-you dot; +N folds the rest into a checklist that toggles and solos; "
-            + "both dimensions persist and come back on a relaunch; the row needs two pills"
+        try expect(abs(bare.listTopInsetForQA - singleTop) < 0.5 && pills(bare).isEmpty,
+                   "multiple workspaces add no counter row or vertical gap")
+        for width: CGFloat in [260, 480] {
+            window.setContentSize(NSSize(width: width, height: 400))
+            bare.frame = NSRect(x: 0, y: 0, width: width, height: 400)
+            bare.layoutForQA()
+            try expect(abs(bare.listTopInsetForQA - singleTop) < 0.5 && pills(bare).isEmpty,
+                       "the counter-free header keeps its height at \(width)pt")
+        }
+        return "Sidebar header: no workspace/source pills or extra gap; accessibility activation and checklist callbacks toggle actual source rows, persist, restore and clear filters"
     }
+
 }
 
 extension Optional {

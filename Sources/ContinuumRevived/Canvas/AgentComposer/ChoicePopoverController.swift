@@ -377,6 +377,8 @@ final class ChoicePopoverController {
     nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
     private var anchorWindowObservation: NSKeyValueObservation?
     private var cancellationHandler: (() -> Void)?
+    /// Presentation ended, whether by selection, cancellation, or owner teardown.
+    private var closeHandler: (() -> Void)?
     /// Where an intrinsic panel of a given content size goes, kept from `present`
     /// so a checklist that grows or shrinks while open stays on its anchor.
     private var reframeIntrinsicPanel: ((NSSize) -> NSRect)?
@@ -389,6 +391,8 @@ final class ChoicePopoverController {
     var pageZoom: AgentPageZoom = .default
 
     var isPresented: Bool { panel?.isVisible == true }
+    /// Toggle triggers consume their closing click before it can reopen the menu.
+    var dismissesOnAnchorClick = false
     /// Why the panel last closed ITSELF, cleared on each present: a check can
     /// then tell the window or app losing focus (outside its control) from a
     /// close the owner caused.
@@ -414,6 +418,7 @@ final class ChoicePopoverController {
         onSelection: @escaping (ChoiceItem) -> Void,
         focusReturnView: NSView? = nil,
         onDismiss: (() -> Void)? = nil,
+        onClose: (() -> Void)? = nil,
         onAccessory: ((ChoiceItem, String) -> Void)? = nil,
         onFocusChange: ((String?) -> Void)? = nil
     ) {
@@ -507,6 +512,7 @@ final class ChoicePopoverController {
             backing: .buffered,
             defer: false
         )
+        panel.appearance = window.effectiveAppearance
         panel.isOpaque = false
         panel.backgroundColor = .clear
         // See `ChoicePanelShadowView`: the server's shadow brings a rim with it.
@@ -542,6 +548,7 @@ final class ChoicePopoverController {
         anchorView = view
         self.focusReturnView = focusReturnView
         cancellationHandler = onDismiss
+        closeHandler = onClose
         parentWindow = window
         let defaultAccessibilityLabel: String
         switch layout {
@@ -633,6 +640,8 @@ final class ChoicePopoverController {
     }
 
     func dismiss() {
+        let onClose = closeHandler
+        closeHandler = nil
         reframeIntrinsicPanel = nil
         removeDismissalObservers()
         if let panel {
@@ -652,6 +661,7 @@ final class ChoicePopoverController {
         if let returnView, let window, returnView.window === window {
             window.makeFirstResponder(returnView)
         }
+        onClose?()
     }
 
     private func dismissItself(_ reason: String) {
@@ -773,7 +783,7 @@ final class ChoicePopoverController {
         let rowHeight = list.layoutRowHeight
         let maxHeight = CGFloat(configuration.maximumVisibleRows) * rowHeight
             + ChoiceListView.verticalPadding(zoom: zoom) * 2
-        let height = min(maxHeight, max(1, list.intrinsicContentSize.height))
+        let height = min(maxHeight, visibleFrame.height, max(1, list.intrinsicContentSize.height))
         return NSSize(width: max(1, width), height: max(1, height))
     }
 
@@ -826,8 +836,7 @@ final class ChoicePopoverController {
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
             [weak self] event in
             guard let self else { return event }
-            if event.window !== self.panel { self.dismissItself("outsideClick") }
-            return event
+            return self.filterPointerEvent(event, originatingWindow: event.window)
         }
         #if ARRAY_FILM
         // Not in a film run: the user's own clicks in other apps would cancel the take's picker.
@@ -836,6 +845,17 @@ final class ChoicePopoverController {
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
             [weak self] _ in Task { @MainActor [weak self] in self?.dismissItself("otherAppClick") }
         }
+    }
+
+    /// The local monitor and deterministic event witness share this dispatch path.
+    func filterPointerEvent(_ event: NSEvent, originatingWindow: NSWindow?) -> NSEvent? {
+        guard isPresented, originatingWindow !== panel else { return event }
+        let closesTrigger = dismissesOnAnchorClick && anchorView.map { anchor in
+            originatingWindow === anchor.window
+                && anchor.bounds.contains(anchor.convert(event.locationInWindow, from: nil))
+        } == true
+        dismissItself("outsideClick")
+        return closesTrigger ? nil : event
     }
 
     private func removeDismissalObservers() {

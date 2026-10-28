@@ -450,6 +450,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             self, selector: #selector(terminalToggleSettingChanged(_:)),
             name: SettingChangeEvent.name(for: SettingID(rawValue: AgentTerminalFaceConfig.showToggleKey)),
             object: nil)
+        agentHeader.showsElapsedTime = false
         agentHeader.installStatusBadge(awarenessBadge)
         enableTitleBarActions()
         compactStatusRow.hideLocationActions()
@@ -968,6 +969,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     func applyAwarenessSignal(_ signal: AgentSignal?) {
         defer { chromeDidChange() }
         awarenessBadge.apply(signal)
+        agentHeader.updateVisibility()
         awarenessBorder.apply(signal)
         needsLayout = true
     }
@@ -1065,6 +1067,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private func makePageZoomMenuItems() -> [NSMenuItem] {
         let root = NSMenuItem(title: "Zoom", action: nil, keyEquivalent: "")
         let menu = NSMenu(title: "Zoom")
+        // The builder owns end-stop availability. AppKit's automatic target
+        // validation otherwise re-enables Zoom Out at 80% and Zoom In at 150%.
+        menu.autoenablesItems = false
         // The current percentage, always visible so the rung is discoverable
         // without stepping. Disabled: it is a readout, not a command.
         let readout = NSMenuItem(
@@ -3376,9 +3381,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let composeViews: [NSView]
         switch statusRowPlacement {
         case .aboveComposer:
-            composeViews = [compactStatusRow, composer, footerRow]
+            composeViews = [agentHeader, compactStatusRow, composer, footerRow]
         case .belowComposer:
-            composeViews = [composer, compactStatusRow, statusSpacer, footerRow]
+            composeViews = [agentHeader, composer, compactStatusRow, statusSpacer, footerRow]
             let spacerHeight = statusSpacer.heightAnchor.constraint(
                 equalToConstant: CGFloat(pageZoom.scaled(Space.l)))
             spacerHeight.isActive = true
@@ -3424,7 +3429,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         }() : nil
         let transcriptInStack: NSView = slot ?? transcript
         let layout = NSStackView(views: [
-            agentHeader, locationStatus, transcriptInStack, pendingDock, faceFlipBanner, sessionHandoffBanner,
+            locationStatus, transcriptInStack, pendingDock, faceFlipBanner, sessionHandoffBanner,
             composeBackdrop,
         ])
         layout.orientation = .vertical
@@ -3464,7 +3469,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             layout.topAnchor.constraint(equalTo: root.topAnchor),
             layout.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             headerHeight,
-            agentHeader.widthAnchor.constraint(equalTo: layout.widthAnchor),
+            agentHeader.widthAnchor.constraint(equalTo: compactStatusRow.widthAnchor),
             locationStatus.widthAnchor.constraint(equalTo: layout.widthAnchor),
             transcriptInStack.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeBackdrop.widthAnchor.constraint(equalTo: layout.widthAnchor),
@@ -4391,25 +4396,23 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     private func applyAgentHeader(status: AgentStatus) {
         defer { chromeDidChange() }
+        let presentation: AgentTileStatePresenter.Presentation
         if let shown = agentStatusOverride {
-            // Another app's session decides it (`.plans/79` phase 2).
-            agentHeader.apply(AgentTileStatePresenter.present(
-                name: headerAgentName ?? tile.title, status: shown, branchContext: branchContext, startedAt: startedAt))
+            presentation = AgentTileStatePresenter.present(
+                name: headerAgentName ?? tile.title, status: shown, branchContext: branchContext, startedAt: startedAt)
         } else if let snapshot = v2TurnSnapshot {
-            agentHeader.apply(AgentTileStatePresenter.present(
-                name: headerAgentName ?? tile.title,
-                snapshot: snapshot,
-                branchContext: branchContext,
-                startedAt: startedAt
-            ))
+            presentation = AgentTileStatePresenter.present(
+                name: headerAgentName ?? tile.title, snapshot: snapshot,
+                branchContext: branchContext, startedAt: startedAt)
         } else {
-            agentHeader.apply(AgentTileStatePresenter.present(
-                name: headerAgentName ?? tile.title,
-                status: status,
-                branchContext: branchContext,
-                startedAt: startedAt
-            ))
+            presentation = AgentTileStatePresenter.present(
+                name: headerAgentName ?? tile.title, status: agentStatus ?? status,
+                branchContext: branchContext, startedAt: startedAt)
         }
+        agentHeader.apply(presentation)
+        // A session observer may have updated the public status before a turn
+        // snapshot arrives. Never put an older phase label on that newer state.
+        setAgentStatusLabel(presentation.status == agentStatus ? presentation.stateLabel : nil)
     }
 
     /// A detached tile keeps showing the agent it previously represented, but it
@@ -4935,42 +4938,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         onClose = savedClose
         guard stopCount == 1, detachCount == 1 else { return false }
 
-        // Drive the exact timer update used by the one-second Timer. A tick must
-        // update only the fixed-width header label, never invalidate transcript
-        // layout. Settling idle must tear the timer down and hide elapsed time.
-        let start = Date(timeIntervalSince1970: 100)
-        agentHeader.apply(AgentTileStatePresenter.present(
-            name: headerAgentName ?? tile.title,
-            status: .working,
-            branchContext: branchContext,
-            startedAt: start,
-            now: Date(timeIntervalSince1970: 165)
-        ))
-        // Applying a wholly new presentation may legitimately lay out the
-        // shell. Settle it, then count actual transcript layout passes while an
-        // isolated timer tick and its resulting layout are processed.
-        contentView?.layoutSubtreeIfNeeded()
-        let transcriptLayoutsBeforeTick = listTranscript?.transcriptLayout.preparePassCount ?? 0
-        agentHeader.qaTick(now: Date(timeIntervalSince1970: 165))
-        contentView?.layoutSubtreeIfNeeded()
-        let timerActive = agentHeader.qaTimerIsActive
-        let elapsedText = agentHeader.qaElapsed
-        let transcriptLayoutDelta = (listTranscript?.transcriptLayout.preparePassCount ?? 0) - transcriptLayoutsBeforeTick
-        let workingTimerHolds = timerActive
-            && elapsedText == "· 1m 5s"
-            && transcriptLayoutDelta == 0
-        agentHeader.apply(AgentTileStatePresenter.present(
-            name: headerAgentName ?? tile.title,
-            status: .idle,
-            branchContext: branchContext,
-            startedAt: start,
-            now: Date(timeIntervalSince1970: 165)
-        ))
-        let idleTimerHolds = !agentHeader.qaTimerIsActive && agentHeader.qaElapsed == nil
-        applyAgentHeader(status: descriptor.status)
-        qaV2ContractDetail = "callbacks=\(stopCount)/\(detachCount) timerActive=\(timerActive) "
-            + "elapsed=\(elapsedText ?? "nil") transcriptLayouts=\(transcriptLayoutDelta) idleTimer=\(idleTimerHolds)"
-        return workingTimerHolds && idleTimerHolds
+        // The context strip is installed beside the composer and owns no live
+        // timer. The compact status row is the sole elapsed/activity surface.
+        qaV2ContractDetail = "callbacks=\(stopCount)/\(detachCount) contextByComposer=\(agentHeader.isDescendant(of: composeBackdrop))"
+        return agentHeader.isDescendant(of: composeBackdrop)
+            && !agentHeader.qaTimerIsActive && agentHeader.qaNameFrame == nil
+
     }
     private var qaV2HeaderFailure: String {
         "__invalid-v2-agent-header-shell__ "

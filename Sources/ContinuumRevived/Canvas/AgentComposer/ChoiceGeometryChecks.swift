@@ -110,6 +110,8 @@ enum ChoiceGeometryChecks {
         let cases: [(name: String, presentation: ChoiceListPresentation, icons: Bool, details: Bool)] = [
             ("choices", .choices, false, false),
             ("choices+detail", .choices, false, true),
+            ("compactChoices", .compactChoices, false, false),
+            ("compactChoices+detail", .compactChoices, false, true),
             ("commands", .commands, false, false),
             ("commands+icon", .commands, true, false),
             ("slashCommands", .slashCommands, false, true),

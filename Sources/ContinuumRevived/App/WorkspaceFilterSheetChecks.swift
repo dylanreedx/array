@@ -274,12 +274,18 @@ enum WorkspaceFilterSheet {
         list.perform(.first)
         for _ in 0..<filmIndex { list.perform(.next) }
         try expect(inbox.peekWorkspace == studio.id, "\(tag): focusing Film's row peeks Film")
-        try expect(inbox.marksWorkspacesForQA, "\(tag): a list spanning two workspaces carries edge marks")
+        try expect(inbox.marksWorkspacesForQA, "\(tag): a list spanning two workspaces carries tinted icon containers inside its cards")
         inbox.layoutForQA()
         var marked = 0, dimmed = 0
         for case let cell as AgentInbox96CellView in inbox.qaMaterializedRowCells {
             guard let id = cell.qaAgentID, let row = all.first(where: { $0.id == id }) else { continue }
-            if cell.qaWorkspaceMarkFrame != nil { marked += 1 }
+            if cell.qaWorkspaceMarkFrame != nil {
+                marked += 1
+                try expect(cell.qaWorkspaceTreatmentIsInsideCard,
+                           "\(tag): workspace label must stay inside '\(row.title)' card")
+                try expect(cell.qaWorkspaceLabel == nil && cell.qaWorkspaceIconBadgeGeometry != nil,
+                           "\(tag): the selected workspace treatment is a tinted project icon container")
+            }
             if row.workspaceId != studio.id && cell.peekAlpha < 0.5 { dimmed += 1 }
             if row.workspaceId == studio.id && cell.peekAlpha < 1 {
                 throw Failure(description: "\(tag): the peeked workspace's own card '\(row.title)' was dimmed")

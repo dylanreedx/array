@@ -120,7 +120,18 @@ class TileNSView: NSView, TokenThemed {
     /// agent's own turns decides it: a watched session's status in another app,
     /// or a paused agent waiting on one (`.plans/79` phase 2).
     var agentStatusOverride: AgentStatus? {
-        didSet { if agentStatusOverride != oldValue { applyShownAgentStatus() } }
+        didSet {
+            if agentStatusOverride != oldValue {
+                titleBar?.semanticStatusLabel = nil
+                applyShownAgentStatus()
+            }
+        }
+    }
+
+    /// The managed turn presenter owns specific phases (Starting / Failed /
+    /// Compacting). Other tiles keep the shared coarse status vocabulary.
+    func setAgentStatusLabel(_ label: String?) {
+        titleBar?.semanticStatusLabel = label
     }
 
     private func applyShownAgentStatus() {
@@ -154,6 +165,7 @@ class TileNSView: NSView, TokenThemed {
     }
 
     func enableTitleBarActions() { titleBar?.enableActions() }
+    var titleBarActionsButtonForQA: NSView? { titleBar?.actionsButtonForQA }
     var titleBarUsesCustomOverflowForQA: Bool { titleBar?.usesCustomActionsForQA ?? false }
     var titleBarActionsFrameForQA: NSRect? { titleBar?.actionsFrameForQA.map { titleBar!.convert($0, to: self) } }
 
@@ -837,6 +849,7 @@ class TileNSView: NSView, TokenThemed {
             titleBar?.invalidateChrome()
         }
         titleBar?.applyCloseButtonSizing(buttonSize: closeButtonWorldSize, glyphPointSize: closeGlyphWorldPointSize)
+        titleBar?.applyOverflowGlyphWidth(overflowGlyphWorldWidth)
         // Repair the bar-above-body z-order only when it is actually wrong.
         // `addSubview(_:positioned:)` is a remove+insert that reorders the
         // backing sublayers even when the order is already correct, and this
@@ -1411,6 +1424,13 @@ class TileNSView: NSView, TokenThemed {
         return max(Self.closeGlyphPointSize, Self.minScreenCloseGlyphPx / CGFloat(Self.chromeScaleBucket(for: zoom)))
     }
 
+    /// The dots keep a 13pt visual width between the same chrome buckets as ×.
+    /// This sizes the glyph separately from its larger, existing hit target.
+    private var overflowGlyphWorldWidth: CGFloat {
+        guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return 13 }
+        return max(13, 13 / CGFloat(Self.chromeScaleBucket(for: zoom)))
+    }
+
     func qaResizeEdge(at point: CGPoint) -> ResizeEdge? {
         resizeEdge(at: point)
     }
@@ -1822,10 +1842,21 @@ private final class TitleBarView: NSView, TokenThemed {
     var agentStatus: AgentStatus? {
         didSet {
             guard agentStatus != oldValue else { return }
+            semanticStatusLabel = nil
             invalidateChrome()
             // The pill's width is part of the switch's budget.
             if faceSwitchState != nil { needsLayout = true }
         }
+    }
+    var semanticStatusLabel: String? {
+        didSet {
+            guard semanticStatusLabel != oldValue else { return }
+            invalidateChrome()
+            if faceSwitchState != nil { needsLayout = true }
+        }
+    }
+    private func statusLabel(for status: AgentStatus) -> String {
+        semanticStatusLabel ?? StatusChipPresenter.display(for: status).label
     }
     var agentStatusErrorMessage: String? { didSet { toolTip = agentStatusErrorMessage } }
 
@@ -1868,7 +1899,7 @@ private final class TitleBarView: NSView, TokenThemed {
             providerModel: providerMarkView.toolTip,
             showsProviderMark: !providerMarkView.isHidden,
             agentStatus: agentStatus,
-            agentStatusLabel: agentStatus.map { StatusChipPresenter.display(for: $0).label },
+            agentStatusLabel: agentStatus.map { statusLabel(for: $0) },
             agentStatusErrorMessage: agentStatusErrorMessage
         )
     }
@@ -1912,6 +1943,7 @@ private final class TitleBarView: NSView, TokenThemed {
     }
 
     private var actionsButton: AgentTileOverflowButton?
+    var actionsButtonForQA: NSView? { actionsButton }
     var usesCustomActionsForQA: Bool { actionsButton.map { $0.subviews.allSatisfy { !($0 is NSButton) } } ?? false }
     var actionsFrameForQA: NSRect? { actionsButton?.frame }
 
@@ -1925,6 +1957,10 @@ private final class TitleBarView: NSView, TokenThemed {
         addSubview(button)
         actionsButton = button
         needsLayout = true
+    }
+
+    func applyOverflowGlyphWidth(_ width: CGFloat) {
+        actionsButton?.applyChromeGlyphWidth(width)
     }
 
     @objc private func showTileActions(_ sender: AgentTileOverflowButton) {
@@ -2646,13 +2682,13 @@ private final class TitleBarView: NSView, TokenThemed {
     }
 
     private func statusPillWidth(for status: AgentStatus) -> CGFloat {
-        let width = BandTextWidth.width(StatusChipPresenter.display(for: status).label, font: .token(.caption))
+        let width = BandTextWidth.width(statusLabel(for: status), font: .token(.caption))
         return width + Self.statusPillDotDiameter + 3 * Self.statusPillPad
     }
 
     private func drawAgentStatus(_ status: AgentStatus) {
         let display = StatusChipPresenter.display(for: status)
-        let label = display.label
+        let label = statusLabel(for: status)
         // The dot-and-tint shape, so the accent — now resolved in the bar's OWN
         // theme. It was pinned `.dark` because this bar painted a dark-only
         // white:0.16 literal; P1.11 put the bar on `tileChrome`, which carries a

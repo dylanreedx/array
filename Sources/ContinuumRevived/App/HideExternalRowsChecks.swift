@@ -78,16 +78,16 @@ enum HideExternalRowsChecks {
         func shown(_ session: ExternalAgentSession) -> Bool { inbox.rowIdsForQA.contains(rowId(session)) }
         try expect([cmux, ghostty, terminal].allSatisfy(shown), "precondition: every session is a row; got \(inbox.titlesForQA)")
 
-        // Array's own agent: its × SNOOZES (.plans/87, --sidebar-hide-any-row-check),
+        // Array's own agent: its clock SNOOZES (.plans/87, --sidebar-hide-any-row-check),
         // and never touches the hidden-sessions store.
         _ = inbox.hoverRowForQA(id: agentRow)
         inbox.layoutForQA()
-        try expect(inbox.hoverActionsForQA(id: agentRow)?.titles.contains("Hide") == true,
-                   "an Array agent's row offers the × that snoozes it; got \(inbox.hoverActionsForQA(id: agentRow)?.titles ?? [])")
-        try expect(inbox.clickHoverHideForQA(id: agentRow), "the agent's × must be pressable")
+        try expect(inbox.hoverActionsForQA(id: agentRow)?.titles.contains("Snooze") == true,
+                   "an Array agent's row offers the clock that snoozes it; got \(inbox.hoverActionsForQA(id: agentRow)?.titles ?? [])")
+        try expect(inbox.clickHoverSnoozeForQA(id: agentRow), "the agent's clock must be pressable")
         inbox.layoutForQA()
         try expect(delegate.externalSessionHiding.entries.isEmpty,
-                   "an Array agent's × snoozes; it hides nothing — got \(delegate.externalSessionHiding.entries.map(\.title))")
+                   "an Array agent's clock snoozes; it hides nothing — got \(delegate.externalSessionHiding.entries.map(\.title))")
         try expect(inbox.clickUndoForQA(), "the snooze's Undo must be pressable")
         inbox.layoutForQA()
         try expect(inbox.rowIdsForQA.contains(agentRow), "Undo brings the agent back; got \(inbox.titlesForQA)")
@@ -168,7 +168,7 @@ enum HideExternalRowsChecks {
         ageing.showAll()
 
         return "HideExternalRowsChecks: × and menu Hide remove a session's row, Undo and ⌘Z restore it, hidden survives a store reload "
-            + "and a live turn, Hidden (N) shows one and Show all the rest, an Array agent's × snoozes and hides nothing"
+            + "and a live turn, Hidden (N) shows one and Show all the rest, an Array agent's clock snoozes and hides nothing"
             + (sheetDirectory.map { " (sheet: \($0))" } ?? "")
     }
 

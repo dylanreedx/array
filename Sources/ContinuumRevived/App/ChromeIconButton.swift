@@ -23,8 +23,8 @@ final class ChromeIconButton: NSButton, TokenThemed {
     var isActive = false { didSet { if isActive != oldValue { applyTokens() } } }
     /// Under the pointer. Settable so a probe can paint the hovered state.
     var isHovered = false { didSet { if isHovered != oldValue { applyTokens() } } }
-    /// A menu the button opens on press, below itself, the way a pull-down does.
-    var pullDownMenu: NSMenu?
+    /// A shared choice menu opens on press; its owner supplies presentation.
+    var onOpenMenu: (() -> Void)?
 
     private var isPressed = false { didSet { if isPressed != oldValue { applyTokens() } } }
     private var tracking: NSTrackingArea?
@@ -126,8 +126,8 @@ final class ChromeIconButton: NSButton, TokenThemed {
 
     override func mouseDown(with event: NSEvent) {
         guard isEnabled else { return }
-        if pullDownMenu != nil {
-            popUpPullDownMenu()
+        if let onOpenMenu {
+            onOpenMenu()
             return
         }
         isPressed = true
@@ -135,12 +135,18 @@ final class ChromeIconButton: NSButton, TokenThemed {
         super.mouseDown(with: event)
     }
 
-    /// Open `pullDownMenu` under the button. Blocks until the menu closes.
-    func popUpPullDownMenu() {
-        guard let pullDownMenu else { return }
-        isActive = true
-        defer { isActive = false; isHovered = false }
-        let below = NSPoint(x: 0, y: isFlipped ? bounds.maxY + 4 : bounds.minY - 4)
-        pullDownMenu.popUp(positioning: nil, at: below, in: self)
+    override func keyDown(with event: NSEvent) {
+        if let onOpenMenu, isEnabled, [36, 49, 125, 126].contains(event.keyCode) {
+            onOpenMenu()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let onOpenMenu else { return super.accessibilityPerformPress() }
+        guard isEnabled else { return false }
+        onOpenMenu()
+        return true
     }
 }

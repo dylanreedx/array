@@ -52,7 +52,13 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     private let sidebarButton = ChromeIconButton(symbolName: "sidebar.left", accessibilityLabel: "Show/Hide Sidebar")
     private let titleButton = ChromeIconButton(
         symbolName: "chevron.down", accessibilityLabel: "Workspace", title: "Workspace")
-    private let titleMenu = NSMenu()
+    private let titlePopover = ChoicePopoverController()
+    private var titleItems: [ChoiceItem] = []
+    private enum MenuID {
+        static let create = "workspace.create"
+        static let rename = "workspace.rename"
+        static let delete = "workspace.delete"
+    }
     /// Unsaved or saving: a dot beside the title, with the state as its tooltip.
     private let saveDot = NSImageView()
     /// Words only when they matter: "Save failed", or "Switching…" mid-switch.
@@ -120,15 +126,11 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         sidebarButton.target = self
         sidebarButton.action = #selector(toggleSidebarClicked(_:))
 
-        // The menu is the control; the button only opens it, on press, the way a
-        // pull-down does. `autoenablesItems` off: enablement is the model's, and a
-        // refused Delete has to stay greyed whatever AppKit's validation thinks.
-        titleMenu.autoenablesItems = false
-        titleButton.pullDownMenu = titleMenu
-        titleButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarTitle")
-        titleButton.setAccessibilityRole(.menuButton)
+        titleButton.onOpenMenu = { [weak self] in self?.toggleTitlePopover() }
         titleButton.target = self
         titleButton.action = #selector(titleClicked(_:))
+        titleButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarTitle")
+        titleButton.setAccessibilityRole(.menuButton)
         titleButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         saveDot.image = CanvasSymbolImage.image(named: "circle.fill", pointSize: 6, weight: .regular)
@@ -274,6 +276,8 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     }
 
     func reload(_ model: WorkspaceTopBarModel) {
+        let previousWorkspaceId = currentWorkspaceId
+        let previousItems = titleItems
         currentWorkspaceId = model.currentWorkspaceId
         workspaces = model.workspaces
         titleButton.titleText = model.currentWorkspaceName
@@ -283,50 +287,75 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         renderStatus()
         setManagementMessage(model.managementMessage)
         rebuildTitleMenu()
+        // Agent activity and save-state refreshes also reload this bar. Keep a
+        // person's open menu and keyboard focus unless its actual choices changed.
+        if currentWorkspaceId != previousWorkspaceId || titleItems != previousItems {
+            dismissTitlePopover()
+        }
     }
 
-    /// Every workspace with a check on the current one, then the three verbs.
-    /// Built by hand, never `addItem(withTitle:)`, which would collapse two
-    /// workspaces that share a name (`AgentInboxView.updateScopeMenu` precedent).
+    /// UUIDs identify workspace rows; management commands never become values.
     private func rebuildTitleMenu() {
-        titleMenu.removeAllItems()
-        let switchingTo = switchingWorkspaceId
-        for workspace in workspaces {
-            let item = NSMenuItem(title: workspace.name, action: #selector(workspaceItemPicked(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = workspace.id.uuidString
-            item.state = workspace.id == (switchingTo ?? currentWorkspaceId) ? .on : .off
-            item.isEnabled = switchingTo == nil
-            titleMenu.addItem(item)
+        let canManage = switchingWorkspaceId == nil
+        titleItems = workspaces.map {
+            ChoiceItem(id: $0.id.uuidString, title: $0.name, enabled: canManage)
         }
-        if !workspaces.isEmpty { titleMenu.addItem(.separator()) }
-
-        let create = NSMenuItem(title: AgentInboxView.WorkspaceManagementAction.create.title,
-                                action: #selector(createWorkspaceClicked(_:)), keyEquivalent: "")
-        create.target = self
-        titleMenu.addItem(create)
-
-        let rename = NSMenuItem(title: AgentInboxView.WorkspaceManagementAction.rename.title,
-                                action: #selector(renameWorkspaceClicked(_:)), keyEquivalent: "")
-        rename.target = self
-        rename.isEnabled = currentWorkspaceId != nil
-        titleMenu.addItem(rename)
-
-        // 0721: a greyed Delete with no explanation reads as "I can't delete a
-        // workspace". The refusal is intended; being unable to find out why is
-        // not. The reason rides on the item itself, in the scope menu's form.
+        var create = ChoiceItem(id: MenuID.create, title: AgentInboxView.WorkspaceManagementAction.create.title,
+                                enabled: canManage)
+        create.separatorBefore = !workspaces.isEmpty
+        titleItems.append(create)
+        titleItems.append(ChoiceItem(id: MenuID.rename, title: AgentInboxView.WorkspaceManagementAction.rename.title,
+                                     enabled: canManage && currentWorkspaceId != nil))
+        let reason = Self.deleteDisabledReason(workspaceCount: workspaces.count, hasCurrentWorkspace: currentWorkspaceId != nil)
         let deleteTitle = AgentInboxView.WorkspaceManagementAction.delete.title
-        let delete = NSMenuItem(title: deleteTitle, action: #selector(deleteWorkspaceClicked(_:)), keyEquivalent: "")
-        delete.target = self
-        let reason = Self.deleteDisabledReason(
-            workspaceCount: workspaces.count, hasCurrentWorkspace: currentWorkspaceId != nil)
-        // 0721: enablement must come from a model that really loaded — before the
-        // first `reload(_:)` Delete is greyed and says why.
-        delete.isEnabled = reason == nil
-        if let reason { delete.title = "\(deleteTitle) — \(reason)" }
-        delete.toolTip = Self.deleteToolTip(
-            workspaceCount: workspaces.count, hasCurrentWorkspace: currentWorkspaceId != nil)
-        titleMenu.addItem(delete)
+        titleItems.append(ChoiceItem(id: MenuID.delete,
+            title: reason.map { "\(deleteTitle) — \($0)" } ?? deleteTitle,
+            enabled: canManage && reason == nil, destructive: true,
+            toolTip: Self.deleteToolTip(workspaceCount: workspaces.count, hasCurrentWorkspace: currentWorkspaceId != nil)))
+    }
+
+    @objc private func titleClicked(_ sender: NSButton) { toggleTitlePopover() }
+
+    private func toggleTitlePopover() {
+        if titlePopover.isPresented { dismissTitlePopover(); return }
+        titleButton.isActive = true
+        titlePopover.dismissesOnAnchorClick = true
+        titlePopover.present(
+            items: titleItems, selectedID: (switchingWorkspaceId ?? currentWorkspaceId)?.uuidString,
+            presentation: .compactChoices,
+            layout: .commands(CommandPopoverLayout(maximumVisibleRows: 12, minimumWidth: 220, maximumWidth: 480)),
+            anchor: titleButton.bounds, relativeTo: titleButton,
+            accessibilityLabel: "Workspaces",
+            onSelection: { [weak self] item in
+                self?.titleButton.isActive = false
+                self?.handleTitleChoice(item)
+            }, focusReturnView: titleButton,
+            onClose: { [weak self] in self?.titleButton.isActive = false })
+        titleButton.isActive = titlePopover.isPresented
+    }
+
+    private func dismissTitlePopover() {
+        titlePopover.dismiss()
+        titleButton.isActive = false
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { dismissTitlePopover() }
+    }
+
+    /// Validate against the latest model, so a stale menu can never dispatch.
+    private func handleTitleChoice(_ item: ChoiceItem) {
+        guard titleItems.contains(where: { $0.id == item.id && $0.enabled }) else { return }
+        switch item.id {
+        case MenuID.create: onCreateWorkspace?()
+        case MenuID.rename:
+            if let currentWorkspaceId { onRenameWorkspace?(currentWorkspaceId) }
+        case MenuID.delete: deleteWorkspaceClicked()
+        default:
+            guard let id = UUID(uuidString: item.id), id != currentWorkspaceId else { return }
+            onSwitchWorkspace?(id)
+        }
     }
 
     /// The four readings of Delete, as its tooltip states them.
@@ -423,6 +452,7 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     /// paint it now: the switch holds the main thread, so a bar that waited for
     /// the next display cycle would only ever show the result.
     func beginSwitching(to workspaceId: UUID, name: String) {
+        dismissTitlePopover()
         switchingWorkspaceId = workspaceId
         titleButton.titleText = name
         renderStatus()
@@ -433,6 +463,7 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     /// The switch ended. The next `reload` puts back the truth — the target on
     /// success, the workspace still mounted on failure.
     func endSwitching() {
+        dismissTitlePopover()
         switchingWorkspaceId = nil
         renderStatus()
         rebuildTitleMenu()
@@ -443,7 +474,7 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     }
     /// The workspace the title menu checks.
     var selectedWorkspaceIdForQA: UUID? {
-        (titleMenu.items.first { $0.state == .on }?.representedObject as? String).flatMap(UUID.init(uuidString:))
+        switchingWorkspaceId ?? currentWorkspaceId
     }
 
     var managementMessageIsVisibleForQA: Bool { !managementMessageLabel.isHidden && managementMessageLabel.superview != nil }
@@ -451,7 +482,8 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     var sidebarToggleForQA: ChromeIconButton { sidebarButton }
     var commandCenterButtonForQA: ChromeIconButton { commandCenterButton }
     var titleButtonForQA: ChromeIconButton { titleButton }
-    var titleMenuForQA: NSMenu { titleMenu }
+    var titleItemsForQA: [ChoiceItem] { titleItems }
+    var titlePopoverForQA: ChoicePopoverController { titlePopover }
     var saveDotForQA: NSView? { saveDot }
     var saveFailedVisibleForQA: Bool { !statusLabel.isHidden && statusLabel.stringValue == WorkspaceDocumentSaveState.saveFailed.displayTitle }
 
@@ -470,44 +502,38 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     }
     var managementMessageForQA: String { managementMessageLabel.stringValue }
 
-    private func titleMenuItem(_ action: AgentInboxView.WorkspaceManagementAction) -> NSMenuItem? {
-        titleMenu.items.first { $0.title.hasPrefix(action.title) }
-    }
+    var deleteEnabledForQA: Bool { titleItems.first { $0.id == MenuID.delete }?.enabled ?? false }
+    var deleteToolTipForQA: String { titleItems.first { $0.id == MenuID.delete }?.toolTip ?? "" }
+    var deleteMenuTitleForQA: String { titleItems.first { $0.id == MenuID.delete }?.title ?? "" }
 
-    var deleteEnabledForQA: Bool { titleMenuItem(.delete)?.isEnabled ?? false }
-    var deleteToolTipForQA: String { titleMenuItem(.delete)?.toolTip ?? "" }
-    var deleteMenuTitleForQA: String { titleMenuItem(.delete)?.title ?? "" }
-
-    /// Drive the real `@objc` action regardless of enablement, so a witness can
-    /// assert the handler itself explains a refusal instead of returning silently.
-    func invokeDeleteActionForQA() {
-        deleteWorkspaceClicked(titleMenuItem(.delete) ?? NSMenuItem())
-    }
+    func invokeDeleteActionForQA() { deleteWorkspaceClicked() }
     var switchWorkspaceNamesForQA: [String] {
-        titleMenu.items.filter { $0.representedObject is String }.map(\.title)
+        titleItems.filter { UUID(uuidString: $0.id) != nil }.map(\.title)
     }
 
-    /// Fire a title-menu item the way AppKit does when it is picked, refusing a
-    /// greyed one as the menu would.
-    private func pickTitleMenuItem(_ item: NSMenuItem?) -> Bool {
-        guard let item, item.isEnabled, let index = titleMenu.items.firstIndex(of: item) else { return false }
-        titleMenu.performActionForItem(at: index)
+    /// Drive the same list and dispatch seam as a pick, even in unmounted checks.
+    private func pickTitleChoiceForQA(_ id: String) -> Bool {
+        guard titleItems.contains(where: { $0.id == id && $0.enabled }) else { return false }
+        if window != nil {
+            if !titlePopover.isPresented { toggleTitlePopover() }
+            titlePopover.listView?.choose(id: id)
+        } else {
+            let list = ChoiceListView(items: titleItems, selectedID: selectedWorkspaceIdForQA?.uuidString,
+                                      presentation: .compactChoices)
+            list.onSelection = { [weak self] in self?.handleTitleChoice($0) }
+            list.choose(id: id)
+        }
         return true
     }
 
     @discardableResult
-    func selectWorkspaceForQA(_ workspaceId: UUID) -> Bool {
-        pickTitleMenuItem(titleMenu.items.first { ($0.representedObject as? String) == workspaceId.uuidString })
-    }
-
+    func selectWorkspaceForQA(_ workspaceId: UUID) -> Bool { pickTitleChoiceForQA(workspaceId.uuidString) }
     @discardableResult
-    func clickCreateForQA() -> Bool { pickTitleMenuItem(titleMenuItem(.create)) }
-
+    func clickCreateForQA() -> Bool { pickTitleChoiceForQA(MenuID.create) }
     @discardableResult
-    func clickRenameForQA() -> Bool { pickTitleMenuItem(titleMenuItem(.rename)) }
-
+    func clickRenameForQA() -> Bool { pickTitleChoiceForQA(MenuID.rename) }
     @discardableResult
-    func clickDeleteForQA() -> Bool { pickTitleMenuItem(titleMenuItem(.delete)) }
+    func clickDeleteForQA() -> Bool { pickTitleChoiceForQA(MenuID.delete) }
 
     @discardableResult
     func clickToggleSidebarForQA() -> Bool {
@@ -522,29 +548,7 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         return true
     }
 
-    /// Keyboard and VoiceOver presses reach here; the mouse opens the menu on
-    /// press inside the button itself.
-    @objc private func titleClicked(_ sender: NSButton) {
-        titleButton.popUpPullDownMenu()
-    }
-
-    @objc private func workspaceItemPicked(_ sender: NSMenuItem) {
-        guard let idString = sender.representedObject as? String,
-              let workspaceId = UUID(uuidString: idString),
-              workspaceId != currentWorkspaceId else { return }
-        onSwitchWorkspace?(workspaceId)
-    }
-
-    @objc private func createWorkspaceClicked(_ sender: NSMenuItem) {
-        onCreateWorkspace?()
-    }
-
-    @objc private func renameWorkspaceClicked(_ sender: NSMenuItem) {
-        guard let currentWorkspaceId else { return }
-        onRenameWorkspace?(currentWorkspaceId)
-    }
-
-    @objc private func deleteWorkspaceClicked(_ sender: NSMenuItem) {
+    private func deleteWorkspaceClicked() {
         // 0721: say so. Reaching here with no loaded workspace used to return in
         // silence, which is indistinguishable from a broken button.
         guard let currentWorkspaceId else {

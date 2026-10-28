@@ -5961,9 +5961,8 @@ enum UIProbeGeometry {
                   tile.bounds.insetBy(dx: -0.5, dy: -0.5).contains(overflow), tile.titleBarUsesCustomOverflowForQA else {
                 throw fail("agent tile: consolidated top-bar action lost its custom hit target at \(Int(width))pt")
             }
-            guard let name = header.qaNameFrame, name.maxX <= header.bounds.maxX,
-                  name.minX >= 0, header.qaName == longName else {
-                throw fail("agent header: name label escaped its lane at \(Int(width))pt — truncation must stay inside the shell")
+            guard header.qaNameFrame == nil else {
+                throw fail("agent context: duplicated the tile title at \(Int(width))pt")
             }
             // `apply` is a live view entry point and stamps its first display from
             // the wall clock. Drive the same timer seam to the presenter's pinned

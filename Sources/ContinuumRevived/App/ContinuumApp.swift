@@ -805,6 +805,13 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        if (ProcessInfo.processInfo.environment["ARRAY_SIDEBAR_PREVIEW"] == "1"
+            || Bundle.main.bundleIdentifier == "dev.arrayapp.macos.sidebar-preview"),
+           Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier,
+           !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) {
+            SidebarRefinementsPreview.run()
+            return
+        }
         // Opt-in motion benchmark: a visible window and own-window capture, so it is
         // never a matrix leg.
         if CommandLine.arguments.contains("--canvas-motion-probe") {
@@ -1319,6 +1326,23 @@ enum ContinuumApp {
                     Foundation.exit(0)
                 } catch {
                     fputs("shell-tool-row check failed: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
+        if CommandLine.arguments.contains("--sidebar-workspace-treatment-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let out = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                        .appendingPathComponent("qa-runs/sidebar-workspace-treatment", isDirectory: true)
+                    print(try SidebarSwarmGlyphChecks.checkMetadataLayout())
+                    print(try await SidebarWorkspaceTreatmentChecks.run(outputDirectory: out))
+                    print(try SidebarIconAlignmentChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("sidebar-workspace-treatment check failed: \(error)\n", stderr)
                     Foundation.exit(1)
                 }
             }
@@ -2422,6 +2446,30 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--agent-tile-chrome-consolidation-check") {
+            do {
+                _ = NSApplication.shared
+                try AgentTileChromeConsolidationChecks.run()
+                print("AgentTileChromeConsolidationChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--transcript-viewport-clipping-check") {
+            do {
+                _ = NSApplication.shared
+                try TranscriptViewportClippingChecks.run()
+                print("TranscriptViewportClippingChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--tile-chrome-canvas-check") {
             do {
                 _ = NSApplication.shared
@@ -2881,6 +2929,16 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-selector-check") {
+            _ = NSApplication.shared
+            do {
+                print(try WorkspaceSelectorChecks.run())
+                exit(0)
+            } catch {
+                fputs("workspace-selector-check failed: \(error)\n", stderr)
+                exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--top-bar-icons-check") {
             do {
                 _ = NSApplication.shared
@@ -3018,6 +3076,18 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 let artifact = try AgentTileBindingChecks.run()
                 print("ContinuumRevivedAgentTileBindingChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--agent-native-menu-check") {
+            do {
+                _ = NSApplication.shared
+                let summary = try AgentNativeMenuChecks.run()
+                print("ContinuumRevivedAgentNativeMenuChecks passed: \(summary)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -14294,8 +14364,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         func descendants(_ view: NSView) -> [NSView] {
             view.subviews.flatMap { [$0] + descendants($0) }
         }
-        func menuTitles(_ menu: NSMenu) -> [String] {
-            menu.items.map { $0.isSeparatorItem ? "—" : $0.title }
+        func menuTitles(_ items: [ChoiceItem]) -> [String] {
+            items.flatMap { $0.separatorBefore ? ["—", $0.title] : [$0.title] }
         }
 
         let fm = FileManager.default
@@ -14400,50 +14470,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                "the search icon must sit at the bar's trailing \(WorkspaceTopBarView.identityLeading)pt margin, sits \(bar.maxX - searchFrame.maxX)pt in")
 
         // 3. The title menu: every workspace, a check on the current one, the verbs.
-        let menu = topBar.titleMenuForQA
-        menu.update()
+        let menu = topBar.titleItemsForQA
         let titleButton: ChromeIconButton? = topBar.titleButtonForQA
         expect(titleButton?.titleText == "Forest" && titleButton?.symbolName == "chevron.down",
                "the title menu reads '\(titleButton?.titleText ?? "none")' with '\(titleButton?.symbolName ?? "none")', expected 'Forest' and a chevron")
         expect(titleButton?.toolTip == "0 projects · 0 zones · empty workspace",
                "the title's tooltip must carry the counts, got '\(titleButton?.toolTip ?? "")'")
-        expect(titleButton?.pullDownMenu === menu, "the title button does not open the title menu")
+        expect(titleButton?.onOpenMenu != nil, "the title button has no choice presentation")
         expect(menuTitles(menu) == ["Forest", "Grove", "—", "New Workspace…", "Rename Workspace…", "Delete Workspace…"],
                "the title menu lists \(menuTitles(menu))")
-        expect(menu.items.filter { $0.state == .on }.map(\.title) == ["Forest"],
-               "the check must sit on the current workspace alone, got \(menu.items.filter { $0.state == .on }.map(\.title))")
-        expect(menu.items.filter { !$0.isSeparatorItem }.allSatisfy(\.isEnabled),
-               "with two workspaces every item is live, disabled: \(menu.items.filter { !$0.isSeparatorItem && !$0.isEnabled }.map(\.title))")
+        expect(menu.filter { $0.id == topBar.selectedWorkspaceIdForQA?.uuidString }.map(\.title) == ["Forest"],
+               "the check must sit on the current workspace alone, got \(menu.filter { $0.id == topBar.selectedWorkspaceIdForQA?.uuidString }.map(\.title))")
+        expect(menu.allSatisfy(\.enabled),
+               "with two workspaces every item is live, disabled: \(menu.filter { !$0.enabled }.map(\.title))")
 
         // 4. Picking a workspace switches it, through the item AppKit would fire.
-        if let index = menu.items.firstIndex(where: { $0.title == "Grove" }) {
-            menu.performActionForItem(at: index)
-        }
+        expect(topBar.selectWorkspaceForQA(grove), "Grove choice was refused")
         topBar.layoutSubtreeIfNeeded()
-        let switched = topBar.titleMenuForQA
+        let switched = topBar.titleItemsForQA
         expect(runtime.workspaceId == grove, "picking Grove from the title menu did not switch the workspace")
         expect(topBar.titleButtonForQA.titleText == "Grove"
-               && switched.items.filter { $0.state == .on }.map(\.title) == ["Grove"],
-               "after the switch the title reads '\(topBar.titleButtonForQA.titleText ?? "")' with the check on \(switched.items.filter { $0.state == .on }.map(\.title))")
+               && switched.filter { $0.id == topBar.selectedWorkspaceIdForQA?.uuidString }.map(\.title) == ["Grove"],
+               "after the switch the title reads '\(topBar.titleButtonForQA.titleText ?? "")' with the check on \(switched.filter { $0.id == topBar.selectedWorkspaceIdForQA?.uuidString }.map(\.title))")
 
         // 5. A refused Delete is disabled and says why, in the scope menu's words.
         topBar.reload(WorkspaceTopBarModel(
             currentWorkspaceId: grove, currentWorkspaceName: "Grove", projectCount: 0, zoneCount: 0,
             saveState: .saved, workspaces: [groveEntry], managementMessage: nil))
-        let only = topBar.titleMenuForQA
-        only.update()
-        let onlyDelete = only.items.last
-        expect(onlyDelete?.isEnabled == false
+        let onlyDelete = topBar.titleItemsForQA.last
+        expect(onlyDelete?.enabled == false
                && onlyDelete?.title == "Delete Workspace… — this is your only workspace — create another first"
                && (onlyDelete?.toolTip ?? "").contains("only workspace"),
-               "the last workspace's Delete reads '\(onlyDelete?.title ?? "")' enabled=\(String(describing: onlyDelete?.isEnabled)) tooltip='\(onlyDelete?.toolTip ?? "")'")
+               "the last workspace's Delete reads '\(onlyDelete?.title ?? "")' enabled=\(String(describing: onlyDelete?.enabled)) tooltip='\(onlyDelete?.toolTip ?? "")'")
         let unloaded = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 900, height: workspaceTopBarHeight))
-        let unloadedMenu = unloaded.titleMenuForQA
-        unloadedMenu.update()
-        let unloadedDelete = unloadedMenu.items.last
-        expect(unloadedDelete?.isEnabled == false && (unloadedDelete?.title ?? "").hasPrefix("Delete Workspace… — ")
+        let unloadedDelete = unloaded.titleItemsForQA.last
+        expect(unloadedDelete?.enabled == false && (unloadedDelete?.title ?? "").hasPrefix("Delete Workspace… — ")
                && (unloadedDelete?.title ?? "").contains("loading"),
-               "an unloaded bar's Delete reads '\(unloadedDelete?.title ?? "")' enabled=\(String(describing: unloadedDelete?.isEnabled))")
+               "an unloaded bar's Delete reads '\(unloadedDelete?.title ?? "")' enabled=\(String(describing: unloadedDelete?.enabled))")
 
         // 6. Save state: nothing when saved, a dot while unsaved or saving, words on failure.
         var saveReadings: [String: String] = [:]

@@ -1106,17 +1106,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// launch must not write the value back.
     var onScopeChange: ((InboxScope) -> Void)?
     // Plan: .plans/87-sidebar-liveness/README.md (quick hide/show)
-    /// The filter's second dimension: outside sources (`InboxSource`) the pills
-    /// turned off, plus `array` while an outside source is soloed. Empty at birth
+    /// Sources hidden through the scope dropdown, plus `array` while an outside
+    /// source is soloed through a host menu. Empty at birth
     /// for the reason `scope` is `.all`; the host restores and persists it.
     private(set) var hiddenSources: Set<String> = []
-    /// The user changed the hidden sources (a pill). Not called for a restore.
+    /// The user changed the hidden sources. Not called for a restore.
     var onHiddenSourcesChange: ((Set<String>) -> Void)?
-    /// The toggle pills under the search field.
-    let pillStrip = InboxFilterPillStrip()
-    private var pillStripHeight: NSLayoutConstraint?
-    private var pillStripGap: NSLayoutConstraint?
-    private let pillOverflowController = ChoicePopoverController()
     private var listBottomToView: NSLayoutConstraint?
     /// `Hidden (N)`, pinned under the list (.plans/87).
     let hiddenFooter = InboxHiddenFooter()
@@ -1437,15 +1432,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
         addSubview(scopeButton)
         addSubview(searchField)
-        pillStrip.translatesAutoresizingMaskIntoConstraints = false
-        pillStrip.setAccessibilityElement(true)
-        pillStrip.setAccessibilityRole(.group)
-        pillStrip.setAccessibilityLabel("Show or hide workspaces and apps")
-        pillStrip.setAccessibilityIdentifier("ContinuumAgentInboxPills")
-        pillStrip.isHidden = true
-        pillStrip.onPress = { [weak self] pill, flags in self?.pillPressed(pill.id, flags: flags) }
-        pillStrip.onMore = { [weak self] rect in self?.presentPillOverflow(anchor: rect) }
-        addSubview(pillStrip)
         newAgentButton.translatesAutoresizingMaskIntoConstraints = false
         newAgentButton.target = self
         newAgentButton.action = #selector(newAgentPressed)
@@ -1507,9 +1493,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         scopeButton.onFocusChange = { [weak self] id in self?.scopeFocusChanged(id) }
         scopeButton.onPopoverDismiss = { [weak self] in
             self?.colourEditingWorkspace = nil
-            // Closed inside Projects ›: the next open starts at the top level.
-            if self?.projectsDrilled == true {
+            // Reopen at the top level after either drill-in closes.
+            if self?.projectsDrilled == true || self?.sourcesDrilled == true {
                 self?.projectsDrilled = false
+                self?.sourcesDrilled = false
                 self?.updateScopeMenu()
             }
             self?.focusedScopeItemID = nil
@@ -1538,7 +1525,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
             searchField.centerYAnchor.constraint(equalTo: scopeButton.centerYAnchor),
             searchField.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            pillStrip.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
+            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
         ]
 
         // Program 96's stacked header: search owns the top row at full width, the
@@ -1553,7 +1540,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             scopeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
             scopeButton.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
             scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            pillStrip.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
+            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
         ]
         // T3 nightly's one row: [search ………][scope][+]. The scope control sizes
         // to its title and search takes the rest, down to the room its glyph and a
@@ -1579,21 +1566,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             newAgentButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             newAgentButton.widthAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
             newAgentButton.heightAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
-            pillStrip.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
+            scrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
         ]
         NSLayoutConstraint.activate(defaultHeaderConstraints)
-        // The pills take no room until there are two of them: height and gap are
-        // both zero, so the list starts exactly where it did without them.
-        let stripHeight = pillStrip.heightAnchor.constraint(equalToConstant: 0)
-        let stripGap = scrollView.topAnchor.constraint(equalTo: pillStrip.bottomAnchor, constant: 0)
-        pillStripHeight = stripHeight
-        pillStripGap = stripGap
-        NSLayoutConstraint.activate([
-            pillStrip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
-            pillStrip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
-            stripHeight, stripGap,
-        ])
-
         NSLayoutConstraint.activate([
             searchIcon.leadingAnchor.constraint(equalTo: searchField.leadingAnchor, constant: CGFloat(Space.s)),
             searchIcon.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
@@ -2385,153 +2360,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return result
     }
 
-    // MARK: - Toggle pills (.plans/87, quick hide/show)
+    // MARK: - Source filtering
 
-    /// The rows the pills count: every row but sessions hidden one by one.
-    private var pillRows: [AgentInboxRow] {
+    /// Source choices include rows hidden by a source filter, excluding individually hidden sessions.
+    private var filterableSourceRows: [AgentInboxRow] {
         let hiddenKeys = externalSessionHiding?.hiddenKeys ?? []
         guard !hiddenKeys.isEmpty else { return allRows }
         return allRows.filter { row in row.externalSession.map { !hiddenKeys.contains($0.sessionKey) } ?? true }
     }
-
-    /// Whether the WORKSPACE dimension keeps this workspace's rows.
-    private func workspaceDimensionShows(_ id: UUID, rows: [AgentInboxRow]) -> Bool {
-        let scope = effectiveScope
-        if scope == .thisMac || scope == .all { return true }
-        if let filter = scope.workspaceFilter { return filter.shows(workspace: id, current: currentWorkspaceId) }
-        // A pick (a project): on while any of its rows survives the pick.
-        return !InboxScope.filter(
-            rows: rows.filter { $0.workspaceId == id }, scope: scope,
-            currentWorkspace: currentWorkspaceName, currentWorkspaceId: currentWorkspaceId).isEmpty
-    }
-
-    /// The pills, in their fixed order: workspaces by name, then the outside
-    /// sources (`InboxSource.ordered`). A workspace pill is on while its
-    /// workspace is in the set AND Array's own agents are not soloed away.
-    func pillModels() -> [InboxFilterPillModel] {
-        let rows = pillRows
-        let shown = Set(InboxScope.filter(
-            rows: rows, scope: effectiveScope, currentWorkspace: currentWorkspaceName,
-            currentWorkspaceId: currentWorkspaceId)
-            .filter { !hiddenSources.contains(InboxSource.key(for: $0)) }.map(\.id))
-        func attention(_ rows: [AgentInboxRow]) -> Bool {
-            rows.contains { $0.lifecycle == .active && InboxTally.needsYou($0) && !shown.contains($0.id) }
-        }
-        let names = workspaceNamesById
-        let workspaceIds = names.keys.sorted { left, right in
-            let order = (names[left] ?? "").localizedCaseInsensitiveCompare(names[right] ?? "")
-            return order == .orderedSame ? left.uuidString < right.uuidString : order == .orderedAscending
-        }
-        let arrayShown = !hiddenSources.contains(InboxSource.arrayAgents)
-        var models = workspaceIds.map { id -> InboxFilterPillModel in
-            let mine = rows.filter { $0.workspaceId == id }
-            let on = arrayShown && workspaceDimensionShows(id, rows: rows)
-            return InboxFilterPillModel(
-                kind: .workspace(id), title: names[id] ?? "Workspace", swatch: workspaceColour(id), symbol: nil,
-                count: InboxTally.count(mine).agents, isOn: on, attention: !on && attention(mine))
-        }
-        var bySource: [String: [AgentInboxRow]] = [:]
-        for row in rows where row.externalSession != nil { bySource[InboxSource.key(for: row), default: []].append(row) }
-        for key in InboxSource.ordered(Set(bySource.keys)) {
-            let mine = bySource[key] ?? []
-            let on = !hiddenSources.contains(key)
-            models.append(InboxFilterPillModel(
-                kind: .source(key), title: key, swatch: nil, symbol: mine.first?.whereMarker?.symbol ?? "terminal",
-                count: InboxTally.count(mine).agents, isOn: on, attention: !on && attention(mine)))
-        }
-        return models
-    }
-
-    /// Repaint the pills, and show the row only when there are two or more.
-    private func updatePills() {
-        let models = pillModels()
-        let shows = models.count >= 2
-        pillStrip.pills = shows ? models : []
-        if pillStrip.isHidden == shows {
-            pillStrip.isHidden = !shows
-            pillStripHeight?.constant = shows ? InboxFilterPill.height : 0
-            pillStripGap?.constant = shows ? Space.xs : 0
-            needsLayout = true
-        }
-        if pillOverflowController.isPresented {
-            pillStrip.layoutSubtreeIfNeeded()
-            pillOverflowController.listView?.replace(items: pillOverflowItems())
-        }
-    }
-
-    /// A pill was pressed: a click toggles it, Option solos it. Workspace pills
-    /// write the scope's own set (`InboxScopeMenu.choose`, the popover's path);
-    /// source pills write `hiddenSources`.
-    private func pillPressed(_ id: String, flags: NSEvent.ModifierFlags) {
-        guard let pill = pillModels().first(where: { $0.id == id }) else { return }
-        let solo = flags.contains(.option)
-        let outside = Set(pillRows.filter { $0.externalSession != nil }.map(InboxSource.key(for:)))
-        let arrayKey = InboxSource.arrayAgents
-        switch pill.kind {
-        case .workspace(let workspace):
-            if solo {
-                // This workspace's agents and nothing else: every source goes off.
-                let next = InboxScopeMenu.choose(.workspace(workspace), from: scope, current: currentWorkspaceId, only: true)
-                setFilters(scope: next ?? scope, hiddenSources: outside, notify: true)
-            } else if hiddenSources.contains(arrayKey) {
-                // An outside source is soloed, so every workspace pill reads off:
-                // turning this one on brings back its agents, and only its.
-                setFilters(scope: InboxScope.normalized(.only(workspace, current: currentWorkspaceId)),
-                           hiddenSources: hiddenSources.subtracting([arrayKey]), notify: true)
-            } else {
-                // `This Mac` already shows every workspace: a click turns one off.
-                let base = scope == .thisMac ? InboxScope.all : scope
-                guard let next = InboxScopeMenu.choose(.workspace(workspace), from: base, current: currentWorkspaceId)
-                else { updatePills(); return }
-                setFilters(scope: next, hiddenSources: hiddenSources, notify: true)
-            }
-        case .source(let key):
-            if solo {
-                setFilters(scope: scope, hiddenSources: outside.subtracting([key]).union([arrayKey]), notify: true)
-            } else {
-                var next = hiddenSources
-                if next.contains(key) { next.remove(key) } else { next.insert(key) }
-                setFilters(scope: scope, hiddenSources: next, notify: true)
-            }
-        }
-    }
-
-    /// `+N`'s checklist: the pills that did not fit, as the shared checklist's
-    /// rows — a box, the dot or glyph, the count, `Only` on hover.
-    private func pillOverflowItems() -> [ChoiceItem] {
-        pillStrip.overflowed.map { pill in
-            var item = ChoiceItem(id: pill.id, title: pill.title, icon: pill.symbol.map { .system($0) })
-            item.check = pill.isOn ? .on : .off
-            item.swatch = pill.swatch
-            item.trailing = pill.attention ? nil : "\(pill.count)"
-            item.attention = pill.attention
-            item.keepsOpen = true
-            item.accessories = [ChoiceAccessory(id: "only", title: "Only", symbol: nil,
-                                                accessibilityLabel: "Show only \(pill.title)")]
-            item.optionAccessoryID = "only"
-            return item
-        }
-    }
-
-    private func presentPillOverflow(anchor: NSRect) {
-        let items = pillOverflowItems()
-        guard !items.isEmpty else { return }
-        let offscreen = presentsPopoversOffscreenForQA
-        pillOverflowController.present(
-            items: items, selectedID: nil, presentation: .checklist, anchor: anchor, relativeTo: pillStrip,
-            placementFrame: offscreen ? window?.frame : nil, takesFocus: !offscreen,
-            accessibilityLabel: "More workspaces and apps",
-            onSelection: { [weak self] item in self?.pillPressed(item.id, flags: []) },
-            focusReturnView: tableView,
-            onAccessory: { [weak self] item, _ in self?.pillPressed(item.id, flags: .option) })
-    }
-
-    /// QA: the open `+N` checklist, if any.
-    var pillOverflowListForQA: ChoiceListView? {
-        pillOverflowController.isPresented || presentsPopoversOffscreenForQA ? pillOverflowController.listView : nil
-    }
-
-    func dismissPillOverflowForQA() { pillOverflowController.dismiss() }
 
     // MARK: - The settled tail (P4.8)
 
@@ -3194,7 +3030,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the wrong scope. The tag carries the index instead of the position, so the
     /// separator between the two blocks costs nothing.
     private func updateScopeMenu() {
-        updatePills()
         var workspaces: [InboxScopeMenu.Workspace] = []
         var projects: [String] = []
         var legacyWorkspaces: [String] = []
@@ -3239,6 +3074,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             items.insert(drill, at: min(first, items.count))
             if items.indices.contains(first + 1) { items[first + 1].separatorBefore = true }
         }
+        if sourcesDrilled {
+            scopeButton.items = sourceChoiceItems()
+            restoreScopeSelection()
+            return
+        }
+        if !sourceKeys.isEmpty || !hiddenSources.isEmpty {
+            var sources = ChoiceItem(id: Self.sourcesItemId, title: "Sources", icon: .system("line.3.horizontal.decrease"))
+            sources.trailing = "›"
+            sources.keepsOpen = true
+            sources.separatorBefore = true
+            items.append(sources)
+        }
         managementItems.removeAll()
         // Keep every management affordance visible. Unsupported actions are
         // disabled in place, rather than disappearing and making the menu's
@@ -3259,6 +3106,30 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
         scopeButton.items = items
         restoreScopeSelection()
+    }
+
+    static let sourcesItemId = "sources:open"
+    static let sourcesBackItemId = "sources:back"
+    static let allSourcesItemId = "sources:all"
+    private var sourcesDrilled = false
+
+    private var sourceKeys: [String] {
+        let observed = Set(filterableSourceRows.filter { $0.externalSession != nil }.map(InboxSource.key(for:)))
+        return InboxSource.ordered(observed.union(hiddenSources).subtracting([InboxSource.arrayAgents]))
+    }
+
+    private func sourceChoiceItems() -> [ChoiceItem] {
+        var back = ChoiceItem(id: Self.sourcesBackItemId, title: "Sources", icon: .system("chevron.left"))
+        back.keepsOpen = true
+        var all = ChoiceItem(id: Self.allSourcesItemId, title: "Show all sources")
+        all.keepsOpen = true
+        all.separatorBefore = true
+        return [back, all] + ([InboxSource.arrayAgents] + sourceKeys).map { key in
+            var item = ChoiceItem(id: "source:\(key)", title: key == InboxSource.arrayAgents ? "Array agents" : key)
+            item.check = hiddenSources.contains(key) ? .off : .on
+            item.keepsOpen = true
+            return item
+        }
     }
 
     static let allWorkspacesTitle = "All workspaces"
@@ -3420,6 +3291,24 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private func choicePicked(_ item: ChoiceItem) {
+        if item.id == Self.sourcesItemId || item.id == Self.sourcesBackItemId {
+            sourcesDrilled = item.id == Self.sourcesItemId
+            setPeek(nil)
+            updateScopeMenu()
+            return
+        }
+        if item.id == Self.allSourcesItemId {
+            setHiddenSources([], notify: true)
+            return
+        }
+        if item.id.hasPrefix("source:") {
+            let key = String(item.id.dropFirst("source:".count))
+            guard key == InboxSource.arrayAgents || sourceKeys.contains(key) else { return }
+            var next = hiddenSources
+            if next.contains(key) { next.remove(key) } else { next.insert(key) }
+            setHiddenSources(next, notify: true)
+            return
+        }
         if item.id == Self.projectsItemId || item.id == Self.projectsBackItemId {
             projectsDrilled = item.id == Self.projectsItemId
             setPeek(nil)
@@ -3732,12 +3621,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
         if let card = cell as? AgentInbox96CellView {
             card.setRevealedHidden(false)
-            // .plans/87: the × IS the snooze on Array's own rows (three hours, or
-            // until it needs you), so it takes the Snooze pill's place.
+            // Keep the quick snooze behavior while presenting its actual action.
+            // External sessions retain a separate Hide control.
             let hide: (() -> Void)? = canHide(model) ? { [weak self] in self?.hideRows([id]) } : nil
-            card.configureHoverActions(snooze: hide == nil ? action(.snooze) : nil, settle: action(.settle))
-            card.configureExternalActions(moveHere: nil, copy: nil, hide: hide,
-                                          hideHelp: "Snooze for 3 hours, or until it needs you")
+            card.configureHoverActions(snooze: hide ?? action(.snooze), settle: action(.settle))
+            card.configureExternalActions(moveHere: nil, copy: nil, hide: nil)
         } else if let slim = cell as? AgentInboxSlimCellView {
             if model.closingSince != nil {
                 slim.configureBackgroundActions(
@@ -3781,9 +3669,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Every visible icon on row `id` against its line's rendered x-height.
     func iconAlignmentForQA(id: UUID) -> [AgentInbox96CellView.IconInkForQA]? {
         guard let tableRow = tableRow(forAgentId: id),
-              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+              let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
         else { return nil }
-        return card.qaIconAlignmentForQA()
+        if let card = cell as? AgentInbox96CellView { return card.qaIconAlignmentForQA() }
+        return (cell as? AgentInboxSlimCellView)?.qaIconAlignmentForQA()
     }
 
     func metadataInkGeometryForQA(id: UUID) -> [String: NSRect]? {
@@ -3792,6 +3681,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         else { return nil }
         card.layoutSubtreeIfNeeded()
         return card.qaMetadataInkGeometry
+    }
+
+    /// Press the clock through its actual target/action.
+    func clickHoverSnoozeForQA(id: UUID) -> Bool {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return false }
+        card.layoutSubtreeIfNeeded()
+        return card.clickHoverSnoozeForQA()
     }
 
     /// Press a hovered row's × through its own button.
@@ -4567,7 +4465,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
         let sameHost = rows.filter { Self.hostLabel(of: $0) == host && canHide($0) }.map(\.id)
         let source = InboxSource.key(for: model)
-        let sourceRows = pillRows.filter { $0.externalSession != nil && InboxSource.key(for: $0) == source }
+        let sourceRows = filterableSourceRows.filter { $0.externalSession != nil && InboxSource.key(for: $0) == source }
         // "Show only tmux" while every session of the pill is tmux; the pill's own
         // name once it gathers more than one host (Terminal holds tmux too).
         let onlyName = sourceRows.allSatisfy { Self.hostLabel(of: $0) == host } ? host : source
@@ -4590,7 +4488,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             case Self.hideThisSessionItemId:
                 self.hideRows([rowId])
             case Self.showOnlyHostItemId:
-                let outside = Set(self.pillRows.filter { $0.externalSession != nil }.map(InboxSource.key(for:)))
+                let outside = Set(self.filterableSourceRows.filter { $0.externalSession != nil }.map(InboxSource.key(for:)))
                 self.setFilters(scope: self.scope,
                                 hiddenSources: outside.subtracting([source]).union([InboxSource.arrayAgents]),
                                 notify: true)
@@ -7978,15 +7876,14 @@ enum RowDisclosure: Equatable {
 
 /// The identity colour dot on a slim row: one filled circle in a palette tint.
 /// Not `TokenThemed` — the tint is a user-chosen zone colour outside
-/// `DesignTokens`, and the row that owns it repaints it on every apply. Its
-/// baseline is its bottom edge, so in the row's first-baseline stack a 6pt dot
-/// sits on the name's baseline and fills its x-height.
+/// `DesignTokens`, and the row that owns it repaints it on every apply. The
+/// owning row aligns its centre to the name's optical line, independently of
+/// AppKit's baseline treatment of a non-text arranged view.
 @MainActor
 final class InboxIdentityDotView: NSView {
     var colour: NSColor? { didSet { needsDisplay = true } }
 
     override var isFlipped: Bool { true }
-    override var firstBaselineOffsetFromTop: CGFloat { bounds.height }
     override var intrinsicContentSize: NSSize {
         NSSize(width: AgentInboxView.identityDotSide, height: AgentInboxView.identityDotSide)
     }
@@ -10160,6 +10057,12 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     /// no colour, and a hidden arranged view is detached from the stack: a row
     /// with no colour lays out exactly as it did before the dot existed.
     private let identityDot = InboxIdentityDotView()
+    // Width belongs to the text stack; icon ink follows the title's optical
+    // centre independently of AppKit's baseline policy for non-text views.
+    private let identitySlot = NSView()
+    private let glyphSlot = NSView()
+    private let disclosureSlot = NSView()
+    private var opticalConstraints: [(NSView, NSLayoutConstraint)] = []
     private let titleLabel = NSTextField(labelWithString: "")
     private let branchLabel = NSTextField(labelWithString: "")
     private let timeLabel = NSTextField(labelWithString: "")
@@ -10245,13 +10148,26 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         // measured tiers below rather than letting Auto Layout choose which
         // optional fact to squeeze.
         identityDot.isHidden = true
-        let line = NSStackView(views: [disclosureButton, glyphLabel, identityDot, titleLabel, branchLabel, timeLabel])
+        let line = NSStackView(views: [disclosureSlot, glyphSlot, identitySlot, titleLabel, branchLabel, timeLabel])
         line.orientation = .horizontal
         line.alignment = .firstBaseline
         line.distribution = .fill
         line.spacing = Space.m
         line.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(line)
+        for (slot, icon) in [(disclosureSlot, disclosureButton as NSView),
+                             (glyphSlot, glyphLabel as NSView), (identitySlot, identityDot as NSView)] {
+            slot.translatesAutoresizingMaskIntoConstraints = false
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            card.addSubview(icon)
+            let optical = icon.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor)
+            opticalConstraints.append((icon, optical))
+            NSLayoutConstraint.activate([
+                slot.heightAnchor.constraint(equalToConstant: 1),
+                slot.widthAnchor.constraint(equalTo: icon.widthAnchor),
+                icon.leadingAnchor.constraint(equalTo: slot.leadingAnchor), optical,
+            ])
+        }
 
         let leading = card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0)
         leadingInset = leading
@@ -10331,11 +10247,11 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         card.addSubview(backgroundStopAction)
         NSLayoutConstraint.activate([
             hoverAction.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Inset.row.right),
-            hoverAction.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            hoverAction.centerYAnchor.constraint(equalTo: identityDot.centerYAnchor),
             hoverAction.widthAnchor.constraint(equalToConstant: 20),
             hoverAction.heightAnchor.constraint(equalToConstant: 20),
             pairedStop,
-            backgroundStopAction.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            backgroundStopAction.centerYAnchor.constraint(equalTo: identityDot.centerYAnchor),
             backgroundStopAction.widthAnchor.constraint(equalToConstant: 20),
             backgroundStopAction.heightAnchor.constraint(equalToConstant: 20),
         ])
@@ -10623,6 +10539,60 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         glyphLabel.alphaValue = isInteracting ? Opacity.full : Opacity.receded
         appliedTier = nil
         applyFitTier()
+        updateOpticalAlignment()
+    }
+
+    /// Cache glyph/reference raster geometry when content or scale changes,
+    /// never during layout. Insets are expressed in the unflipped card space.
+    private func updateOpticalAlignment() {
+        let scale = window?.backingScaleFactor ?? 2
+        let titleHeight = titleLabel.intrinsicContentSize.height
+        let titleCentre = InkProbe.xHeightCentre(font: titleLabel.font!, height: titleHeight, scale: scale)
+        let titleOffset = titleHeight / 2 - titleCentre
+        for (icon, constraint) in opticalConstraints {
+            if icon === identityDot {
+                constraint.constant = -titleOffset
+                continue
+            }
+            let size = icon.intrinsicContentSize
+            let appearanceKey = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])?.rawValue ?? "default"
+            let key: String
+            if icon === glyphLabel { key = "slim-status:\(appearanceKey):\(glyphLabel.stringValue)" }
+            else { key = "slim-disclosure:\(appearanceKey):\(disclosureButton.qaTitle)" }
+            let ink = InkProbe.cachedInk(key, scale: scale) {
+                if icon === self.glyphLabel {
+                    let probe = NSTextField(labelWithString: self.glyphLabel.stringValue)
+                    probe.font = self.glyphLabel.font
+                    probe.appearance = self.effectiveAppearance
+                    probe.frame = NSRect(origin: .zero, size: size)
+                    return probe
+                }
+                let probe = InboxDisclosureButton()
+                probe.appearance = self.effectiveAppearance
+                probe.show(self.shown?.disclosure ?? .none,
+                           childCount: max(0, Int(self.disclosureButton.qaTitle.split(separator: " ").last ?? "0") ?? 0))
+                probe.frame = NSRect(origin: .zero, size: size)
+                return probe
+            }
+            constraint.constant = -titleOffset + (size.height / 2 - (ink?.midY ?? size.height / 2))
+        }
+        // AppKit centre-Y constraint constants run top-down; the raster offsets
+        // above were measured top-down and converted to bottom-up optical shifts.
+        for button in [hoverAction, backgroundStopAction] {
+            button.opticalCentreY = 10
+        }
+        identitySlot.isHidden = identityDot.isHidden
+        disclosureSlot.isHidden = disclosureButton.isHidden
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateOpticalAlignment()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateOpticalAlignment()
     }
 
     override func layout() {
@@ -10842,6 +10812,34 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         case .active, .archived:
             return ""
         }
+    }
+
+    func qaIconAlignmentForQA() -> [AgentInbox96CellView.IconInkForQA] {
+        layoutSubtreeIfNeeded()
+        let scale = window?.backingScaleFactor ?? 2
+        guard let band = InkProbe.xHeightBand(of: titleLabel, scale: scale) else { return [] }
+        let titleFrame = titleLabel.convert(titleLabel.bounds, to: card)
+        let centre = titleFrame.maxY - (band.top + band.bottom) / 2
+        var result: [AgentInbox96CellView.IconInkForQA] = []
+        for (name, view) in [("slim identity dot", identityDot as NSView),
+                              ("slim status", glyphLabel as NSView),
+                              ("slim disclosure", disclosureButton as NSView),
+                              ("hover slim restore", hoverAction as NSView),
+                              ("hover slim stop", backgroundStopAction as NSView)] where !view.isHidden {
+            let fill = view.layer?.backgroundColor
+            view.layer?.backgroundColor = nil
+            defer { view.layer?.backgroundColor = fill }
+            guard let ink = InkProbe.ink(of: view, scale: scale) else { continue }
+            let frame = view.convert(view.bounds, to: card)
+            var reading = AgentInbox96CellView.IconInkForQA(
+                name: name, inkMidY: frame.maxY - ink.midY,
+                lineCentreY: centre, neighbour: titleLabel.stringValue)
+            if view is NSButton || view === identityDot {
+                reading.horizontalDelta = ink.midX - view.bounds.midX
+            }
+            result.append(reading)
+        }
+        return result
     }
 
     var qaAgentID: UUID? { shown?.row.id }

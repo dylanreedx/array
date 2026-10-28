@@ -369,8 +369,8 @@ enum ManagedAgentPageZoomChecks {
     /// virtualizer, not the zoom. The transcript's own scaling is asserted
     /// through its measured row heights and its measurement identity instead.
     private static func stableFontSizes(_ tile: ManagedAgentTileNSView) -> [CGFloat] {
-        (resolvedFontSizes(in: tile.qaPageZoomHeaderView)
-            + resolvedFontSizes(in: tile.qaPageZoomComposeBackdrop)).sorted()
+        // Session context now belongs to the compose subtree; count it once.
+        resolvedFontSizes(in: tile.qaPageZoomComposeBackdrop)
     }
 
     private static let steps = AgentPageZoom.steps.map(AgentPageZoom.init(percent:))

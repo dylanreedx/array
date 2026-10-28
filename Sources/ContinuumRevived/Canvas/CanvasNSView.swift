@@ -11718,6 +11718,7 @@ final class CanvasNSView: NSView, TokenThemed {
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("tile-chrome-scale", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try AgentOverflowSizingChecks.run(in: directory)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)

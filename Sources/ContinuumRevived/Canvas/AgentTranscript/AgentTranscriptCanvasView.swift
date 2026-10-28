@@ -352,6 +352,10 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         toolDetail = AgentTranscriptCanvasToolDetail(store: toolDetailStore)
         super.init(frame: .zero)
         wantsLayer = true
+        // This view owns scrolling, without an NSClipView. Its viewport must
+        // contain partial rows and the gyro sublayer above the tile's chrome.
+        clipsToBounds = true
+        layer?.masksToBounds = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
         layer?.addSublayer(gyro)
         gyro.isHidden = true
@@ -909,6 +913,11 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
 
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
+        // Visibility culling admits whole lines/cards crossing either edge;
+        // trim their ink as well, including direct/offscreen drawing contexts.
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.clip(to: bounds)
         qaDrawCount += 1
         // The device transform carries the layer's contentsScale (the CTM does
         // not, under Core Animation's drawing contexts).

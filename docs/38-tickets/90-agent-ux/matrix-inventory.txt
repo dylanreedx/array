@@ -20,6 +20,7 @@ check --agent-local-file-link-check
 check --agent-message-bus-check
 check --agent-message-card-check
 check --agent-message-transcript-check
+check --agent-native-menu-check
 check --agent-observer-independence-check
 check --agent-paused-elsewhere-check
 check --agent-presence-check
@@ -33,6 +34,7 @@ check --agent-steering-runner-check
 check --agent-stop-outcome-check
 check --agent-supervisor-check
 check --agent-tile-binding-check
+check --agent-tile-chrome-consolidation-check
 check --agent-tile-click-focus-check
 check --agent-tile-file-mention-check
 check --agent-tile-reference-check
@@ -224,6 +226,7 @@ check --sidebar-scope-popover-check
 check --sidebar-screenshot-check
 check --sidebar-truth-check
 check --sidebar-ux-check
+check --sidebar-workspace-treatment-check
 check --single-zone-compat-check
 check --spawn-arrange-commit-check
 check --spawn-focus-policy-check
@@ -270,6 +273,7 @@ check --transcript-provider-parity-check
 check --transcript-rehydration-check
 check --transcript-rhythm-check
 check --transcript-turn-cards-check
+check --transcript-viewport-clipping-check
 check --ui-baseline-check
 check --ui-contrast-check
 check --ui-geometry-check
@@ -305,6 +309,7 @@ check --workspace-restart-fault-check
 check --workspace-runtime-install-check
 check --workspace-saver-identity-check
 check --workspace-scene-owner-check
+check --workspace-selector-check
 check --workspace-sidebar-actions-check
 check --workspace-sidebar-default-visible-check
 check --workspace-sidebar-live-status-check
@@ -346,6 +351,8 @@ leg run git diff --check
 leg run scripts/check-agent-tile-ux-program.sh
 leg run scripts/check-sidebar-native-ux-program.sh
 leg run swift build
+leg run swift build --disable-sandbox --skip-update --product Array
+leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
 leg run swift build --product Array
 leg run swift build --product ContinuumRevivedCoreChecks
 leg run swift run ContinuumRevivedSyncIntegrationChecks
@@ -367,6 +374,7 @@ leg run_app_check .build/debug/Array --agent-inventory-wiring-check
 leg run_app_check .build/debug/Array --agent-local-file-link-check
 leg run_app_check .build/debug/Array --agent-message-bus-check
 leg run_app_check .build/debug/Array --agent-message-card-check
+leg run_app_check .build/debug/Array --agent-native-menu-check
 leg run_app_check .build/debug/Array --agent-observer-independence-check
 leg run_app_check .build/debug/Array --agent-paused-elsewhere-check
 leg run_app_check .build/debug/Array --agent-presence-check
@@ -377,6 +385,7 @@ leg run_app_check .build/debug/Array --agent-steering-recovery-check
 leg run_app_check .build/debug/Array --agent-stop-outcome-check
 leg run_app_check .build/debug/Array --agent-supervisor-check
 leg run_app_check .build/debug/Array --agent-tile-binding-check
+leg run_app_check .build/debug/Array --agent-tile-chrome-consolidation-check
 leg run_app_check .build/debug/Array --agent-tile-click-focus-check
 leg run_app_check .build/debug/Array --agent-tile-file-mention-check
 leg run_app_check .build/debug/Array --agent-tile-reference-check
@@ -543,6 +552,7 @@ leg run_app_check .build/debug/Array --sidebar-scope-popover-check
 leg run_app_check .build/debug/Array --sidebar-screenshot-check
 leg run_app_check .build/debug/Array --sidebar-truth-check
 leg run_app_check .build/debug/Array --sidebar-ux-check
+leg run_app_check .build/debug/Array --sidebar-workspace-treatment-check
 leg run_app_check .build/debug/Array --single-zone-compat-check
 leg run_app_check .build/debug/Array --spawn-arrange-commit-check
 leg run_app_check .build/debug/Array --spawn-focus-policy-check
@@ -587,6 +597,7 @@ leg run_app_check .build/debug/Array --transcript-delta-index-oracle-check
 leg run_app_check .build/debug/Array --transcript-provider-parity-check
 leg run_app_check .build/debug/Array --transcript-rhythm-check
 leg run_app_check .build/debug/Array --transcript-turn-cards-check
+leg run_app_check .build/debug/Array --transcript-viewport-clipping-check
 leg run_app_check .build/debug/Array --ui-baseline-check
 leg run_app_check .build/debug/Array --ui-contrast-check
 leg run_app_check .build/debug/Array --ui-geometry-check
@@ -619,6 +630,7 @@ leg run_app_check .build/debug/Array --workspace-restart-fault-check
 leg run_app_check .build/debug/Array --workspace-runtime-install-check
 leg run_app_check .build/debug/Array --workspace-saver-identity-check
 leg run_app_check .build/debug/Array --workspace-scene-owner-check
+leg run_app_check .build/debug/Array --workspace-selector-check
 leg run_app_check .build/debug/Array --workspace-sidebar-actions-check
 leg run_app_check .build/debug/Array --workspace-sidebar-default-visible-check
 leg run_app_check .build/debug/Array --workspace-sidebar-live-status-check

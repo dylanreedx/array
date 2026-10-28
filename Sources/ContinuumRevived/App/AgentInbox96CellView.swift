@@ -43,6 +43,13 @@ final class InboxSettleNudgeButton: NSButton, TokenThemed {
 
     override var intrinsicContentSize: NSSize { cell?.cellSize ?? .zero }
 
+    // This control paints its complete bounds. NSButton's native alignment rect
+    // inherits bezel/image insets; using that rect in Auto Layout displaced the
+    // slim row's constrained capsules by a symbol-dependent 2–5 points.
+    override var alignmentRectInsets: NSEdgeInsets {
+        NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+    }
+
     override func layout() {
         super.layout()
         layer?.applyCapsule()
@@ -122,15 +129,18 @@ private final class InboxSettleNudgeCell: NSButtonCell {
     /// own drawing, without a fill.
     private static var iconInks: [String: NSCache<NSImage, NSNumber>] = [:]
     private static var titleXCentres: [String: CGFloat] = [:]
+    private static var iconXInks: [String: NSCache<NSImage, NSNumber>] = [:]
     private static func probeInk(scale: CGFloat, image: NSImage?, title: NSAttributedString,
-                                 part: (NSButtonCell, NSRect) -> NSRect) -> CGFloat? {
+                                 horizontal: Bool = false, part: (NSButtonCell, NSRect) -> NSRect) -> CGFloat? {
         let probe = InboxSettleNudgeButton(frame: .zero)
         probe.image = image
         probe.attributedTitle = title
         probe.setFrameSize(probe.intrinsicContentSize)
         guard let cell = probe.cell as? NSButtonCell else { return nil }
         let rect = part(cell, probe.bounds)
-        return InkProbe.ink(of: probe, scale: scale, in: rect.insetBy(dx: -1, dy: -1)).map { $0.midY - rect.minY }
+        return InkProbe.ink(of: probe, scale: scale, in: rect.insetBy(dx: -1, dy: -1)).map {
+            horizontal ? $0.midX - rect.minX : $0.midY - rect.minY
+        }
     }
     private func iconInkMidY(scale: CGFloat) -> CGFloat {
         guard let image else { return 0 }
@@ -144,6 +154,19 @@ private final class InboxSettleNudgeCell: NSButtonCell {
         cache.setObject(NSNumber(value: Double(mid)), forKey: image)
         return mid
     }
+    private func iconInkMidX(scale: CGFloat) -> CGFloat {
+        guard let image else { return 0 }
+        let key = "\(scale)"
+        let cache = Self.iconXInks[key] ?? NSCache<NSImage, NSNumber>()
+        Self.iconXInks[key] = cache
+        if let cached = cache.object(forKey: image) { return CGFloat(cached.doubleValue) }
+        let mid = Self.probeInk(scale: scale, image: image, title: NSAttributedString(), horizontal: true) {
+            $0.imageRect(forBounds: $1)
+        } ?? image.size.width / 2
+        cache.setObject(NSNumber(value: Double(mid)), forKey: image)
+        return mid
+    }
+
     private func titleXCentre(scale: CGFloat) -> CGFloat {
         let font = attributedTitle.length > 0
             ? attributedTitle.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil
@@ -158,7 +181,7 @@ private final class InboxSettleNudgeCell: NSButtonCell {
     }
 
     override var cellSize: NSSize {
-        let icon = iconSize.width > 0 ? iconSize.width + InboxSettleNudgeButton.iconTextGap : 0
+        let icon = iconSize.width > 0 ? iconSize.width + (title.isEmpty ? 0 : InboxSettleNudgeButton.iconTextGap) : 0
         return NSSize(
             width: InboxSettleNudgeButton.horizontalPadding * 2 + icon + textSize.width,
             height: InboxSettleNudgeButton.height)
@@ -170,7 +193,10 @@ private final class InboxSettleNudgeCell: NSButtonCell {
         let y = opticalLine.map { InkProbe.snap($0.y - iconInkMidY(scale: $0.scale), scale: $0.scale) }
             ?? ((rect.height - size.height) / 2).rounded()
         return NSRect(
-            x: rect.minX + InboxSettleNudgeButton.horizontalPadding,
+            x: rect.minX + (title.isEmpty
+                ? opticalLine.map { InkProbe.snap(rect.width / 2 - iconInkMidX(scale: $0.scale), scale: $0.scale) }
+                    ?? (rect.width - size.width) / 2
+                : InboxSettleNudgeButton.horizontalPadding),
             y: rect.minY + y, width: size.width, height: size.height)
     }
 
@@ -583,19 +609,57 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     let anatomy: SidebarRowAnatomy
 
     private let card = AgentInboxCardView()
-    // Plan: .plans/86-workspace-filter/README.md
-    /// The workspace's colour as a short bar in the sidebar's leading gutter, set
-    /// by the list only while it shows more than one workspace.
-    private let workspaceMark = ChoiceDotView()
-    var workspaceMarkColour: NSColor? {
-        get { workspaceMark.colour }
-        set {
-            workspaceMark.colour = newValue
-            workspaceMark.isHidden = newValue == nil
-            needsLayout = true
-        }
+    /// Workspace identity stays within the card; the agent's own colour dot
+    /// remains a separate title decoration. Alternatives are QA-only.
+    enum WorkspaceTreatment: String, CaseIterable {
+        case outline, wash, iconBadge, workspaceLabel, projectText
     }
-    var qaWorkspaceMarkFrame: NSRect? { workspaceMark.isHidden ? nil : workspaceMark.frame }
+    var workspaceTreatmentForQA: WorkspaceTreatment = .iconBadge {
+        didSet { needsLayout = true }
+    }
+    private let workspaceLabel = NSTextField(labelWithString: "")
+    private var workspaceLabelNaturalWidth: CGFloat = 0
+    var workspaceMarkColour: NSColor? {
+        didSet { needsLayout = true }
+    }
+    var qaWorkspaceMarkFrame: NSRect? {
+        guard workspaceMarkColour != nil else { return nil }
+        if !workspaceLabel.isHidden { return workspaceLabel.convert(workspaceLabel.bounds, to: self) }
+        return decorations.workspaceSlot.map { decorations.convert($0, to: self) }
+    }
+    var qaWorkspaceTreatmentIsInsideCard: Bool {
+        guard let frame = qaWorkspaceMarkFrame else { return workspaceMarkColour == nil }
+        return card.frame.insetBy(dx: -0.5, dy: -0.5).contains(frame)
+    }
+    var qaWorkspaceLabel: String? { workspaceLabel.isHidden ? nil : workspaceLabel.stringValue }
+    var qaWorkspaceIconBadgeGeometry: (badge: NSRect, ink: NSRect, textCentre: CGFloat, textGap: CGFloat, statusClear: Bool)? {
+        guard workspaceTreatmentForQA == .iconBadge, workspaceMarkColour != nil,
+              let slot = decorations.workspaceSlot, let ink = qaRenderedInk(projectIcon),
+              let textCentre = qaLineCentre(of: placementLabel) else { return nil }
+        let badge = decorations.convert(slot, to: card)
+        let status = throbber?.frame ?? (statusGlyph.isHidden ? nil : statusGlyph.frame)
+        return (badge, ink, textCentre, placementLabel.frame.minX - badge.maxX,
+                status.map { !$0.intersects(badge) } ?? true)
+    }
+    var qaWorkspaceTextForQA: NSTextField? {
+        if workspaceTreatmentForQA == .workspaceLabel, !workspaceLabel.isHidden { return workspaceLabel }
+        if workspaceTreatmentForQA == .projectText, workspaceMarkColour != nil { return placementLabel }
+        return nil
+    }
+
+    /// Palette swatches identify a workspace; small type needs semantic text ink.
+    /// Keep the selected hue in the badge fill and blend the existing primary
+    /// token over that hue for legible text in the current appearance.
+    private func workspaceTextInk(_ colour: NSColor) -> NSColor {
+        guard let rgb = colour.usingColorSpace(.sRGB) else {
+            return TextToken.textPrimary.color.nsColor(in: self)
+        }
+        let hue = ChipColor(r: rgb.redComponent, g: rgb.greenComponent, b: rgb.blueComponent)
+        let theme = effectiveTokenTheme
+        let primary = TextToken.textPrimary.color.resolved(for: theme)
+        return TokenColor(primary.composited(over: hue, alpha: theme == .light ? 0.82 : 0.88))
+            .nsColor(for: theme)
+    }
 
     /// The sidebar peek's dimming, on this cell's CONTENTS rather than on the cell:
     /// the cell's own opacity belongs to the list's row motion, which hides a live
@@ -620,7 +684,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// T3 nightly's hover actions (confidence pass, sidebar stream): the status
     /// slot cross-fades to [Snooze] [Settle] while the pointer is over the row.
     private let hoverSnooze = InboxRowHoverActionButton(symbol: "clock", label: "Snooze")
-    private let hoverSettle = InboxRowHoverActionButton(symbol: "checkmark", label: "Settle")
+    private let hoverSettle = InboxRowHoverActionButton(symbol: "tray.and.arrow.down", label: "Settle")
     private var onHoverSnooze: (() -> Void)?
     private var onHoverSettle: (() -> Void)?
     private var hoverActionsShown = false
@@ -649,6 +713,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private static var metadataSymbols: [String: NSImage] = [:]
     private var metadataRasterScale: CGFloat = 1
     private var projectIconInkCenterY: CGFloat = 6
+    private var projectIconInkRect = NSRect(x: 0, y: 0, width: 12, height: 12)
     private var whereIconInkCenterY: CGFloat = 6
 
     private static func metadataSymbol(_ name: String, pointSize: CGFloat? = nil) -> NSImage? {
@@ -670,11 +735,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private var statusInkMidY: CGFloat = 0
     private var branchInkMidY: CGFloat = 0
     private var markInkMidY: CGFloat = 0
-    private var hoverSnoozeInkMidY: CGFloat = 0
-    private var hoverSettleInkMidY: CGFloat = 0
     private static let branchGlyphSide: CGFloat = 11
     private static let markSide: CGFloat = 14
-    private static let hoverActionSide: CGFloat = 20
 
     /// Ink midY of `image` as `view` paints it in a `side` square at `scale`,
     /// top-down, measured once per image, kind, side and scale through the real
@@ -709,6 +771,26 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
     }
 
+    private static var metadataInkRects: [CGFloat: NSCache<NSImage, NSValue>] = [:]
+    /// Native image ink cached when content/backing changes, never in layout.
+    private static func metadataInkRect(of image: NSImage?, scale: CGFloat) -> NSRect {
+        let box = NSRect(x: 0, y: 0, width: metadataIconSide, height: metadataIconSide)
+        guard let image else { return box }
+        let cache: NSCache<NSImage, NSValue>
+        if let existing = metadataInkRects[scale] { cache = existing } else {
+            cache = NSCache<NSImage, NSValue>()
+            cache.countLimit = 64
+            metadataInkRects[scale] = cache
+        }
+        if let cached = cache.object(forKey: image) { return cached.rectValue }
+        let view = NSImageView(frame: box)
+        view.imageScaling = .scaleProportionallyDown
+        view.image = image
+        let ink = InkProbe.ink(of: view, scale: scale) ?? box
+        cache.setObject(NSValue(rect: ink), forKey: image)
+        return ink
+    }
+
     /// The line centres and the fixed icons' ink, for this backing scale.
     private func refreshInkMetrics() {
         let scale = metadataRasterScale
@@ -716,23 +798,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             InkProbe.xHeightCentre(font: placementLabel.font ?? .token(.caption), height: proposal.bandTop, scale: scale),
             InkProbe.xHeightCentre(font: titleLabel.font ?? .token(.title), height: proposal.bandTitle, scale: scale),
             InkProbe.xHeightCentre(font: branchLabel.font ?? .token(.label), height: proposal.bandDetail, scale: scale))
-        let side = Self.hoverActionSide
-        func hoverInk(_ symbol: String, _ label: String) -> CGFloat {
-            InkProbe.cachedInk("hover:\(symbol):\(side)", scale: scale) {
-                let probe = InboxRowHoverActionButton(symbol: symbol, label: label)
-                probe.frame = NSRect(x: 0, y: 0, width: side, height: side)
-                return probe
-            }?.midY ?? side / 2
-        }
-        hoverSnoozeInkMidY = hoverInk("clock", "Snooze")
-        hoverSettleInkMidY = hoverInk("checkmark", "Settle")
         refreshContentInk()
     }
 
     /// The ink of what THIS row draws: called when its content or scale changes.
     private func refreshContentInk() {
         let scale = metadataRasterScale
-        projectIconInkCenterY = Self.metadataInkCenter(of: projectIcon.image, scale: scale)
+        projectIconInkRect = Self.metadataInkRect(of: projectIcon.image, scale: scale)
+        projectIconInkCenterY = projectIconInkRect.midY
         whereIconInkCenterY = Self.metadataInkCenter(of: whereIcon.image, scale: scale)
         let alignment = statusGlyph.alignment, fraction = statusGlyph.inkFraction
         statusInkMidY = Self.inkMidY("status:\(alignment):\(fraction)",
@@ -869,13 +942,15 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
         addSubview(groupBackground)
         addSubview(card)
-        workspaceMark.isHidden = true
-        workspaceMark.isRounded = true
-        addSubview(workspaceMark)
+        workspaceLabel.isHidden = true
+        workspaceLabel.font = .token(.caption)
+        workspaceLabel.lineBreakMode = .byTruncatingTail
+        workspaceLabel.setAccessibilityIdentifier("ContinuumSidebarWorkspaceLabel")
         // ABOVE the card: a parent's descender crosses its own card's leading
         // inset, and the card paints a fill while hovered, selected or active.
         addSubview(spine)
         card.addSubview(decorations)
+        card.addSubview(workspaceLabel)
         card.addSubview(statusGlyph)
 
         metadataRasterScale = NSScreen.main?.backingScaleFactor ?? 1
@@ -1033,6 +1108,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         self.indent = indent
         card.isSelected = isSelected
 
+        // Measure metadata only when its content changes, outside layout.
+        let workspaceName = row.workspaceName ?? "Workspace"
+        if workspaceLabel.stringValue != workspaceName {
+            workspaceLabel.stringValue = workspaceName
+            workspaceLabel.toolTip = "Workspace: \(workspaceName)"
+            workspaceLabelNaturalWidth = Self.width(of: workspaceLabel)
+        }
         let placement = row.directoryName ?? row.projectName ?? ""
         placementLabel.stringValue = placement
         whereLabel.stringValue = row.whereMarker?.text ?? ""
@@ -1287,7 +1369,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private func applyColours() {
         guard let shown else { return }
         let row = shown.row
-        placementLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        placementLabel.textColor = workspaceTreatmentForQA == .projectText
+            ? workspaceMarkColour.map(workspaceTextInk) ?? TextToken.textSecondary.color.nsColor(in: self)
+            : TextToken.textSecondary.color.nsColor(in: self)
+        if let colour = workspaceMarkColour { workspaceLabel.textColor = workspaceTextInk(colour) }
         projectIcon.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         whereDot.textColor = TextToken.textSecondary.color.nsColor(in: self)
         whereLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
@@ -1310,7 +1395,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         decorations.markColour = BrandMark96.foreground(in: self)
         settleNudge.applyTokens()
         for button in [hoverSnooze, hoverSettle] {
-            button.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+            button.applyTokens()
         }
 
         // Recession is the row's words, never its accent: `accentOpacity` paints the
@@ -1452,13 +1537,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             width: max(0, bounds.width - gutter * 2 - CGFloat(indent)),
             height: max(0, bounds.height - gap - groupEndGap))
         decorations.frame = card.bounds
-        // Three points in from the SIDEBAR's edge, whatever this cell's own inset
-        // and the row's indent are: every workspace's marks line up in one column.
-        // Placed only while shown: a hidden mark's frame would follow whether the
-        // cell has found its scroll view yet, and move under every relayout.
-        if !workspaceMark.isHidden {
-            let markX = enclosingScrollView.map { convert(NSPoint(x: 3, y: 0), from: $0).x } ?? 0
-            workspaceMark.frame = NSRect(x: markX, y: card.frame.minY + 10, width: 3, height: max(10, card.frame.height - 20))
+        decorations.workspaceColour = workspaceMarkColour
+        decorations.workspaceTreatment = workspaceTreatmentForQA
+        decorations.workspaceSlot = nil
+        workspaceLabel.isHidden = true
+        if workspaceMarkColour != nil,
+           workspaceTreatmentForQA == .outline || workspaceTreatmentForQA == .wash {
+            decorations.workspaceSlot = decorations.bounds.insetBy(dx: 0.5, dy: 0.5)
         }
         // THE CONNECTOR BLEEDS INTO THE INTERCELL SPACING, by half of it at each
         // end, so the lanes of two stacked rows meet exactly. A cell owns its own
@@ -1492,7 +1577,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             rowHeight: Double(bounds.height + bleed * 2))
 
         let insetH: CGFloat = 10
-        var textLeft = insetH + anatomy.leadingGutter
+        let metadataLeft = insetH + anatomy.leadingGutter
+        var textLeft = metadataLeft
         let textRight = card.bounds.width - insetH
 
         // THE FOLD CONTROL LIVES IN THE CONNECTOR LANE, not in the text column.
@@ -1500,15 +1586,15 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // parent's control and its child's title within 2 pt of the same x — the
         // reported defect: the second group under the first read as nested inside
         // it. Centred on `spineX(depth)` instead, its glyph is the head of its own
-        // descender. It takes the card's full height across the lane and the
-        // count, so the fold target is generous and the rest of the card is
-        // "go to agent"; the glyph sits on the title's line.
+        // descender. Its generous title/detail target clears the metadata band,
+        // which uses the card's own leading inset; the glyph stays on the title.
         if !disclosureButton.isHidden, let shown {
             let trailing = Self.disclosureTrailing(
                 for: shown.disclosure, childCount: shown.rollup?.children ?? 0)
-            disclosureButton.frame = NSRect(x: 0, y: 0, width: trailing, height: card.bounds.height)
-            disclosureButton.glyphCentreY = proposal.insetV + proposal.bandTop + proposal.gapTop
-                + lineCentres.title
+            let titleTop = proposal.insetV + proposal.bandTop + proposal.gapTop
+            disclosureButton.frame = inCard(NSRect(
+                x: 0, y: titleTop, width: trailing, height: card.bounds.height - titleTop))
+            disclosureButton.glyphCentreY = lineCentres.title
             textLeft = max(textLeft, trailing + CGFloat(Space.s))
         }
         // A CHILD'S TITLE CLEARS ITS PARENT'S CONTROL. One indent level is 16pt
@@ -1535,7 +1621,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let metaRight = settleNudge.isHidden ? textRight : textRight - nudgeSize.width - 6
         let stateWidth = stateLabel.isHidden
             ? 0 : min(card.bounds.width * 0.55, Self.width(of: stateLabel))
-        var placementLeft = textLeft
+        var placementLeft = metadataLeft
         var trailingIconWidth: CGFloat = 0
         // Every icon on a line puts its measured INK on the line's x-height
         // centre, on the backing grid. The gyro is point-symmetric about its box.
@@ -1543,7 +1629,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let statusY = snapped(topLine - (isWorking ? iconSide / 2 : statusInkMidY))
         if leadsWithIcon {
             statusSlot = hasIcon
-                ? NSRect(x: textLeft, y: statusY, width: iconSide, height: iconSide)
+                ? NSRect(x: metadataLeft, y: statusY, width: iconSide, height: iconSide)
                 : nil
             // The slot is NOT reserved when nothing is drawn in it. The column is
             // made of the icons, which are pinned to one x and aligned to each
@@ -1558,6 +1644,20 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         } else {
             statusSlot = nil
         }
+        // A workspace name uses the same metadata line and optical centre as
+        // project text. It never occupies the sidebar gutter or title-dot slot.
+        if let colour = workspaceMarkColour, workspaceTreatmentForQA == .workspaceLabel {
+            workspaceLabel.textColor = workspaceTextInk(colour)
+            let room = max(0, metaRight - stateWidth - trailingIconWidth - placementLeft - 48)
+            let width = min(workspaceLabelNaturalWidth, min(90, room))
+            if width >= 24 {
+                workspaceLabel.isHidden = false
+                let slot = NSRect(x: placementLeft + 5, y: bandY, width: width, height: proposal.bandTop)
+                workspaceLabel.frame = inCard(slot)
+                decorations.workspaceSlot = slot.insetBy(dx: -5, dy: -1)
+                placementLeft += width + 15
+            }
+        }
         // The working/attention glyph and the directory icon are two distinct
         // leading slots. Directory identity used to be laid out first and then
         // `placementLeft` was reset to the status slot's trailing edge, putting
@@ -1565,10 +1665,23 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         var projectIconFrame: NSRect?
         if projectIcon.image != nil {
             let side = Self.metadataIconSide
-            projectIconFrame = NSRect(
-                x: placementLeft, y: snapped(topLine - projectIconInkCenterY),
-                width: side, height: side)
-            placementLeft += side + 4
+            if workspaceMarkColour != nil, workspaceTreatmentForQA == .iconBadge {
+                // The container owns the slot. Centre rendered ink in both
+                // axes, including favicons whose transparent margins differ.
+                let badgeSide: CGFloat = 18
+                let badge = NSRect(x: snapped(placementLeft), y: snapped(topLine - badgeSide / 2),
+                                   width: badgeSide, height: badgeSide)
+                decorations.workspaceSlot = badge
+                projectIconFrame = NSRect(
+                    x: snapped(badge.midX - projectIconInkRect.midX),
+                    y: snapped(badge.midY - projectIconInkRect.midY), width: side, height: side)
+                placementLeft = badge.maxX + 4
+            } else {
+                projectIconFrame = NSRect(
+                    x: placementLeft, y: snapped(topLine - projectIconInkCenterY),
+                    width: side, height: side)
+                placementLeft += side + 4
+            }
         } else {
             projectIcon.frame = .zero
         }
@@ -1608,6 +1721,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if let iconFrame = projectIconFrame {
             projectIcon.frame = inCard(iconFrame)
         }
+        if let colour = workspaceMarkColour, workspaceTreatmentForQA == .projectText {
+            placementLabel.textColor = workspaceTextInk(colour)
+            decorations.workspaceSlot = placementFrame
+        } else {
+            placementLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        }
+        decorations.needsDisplay = true
         stateLabel.frame = inCard(NSRect(
             x: metaRight - stateWidth, y: bandY,
             width: stateWidth, height: proposal.bandTop))
@@ -1667,10 +1787,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         modelLabel.frame = inCard(NSRect(
             x: textRight - modelWidth, y: bandY,
             width: modelWidth, height: proposal.bandDetail))
-        // An external row's hover actions sit left of the mark, and the branch
-        // ends where they begin.
-        var actionRight = textRight - trailing - 6
-        for button in [hoverHide, hoverCopy, hoverMoveHere] where !button.isHidden {
+        // Every trailing action shares the same control geometry and line.
+        // Keep the provider lane available for external-session actions.
+        let actionEdge = (hoverActionsShown && (onHoverSnooze != nil || onHoverSettle != nil))
+            ? textRight : textRight - trailing - 6
+        var actionRight = actionEdge
+        for button in [hoverSettle, hoverSnooze, hoverHide, hoverCopy, hoverMoveHere] where !button.isHidden {
             let size = button.intrinsicContentSize
             let top = snapped(detailLine - size.height / 2)
             button.opticalCentreY = detailLine - top
@@ -1705,19 +1827,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             y: (bounds.height - hintSize.height) / 2,
             width: hintSize.width,
             height: hintSize.height)
-        // The hover actions take the provider mark's corner on the detail line,
-        // cross-fading with it. The status slot on the meta line is never
-        // touched by hover: what the agent is doing stays readable while you
-        // point at it.
-        let actionSide = Self.hoverActionSide
-        let actionCentreX = textRight - trailing + (hasMark ? markSide / 2 : -actionSide / 2)
-        hoverSettle.frame = inCard(NSRect(
-            x: actionCentreX - actionSide / 2, y: snapped(detailLine - hoverSettleInkMidY),
-            width: actionSide, height: actionSide))
-        hoverSnooze.frame = inCard(NSRect(
-            x: hoverSettle.isHidden || !settleNudge.isHidden
-                ? actionCentreX - actionSide / 2 : actionCentreX - actionSide * 1.5 - 4,
-            y: snapped(detailLine - hoverSnoozeInkMidY), width: actionSide, height: actionSide))
+
     }
 
     /// The states that are asking for a person, as opposed to reporting one. The
@@ -1805,6 +1915,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
 
     /// Presses the hover × through its own target/action.
+    func clickHoverSnoozeForQA() -> Bool {
+        guard !hoverSnooze.isHidden else { return false }
+        hoverSnooze.performClick(nil)
+        return true
+    }
+
     func clickHoverHideForQA() -> Bool {
         guard !hoverHide.isHidden else { return false }
         hoverHide.performClick(nil)
@@ -1821,7 +1937,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Cross-fade the status slot and the actions over 150ms (instant under Reduce
     /// Motion). Only the actions the row offers ever appear.
     private func setHoverActionsShown(_ shown: Bool) {
-        let snoozeOn = shown && onHoverSnooze != nil
+        let snoozeOn = (shown || card.isSelected) && onHoverSnooze != nil
         // The nudge IS the settle action while it shows; a second one beside it
         // is the duplicate the first version drew.
         let settleOn = shown && onHoverSettle != nil && settleNudge.isHidden
@@ -1870,6 +1986,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private func finishHoverFade() {
         if !(hoverActionsShown && onHoverSnooze != nil) { hoverSnooze.isHidden = true }
         if !(hoverActionsShown && onHoverSettle != nil && settleNudge.isHidden) { hoverSettle.isHidden = true }
+        needsLayout = true
     }
 
     func showSettleNudge(_ shown: Bool, onSettle: (() -> Void)?) {
@@ -1894,7 +2011,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     func setProjectIcon(_ image: NSImage?, for rowID: UUID) {
         guard shown?.row.id == rowID, let image else { return }
         projectIcon.image = image
-        projectIconInkCenterY = Self.metadataInkCenter(of: image, scale: metadataRasterScale)
+        projectIconInkRect = Self.metadataInkRect(of: image, scale: metadataRasterScale)
+        projectIconInkCenterY = projectIconInkRect.midY
         projectIcon.contentTintColor = nil
         needsLayout = true
     }
@@ -2020,6 +2138,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         /// The x-height centre of the line's RENDERED text, card coordinates.
         let lineCentreY: CGFloat
         let neighbour: String
+        var horizontalDelta: CGFloat? = nil
         var delta: CGFloat { inkMidY - lineCentreY }
     }
 
@@ -2049,8 +2168,6 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if let throbber { add("gyro (orbit centre)", throbber.frame.midY, top) }
         add("folder", projectIcon.image == nil ? nil : qaRenderedInk(projectIcon)?.midY, top)
         add("where", whereIcon.isHidden ? nil : qaRenderedInk(whereIcon)?.midY, top)
-        add("hover snooze", hoverSnooze.isHidden ? nil : qaRenderedInk(hoverSnooze)?.midY, detail)
-        add("hover settle", hoverSettle.isHidden ? nil : qaRenderedInk(hoverSettle)?.midY, detail)
         func pillIcon(_ pill: InboxSettleNudgeButton) -> CGFloat? {
             guard !pill.isHidden, let rect = pill.cell?.imageRect(forBounds: pill.bounds) else { return nil }
             // The capsule's fill is ink too; measure the glyph without it.
@@ -2060,6 +2177,27 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             guard let ink = InkProbe.ink(of: pill, scale: metadataRasterScale, in: rect.insetBy(dx: -1, dy: -1))
             else { return nil }
             return pill.frame.maxY - ink.midY
+        }
+        let actionIcons = [("hover snooze", hoverSnooze), ("hover settle", hoverSettle),
+                           (isRevealedHidden ? "hover show" : "hover hide", hoverHide),
+                           ("copy icon", hoverCopy), ("move icon", hoverMoveHere)]
+        for (name, button) in actionIcons where !button.isHidden {
+            add(name, pillIcon(button), detail)
+            // Icon-only capsules centre on their hit target. Labelled capsules
+            // centre the glyph within the image slot beside their text.
+            let fill = button.layer?.backgroundColor
+            button.layer?.backgroundColor = nil
+            defer { button.layer?.backgroundColor = fill }
+            guard let index = out.lastIndex(where: { $0.name == name }) else { continue }
+            if button.title.isEmpty {
+                if let ink = InkProbe.ink(of: button, scale: metadataRasterScale) {
+                    out[index].horizontalDelta = ink.midX - button.bounds.midX
+                }
+            } else if let slot = button.cell?.imageRect(forBounds: button.bounds),
+                      let ink = InkProbe.ink(of: button, scale: metadataRasterScale,
+                                            in: slot.insetBy(dx: -1, dy: -1)) {
+                out[index].horizontalDelta = ink.midX - slot.midX
+            }
         }
         add("settle nudge icon", pillIcon(settleNudge), top)
         func decoration(_ slot: NSRect?) -> CGFloat? {
@@ -2071,8 +2209,6 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         add("identity dot", decoration(decorations.identityDot), title)
         add("branch", decorations.drawsBranchGlyph ? decoration(decorations.branchSlot) : nil, detail)
         add("provider mark", decorations.mark == nil ? nil : decoration(decorations.markSlot), detail)
-        add("copy icon", pillIcon(hoverCopy), detail)
-        add("move icon", pillIcon(hoverMoveHere), detail)
         return out
     }
 
@@ -2247,6 +2383,20 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             ? nil : disclosureButton.convert(disclosureButton.bounds, to: self)
     }
     var qaTitleFrameForQA: NSRect { titleLabel.convert(titleLabel.bounds, to: self) }
+    /// The actual metadata slots, in cell coordinates, for hit-target witnesses.
+    var qaProjectIconImageForQA: NSImage? { projectIcon.image }
+
+    var qaLeadingMetadataFramesForQA: [String: NSRect] {
+        var frames = ["project": placementLabel.convert(placementLabel.bounds, to: self)]
+        if projectIcon.image != nil { frames["project icon"] = projectIcon.convert(projectIcon.bounds, to: self) }
+        if workspaceTreatmentForQA == .iconBadge, let slot = decorations.workspaceSlot {
+            frames["project container"] = decorations.convert(slot, to: self)
+        }
+        if let throbber { frames["status"] = throbber.convert(throbber.bounds, to: self) }
+        else if !statusGlyph.isHidden { frames["status"] = statusGlyph.convert(statusGlyph.bounds, to: self) }
+        return frames
+    }
+
     /// The identity dot as painted, in this cell's coordinates, or nil.
     var qaIdentityDotForQA: (frame: NSRect, colour: NSColor)? {
         guard let slot = decorations.identityDot, let colour = decorations.identityDotColour else { return nil }
@@ -2489,12 +2639,30 @@ private final class Decorations: NSView {
     /// The agent's identity colour dot, beside the name. nil draws nothing.
     var identityDot: NSRect?
     var identityDotColour: NSColor?
+    var workspaceColour: NSColor?
+    var workspaceSlot: NSRect?
+    var workspaceTreatment: AgentInbox96CellView.WorkspaceTreatment = .workspaceLabel
 
     override var isFlipped: Bool { true }
     /// Decoration only — every click belongs to the row beneath it.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
+        if let colour = workspaceColour, let slot = workspaceSlot {
+            let shape = NSBezierPath(roundedRect: slot,
+                xRadius: workspaceTreatment == .outline || workspaceTreatment == .wash ? CGFloat(Radius.card) : 4,
+                yRadius: workspaceTreatment == .outline || workspaceTreatment == .wash ? CGFloat(Radius.card) : 4)
+            switch workspaceTreatment {
+            case .outline:
+                colour.withAlphaComponent(0.45).setStroke()
+                shape.lineWidth = 1
+                shape.stroke()
+            case .wash, .iconBadge, .workspaceLabel:
+                colour.withAlphaComponent(workspaceTreatment == .wash ? 0.055 : 0.12).setFill()
+                shape.fill()
+            case .projectText: break
+            }
+        }
         if paintsBorder { drawBorder() }
         if let slot = identityDot, let identityDotColour {
             identityDotColour.setFill()
@@ -2603,22 +2771,21 @@ private final class Decorations: NSView {
 }
 
 
-/// One icon-only hover action in a sidebar row's status slot. A plain
-/// borderless `NSButton` tinted by its row's tokens — deliberately not a
-/// `TokenThemed` view (hazard 8): the row that owns it repaints it.
-@MainActor
-final class InboxRowHoverActionButton: NSButton {
-    init(symbol: String, label: String) {
-        super.init(frame: .zero)
+/// Icon-only action using the same capsule, tracking and pressed states as
+/// the sidebar's labelled action pills. The owning row applies its tokens.
+typealias InboxRowHoverActionButton = InboxSettleNudgeButton
+
+extension InboxSettleNudgeButton {
+    convenience init(symbol: String, label: String) {
+        self.init(frame: .zero)
         isBordered = false
         title = ""
-        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+            .withSymbolConfiguration(.init(pointSize: Typography.style(for: .label).size - 2, weight: .semibold))
+        image?.isTemplate = true
         imagePosition = .imageOnly
         imageScaling = .scaleProportionallyDown
         toolTip = label
         setAccessibilityLabel(label)
     }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

@@ -805,7 +805,7 @@ enum SidebarTruthChecks {
         try hoverActionsSettle(world, id)
     }
 
-    // MARK: - Hover: the status slot becomes [Settle], beside the × that snoozes
+    // MARK: - Hover: matched Snooze and Settle controls
 
     static func hoverActionsSettle(_ world: World, _ agent: AgentID) throws {
         let inbox = world.inbox
@@ -814,15 +814,38 @@ enum SidebarTruthChecks {
                    "control: a row nobody is pointing at shows its status, not its actions")
         try expect(inbox.hoverRowForQA(id: agent.rawValue), "the new agent's row must be hoverable")
         let hovered = inbox.hoverActionsForQA(id: agent.rawValue)
-        // .plans/87: the × snoozes an Array agent (three hours, or until it needs
-        // you), so it takes the Snooze pill's place (--sidebar-hide-any-row-check).
-        try expect(hovered?.shown == true && hovered?.titles == ["Settle", "Hide"],
-                   "hovering an idle card cross-fades its status slot to [Settle] and shows the × — got \(String(describing: hovered))")
+        // The clock preserves quick snooze (three hours, or until it needs you).
+        try expect(hovered?.shown == true && hovered?.titles == ["Snooze", "Settle"],
+                   "hovering an idle card offers matched Snooze and Settle controls — got \(String(describing: hovered))")
+        let beforeSnooze = Date()
+        try expect(inbox.clickHoverSnoozeForQA(id: agent.rawValue), "the clock must invoke its actual target/action")
+        inbox.layoutForQA()
+        let until = world.supervisor.records[agent]?.snoozedUntil
+        try expect(until.map { abs($0.timeIntervalSince(beforeSnooze) - 3 * 3600) < 120 } == true,
+                   "the clock snoozes for three hours — got \(String(describing: until))")
+        try expect(block(world, agent) != "live", "the clock removes the agent from the live list")
+        try expect(inbox.clickUndoForQA(), "the actual Undo button restores the snoozed agent")
+        inbox.layoutForQA()
+        try expect(world.supervisor.records[agent]?.snoozedUntil == nil && block(world, agent) == "live",
+                   "Undo restores both the record and visible live row")
+        try expect(inbox.hoverRowForQA(id: agent.rawValue), "the restored agent is hoverable")
         try expect(inbox.clickHoverSettleForQA(id: agent.rawValue), "the hover Settle must be clickable")
         try expect(world.supervisor.records[agent]?.settledOverride == .settled,
                    "the hover Settle settles the agent — got \(String(describing: world.supervisor.records[agent]?.settledOverride))")
         try expect(block(world, agent) != "live",
                    "…and its row leaves the live list — drawn \(String(describing: block(world, agent)))")
+        try expect(inbox.clickUndoForQA(), "the actual Undo restores the settled agent")
+        inbox.layoutForQA()
+        try expect(inbox.hoverRowForQA(id: agent.rawValue), "the restored agent remains hoverable")
+        try expect(inbox.clickHoverSnoozeForQA(id: agent.rawValue), "the restored clock remains wired")
+        world.supervisor.qaDeliver(.userInputRequested(threadId: "sidebar-refinements", requestId: "clock-wake", questions: []), to: agent)
+        world.app.qaRefreshAgentSurfaces()
+        inbox.layoutForQA()
+        try expect(block(world, agent) == "live" && world.supervisor.records[agent]?.snoozedUntil != nil,
+                   "a snoozed agent returns visibly when it needs attention")
+        try expect(inbox.clickUndoForQA(), "the second quick snooze remains undoable")
+        inbox.layoutForQA()
+        try expect(world.supervisor.records[agent]?.snoozedUntil == nil, "Undo clears the second snooze")
         _ = inbox.hoverRowForQA(id: nil)
     }
 }

@@ -226,7 +226,7 @@ enum AgentPresenceChecks {
                     // this check's own subscription sees it; a stamped turn
                     // start means the provider has started, so the window is over.
                     if state == .working, snapshot?.turnStartedAt != nil { break }
-                    let header = bench.tile.qaPageZoomHeaderView.qaState
+                    let header = (bench.tile.chromeSnapshot?.agentStatusLabel ?? "")
                     let tail = bench.tile.qaThinkingIndicatorVisible
                     let phase = bench.tile.qaCompactStatusPhase
                     let afterReady = bench.readyCount > readyBefore
@@ -327,8 +327,8 @@ enum AgentPresenceChecks {
             let held = bench.supervisor.turnPresence(for: bench.id)
             try expect(held?.phase == .starting && held?.startupDetail?.contains("finish starting") == true,
                        "\(kind): a held prompt must read Starting and say what it waits on, got \(String(describing: held?.phase)) / \(String(describing: held?.startupDetail))")
-            try expect(bench.tile.qaPageZoomHeaderView.qaState == AgentStatusVocabulary.starting,
-                       "\(kind): the header read '\(bench.tile.qaPageZoomHeaderView.qaState)' for a held prompt")
+            try expect((bench.tile.chromeSnapshot?.agentStatusLabel ?? "") == AgentStatusVocabulary.starting,
+                       "\(kind): the header read '\((bench.tile.chromeSnapshot?.agentStatusLabel ?? ""))' for a held prompt")
             try await eventually("\(kind): the tail must say what the held prompt waits on, got '\(bench.tile.qaTailStatusText)'") {
                 bench.tile.qaThinkingIndicatorVisible && bench.tile.qaTailStatusText.hasPrefix("Waiting for")
             }
@@ -389,8 +389,8 @@ enum AgentPresenceChecks {
             if case .failed = failedPresence?.phase, failedPresence?.errorText?.contains("401") == true {} else {
                 violations.append("\(kind) in-band: presence \(String(describing: failedPresence?.phase)) / \(String(describing: failedPresence?.errorText))")
             }
-            if bench.tile.qaPageZoomHeaderView.qaState != AgentStatusVocabulary.failed {
-                violations.append("\(kind) in-band: header read '\(bench.tile.qaPageZoomHeaderView.qaState)'")
+            if (bench.tile.chromeSnapshot?.agentStatusLabel ?? "") != AgentStatusVocabulary.failed {
+                violations.append("\(kind) in-band: header read '\((bench.tile.chromeSnapshot?.agentStatusLabel ?? ""))'")
             }
 
             // Process lost mid-turn.

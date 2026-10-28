@@ -95,6 +95,8 @@ struct ChoiceAccessory: Equatable {
 /// slot only when its caller supplies an icon and adopts native menu density.
 enum ChoiceListPresentation {
     case choices
+    /// Compact checked rows for window-chrome menus, with section dividers.
+    case compactChoices
     case commands
     /// Prompt commands carry explanatory copy, unlike compact sidebar menus.
     case slashCommands
@@ -103,6 +105,8 @@ enum ChoiceListPresentation {
     /// a trailing caption and hover accessories, and size to their own content
     /// (30pt, or 36pt with a detail line), with dividers between sections.
     case checklist
+
+    var showsSelectionCheckmark: Bool { self == .choices || self == .compactChoices }
 }
 
 enum ChoiceListChrome {
@@ -214,7 +218,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
         }.max() ?? 0
         let minimumWidth = presentation == .commands
             ? CGFloat(pageZoom.scaled(184)) : Self.minimumWidth(zoom: pageZoom)
-        let height = presentation == .checklist
+        let height = [.checklist, .compactChoices].contains(presentation)
             ? items.map(rowHeight(for:)).reduce(0, +) + CGFloat(separatorIndices.count) * sectionGap
             : CGFloat(items.count) * renderedRowHeight + destructiveSeparatorGap
         return NSSize(
@@ -229,9 +233,9 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
         return item.detail == nil ? Self.commandRowHeight(zoom: pageZoom) : Self.rowHeight(zoom: pageZoom)
     }
 
-    /// Rows a checklist draws a divider above.
+    /// Rows a sectioned list draws a divider above.
     private var separatorIndices: [Int] {
-        guard presentation == .checklist else { return [] }
+        guard [.checklist, .compactChoices].contains(presentation) else { return [] }
         return items.indices.filter { $0 > 0 && items[$0].separatorBefore }
     }
 
@@ -254,8 +258,8 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
 
     override func layout() {
         super.layout()
-        if presentation == .checklist {
-            layoutChecklist()
+        if [.checklist, .compactChoices].contains(presentation) {
+            layoutSectionedRows()
             return
         }
         var y = bounds.height - renderedVerticalPadding - renderedRowHeight
@@ -280,7 +284,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
         }
     }
 
-    private func layoutChecklist() {
+    private func layoutSectionedRows() {
         var top = bounds.height - renderedVerticalPadding
         let rowInset = renderedRowInset
         let dividers = Set(separatorIndices)
@@ -304,7 +308,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
 
     private var renderedRowHeight: CGFloat {
         switch presentation {
-        case .commands:
+        case .commands, .compactChoices:
             // A command row that carries a subtitle needs the two-line height.
             // Every row of the list takes it, so a menu never mixes 30pt and 40pt
             // rows; at 30pt the title and subtitle of the zone cancel menu's
@@ -536,6 +540,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
         }) {
             focusedID = match.id
             updateRows()
+            scrollFocusedRowToVisible()
             announceFocusedChoice()
         }
     }
@@ -620,7 +625,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
 
     var qaSelected: Bool { selected }
     var qaFocused: Bool { focused }
-    var qaCheckHidden: Bool { presentation != .choices || leadingImageView.isHidden }
+    var qaCheckHidden: Bool { !presentation.showsSelectionCheckmark || leadingImageView.isHidden }
     var qaLeadingImageHidden: Bool { leadingImageView.isHidden }
     var qaTitleFrame: NSRect { titleLabel.frame }
     var qaTitleDrawsWhole: Bool {
@@ -647,7 +652,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         detailLabel.lineBreakMode = presentation == .completions
             ? .byTruncatingMiddle : .byTruncatingTail
         detailLabel.isHidden = item.detail == nil
-        leadingImageView.image = item.icon?.image() ?? (presentation == .choices
+        leadingImageView.image = item.icon?.image() ?? (presentation.showsSelectionCheckmark
             ? CanvasSymbolImage.image(named: "checkmark") : nil)
         leadingImageView.imageScaling = .scaleProportionallyDown
         leadingImageView.setAccessibilityElement(false)
@@ -719,6 +724,16 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
             $0 + ChoiceAccessoryButton.width(for: $1, zoom: zoom) + CGFloat(zoom.scaled(4))
         }
         return max(caption, accessories == 0 ? 0 : accessories + gap)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyTokens()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
     }
 
     override func layout() {
@@ -850,7 +865,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
             layer?.backgroundColor = nil
         }
         layer?.borderWidth = 0
-        leadingImageView.isHidden = presentation == .choices ? (item.icon == nil && !selected) : item.icon == nil
+        leadingImageView.isHidden = presentation.showsSelectionCheckmark ? (item.icon == nil && !selected) : item.icon == nil
         if presentation == .checklist { applyChecklistTokens(theme: theme) }
         // A destructive command reads as one in its title and its icon: the
         // failure accent, which is the app's destructive colour. The row's FILL
@@ -859,7 +874,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
             : item.destructive ? AccentToken.accentFailed.color : TextToken.textPrimary.color
         titleLabel.textColor = foreground.nsColor(for: theme)
         detailLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
-        leadingImageView.contentTintColor = presentation == .choices
+        leadingImageView.contentTintColor = presentation.showsSelectionCheckmark
             ? AgentLineRole.focusRing.color.nsColor(for: theme)
             : (item.destructive
                 ? AccentToken.accentFailed.color.nsColor(for: theme)

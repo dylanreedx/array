@@ -5,7 +5,7 @@ import Foundation
 /// Part of `--inbox-parent-fold-check`: the fold BUTTON on a parent card.
 ///
 /// Dylan wanted the card to stay "go to agent" and the fold to be a clear
-/// button. Read off the SHIPPED list: the control spans the card's height across
+/// button. Read off the SHIPPED list: the control clears the metadata band across
 /// the lane and count at a width fixed by the count's digits; its glyph is two
 /// cards, the front one knocking a gap out of the back; its highlight is a
 /// circle around the glyph; a mouse DOWN folds and paints the pressed step; only
@@ -51,8 +51,112 @@ enum SidebarSwarmGlyphChecks {
                 lines.append(try await checkControl(variant: variant, appearance: appearance))
             }
         }
+        lines.append(try checkMetadataLayout())
         lines.append("contact sheet: " + (try writeContactSheet()))
         return lines.map { "  " + $0 }.joined(separator: "\n")
+    }
+
+    /// Native geometry and production target/action witness independent of the
+    /// host's application-event dispatch permissions.
+    static func checkMetadataLayout() throws -> String {
+        var checked = 0
+        let workspace = id(900), secondWorkspace = id(904)
+        let singleton = id(901), nestedRoot = id(902), nestedParent = id(903)
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            for width in [CGFloat(260), 340, 480] {
+                for state in [InboxState.working, .ready] {
+                    let label = "metadata \(appearance.rawValue)/\(Int(width))/\(state)"
+                    func row(_ value: UUID, parent owner: UUID? = nil, depth: Int = 0) -> AgentInboxRow {
+                        AgentInboxRow(id: value, title: "Plan native agent tile menus",
+                            projectName: "Array", workspaceName: "personal", workspaceId: workspace,
+                            state: state, lastActiveAt: epoch, depth: depth,
+                            createdAt: epoch, parentId: owner)
+                    }
+                    let fixture = [row(parent), row(bigParent), row(singleton), row(nestedRoot),
+                                   row(nestedParent, parent: nestedRoot, depth: 1)]
+                        + (0..<3).map { row(id(1_000 + $0), parent: parent, depth: 1) }
+                        + (0..<12).map { row(id(1_100 + $0), parent: bigParent, depth: 1) }
+                        + (0..<3).map { row(id(1_200 + $0), parent: nestedParent, depth: 2) }
+                        + [AgentInboxRow(id: id(1_300), title: "Other workspace",
+                            projectName: "harmony", workspaceName: "work", workspaceId: secondWorkspace,
+                            state: .ready, lastActiveAt: epoch, createdAt: epoch)]
+                    let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: width, height: 2_400))
+                    inbox.clock = { epoch }
+                    inbox.prefersReducedMotion = { true }
+                    inbox.hoverCardEnabled = false
+                    inbox.foldsUntouchedGroups = false
+                    inbox.workspaceColourNames = [workspace: "teal", secondWorkspace: "purple"]
+                    var revealed: [UUID] = []
+                    inbox.onRevealRow = { revealed.append($0) }
+                    let window = NSWindow(contentRect: inbox.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                    window.appearance = NSAppearance(named: appearance)
+                    window.contentView = inbox
+                    window.orderFrontOffscreenForChecks()
+                    defer { window.orderOut(nil) }
+                    inbox.reload(rows: fixture)
+                    _ = inbox.pickScopeForQA(.all)
+                    inbox.layoutForQA()
+                    try expect(inbox.marksWorkspacesForQA,
+                               "\(label): the two-workspace production list must display workspace identity")
+                    func card(_ value: UUID) throws -> AgentInbox96CellView {
+                        guard let cell = inbox.qaMaterializedRowCells.compactMap({ $0 as? AgentInbox96CellView }).first(where: { $0.qaAgentID == value }) else {
+                            throw Failure(description: "\(label): missing card \(value)")
+                        }
+                        cell.layoutSubtreeIfNeeded()
+                        return cell
+                    }
+                    let single = try card(singleton)
+                    let singleLeading = single.qaLeadingMetadataFramesForQA.values.map(\.minX).min()! - single.qaCardFrameForQA.minX
+                    for value in [singleton, parent, bigParent, nestedParent] {
+                        let cell = try card(value)
+                        let slots = cell.qaLeadingMetadataFramesForQA
+                        guard let project = slots["project"], let container = slots["project container"] else {
+                            throw Failure(description: "\(label): project text/container absent")
+                        }
+                        let leading = slots.values.map(\.minX).min()! - cell.qaCardFrameForQA.minX
+                        try expect(abs(leading - singleLeading) <= 0.5,
+                                   "\(label): a fold or parent indents metadata (\(leading) vs singleton \(singleLeading))")
+                        try expect(project.minX >= container.maxX + 3.5, "\(label): project label crowds its container")
+                        if state == .working {
+                            guard let status = slots["status"] else { throw Failure(description: "\(label): working glyph absent") }
+                            try expect(status.maxX <= container.minX + 0.5, "\(label): working glyph overlaps the project container")
+                        }
+                        if let fold = cell.qaFoldControlForQA, let frame = cell.qaDisclosureFrameForQA {
+                            try expect(frame.height >= 28 && frame.width >= 22, "\(label): fold target lost its generous title/detail area")
+                            for (name, slot) in slots {
+                                try expect(!frame.intersects(slot), "\(label): fold target overlaps metadata \(name)")
+                                let point = cell.convert(NSPoint(x: slot.midX, y: slot.midY), to: cell.superview)
+                                let hit = cell.hitTest(point)
+                                try expect(hit.map { $0 !== fold && !$0.isDescendant(of: fold) } ?? false,
+                                           "\(label): metadata \(name) clicks the fold target")
+                            }
+                            let foldPoint = cell.convert(NSPoint(x: frame.midX, y: frame.midY), to: cell.superview)
+                            let foldHit = cell.hitTest(foldPoint)
+                            try expect(foldHit.map { $0 === fold || $0.isDescendant(of: fold) } ?? false,
+                                       "\(label): title/count lane no longer hits its fold control")
+                            let title = cell.qaTitleFrameForQA
+                            try expect(title.minX >= frame.maxX + 3.5, "\(label): title shifted into the count")
+                            let titleHit = cell.hitTest(cell.convert(NSPoint(x: title.midX, y: title.midY), to: cell.superview))
+                            try expect(titleHit.map { $0 !== fold && !$0.isDescendant(of: fold) } ?? false,
+                                       "\(label): title clicks fold instead of reveal")
+                        }
+                        let before = revealed.count
+                        try expect(inbox.clickRowForQA(id: value) && revealed.count == before + 1 && revealed.last == value,
+                                   "\(label): row/title reveal no longer reaches its production callback")
+                        checked += 1
+                    }
+                    guard let (_, fold) = control(inbox, parent), let action = fold.action else {
+                        throw Failure(description: "\(label): parent fold has no action")
+                    }
+                    let before = revealed.count
+                    try expect(fold.sendAction(action, to: fold.target), "\(label): fold target/action is unwired")
+                    inbox.layoutForQA()
+                    try expect(!(0..<3).contains { inbox.rowIdsForQA.contains(id(1_000 + $0)) } && revealed.count == before,
+                               "\(label): fold action must collapse children without revealing the agent")
+                }
+            }
+        }
+        return "metadata layout: \(checked) working/ready singleton, 3/12-child and nested-parent cards at 260/340/480pt in Aqua/Dark Aqua; metadata clears fold hit targets; count folds, row/title reveal preserved"
     }
 
     // MARK: - The control in the shipped list
@@ -83,12 +187,15 @@ enum SidebarSwarmGlyphChecks {
         guard let (cell, fold) = control(inbox, parent), let (_, wide) = control(inbox, bigParent) else {
             throw Failure(description: "\(label): a folded parent drew no fold control")
         }
-        // Geometry: the full card height, across the lane and the count, at a
+        // Geometry: the title/detail target clears metadata across the lane and count, at a
         // width the digits fix.
         let card = cell.qaCardFrameForQA
         let frame = fold.convert(fold.bounds, to: cell)
-        try expect(abs(frame.height - card.height) < 0.5 && abs(frame.minY - card.minY) < 0.5,
-                   "\(label): the fold target \(frame) must span the card's height \(card)")
+        try expect(frame.height >= 28 && frame.height < card.height && frame.maxY <= card.maxY + 0.5,
+                   "\(label): the fold target \(frame) must retain a generous title/detail area inside \(card)")
+        for (name, metadata) in cell.qaLeadingMetadataFramesForQA {
+            try expect(!frame.intersects(metadata), "\(label): fold target overlaps \(name): \(metadata)")
+        }
         try expect(abs(frame.width - InboxSwarmFoldControl.width(childCount: 3)) < 0.01
                    && abs(wide.bounds.width - InboxSwarmFoldControl.width(childCount: 12)) < 0.01
                    && wide.bounds.width > fold.bounds.width && fold.bounds.width >= 22,
