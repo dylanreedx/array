@@ -17,6 +17,12 @@ print("screen: %d camera states in %.0fs (%.0f/s), interval p50 %.1f p95 %.1f ma
     s["distinctCapturedCameraStates"], end - begin, s["capturedCameraStatesPerSecond"],
     iv.get("p50", 0), iv.get("p95", 0), iv.get("max", 0), s["gapsOver16_7ms"], s["gapsOver33ms"],
     s["gapsOver50ms"], s["firstCapturedChangeMs"] or -1, s["finalCameraAfterInputEndMs"] or -1))
+c0, c1 = ph["before"].get("cost"), ph["afterInput"].get("cost")
+if c0 and c1:
+    commits = max(1, s["cameraCommitCount"])
+    d = {k: c1[k] - c0[k] for k in c0}
+    print("cost per camera commit (%d commits): main thread %.2f ms CPU, process %.1f M instructions, %.1f M cycles" % (
+        commits, d["mainThreadCPUSeconds"] * 1000 / commits, d["processInstructions"] / 1e6 / commits, d["processCycles"] / 1e6 / commits))
 lag = s["scheduledToMainMs"]
 print("input: scheduled->main p50 %.1f p95 %.1f max %.1f ms" % (lag.get("p50", 0), lag.get("p95", 0), lag.get("max", 0)))
 

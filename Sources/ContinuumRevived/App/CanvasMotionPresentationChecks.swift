@@ -358,7 +358,10 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         // CANVAS_MOTION_STREAM=0 is the quiet control: agents attached, nothing streaming.
         let streams = env["CANVAS_MOTION_STREAM"] != "0"
         let deltaMs = max(5, Int(env["CANVAS_MOTION_DELTA_MS"] ?? "") ?? 50)
-        let sourceTickLimit = streams ? Int(duration * 1_000 / Double(deltaMs)) : 0
+        // CANVAS_MOTION_STREAM_LEAD_SECONDS: agents are already working when the
+        // gesture starts, as they are in use; their ticks join the fixed budget.
+        let lead = number("CANVAS_MOTION_STREAM_LEAD_SECONDS", 0, 0...30)
+        let sourceTickLimit = streams ? Int((duration + lead) * 1_000 / Double(deltaMs)) : 0
         let fixture = try CanvasMotionWorkload(root: URL(fileURLWithPath: rootPath),
             support: URL(fileURLWithPath: supportPath), markdownCount: markdownCount, agentCount: agentCount)
         workload = fixture
@@ -474,6 +477,7 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         print("[canvas-motion] ready pid=\(ProcessInfo.processInfo.processIdentifier) output=\(output.path)")
         try await Task.sleep(for: .seconds(warmup))
         fixture.stripTilesIfRequested()
+        fixture.holdPointerOverTiles()
         // CANVAS_MOTION_INTERACTIVE=1: a preview for a person, not a measurement. No
         // scripted input; the chosen agents stream for up to ten minutes and the window
         // stays until it is closed.
@@ -483,6 +487,10 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
             while fixture.window.isVisible { try await Task.sleep(for: .milliseconds(500)) }
             fixture.stopStreaming()
             return 0
+        }
+        if lead > 0 {
+            fixture.startStreaming(delay: 0, tickLimit: sourceTickLimit)
+            try await Task.sleep(for: .seconds(lead))
         }
         let baseline = fixture.snapshot()
         var visibilityErrors: [String] = []
@@ -665,7 +673,7 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         let initialSource = baseline["source"] as? [String: Any] ?? [:]
         let finalSource = finalSnapshot["source"] as? [String: Any] ?? [:]
         var sourceErrors: [String] = []
-        if initialSource["successfulDeltas"] as? Int != 0 {
+        if lead == 0, initialSource["successfulDeltas"] as? Int != 0 {
             sourceErrors.append("live source emitted deltas during static warmup")
         }
         let sourceFinished = finalSource["sourceFinished"] as? Bool == true

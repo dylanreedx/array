@@ -346,6 +346,33 @@ final class CanvasMotionWorkload {
     }
     private(set) var bareRemoved = 0
 
+    /// `CANVAS_MOTION_POINTER_TILES=N` (default 0): the pointer rests over the N
+    /// agent tiles nearest the window's centre, and the real cursor is ignored, so
+    /// which tiles stay live is the arm's choice and not wherever the cursor sat.
+    func holdPointerOverTiles() {
+        let count = max(0, Int(ProcessInfo.processInfo.environment["CANVAS_MOTION_POINTER_TILES"] ?? "") ?? 0)
+        let center = NSPoint(x: canvas.bounds.midX, y: canvas.bounds.midY)
+        let agents = agentTileIDs.compactMap { canvas.tileView(for: $0) as? ManagedAgentTileNSView }
+            .filter { $0.window != nil }
+            .sorted {
+                let a = $0.convert($0.bounds, to: canvas), b = $1.convert($1.bounds, to: canvas)
+                return hypot(a.midX - center.x, a.midY - center.y) < hypot(b.midX - center.x, b.midY - center.y)
+            }
+        let held = Set(agents.prefix(count).map(ObjectIdentifier.init))
+        pointerTiles = held.count
+        ManagedAgentTileNSView.qaPointerInside = { held.contains(ObjectIdentifier($0)) }
+        for tile in agents {
+            if held.contains(ObjectIdentifier(tile)) { tile.wakeChrome() } else { tile.restChromeIfIdle() }
+        }
+    }
+    private(set) var pointerTiles = 0
+
+    /// Agent tiles whose real chrome is installed (not resting).
+    var liveChromeCount: Int {
+        agentTileIDs.compactMap { canvas.tileView(for: $0) as? ManagedAgentTileNSView }
+            .filter { $0.qaChromeCanvas != nil && !$0.isChromeResting }.count
+    }
+
     func prepareStreaming() {
         guard !closed else { return }
         if !sentPrompts {
@@ -561,6 +588,7 @@ final class CanvasMotionWorkload {
         let source = emitter.snapshot()
         return [
             "protocolTag": "fixed-anchor-finite-source-v3",
+            "cost": MotionCost.read(),
             "variantName": CanvasMotionVariants.requestedValue, "variantMask": CanvasMotionVariants.mask,
             "inputKind": inputKind, "markdownMode": markdownMode, "realDocumentCopies": realDocumentCopies,
             "installedTiles": tiles.count, "visibleTiles": canvas.visibleTileViews.count,
@@ -578,6 +606,8 @@ final class CanvasMotionWorkload {
             "viewCensus": ProcessInfo.processInfo.environment["CANVAS_MOTION_CENSUS"] == "1" ? viewCensus() : NSNull(),
             "bareTiles": bareTiles.map { ["stripped": $0.stripped, "of": $0.of, "removed": bareRemoved] } as Any? ?? NSNull(),
             "streamingAgents": emitter.streamingCount ?? agentIDs.count,
+            "pointerTiles": pointerTiles, "liveChromes": liveChromeCount,
+            "chromeMotionRests": agentTileIDs.compactMap { canvas.tileView(for: $0) as? ManagedAgentTileNSView }.reduce(0) { $0 + $1.qaChromeMotionRestCount },
             "farParkedTiles": canvas.qaFarParkedTileCount,
             "lastGestureReport": canvas.qaLastGestureReport?.summary as Any? ?? NSNull(),
             "work": canvas.qaFrameWorkCounters,
@@ -915,5 +945,31 @@ struct CanvasMotionReplay {
         return CanvasMotionReplay(source: spec["source"] as? [String: Any] ?? [:], document: document,
                                   tiles: tiles, agents: agents, window: window,
                                   omitted: spec["omitted"] as? [[String: Any]] ?? [])
+    }
+}
+
+/// Work counters that machine load does not change: instructions and cycles the
+/// whole process retired, and the main thread's own CPU time. Read on the main thread.
+enum MotionCost {
+    static func read() -> [String: Double] {
+        var usage = rusage_info_v4()
+        let status = withUnsafeMutablePointer(to: &usage) {
+            $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(getpid(), RUSAGE_INFO_V4, $0) }
+        }
+        var info = thread_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<thread_basic_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let port = pthread_mach_thread_np(pthread_self())
+        let threadStatus = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                thread_info(port, thread_flavor_t(THREAD_BASIC_INFO), $0, &count)
+            }
+        }
+        let cpu = threadStatus == KERN_SUCCESS
+            ? Double(info.user_time.seconds + info.system_time.seconds)
+                + Double(info.user_time.microseconds + info.system_time.microseconds) / 1_000_000
+            : -1
+        return ["mainThreadCPUSeconds": cpu,
+                "processInstructions": status == 0 ? Double(usage.ri_instructions) : -1,
+                "processCycles": status == 0 ? Double(usage.ri_cycles) : -1]
     }
 }
