@@ -297,8 +297,8 @@ enum ExternalSessionHandoffChecks {
         // On screen, not just in the document: a render that lands before the
         // new tile's first layout used to place the last row nowhere.
         try expect(world.pump(until: {
-            (view.qaTranscriptForChecks?.qaVisibleAccessibilityText.count ?? 0) == 3
-        }), "all three rows are on screen; visible \(view.qaTranscriptForChecks?.qaVisibleAccessibilityText ?? [])")
+            view.qaVisibleRowTexts.count == 3
+        }), "all three rows are on screen; visible \(view.qaVisibleRowTexts)")
         try expect(view.sessionHandoffState == .watching(app: "cmux", canCopy: true, canMove: true),
                    "the banner says Watching in cmux; got \(String(describing: view.sessionHandoffState))")
         try expect(view.qaSessionHandoffBanner?.titleLabel.stringValue == "Watching \u{00B7} running in cmux"

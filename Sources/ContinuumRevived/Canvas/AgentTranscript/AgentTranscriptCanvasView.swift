@@ -1518,6 +1518,15 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             iconRect: icon, statusRect: status?.0, statusFont: status?.1)
     }
 
+    /// The units at least partly inside the view's bounds right now, each as
+    /// the text of its rows.
+    var qaVisibleUnitTexts: [String] {
+        placed.filter { item in
+            let top = item.y - scrollOffset
+            return top < bounds.height && top + item.block.height > 0
+        }.map { $0.block.rows.map(\.string.string).joined(separator: " ") }
+    }
+
     /// The rows a laid-out unit draws, as strings, in order.
     func qaRowStrings(of blockID: AgentNodeID) -> [String] {
         placed.first { $0.blockID == blockID }?.block.rows.map(\.string.string) ?? []

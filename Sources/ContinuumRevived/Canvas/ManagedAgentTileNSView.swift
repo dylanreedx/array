@@ -5204,6 +5204,13 @@ extension ManagedAgentTileNSView {
         return qaSessionBoundaryViews.map { ($0.qaLabelText, $0.qaGlyphVisible, true) }
     }
 
+    /// The rows on screen in the transcript right now, as text: the list's
+    /// visible items (their spoken text), or the drawn units inside its bounds.
+    var qaVisibleRowTexts: [String] {
+        if let canvas = qaCanvasTranscript { return canvas.qaVisibleUnitTexts }
+        return listTranscript?.qaVisibleAccessibilityText ?? []
+    }
+
     /// The presented tool block for a document block, as the transcript drew it.
     func qaPresentedToolBlock(for blockID: AgentNodeID) -> AgentBlock? {
         if let canvas = qaCanvasTranscript {
