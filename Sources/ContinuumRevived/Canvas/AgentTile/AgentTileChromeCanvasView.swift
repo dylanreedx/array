@@ -414,7 +414,7 @@ final class AgentTileChromeCanvasView: NSView {
         // The host window's appearance is the app's; the body takes the tile's.
         body.appearance = effectiveAppearance
         body.removeFromSuperview()
-        Self.restingHost.contentView?.addSubview(body)
+        Self.restingHost(matching: window).contentView?.addSubview(body)
         body.frame = bounds
         layOutRestingBody()
         drawnFingerprint = nil
@@ -453,8 +453,8 @@ final class AgentTileChromeCanvasView: NSView {
         needsLayout = true
     }
 
-    /// Where every resting body lives: one borderless window that is never
-    /// shown, so nothing in it is displayed, hit or composited.
+    /// Where every resting body lives: a borderless window that is never shown,
+    /// so nothing in it is displayed, hit or composited.
     ///
     /// Why a window and not nowhere: a view tree outside any window has no Auto
     /// Layout engine of its own, so each `layoutSubtreeIfNeeded` built a temporary
@@ -462,13 +462,37 @@ final class AgentTileChromeCanvasView: NSView {
     /// a resting layout, run whenever a streaming agent's labels changed and at
     /// every turn end. In a window the engine persists and a changed label is an
     /// incremental update.
-    static let restingHost: NSWindow = {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 4096, height: 4096),
-                              styleMask: .borderless, backing: .buffered, defer: true)
-        window.isReleasedWhenClosed = false
-        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 4096, height: 4096))
-        return window
-    }()
+    ///
+    /// One per backing scale, each placed on a screen of that scale: Auto Layout
+    /// rounds frames to its window's pixel grid, so a body laid out in a 1x host
+    /// for a tile on a 2x display drew its labels half a point off the live ones
+    /// (with a 1x external display as the main screen, every wake nudged them).
+    private static var restingHosts: [CGFloat: NSWindow] = [:]
+
+    static func restingHost(matching window: NSWindow?) -> NSWindow {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        if let host = restingHosts[scale] { return host }
+        let screen = window?.screen.flatMap { $0.backingScaleFactor == scale ? $0 : nil }
+            ?? NSScreen.screens.first { $0.backingScaleFactor == scale }
+        let origin = screen?.frame.origin ?? .zero
+        let host = NSWindow(contentRect: NSRect(origin: origin, size: NSSize(width: 1, height: 1)),
+                            styleMask: .borderless, backing: .buffered, defer: true)
+        host.isReleasedWhenClosed = false
+        host.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        restingHosts[scale] = host
+        return host
+    }
+
+    /// The tile moved to a display of another scale while resting: lay the body
+    /// out again in the host of that scale.
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        guard isResting, let window, body.window?.backingScaleFactor != window.backingScaleFactor else { return }
+        body.removeFromSuperview()
+        Self.restingHost(matching: window).contentView?.addSubview(body)
+        body.frame = bounds
+        forceRestingRedraw()
+    }
 
     private var restingDirty = false
     /// The values the body was last laid out for, and last drawn with; nil forces.

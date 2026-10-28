@@ -113,6 +113,11 @@ enum TileChromeCanvasChecks {
         try expect(tile.qaChromeBody.window != nil && tile.qaChromeBody.window !== tile.window
                    && tile.qaChromeBody.window?.isVisible == false,
                    "the resting body must be out of the canvas window, in the hidden host")
+        // Laid out on the tile's own pixel grid: a 1x host for a tile on a 2x
+        // display put every label half a point off the live one.
+        try expect(tile.qaChromeBody.window?.backingScaleFactor == tile.window?.backingScaleFactor,
+                   "the resting body is laid out at \(tile.qaChromeBody.window?.backingScaleFactor ?? 0)x for a tile at "
+                   + "\(tile.window?.backingScaleFactor ?? 0)x")
 
         // Pixels: resting vs live, same tile; resting vs today.
         let restPixels = try render(tile)
