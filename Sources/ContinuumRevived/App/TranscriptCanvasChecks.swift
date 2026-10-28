@@ -324,6 +324,14 @@ enum TranscriptCanvasChecks {
                    && surface.qaLaidOutText.contains("XCTAssertEqual failed"),
                    "pressing the chevron must expand the tool row to its output: height \(collapsedHeight) -> "
                    + "\(surface.qaHeight(of: toolID) ?? 0), controls \(surface.qaControls.filter { $0.blockID == toolID }.map(\.kind))")
+        // Presenting a tool row is redaction and string work; a rebuild of an
+        // unchanged transcript must not repeat it for every row (it ran a
+        // transcript's worth on each update and at every turn end).
+        let presentedBefore = surface.toolDetail.qaPresentationCount
+        try expect(presentedBefore > 0, "no tool row was presented from its detail; the assertion is vacuous")
+        surface.rebuild()
+        try expect(surface.toolDetail.qaPresentationCount == presentedBefore,
+                   "rebuilding an unchanged transcript presented \(surface.toolDetail.qaPresentationCount - presentedBefore) tool row(s) again")
         // Persists: a theme flip makes the tile push a new context, which drops
         // every cached layout; the row must come back open.
         let layoutsBeforeFlip = surface.qaBlockLayoutCount

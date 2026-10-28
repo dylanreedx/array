@@ -194,6 +194,7 @@ final class AgentTranscriptCanvasToolDetail {
             let records = await store.allDetails()
             guard !Task.isCancelled, let self else { return }
             self.details = Dictionary(uniqueKeysWithValues: records.map { ($0.identity, $0) })
+            self.presentedCache.removeAll()
             self.onRefresh?()
         }
     }
@@ -221,6 +222,12 @@ final class AgentTranscriptCanvasToolDetail {
         }
         guard let identity = key(for: entry), let detail = details[identity], detail.identity == identity else { return block }
         if let timeToLive, timeToLive <= 0 || clock().timeIntervalSince(detail.updatedAt) >= timeToLive { return block }
+        // Every rebuild presents every tool row, and presenting is redaction and
+        // string work; a transcript's worth of it ran on each update and at every
+        // turn end. The result depends on the block and its detail record only.
+        if let cached = presentedCache[block.id], cached.revision == block.revision, cached.identity == identity {
+            return cached.block
+        }
         var presented = block
         switch block.payload {
         case var .toolCall(payload):
@@ -247,6 +254,14 @@ final class AgentTranscriptCanvasToolDetail {
         default:
             return block
         }
+        presentedCache[block.id] = (block.revision, identity, presented)
+        qaPresentationCount += 1
         return presented
     }
+
+    /// Tool and diff blocks presented from their detail records, not the cache.
+    private(set) var qaPresentationCount = 0
+
+    /// Presented tool and diff blocks, emptied whenever detail records land.
+    private var presentedCache: [AgentNodeID: (revision: UInt64, identity: AgentToolDetailKey, block: AgentBlock)] = [:]
 }
