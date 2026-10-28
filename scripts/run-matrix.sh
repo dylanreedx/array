@@ -577,6 +577,11 @@ run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 # main keeps running, and that a reply's picture leaves as an MCP image item.
 # The leg existed since T3 (0.7.26) but was never registered, so it never ran.
 run_app_check .build/debug/Array --workspace-mcp-host-check
+# S2 (.plans/80-browser-computer-use): the engine an agent drives a browser
+# tile through. Outline past a tampering page, trusted clicks at three canvas
+# zooms without moving the user's focus, typing, the user-typing hold, refusals,
+# dialogs answered for the agent, and screenshots hidden and off-window.
+run_app_check .build/debug/Array --browser-automation-engine-check
 run_app_check .build/debug/Array --palette-first-responder-restore-check
 run_app_check .build/debug/Array --settings-panel-check
 # Launch polish: settings as an in-window modal, and its search.

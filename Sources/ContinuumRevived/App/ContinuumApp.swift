@@ -961,6 +961,16 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--browser-automation-engine-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserAutomationEngineCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-mcp-host-check") {
             do {
                 _ = NSApplication.shared

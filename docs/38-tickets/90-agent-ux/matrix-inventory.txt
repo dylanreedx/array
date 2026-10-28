@@ -48,6 +48,7 @@ check --board-tile-lifecycle-check
 check --border-census-check
 check --bring-to-front-focus-check
 check --browser-auth-challenge-check
+check --browser-automation-engine-check
 check --browser-click-recency-check
 check --browser-download-check
 check --browser-element-context-check
@@ -385,6 +386,7 @@ leg run_app_check .build/debug/Array --board-tile-lifecycle-check
 leg run_app_check .build/debug/Array --border-census-check
 leg run_app_check .build/debug/Array --bring-to-front-focus-check
 leg run_app_check .build/debug/Array --browser-auth-challenge-check
+leg run_app_check .build/debug/Array --browser-automation-engine-check
 leg run_app_check .build/debug/Array --browser-click-recency-check
 leg run_app_check .build/debug/Array --browser-download-check
 leg run_app_check .build/debug/Array --browser-element-context-check
