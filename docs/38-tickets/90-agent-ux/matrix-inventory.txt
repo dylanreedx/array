@@ -133,6 +133,7 @@ check --focus-broker-activation-check
 check --focus-mode-check
 check --focus-scope-dispatch-check
 check --fresh-install-check
+check --gesture-telemetry-check
 check --hide-external-rows-check
 check --inbox-parent-fold-check
 check --inbox-reveal-project-check
@@ -230,6 +231,7 @@ check --spawn-placement-check
 check --spawn-rate-limit-check
 check --stranded-tile-recovery-check
 check --stray-window-audit-check
+check --streaming-ingest-check
 check --strict-agent-harness-check
 check --subagent-tile-zone-check
 check --terminal-clipboard-check
@@ -248,6 +250,7 @@ check --terminal-tmux-persistence-check
 check --throbber-timeline-check
 check --ticket-queue-tile-check
 check --tile-action-check
+check --tile-chrome-canvas-check
 check --tile-chrome-scale-check
 check --tile-drag-grab-check
 check --tile-insert-slide-check
@@ -261,6 +264,7 @@ check --tile-world-bounds-check
 check --tool-detail-check
 check --top-bar-icons-check
 check --topology-migration-check
+check --transcript-canvas-check
 check --transcript-delta-index-oracle-check
 check --transcript-provider-parity-check
 check --transcript-rehydration-check
@@ -358,7 +362,6 @@ leg run_app_check .build/debug/Array --agent-first-paint-check
 leg run_app_check .build/debug/Array --agent-identity-color-check
 leg run_app_check .build/debug/Array --agent-inbox-check
 leg run_app_check .build/debug/Array --agent-incremental-refresh-check
-leg run_app_check .build/debug/Array --sidebar-liveness-check
 leg run_app_check .build/debug/Array --agent-input-check
 leg run_app_check .build/debug/Array --agent-inventory-wiring-check
 leg run_app_check .build/debug/Array --agent-local-file-link-check
@@ -458,6 +461,7 @@ leg run_app_check .build/debug/Array --focus-broker-activation-check
 leg run_app_check .build/debug/Array --focus-mode-check
 leg run_app_check .build/debug/Array --focus-scope-dispatch-check
 leg run_app_check .build/debug/Array --fresh-install-check
+leg run_app_check .build/debug/Array --gesture-telemetry-check
 leg run_app_check .build/debug/Array --hide-external-rows-check
 leg run_app_check .build/debug/Array --inbox-parent-fold-check
 leg run_app_check .build/debug/Array --inbox-reveal-project-check
@@ -531,6 +535,7 @@ leg run_app_check .build/debug/Array --shell-tool-row-check
 leg run_app_check .build/debug/Array --sidebar-bulk-hide-check
 leg run_app_check .build/debug/Array --sidebar-hidden-footer-check
 leg run_app_check .build/debug/Array --sidebar-hide-any-row-check
+leg run_app_check .build/debug/Array --sidebar-liveness-check
 leg run_app_check .build/debug/Array --sidebar-pills-check
 leg run_app_check .build/debug/Array --sidebar-production-corpus-check
 leg run_app_check .build/debug/Array --sidebar-push-coalescing-check
@@ -545,6 +550,7 @@ leg run_app_check .build/debug/Array --spawn-placement-check
 leg run_app_check .build/debug/Array --spawn-rate-limit-check
 leg run_app_check .build/debug/Array --stranded-tile-recovery-check
 leg run_app_check .build/debug/Array --stray-window-audit-check
+leg run_app_check .build/debug/Array --streaming-ingest-check
 leg run_app_check .build/debug/Array --strict-agent-harness-check
 leg run_app_check .build/debug/Array --subagent-tile-zone-check
 leg run_app_check .build/debug/Array --terminal-clipboard-check
@@ -563,6 +569,7 @@ leg run_app_check .build/debug/Array --terminal-tmux-persistence-check
 leg run_app_check .build/debug/Array --throbber-timeline-check
 leg run_app_check .build/debug/Array --ticket-queue-tile-check
 leg run_app_check .build/debug/Array --tile-action-check
+leg run_app_check .build/debug/Array --tile-chrome-canvas-check
 leg run_app_check .build/debug/Array --tile-chrome-scale-check
 leg run_app_check .build/debug/Array --tile-drag-grab-check
 leg run_app_check .build/debug/Array --tile-insert-slide-check
@@ -575,6 +582,7 @@ leg run_app_check .build/debug/Array --tile-world-bounds-check
 leg run_app_check .build/debug/Array --tool-detail-check
 leg run_app_check .build/debug/Array --top-bar-icons-check
 leg run_app_check .build/debug/Array --topology-migration-check
+leg run_app_check .build/debug/Array --transcript-canvas-check
 leg run_app_check .build/debug/Array --transcript-delta-index-oracle-check
 leg run_app_check .build/debug/Array --transcript-provider-parity-check
 leg run_app_check .build/debug/Array --transcript-rhythm-check

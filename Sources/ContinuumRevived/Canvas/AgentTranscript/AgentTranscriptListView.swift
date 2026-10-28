@@ -498,6 +498,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         super.init(frame: .zero)
         self.renderContext = contextWithDisclosureState(renderContext)
         configureCollectionView()
+        updateScheduler.isPresentable = { [weak self] in self?.isOnScreenForVisualUpdates ?? true }
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Agent transcript")
@@ -762,6 +763,13 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// interaction boundary, a probe, a teardown — use this instead of dropping
     /// back to the ungated `apply` path.
     func flushPendingVisualUpdate() { updateScheduler.flush() }
+
+    /// On screen: in a window, not hidden or parked, and not clipped out of the
+    /// canvas. A view with no window keeps the old behaviour (checks build them).
+    var isOnScreenForVisualUpdates: Bool {
+        guard window != nil else { return true }
+        return !isHiddenOrHasHiddenAncestor && !visibleRect.isEmpty
+    }
 
     var qaVisualApplyCount: Int { updateScheduler.visualApplyCount }
     var qaLastInvalidatedTopLevelCount: Int { lastInvalidatedTopLevelCount }
@@ -1687,9 +1695,12 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// real zoom names this method directly (~960 samples), so the tile body owns
     /// a real share of the traversal, not just AppKit's recursion around it.
     private(set) var qaLayoutPassCount = 0
+    /// Every list's layout passes, read per frame by the motion benchmark.
+    static private(set) var qaTotalLayoutPasses = 0
 
     override func layout() {
         qaLayoutPassCount += 1
+        Self.qaTotalLayoutPasses += 1
         super.layout()
         let clipSize = scrollView.contentView.bounds.size
         if abs(collectionView.frame.width - clipSize.width) > 0.5 {
@@ -3484,6 +3495,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// The version this view has actually painted — a fixture must patch FROM it,
     /// not from a version it assumed.
     var qaAppliedVersion: UInt64 { appliedVersion ?? 0 }
+    var qaEnqueuedVersion: UInt64 { latestEnqueuedVersion ?? appliedVersion ?? 0 }
     var qaTopSemanticID: AgentNodeID? { transcriptID(at: scrollView.contentView.bounds.minY) }
     var qaTopSemanticOffset: CGFloat? {
         guard let id = qaTopSemanticID, let y = transcriptY(for: id) else { return nil }

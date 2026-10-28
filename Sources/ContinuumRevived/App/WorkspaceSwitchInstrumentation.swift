@@ -19,6 +19,8 @@ enum WorkspaceSwitchCounters {
     static var syncTmuxOperationsOnMain = 0
     static var layoutPasses = 0
     static var sidebarReloads = 0
+    /// Disk-reading rebuilds of the agent activity snapshot (sidebar and sync).
+    static var activitySnapshotRebuilds = 0
 
     struct Snapshot: Equatable {
         var tileViewsBuilt: Int

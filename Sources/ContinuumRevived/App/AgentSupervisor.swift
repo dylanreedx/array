@@ -4007,6 +4007,7 @@ final class AgentSupervisor {
     private func transcriptProjection(for id: AgentID) -> ManagedAgentTranscriptModel {
         if let projection = transcriptProjections[id] { return projection }
         var projection = ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+        projection.streamingParsesPerSecond = Self.transcriptStreamingParsesPerSecond
         if let restored = rehydratedTranscripts[id] {
             // The tile's own restore draws the same notice and steps.
             projection.appendNotice(id: "notice-previous-session", title: "previous session", text: restored.boundaryNoticeText)
@@ -6286,6 +6287,9 @@ final class AgentSupervisor {
     /// the same projection the durable snapshot is written from — or nil when no
     /// event has reached it in this session. A READ: nothing is flushed, marked,
     /// persisted or woken. Absence here is not evidence the agent did nothing.
+    /// QA: how many times the supervisor's copy re-parsed an open stream.
+    func qaTranscriptParseCount(for id: AgentID) -> Int { transcriptProjections[id]?.streamingMarkupParseCount ?? 0 }
+
     func transcriptDocumentProjection(for id: AgentID) -> AgentDocument? {
         transcriptProjections[id]?.document
     }
@@ -6869,6 +6873,11 @@ final class AgentSupervisor {
             checkedOutBranch: checkedOutBranches.cachedOnly(
                 repo: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)) ?? nil
         )
+    }
+
+    /// The working directory whose branch `id`'s chip shows.
+    func checkoutRoot(for id: AgentID) -> URL? {
+        records[id].map { URL(fileURLWithPath: $0.checkoutRoot, isDirectory: true) }
     }
 
     /// Every distinct working directory a warm pass should read, each once.
@@ -7497,11 +7506,18 @@ final class AgentSupervisor {
     /// Feeds one provider event into the durable semantic document, then
     /// schedules a save. A no-op with no `transcriptStore` injected, which is
     /// every check that does not pass one.
+    /// The supervisor's copy is persisted and previewed, never drawn: the tile keeps
+    /// its own at the view rate. Re-parsing a long open message 30 times a second per
+    /// agent was the largest single cost of streaming on the motion benchmark
+    /// (`.plans/84`).
+    static let transcriptStreamingParsesPerSecond: Double = 4
+
     private func ingestTranscriptEvent(_ event: AgentRuntimeEvent, for id: AgentID) {
         guard transcriptStore != nil else { return }
-        var projection = transcriptProjection(for: id)
-        projection.ingest(event)
-        transcriptProjections[id] = projection
+        if transcriptProjections[id] == nil { transcriptProjections[id] = transcriptProjection(for: id) }
+        // In place: a copy mutated while the dictionary still held the original
+        // duplicated the whole transcript's storage on every streamed chunk.
+        transcriptProjections[id]!.ingest(event)
         scheduleTranscriptPersist(for: id, final: Self.isTranscriptPersistBoundary(event))
     }
 
@@ -19562,12 +19578,23 @@ private func checkBranchChip(
     // that invalidated and re-applied by hand would pass over a tile that never
     // refreshes at all (the cross-review's finding).
     try runIsolatedSpawnGit(["checkout", "-q", "-b", "wandered-off"], in: URL(fileURLWithPath: isolated.cwd))
+    let readsBeforeTurn = supervisor.qaBranchGitReads
+    let landedBeforeTurn = isolatedTile.qaBranchRefreshesLanded
     isolatedTile.ingest(.turnCompleted(
         threadId: AgentSupervisor.threadId(for: isolatedId),
         turnId: "branch-chip-turn",
         outcome: .completed,
         errorMessage: nil
     ))
+    // The read is a `git` launch; on the main thread it hitched the canvas every
+    // time an agent finished a turn. It happens off main, and lands after.
+    guard supervisor.qaBranchGitReads == readsBeforeTurn else {
+        throw fail("a turn ending ran git on the main thread (\(supervisor.qaBranchGitReads - readsBeforeTurn) read(s)) — every finished turn hitches the canvas")
+    }
+    let deadline = Date().addingTimeInterval(5)
+    while isolatedTile.qaBranchRefreshesLanded == landedBeforeTurn, Date() < deadline {
+        try await Task.sleep(for: .milliseconds(20))
+    }
     guard isolatedTile.qaBranchChipIsWarning else {
         throw fail(
             "the agent's checkout moved to wandered-off and the tile still reads "

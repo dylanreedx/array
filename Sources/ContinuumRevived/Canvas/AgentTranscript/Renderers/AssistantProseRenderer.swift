@@ -66,7 +66,7 @@ final class AssistantProseView: NSView {
         CGFloat(zoom.scaled(Double(bodyLinePitchAt100)))
     }
 
-    private static func blockSpacing(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+    static func blockSpacing(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
 
     private(set) var textFields: [RichInlineTextView] = []
     /// Pre-built marker glyphs by row index, and the frames to draw them beside.
@@ -82,7 +82,7 @@ final class AssistantProseView: NSView {
     private static let headingRole = NSAccessibility.Role(rawValue: "AXHeading")
     private static let listItemRole = NSAccessibility.Role(rawValue: "AXListItem")
 
-    private struct Row {
+    struct Row {
         let blockID: AgentNodeID
         let runs: [AgentInline]
         let role: NSAccessibility.Role
@@ -106,7 +106,7 @@ final class AssistantProseView: NSView {
     private static func listIndentPerLevel(zoom: AgentPageZoom) -> CGFloat {
         CGFloat(zoom.scaled(Space.l))
     }
-    private static func markerGutter(zoom: AgentPageZoom) -> CGFloat {
+    static func markerGutter(zoom: AgentPageZoom) -> CGFloat {
         CGFloat(zoom.scaled(Space.l))
     }
 
@@ -299,7 +299,7 @@ final class AssistantProseView: NSView {
         return ceil(text + CGFloat(max(0, rows.count - 1)) * blockSpacing(zoom: zoom) + leading)
     }
 
-    private static func rows(
+    static func rows(
         for block: AgentBlock,
         zoom: AgentPageZoom,
         listDepth: Int = 0,

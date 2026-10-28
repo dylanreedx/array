@@ -318,6 +318,7 @@ enum TileSurfaceResidencyChecks {
         try checkDefaultIsOff()
         try checkFlagOffChangesNothing()
         try checkFarOffscreenLiveTilesParkAndReturn()
+        try runUnseenTranscriptsWaitUntilOnScreen()
         try checkFarParkingCoversMarkdownEditorsAndBodySwaps()
         try checkQuietSurfacesAndLiveStaysNative()
         try checkHysteresisIgnoresAPointerSweep()
@@ -649,6 +650,169 @@ enum TileSurfaceResidencyChecks {
     /// transcript at all once they are parked. A parked agent keeps streaming, a
     /// focused tile is never parked, nothing parks mid-gesture, and every tile is
     /// back the moment the camera returns.
+    /// An agent streaming off screen must not lay out its transcript: the
+    /// benchmark (`.plans/84`) measured visual applies at a quarter of the main
+    /// thread with 8 agents streaming, half of them for tiles nobody could see.
+    /// The latest snapshot waits and applies once the tile is back on screen.
+    private static func runUnseenTranscriptsWaitUntilOnScreen() throws {
+        let world = World(tileCount: 2)
+        defer { world.teardown() }
+        let canvas = world.canvas
+        canvas.surfaceResidencyEnabled = false
+        canvas.farParkingEnabled = false
+        world.pump()
+        guard let seen = world.agentViews[world.tiles[0].id]?.qaTranscriptForChecks,
+              let unseenTile = world.agentViews[world.tiles[1].id],
+              let unseen = unseenTile.qaTranscriptForChecks,
+              let seenTile = world.agentViews[world.tiles[0].id] else {
+            throw Failure(message: "fixture has no transcripts")
+        }
+        func stream(_ tile: ManagedAgentTileNSView, _ index: Int, _ text: String) {
+            let thread = "surface-residency-\(index)", turn = "live-\(index)"
+            tile.ingest(.turnStarted(threadId: thread, turnId: turn))
+            tile.ingest(.contentDelta(threadId: thread, turnId: turn, streamKind: .assistant, delta: text))
+        }
+        func wait(_ seconds: TimeInterval) {
+            RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+            world.pump()
+        }
+        // Tile 1 off screen: the camera looks a viewport to the right of it.
+        let frame = world.tiles[1].frame
+        canvas.setViewport(CanvasViewport(x: frame.x + frame.width + 2_000, y: 0, zoom: 1))
+        world.pump()
+        try expect(!unseen.isOnScreenForVisualUpdates && seen.isOnScreenForVisualUpdates == false,
+                   "both tiles must be off screen for the first half")
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        world.pump()
+        try expect(seen.isOnScreenForVisualUpdates, "tile 0 must be on screen at the origin")
+        // Positive control: the on-screen transcript applies on its timer.
+        let seenBefore = seen.qaVisualApplyCount
+        stream(seenTile, 0, "on screen")
+        wait(0.15)
+        try expect(seen.qaVisualApplyCount > seenBefore, "an on-screen transcript must apply on its timer")
+        // Now look away from tile 1 only and stream into it.
+        canvas.setViewport(CanvasViewport(x: frame.x + frame.width + 2_000, y: 0, zoom: 1))
+        world.pump()
+        let before = unseen.qaVisualApplyCount
+        stream(unseenTile, 1, "off screen")
+        wait(0.4)
+        try expect(unseen.qaVisualApplyCount == before,
+                   "an off-screen transcript applied \(unseen.qaVisualApplyCount - before) times")
+        try expect(unseen.qaAppliedVersion < unseen.qaEnqueuedVersion,
+                   "the off-screen rows must still be the old version")
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        world.pump()
+        wait(AgentTranscriptUpdateScheduler.unseenRecheckInterval + 0.15)
+        try expect(unseen.qaVisualApplyCount == before + 1,
+                   "back on screen it must apply once; applied \(unseen.qaVisualApplyCount - before) times")
+        try expect(unseen.qaAppliedVersion == unseen.qaEnqueuedVersion,
+                   "the applied rows must be the document streamed while it was off screen")
+        print("transcripts: an off-screen agent streamed without applying and caught up once on screen")
+    }
+
+    /// `--gesture-telemetry-check`: the gesture log must name the frame a reparent
+    /// landed in. Dylan's report was about ONE frame ("the first initial movement
+    /// is a lag", 2026-10-24) and the log only had percentiles, which a single slow
+    /// frame never moves. Two production promoters are driven here: the scroll
+    /// router's hit-test (before the first camera step) and a far-parked body
+    /// returning inside a camera step (the third frame). Each must be charged to
+    /// its own frame and to no other.
+    static func runGestureTelemetry() throws {
+        let world = World(tileCount: 6)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = false
+        world.canvas.qaResetSurfaceResidencyCounters()
+        func parkEverything() throws {
+            world.canvas.setViewport(CanvasViewport(x: 9_000, y: 0, zoom: 1))
+            world.pump()
+            world.settle()
+            world.window.makeFirstResponder(nil)
+            while world.canvas.qaRunFarParkingPass() { world.pump() }
+            world.pump()
+            try expect(world.canvas.qaFarParkedTileCount == world.tiles.count,
+                       "the fixture must start with every tile far-parked; parked \(world.canvas.qaFarParkedTileCount)")
+        }
+        func frame(_ step: () -> Void) {
+            step()
+            world.pump()
+            world.canvas.qaCompletePendingFrame()
+        }
+
+        // 1. A pan that starts over a parked tile: the router's hit-test promotes it
+        //    before any camera step. That reparent belongs to the FIRST frame.
+        try parkEverything()
+        guard let target = world.agentViews[world.tiles[0].id] else {
+            throw Failure(message: "the fixture has no first tile")
+        }
+        let midpoint = NSPoint(x: target.frame.midX, y: target.frame.midY)
+        let routedToTile = world.canvas.measureGestureInputRouting(at: ProcessInfo.processInfo.systemUptime) {
+            _ = target.hitTest(midpoint)
+            return false
+        }
+        try expect(!routedToTile, "the probe route sends the event to the camera")
+        try expect(!target.isFarParked, "the router's hit-test must promote the parked tile under the pointer")
+        for step in 1...3 { frame { world.cameraStep(toZoom: 1.0 - 0.02 * Double(step)) } }
+        world.settle()
+        guard let routed = world.canvas.qaLastGestureReport else {
+            throw Failure(message: "a three-step gesture logged no report")
+        }
+        print("gesture telemetry, router hit-test: \(routed.summary)")
+        try expect(routed.frames.count == 3, "three camera steps must report three frames, saw \(routed.frames.count)")
+        try expect(routed.work(at: 0)?.hitTestPromotions == 1,
+                   "the hit-test promotion must be charged to the first frame; first frame paid \(routed.work(at: 0)?.summary ?? "nothing")")
+        try expect(routed.work.dropFirst().allSatisfy { $0.hitTestPromotions == 0 },
+                   "no later frame paid that promotion")
+        try expect(routed.inputEvents == 1 && routed.inputToFirstFrameMs != nil,
+                   "the routed event must open the gesture and time input to first frame")
+
+        // 2. A parked tile coming on screen in the THIRD camera step returns inside
+        //    that step. Frames one and two paid nothing.
+        try parkEverything()
+        frame { world.cameraStep(toZoom: 0.98) }
+        frame { world.cameraStep(toZoom: 0.96) }
+        frame { world.canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 0.96)) }
+        world.settle()
+        guard let returned = world.canvas.qaLastGestureReport else {
+            throw Failure(message: "the far-return gesture logged no report")
+        }
+        print("gesture telemetry, far return: \(returned.summary)")
+        try expect(returned.frames.count == 3, "three steps must report three frames, saw \(returned.frames.count)")
+        try expect((returned.work(at: 2)?.farReturns ?? 0) > 0,
+                   "the step that brought parked tiles on screen must be charged their return; frame 3 paid \(returned.work(at: 2)?.summary ?? "nothing")")
+        try expect(returned.work.prefix(2).allSatisfy { $0.farReturns == 0 && $0.hitTestPromotions == 0 },
+                   "frames before the return paid for nothing")
+        try expect(returned.inputEvents == 0 && returned.inputToFirstFrameMs == nil,
+                   "a gesture with no routed input must not invent an input time")
+        try runSelectionDefersCursorRectsWhileTheCameraMoves()
+    }
+
+    /// With a tile selected, every camera step invalidated the selection overlay's
+    /// cursor rects, which walks the whole window (155 samples a minute live,
+    /// 2026-10-24 22:42). A driver step defers it; the settle edge does it once.
+    private static func runSelectionDefersCursorRectsWhileTheCameraMoves() throws {
+        let world = World(tileCount: 4)
+        defer { world.teardown() }
+        let canvas = world.canvas
+        canvas.surfaceResidencyEnabled = false
+        canvas.tileSelection.selectOnly(world.tiles[0].id)
+        canvas.tileSelection.refresh()
+        world.pump()
+        world.settle()
+        let selection = canvas.tileSelection
+        let before = selection.qaCursorInvalidations
+        let deferredBefore = selection.qaDeferredCursorInvalidations
+        for step in 1...6 {
+            world.cameraStep(toZoom: 1.0 - 0.05 * Double(step))
+            world.pump()
+        }
+        let during = selection.qaCursorInvalidations - before
+        let deferred = selection.qaDeferredCursorInvalidations - deferredBefore
+        print("selection: 6 camera steps invalidated cursor rects \(during) times and deferred \(deferred)")
+        try expect(during == 0 && deferred >= 6, "camera steps must defer the selection's cursor rects; invalidated \(during), deferred \(deferred)")
+        world.settle()
+        try expect(selection.qaCursorInvalidations - before == 1, "the settle must invalidate them exactly once")
+    }
+
     private static func checkFarOffscreenLiveTilesParkAndReturn() throws {
         let world = World(tileCount: 6)
         defer { world.teardown() }

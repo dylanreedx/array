@@ -1390,6 +1390,26 @@ if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
 else
   run_app_check .build/debug/Array --tile-surface-residency-check
 fi
+# The live gesture log names the first and the worst frame of every gesture and
+# what each paid for (a hit-test promotion, a far-parked return, text measures, a
+# zone install). Percentiles never move for one slow frame, and one slow frame is
+# what Dylan reported. Not display-dependent: far parking bakes nothing.
+run_app_check .build/debug/Array --gesture-telemetry-check
+# Streaming ingest (.plans/84 motion benchmark): the supervisor's transcript copy
+# re-parses an open message at its own low rate and keeps every chunk; streamed
+# chunks refresh a tile's status row at most every 0.25 s.
+run_app_check .build/debug/Array --streaming-ingest-check
+# The one-view CoreText transcript behind ARRAY_TRANSCRIPT_RENDERER=canvas, driven
+# through a real agent tile: a delta re-lays out only its block, tail follow,
+# selection + Cmd-C, link click, and a redraw at 2x/4x zoom with no layout.
+run_app_check .build/debug/Array --transcript-canvas-check
+# The resting agent tile behind the same switch: its chrome detached and drawn by
+# one view, at most 6 views at rest, resting and live window-server pictures equal
+# within 0.03% of pixels, and presses on the drawn composer, picker, ⋯ and × reach
+# the real controls through NSApp.sendEvent. Also: a pan sliding tiles under a still
+# pointer wakes none until the settle wakes the one under it; wake/rest at any zoom
+# leaves every transcript line where it was; unchanged streamed chunks redraw nothing.
+run_app_check .build/debug/Array --tile-chrome-canvas-check
 # The correctness oracle for the incremental row index, and the reason the cheap
 # path is allowed to exist. transcript.delta measures what a delta COSTS and is
 # structurally blind to a fast path that is cheap and WRONG — every count budget

@@ -3896,9 +3896,27 @@ final class CanvasNSView: NSView, TokenThemed {
     /// these — the N-inputs-one-commit witness counts this, and it is the
     /// number that used to equal the raw event rate.
     private(set) var qaViewportApplyCount = 0
+    /// The motion benchmark's observer, called after every camera apply.
+    var qaOnViewportApplied: ((CanvasViewport) -> Void)?
+
+    /// QA: cumulative counts of the off-camera work a frame can pay for, read
+    /// between camera commits to name what a slow frame spent its time on.
+    var qaFrameWorkCounters: [String: Int] {
+        ["promotions": qaSurfacePromotionCount, "demotions": qaSurfaceDemotionCount,
+         "hitTestPromotions": TileNSView.hitTestPromotionTotal,
+         "farParks": qaFarParkCount, "farReturns": qaFarReturnCount,
+         "proseMeasures": AssistantProseView.qaMeasurementCount,
+         "markdownPasses": FileMarkdownDocumentView.qaTotalMeasurePasses,
+         "zoneInstalls": qaZoneLayerInstallCount,
+         "transcriptApplies": AgentTranscriptUpdateScheduler.qaTotalVisualApplies,
+         "transcriptLayouts": AgentTranscriptListView.qaTotalLayoutPasses,
+         "sidebarReloads": WorkspaceSwitchCounters.sidebarReloads,
+         "activityRebuilds": WorkspaceSwitchCounters.activitySnapshotRebuilds]
+    }
 
     func setViewport(_ viewport: CanvasViewport) {
         let cameraStepStart = ProcessInfo.processInfo.systemUptime
+        defer { qaOnViewportApplied?(viewport) }
         if let last = lastViewportCommitAt {
             gestureCommitGapsMs.append((cameraStepStart - last) * 1_000)
         }
@@ -3906,6 +3924,9 @@ final class CanvasNSView: NSView, TokenThemed {
         // Read by the run-loop observer AFTER layout, display and the CA commit have
         // run — the three stages this method's own timing cannot see.
         pendingFrameStartedAt = cameraStepStart
+        // A writer that never passed the scroll router (pointer pan, pinch glide,
+        // a check) opens the gesture's work window at its first step.
+        if gestureWorkBaseline == nil { gestureWorkBaseline = gestureWorkSnapshot() }
         defer { gestureStepDurationsMs.append((ProcessInfo.processInfo.systemUptime - cameraStepStart) * 1_000) }
         qaViewportApplyCount += 1
         // CX-01: only the USER's camera (trackpad/pinch through the driver, or a
@@ -3914,6 +3935,10 @@ final class CanvasNSView: NSView, TokenThemed {
         // A navigation flight's steps are the driver's, but programmatic: the jump
         // that started it already noted the user's interaction once.
         if (cameraDriver.isApplying && !cameraDriver.isFlying) || pointerPanActive { onUserCameraChange?() }
+        if !agentChromeRestedForMotion, cameraDriver.isApplying || pointerPanActive {
+            agentChromeRestedForMotion = true
+            restAgentChromeForCameraMotion()
+        }
         // Any writer other than the driver — a navigation snap, a pointer-pan
         // drag, a restore, a self-check — owns the camera now: gesture state
         // still in flight (a glide, accumulated scroll) must not keep steering
@@ -3986,7 +4011,27 @@ final class CanvasNSView: NSView, TokenThemed {
     /// housekeeping its commits deferred. Cursor rects rebuild against the
     /// resting camera; the delegate arms its persistence/hydration debounces
     /// exactly once.
+    var isCameraDriverStepInFlight: Bool { cameraDriver.isApplying }
+
+    /// Set at a camera gesture's first step, cleared when it settles.
+    private var agentChromeRestedForMotion = false
+
+    /// Once per gesture, never per step: the live agent chrome the pointer was
+    /// holding awake rests for the gesture (`restChromeForCameraMotion`).
+    private func restAgentChromeForCameraMotion() {
+        let views = Array(tileViews.values) + zoneLayers.flatMap { Array($0.tileViews.values) }
+        for case let agent as ManagedAgentTileNSView in views where !agent.isChromeResting {
+            agent.restChromeForCameraMotion(pressBelongsToPan: pointerPanActive)
+        }
+    }
+
     private func cameraGestureDidSettle() {
+        agentChromeRestedForMotion = false
+        // Agent chrome the pointer reached only because tiles slid under it waited
+        // for this edge (`ManagedAgentTileNSView.mouseEntered`).
+        wakeAgentChromeUnderPointer()
+        // Selection cursor rects were deferred while the driver moved the camera.
+        tileSelection.updatePresentation()
         discardCursorRects()
         window?.invalidateCursorRects(for: self)
         delegate?.canvasDidChange(self)
@@ -4010,13 +4055,19 @@ final class CanvasNSView: NSView, TokenThemed {
 
     private func logGestureCost() {
         let steps = gestureStepDurationsMs.sorted()
-        let frames = gestureFrameTailsMs.sorted()
+        let framesInOrder = gestureFrameTailsMs
+        let frames = framesInOrder.sorted()
         let gaps = gestureCommitGapsMs.sorted()
+        let frameWork = gestureFrameWork
+        let input = (events: gestureInputEvents, toTile: gestureTileRoutedEvents,
+                     routingMaxMs: gestureRoutingMaxMs, toFirstFrameMs: gestureFirstInputToFrameMs)
         gestureStepDurationsMs.removeAll(keepingCapacity: true)
         gestureFrameTailsMs.removeAll(keepingCapacity: true)
         gestureCommitGapsMs.removeAll(keepingCapacity: true)
+        gestureFrameWork.removeAll(keepingCapacity: true)
         lastViewportCommitAt = nil
         pendingFrameStartedAt = nil
+        resetGestureInputWindow()
         guard steps.count >= 3 else { return }
         func p(_ sorted: [Double], _ q: Double) -> Double {
             guard !sorted.isEmpty else { return 0 }
@@ -4046,8 +4097,156 @@ final class CanvasNSView: NSView, TokenThemed {
             proseMeasures, AssistantProseView.qaLastMeasureTrigger,
             markdownMeasures, FileMarkdownDocumentView.qaLastMeasureTrigger
         )
-        Logger(subsystem: "continuum.canvas", category: "gesture").notice("\(line, privacy: .public)")
+        let report = GestureReport(frames: framesInOrder, work: frameWork, inputEvents: input.events,
+                                   tileRoutedEvents: input.toTile, routingMaxMs: input.routingMaxMs,
+                                   inputToFirstFrameMs: input.toFirstFrameMs)
+        qaLastGestureReport = report
+        Logger(subsystem: "continuum.canvas", category: "gesture")
+            .notice("\(line, privacy: .public) | \(report.summary, privacy: .public)")
     }
+
+    /// The parts of a gesture the percentiles cannot show: the FIRST frame, the
+    /// single WORST frame, and what each of them paid for. One slow frame in a
+    /// 60-step pan is under the p95, and the p95 was all this log had while Dylan
+    /// described exactly that frame ("the first initial movement is a lag",
+    /// 2026-10-24). Work is charged to the frame it delayed: everything between the
+    /// previous frame's end (or the gesture's first input) and this frame's end.
+    struct GestureReport {
+        let frames: [Double]
+        let work: [GestureWork]
+        let inputEvents: Int
+        let tileRoutedEvents: Int
+        let routingMaxMs: Double
+        let inputToFirstFrameMs: Double?
+
+        var firstFrameMs: Double? { frames.first }
+        var worstFrameIndex: Int? { frames.indices.max { frames[$0] < frames[$1] } }
+        var worstFrameMs: Double? { worstFrameIndex.map { frames[$0] } }
+        func work(at index: Int?) -> GestureWork? {
+            guard let index, work.indices.contains(index) else { return nil }
+            return work[index]
+        }
+        func framesOver(_ ms: Double) -> Int { frames.filter { $0 > ms }.count }
+
+        var summary: String {
+            func ms(_ value: Double?) -> String { value.map { String(format: "%.1f", $0) } ?? "-" }
+            let first = "first frame \(ms(firstFrameMs)) ms (input to frame \(ms(inputToFirstFrameMs)) ms)"
+                + " [\(work(at: 0)?.summary ?? "-")]"
+            let worst = "worst frame \(ms(worstFrameMs)) ms at frame \(worstFrameIndex.map { $0 + 1 } ?? 0)"
+                + " of \(frames.count) [\(work(at: worstFrameIndex)?.summary ?? "-")]"
+            let histogram = "frames over 8.3/16.7/33.3 ms: \(framesOver(8.33))/\(framesOver(16.67))/\(framesOver(33.33))"
+            let routing = String(format: "input %d events, %d to tiles, routing max %.2f ms",
+                                 inputEvents, tileRoutedEvents, routingMaxMs)
+            return [first, worst, histogram, routing].joined(separator: " | ")
+        }
+    }
+
+    /// Work a frame can pay for that is not the camera: each is a reparent, a
+    /// text measurement or a zone build that lands inside whichever frame is next.
+    struct GestureWork: Equatable {
+        var residencyPromotions = 0
+        var hitTestPromotions = 0
+        var farReturns = 0
+        var proseMeasures = 0
+        var markdownPasses = 0
+        var zoneInstalls = 0
+
+        func since(_ base: GestureWork) -> GestureWork {
+            GestureWork(
+                residencyPromotions: max(0, residencyPromotions - base.residencyPromotions),
+                hitTestPromotions: max(0, hitTestPromotions - base.hitTestPromotions),
+                farReturns: max(0, farReturns - base.farReturns),
+                proseMeasures: max(0, proseMeasures - base.proseMeasures),
+                markdownPasses: max(0, markdownPasses - base.markdownPasses),
+                zoneInstalls: max(0, zoneInstalls - base.zoneInstalls))
+        }
+
+        var summary: String {
+            "promote \(residencyPromotions), hit-test promote \(hitTestPromotions), far return \(farReturns), "
+                + "prose \(proseMeasures), markdown \(markdownPasses), zone installs \(zoneInstalls)"
+        }
+    }
+
+    private(set) var qaLastGestureReport: GestureReport?
+
+    private func gestureWorkSnapshot() -> GestureWork {
+        GestureWork(
+            residencyPromotions: qaSurfacePromotionCount,
+            hitTestPromotions: TileNSView.hitTestPromotionTotal,
+            farReturns: qaFarReturnCount,
+            proseMeasures: AssistantProseView.qaMeasurementCount,
+            markdownPasses: FileMarkdownDocumentView.qaTotalMeasurePasses,
+            zoneInstalls: qaZoneLayerInstallCount)
+    }
+
+    /// The scroll router's per-event decision, timed and counted. It hit-tests the
+    /// whole window on every pan event outside a zoom session, and a hit-test over
+    /// a surfaced tile promotes it, so this is where a pan can pay a reparent
+    /// before its first camera step even starts. `route` returns true when the
+    /// event goes to a tile instead of the camera.
+    func measureGestureInputRouting(at timestamp: TimeInterval, _ route: () -> Bool) -> Bool {
+        openGestureInputWindowIfQuiet(at: timestamp)
+        let start = ProcessInfo.processInfo.systemUptime
+        let toTile = route()
+        gestureRoutingMaxMs = max(gestureRoutingMaxMs, (ProcessInfo.processInfo.systemUptime - start) * 1_000)
+        if toTile { gestureTileRoutedEvents += 1 }
+        return toTile
+    }
+
+    /// A pinch event: counted, and it can open the gesture, but it routes nowhere.
+    func noteGestureInput(at timestamp: TimeInterval) {
+        openGestureInputWindowIfQuiet(at: timestamp)
+    }
+
+    private func openGestureInputWindowIfQuiet(at timestamp: TimeInterval) {
+        let now = ProcessInfo.processInfo.systemUptime
+        // NSEvent timestamps share systemUptime's clock; a value from the future or
+        // from long ago is not this gesture's and falls back to now.
+        let arrival = (timestamp <= now && now - timestamp < 5) ? timestamp : now
+        // Events that all went to a tile never step the camera, so nothing settles
+        // them: a quiet gap closes that window instead.
+        let stale = gestureStepDurationsMs.isEmpty
+            && (gestureLastInputUptime.map { arrival - $0 > 0.3 } ?? true)
+        if gestureFirstInputUptime == nil || stale {
+            resetGestureInputWindow()
+            gestureFirstInputUptime = arrival
+            gestureWorkBaseline = gestureWorkSnapshot()
+        }
+        gestureLastInputUptime = arrival
+        gestureInputEvents += 1
+    }
+
+    private func resetGestureInputWindow() {
+        gestureFirstInputUptime = nil
+        gestureLastInputUptime = nil
+        gestureFirstInputToFrameMs = nil
+        gestureWorkBaseline = nil
+        gestureInputEvents = 0
+        gestureTileRoutedEvents = 0
+        gestureRoutingMaxMs = 0
+    }
+
+    /// Closes the frame `setViewport` opened: called by the run-loop observer
+    /// after layout, display and the CA commit.
+    private func completePendingFrame() {
+        guard let start = pendingFrameStartedAt else { return }
+        pendingFrameStartedAt = nil
+        let now = ProcessInfo.processInfo.systemUptime
+        gestureFrameTailsMs.append((now - start) * 1_000)
+        let snapshot = gestureWorkSnapshot()
+        gestureFrameWork.append(snapshot.since(gestureWorkBaseline ?? snapshot))
+        gestureWorkBaseline = snapshot
+        if gestureFrameTailsMs.count == 1, let input = gestureFirstInputUptime {
+            gestureFirstInputToFrameMs = (now - input) * 1_000
+        }
+    }
+
+    /// Checks pump the display without the run loop going to sleep, so the
+    /// observer never fires there.
+    func qaCompletePendingFrame() { completePendingFrame() }
+
+    /// Ends the current gesture as the settle edge would, and logs it.
+    func qaLogGestureNow() { logGestureCost() }
 
     // MARK: - Surface residency (.plans/36)
 
@@ -4119,6 +4318,16 @@ final class CanvasNSView: NSView, TokenThemed {
     private var lastMarkdownMeasureCount = 0
     private var pendingFrameStartedAt: TimeInterval?
     private var frameTailObserver: CFRunLoopObserver?
+    /// Per-frame work, parallel to `gestureFrameTailsMs`, and the counter
+    /// snapshot it is measured from.
+    private var gestureFrameWork: [GestureWork] = []
+    private var gestureWorkBaseline: GestureWork?
+    private var gestureFirstInputUptime: TimeInterval?
+    private var gestureLastInputUptime: TimeInterval?
+    private var gestureFirstInputToFrameMs: Double?
+    private var gestureInputEvents = 0
+    private var gestureTileRoutedEvents = 0
+    private var gestureRoutingMaxMs = 0.0
 
     /// Order 3,000,000: AFTER Core Animation's own commit observer (~2,000,000), so
     /// the tail includes the commit, and after NSWindow's display cycle. Repeats on
@@ -4128,13 +4337,7 @@ final class CanvasNSView: NSView, TokenThemed {
         let observer = CFRunLoopObserverCreateWithHandler(
             kCFAllocatorDefault, CFRunLoopActivity.beforeWaiting.rawValue, true, 3_000_000
         ) { [weak self] _, _ in
-            MainActor.assumeIsolated {
-                guard let self, let start = self.pendingFrameStartedAt else { return }
-                self.pendingFrameStartedAt = nil
-                self.gestureFrameTailsMs.append(
-                    (ProcessInfo.processInfo.systemUptime - start) * 1_000
-                )
-            }
+            MainActor.assumeIsolated { self?.completePendingFrame() }
         }
         CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
         frameTailObserver = observer
@@ -4730,7 +4933,12 @@ final class CanvasNSView: NSView, TokenThemed {
     static let maxFarReturnsPerStep = 2
 
     private(set) var qaFarParkCount = 0
+    /// Off only for the motion benchmark's comparison arms (`--canvas-motion-probe`).
+    var farParkingEnabled = true
     private(set) var qaFarReturnCount = 0
+    /// Zone layers installed this session: a zone becoming live builds every one
+    /// of its tile views synchronously, so a frame that waited on one says so.
+    private(set) var qaZoneLayerInstallCount = 0
     private(set) var qaFarReturnDeferredCount = 0
     var qaFarParkedTileCount: Int { tileViewsInVisualOrder.filter(\.isFarParked).count }
     private var farParkingPassScheduled = false
@@ -4778,7 +4986,8 @@ final class CanvasNSView: NSView, TokenThemed {
         // The residency hold: nothing crosses while the camera moves. VoiceOver
         // reads the whole canvas, so a parked tile would be promoted on every
         // query; leave it native for an assistive client.
-        guard window != nil, cameraDriver.isSettled, !TileNSView.assistiveClientActive() else { return false }
+        guard farParkingEnabled, window != nil, cameraDriver.isSettled,
+              !TileNSView.assistiveClientActive() else { return false }
         let visible = worldPlane.bounds
         let keep = visible.insetBy(
             dx: -visible.width * Self.farParkMargin, dy: -visible.height * Self.farParkMargin)
@@ -6169,6 +6378,34 @@ final class CanvasNSView: NSView, TokenThemed {
 
     var isPointerPanActive: Bool { pointerPanActive }
 
+    /// The camera is moving: a driver burst that has not settled, a step being
+    /// applied, or a pointer pan. A resting agent tile's chrome never wakes for a
+    /// pointer that only "entered" because the canvas moved under it; waking costs
+    /// 7-15 ms and landed mid-gesture (pan with three agents streaming, 56 -> 34/s).
+    var isCameraInMotion: Bool { pointerPanActive || cameraDriver.isApplying || !cameraDriver.isSettled }
+
+    /// At a settle (or a pointer pan's end): the one agent tile actually under the
+    /// pointer wakes, if it is resting. Every other tile the camera slid under the
+    /// pointer stays drawn.
+    func wakeAgentChromeUnderPointer() {
+        guard let window, let root = window.contentView else { return }
+        let pointer: NSPoint?
+        if let residencyPointerProvider {
+            pointer = residencyPointerProvider()
+        } else {
+            pointer = window.mouseLocationOutsideOfEventStream
+        }
+        guard let pointer, root.frame.contains(pointer) else { return }
+        var view = root.hitTest(pointer)
+        while let current = view {
+            if let agent = current as? ManagedAgentTileNSView {
+                agent.wakeChromeAfterCameraMotion()
+                return
+            }
+            view = current.superview
+        }
+    }
+
     /// Start the shared pointer-pan lifecycle. Canvas background gestures and
     /// Cmd/Space drags whose AppKit target is tile chrome both delegate here so
     /// camera math, cursor ownership, and release handling cannot diverge.
@@ -6199,6 +6436,10 @@ final class CanvasNSView: NSView, TokenThemed {
         if !spaceHeld, spaceCursorPushed {
             NSCursor.pop() // deferred open hand after a mid-drag Space release
             spaceCursorPushed = false
+        }
+        if !isCameraInMotion {
+            agentChromeRestedForMotion = false
+            wakeAgentChromeUnderPointer()
         }
     }
 
@@ -6879,6 +7120,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Add or replace a single layer by zoneId. Unregisters old tile adapters before registering new ones.
     func upsertZoneLayer(_ layer: ZoneLayer) {
         let zoneId = layer.placement.zoneId
+        qaZoneLayerInstallCount += 1
         if let existing = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
             // Retire the old layer's tile views. One the new layer carries over
             // is re-installed below, not retired.
