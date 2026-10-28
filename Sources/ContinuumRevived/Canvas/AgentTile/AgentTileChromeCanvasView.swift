@@ -474,11 +474,13 @@ final class AgentTileChromeCanvasView: NSView {
         if let host = restingHosts[scale] { return host }
         let screen = window?.screen.flatMap { $0.backingScaleFactor == scale ? $0 : nil }
             ?? NSScreen.screens.first { $0.backingScaleFactor == scale }
-        let origin = screen?.frame.origin ?? .zero
-        let host = NSWindow(contentRect: NSRect(origin: origin, size: NSSize(width: 1, height: 1)),
-                            styleMask: .borderless, backing: .buffered, defer: true)
+        // Exactly that screen's frame: the window is then on it and no other, and
+        // a body laid out at the origin is within the window's visible rect, which
+        // AppKit uses to decide what to lay out (a collection view's items).
+        let frame = screen?.frame ?? NSRect(x: 0, y: 0, width: 4096, height: 4096)
+        let host = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: true)
         host.isReleasedWhenClosed = false
-        host.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        host.contentView = NSView(frame: NSRect(origin: .zero, size: frame.size))
         restingHosts[scale] = host
         return host
     }
