@@ -469,10 +469,27 @@ enum TileChromeCanvasChecks {
         try expect(settleWakes == 1 && !underPointer[0].isChromeResting
                    && views.filter { $0 !== underPointer[0] }.allSatisfy(\.isChromeResting),
                    "at the settle exactly the tile under the pointer must wake; \(settleWakes) woke")
+        // The next gesture starts over the tile now awake under the pointer, as a
+        // zoom always does over the tile it centres on: that tile rests for the
+        // gesture (one live hovered tile cost a zoom a third of its frames) and
+        // the settle wakes it again.
+        let hovered = underPointer[0]
+        let motionRests = hovered.qaChromeMotionRestCount
+        clock.now += gap
+        canvas.cameraDriver.noteScrollPan(dx: -1, dy: 0, location: pointer)
+        canvas.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        try expect(canvas.isCameraInMotion, "the second pan never moved the camera; the assertion is vacuous")
+        try expect(hovered.isChromeResting && hovered.qaChromeMotionRestCount == motionRests + 1,
+                   "the live tile under the pointer stayed live through a camera gesture")
+        canvas.cameraDriver.qaMarkSettledNow()
+        canvas.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        try expect(!hovered.isChromeResting, "the settle did not wake the tile under the pointer again")
         print("tile chrome canvas: a pan with 3 tiles streaming 3 chunks a frame cost at most "
               + "\(worstFrame.layouts) body layouts and \(worstFrame.draws) chrome draws a frame")
         print("tile chrome canvas: a pan slid \(crossings) tile edges under a still pointer with 0 wakes; "
-              + "the settle woke \(settleWakes), the tile under the pointer")
+              + "the settle woke \(settleWakes), the tile under the pointer; it rested for the next gesture and woke after")
     }
 
     // MARK: Transcript geometry

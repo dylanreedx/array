@@ -3884,6 +3884,10 @@ final class CanvasNSView: NSView, TokenThemed {
         // A navigation flight's steps are the driver's, but programmatic: the jump
         // that started it already noted the user's interaction once.
         if (cameraDriver.isApplying && !cameraDriver.isFlying) || pointerPanActive { onUserCameraChange?() }
+        if !agentChromeRestedForMotion, cameraDriver.isApplying || pointerPanActive {
+            agentChromeRestedForMotion = true
+            restAgentChromeForCameraMotion()
+        }
         // Any writer other than the driver — a navigation snap, a pointer-pan
         // drag, a restore, a self-check — owns the camera now: gesture state
         // still in flight (a glide, accumulated scroll) must not keep steering
@@ -3958,7 +3962,20 @@ final class CanvasNSView: NSView, TokenThemed {
     /// exactly once.
     var isCameraDriverStepInFlight: Bool { cameraDriver.isApplying }
 
+    /// Set at a camera gesture's first step, cleared when it settles.
+    private var agentChromeRestedForMotion = false
+
+    /// Once per gesture, never per step: the live agent chrome the pointer was
+    /// holding awake rests for the gesture (`restChromeForCameraMotion`).
+    private func restAgentChromeForCameraMotion() {
+        let views = Array(tileViews.values) + zoneLayers.flatMap { Array($0.tileViews.values) }
+        for case let agent as ManagedAgentTileNSView in views where !agent.isChromeResting {
+            agent.restChromeForCameraMotion(pressBelongsToPan: pointerPanActive)
+        }
+    }
+
     private func cameraGestureDidSettle() {
+        agentChromeRestedForMotion = false
         // Agent chrome the pointer reached only because tiles slid under it waited
         // for this edge (`ManagedAgentTileNSView.mouseEntered`).
         wakeAgentChromeUnderPointer()
@@ -6369,7 +6386,10 @@ final class CanvasNSView: NSView, TokenThemed {
             NSCursor.pop() // deferred open hand after a mid-drag Space release
             spaceCursorPushed = false
         }
-        if !isCameraInMotion { wakeAgentChromeUnderPointer() }
+        if !isCameraInMotion {
+            agentChromeRestedForMotion = false
+            wakeAgentChromeUnderPointer()
+        }
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {

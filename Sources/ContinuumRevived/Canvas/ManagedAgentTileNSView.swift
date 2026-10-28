@@ -154,6 +154,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private var chromeRestWork: DispatchWorkItem?
     private(set) var qaChromeWakeCount = 0
     private(set) var qaChromeSettleWakeCount = 0
+    fileprivate(set) var qaChromeMotionRestCount = 0
     /// The row renderer when it is the one installed; list-only QA seams read it.
     private var listTranscript: AgentTranscriptListView? { transcriptCollectionFixture as? AgentTranscriptListView }
     func prepareBoardTask(
@@ -5014,7 +5015,7 @@ extension ManagedAgentTileNSView {
     /// wakes the one tile under the pointer at the settle instead.
     override func mouseEntered(with event: NSEvent) {
         cancelChromeRest()
-        if canvas?.isCameraInMotion != true { wakeChrome() }
+        if canvas?.isCameraInMotion != true, Self.qaPointerInside == nil { wakeChrome() }
         super.mouseEntered(with: event)
     }
 
@@ -5035,6 +5036,10 @@ extension ManagedAgentTileNSView {
         return super.accessibilityChildren()
     }
 
+    /// Checks only: stands in for the real pointer, which a benchmark must not
+    /// depend on (wherever the cursor happened to sit kept one tile live).
+    static var qaPointerInside: ((ManagedAgentTileNSView) -> Bool)?
+
     /// Put the real controls back. Idempotent and cheap when already live.
     func wakeChrome() {
         cancelChromeRest()
@@ -5047,24 +5052,43 @@ extension ManagedAgentTileNSView {
     /// Rest once nothing needs the real controls: no pointer over the tile, no
     /// focus or popover inside it, no press in progress, nothing animating.
     @discardableResult
-    func restChromeIfIdle() -> Bool {
+    func restChromeIfIdle() -> Bool { restChrome(forCameraMotion: false, pressBelongsToPan: false) }
+
+    /// A camera gesture's first step: the pointer over this tile is no reason to
+    /// keep its ~230 real views live through every step — one hovered tile cost a
+    /// zoom a third of its frames, and a zoom is always over the tile it centres
+    /// on. Focus, an open choice list, a held press and dictation still keep it
+    /// live. The settle wakes the tile under the pointer again.
+    @discardableResult
+    func restChromeForCameraMotion(pressBelongsToPan: Bool) -> Bool {
+        restChrome(forCameraMotion: true, pressBelongsToPan: pressBelongsToPan)
+    }
+
+    private func restChrome(forCameraMotion: Bool, pressBelongsToPan: Bool) -> Bool {
         guard let chromeCanvas, !chromeCanvas.isResting, contentView === chromeCanvas,
               terminalFaceSession == nil, !chromeIsAnimating else { return false }
-        // Never re-parent ~230 views while the camera moves; the rest waits.
-        if canvas?.isCameraInMotion == true {
+        // Otherwise never re-parent ~230 views while the camera moves; the rest waits.
+        if !forCameraMotion, canvas?.isCameraInMotion == true {
             scheduleChromeRest()
             return false
         }
         if let window {
-            if Self.chromePressedMouseButtons() != 0 { return false }
-            let pointer = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-            if window.isVisible, bounds.contains(pointer) { return false }
+            if !pressBelongsToPan, Self.chromePressedMouseButtons() != 0 { return false }
+            if forCameraMotion {
+                // The pointer does not count.
+            } else if let inside = Self.qaPointerInside {
+                if inside(self) { return false }
+            } else {
+                let pointer = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+                if window.isVisible, bounds.contains(pointer) { return false }
+            }
             if let responder = window.firstResponder as? NSView, responder !== self,
                responder.isDescendant(of: contentBackdrop) || (qaTitleBarView.map(responder.isDescendant(of:)) ?? false) {
                 return false
             }
         }
         if Self.presentsChoices(contentBackdrop) { return false }
+        if forCameraMotion { qaChromeMotionRestCount += 1 }
         chromeCanvas.rest()
         setTitleBarControlsDrawn(true) { [weak self] event in
             self?.redeliverRestingPress(event) ?? false
