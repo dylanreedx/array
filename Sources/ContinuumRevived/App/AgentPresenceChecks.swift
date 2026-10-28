@@ -1048,10 +1048,24 @@ enum AgentPresenceChecks {
             bench.window.layoutIfNeeded()
             bench.tile.layoutSubtreeIfNeeded()
             let running = toolRows(in: bench.tile).filter { !$0.statusLabel.stringValue.contains("✓") }
+            let canvas = bench.tile.qaTranscriptSurface as? AgentTranscriptCanvasView
+            canvas?.flushPendingVisualUpdate()
+            let layoutsBeforeTick = canvas?.qaBlockLayoutCount ?? 0
+            let clockRelayoutsBeforeTick = canvas?.qaLiveClockRelayoutCount ?? 0
             ToolRowLiveClock.now = { realClock().addingTimeInterval(75) }
             ToolRowLiveClock.shared.tick()
-            let labels = running.map(\.statusLabel.stringValue)
-            if running.isEmpty || !labels.contains(where: { $0.contains("1m 15s") || $0.contains("1m 1") }) {
+            // The drawn transcript's running rows, as drawn after the tick.
+            let drawn = canvas?.qaToolStatuses.filter(\.running).map(\.text)
+            if let canvas {
+                // The tick re-lays the running rows alone, never the transcript.
+                let clockRelayouts = canvas.qaLiveClockRelayoutCount - clockRelayoutsBeforeTick
+                if canvas.qaBlockLayoutCount != layoutsBeforeTick || clockRelayouts != drawn?.count {
+                    violations.append("\(kind) long tool: the clock tick re-laid \(clockRelayouts) row(s) in place for "
+                        + "\(drawn?.count ?? 0) running and \(canvas.qaBlockLayoutCount - layoutsBeforeTick) through a rebuild")
+                }
+            }
+            let labels = drawn ?? running.map(\.statusLabel.stringValue)
+            if labels.isEmpty || !labels.contains(where: { $0.contains("1m 15s") || $0.contains("1m 1") }) {
                 violations.append("\(kind) long tool: the running row shows no live clock: \(labels)")
             }
             ToolRowLiveClock.now = realClock

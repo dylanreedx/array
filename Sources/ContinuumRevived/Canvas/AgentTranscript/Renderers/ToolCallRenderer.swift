@@ -828,6 +828,15 @@ final class AgentDisclosureButton: NSButton {
     }
 }
 
+/// Something showing running tool clocks: a `ToolCallView`, or the drawn
+/// transcript for all of its running rows. False when nothing it shows runs.
+@MainActor
+protocol ToolRowLiveClockTicking: AnyObject {
+    func tickLiveClock(at now: Date) -> Bool
+}
+
+extension ToolCallView: ToolRowLiveClockTicking {}
+
 /// S3 — the one 1 Hz tick behind every running tool row's clock. Holds its
 /// rows weakly, runs in `.common` modes (a canvas drag must not freeze it),
 /// and stops when no row is running, so a settled transcript schedules nothing.
@@ -837,10 +846,10 @@ final class ToolRowLiveClock {
     /// The clock's time source; checks advance it instead of waiting.
     static var now: () -> Date = { Date() }
 
-    private let rows = NSHashTable<ToolCallView>.weakObjects()
+    private let rows = NSHashTable<AnyObject>.weakObjects()
     private var timer: Timer?
 
-    func add(_ row: ToolCallView) {
+    func add(_ row: ToolRowLiveClockTicking) {
         rows.add(row)
         guard timer == nil else { return }
         let timer = Timer(timeInterval: 1, repeats: true) { _ in
@@ -851,15 +860,18 @@ final class ToolRowLiveClock {
         self.timer = timer
     }
 
-    func remove(_ row: ToolCallView) {
+    func remove(_ row: ToolRowLiveClockTicking) {
         rows.remove(row)
         if rows.count == 0 { stop() }
     }
 
     func tick() {
         let now = Self.now()
-        for row in rows.allObjects where !row.tickLiveClock(at: now) {
-            rows.remove(row)
+        for row in rows.allObjects {
+            guard let ticking = row as? ToolRowLiveClockTicking, ticking.tickLiveClock(at: now) else {
+                rows.remove(row)
+                continue
+            }
         }
         if rows.count == 0 { stop() }
     }

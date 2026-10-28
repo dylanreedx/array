@@ -58,6 +58,10 @@ extension AgentTranscriptCanvasView {
     /// Live inputs a block's drawing depends on that its revision does not carry.
     func combineLiveVariant(of block: AgentBlock, into hasher: inout Hasher) {
         switch block.payload {
+        case let .toolCall(tool) where !tool.status.agentToolIsTerminal:
+            // The running clock's whole seconds: the drawn status changes with them.
+            let since = renderContext.toolClockScope.startDate(for: block.id)
+            hasher.combine(since.map { Int(ToolRowLiveClock.now().timeIntervalSince($0)) } ?? -1)
         case let .image(image):
             combineImage(image.attachment.id, into: &hasher)
         case let .imageGallery(gallery):
@@ -247,11 +251,21 @@ extension AgentTranscriptCanvasView {
     func toolBody(_ block: AgentBlock, tool: AgentToolCallPayload, width: CGFloat) -> Body {
         let shell = tool.presentedShell.flatMap { $0.command.isEmpty ? nil : $0 }
         let title = ToolCallView.safeSingleLine(tool.name, fallback: "Tool")
-        let status = tool.presentedShell == nil
+        var status = tool.presentedShell == nil
             ? ToolCallView.statusText(status: tool.status, duration: tool.presentedTrailingDetailText)
             : ToolCallView.shellStatusText(
                 status: ToolCallView.glyphStatus(tool.status, shell: tool.presentedShell),
                 duration: tool.presentedTrailingDetailText, badge: tool.presentedShell?.badgeText)
+        // S3: a running row carries its own live clock ("◐ 1m 12s"), as
+        // `ToolCallView` does, started the first time the row is laid out and
+        // advanced by `ToolRowLiveClock`'s shared 1 Hz tick (`tickLiveClock`).
+        if tool.status.agentToolIsTerminal {
+            renderContext.toolClockScope.clear(blockID: block.id)
+        } else {
+            let now = ToolRowLiveClock.now()
+            let since = renderContext.toolClockScope.startIfNeeded(blockID: block.id, at: now)
+            status = ToolCallView.runningStatusText(status: tool.status, elapsed: now.timeIntervalSince(since))
+        }
         let needsAttention = tool.status == .failed || tool.presentedShell?.needsAttention == true
         let outputText = tool.presentedOutputText?.isEmpty == false ? tool.presentedOutputText : nil
         let summary = ToolCallView.presentedSummary(
@@ -270,6 +284,7 @@ extension AgentTranscriptCanvasView {
             status: status, statusAttention: needsAttention,
             symbolName: ToolCallView.symbolName(forToolNamed: tool.presentedToolNameText ?? tool.name),
             disclosure: hasDetail ? (block.id, expanded) : nil)
+        body.builder.toolStatus = (status, !tool.status.agentToolIsTerminal)
         let inset = ToolCallView.horizontalInset(zoom: zoom)
         let indent = ToolCallView.detailIndent(zoom: zoom)
         let summaryFont = NSFont.token(shell == nil ? .body : .bodyMono, zoom: zoom)

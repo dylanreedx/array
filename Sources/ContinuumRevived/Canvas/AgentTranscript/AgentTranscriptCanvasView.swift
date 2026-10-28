@@ -33,7 +33,7 @@ import ContinuumRevivedCore
 /// Witness: `--transcript-canvas-check` (`TranscriptCanvasChecks`).
 @MainActor
 final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuItemValidation, CornerStyled,
-    DrawnCornerReporting {
+    DrawnCornerReporting, ToolRowLiveClockTicking {
     // MARK: Switch
 
     static let rendererEnvironmentKey = "ARRAY_TRANSCRIPT_RENDERER"
@@ -160,6 +160,9 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         var regions: [ScrollRegion] = []
         var images: [AgentImageMenuTarget] = []
         var containedIDs: Set<AgentNodeID> = []
+        /// A tool row's status as drawn ("◐ 1m 12s", "2.1s ✓") and whether the
+        /// tool is still running.
+        var toolStatus: (text: String, running: Bool)?
 
         /// Places a laid child at (dx, dy): a block inside a reasoning disclosure.
         mutating func embed(_ child: LaidBlock, dx: CGFloat, dy: CGFloat) {
@@ -209,6 +212,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let regions: [ScrollRegion]
         let images: [AgentImageMenuTarget]
         let containedIDs: Set<AgentNodeID>
+        let toolStatus: (text: String, running: Bool)?
         let alpha: CGFloat
         let clipsToBounds: Bool
         /// Each row's offset in the block's text; every row is followed by one
@@ -233,6 +237,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             self.regions = builder.regions
             self.images = builder.images
             self.containedIDs = builder.containedIDs
+            self.toolStatus = builder.toolStatus
             self.alpha = alpha
             self.clipsToBounds = clipsToBounds
             var offsets: [Int] = []
@@ -644,6 +649,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let turnSpacing = CGFloat(zoom.scaled(Double(AgentTranscriptLayout.interTurnSpacing)))
 
         var next: [AgentNodeID: LaidBlock] = [:]
+        var running: [AgentNodeID: Unit] = [:]
         var relaid: [AgentNodeID] = []
         var result: [Placed] = []
         var y = insets.top
@@ -680,6 +686,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                     relaid.append(unit.id)
                 }
                 next[unit.id] = laid
+                if laid.toolStatus?.running == true { running[unit.id] = unit }
                 if !result.isEmpty {
                     // A user prompt after anything else opens a turn (the list's
                     // `startsTurn`): the wider gap.
@@ -695,12 +702,46 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         cache = next
         placed = result
         blocksBottom = y
+        runningToolUnits = running
+        if !running.isEmpty { ToolRowLiveClock.shared.add(self) }
         qaBlockLayoutCount += relaid.count
         qaLastRelaidBlockIDs = relaid
         placeTail()
         if let anchor = selectionAnchor, anchor > text { selectionAnchor = nil; selectionFocus = nil }
         let liveBlocks = Set(next.keys)
         regionOffsets = regionOffsets.filter { liveBlocks.contains($0.key.blockID) }
+    }
+
+    // MARK: Running tool clocks
+
+    /// The units of tool rows still running, from the last rebuild.
+    private var runningToolUnits: [AgentNodeID: Unit] = [:]
+    private(set) var qaLiveClockRelayoutCount = 0
+
+    /// One tick of `ToolRowLiveClock`: each running row whose drawn second moved
+    /// is re-laid alone, in place (its height cannot change: the clock is in the
+    /// fixed-height header), and only its rect is redrawn. False once nothing
+    /// here runs, which takes this transcript off the tick.
+    func tickLiveClock(at now: Date) -> Bool {
+        guard !runningToolUnits.isEmpty, laidWidth > 0 else { return false }
+        let signature = Self.signature(of: renderContext)
+        var displaced = false
+        for (index, item) in placed.enumerated() {
+            guard let unit = runningToolUnits[item.blockID] else { continue }
+            let (_, _, variant) = identity(of: unit)
+            guard variant != item.block.variant else { continue }
+            let laid = layoutUnit(unit, width: laidWidth, signature: signature, variant: variant)
+            guard abs(laid.height - item.block.height) < 0.01 else {
+                displaced = true
+                break
+            }
+            cache[item.blockID] = laid
+            placed[index] = Placed(block: laid, y: item.y, textStart: item.textStart, blockID: item.blockID)
+            qaLiveClockRelayoutCount += 1
+            setNeedsDisplay(NSRect(x: 0, y: item.y - scrollOffset, width: bounds.width, height: laid.height))
+        }
+        if displaced { preservingTail { rebuild() } }
+        return !runningToolUnits.isEmpty
     }
 
     // MARK: Delegations
@@ -1558,6 +1599,11 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let x = CTLineGetOffsetForStringIndex(line.ctLine, hit.local, nil)
         return NSPoint(x: insets.left + line.x + x + 0.5 - offset.x,
                        y: hit.placed.y + line.top + line.height / 2 - scrollOffset - offset.y)
+    }
+
+    /// Every tool row's drawn status, in document order.
+    var qaToolStatuses: [(blockID: AgentNodeID, text: String, running: Bool)] {
+        placed.compactMap { item in item.block.toolStatus.map { (item.blockID, $0.text, $0.running) } }
     }
 
     /// Every drawn control as (block, title, style name, centre point in view
