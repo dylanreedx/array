@@ -10,6 +10,24 @@ protocol CornerStyled: NSView {
     func applyCornerStyle()
 }
 
+/// A view that DRAWS rounded surfaces in `draw(_:)` instead of rounding layers
+/// (the canvas transcript). The corner census cannot read a drawn corner from
+/// any layer, so while `DrawnCornerCensus.isRecording` such a view keeps the
+/// paths its last draw filled or stroked, keyed by where they are.
+@MainActor
+protocol DrawnCornerReporting: NSView {
+    var qaDrawnCorners: [(key: String, path: CGPath)] { get }
+    /// Applies any queued content now, so what is drawn stops moving.
+    func flushPendingVisualUpdate()
+}
+
+/// Off in the app: recording costs one branch per drawn surface. Only
+/// `--corner-style-check` turns it on.
+@MainActor
+enum DrawnCornerCensus {
+    static var isRecording = false
+}
+
 /// The one writer of `CornerStyle.current`, and the live re-render that makes a
 /// new style land on everything already on screen without a restart.
 ///

@@ -3225,8 +3225,16 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         refreshFaceSwitch()
         if let agentID = attachedAgentID,
            let snapshot = agentSource?.turnSnapshot(for: agentID) {
+            let couldRespond = v2TurnSnapshot?.capabilities.canRespondToRequests ?? false
             v2TurnSnapshot = snapshot
             v2Composer?.updateTurnSnapshot(snapshot)
+            // TR-06: request choices are drawn only while the runner can answer,
+            // and the runner slot being taken or freed moves that with no runtime
+            // event. Without this the transcript keeps the context from before
+            // the runner bound and an answerable request shows no choices.
+            if snapshot.capabilities.canRespondToRequests != couldRespond {
+                try? transcriptCollectionFixture?.updateRenderContext(v2RenderContext)
+            }
             // B4: the queue mutates on the same seam (enqueue, drain, cancel,
             // clear all route through `notifyTurnCapabilitiesChanged`), so the
             // chips stay in lockstep with the primary control's own repaint.
@@ -4464,7 +4472,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// The compact row is exposed only as a deterministic geometry/AX witness;
     /// production updates it through `refreshCompactStatus` above.
     var qaCompactStatusRow: AgentCompactStatusRowView { compactStatusRow }
-    var qaThinkingIndicatorVisible: Bool { listTranscript?.qaThinkingIndicatorVisible == true }
+    var qaThinkingIndicatorVisible: Bool { transcriptCollectionFixture?.qaThinkingIndicatorVisible == true }
     // `.plans/45` S6 — deterministic seams for the optimistic-window witness.
     func qaBeginOptimisticSubmissionForChecks(_ text: String) {
         beginOptimisticSubmission(AgentPrompt(text))
@@ -4706,8 +4714,40 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         return v2SendChoice.qaChoose(modifier)
     }
     var qaV2ActionEnabled: Bool { v2ActionButton?.presentation.isEnabled == true }
+    /// The choice titles the installed transcript actually presents for a
+    /// request: the canvas's drawn choices, or the list's choice buttons.
+    func qaV2RequestChoiceTitles(_ requestID: String) -> [String] {
+        if let canvas = transcriptCollectionFixture as? AgentTranscriptCanvasView {
+            canvas.flushPendingVisualUpdate()
+            canvas.layoutSubtreeIfNeeded()
+            return canvas.qaRequestChoiceTitles(requestID: requestID)
+        }
+        guard let list = listTranscript else { return [] }
+        list.flushPendingVisualUpdate()
+        list.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+        func titles(in view: NSView) -> [String] {
+            if let button = view as? AgentRequestChoiceButton,
+               (button.superview as? AgentRequestView)?.requestID == requestID {
+                return [button.title]
+            }
+            return view.subviews.flatMap(titles)
+        }
+        return titles(in: list)
+    }
+
     @discardableResult
     func qaClickV2RequestChoice(requestID: String, value: String) -> Bool {
+        if let canvas = transcriptCollectionFixture as? AgentTranscriptCanvasView {
+            canvas.flushPendingVisualUpdate()
+            canvas.layoutSubtreeIfNeeded()
+            if canvas.qaPressRequestChoice(requestID: requestID, value: value) { return true }
+            // No drawn choice (no transport draws none): the same semantic
+            // fallback the list takes below.
+            guard v2RequestPayload(requestID)?.choices.contains(value) == true else { return false }
+            performV2RenderAction(.submitResponse(requestID: requestID, value: value))
+            return true
+        }
         guard let transcriptCollectionFixture = listTranscript else { return false }
         transcriptCollectionFixture.layoutSubtreeIfNeeded()
         transcriptCollectionFixture.collectionView.layoutSubtreeIfNeeded()

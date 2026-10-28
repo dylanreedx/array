@@ -1466,6 +1466,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     var qaTurnIsInFlightForChecks: Bool { turnIsInFlight }
 
     func setThinkingIndicatorVisible(_ visible: Bool) {
+        // The tail reads Reduce Motion from the transcript's one source (the
+        // system setting, injectable for witnesses), as the drawn tail does.
+        tailThinkingIndicator.setReducedMotion(AgentTranscriptMotion.prefersReducedMotion())
         let wasSettled = tailIsSettled
         tailIsSettled = false
         guard tailThinkingIndicatorIsVisible != visible else {
@@ -1583,6 +1586,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     }
 
     var qaThinkingIndicatorVisible: Bool { tailThinkingIndicatorIsVisible && !tailThinkingIndicator.isHidden }
+    var qaThinkingIndicatorAnimating: Bool {
+        qaThinkingIndicatorVisible && tailThinkingIndicator.qaActiveAnimationCount > 0
+    }
     var qaTailIsVirtualDocumentRow: Bool {
         tailRowIsPresented &&
             collectionView.item(at: IndexPath(item: displayItems.count, section: 0)) is AgentTranscriptTailItem

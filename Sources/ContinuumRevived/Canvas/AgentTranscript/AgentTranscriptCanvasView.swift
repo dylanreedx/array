@@ -32,7 +32,8 @@ import ContinuumRevivedCore
 /// instead, read once per tile.
 /// Witness: `--transcript-canvas-check` (`TranscriptCanvasChecks`).
 @MainActor
-final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuItemValidation {
+final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuItemValidation, CornerStyled,
+    DrawnCornerReporting {
     // MARK: Switch
 
     static let rendererEnvironmentKey = "ARRAY_TRANSCRIPT_RENDERER"
@@ -325,6 +326,9 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     private(set) var qaLastRelaidBlockIDs: [AgentNodeID] = []
     private(set) var qaFullRelayoutCount = 0
     private(set) var qaDrawCount = 0
+    /// Documents applied (each a rebuild): the positive control for a witness
+    /// that asserts how little each one re-laid.
+    private(set) var qaVisualApplyCount = 0
     private(set) var qaLastDrawScale: CGFloat = 0
     private(set) var qaLastDrawnLineCount = 0
     private(set) var qaLastDrawnControlCount = 0
@@ -334,6 +338,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     var qaContentHeight: CGFloat { contentHeight }
     var qaPlacedBlockIDs: [AgentNodeID] { placed.map(\.blockID) }
     var qaGyroIsAnimating: Bool { gyro.isAnimating }
+    var qaThinkingIndicatorAnimating: Bool { !gyro.isHidden && gyro.qaInstalledAnimationCount > 0 }
     var qaGyroLayer: CALayer { gyro }
 
     // MARK: Init
@@ -354,6 +359,13 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Agent transcript")
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+    }
+
+    @objc private func accessibilityDisplayOptionsDidChange(_ notification: Notification) {
+        reconcileGyro()
     }
 
     @available(*, unavailable)
@@ -424,6 +436,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             guard let self else { return }
             self.document = document
             self.appliedVersion = document.version
+            self.qaVisualApplyCount += 1
             self.preservingTail { self.rebuild() }
         }, final: final)
     }
@@ -441,7 +454,13 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             || context.tokens != renderContext.tokens
         renderContext = contextWithDisclosureState(context)
         gyro.apply(theme: context.appearance)
-        guard moved else { return }
+        guard moved else {
+            // A new live source (a chip's status, an image's state) changes no
+            // signature; the rebuild re-lays exactly the units whose live
+            // variant it moved and answers the rest from the cache.
+            preservingTail { rebuild() }
+            return
+        }
         cache.removeAll()
         preservingTail { rebuild() }
     }
@@ -500,6 +519,13 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     }
 
     var qaTailStatusText: String { tailText }
+
+    /// The working tail is placed in the drawn document (gyro and words), not
+    /// settled; in a window, its gyro layer is showing too. The list's reading
+    /// of the same state is `tailThinkingIndicatorIsVisible && !gyro.isHidden`.
+    var qaThinkingIndicatorVisible: Bool {
+        tailVisible && !tailSettled && tailLine != nil && (window == nil || !gyro.isHidden)
+    }
 
     var transcriptScrollOrigin: CGPoint { CGPoint(x: 0, y: scrollOffset) }
 
@@ -564,7 +590,17 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         hasher.combine(context.appearance.rawValue)
         hasher.combine(context.pageZoom.percent)
         hasher.combine(context.canRespondToRequests)
+        // Every drawn radius is resolved from `CornerRole` at layout time, so a
+        // laid block is only valid for the corner style it was laid out in.
+        hasher.combine(CornerStyle.current.rawValue)
         return hasher.finalize()
+    }
+
+    /// Settings › Appearance › Corner style changed: the corner-style walk calls
+    /// this. Radii are baked into each `LaidBlock`, and nothing else re-lays a
+    /// block whose content did not move, so re-lay them all now.
+    func applyCornerStyle() {
+        preservingTail { rebuild() }
     }
 
     /// One thing the transcript draws: a block, or a finished reasoning entry.
@@ -599,6 +635,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         var text = 0
         var previousEntryID: AgentNodeID?
         let entries = document.entries
+        chipFold = Self.foldDelegations(entries)
         for (entryIndex, entry) in entries.enumerated() {
             var units: [Unit] = []
             if entry.role == .reasoning {
@@ -606,7 +643,15 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                 guard entry.lifecycle == .finished, !entry.blocks.isEmpty else { continue }
                 units = [.reasoning(entry, duration: Self.reasoningDuration(entries, at: entryIndex))]
             } else {
-                units = entry.blocks.map { .block($0, entry) }
+                units = entry.blocks.compactMap { block in
+                    // A delegation is one row: its superseded tool row and the
+                    // chips that follow a run's first chip draw nowhere else.
+                    if chipFold.superseded.contains(block.id) || chipFold.leaderByFollower[block.id] != nil { return nil }
+                    if let followers = chipFold.followersByLeader[block.id] {
+                        return .block(Self.presentedChipRun(block, followers: followers), entry)
+                    }
+                    return .block(block, entry)
+                }
             }
             for unit in units {
                 let (revision, presented, variant) = identity(of: unit)
@@ -642,6 +687,88 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let liveBlocks = Set(next.keys)
         regionOffsets = regionOffsets.filter { liveBlocks.contains($0.key.blockID) }
     }
+
+    // MARK: Delegations
+
+    /// How the transcript folds delegations, as `AgentTranscriptListView` does
+    /// (`supersededID`, `rebuildChipRuns`, `presentedChipRun`).
+    struct ChipFold {
+        /// Tool rows a chip stands for: the provider call that spawned it.
+        var superseded: Set<AgentNodeID> = []
+        /// A run's first chip → the chips after it, in order.
+        var followersByLeader: [AgentNodeID: [AgentBlock]] = [:]
+        var leaderByFollower: [AgentNodeID: AgentNodeID] = [:]
+    }
+
+    private var chipFold = ChipFold()
+
+    /// A chip whose `sourceItemID` is the provider's call id supersedes the first
+    /// row that call produced (never itself), and consecutive chips — rows
+    /// already superseded are transparent, any other row ends the run — share
+    /// the first chip's row. A document with no chip costs one scan.
+    static func foldDelegations(_ entries: [AgentEntry]) -> ChipFold {
+        var fold = ChipFold()
+        guard entries.contains(where: { entry in
+            entry.role != .reasoning && entry.blocks.contains { if case .agentReference = $0.payload { return true }; return false }
+        }) else { return fold }
+        var order: [(id: AgentNodeID, chip: AgentBlock?)] = []
+        var unitBySource: [String: AgentNodeID] = [:]
+        for entry in entries {
+            var source: String?
+            if case let .providerItem(_, itemID?) = entry.provenance { source = itemID }
+            if entry.role == .reasoning {
+                guard entry.lifecycle == .finished, !entry.blocks.isEmpty else { continue }
+                order.append((entry.id, nil))
+                if let source, unitBySource[source] == nil { unitBySource[source] = entry.id }
+                continue
+            }
+            for block in entry.blocks {
+                var chip: AgentBlock?
+                if case .agentReference = block.payload { chip = block }
+                order.append((block.id, chip))
+                if let source, unitBySource[source] == nil { unitBySource[source] = block.id }
+            }
+        }
+        for unit in order {
+            guard let chip = unit.chip, case let .agentReference(payload) = chip.payload,
+                  let source = payload.sourceItemID, !source.isEmpty,
+                  let mapped = unitBySource[source], mapped != chip.id else { continue }
+            fold.superseded.insert(mapped)
+        }
+        var leader: AgentNodeID?
+        for unit in order where !fold.superseded.contains(unit.id) {
+            guard let chip = unit.chip else {
+                leader = nil
+                continue
+            }
+            if let leader {
+                fold.followersByLeader[leader, default: []].append(chip)
+                fold.leaderByFollower[chip.id] = leader
+            } else {
+                leader = chip.id
+            }
+        }
+        return fold
+    }
+
+    /// The run's first chip carrying its followers as presentation-only
+    /// `children` for the chip flow. Membership is folded into the revision so
+    /// the cache re-lays the row when the run changes; live statuses are in the
+    /// unit's variant.
+    static func presentedChipRun(_ block: AgentBlock, followers: [AgentBlock]) -> AgentBlock {
+        var presented = block
+        presented.children = followers
+        var identity = Hasher()
+        for member in [block] + followers {
+            identity.combine(member.id)
+            identity.combine(member.revision)
+        }
+        presented.revision = UInt64(bitPattern: Int64(identity.finalize()))
+        return presented
+    }
+
+    var qaSupersededBlockIDs: Set<AgentNodeID> { chipFold.superseded }
+    var qaChipRunLeaderByFollower: [AgentNodeID: AgentNodeID] { chipFold.leaderByFollower }
 
     /// The parts of a unit's identity the cache compares.
     private func identity(of unit: Unit) -> (revision: UInt64, presented: AgentBlockPayload?, variant: Int) {
@@ -693,13 +820,21 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
 
     // MARK: Gyro
 
-    /// The tail's working gyro: animated only while a turn is working, the view is
-    /// in a window and not hidden. A settled tail keeps its words, not the gyro.
+    /// The tail's working gyro: shown only while a turn is working, the view is
+    /// in a window and not hidden; animated unless the reader prefers reduced
+    /// motion, which holds the list gyro's fixed pose instead. A settled tail
+    /// keeps its words, not the gyro.
     private func reconcileGyro() {
-        let animate = tailVisible && !tailSettled && window != nil && !isHiddenOrHasHiddenAncestor
-        gyro.isHidden = !animate
-        if animate { gyro.start() } else { gyro.stop() }
+        let show = tailVisible && !tailSettled && window != nil && !isHiddenOrHasHiddenAncestor
+        gyro.isHidden = !show
         positionGyro()
+        if !show {
+            gyro.stop()
+        } else if AgentTranscriptMotion.prefersReducedMotion() {
+            gyro.holdStill()
+        } else {
+            gyro.start()
+        }
     }
 
     private func positionGyro() {
@@ -730,6 +865,8 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let highlight = NSColor.selectedTextBackgroundColor.cgColor
         var drawnLines = 0
         var drawnControls = 0
+        let recordsCorners = DrawnCornerCensus.isRecording
+        if recordsCorners { qaDrawnCornerRecord = [] }
         context.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         var index = firstPlaced(atOrBelow: visible.minY)
         while index < placed.count {
@@ -747,24 +884,32 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                 case let .fill(rect, color, radius) where rect.intersects(localVisible):
                     context.setFillColor(color)
                     if radius > 0 {
-                        context.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+                        let path = CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
+                        if recordsCorners { recordCorner("fill", item.blockID, rect, path) }
+                        context.addPath(path)
                         context.fillPath()
                     } else {
+                        if recordsCorners { recordCorner("fill", item.blockID, rect, CGPath(rect: rect, transform: nil)) }
                         context.fill(rect)
                     }
                 case let .stroke(rect, color, radius, width) where rect.intersects(localVisible):
                     context.setStrokeColor(color)
                     context.setLineWidth(width)
                     let inset = rect.insetBy(dx: width / 2, dy: width / 2)
-                    context.addPath(CGPath(roundedRect: inset, cornerWidth: max(0, radius - width / 2),
-                                           cornerHeight: max(0, radius - width / 2), transform: nil))
+                    let path = CGPath(roundedRect: inset, cornerWidth: max(0, radius - width / 2),
+                                      cornerHeight: max(0, radius - width / 2), transform: nil)
+                    if recordsCorners { recordCorner("stroke", item.blockID, rect, path) }
+                    context.addPath(path)
                     context.strokePath()
                 default:
                     continue
                 }
             }
             for (controlIndex, control) in block.controls.enumerated() where control.rect.intersects(localVisible) {
-                drawControlBackground(control, key: ControlKey(blockID: item.blockID, index: controlIndex), in: context)
+                if let path = drawControlBackground(control, key: ControlKey(blockID: item.blockID, index: controlIndex), in: context),
+                   recordsCorners {
+                    recordCorner("control", item.blockID, control.rect, path)
+                }
             }
             if block.clipsToBounds { context.clip(to: CGRect(x: 0, y: 0, width: block.width, height: block.height)) }
             for (rowIndex, row) in block.rows.enumerated() {
@@ -856,9 +1001,12 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                       width: fitted.width, height: fitted.height)
     }
 
-    private func drawControlBackground(_ control: Control, key: ControlKey, in context: CGContext) {
+    /// Fills a control's surface; returns the path it filled, if any.
+    @discardableResult
+    private func drawControlBackground(_ control: Control, key: ControlKey, in context: CGContext) -> CGPath? {
         let hovered = hoveredControl == key && control.enabled
         let pressed = pressedControl == key && pressedInside && control.enabled
+        let path: CGPath
         switch control.style {
         case .choice:
             // `AgentRequestChoiceButton`: every idle choice has equal emphasis;
@@ -866,16 +1014,29 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             let surface = (hovered || pressed) ? AgentSurfaceRole.rowSelected.color : SurfaceToken.overlay.color
             context.setFillColor(surface.cgColor(for: theme))
             let radius = CGFloat(renderContext.pageZoom.scaled(CornerRole.card.radius))
-            context.addPath(CGPath(roundedRect: control.rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
-            context.fillPath()
+            path = CGPath(roundedRect: control.rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
         case let .region(hoverFill, pressedFill, radius):
-            guard let fill = pressed ? (pressedFill ?? hoverFill) : (hovered ? hoverFill : nil) else { return }
+            guard let fill = pressed ? (pressedFill ?? hoverFill) : (hovered ? hoverFill : nil) else { return nil }
             context.setFillColor(fill)
-            context.addPath(CGPath(roundedRect: control.rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
-            context.fillPath()
+            path = CGPath(roundedRect: control.rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
         case .text, .chevron:
-            return
+            return nil
         }
+        context.addPath(path)
+        context.fillPath()
+        return path
+    }
+
+    // MARK: Drawn corners (QA)
+
+    /// What the last `draw(_:)` filled or stroked as a surface, while
+    /// `DrawnCornerCensus.isRecording`: the corner census measures these paths,
+    /// because a drawn card has no layer whose `cornerRadius` it could read.
+    private var qaDrawnCornerRecord: [(key: String, path: CGPath)] = []
+    var qaDrawnCorners: [(key: String, path: CGPath)] { qaDrawnCornerRecord }
+
+    private func recordCorner(_ kind: String, _ blockID: AgentNodeID, _ rect: CGRect, _ path: CGPath) {
+        qaDrawnCornerRecord.append(("\(kind) \(blockID.rawValue) \(rect.integral)", path))
     }
 
     private func drawControlForeground(_ control: Control, key: ControlKey, in context: CGContext) {
@@ -1400,6 +1561,180 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                         NSPoint(x: insets.left + control.rect.midX, y: item.y + control.rect.midY - scrollOffset))
             }
         }
+    }
+
+    /// The titles of the choices drawn for `requestID`, in order.
+    func qaRequestChoiceTitles(requestID: String) -> [String] {
+        placed.flatMap { item in
+            item.block.controls.compactMap { control -> String? in
+                guard case let .perform(.submitResponse(id, _)) = control.action, id == requestID else { return nil }
+                return control.title
+            }
+        }
+    }
+
+    /// Clicks the drawn choice that answers `requestID` with `value`: reveals its
+    /// block, then sends a mouse down and up at the choice's centre through the
+    /// view's own hit testing and press handling (a disabled choice ignores it,
+    /// as a disabled button does). False when no such choice is drawn.
+    @discardableResult
+    func qaPressRequestChoice(requestID: String, value: String) -> Bool {
+        guard let item = placed.first(where: { item in
+            item.block.controls.contains { control in
+                guard case let .perform(.submitResponse(id, choice)) = control.action else { return false }
+                return id == requestID && choice == value
+            }
+        }) else { return false }
+        qaReveal(blockID: item.blockID)
+        guard let target = qaControls.first(where: { $0.blockID == item.blockID
+            && $0.title == ApprovalDecision.displayTitle(forChoice: value) && $0.kind == "choice" }) else { return false }
+        return qaSendClick(at: target.center)
+    }
+
+    /// A mouse down and up at `point` (view coordinates), handed to this view's
+    /// own handlers: hit testing, press state, and what a click there does.
+    @discardableResult
+    func qaSendClick(at point: NSPoint) -> Bool {
+        let location = convert(point, to: nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(
+                with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window?.windowNumber ?? 0, context: nil, eventNumber: 0, clickCount: 1,
+                pressure: type == .leftMouseDown ? 1 : 0) else { return false }
+            if type == .leftMouseDown { mouseDown(with: event) } else { mouseUp(with: event) }
+        }
+        return true
+    }
+
+    /// The pointer moving to `point` (view coordinates), or leaving the view,
+    /// through this view's own tracking handlers.
+    func qaSendHover(at point: NSPoint?) {
+        let location = point.map { convert($0, to: nil) } ?? .zero
+        if point != nil, let event = NSEvent.mouseEvent(
+            with: .mouseMoved, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window?.windowNumber ?? 0, context: nil, eventNumber: 0, clickCount: 0, pressure: 0) {
+            mouseMoved(with: event)
+        } else if point == nil, let event = NSEvent.enterExitEvent(
+            with: .mouseExited, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window?.windowNumber ?? 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil) {
+            mouseExited(with: event)
+        }
+    }
+
+    /// The control the pointer is over, if it paints a hover state.
+    var qaHoveredControlTitle: String? { hoveredControl.flatMap { control(for: $0)?.title } }
+
+    /// The enabled control at a view point, if any.
+    func qaControlTitle(at point: NSPoint) -> String? { control(at: point).map(\.control.title) }
+
+    /// One drawn subagent chip, in its run's coordinates.
+    struct QAChip {
+        let blockID: AgentNodeID
+        let agentID: UUID
+        let rect: CGRect
+        let title: String
+        /// The title line as drawn.
+        let titleRect: CGRect
+        let titleLine: CTLine
+        /// The whole title is drawn: the line was not truncated to fit.
+        let titleFits: Bool
+        let glyphRect: CGRect?
+        /// The capsule's drawn outline.
+        let strokeRadius: CGFloat?
+        let strokeWidth: CGFloat?
+    }
+
+    /// One drawn chip run: a placed block whose controls reveal subagents.
+    struct QAChipRun {
+        let leaderID: AgentNodeID
+        /// The run's (0, 0) in view coordinates.
+        let origin: CGPoint
+        let size: CGSize
+        let chips: [QAChip]
+    }
+
+    /// Every chip run as laid and drawn, in document order. Read from the laid
+    /// block itself: each chip appends one reveal control and one title row,
+    /// in order, plus its outline and glyph decorations.
+    var qaChipRuns: [QAChipRun] {
+        placed.compactMap { item -> QAChipRun? in
+            let block = item.block
+            let reveals: [(rect: CGRect, agentID: UUID, blockID: AgentNodeID)] = block.controls.compactMap { control in
+                guard case let .perform(.revealAgent(blockID, agentID, _)) = control.action else { return nil }
+                return (control.rect, agentID, blockID)
+            }
+            guard !reveals.isEmpty, block.rows.count == reveals.count else { return nil }
+            let chips = reveals.enumerated().map { index, reveal -> QAChip in
+                let row = block.rows[index]
+                let line = row.lines.first
+                let full = Self.width(of: CTLineCreateWithAttributedString(Self.coreTextString(row.string)))
+                var glyph: CGRect?
+                var stroke: (CGFloat, CGFloat)?
+                for decoration in block.decorations {
+                    switch decoration {
+                    case let .symbol(_, rect) where reveal.rect.contains(CGPoint(x: rect.midX, y: rect.midY)):
+                        glyph = rect
+                    case let .stroke(rect, _, radius, width) where rect == reveal.rect:
+                        stroke = (radius, width)
+                    default:
+                        break
+                    }
+                }
+                return QAChip(
+                    blockID: reveal.blockID, agentID: reveal.agentID, rect: reveal.rect, title: row.string.string,
+                    titleRect: line.map { CGRect(x: $0.x, y: $0.top, width: $0.width, height: $0.height) } ?? .zero,
+                    titleLine: line?.ctLine ?? CTLineCreateWithAttributedString(NSAttributedString()),
+                    titleFits: line.map { $0.width >= full - 0.5 } ?? false,
+                    glyphRect: glyph, strokeRadius: stroke?.0, strokeWidth: stroke?.1)
+            }
+            return QAChipRun(leaderID: item.blockID, origin: CGPoint(x: insets.left, y: item.y - scrollOffset),
+                             size: CGSize(width: block.width, height: block.height), chips: chips)
+        }
+    }
+
+    /// Nil when the incremental placement equals a from-scratch layout of the
+    /// same document at the same width; otherwise what differs. Cheap and WRONG
+    /// is the failure a cost witness cannot see.
+    func qaFreshLayoutMismatch() -> String? {
+        let incremental = placed.map { ($0.blockID, $0.y, $0.block.height, $0.textStart) }
+        cache.removeAll()
+        rebuild()
+        let fresh = placed.map { ($0.blockID, $0.y, $0.block.height, $0.textStart) }
+        guard incremental.count == fresh.count else {
+            return "\(incremental.count) placed blocks incrementally, \(fresh.count) from scratch"
+        }
+        for (a, b) in zip(incremental, fresh) where a.0 != b.0 || abs(a.1 - b.1) > 0.01 || abs(a.2 - b.2) > 0.01 || a.3 != b.3 {
+            return "block \(a.0.rawValue) at y \(a.1) h \(a.2) text \(a.3) incrementally, \(b.0.rawValue) at y \(b.1) h \(b.2) text \(b.3) from scratch"
+        }
+        return nil
+    }
+
+    /// Every semantic link laid out on a drawn line, in document order, with
+    /// the document offset of its first character.
+    var qaDrawnLinks: [(destination: String, index: Int)] {
+        placed.flatMap { item in
+            item.block.rows.enumerated().flatMap { rowIndex, row in
+                row.links.compactMap { link -> (destination: String, index: Int)? in
+                    guard row.lines.contains(where: { NSLocationInRange(link.range.location, $0.range) }) else { return nil }
+                    return (link.destination, item.textStart + item.block.rowOffsets[rowIndex] + link.range.location)
+                }
+            }
+        }
+    }
+
+    /// Clicks the drawn text of the link at document offset `index`: scrolls its
+    /// line into view, then clicks it through the view's own mouse handling, so
+    /// the click resolves the link from the drawn line as a reader's would.
+    @discardableResult
+    func qaClickLink(atCharacterIndex index: Int) -> Bool {
+        guard var point = qaPoint(forCharacterIndex: index) else { return false }
+        if point.y < 0 || point.y > bounds.height {
+            scrollTranscript(toY: scrollOffset + point.y - bounds.height / 2)
+            guard let revealed = qaPoint(forCharacterIndex: index) else { return false }
+            point = revealed
+        }
+        // Inside the first character, not on its leading edge.
+        return qaSendClick(at: NSPoint(x: point.x + 1.5, y: point.y))
     }
 
     /// Scrolls so the given block's top is in view.

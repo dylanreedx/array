@@ -288,7 +288,25 @@ enum CornerStyleChecks {
         "NSTableRowView": "a native table row's selection, drawn by AppKit in its own inset style",
     ]
 
-    private enum Kind: String { case corner, path, shadowPath }
+    /// The same exemption for a glyph that is a sublayer of a view that owns
+    /// other chrome: the canvas transcript draws the working throbber as a
+    /// layer, not as the exempt `DualPlaneGyroTiltedThinkingIndicatorView`.
+    static let exemptLayers: [String: String] = [
+        "AgentTranscriptCanvasGyroLayer": "the canvas transcript's working throbber: the same rings and orbit as DualPlaneGyroTiltedThinkingIndicatorView",
+    ]
+
+    private static func isExemptGlyph(_ layer: CALayer) -> Bool {
+        var current: CALayer? = layer
+        while let candidate = current {
+            if exemptLayers[String(describing: type(of: candidate))] != nil { return true }
+            current = candidate.superlayer
+        }
+        return false
+    }
+
+    /// `drawn`: a surface a `DrawnCornerReporting` view filled or stroked in
+    /// `draw(_:)`, measured from the path it drew.
+    private enum Kind: String { case corner, path, shadowPath, drawn }
 
     /// One radius, found by WHERE it is rather than by object identity: a
     /// re-render may rebuild a view (a transcript row, a table cell), and the
@@ -303,23 +321,39 @@ enum CornerStyleChecks {
         let kind: Kind
         let standard: CGFloat
         weak var view: NSView?
+        /// For `.drawn`: where the surface is, in the view's drawn record.
+        var drawnKey: String? = nil
 
         var label: String { "\(surface): \(owner) \(kind.rawValue)" }
 
-        func currentLayer() -> CALayer? {
+        func currentHost() -> NSView? {
             var host = view
             if host?.window == nil {
                 host = ChromeCensusSurfaces.views(in: root).filter { CornerStyleChecks.label($0) == owner }
                     .dropFirst(ordinal).first
             }
-            guard let host else { return nil }
+            return host
+        }
+
+        func currentLayer() -> CALayer? {
+            guard let host = currentHost() else { return nil }
             let layers = ChromeCensusSurfaces.ownedLayers(of: host)
             return layerIndex < layers.count ? layers[layerIndex] : nil
         }
 
         func read() -> (radius: CGFloat, half: CGFloat)? {
+            if kind == .drawn {
+                guard let reporter = currentHost() as? DrawnCornerReporting else { return nil }
+                // A full draw, now, in the style just applied.
+                reporter.display()
+                guard let path = reporter.qaDrawnCorners.first(where: { $0.key == drawnKey })?.path,
+                      let radius = PathCornerRadius.measure(path) else { return nil }
+                return (radius, min(path.boundingBoxOfPath.width, path.boundingBoxOfPath.height) / 2)
+            }
             guard let layer = currentLayer() else { return nil }
             switch kind {
+            case .drawn:
+                return nil
             case .corner:
                 return (layer.cornerRadius, min(layer.bounds.width, layer.bounds.height) / 2)
             case .path:
@@ -334,7 +368,11 @@ enum CornerStyleChecks {
 
     static func run() throws {
         CornerStyleController.apply(.standard)
-        defer { CornerStyleController.apply(.standard) }
+        DrawnCornerCensus.isRecording = true
+        defer {
+            CornerStyleController.apply(.standard)
+            DrawnCornerCensus.isRecording = false
+        }
 
         var probes: [UIProbe.Probed] = []
         var samples: [Sample] = []
@@ -347,6 +385,12 @@ enum CornerStyleChecks {
             probe.host.layoutSubtreeIfNeeded()
             probes.append(probe)
             samples += collect(surface: surface.id, root: probe.view)
+        }
+        CornerStyleController.apply(.standard)
+        for (probe, surface) in zip(probes, surfaces) {
+            probe.host.layoutSubtreeIfNeeded()
+            probe.host.displayIfNeeded()
+            samples += collectDrawn(surface: surface.id, root: probe.view)
         }
         guard samples.count >= 60 else {
             throw Failure(description: "found only \(samples.count) rounded corners across \(surfaces.count) surfaces — the census stopped reaching the chrome")
@@ -454,6 +498,31 @@ enum CornerStyleChecks {
         return own
     }
 
+    /// The surfaces `DrawnCornerReporting` views drew at Default, sampled once
+    /// every surface has been built and laid out: a drawn surface exists only
+    /// while it is in view, so it is sampled from the settled tile, not the one
+    /// still taking its first content.
+    private static func collectDrawn(surface: String, root: NSView) -> [Sample] {
+        var samples: [Sample] = []
+        var ordinals: [String: Int] = [:]
+        for view in ChromeCensusSurfaces.views(in: root) {
+            let owner = label(view)
+            let ordinal = ordinals[owner, default: 0]
+            ordinals[owner] = ordinal + 1
+            guard let reporter = view as? DrawnCornerReporting, reporter.window != nil, !reporter.bounds.isEmpty else { continue }
+            reporter.flushPendingVisualUpdate()
+            reporter.display()
+            for corner in reporter.qaDrawnCorners {
+                guard let radius = PathCornerRadius.measure(corner.path), radius > 0.5 else { continue }
+                var sample = Sample(surface: surface, root: root, owner: owner, ordinal: ordinal,
+                                    layerIndex: -1, kind: .drawn, standard: radius, view: view)
+                sample.drawnKey = corner.key
+                samples.append(sample)
+            }
+        }
+        return samples
+    }
+
     private static func collect(surface: String, root: NSView) -> [Sample] {
         var samples: [Sample] = []
         var ordinals: [String: Int] = [:]
@@ -467,6 +536,8 @@ enum CornerStyleChecks {
             for (index, layer) in ChromeCensusSurfaces.ownedLayers(of: view).enumerated() {
                 // A layer with no size draws no corner.
                 guard layer.bounds.width > 0, layer.bounds.height > 0 else { continue }
+                // A glyph's circles are not corners (`exemptLayers`).
+                guard !isExemptGlyph(layer) else { continue }
                 func add(_ kind: Kind, _ radius: CGFloat) {
                     samples.append(Sample(surface: surface, root: root, owner: owner, ordinal: ordinal,
                                           layerIndex: index, kind: kind, standard: radius, view: view))

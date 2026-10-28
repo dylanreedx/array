@@ -851,6 +851,10 @@ extension AgentFirstPaintChecks {
             tile.ingest(.turnCompleted(
                 threadId: thread, turnId: "turn-\(turn)", outcome: .completed, errorMessage: nil))
         }
+        if let canvas = tile.qaTranscriptSurface as? AgentTranscriptCanvasView {
+            try checkStreamingLocalityOnCanvas(tile: tile, canvas: canvas, thread: thread)
+            return
+        }
         guard let transcript = tile.qaTranscriptForChecks else {
             throw fail("streaming locality: the tile has no transcript to measure")
         }
@@ -966,6 +970,113 @@ extension AgentFirstPaintChecks {
             throw fail(
                 "streaming locality: the streamed answer never became a row — "
                 + "\(transcript.qaSemanticRowCount) rows for \(history) of history"
+            )
+        }
+    }
+
+    /// The same contract on the drawn transcript, read from what it actually
+    /// re-laid. The canvas has no row index to flatten: every update walks the
+    /// document's units and answers each from its layout cache, and the cost a
+    /// token must not scale with history is LAYOUT — CoreText typesetting of a
+    /// block. So a chunk inside an open answer must re-lay that answer's block
+    /// and nothing else, never trigger a whole-transcript relayout, and leave a
+    /// placement identical to laying the document out from scratch.
+    @MainActor
+    private static func checkStreamingLocalityOnCanvas(
+        tile: ManagedAgentTileNSView, canvas: AgentTranscriptCanvasView, thread: String
+    ) throws {
+        func present() {
+            tile.qaFlushStreamingMarkupForChecks()
+            canvas.flushPendingVisualUpdate()
+        }
+        // The canvas lays out only at a real width: give the tile a window,
+        // parked off every display.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = tile
+        window.orderFrontOffscreenForChecks()
+        window.layoutIfNeeded()
+        tile.layoutSubtreeIfNeeded()
+        present()
+        canvas.layoutSubtreeIfNeeded()
+        let history = canvas.qaPlacedBlockIDs.count
+        guard history >= 40 else {
+            throw fail(
+                "streaming locality: the fixture placed only \(history) blocks, so a whole-history "
+                + "relayout would be indistinguishable from a local one"
+            )
+        }
+        // The first chunk of a turn is structural: it begins the entry.
+        tile.ingest(.turnStarted(threadId: thread, turnId: "turn-live"))
+        tile.ingest(.contentDelta(
+            threadId: thread, turnId: "turn-live", streamKind: .assistant, delta: "opening "))
+        present()
+        let appliesBefore = canvas.qaVisualApplyCount
+        let fullRelayoutsBefore = canvas.qaFullRelayoutCount
+        let chunks = 12
+        for chunk in 0..<chunks {
+            tile.ingest(.contentDelta(
+                threadId: thread, turnId: "turn-live", streamKind: .assistant, delta: "chunk \(chunk) "))
+            let layoutsBefore = canvas.qaBlockLayoutCount
+            present()
+            let relaid = canvas.qaBlockLayoutCount - layoutsBefore
+            guard let answer = canvas.qaPlacedBlockIDs.last,
+                  relaid == 1, canvas.qaLastRelaidBlockIDs == [answer] else {
+                throw fail(
+                    "streaming locality: chunk \(chunk) inside an already-open answer re-laid \(relaid) "
+                    + "block(s) \(canvas.qaLastRelaidBlockIDs.map(\.rawValue)) over \(history) blocks of history "
+                    + "— a token must re-lay the answer it grows and nothing else"
+                )
+            }
+        }
+        // POSITIVE CONTROL: every budget above is met by a transcript that
+        // presented nothing.
+        let presented = canvas.qaVisualApplyCount - appliesBefore
+        guard presented >= chunks else {
+            throw fail(
+                "streaming locality: \(chunks) chunks produced only \(presented) presentations, so the "
+                + "counts above measure an empty queue rather than a cheap one"
+            )
+        }
+        guard canvas.qaFullRelayoutCount == fullRelayoutsBefore else {
+            throw fail(
+                "streaming locality: streaming chunks caused \(canvas.qaFullRelayoutCount - fullRelayoutsBefore) "
+                + "whole-transcript relayouts"
+            )
+        }
+        if let mismatch = canvas.qaFreshLayoutMismatch() {
+            throw fail("streaming locality: the incremental placement diverged from a fresh layout — \(mismatch)")
+        }
+        // Per turn: opening and closing an entry is structural; per token is not.
+        let turnLayoutsBefore = canvas.qaBlockLayoutCount
+        var steps = 0
+        for turn in 100..<104 {
+            tile.ingest(.turnStarted(threadId: thread, turnId: "turn-\(turn)"))
+            for chunk in 0..<8 {
+                tile.ingest(.contentDelta(
+                    threadId: thread, turnId: "turn-\(turn)", streamKind: .assistant, delta: "chunk \(chunk) "))
+                present()
+                steps += 1
+            }
+            tile.ingest(.turnCompleted(
+                threadId: thread, turnId: "turn-\(turn)", outcome: .completed, errorMessage: nil))
+            present()
+            steps += 1
+        }
+        let turnLayouts = canvas.qaBlockLayoutCount - turnLayoutsBefore
+        guard turnLayouts <= 2 * steps, canvas.qaFullRelayoutCount == fullRelayoutsBefore else {
+            throw fail(
+                "streaming locality: 4 turns of 8 chunks re-laid \(turnLayouts) blocks over \(steps) presented "
+                + "steps and \(history) blocks of history — a block or two per step is the answer growing, "
+                + "history per step is the regression"
+            )
+        }
+        guard canvas.qaPlacedBlockIDs.count > history else {
+            throw fail(
+                "streaming locality: the streamed answers never became blocks — "
+                + "\(canvas.qaPlacedBlockIDs.count) placed for \(history) of history"
             )
         }
     }
@@ -1125,16 +1236,58 @@ extension AgentFirstPaintChecks {
             )
         }
 
-        // A reduce-motion reader gets the same INFORMATION. The gyro falls back
-        // to a fixed pose rather than disappearing, so the signal must not be
-        // conditioned on motion being available.
-        AgentTranscriptMotion.qaWithMotion(enabled: true, reducedMotion: true) {
-            tile.qaTranscriptForChecks?.setThinkingIndicatorVisible(true)
+        // A reduce-motion reader gets the same INFORMATION without the MOTION.
+        // The gyro falls back to a fixed pose rather than disappearing, so the
+        // signal must not be conditioned on motion being available — and the
+        // pose must actually be still. Both are read in a window, the only place
+        // either renderer animates its gyro; parked off every display.
+        let motionTile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "streaming-liveness-motion",
+            frame: TileFrame(x: 0, y: 0, width: 560, height: 460),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = motionTile
+        window.orderFrontOffscreenForChecks()
+        guard let surface = motionTile.qaTranscriptSurface else {
+            throw fail("streaming liveness: the tile has no transcript surface")
         }
-        guard tile.qaThinkingIndicatorVisible else {
+        func settle() {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            window.layoutIfNeeded()
+            motionTile.layoutSubtreeIfNeeded()
+            surface.layoutSubtreeIfNeeded()
+            motionTile.qaTranscriptForChecks?.collectionView.layoutSubtreeIfNeeded()
+        }
+        // Positive control: with motion available the same tail animates, so
+        // "not animating" below cannot pass for want of a window or a gyro.
+        AgentTranscriptMotion.qaWithMotion(enabled: true, reducedMotion: false) {
+            surface.setThinkingIndicatorVisible(true)
+            settle()
+        }
+        guard surface.qaThinkingIndicatorAnimating else {
+            throw fail(
+                "streaming liveness: the working tail did not animate with motion available, "
+                + "so the reduce-motion assertion below would prove nothing"
+            )
+        }
+        AgentTranscriptMotion.qaWithMotion(enabled: true, reducedMotion: true) {
+            surface.setThinkingIndicatorVisible(true)
+            settle()
+        }
+        guard motionTile.qaThinkingIndicatorVisible else {
             throw fail(
                 "streaming liveness: the tail vanished under reduce-motion — the fixed-pose "
                 + "fallback exists so the signal survives without the animation"
+            )
+        }
+        guard !surface.qaThinkingIndicatorAnimating else {
+            throw fail(
+                "streaming liveness: the working gyro kept animating under Reduce Motion — it "
+                + "must hold its fixed pose"
             )
         }
     }
@@ -1254,14 +1407,15 @@ extension AgentFirstPaintChecks {
             for event in synthesizedSpawnEvents() { tile.ingest(event) }
         }
 
-        guard let transcript = tile.qaTranscriptForChecks else {
+        guard let surface = tile.qaTranscriptSurface else {
             throw fail("delegation chips: the tile has no transcript")
         }
         tile.qaFlushStreamingMarkupForChecks()
-        transcript.flushPendingVisualUpdate()
+        surface.flushPendingVisualUpdate()
         // The collection view materializes items only inside a real window's
         // layout/display cycle, and only for the rows the viewport actually
-        // reaches — so the walk below SCROLLS through the whole document.
+        // reaches — so the walk below SCROLLS through the whole document; the
+        // drawn transcript lays out only at a real width.
         // Parked off every display (orderFrontOffscreenForChecks): real layout,
         // nothing presented.
         let window = NSWindow(
@@ -1272,8 +1426,8 @@ extension AgentFirstPaintChecks {
         window.orderFrontOffscreenForChecks()
         window.layoutIfNeeded()
         tile.layoutSubtreeIfNeeded()
-        transcript.layoutSubtreeIfNeeded()
-        transcript.collectionView.layoutSubtreeIfNeeded()
+        surface.layoutSubtreeIfNeeded()
+        tile.qaTranscriptForChecks?.collectionView.layoutSubtreeIfNeeded()
 
         // The fixture's own teeth: the document must hold both Agent tool rows
         // and both chips, or every display assertion below is vacuous.
@@ -1309,6 +1463,16 @@ extension AgentFirstPaintChecks {
         }
         guard chipChildIDs == expectedChildIDs else {
             throw fail("delegation chips: chip child ids \(chipChildIDs) diverged from the derived observed-child ids")
+        }
+        if let canvas = surface as? AgentTranscriptCanvasView {
+            try assertDrawnDelegationChips(
+                tile: tile, canvas: canvas, agentToolBlockIDs: agentToolBlockIDs, chipBlockIDs: chipBlockIDs,
+                expectedChildIDs: expectedChildIDs, parentAgentID: parentAgentID,
+                revealed: { revealLog.revealed.map { ($0.child.rawValue, $0.parent.rawValue) } })
+            return
+        }
+        guard let transcript = tile.qaTranscriptForChecks else {
+            throw fail("delegation chips: the tile has no transcript")
         }
 
         // (a) The chips are DISPLAYED and the tool rows they name are SUPERSEDED
@@ -1547,6 +1711,16 @@ extension AgentFirstPaintChecks {
                 sourceItemID: nil,
                 provider: "claude",
                 spawnedAt: Date(timeIntervalSince1970: 0)))
+        }
+        if let canvas = tile.qaTranscriptSurface as? AgentTranscriptCanvasView {
+            canvas.flushPendingVisualUpdate()
+            try canvas.updateRenderContext(AgentRenderContext(
+                actions: .disabled, tokens: .transcript, appearance: .dark, agentStatus: statusSource))
+            try assertDrawnChipFlow(
+                tile: tile, canvas: canvas, window: window, wide: wide, names: names, childIDs: childIDs,
+                workingLabel: workingLabel, expectsLabel: { stub.states[$0]?.label != nil },
+                tickLastToWorking: { stub.publish(.working, for: childIDs[3]) })
+            return
         }
         guard let transcript = tile.qaTranscriptForChecks else {
             throw fail("subagent chip flow: the tile has no transcript")
@@ -2047,11 +2221,11 @@ extension AgentFirstPaintChecks {
                 ingestChip((callID, childID, name))
             }
         }
-        guard let transcript = tile.qaTranscriptForChecks else {
+        guard let surface = tile.qaTranscriptSurface else {
             throw fail("delegation fold (\(harness)): the tile has no transcript")
         }
         tile.qaFlushStreamingMarkupForChecks()
-        transcript.flushPendingVisualUpdate()
+        surface.flushPendingVisualUpdate()
 
         // The replay's own teeth: one chip per spawning call, and one tool row for
         // every call — a call with no row has nothing to fold, and a refusal with
@@ -2087,6 +2261,16 @@ extension AgentFirstPaintChecks {
         }
         guard statusByCall[refusedCallID] == .failed else {
             throw fail("delegation fold (\(harness)): the refused call reads \(String(describing: statusByCall[refusedCallID])), not failed")
+        }
+        if let canvas = surface as? AgentTranscriptCanvasView {
+            try assertDrawnDelegationFold(
+                harness: harness, tile: tile, canvas: canvas, window: window, wide: wide, chips: chips,
+                chipIDs: chipIDs, spawningRows: spawningCallIDs.map { toolRowsByCall[$0]![0] },
+                refusedRow: toolRowsByCall[refusedCallID]![0])
+            return
+        }
+        guard let transcript = tile.qaTranscriptForChecks else {
+            throw fail("delegation fold (\(harness)): the tile has no transcript")
         }
 
         let displayed = Set(transcript.qaDisplayedRowIDsForChecks)
@@ -2196,4 +2380,419 @@ extension AgentFirstPaintChecks {
         try capture("narrow")
     }
 
+}
+
+// MARK: - The drawn transcript's delegation witnesses
+//
+// The same properties as the list's, read from what `AgentTranscriptCanvasView`
+// laid out and drew: its placed blocks (displayed rows), its delegation fold
+// (superseded tool rows, chip runs), and each chip's drawn capsule, glyph,
+// title line and reveal control, pressed and hovered through the view's own
+// mouse handling.
+
+extension AgentFirstPaintChecks {
+    /// A chip as drawn, located in view coordinates.
+    @MainActor
+    struct DrawnChip {
+        let run: AgentTranscriptCanvasView.QAChipRun
+        let chip: AgentTranscriptCanvasView.QAChip
+        var viewRect: CGRect { chip.rect.offsetBy(dx: run.origin.x, dy: run.origin.y) }
+        var viewCenter: CGPoint { CGPoint(x: viewRect.midX, y: viewRect.midY) }
+    }
+
+    /// Where the list's chip and tool labels put their first glyph: an
+    /// `NSTextField` draws its text inset from its frame (half the difference
+    /// between the cell's size and the text's), and the list aligns label
+    /// FRAMES on `ToolCallView.detailIndent`. The drawn title has no frame, so
+    /// its first glyph is what must land on the reading column the reader sees.
+    @MainActor
+    private static var drawnReadingColumn: CGFloat {
+        let font = NSFont.token(.label, zoom: .default)
+        let cell = NSTextFieldCell(textCell: "Subagent")
+        cell.isBordered = false
+        cell.isBezeled = false
+        cell.font = font
+        let text = ("Subagent" as NSString).size(withAttributes: [.font: font]).width
+        return ToolCallView.detailIndent + (cell.cellSize.width - text) / 2
+    }
+
+    @MainActor
+    private static func drawnChips(_ canvas: AgentTranscriptCanvasView) -> [UUID: DrawnChip] {
+        var found: [UUID: DrawnChip] = [:]
+        for run in canvas.qaChipRuns {
+            for chip in run.chips { found[chip.agentID] = DrawnChip(run: run, chip: chip) }
+        }
+        return found
+    }
+
+    /// The capsule, as `AgentReferenceChipView` draws it: hairline outline at the
+    /// artifact radius, a glyph, the title one gap after the glyph, the content
+    /// centred, the chip narrower than its row, and the row empty between chips.
+    @MainActor
+    private static func assertDrawnCapsule(_ drawn: DrawnChip, canvas: AgentTranscriptCanvasView, label: String) throws {
+        let chip = drawn.chip
+        let zoom = AgentPageZoom.default
+        guard chip.rect.width < drawn.run.size.width,
+              chip.strokeWidth == CGFloat(LineWidth.hairline),
+              let radius = chip.strokeRadius, abs(radius - CornerRole.artifact.cgRadius(zoom: zoom)) < 0.01,
+              let glyph = chip.glyphRect,
+              abs(chip.rect.height - AgentReferenceChipView.controlHeight(zoom: zoom)) < 0.01 else {
+            throw fail(
+                "\(label): the drawn chip is not a hairline, icon-bearing agent capsule "
+                + "(rect \(chip.rect), stroke \(String(describing: chip.strokeWidth)) radius "
+                + "\(String(describing: chip.strokeRadius)), glyph \(String(describing: chip.glyphRect)))")
+        }
+        // The glyph sits centred in its 14pt box, which leads the content.
+        let glyphBoxMaxX = glyph.midX + 7
+        let contentMinX = glyph.midX - 7
+        guard abs(chip.titleRect.minX - glyphBoxMaxX - CGFloat(Space.s)) < 0.5,
+              abs((contentMinX + chip.titleRect.maxX) / 2 - chip.rect.midX) < 1 else {
+            throw fail(
+                "\(label): the drawn chip's icon/title are not centred with one gap between them "
+                + "(glyph \(glyph), title \(chip.titleRect), chip \(chip.rect))")
+        }
+        let emptyRowPoint = CGPoint(x: drawn.run.origin.x + drawn.run.size.width - 1, y: drawn.viewCenter.y)
+        guard drawn.run.chips.allSatisfy({ !$0.rect.contains(CGPoint(x: drawn.run.size.width - 1, y: chip.rect.midY)) }),
+              canvas.qaControlTitle(at: emptyRowPoint) == nil else {
+            throw fail("\(label): empty row space beside the drawn chips is still clickable")
+        }
+    }
+
+    /// (a) on the canvas: displayed and superseded, then interactive.
+    @MainActor
+    fileprivate static func assertDrawnDelegationChips(
+        tile: ManagedAgentTileNSView, canvas: AgentTranscriptCanvasView,
+        agentToolBlockIDs: [AgentNodeID], chipBlockIDs: [AgentNodeID],
+        expectedChildIDs: [UUID], parentAgentID: UUID,
+        revealed: () -> [(child: UUID, parent: UUID)]
+    ) throws {
+        canvas.layoutSubtreeIfNeeded()
+        let displayed = Set(canvas.qaPlacedBlockIDs)
+        let leaderByFollower = canvas.qaChipRunLeaderByFollower
+        for chipID in chipBlockIDs
+            where !displayed.contains(chipID) && !displayed.contains(leaderByFollower[chipID] ?? chipID) {
+            throw fail(
+                "delegation chips: chip \(chipID.rawValue) is not among the drawn blocks — the "
+                + "delegation is invisible, which is the live defect")
+        }
+        let superseded = canvas.qaSupersededBlockIDs
+        for toolID in agentToolBlockIDs {
+            guard superseded.contains(toolID) else {
+                throw fail(
+                    "delegation chips: Agent tool row \(toolID.rawValue) was never superseded by its chip — "
+                    + "one delegation draws as two rows")
+            }
+            guard !displayed.contains(toolID) else {
+                throw fail("delegation chips: superseded Agent tool row \(toolID.rawValue) is still drawn beside its chip")
+            }
+        }
+
+        // (b) interactive: each drawn chip, scrolled into view, hovered and
+        // clicked through the canvas's own mouse handling.
+        var exercised = 0
+        var captured = false
+        for childID in expectedChildIDs {
+            guard let leader = drawnChips(canvas)[childID]?.run.leaderID else {
+                throw fail("delegation chips: no drawn chip for child \(childID)")
+            }
+            canvas.qaReveal(blockID: leader)
+            guard let drawn = drawnChips(canvas)[childID] else {
+                throw fail("delegation chips: the chip for \(childID) vanished when scrolled into view")
+            }
+            exercised += 1
+            try assertDrawnCapsule(drawn, canvas: canvas, label: "delegation chips")
+            let opensALine = drawn.run.chips.first(where: { abs($0.rect.minY - drawn.chip.rect.minY) < 0.5 })?.agentID == childID
+            guard !opensALine || abs(drawn.chip.titleRect.minX - drawnReadingColumn) < 0.5 else {
+                throw fail(
+                    "delegation chips: the drawn chip's label starts at \(drawn.chip.titleRect.minX), not on the "
+                    + "transcript action reading column \(drawnReadingColumn)")
+            }
+            if !captured, let capturePath = ProcessInfo.processInfo.environment["CONTINUUM_AGENT_REFERENCE_CAPTURE"] {
+                let rep = try UIProbe.bitmap(of: canvas, id: "agent-reference-chip")
+                guard let png = rep.representation(using: .png, properties: [:]) else {
+                    throw fail("delegation chips: could not encode the requested visual witness")
+                }
+                try png.write(to: URL(fileURLWithPath: capturePath), options: .atomic)
+                captured = true
+            }
+            canvas.qaSendHover(at: drawn.viewCenter)
+            guard canvas.qaHoveredControlTitle == "Open subagent \(drawn.chip.title.components(separatedBy: "  ·  ")[0])" else {
+                throw fail(
+                    "delegation chips: hovering a drawn chip changes nothing (hovered "
+                    + "\(String(describing: canvas.qaHoveredControlTitle))) — no affordance says it is clickable")
+            }
+            canvas.qaSendHover(at: nil)
+            guard canvas.qaHoveredControlTitle == nil else {
+                throw fail("delegation chips: leaving the transcript did not clear the chip's hover state")
+            }
+            canvas.qaSendClick(at: drawn.viewCenter)
+        }
+        guard exercised >= 2 else {
+            throw fail("delegation chips: only \(exercised) drawn chip(s) for 2 displayed chips")
+        }
+        guard revealed().map(\.child) == expectedChildIDs else {
+            throw fail(
+                "delegation chips: clicking the two drawn chips reached onRevealAgent with "
+                + "\(revealed().map(\.child)) — expected \(expectedChildIDs); a chip whose click goes nowhere is a dead end")
+        }
+        guard revealed().allSatisfy({ $0.parent == parentAgentID }) else {
+            throw fail("delegation chips: a chip's reveal carried the wrong parent agent id")
+        }
+
+        let blocksBeforeNotice = canvas.qaPlacedBlockIDs.count
+        tile.showActionFailedNotice("Couldn't open that subagent — it may have been deleted.")
+        canvas.flushPendingVisualUpdate()
+        let noticeLanded = tile.qaDocumentForChecks.entries.flatMap(\.blocks).contains { block in
+            if case let .notice(payload) = block.payload {
+                return agentPlainText(payload.message).contains("Couldn't open that subagent")
+            }
+            return false
+        }
+        guard noticeLanded, canvas.qaPlacedBlockIDs.count == blocksBeforeNotice + 1 else {
+            throw fail(
+                "delegation chips: a failed reveal's notice never became a drawn block "
+                + "(landed=\(noticeLanded), blocks \(blocksBeforeNotice) -> \(canvas.qaPlacedBlockIDs.count))")
+        }
+    }
+
+    /// Asserts the chips form ONE drawn run that flows left to right with a
+    /// constant gap, wraps to the leading inset, fits the run's measured height,
+    /// stays inside it, and keeps the first label on the tool title column.
+    /// Returns the number of lines.
+    @MainActor
+    private static func assertDrawnFlow(_ chips: [DrawnChip], label: String) throws -> Int {
+        guard let run = chips.first?.run, chips.allSatisfy({ $0.run.leaderID == run.leaderID }) else {
+            let runs = Set(chips.map(\.run.leaderID))
+            throw fail(
+                "\(label): \(chips.count) consecutive chips draw in \(runs.count) transcript rows — one chip per "
+                + "row, stacked, instead of one row that lays them out left to right")
+        }
+        let frames = chips.map(\.chip.rect)
+        let lineHeight = AgentReferenceChipView.height(zoom: .default)
+        var lineStarts: [CGFloat] = []
+        for frame in frames where !lineStarts.contains(where: { abs($0 - frame.minY) < 0.5 }) { lineStarts.append(frame.minY) }
+        var gaps: [CGFloat] = []
+        for index in frames.indices.dropFirst() {
+            let previous = frames[index - 1], frame = frames[index]
+            if abs(previous.minY - frame.minY) < 0.5 {
+                guard frame.minX > previous.maxX else {
+                    throw fail("\(label): chip \(index) does not follow chip \(index - 1) on its line (\(frame) after \(previous))")
+                }
+                gaps.append(frame.minX - previous.maxX)
+            } else {
+                guard abs(frame.minX - frames[0].minX) < 0.5 else {
+                    throw fail("\(label): a wrapped line starts at x=\(frame.minX), not at the row's leading inset \(frames[0].minX)")
+                }
+            }
+        }
+        if let first = gaps.first, gaps.contains(where: { abs($0 - first) > 0.5 }) {
+            throw fail("\(label): the gap between chips is not constant: \(gaps)")
+        }
+        guard abs(run.size.height - CGFloat(lineStarts.count) * lineHeight) < 0.5 else {
+            throw fail("\(label): \(lineStarts.count) line(s) of chips in a \(run.size.height)pt drawn row — the measured height disagrees with the wrap")
+        }
+        for (index, frame) in frames.enumerated() {
+            guard frame.minX >= -0.5, frame.maxX <= run.size.width + 0.5, frame.minY >= -0.5, frame.maxY <= run.size.height + 0.5 else {
+                throw fail("\(label): chip \(index) at \(frame) spills out of its \(run.size) drawn row")
+            }
+        }
+        guard abs(chips[0].chip.titleRect.minX - drawnReadingColumn) < 0.5 else {
+            throw fail(
+                "\(label): the first chip's label starts at \(chips[0].chip.titleRect.minX), not on the tool "
+                + "title column \(drawnReadingColumn)")
+        }
+        return lineStarts.count
+    }
+
+    /// (c) on the canvas: consecutive chips flow, wrap, and read their status.
+    @MainActor
+    fileprivate static func assertDrawnChipFlow(
+        tile: ManagedAgentTileNSView, canvas: AgentTranscriptCanvasView, window: NSWindow, wide: NSSize,
+        names: [String], childIDs: [UUID], workingLabel: String,
+        expectsLabel: (UUID) -> Bool, tickLastToWorking: () -> Void
+    ) throws {
+        func settle() {
+            // A status tick re-lays on the next main-queue turn.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            window.layoutIfNeeded()
+            tile.layoutSubtreeIfNeeded()
+            canvas.layoutSubtreeIfNeeded()
+        }
+        func chips() throws -> [DrawnChip] {
+            if let first = drawnChips(canvas)[childIDs[0]] { canvas.qaReveal(blockID: first.run.leaderID) }
+            let found = drawnChips(canvas)
+            return try childIDs.map { id in
+                guard let chip = found[id] else {
+                    throw fail("subagent chip flow: no drawn chip for child \(id) (found \(found.count) of \(childIDs.count))")
+                }
+                return chip
+            }
+        }
+        /// Inked pixels where the trailing `word` of a drawn title lands. On
+        /// PIXELS, because the defect was a correct string that was never drawn.
+        func inkedPixels(ofTrailing word: String, in drawn: DrawnChip) throws -> Int {
+            let title = drawn.chip.title as NSString
+            let start = title.range(of: word, options: .backwards).location
+            guard start != NSNotFound else { return 0 }
+            let line = drawn.chip.titleLine
+            let x0 = drawn.run.origin.x + drawn.chip.titleRect.minX + CTLineGetOffsetForStringIndex(line, start, nil)
+            let x1 = drawn.run.origin.x + drawn.chip.titleRect.minX + CTLineGetOffsetForStringIndex(line, title.length, nil)
+            let rect = CGRect(x: x0, y: drawn.run.origin.y + drawn.chip.rect.minY, width: max(0, x1 - x0), height: drawn.chip.rect.height)
+                .intersection(drawn.viewRect)
+            guard !rect.isEmpty else { return 0 }
+            let rep = try UIProbe.bitmap(of: canvas, id: "subagent-chip-title")
+            let scale = CGFloat(rep.pixelsWide) / max(1, canvas.bounds.width)
+            let background = rep.colorAt(x: Int((drawn.viewRect.minX + 2) * scale), y: Int(drawn.viewRect.midY * scale))
+            var inked = 0
+            for x in Int(rect.minX * scale)..<Int(rect.maxX * scale) {
+                for y in Int(rect.minY * scale)..<Int(rect.maxY * scale) {
+                    guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                          let base = background?.usingColorSpace(.deviceRGB) else { continue }
+                    let delta = abs(color.redComponent - base.redComponent) + abs(color.greenComponent - base.greenComponent)
+                        + abs(color.blueComponent - base.blueComponent)
+                    if delta > 0.3 { inked += 1 }
+                }
+            }
+            return inked
+        }
+        func assertStatusReads(_ chips: [DrawnChip], phase: String) throws {
+            for (index, drawn) in chips.enumerated() {
+                let labelled = expectsLabel(childIDs[index])
+                let expected = labelled ? "\(names[index])  ·  \(workingLabel)" : names[index]
+                guard drawn.chip.title == expected else {
+                    throw fail("subagent chip flow (\(phase)): drawn chip \(index) composes \"\(drawn.chip.title)\", expected \"\(expected)\"")
+                }
+                guard drawn.chip.titleFits, drawn.chip.titleRect.maxX <= drawn.chip.rect.maxX + 0.5 else {
+                    throw fail(
+                        "subagent chip flow (\(phase)): drawn chip \(index)'s title \"\(drawn.chip.title)\" is truncated or "
+                        + "clipped — line \(drawn.chip.titleRect) in a \(drawn.chip.rect) capsule")
+                }
+                guard labelled else { continue }
+                guard try inkedPixels(ofTrailing: workingLabel, in: drawn) > 0 else {
+                    throw fail(
+                        "subagent chip flow (\(phase)): drawn chip \(index) composes \"\(drawn.chip.title)\" but paints "
+                        + "nothing where \"\(workingLabel)\" belongs — the capsule reads \"Name ·\"")
+                }
+            }
+        }
+
+        settle()
+        let wideChips = try chips()
+        try assertStatusReads(wideChips, phase: "wide")
+        let wideLines = try assertDrawnFlow(wideChips, label: "subagent chip flow (wide)")
+        guard wideLines == 1 else {
+            throw fail("subagent chip flow (wide): four chips took \(wideLines) lines in a \(wide.width)pt tile")
+        }
+        let chrome = wide.width - wideChips[0].run.size.width
+        func predictedLines(lastIsWorking: Bool, rowWidth: CGFloat) -> Int {
+            let widths = names.enumerated().map { index, name in
+                AgentReferenceChipView.preferredWidth(
+                    name: name, label: index == 3 && !lastIsWorking ? nil : workingLabel, zoom: .default)
+            }
+            let height = AgentReferenceChipRowView.flow(widths: widths, width: rowWidth, zoom: .default).height
+            return Int((height / AgentReferenceChipView.height(zoom: .default)).rounded())
+        }
+        guard let narrowRowWidth = stride(from: wideChips[0].run.size.width, through: 160, by: -1).first(where: { width in
+            let before = predictedLines(lastIsWorking: false, rowWidth: width)
+            return before >= 2 && predictedLines(lastIsWorking: true, rowWidth: width) > before
+        }) else {
+            throw fail("subagent chip flow: no width wraps these chips and lets a status tick add a line")
+        }
+        window.setContentSize(NSSize(width: narrowRowWidth + chrome, height: wide.height))
+        settle()
+        let narrowChips = try chips()
+        try assertStatusReads(narrowChips, phase: "narrow")
+        let narrowLines = try assertDrawnFlow(narrowChips, label: "subagent chip flow (narrow)")
+        guard narrowLines == predictedLines(lastIsWorking: false, rowWidth: narrowChips[0].run.size.width), narrowLines >= 2 else {
+            throw fail(
+                "subagent chip flow (narrow): \(narrowLines) line(s) in a \(narrowChips[0].run.size.width)pt drawn row, expected "
+                + "\(predictedLines(lastIsWorking: false, rowWidth: narrowChips[0].run.size.width))")
+        }
+        tickLastToWorking()
+        settle()
+        let tickedChips = try chips()
+        try assertStatusReads(tickedChips, phase: "after a status tick")
+        let tickedLines = try assertDrawnFlow(tickedChips, label: "subagent chip flow (after a status tick)")
+        guard tickedLines == narrowLines + 1 else {
+            throw fail(
+                "subagent chip flow (after a status tick): \(tickedLines) line(s), expected the tick to wrap the "
+                + "widened chip onto line \(narrowLines + 1)")
+        }
+    }
+
+    /// (d) on the canvas: every spawning call's tool row folded away, the refused
+    /// call drawn, the chips one run on one line wide and wrapped narrow.
+    @MainActor
+    fileprivate static func assertDrawnDelegationFold(
+        harness: String, tile: ManagedAgentTileNSView, canvas: AgentTranscriptCanvasView,
+        window: NSWindow, wide: NSSize, chips: [(callID: String, childID: UUID, name: String)],
+        chipIDs: [AgentNodeID], spawningRows: [AgentNodeID], refusedRow: AgentNodeID
+    ) throws {
+        func settle() {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            window.layoutIfNeeded()
+            tile.layoutSubtreeIfNeeded()
+            canvas.layoutSubtreeIfNeeded()
+        }
+        settle()
+        let displayed = Set(canvas.qaPlacedBlockIDs)
+        let superseded = canvas.qaSupersededBlockIDs
+        for (row, chip) in zip(spawningRows, chips) where !superseded.contains(row) || displayed.contains(row) {
+            throw fail(
+                "delegation fold (\(harness)): the call that spawned \"\(chip.name)\" still draws as its own tool row "
+                + "beside its chip (superseded=\(superseded.contains(row)), drawn=\(displayed.contains(row)))")
+        }
+        guard displayed.contains(refusedRow), !superseded.contains(refusedRow) else {
+            throw fail(
+                "delegation fold (\(harness)): the refused delegate call is not drawn (drawn=\(displayed.contains(refusedRow)), "
+                + "superseded=\(superseded.contains(refusedRow))) — an error must never fold away")
+        }
+        let leaderByFollower = canvas.qaChipRunLeaderByFollower
+        guard displayed.contains(chipIDs[0]), chipIDs.dropFirst().allSatisfy({ leaderByFollower[$0] == chipIDs[0] }) else {
+            throw fail(
+                "delegation fold (\(harness)): the \(chipIDs.count) chips are not one run — the spawning calls between "
+                + "them break it (followers \(chipIDs.dropFirst().map { leaderByFollower[$0]?.rawValue ?? "none" }))")
+        }
+        func lines(phase: String) throws -> (count: Int, run: AgentTranscriptCanvasView.QAChipRun) {
+            let found = drawnChips(canvas)
+            let drawn = try chips.map { chip -> DrawnChip in
+                guard let drawn = found[chip.childID] else {
+                    throw fail("delegation fold (\(harness), \(phase)): no drawn chip for \"\(chip.name)\"")
+                }
+                return drawn
+            }
+            guard let run = drawn.first?.run, drawn.allSatisfy({ $0.run.leaderID == run.leaderID }) else {
+                throw fail(
+                    "delegation fold (\(harness), \(phase)): \(drawn.count) chips draw in "
+                    + "\(Set(drawn.map(\.run.leaderID)).count) transcript rows — the spawning calls between them keep "
+                    + "each chip on a row of its own")
+            }
+            let frames = drawn.map(\.chip.rect)
+            var starts: [CGFloat] = []
+            for frame in frames where !starts.contains(where: { abs($0 - frame.minY) < 0.5 }) { starts.append(frame.minY) }
+            for index in frames.indices.dropFirst() where abs(frames[index].minY - frames[index - 1].minY) < 0.5 {
+                guard frames[index].minX > frames[index - 1].maxX else {
+                    throw fail("delegation fold (\(harness), \(phase)): chip \(index) does not follow chip \(index - 1) on its line")
+                }
+            }
+            return (starts.count, run)
+        }
+        let wideLines = try lines(phase: "wide")
+        guard wideLines.count == 1 else {
+            throw fail("delegation fold (\(harness), wide): \(chips.count) chips took \(wideLines.count) lines in a \(wide.width)pt tile")
+        }
+        let chrome = wide.width - wideLines.run.size.width
+        let widths = chips.map { AgentReferenceChipView.preferredWidth(name: $0.name, label: nil, zoom: .default) }
+        guard let narrowRowWidth = stride(from: wideLines.run.size.width, through: 120, by: -1).first(where: { width in
+            AgentReferenceChipRowView.flow(widths: widths, width: width, zoom: .default).height
+                > AgentReferenceChipView.height(zoom: .default) * 1.5
+        }) else {
+            throw fail("delegation fold (\(harness)): no row width wraps these chips")
+        }
+        window.setContentSize(NSSize(width: narrowRowWidth + chrome, height: wide.height))
+        settle()
+        guard try lines(phase: "narrow").count >= 2 else {
+            throw fail("delegation fold (\(harness), narrow): the run did not wrap in a \(narrowRowWidth)pt row")
+        }
+    }
 }
