@@ -926,7 +926,10 @@ final class FilmDirector {
                 let visible = control.visibleRect.isEmpty ? control.bounds : control.visibleRect
                 let point = target.at == .send ? CGPoint(x: visible.midX, y: visible.midY)
                     : CGPoint(x: visible.minX + min(80, visible.width / 2), y: visible.midY)
-                return topLeft(fromWindow: control.convert(point, to: nil))
+                // Where the tile DRAWS it: a resting tile's composer lives in a hidden
+                // host window, and a press where it is drawn is what wakes the tile.
+                guard let drawn = agent.qaPresentedRect(of: control, NSRect(origin: point, size: .zero)) else { return nil }
+                return topLeft(fromWindow: agent.convert(drawn.origin, to: nil))
             }
             return topLeft(fromWindow: view.convert(local, to: nil))
         }
