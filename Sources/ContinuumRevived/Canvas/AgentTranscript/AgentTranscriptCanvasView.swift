@@ -32,7 +32,8 @@ import ContinuumRevivedCore
 /// instead, read once per tile.
 /// Witness: `--transcript-canvas-check` (`TranscriptCanvasChecks`).
 @MainActor
-final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuItemValidation {
+final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuItemValidation, CornerStyled,
+    DrawnCornerReporting {
     // MARK: Switch
 
     static let rendererEnvironmentKey = "ARRAY_TRANSCRIPT_RENDERER"
@@ -564,7 +565,17 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         hasher.combine(context.appearance.rawValue)
         hasher.combine(context.pageZoom.percent)
         hasher.combine(context.canRespondToRequests)
+        // Every drawn radius is resolved from `CornerRole` at layout time, so a
+        // laid block is only valid for the corner style it was laid out in.
+        hasher.combine(CornerStyle.current.rawValue)
         return hasher.finalize()
+    }
+
+    /// Settings › Appearance › Corner style changed: the corner-style walk calls
+    /// this. Radii are baked into each `LaidBlock`, and nothing else re-lays a
+    /// block whose content did not move, so re-lay them all now.
+    func applyCornerStyle() {
+        preservingTail { rebuild() }
     }
 
     /// One thing the transcript draws: a block, or a finished reasoning entry.
@@ -730,6 +741,8 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let highlight = NSColor.selectedTextBackgroundColor.cgColor
         var drawnLines = 0
         var drawnControls = 0
+        let recordsCorners = DrawnCornerCensus.isRecording
+        if recordsCorners { qaDrawnCornerRecord = [] }
         context.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         var index = firstPlaced(atOrBelow: visible.minY)
         while index < placed.count {
@@ -747,24 +760,32 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                 case let .fill(rect, color, radius) where rect.intersects(localVisible):
                     context.setFillColor(color)
                     if radius > 0 {
-                        context.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+                        let path = CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
+                        if recordsCorners { recordCorner("fill", item.blockID, rect, path) }
+                        context.addPath(path)
                         context.fillPath()
                     } else {
+                        if recordsCorners { recordCorner("fill", item.blockID, rect, CGPath(rect: rect, transform: nil)) }
                         context.fill(rect)
                     }
                 case let .stroke(rect, color, radius, width) where rect.intersects(localVisible):
                     context.setStrokeColor(color)
                     context.setLineWidth(width)
                     let inset = rect.insetBy(dx: width / 2, dy: width / 2)
-                    context.addPath(CGPath(roundedRect: inset, cornerWidth: max(0, radius - width / 2),
-                                           cornerHeight: max(0, radius - width / 2), transform: nil))
+                    let path = CGPath(roundedRect: inset, cornerWidth: max(0, radius - width / 2),
+                                      cornerHeight: max(0, radius - width / 2), transform: nil)
+                    if recordsCorners { recordCorner("stroke", item.blockID, rect, path) }
+                    context.addPath(path)
                     context.strokePath()
                 default:
                     continue
                 }
             }
             for (controlIndex, control) in block.controls.enumerated() where control.rect.intersects(localVisible) {
-                drawControlBackground(control, key: ControlKey(blockID: item.blockID, index: controlIndex), in: context)
+                if let path = drawControlBackground(control, key: ControlKey(blockID: item.blockID, index: controlIndex), in: context),
+                   recordsCorners {
+                    recordCorner("control", item.blockID, control.rect, path)
+                }
             }
             if block.clipsToBounds { context.clip(to: CGRect(x: 0, y: 0, width: block.width, height: block.height)) }
             for (rowIndex, row) in block.rows.enumerated() {
@@ -856,9 +877,12 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                       width: fitted.width, height: fitted.height)
     }
 
-    private func drawControlBackground(_ control: Control, key: ControlKey, in context: CGContext) {
+    /// Fills a control's surface; returns the path it filled, if any.
+    @discardableResult
+    private func drawControlBackground(_ control: Control, key: ControlKey, in context: CGContext) -> CGPath? {
         let hovered = hoveredControl == key && control.enabled
         let pressed = pressedControl == key && pressedInside && control.enabled
+        let path: CGPath
         switch control.style {
         case .choice:
             // `AgentRequestChoiceButton`: every idle choice has equal emphasis;
@@ -866,16 +890,29 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             let surface = (hovered || pressed) ? AgentSurfaceRole.rowSelected.color : SurfaceToken.overlay.color
             context.setFillColor(surface.cgColor(for: theme))
             let radius = CGFloat(renderContext.pageZoom.scaled(CornerRole.card.radius))
-            context.addPath(CGPath(roundedRect: control.rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
-            context.fillPath()
+            path = CGPath(roundedRect: control.rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
         case let .region(hoverFill, pressedFill, radius):
-            guard let fill = pressed ? (pressedFill ?? hoverFill) : (hovered ? hoverFill : nil) else { return }
+            guard let fill = pressed ? (pressedFill ?? hoverFill) : (hovered ? hoverFill : nil) else { return nil }
             context.setFillColor(fill)
-            context.addPath(CGPath(roundedRect: control.rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
-            context.fillPath()
+            path = CGPath(roundedRect: control.rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
         case .text, .chevron:
-            return
+            return nil
         }
+        context.addPath(path)
+        context.fillPath()
+        return path
+    }
+
+    // MARK: Drawn corners (QA)
+
+    /// What the last `draw(_:)` filled or stroked as a surface, while
+    /// `DrawnCornerCensus.isRecording`: the corner census measures these paths,
+    /// because a drawn card has no layer whose `cornerRadius` it could read.
+    private var qaDrawnCornerRecord: [(key: String, path: CGPath)] = []
+    var qaDrawnCorners: [(key: String, path: CGPath)] { qaDrawnCornerRecord }
+
+    private func recordCorner(_ kind: String, _ blockID: AgentNodeID, _ rect: CGRect, _ path: CGPath) {
+        qaDrawnCornerRecord.append(("\(kind) \(blockID.rawValue) \(rect.integral)", path))
     }
 
     private func drawControlForeground(_ control: Control, key: ControlKey, in context: CGContext) {
