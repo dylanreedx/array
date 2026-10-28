@@ -1471,7 +1471,13 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         qaReveal(blockID: item.blockID)
         guard let target = qaControls.first(where: { $0.blockID == item.blockID
             && $0.title == ApprovalDecision.displayTitle(forChoice: value) && $0.kind == "choice" }) else { return false }
-        let location = convert(target.center, to: nil)
+        return qaSendClick(at: target.center)
+    }
+
+    /// A mouse down and up at `point` (view coordinates), handed to this view's
+    /// own handlers: hit testing, press state, and what a click there does.
+    private func qaSendClick(at point: NSPoint) -> Bool {
+        let location = convert(point, to: nil)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             guard let event = NSEvent.mouseEvent(
                 with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
@@ -1480,6 +1486,34 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             if type == .leftMouseDown { mouseDown(with: event) } else { mouseUp(with: event) }
         }
         return true
+    }
+
+    /// Every semantic link laid out on a drawn line, in document order, with
+    /// the document offset of its first character.
+    var qaDrawnLinks: [(destination: String, index: Int)] {
+        placed.flatMap { item in
+            item.block.rows.enumerated().flatMap { rowIndex, row in
+                row.links.compactMap { link -> (destination: String, index: Int)? in
+                    guard row.lines.contains(where: { NSLocationInRange(link.range.location, $0.range) }) else { return nil }
+                    return (link.destination, item.textStart + item.block.rowOffsets[rowIndex] + link.range.location)
+                }
+            }
+        }
+    }
+
+    /// Clicks the drawn text of the link at document offset `index`: scrolls its
+    /// line into view, then clicks it through the view's own mouse handling, so
+    /// the click resolves the link from the drawn line as a reader's would.
+    @discardableResult
+    func qaClickLink(atCharacterIndex index: Int) -> Bool {
+        guard var point = qaPoint(forCharacterIndex: index) else { return false }
+        if point.y < 0 || point.y > bounds.height {
+            scrollTranscript(toY: scrollOffset + point.y - bounds.height / 2)
+            guard let revealed = qaPoint(forCharacterIndex: index) else { return false }
+            point = revealed
+        }
+        // Inside the first character, not on its leading edge.
+        return qaSendClick(at: NSPoint(x: point.x + 1.5, y: point.y))
     }
 
     /// Scrolls so the given block's top is in view.

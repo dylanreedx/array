@@ -1200,24 +1200,51 @@ enum FileOpenChecks {
         agentView.ingest(AgentRuntimeEvent.turnCompleted(threadId: "thread-link", turnId: "turn-1", outcome: .completed, errorMessage: nil))
         agentView.layoutSubtreeIfNeeded()
 
-        func renderedLinks() -> [(view: RichInlineTextView, link: AgentTextStyleResolver.LinkRange)] {
+        // The links the installed renderer presents, each with how a reader
+        // activates it: the list's RichInlineTextViews, or the drawn
+        // transcript's laid lines, clicked through its own mouse handling.
+        // `target` is an explicit open intent (the context menu's).
+        struct RenderedLink {
+            let destination: String
+            let activate: (AgentLinkOpenTarget?) -> Void
+        }
+        func renderedLinks() -> [RenderedLink] {
+            if let canvas = agentView.qaTranscriptSurface as? AgentTranscriptCanvasView {
+                canvas.flushPendingVisualUpdate()
+                canvas.layoutSubtreeIfNeeded()
+                return canvas.qaDrawnLinks.map { link in
+                    RenderedLink(destination: link.destination) { target in
+                        if let target {
+                            _ = canvas.activateLink(at: link.index, target: target)
+                        } else {
+                            _ = canvas.qaClickLink(atCharacterIndex: link.index)
+                        }
+                    }
+                }
+            }
             var inlineViews: [RichInlineTextView] = []
             func walk(_ view: NSView) {
                 if let inline = view as? RichInlineTextView { inlineViews.append(inline) }
                 view.subviews.forEach(walk)
             }
             walk(agentView)
-            return inlineViews.flatMap { view in view.linkRanges.map { (view: view, link: $0) } }
+            return inlineViews.flatMap { view in
+                view.linkRanges.map { link in
+                    RenderedLink(destination: link.destination) { target in
+                        _ = view.activateLink(at: link.range.location, target: target)
+                    }
+                }
+            }
         }
         let links = renderedLinks()
         try expect(!links.isEmpty, "the assistant message must render semantic links in the tile")
 
         func activate(_ destination: String) throws {
             let currentLinks = renderedLinks()
-            guard let match = currentLinks.first(where: { $0.link.destination == destination }) else {
-                throw Failure(message: "the transcript must contain a link to \(destination); it has \(currentLinks.map(\.link.destination))")
+            guard let match = currentLinks.first(where: { $0.destination == destination }) else {
+                throw Failure(message: "the transcript must contain a link to \(destination); it has \(currentLinks.map(\.destination))")
             }
-            _ = match.view.activateLink(at: match.link.range.location)
+            match.activate(nil)
         }
 
         // 1. A relative path with coordinates resolves, opens, and reveals.
@@ -1277,12 +1304,9 @@ enum FileOpenChecks {
         try activate("https://example.com/guide")
         try activate("https://example.com/guide")
         guard let webMatch = renderedLinks().first(where: {
-            $0.link.destination == "https://example.com/guide"
+            $0.destination == "https://example.com/guide"
         }) else { throw Failure(message: "the transcript lost its https link") }
-        _ = webMatch.view.activateLink(
-            at: webMatch.link.range.location,
-            target: .systemBrowser
-        )
+        webMatch.activate(.systemBrowser)
         try expect(webTargets == [.array, .array, .systemBrowser],
                    "web link activation must preserve Array vs system intent; got \(webTargets)")
         try expect(Set(spawnedBrowserTileIDs).count == 2,
