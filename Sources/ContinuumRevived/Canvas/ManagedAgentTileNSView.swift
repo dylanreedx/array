@@ -2780,7 +2780,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             // A running compaction names itself; the silence and tool
             // overrides describe a turn, which this is not.
             let compacting = compactionSessionFact != nil
-            transcriptCollectionFixture?.setThinkingStatusText(
+            setLiveTailStatusText(
                 (compacting ? nil : presenceTailOverride(now: now)) ?? Self.tailStatusText(
                     for: presented.activity, liveToolVerb: liveToolVerb?.text,
                     startupDetail: currentPresence.startupDetail, compacting: compacting))
@@ -2795,7 +2795,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             quotas: currentQuotaPresentations(at: now),
             cost: currentCostPresentation(),
             enabledElements: AgentStatusElementConfig.visibleElements())))
-        transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(
+        setLiveTailStatusText(Self.tailStatusText(
             for: activity, liveToolVerb: liveToolVerb?.text, compacting: compactionSessionFact != nil))
         syncCompactStatusTick(for: activity)
     }
@@ -3147,7 +3147,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             // so a witness MUST come through here rather than calling
             // `compactStatusRow.apply` with a presentation of its own.
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
-            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: presented.activity, liveToolVerb: liveToolVerb?.text))
+            setLiveTailStatusText(Self.tailStatusText(for: presented.activity, liveToolVerb: liveToolVerb?.text))
             syncCompactStatusTick(for: presented.activity)
         } else {
             let detail = AgentLocationStatusPresenter.present(
@@ -3165,7 +3165,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                         accountQuota ?? currentAccountQuota(), element: $0, now: now) },
                 cost: currentCostPresentation(),
                 enabledElements: AgentStatusElementConfig.visibleElements())))
-            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: activity, liveToolVerb: liveToolVerb?.text))
+            setLiveTailStatusText(Self.tailStatusText(for: activity, liveToolVerb: liveToolVerb?.text))
             syncCompactStatusTick(for: activity)
         }
     }
@@ -3560,16 +3560,36 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let showsWorkingTail = Self.showsWorkingTail(
             statusIsActive: statusIsActive, document: model.document,
             turnLiveness: turnLiveness)
-        // The settled "Worked for Ns" is the tail row, pinned to the foot of the
-        // document. Once a compaction boundary lands after that turn it would
-        // sit BELOW the boundary and read as the compaction's duration, so the
-        // boundary retires it — as the next turn starting already does.
-        let boundaryIsNewest = model.document.entries.last?.blocks.last?.kind == .compaction
-        if !statusIsActive, !boundaryIsNewest, let settled = Self.settledTailText(for: presence) {
+        if let settled = settledTailStatusText {
             transcriptCollectionFixture.setSettledTailStatus(settled)
             return
         }
         transcriptCollectionFixture.setThinkingIndicatorVisible(showsWorkingTail)
+    }
+
+    /// The settled "Worked for Ns" the tail shows now, or nil while it is live.
+    /// The settled row is pinned to the foot of the document; once a compaction
+    /// boundary lands after that turn it would sit BELOW the boundary and read
+    /// as the compaction's duration, so the boundary retires it — as the next
+    /// turn starting already does.
+    private var settledTailStatusText: String? {
+        guard pendingOptimisticSubmissionID == nil else { return nil }
+        let presence = currentPresence
+        let awaitingUser: Bool
+        if case .needsAction = v2TurnSnapshot?.state { awaitingUser = true } else { awaitingUser = false }
+        guard !presence.isLive || awaitingUser else { return nil }
+        guard model.document.entries.last?.blocks.last?.kind != .compaction else { return nil }
+        return Self.settledTailText(for: presence)
+    }
+
+    /// The gyro's live words. With nothing live to say, a settled tail keeps its
+    /// own words: the compact status re-renders whenever anything about the agent
+    /// lands — a branch read that finishes off the main thread after the turn
+    /// ended, a quota, a location — and each of those blanked "Worked for Ns".
+    /// Live words (a compaction running after the turn) still take the tail.
+    private func setLiveTailStatusText(_ text: String?) {
+        let live = text ?? ""
+        transcriptCollectionFixture?.setThinkingStatusText(live.isEmpty ? (settledTailStatusText ?? live) : live)
     }
 
     /// The tail's words for a settled submission, measured Return → settle,
