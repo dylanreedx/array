@@ -85,6 +85,15 @@ enum WorkspaceChromePolishChecks {
             let own = (view as? NSControl).map { ["Agent actions", "Location actions"].contains($0.accessibilityLabel() ?? "") ? 1 : 0 } ?? 0
             return own + view.subviews.reduce(0) { $0 + visibleMenus($1) }
         }
+        // Laid out at its frame, as on screen: the bar hides what its width budget
+        // cannot fit, which an unlaid tile never decides.
+        tile.frame = NSRect(x: 0, y: 0, width: 700, height: 600)
+        tile.layoutSubtreeIfNeeded()
+        // Resting (an idle tile), the tile draws its detached body and title-bar
+        // controls; live, they are its subviews. One action menu either way.
+        let drawnMenus = tile.qaPresentedViewRoots.reduce(0) { $0 + visibleMenus($1) }
+        try expect(drawnMenus == 1, "agent tile must show exactly one action menu, found \(drawnMenus) (resting \(tile.isChromeResting))")
+        tile.wakeChrome()
         try expect(visibleMenus(tile) == 1, "agent tile must show exactly one action menu, found \(visibleMenus(tile))")
         var stopped = false
         var detached = false

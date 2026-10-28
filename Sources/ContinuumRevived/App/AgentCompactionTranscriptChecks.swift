@@ -125,6 +125,30 @@ func runAgentCompactionTranscriptChecks() async throws {
 
     /// What one rendered transcript says about its compaction rows.
     func assertBoundaryRows(in root: NSView, expected: [String], label: String) throws {
+        if let tile = root as? ManagedAgentTileNSView, let canvas = tile.qaCanvasTranscript {
+            // The drawn transcript: the same properties, read off the boundary
+            // blocks it laid out — the label it drew, the width it drew it at
+            // against the width it needs, and the rules painted beside it.
+            let compactions = Set(tile.qaDocumentForChecks.entries.flatMap(\.blocks)
+                .filter { $0.kind == .compaction }.map(\.id))
+            let boundaries = canvas.qaPlacedBlockIDs.filter(compactions.contains).compactMap(canvas.qaBoundary(for:))
+            guard boundaries.map(\.text) == expected else {
+                throw fail("\(label): expected boundary rows \(expected), drew \(boundaries.map(\.text))")
+            }
+            for boundary in boundaries {
+                guard boundary.width > 0 else { throw fail("\(label): a boundary row has no width") }
+                guard boundary.drawnWidth + 0.5 >= boundary.neededWidth,
+                      boundary.neededWidth + 32 <= boundary.width else {
+                    throw fail("\(label): the boundary label is clipped — drawn \(boundary.drawnWidth)pt of the "
+                        + "\(boundary.neededWidth)pt '\(boundary.text)' needs, in a \(boundary.width)pt row")
+                }
+                guard boundary.ruleRects.contains(where: { $0.height <= 3 && $0.width >= 16 }) else {
+                    throw fail("\(label): the boundary row paints no divider line — it reads as stray "
+                        + "text, not as the point the context was cut")
+                }
+            }
+            return
+        }
         let views = descendants(in: root)
         let unknown = views.compactMap { $0 as? AgentUnknownBlockView }
             .map(\.summaryLabel.stringValue)
@@ -243,7 +267,8 @@ func runAgentCompactionTranscriptChecks() async throws {
             throw fail("\(name) relaunch: the compaction boundary did not survive rehydration")
         }
         try await eventually("\(name) relaunch: the compaction row never reached the list") {
-            tile.qaTranscriptForChecks?.qaDisplayedRowIDsForChecks.contains(block.id) == true
+            tile.layoutSubtreeIfNeeded()
+            return tile.qaDisplayedBlockIDs.contains(block.id)
         }
         tile.layoutSubtreeIfNeeded()
         if let list = tile.qaTranscriptForChecks {
@@ -446,6 +471,11 @@ func runAgentCompactionTranscriptChecks() async throws {
             if let list = tile.qaTranscriptForChecks {
                 list.layout()
                 list.collectionView.layout()
+            }
+            if let canvas = tile.qaCanvasTranscript {
+                return canvas.qaPlacedBlockIDs.contains { id in
+                    tile.qaDocumentForChecks.entries.flatMap(\.blocks).contains { $0.id == id && $0.kind == .compaction }
+                }
             }
             return descendants(in: tile).contains { $0 is CompactionBoundaryView }
         }

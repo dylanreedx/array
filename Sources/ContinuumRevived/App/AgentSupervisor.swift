@@ -15136,6 +15136,9 @@ func runAgentRestoreChecks() async throws {
     guard tile.qaTranscriptText.contains(ManagedAgentTileNSView.previousSessionNoticeText) else {
         throw fail("the previous-session notice did not reach the transcript: \(tile.qaTranscriptText)")
     }
+    // The drawn transcript lays out what it shows only once the tile is laid out.
+    tile.qaTranscriptSurface?.flushPendingVisualUpdate()
+    tile.layoutSubtreeIfNeeded()
     guard tile.qaRenderedCardCount == tile.transcriptCardCount, tile.transcriptCardCount == 1 else {
         throw fail("the notice rendered \(tile.qaRenderedCardCount) view(s) for \(tile.transcriptCardCount) card(s)")
     }
@@ -15798,6 +15801,9 @@ private func checkLiveV2TileMigration<Failure: Error>(
         metadata: TileMetadata(launchProfileId: "managed")
     ))
     tile.frame = NSRect(x: 0, y: 0, width: 520, height: 420)
+    // Laid out once, as a tile on screen is: the drawn transcript lays out (and
+    // so renders) its rows only at a real width.
+    tile.layoutSubtreeIfNeeded()
     let draftStore = AgentComposerDraftStore(
         applicationSupportDirectory: store.layout.applicationSupportDirectory,
         debounceInterval: 60
@@ -16202,6 +16208,10 @@ private func checkTileIsASubscriber(
         throw fail("re-attaching after a detach duplicated the transcript (\(alphaCards) copies of the first reply): \(tile.qaTranscriptText)")
     }
     // The reset has to reach the view hierarchy, not just the model behind it.
+    // The drawn transcript lays out what it shows only once the tile is laid out,
+    // as every tile on screen is.
+    tile.qaTranscriptSurface?.flushPendingVisualUpdate()
+    tile.layoutSubtreeIfNeeded()
     guard tile.qaRenderedCardCount == tile.transcriptCardCount else {
         throw fail("the card stack holds \(tile.qaRenderedCardCount) views for \(tile.transcriptCardCount) cards — a reset left stale arranged subviews")
     }

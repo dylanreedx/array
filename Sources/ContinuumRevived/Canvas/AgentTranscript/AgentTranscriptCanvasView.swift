@@ -462,7 +462,22 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             return
         }
         cache.removeAll()
+        // A reader scrolled up keeps the row they were reading under the
+        // viewport top, at the same share of its height, as the row list does:
+        // a rung or appearance change re-lays out every block, and a kept pixel
+        // offset would land them somewhere else in the document.
+        let anchor: (id: AgentNodeID, fraction: CGFloat)? = isNearBottom ? nil : {
+            let index = firstPlaced(atOrBelow: scrollOffset)
+            guard index < placed.count else { return nil }
+            let item = placed[index]
+            return (item.blockID, item.block.height > 0 ? (scrollOffset - item.y) / item.block.height : 0)
+        }()
         preservingTail { rebuild() }
+        if let anchor, let item = placed.first(where: { $0.blockID == anchor.id }) {
+            scrollOffset = min(max(0, item.y + anchor.fraction * item.block.height), maximumScrollOffset)
+            positionGyro()
+            needsDisplay = true
+        }
     }
 
     func bindToolDetailAgent(_ agentID: AgentID?) {
@@ -1744,6 +1759,244 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     }
 
     func qaHeight(of blockID: AgentNodeID) -> CGFloat? { placed.first { $0.blockID == blockID }?.block.height }
+
+    // Renderer-agnostic readbacks for `ManagedAgentTileNSView`'s QA seams: what
+    // this view laid out and draws, never what the document says it should.
+
+    /// The block exactly as it was laid out: a tool or diff block carries the
+    /// presented payload (host-local detail) its drawing was made from. nil when
+    /// the block is not laid out.
+    func qaPresentedBlock(for blockID: AgentNodeID) -> AgentBlock? {
+        guard let item = placed.first(where: { $0.blockID == blockID }),
+              var block = document.entries.lazy.flatMap(\.blocks).first(where: { $0.id == blockID }) else { return nil }
+        if let presented = item.block.presented { block.payload = presented }
+        return block
+    }
+
+    /// Waits for the tool-detail snapshot in flight, whose landing re-lays out
+    /// the presented rows.
+    func qaWaitForToolDetailRefresh() async { await toolDetail.qaWaitForRefresh() }
+
+    /// The tail carries the working gyro: a placed, unsettled tail row, and —
+    /// once the view is in a window, where it can animate — the gyro layer
+    /// shown and animating there. (The row list's indicator reads the same
+    /// way: its tail row, whether or not a window is there to show it.)
+    var qaTailGyroVisible: Bool {
+        guard tailLine != nil, !tailSettled else { return false }
+        return window == nil || isHiddenOrHasHiddenAncestor || (!gyro.isHidden && gyro.isAnimating)
+    }
+
+    /// Every selectable text line drawn inside the view's bounds right now: its
+    /// string and its rect in view coordinates (lines clipped by a scroll region's
+    /// viewport or the view's edge are left out).
+    var qaVisibleTextLines: [(text: String, rect: NSRect)] {
+        var result: [(String, NSRect)] = []
+        for item in placed {
+            let top = item.y - scrollOffset
+            guard top + item.block.height > 0, top < bounds.height else { continue }
+            for row in item.block.rows {
+                var offset = CGPoint.zero
+                var clip = CGRect(x: 0, y: 0, width: item.block.width, height: item.block.height)
+                if let region = row.region, item.block.regions.indices.contains(region) {
+                    offset = regionOffsets[RegionKey(blockID: item.blockID, index: region)] ?? .zero
+                    clip = item.block.regions[region].viewport
+                }
+                for line in row.lines {
+                    let local = CGRect(x: line.x - offset.x, y: line.top - offset.y, width: line.width, height: line.height)
+                    guard clip.contains(local) else { continue }
+                    let rect = local.offsetBy(dx: insets.left, dy: top)
+                    guard bounds.contains(rect) else { continue }
+                    let text = (row.string.string as NSString).substring(with: line.range)
+                    result.append((text, rect))
+                }
+            }
+        }
+        return result
+    }
+
+    /// A one-line boundary block (session boundary, compaction) as drawn: its
+    /// label, the width the label was drawn at and the width it needs, the
+    /// block's width, and the rules painted beside it.
+    struct QABoundary {
+        let text: String
+        let drawnWidth: CGFloat
+        let neededWidth: CGFloat
+        let width: CGFloat
+        let ruleRects: [CGRect]
+        let symbolRects: [CGRect]
+    }
+
+    /// A tool row's header as drawn, in view coordinates: the block's frame and
+    /// its gaps to its neighbours, the title (string and fonts) and its line
+    /// rect, the icon's rect, and the status line's rect and font.
+    struct QAToolHeader {
+        let frame: NSRect
+        let gapAbove: CGFloat?
+        let gapBelow: CGFloat?
+        let title: NSAttributedString
+        let titleRect: NSRect
+        let iconRect: NSRect?
+        let statusRect: NSRect?
+        let statusFont: NSFont?
+    }
+
+    func qaToolHeader(for blockID: AgentNodeID) -> QAToolHeader? {
+        guard let index = placed.firstIndex(where: { $0.blockID == blockID }) else { return nil }
+        let item = placed[index]
+        guard let row = item.block.rows.first, let line = row.lines.first else { return nil }
+        let origin = CGPoint(x: insets.left, y: item.y - scrollOffset)
+        let frame = NSRect(x: origin.x, y: origin.y, width: item.block.width, height: item.block.height)
+        let gapAbove = index > 0 ? item.y - (placed[index - 1].y + placed[index - 1].block.height) : nil
+        let gapBelow = index + 1 < placed.count ? placed[index + 1].y - (item.y + item.block.height) : nil
+        var icon: NSRect?
+        var status: (NSRect, NSFont?)?
+        for decoration in item.block.decorations {
+            switch decoration {
+            case let .symbol(_, rect) where icon == nil:
+                icon = rect.offsetBy(dx: origin.x, dy: origin.y)
+            case let .text(ctLine, baseline) where status == nil:
+                var ascent: CGFloat = 0, descent: CGFloat = 0
+                let width = CGFloat(CTLineGetTypographicBounds(ctLine, &ascent, &descent, nil))
+                let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] ?? []
+                let font = runs.first.flatMap {
+                    (CTRunGetAttributes($0) as NSDictionary)[kCTFontAttributeName as String] as? NSFont
+                }
+                status = (NSRect(x: origin.x + baseline.x, y: origin.y + baseline.y - ascent,
+                                 width: width, height: ascent + descent), font)
+            default:
+                continue
+            }
+        }
+        return QAToolHeader(
+            frame: frame, gapAbove: gapAbove, gapBelow: gapBelow,
+            title: row.string.attributedSubstring(from: line.range),
+            titleRect: NSRect(x: origin.x + line.x, y: origin.y + line.top, width: line.width, height: line.height),
+            iconRect: icon, statusRect: status?.0, statusFont: status?.1)
+    }
+
+    /// The units at least partly inside the view's bounds right now, each as
+    /// the text of its rows.
+    var qaVisibleUnitTexts: [String] {
+        placed.filter { item in
+            let top = item.y - scrollOffset
+            return top < bounds.height && top + item.block.height > 0
+        }.map { $0.block.rows.map(\.string.string).joined(separator: " ") }
+    }
+
+    var qaAppliedVersion: UInt64 { latestEnqueuedVersion ?? appliedVersion ?? 0 }
+    var qaPageZoomPercent: Int { renderContext.pageZoom.percent }
+    /// The disclosure state the transcript holds for a block (default closed).
+    func qaIsExpanded(_ blockID: AgentNodeID) -> Bool { renderContext.actions.isExpanded(blockID: blockID, default: false) }
+    var qaIsNearBottom: Bool { isNearBottom }
+
+    /// The unit under the viewport's top edge, and how far into it the edge is.
+    var qaTopBlock: (id: AgentNodeID, offset: CGFloat)? {
+        let index = firstPlaced(atOrBelow: scrollOffset)
+        guard index < placed.count else { return nil }
+        return (placed[index].blockID, scrollOffset - placed[index].y)
+    }
+
+    /// How far the widest laid line's glyphs reach past the column's right edge
+    /// (0 or less when every line fits). Lines in a scroll region (code, output) are
+    /// left out: those panes scroll sideways by design.
+    var qaWidestLineOverflow: CGFloat {
+        var worst = -CGFloat.greatestFiniteMagnitude
+        for item in placed {
+            for row in item.block.rows where row.region == nil {
+                for line in row.lines {
+                    // Trailing whitespace is measured but never drawn.
+                    let inked = line.width - CGFloat(CTLineGetTrailingWhitespaceWidth(line.ctLine))
+                    worst = max(worst, line.x + inked - item.block.width)
+                }
+            }
+        }
+        return worst
+    }
+
+    /// The point size of the first laid line's first run in a unit.
+    func qaFirstLineFontSize(of blockID: AgentNodeID) -> CGFloat? {
+        guard let row = placed.first(where: { $0.blockID == blockID })?.block.rows.first,
+              let font = row.string.length > 0 ? row.string.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil
+        else { return nil }
+        return font.pointSize
+    }
+
+    /// The drawn control that opens `agentID`'s tile (a subagent reference
+    /// chip), in view coordinates; nil when none is laid out inside the bounds.
+    func qaRevealAgentControlRect(agentID: UUID) -> NSRect? {
+        for item in placed {
+            for control in item.block.controls {
+                guard case let .perform(.revealAgent(_, target, _)) = control.action, target == agentID else { continue }
+                let rect = control.rect.offsetBy(dx: insets.left, dy: item.y - scrollOffset)
+                return bounds.intersects(rect) ? rect : nil
+            }
+        }
+        return nil
+    }
+
+    /// The rows a laid-out unit draws, as strings, in order.
+    func qaRowStrings(of blockID: AgentNodeID) -> [String] {
+        placed.first { $0.blockID == blockID }?.block.rows.map(\.string.string) ?? []
+    }
+
+    /// Every row the user's own prompts draw (prose laid out as a user prompt,
+    /// as `UserPromptView` shows it), joined by newlines.
+    var qaUserText: String {
+        let prose = Set(document.entries.filter { $0.role == .user }.flatMap(\.blocks)
+            .filter { AssistantProseRenderer.supportedKinds.contains($0.kind) }.map(\.id))
+        return placed.filter { prose.contains($0.blockID) }.flatMap { $0.block.rows.map(\.string.string) }
+            .joined(separator: "\n")
+    }
+
+    /// An agent-message card as drawn: its header and body rows, whether every
+    /// body line sits inside the card, the colour of its accent bar (nil when it
+    /// wears no agent's colour, only the decorative line), and the centre of
+    /// its reveal control, if it drew one.
+    struct QAMessageCard {
+        let blockID: AgentNodeID
+        let header: String
+        let body: String
+        let bodyFits: Bool
+        let accent: CGColor?
+        let revealPoint: NSPoint?
+    }
+
+    func qaMessageCard(for blockID: AgentNodeID) -> QAMessageCard? {
+        guard let item = placed.first(where: { $0.blockID == blockID }), item.block.rows.count >= 2 else { return nil }
+        let fills: [(CGRect, CGColor)] = item.block.decorations.compactMap {
+            if case let .fill(rect, color, _) = $0 { return (rect, color) }
+            return nil
+        }
+        guard let card = fills.first?.0 else { return nil }
+        let plain = renderContext.tokens.decorativeLine.color.nsColor(for: theme).cgColor
+        let bar = fills.dropFirst().first?.1
+        let bodyRow = item.block.rows[1]
+        let fits = bodyRow.lines.allSatisfy { card.contains(CGRect(x: $0.x, y: $0.top, width: $0.width, height: $0.height)) }
+        let reveal = item.block.controls.first { control in
+            if case .perform(.revealMessageSender) = control.action { return true }
+            return false
+        }
+        return QAMessageCard(
+            blockID: blockID, header: item.block.rows[0].string.string, body: bodyRow.string.string, bodyFits: fits,
+            accent: bar == plain ? nil : bar,
+            revealPoint: reveal.map { NSPoint(x: insets.left + $0.rect.midX, y: item.y + $0.rect.midY - scrollOffset) })
+    }
+
+    func qaBoundary(for blockID: AgentNodeID) -> QABoundary? {
+        guard let item = placed.first(where: { $0.blockID == blockID }),
+              let row = item.block.rows.first, let line = row.lines.first else { return nil }
+        let needed = Self.width(of: CTLineCreateWithAttributedString(Self.coreTextString(row.string)))
+        let rules: [CGRect] = item.block.decorations.compactMap {
+            if case let .fill(rect, _, _) = $0, rect.width > 0, rect.height > 0 { return rect }
+            return nil
+        }
+        let symbols: [CGRect] = item.block.decorations.compactMap {
+            if case let .symbol(_, rect) = $0, rect.width > 0, rect.height > 0 { return rect }
+            return nil
+        }
+        return QABoundary(text: row.string.string, drawnWidth: line.width, neededWidth: needed,
+                          width: item.block.width, ruleRects: rules, symbolRects: symbols)
+    }
 }
 
 extension AgentTranscriptCanvasView.ControlStyle {

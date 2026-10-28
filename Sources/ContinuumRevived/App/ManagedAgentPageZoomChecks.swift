@@ -34,6 +34,15 @@ enum ManagedAgentPageZoomChecks {
     }
 
     static func run() throws {
+        // Sections 0-10 read the ROW LIST's own measurement machinery (its
+        // measurement cache and scale bucket, prepared row frames, virtualized
+        // text views), so they pin it (`ARRAY_TRANSCRIPT_RENDERER=list`, still
+        // selectable). The default drawn transcript has its own witness of the
+        // same user-facing properties: `checkDrawnTranscriptFollowsTheRung`.
+        let rendererKey = AgentTranscriptCanvasView.rendererEnvironmentKey
+        let previousRenderer = ProcessInfo.processInfo.environment[rendererKey]
+        defer { if let previousRenderer { setenv(rendererKey, previousRenderer, 1) } else { unsetenv(rendererKey) } }
+        setenv(rendererKey, "list", 1)
         try checkCompactActionFitsTheStatusRowAtEveryRung()
         try checkStepGeometryAtTwoTileSizes()
         try checkOuterChromeAndModelAreUntouched()
@@ -47,6 +56,8 @@ enum ManagedAgentPageZoomChecks {
         try checkOnlyTheFocusedManagedTileAnswersAChord()
         try checkTwoTilesHoldDifferentRungs()
         try checkNothingIsPersistedAndRecreationResets()
+        setenv(rendererKey, "canvas", 1)
+        try checkDrawnTranscriptFollowsTheRung()
         print(
             "ManagedAgentPageZoomChecks passed: six rungs reflow real AppKit geometry at 360x480 and "
             + "560x620 with no horizontal overflow at 150%, the tile's world frame / title bar / zone "
@@ -57,8 +68,180 @@ enum ManagedAgentPageZoomChecks {
             + "percentage and disables both end stops, Command-equal / Command-Shift-equal / "
             + "Command-hyphen / Command-zero route while Command-C and Option-Command-equal fall "
             + "through, two tiles hold 150% and 80% at once with different resolved fonts, and nothing "
-            + "reaches the Tile model, the canvas JSON or a zoom-named default — a rebuilt tile is 100%"
+            + "reaches the Tile model, the canvas JSON or a zoom-named default — a rebuilt tile is 100%; "
+            + "the drawn transcript reflows at every rung with no line past its column, re-lays out each "
+            + "block once per rung and none on a repeat, keeps the reader's row, the tail and an open "
+            + "disclosure, redraws a resting tile's chrome at the rung, and two drawn tiles hold their own rungs"
         )
+    }
+
+    // MARK: - 11. The drawn transcript (the default renderer since 0.7.32)
+
+    /// A drawn tile, filled with the same fixture document through its own
+    /// transcript, laid out and settled.
+    private static func makeDrawnTile(
+        named title: String, size: NSSize
+    ) throws -> (tile: ManagedAgentTileNSView, window: NSWindow, canvas: AgentTranscriptCanvasView) {
+        let view = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: title,
+            frame: TileFrame(x: 40, y: 60, width: Double(size.width), height: Double(size.height)),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed")))
+        view.frame = NSRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        window.orderFrontOffscreenForChecks()
+        guard let canvas = view.qaCanvasTranscript else {
+            throw fail("\(title): the tile did not install the drawn transcript")
+        }
+        let base = canvas.qaAppliedVersion
+        let (document, ids) = fixtureDocument(version: base + 1)
+        try canvas.enqueue(document: document,
+                           patch: try AgentDocumentPatch(fromVersion: base, toVersion: base + 1, inserted: ids),
+                           final: true)
+        drawnSettle(view)
+        return (view, window, canvas)
+    }
+
+    private static func drawnSettle(_ tile: ManagedAgentTileNSView) {
+        tile.qaTranscriptSurface?.flushPendingVisualUpdate()
+        tile.window?.layoutIfNeeded()
+        tile.layoutSubtreeIfNeeded()
+    }
+
+    private static func drawnHeights(_ canvas: AgentTranscriptCanvasView) -> [CGFloat] {
+        canvas.qaPlacedBlockIDs.compactMap(canvas.qaHeight(of:))
+    }
+
+    private static func checkDrawnTranscriptFollowsTheRung() throws {
+        // Reflow at every rung, two sizes: fonts and heights grow with the rung,
+        // nothing is wider than its column, and each rung re-lays out every block
+        // exactly once while a repeat lays out none.
+        for size in [NSSize(width: 360, height: 480), NSSize(width: 560, height: 620)] {
+            let label = "drawn \(Int(size.width))x\(Int(size.height))"
+            let fixture = try makeDrawnTile(named: "ws5-drawn-\(Int(size.width))", size: size)
+            defer { fixture.window.orderOut(nil) }
+            let (tile, canvas) = (fixture.tile, fixture.canvas)
+            var totals: [CGFloat] = []
+            var proseSizes: [CGFloat] = []
+            var headers: [CGFloat] = []
+            for zoom in steps {
+                let layoutsBefore = canvas.qaBlockLayoutCount
+                let changed = tile.setPageZoom(zoom)
+                drawnSettle(tile)
+                try expect(tile.pageZoom == zoom && canvas.qaPageZoomPercent == zoom.percent,
+                           "\(label) @\(zoom.percent)%: the drawn transcript is at \(canvas.qaPageZoomPercent)%")
+                if changed {
+                    try expect(canvas.qaBlockLayoutCount - layoutsBefore == canvas.qaPlacedBlockIDs.count,
+                               "\(label) @\(zoom.percent)%: a rung change laid out \(canvas.qaBlockLayoutCount - layoutsBefore) "
+                               + "block(s) of \(canvas.qaPlacedBlockIDs.count)")
+                }
+                let steady = canvas.qaBlockLayoutCount
+                _ = tile.setPageZoom(zoom)
+                drawnSettle(tile)
+                try expect(canvas.qaBlockLayoutCount == steady,
+                           "\(label) @\(zoom.percent)%: repeating the rung laid out \(canvas.qaBlockLayoutCount - steady) block(s)")
+                try expect(canvas.qaWidestLineOverflow <= 0.5,
+                           "\(label) @\(zoom.percent)%: a drawn line reaches \(canvas.qaWidestLineOverflow)pt past its column")
+                try expect(canvas.subviews.isEmpty, "\(label) @\(zoom.percent)%: the drawn transcript grew subviews")
+                totals.append(drawnHeights(canvas).reduce(0, +))
+                proseSizes.append(canvas.qaFirstLineFontSize(of: nodeID("ws5-prose")) ?? 0)
+                headers.append(tile.qaPageZoomHeaderHeightConstant)
+            }
+            try expect(zip(totals, totals.dropFirst()).allSatisfy { $0 < $1 },
+                       "\(label): the drawn transcript's height does not grow with the rung: \(totals)")
+            try expect(zip(proseSizes, proseSizes.dropFirst()).allSatisfy { $0 < $1 },
+                       "\(label): the drawn prose font does not grow with the rung: \(proseSizes)")
+            try expect(zip(headers, headers.dropFirst()).allSatisfy { $0 < $1 },
+                       "\(label): the header does not grow with the rung: \(headers)")
+            _ = tile.setPageZoom(.default)
+        }
+
+        // The reader's row, an open disclosure, and the tail.
+        do {
+            let fixture = try makeDrawnTile(named: "ws5-drawn-reader", size: NSSize(width: 520, height: 420))
+            defer { fixture.window.orderOut(nil) }
+            let (tile, canvas) = (fixture.tile, fixture.canvas)
+            // The same disclosure state the list section opens (this fixture's tool
+            // row has no detail, so it draws no chevron to press).
+            canvas.perform(.toggle(nodeID("ws5-tool"), expanded: true))
+            drawnSettle(tile)
+            func toolExpanded() -> Bool { canvas.qaIsExpanded(nodeID("ws5-tool")) }
+            try expect(toolExpanded(), "drawn reader: the disclosure did not open")
+            canvas.scrollTranscript(toY: canvas.qaContentHeight * 0.4)
+            guard let before = canvas.qaTopBlock else { throw fail("drawn reader: no row under the viewport top") }
+            tile.setPageZoom(AgentPageZoom(percent: 125))
+            drawnSettle(tile)
+            guard let after = canvas.qaTopBlock else { throw fail("drawn reader: no row under the viewport top at 125%") }
+            try expect(after.id == before.id,
+                       "drawn reader: the row under the viewport top changed from \(before.id.rawValue) to \(after.id.rawValue)")
+            try expect(abs(after.offset - before.offset) <= 24,
+                       "drawn reader: the anchored row drifted \(after.offset - before.offset)pt under the viewport top")
+            try expect(toolExpanded(), "drawn reader: the open disclosure closed")
+
+            canvas.jumpToLatest()
+            tile.setPageZoom(AgentPageZoom(percent: 150))
+            drawnSettle(tile)
+            try expect(canvas.qaIsNearBottom, "drawn tail: a rung change dropped the reader off the bottom")
+            let base = canvas.qaAppliedVersion
+            var (document, _) = fixtureDocument(version: base + 1)
+            let appended = AgentBlock(
+                id: nodeID("ws5-drawn-stream"), revision: 1, kind: .paragraph,
+                payload: .paragraph([.text(String(repeating: "streamed continuation. ", count: 10))]))
+            var entries = document.entries
+            entries[entries.count - 1].blocks.append(appended)
+            entries[entries.count - 1].revision += 1
+            document = AgentDocument(version: base + 1, entries: entries)
+            try canvas.enqueue(document: document,
+                               patch: try AgentDocumentPatch(fromVersion: base, toVersion: base + 1, inserted: [appended.id]),
+                               final: true)
+            drawnSettle(tile)
+            try expect(canvas.qaPageZoomPercent == 150 && canvas.qaPlacedBlockIDs.contains(appended.id),
+                       "drawn tail: the streamed block did not land at 150%")
+            try expect(canvas.qaIsNearBottom, "drawn tail: a streaming append after a rung change lost the tail")
+        }
+
+        // A resting tile's drawn chrome follows the rung without waking.
+        do {
+            let fixture = try makeDrawnTile(named: "ws5-drawn-rest", size: NSSize(width: 520, height: 480))
+            defer { fixture.window.orderOut(nil) }
+            let tile = fixture.tile
+            _ = tile.restChromeIfIdle()
+            guard tile.isChromeResting, let chrome = tile.qaChromeCanvas else {
+                throw fail("drawn chrome: the idle tile did not rest")
+            }
+            let header = tile.qaPageZoomHeaderHeightConstant
+            let draws = chrome.qaDrawCount
+            tile.setPageZoom(AgentPageZoom(percent: 150))
+            drawnSettle(tile)
+            fixture.window.displayIfNeeded()
+            chrome.layer?.displayIfNeeded()
+            try expect(tile.isChromeResting, "drawn chrome: a rung change woke the resting tile")
+            try expect(tile.qaPageZoomHeaderHeightConstant > header && chrome.qaDrawCount > draws,
+                       "drawn chrome: the resting chrome did not redraw at 150% (header \(header) → "
+                       + "\(tile.qaPageZoomHeaderHeightConstant), draws \(chrome.qaDrawCount - draws))")
+        }
+
+        // Two drawn tiles hold their own rungs; moving one leaves the other alone.
+        let size = NSSize(width: 520, height: 500)
+        let a = try makeDrawnTile(named: "ws5-drawn-a", size: size)
+        let b = try makeDrawnTile(named: "ws5-drawn-b", size: size)
+        defer { a.window.orderOut(nil); b.window.orderOut(nil) }
+        a.tile.setPageZoom(AgentPageZoom(percent: 150))
+        b.tile.setPageZoom(AgentPageZoom(percent: 80))
+        drawnSettle(a.tile)
+        drawnSettle(b.tile)
+        try expect(drawnHeights(a.canvas).reduce(0, +) > drawnHeights(b.canvas).reduce(0, +),
+                   "two drawn tiles at 150% and 80% laid out the same total height")
+        let bHeights = drawnHeights(b.canvas)
+        let bLayouts = b.canvas.qaBlockLayoutCount
+        a.tile.setPageZoom(AgentPageZoom(percent: 90))
+        drawnSettle(a.tile)
+        drawnSettle(b.tile)
+        try expect(b.tile.pageZoom.percent == 80 && b.canvas.qaPageZoomPercent == 80,
+                   "moving drawn tile A moved tile B to \(b.canvas.qaPageZoomPercent)%")
+        try expect(drawnHeights(b.canvas) == bHeights && b.canvas.qaBlockLayoutCount == bLayouts,
+                   "moving drawn tile A re-laid out tile B")
     }
 
     // MARK: - Fixture

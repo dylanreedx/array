@@ -98,6 +98,11 @@ func runAgentQueueRailChecks() async throws {
         }
         guard let composer = tile.qaComposerForChecks else { throw Failure(description: "queue rail: \(kind): no composer") }
         let rail = composer.qaQueueRail
+        // Typing needs the keyboard, which a person gives the composer through the
+        // tile's focus path (a click, a jump): that wakes a resting tile's chrome
+        // into the window, where the rail is then asserted to be.
+        try expect(tile.acquireFocus(reason: .userClick) && window.firstResponder === composer.textView,
+                   "\(kind): focusing the tile must give its composer the keyboard, got \(String(describing: window.firstResponder))")
         func settle() {
             window.layoutIfNeeded()
             tile.layoutSubtreeIfNeeded()
@@ -209,7 +214,7 @@ func runAgentQueueRailChecks() async throws {
         settle()
         try expect(!rail.isDescendant(of: composer) && rail.window === window && !rail.isHidden,
                    "\(kind): the pending rail must be its own view outside the composer, in composer \(rail.isDescendant(of: composer))")
-        if let transcript = tile.qaTranscriptForChecks {
+        if let transcript = tile.qaTranscriptSurface {
             let railRect = rail.convert(rail.bounds, to: tile)
             let composerRect = composer.convert(composer.bounds, to: tile)
             let transcriptRect = transcript.convert(transcript.bounds, to: tile)

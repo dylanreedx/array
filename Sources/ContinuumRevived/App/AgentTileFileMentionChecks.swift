@@ -82,7 +82,29 @@ enum AgentTileFileMentionChecks {
 
         let textView = composer.textView
         window.makeKey()
-        try expect(window.makeFirstResponder(textView), "the composer's editor takes the keyboard")
+        // The keyboard is taken the way a person takes it: a press where the
+        // editor is drawn. An idle tile's chrome rests (drawn, its real views in
+        // a hidden host window), and the press is what wakes it.
+        guard let drawn = tileView.qaPresentedRect(of: textView) else {
+            throw Failure(description: "the tile does not present its composer's editor")
+        }
+        let pressPoint = tileView.convert(NSPoint(x: drawn.midX, y: drawn.midY), to: nil)
+        func mouse(_ type: NSEvent.EventType) throws -> NSEvent {
+            guard let event = NSEvent.mouseEvent(
+                with: type, location: pressPoint, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                pressure: type == .leftMouseUp ? 0 : 1
+            ) else { throw Failure(description: "could not make a mouse event") }
+            return event
+        }
+        // The editor tracks its own release with `nextEvent`: queue it first.
+        NSApp.postEvent(try mouse(.leftMouseUp), atStart: false)
+        window.sendEvent(try mouse(.leftMouseDown))
+        // Let the press finish settling (the editor's own focus bookkeeping runs
+        // on the next turn of the run loop), as it has before a person's next key.
+        _ = await waitUntil(timeout: 0.2, pollInterval: 0.02) { false }
+        try expect(window.firstResponder === textView,
+                   "a press on the composer gives its editor the keyboard, got \(String(describing: window.firstResponder))")
         try expect(composer.qaPreparedCompletionContext == tileView.qaCompletionContext,
                    "taking the keyboard warms the agent's file index before the first @, got \(String(describing: composer.qaPreparedCompletionContext?.checkoutRoot.path))")
 

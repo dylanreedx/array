@@ -147,6 +147,12 @@ enum UIProbeAppearance {
         func visit(_ view: NSView) {
             if view is TokenThemed { found.append(view) }
             view.subviews.forEach(visit)
+            // A resting agent tile draws its body and title-bar controls from
+            // outside its subtree (a hidden host window, detached controls); they
+            // are real, themed views and take the appearance flip there.
+            if let tile = view as? ManagedAgentTileNSView {
+                tile.qaPresentedViewRoots.filter { $0 !== tile }.forEach(visit)
+            }
         }
         visit(root)
         return found
@@ -307,6 +313,16 @@ enum UIProbeAppearance {
         // App-layer half of the ticket is covered by the same sweep.
         let surfaces: [(id: String, size: NSSize, make: () -> NSView)] = [
             ("appearance.managedAgentTile", NSSize(width: 640, height: 560), makeTile),
+            // The same tile on the row-list renderer (`ARRAY_TRANSCRIPT_RENDERER=list`,
+            // still selectable): its request row is an `AgentRequestView`, which
+            // the drawn transcript (the default above) draws itself instead.
+            ("appearance.managedAgentTile.rowList", NSSize(width: 640, height: 560), {
+                let key = AgentTranscriptCanvasView.rendererEnvironmentKey
+                let previous = ProcessInfo.processInfo.environment[key]
+                setenv(key, "list", 1)
+                defer { if let previous { setenv(key, previous, 1) } else { unsetenv(key) } }
+                return makeTile()
+            }),
             ("appearance.kanbanTile", NSSize(width: 480, height: 320), makeKanbanTile),
             ("appearance.editorNavigator", NSSize(width: 260, height: 400), {
                 FileTreeBrowserView(rootURL: URL(fileURLWithPath: "/nonexistent-editor-navigator-probe-root"))
@@ -1324,6 +1340,13 @@ enum UIProbeAppearance {
             // non-token colour.
             guard !view.isHidden else { return }
             defer { view.subviews.forEach(visit) }
+            // A resting agent tile draws its body and title-bar controls from
+            // outside its subtree; their colours are what it draws.
+            defer {
+                if let tile = view as? ManagedAgentTileNSView {
+                    tile.qaPresentedViewRoots.filter { $0 !== tile }.forEach(visit)
+                }
+            }
             guard !isAppKitControlChrome(view) else { return }
             let owner = describe(view)
             switch view {
@@ -1693,79 +1716,95 @@ enum UIProbeAppearance {
             rootPath: "/nonexistent-p111-probe-root", expandedPaths: [], selectedPath: nil,
             searchQuery: "", ignoredNames: [], gitBadges: .off
         )
+        let prepareManagedAgentTile: (NSView) -> Void = { root in
+            openUserInputRequest(in: root)
+            // P5.5: the request arrives the way production delivers it —
+            // the reducer-projected block, not the deleted legacy dock.
+            guard let tile = firstDescendant(ManagedAgentTileNSView.self, in: root) else { return }
+            // Hazard 8 for `CompactionBoundaryView`: a compaction boundary,
+            // delivered as the item every harness's translator emits, so
+            // its two hairlines are painted in an ADOPTED surface too.
+            let compactionTitle = AgentCompactionPayload.encodeTitle(
+                preTokens: 154_000, postTokens: 22_000, automaticCompaction: false,
+                provider: "claude", boundaryID: "token-values-compaction", trigger: "manual")
+            tile.ingest(.itemStarted(
+                threadId: tile.wiringThreadId, itemId: "token-values-compaction",
+                kind: .compaction, title: compactionTitle))
+            tile.ingest(.itemCompleted(
+                threadId: tile.wiringThreadId, itemId: "token-values-compaction",
+                kind: .compaction, status: .completed))
+            tile.ingest(.requestOpened(
+                threadId: tile.wiringThreadId, requestId: "token-values", kind: .commandExecutionApproval
+            ))
+            // DI-01: the dictation pill only exists while a session is
+            // live, so grow it here or the census never sees it paint.
+            tile.qaShowLiveDictationPill()
+            // ST-01: hazard 8 wants a new TokenThemed view painting in an
+            // ADOPTED surface as well as the appearance sweep, and the Lab
+            // tile has no supervisor to deliver a quota observation. Drive
+            // the same seam production repaints through, so the account
+            // pills are real painted colour here rather than hidden views
+            // the census silently covers less of.
+            let quotaNow = Date(timeIntervalSince1970: 1_000)
+            let quotaRoot = URL(fileURLWithPath: "/Users/qa/Projects/continuum", isDirectory: true)
+            tile.qaApplyCompactStatusFacts(
+                .init(interaction: .pending(startedAt: quotaNow.addingTimeInterval(-5))),
+                location: AgentLocationSnapshot(
+                    home: AgentHome(
+                        projectId: nil, projectRoot: quotaRoot, checkoutRoot: quotaRoot),
+                    whereDirectory: quotaRoot),
+                contextWindow: AgentContextWindowSnapshot(
+                    usedTokens: 96_000, maxTokens: 128_000,
+                    observedAt: quotaNow, source: .providerSessionStats, freshness: .live),
+                accountQuota: AgentAccountQuotaSnapshot(
+                    harness: .claudeCode,
+                    windows: [
+                        AgentQuotaWindow(
+                            kind: .fiveHour, utilization: 0.18,
+                            resetsAt: quotaNow.addingTimeInterval(3_600)),
+                    ],
+                    observedAt: quotaNow,
+                    source: .claudeRateLimitEvent),
+                enabledElements: [.location, .activity, .contextMeter, .quotaFiveHour],
+                now: quotaNow)
+            // T5b: the steering/queue rail with every row kind and the
+            // paused header, so its divider, labels, tints and accents
+            // are painted here rather than hidden. Same seam production
+            // repaints through (`updateQueueRail`).
+            tile.qaComposerForChecks?.updateQueueRail(ComposerQueueRailState(
+                steers: [
+                    .init(id: UUID(), text: "also check the iOS build", attachmentCount: 0, kind: .heldSteer),
+                    .init(id: UUID(), text: "and the watch target", attachmentCount: 0, kind: .deliveringSteer),
+                ],
+                queued: [
+                    .init(id: UUID(), text: "then write the release notes", attachmentCount: 2, kind: .queued),
+                    .init(id: UUID(), text: "Compact context", attachmentCount: 0, kind: .compaction),
+                ],
+                pause: .afterStop))
+            tile.layoutSubtreeIfNeeded()
+        }
         return [
             AdoptedSurface(id: "editorNavigator", size: NSSize(width: 260, height: 400), make: {
                 FileTreeBrowserView(rootURL: URL(fileURLWithPath: "/nonexistent-editor-navigator-probe-root"))
             }),
             AdoptedSurface(
                 id: "managedAgentTile", size: NSSize(width: 640, height: 560), make: makeTile,
-                prepare: { root in
-                    openUserInputRequest(in: root)
-                    // P5.5: the request arrives the way production delivers it —
-                    // the reducer-projected block, not the deleted legacy dock.
-                    guard let tile = firstDescendant(ManagedAgentTileNSView.self, in: root) else { return }
-                    // Hazard 8 for `CompactionBoundaryView`: a compaction boundary,
-                    // delivered as the item every harness's translator emits, so
-                    // its two hairlines are painted in an ADOPTED surface too.
-                    let compactionTitle = AgentCompactionPayload.encodeTitle(
-                        preTokens: 154_000, postTokens: 22_000, automaticCompaction: false,
-                        provider: "claude", boundaryID: "token-values-compaction", trigger: "manual")
-                    tile.ingest(.itemStarted(
-                        threadId: tile.wiringThreadId, itemId: "token-values-compaction",
-                        kind: .compaction, title: compactionTitle))
-                    tile.ingest(.itemCompleted(
-                        threadId: tile.wiringThreadId, itemId: "token-values-compaction",
-                        kind: .compaction, status: .completed))
-                    tile.ingest(.requestOpened(
-                        threadId: tile.wiringThreadId, requestId: "token-values", kind: .commandExecutionApproval
-                    ))
-                    // DI-01: the dictation pill only exists while a session is
-                    // live, so grow it here or the census never sees it paint.
-                    tile.qaShowLiveDictationPill()
-                    // ST-01: hazard 8 wants a new TokenThemed view painting in an
-                    // ADOPTED surface as well as the appearance sweep, and the Lab
-                    // tile has no supervisor to deliver a quota observation. Drive
-                    // the same seam production repaints through, so the account
-                    // pills are real painted colour here rather than hidden views
-                    // the census silently covers less of.
-                    let quotaNow = Date(timeIntervalSince1970: 1_000)
-                    let quotaRoot = URL(fileURLWithPath: "/Users/qa/Projects/continuum", isDirectory: true)
-                    tile.qaApplyCompactStatusFacts(
-                        .init(interaction: .pending(startedAt: quotaNow.addingTimeInterval(-5))),
-                        location: AgentLocationSnapshot(
-                            home: AgentHome(
-                                projectId: nil, projectRoot: quotaRoot, checkoutRoot: quotaRoot),
-                            whereDirectory: quotaRoot),
-                        contextWindow: AgentContextWindowSnapshot(
-                            usedTokens: 96_000, maxTokens: 128_000,
-                            observedAt: quotaNow, source: .providerSessionStats, freshness: .live),
-                        accountQuota: AgentAccountQuotaSnapshot(
-                            harness: .claudeCode,
-                            windows: [
-                                AgentQuotaWindow(
-                                    kind: .fiveHour, utilization: 0.18,
-                                    resetsAt: quotaNow.addingTimeInterval(3_600)),
-                            ],
-                            observedAt: quotaNow,
-                            source: .claudeRateLimitEvent),
-                        enabledElements: [.location, .activity, .contextMeter, .quotaFiveHour],
-                        now: quotaNow)
-                    // T5b: the steering/queue rail with every row kind and the
-                    // paused header, so its divider, labels, tints and accents
-                    // are painted here rather than hidden. Same seam production
-                    // repaints through (`updateQueueRail`).
-                    tile.qaComposerForChecks?.updateQueueRail(ComposerQueueRailState(
-                        steers: [
-                            .init(id: UUID(), text: "also check the iOS build", attachmentCount: 0, kind: .heldSteer),
-                            .init(id: UUID(), text: "and the watch target", attachmentCount: 0, kind: .deliveringSteer),
-                        ],
-                        queued: [
-                            .init(id: UUID(), text: "then write the release notes", attachmentCount: 2, kind: .queued),
-                            .init(id: UUID(), text: "Compact context", attachmentCount: 0, kind: .compaction),
-                        ],
-                        pause: .afterStop))
-                    tile.layoutSubtreeIfNeeded()
-                }
+                prepare: prepareManagedAgentTile
+            ),
+            // The same tile and state on the row list (`ARRAY_TRANSCRIPT_RENDERER=list`,
+            // still selectable). Its request, compaction and prompt rows are views
+            // (`AgentRequestView`, `CompactionBoundaryView`, `UserPromptView`) that
+            // the drawn transcript above draws itself instead.
+            AdoptedSurface(
+                id: "managedAgentTile.rowList", size: NSSize(width: 640, height: 560),
+                make: {
+                    let key = AgentTranscriptCanvasView.rendererEnvironmentKey
+                    let previous = ProcessInfo.processInfo.environment[key]
+                    setenv(key, "list", 1)
+                    defer { if let previous { setenv(key, previous, 1) } else { unsetenv(key) } }
+                    return makeTile()
+                },
+                prepare: prepareManagedAgentTile
             ),
             AdoptedSurface(id: "composerSendChoice", size: NSSize(width: 160, height: 32), make: {
                 Self.sendChoiceFixture()

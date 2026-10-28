@@ -306,25 +306,30 @@ final class ToolCallView: NSView, CornerStyled {
     /// secondary mono, on the one line every other row uses.
     private func applyShellTitle(theme: TokenTheme) {
         guard let shellRow else { return }
+        titleLabel.attributedStringValue = Self.shellTitle(
+            shellRow, zoom: zoom,
+            primary: context.tokens.primaryText.color.nsColor(for: theme),
+            secondary: context.tokens.secondaryText.color.nsColor(for: theme))
+    }
+
+    /// The headline of a shell row, shared with the drawn transcript.
+    static func shellTitle(_ shell: AgentShellInvocation, zoom: AgentPageZoom,
+                           primary: NSColor, secondary: NSColor) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
-        let mono = Self.commandFont(zoom: zoom)
-        let primary = context.tokens.primaryText.color.nsColor(for: theme)
-        guard let description = shellRow.description else {
-            titleLabel.attributedStringValue = NSAttributedString(string: shellRow.headline, attributes: [
+        let mono = commandFont(zoom: zoom)
+        guard let description = shell.description else {
+            return NSAttributedString(string: shell.headline, attributes: [
                 .font: mono, .foregroundColor: primary, .paragraphStyle: paragraph,
             ])
-            return
         }
         let title = NSMutableAttributedString(
             string: (description.first.map { String($0).uppercased() } ?? "") + description.dropFirst(),
             attributes: [.font: NSFont.token(.label, zoom: zoom), .foregroundColor: primary, .paragraphStyle: paragraph])
-        title.append(NSAttributedString(string: "  " + shellRow.headline, attributes: [
-            .font: mono,
-            .foregroundColor: context.tokens.secondaryText.color.nsColor(for: theme),
-            .paragraphStyle: paragraph,
+        title.append(NSAttributedString(string: "  " + shell.headline, attributes: [
+            .font: mono, .foregroundColor: secondary, .paragraphStyle: paragraph,
         ]))
-        titleLabel.attributedStringValue = title
+        return title
     }
 
     struct SummaryMeasureKey: Equatable {

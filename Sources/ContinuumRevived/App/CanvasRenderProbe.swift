@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import CoreText
 import IOSurface
@@ -107,7 +108,7 @@ final class CanvasRenderProbe: NSObject {
             context.textPosition = CGPoint(x: Self.padding, y: 22)
             CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string: title, attributes: [
                 .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-                .foregroundColor: NSColor(white: dark ? 0.92 : 0.1, alpha: 1)])), context)
+                .foregroundColor: TextToken.textPrimary.color.nsColor(for: dark ? .dark : .light)])), context)
         }
     }
 
@@ -163,12 +164,13 @@ final class CanvasRenderProbe: NSObject {
         self.duration = duration
         start = replay.document.viewport
         dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let theme: TokenTheme = dark ? .dark : .light
         let prose: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13),
-            .foregroundColor: NSColor(white: dark ? 0.9 : 0.12, alpha: 1)]
+            .foregroundColor: TextToken.textPrimary.color.nsColor(for: theme)]
         let user: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13, weight: .medium),
-            .foregroundColor: NSColor(white: dark ? 1 : 0, alpha: 1)]
+            .foregroundColor: TextToken.textPrimary.color.nsColor(for: theme)]
         let code: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular),
-            .foregroundColor: NSColor(white: dark ? 0.75 : 0.3, alpha: 1)]
+            .foregroundColor: TextToken.textSecondary.color.nsColor(for: theme)]
         var built: [TileText] = []
         for tile in replay.tiles {
             let text = NSMutableAttributedString()

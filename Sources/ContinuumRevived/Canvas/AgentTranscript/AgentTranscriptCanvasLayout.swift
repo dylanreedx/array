@@ -261,9 +261,12 @@ extension AgentTranscriptCanvasView {
         let expanded = hasDetail && renderContext.actions.isExpanded(
             blockID: block.id, default: tool.status.agentToolDefaultExpanded)
         var body = Body()
+        // A shell row's headline is the command (after claude's description),
+        // exactly as `ToolCallView.applyShellTitle` sets it.
         let rowHeight = headerRow(
             into: &body.builder, width: width, title: title,
             titleFont: shell == nil ? NSFont.token(.label, zoom: zoom) : ToolCallView.commandFont(zoom: zoom),
+            attributedTitle: shell.map { ToolCallView.shellTitle($0, zoom: zoom, primary: primary, secondary: secondary) },
             status: status, statusAttention: needsAttention,
             symbolName: ToolCallView.symbolName(forToolNamed: tool.presentedToolNameText ?? tool.name),
             disclosure: hasDetail ? (block.id, expanded) : nil)
@@ -368,7 +371,8 @@ extension AgentTranscriptCanvasView {
     /// The collapsed row both tool families share (`ToolCallView.layout()`):
     /// disclosure column, icon, title, trailing status. Returns the row height.
     @discardableResult
-    func headerRow(into builder: inout Builder, width: CGFloat, title: String, titleFont: NSFont, status: String,
+    func headerRow(into builder: inout Builder, width: CGFloat, title: String, titleFont: NSFont,
+                   attributedTitle: NSAttributedString? = nil, status: String,
                    statusAttention: Bool, symbolName: String, disclosure: (AgentNodeID, Bool)?) -> CGFloat {
         let rowHeight = ToolCallView.rowHeight(zoom: zoom)
         let inset = ToolCallView.horizontalInset(zoom: zoom)
@@ -388,12 +392,14 @@ extension AgentTranscriptCanvasView {
         let captionFont = NSFont.token(.caption, zoom: zoom)
         let statusLine = Self.line(status, font: captionFont,
                                    color: statusAttention ? AgentLineRole.attention.color.nsColor(for: theme) : secondary)
-        let statusWidth = min(ceil(Self.width(of: statusLine)), width * 0.4)
-        let statusX = max(iconX + buttonSide, width - inset - statusWidth)
+        // Right-aligned on the exact width, as the row's status label is: a
+        // rounded-up width set every status a fraction of a point off one edge.
+        let statusX = max(iconX + buttonSide, width - inset - min(Self.width(of: statusLine), width * 0.4))
         builder.decorations.append(.text(statusLine, CGPoint(
             x: statusX, y: Self.centredBaseline(font: captionFont, top: 0, height: rowHeight))))
         let titleX = iconX + buttonSide + S(Space.m)
-        let titleString = NSAttributedString(string: title, attributes: [.font: titleFont, .foregroundColor: primary])
+        let titleString = attributedTitle
+            ?? NSAttributedString(string: title, attributes: [.font: titleFont, .foregroundColor: primary])
         builder.rows.append(TextRow(string: titleString, lines: [Self.singleLine(
             titleString, x: titleX, top: 0, height: rowHeight,
             maxWidth: max(1, statusX - titleX - S(Space.m)), font: titleFont)], links: []))

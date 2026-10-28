@@ -60,7 +60,7 @@ enum ShellToolRowChecks {
                               backing: .buffered, defer: false)
         window.contentView = tile
         window.orderFrontOffscreenForChecks()
-        tile.qaTranscriptForChecks?.bindToolDetailAgent(AgentID(rawValue: UUID()))
+        tile.qaTranscriptSurface?.bindToolDetailAgent(AgentID(rawValue: UUID()))
         return (tile, window)
     }
 
@@ -82,7 +82,7 @@ enum ShellToolRowChecks {
             let events = translate(line) { inbox.observations.append($0) }
             everything += inbox.observations
             for observation in inbox.observations {
-                tile.qaTranscriptForChecks?.captureRuntimeObservation(observation)
+                tile.qaTranscriptSurface?.captureRuntimeObservation(observation)
             }
             for event in events {
                 tile.ingest(event.withThreadId(tile.qaThreadIdForChecks), originalEvent: event)
@@ -107,14 +107,15 @@ enum ShellToolRowChecks {
     private static func settle(_ tile: ManagedAgentTileNSView) async throws {
         func snapshot() -> [String] {
             toolBlocks(tile).sorted { $0.key < $1.key }.map { _, id in
-                String(describing: tile.qaTranscriptForChecks?.qaPresentedToolBlock(for: id))
+                String(describing: tile.qaPresentedToolBlock(for: id))
             }
         }
         let deadline = Date().addingTimeInterval(5)
         var previous = snapshot()
         var stable = 0
         while Date() < deadline {
-            await tile.qaTranscriptForChecks?.qaWaitForToolDetailRefresh()
+            await tile.qaWaitForToolDetailRefresh()
+            tile.layoutSubtreeIfNeeded()
             try? await Task.sleep(nanoseconds: 5_000_000)
             let current = snapshot()
             stable = current == previous ? stable + 1 : 0
@@ -130,8 +131,8 @@ enum ShellToolRowChecks {
         guard let blockID = toolBlocks(tile)[itemID] else {
             throw fail("\(itemID): no tool row in the document (have \(toolBlocks(tile).keys.sorted()))")
         }
-        guard let block = tile.qaTranscriptForChecks?.qaPresentedToolBlock(for: blockID) else {
-            throw fail("\(itemID): the list composed no presented tool block")
+        guard let block = tile.qaPresentedToolBlock(for: blockID) else {
+            throw fail("\(itemID): the transcript composed no presented tool block")
         }
         let renderer = ToolCallRenderer()
         guard let view = renderer.makeView() as? ToolCallView else { throw fail("renderer made no ToolCallView") }
@@ -174,7 +175,7 @@ enum ShellToolRowChecks {
     /// description in primary text, the command in secondary text.
     private static func checkShellTitleTokens(_ tile: ManagedAgentTileNSView, itemID: String) throws {
         guard let blockID = toolBlocks(tile)[itemID],
-              let block = tile.qaTranscriptForChecks?.qaPresentedToolBlock(for: blockID) else {
+              let block = tile.qaPresentedToolBlock(for: blockID) else {
             throw fail("\(itemID): no presented row to check tokens on")
         }
         let renderer = ToolCallRenderer()
@@ -515,7 +516,7 @@ enum ShellToolRowChecks {
             }
         }
         func storeLeaks(_ tile: ManagedAgentTileNSView) async -> [String] {
-            let records = await tile.qaTranscriptForChecks?.qaToolDetailRecords() ?? []
+            let records = await tile.qaToolDetailRecords()
             return records.flatMap { record in
                 record.arguments.filter {
                     $0.key == AgentToolDetailObservation.shellCommandKey || $0.key == AgentToolDetailObservation.shellCwdKey
@@ -686,6 +687,36 @@ enum ShellToolRowChecks {
     private static func readOnScreen(_ tile: ManagedAgentTileNSView, itemID: String, harness: String) throws -> OnScreenRow {
         guard let blockID = toolBlocks(tile)[itemID] else {
             throw fail("\(harness): no tool row for \(itemID) (have \(toolBlocks(tile).keys.sorted()))")
+        }
+        if let canvas = tile.qaCanvasTranscript {
+            // The drawn transcript: the row's header as it laid it out and draws it.
+            canvas.qaReveal(blockID: blockID)
+            guard let header = canvas.qaToolHeader(for: blockID),
+                  canvas.bounds.intersects(header.frame),
+                  let block = tile.qaPresentedToolBlock(for: blockID),
+                  case let .toolCall(payload) = block.payload else {
+                throw fail("\(harness): the shell row is not on screen in the transcript (never laid out)")
+            }
+            let title = header.title
+            guard title.length > 0 else { throw fail("\(harness): the on-screen title is empty") }
+            let commandFont = title.attribute(.font, at: title.length - 1, effectiveRange: nil) as? NSFont
+            let leadFont = title.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+            let hasDescription = leadFont?.isFixedPitch == false
+            // The status line is drawn from these words (the same composition
+            // `toolBody` runs over the same presented payload).
+            let status = payload.presentedShell == nil
+                ? ToolCallView.statusText(status: payload.status, duration: payload.presentedTrailingDetailText)
+                : ToolCallView.shellStatusText(
+                    status: ToolCallView.glyphStatus(payload.status, shell: payload.presentedShell),
+                    duration: payload.presentedTrailingDetailText, badge: payload.presentedShell?.badgeText)
+            return OnScreenRow(
+                harness: harness, frame: header.frame, gapAbove: header.gapAbove, gapBelow: header.gapBelow,
+                titleX: header.titleRect.minX, titleMidY: header.titleRect.midY - header.frame.minY,
+                iconX: header.iconRect?.minX ?? -1,
+                commandPointSize: commandFont?.pointSize ?? 0, commandIsMono: commandFont?.isFixedPitch == true,
+                descriptionPointSize: hasDescription ? leadFont?.pointSize : nil,
+                statusMaxX: header.statusRect?.maxX ?? -1, statusPointSize: header.statusFont?.pointSize ?? 0,
+                status: status, title: title.string)
         }
         guard let list = tile.qaTranscriptForChecks,
               let row = list.qaOnScreenToolRowForChecks(for: blockID) else {

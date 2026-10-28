@@ -667,11 +667,19 @@ extension AgentFaceChecks {
         try expect(view.face == .array && launches().isEmpty && !tmuxSessionAlive(view.tile.id),
                    "while the turn runs, no terminal may start")
         let banner = view.qaFaceFlipBanner
-        try click(windowPoint(of: banner.cancelButton.bounds, in: banner.cancelButton), in: fixture.window)
+        // Where the buttons are DRAWN: an idle tile rests, its body (banner
+        // included) drawn from a hidden host window, and a press there wakes it.
+        func drawnPoint(_ button: NSView) throws -> NSPoint {
+            guard let rect = view.qaPresentedRect(of: button) else {
+                throw Failure(description: "the tile does not present the banner's \(button)")
+            }
+            return windowPoint(of: rect, in: view)
+        }
+        try click(try drawnPoint(banner.cancelButton), in: fixture.window)
         try expect(!view.pendingTerminalFlip && !view.qaFaceFlipBannerVisible, "Cancel must drop the waiting flip")
         try click(try segment("face.toggle", of: view), in: fixture.window)
         try expect(view.pendingTerminalFlip, "the flip must wait again")
-        try click(windowPoint(of: banner.stopButton.bounds, in: banner.stopButton), in: fixture.window)
+        try click(try drawnPoint(banner.stopButton), in: fixture.window)
         try expect(fixture.pump(until: { view.face == .terminal }, timeout: 15),
                    "Stop now must end the turn and flip to the Terminal face")
         log.append("busy flip: waited, cancelled, stopped, flipped")
@@ -753,7 +761,7 @@ extension AgentFaceChecks {
         fixture.window.contentView?.layoutSubtreeIfNeeded()
         view.layoutSubtreeIfNeeded()
         fixture.pump(0.2)
-        try expect(view.qaSessionBoundaryViews.contains { $0.qaLabelText == "In Terminal · 2 turns" && $0.qaGlyphVisible },
+        try expect(view.qaSessionBoundaries.contains { $0.text == "In Terminal · 2 turns" && $0.glyphVisible && $0.ruled },
                    "the divider must draw as a rule with the terminal glyph and its label")
         // The flip stopped the Array face's turn to hand the session over; that
         // is not the user stopping it, and the terminal's turns are newer.

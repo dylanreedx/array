@@ -937,6 +937,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             return false
         }
         promoteForIncomingFocus()
+        // A header drag reaches the recipient with no pointer-enter (tracking
+        // areas sleep through a drag), so an idle recipient is still resting:
+        // its composer is in the hidden host. Wake it before highlighting or
+        // focusing that composer, or both land on views nobody can see.
+        wakeChrome()
         guard commit else { composer.setReferenceDropHighlight(true); return true }
         composer.setReferenceDropHighlight(false)
         // Resolve the display snapshot from the trusted record, never the
@@ -4463,10 +4468,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     // sidebar it meant *stale*) and they had drifted from the board's hues.
     // Everything now comes from `StatusChipPresenter`.
 
-    /// The cards actually in the view hierarchy, so a reset can be asserted against
-    /// the stack and not only against the model behind it.
+    /// The cards actually rendered, so a reset can be asserted against what is on
+    /// screen and not only against the model behind it: the list's semantic rows,
+    /// or the units the drawn transcript laid out (one per row the list makes).
     var qaRenderedCardCount: Int {
-        listTranscript?.qaSemanticRowCount ?? 0
+        if let canvas = qaCanvasTranscript { return canvas.qaPlacedBlockIDs.count }
+        return listTranscript?.qaSemanticRowCount ?? 0
     }
     var qaTranscriptCollectionFixture: AgentTranscriptListView? { listTranscript }
     /// The compact row is exposed only as a deterministic geometry/AX witness;
@@ -5173,3 +5180,115 @@ extension ManagedAgentTileNSView {
     }
 }
 
+// MARK: - Renderer-agnostic QA readbacks
+//
+// What the tile shows, whichever transcript renderer it installed and whether
+// its chrome is live or resting: the drawn transcript's own layout, and the
+// detached views a resting tile draws, mapped to where they are drawn.
+extension ManagedAgentTileNSView {
+    var qaCanvasTranscript: AgentTranscriptCanvasView? { qaTranscriptSurface as? AgentTranscriptCanvasView }
+
+    /// The view trees this tile's picture is made of right now: the tile and,
+    /// while it rests, the detached body and title-bar controls it draws.
+    var qaPresentedViewRoots: [NSView] {
+        var roots: [NSView] = [self]
+        if isChromeResting { roots.append(contentBackdrop) }
+        return roots + qaDrawnTitleBarControls
+    }
+
+    /// Where `rect` (default: the bounds) of `view` is drawn, in the tile's own
+    /// coordinates — through the resting chrome or the drawn title bar when the
+    /// view is detached. nil for a view the tile does not present.
+    func qaPresentedRect(of view: NSView, _ rect: NSRect? = nil) -> NSRect? {
+        let rect = rect ?? view.bounds
+        if view === self || view.isDescendant(of: self) { return view.convert(rect, to: self) }
+        if isChromeResting, let chromeCanvas,
+           view === contentBackdrop || view.isDescendant(of: contentBackdrop) {
+            // The resting body fills the chrome canvas at its origin.
+            return chromeCanvas.convert(NativeViewVectorRenderer.convert(rect, from: view, to: contentBackdrop), to: self)
+        }
+        guard let bar = qaTitleBarView else { return nil }
+        for control in qaDrawnTitleBarControls where view === control || view.isDescendant(of: control) {
+            // The bar draws a detached control at its frame, as when attached.
+            let local = NativeViewVectorRenderer.convert(rect, from: view, to: control)
+            var y = local.minY - control.bounds.minY
+            if control.isFlipped != bar.isFlipped { y = control.bounds.height - y - local.height }
+            return bar.convert(NSRect(x: control.frame.minX + local.minX - control.bounds.minX,
+                                      y: control.frame.minY + y, width: local.width, height: local.height), to: self)
+        }
+        return nil
+    }
+
+    /// The blocks the transcript shows as rows, in order: the list's displayed
+    /// rows (after clustering), or the units the drawn transcript laid out.
+    var qaDisplayedBlockIDs: [AgentNodeID] {
+        if let canvas = qaCanvasTranscript { return canvas.qaPlacedBlockIDs }
+        return listTranscript?.qaDisplayedRowIDsForChecks ?? []
+    }
+
+    /// The session-boundary dividers as drawn: label, whether the glyph shows,
+    /// and whether a rule is painted beside the label.
+    var qaSessionBoundaries: [(text: String, glyphVisible: Bool, ruled: Bool)] {
+        if let canvas = qaCanvasTranscript {
+            let boundaries = Set(model.document.entries.flatMap(\.blocks).filter { $0.kind == .sessionBoundary }.map(\.id))
+            return canvas.qaPlacedBlockIDs.filter(boundaries.contains).compactMap(canvas.qaBoundary(for:)).map {
+                ($0.text, !$0.symbolRects.isEmpty, $0.ruleRects.contains { $0.height <= 3 && $0.width >= 16 })
+            }
+        }
+        return qaSessionBoundaryViews.map { ($0.qaLabelText, $0.qaGlyphVisible, true) }
+    }
+
+    /// The rows on screen in the transcript right now, as text: the list's
+    /// visible items (their spoken text), or the drawn units inside its bounds.
+    var qaVisibleRowTexts: [String] {
+        if let canvas = qaCanvasTranscript { return canvas.qaVisibleUnitTexts }
+        return listTranscript?.qaVisibleAccessibilityText ?? []
+    }
+
+    /// The presented title of the tool row a provider item (a runner's tool_use
+    /// id) produced, as the transcript drew it.
+    func qaPresentedToolTitle(forProviderItemID itemID: String) -> String? {
+        if qaCanvasTranscript != nil {
+            for entry in model.document.entries {
+                guard case let .providerItem(_, id?) = entry.provenance, id == itemID else { continue }
+                for block in entry.blocks where block.kind == .toolCall {
+                    if case let .toolCall(payload)? = qaPresentedToolBlock(for: block.id)?.payload { return payload.name }
+                }
+            }
+            return nil
+        }
+        #if ARRAY_FILM
+        return listTranscript?.qaPresentedToolTitle(forProviderItemID: itemID)
+        #else
+        return nil
+        #endif
+    }
+
+    /// The presented tool block for a document block, as the transcript drew it.
+    func qaPresentedToolBlock(for blockID: AgentNodeID) -> AgentBlock? {
+        if let canvas = qaCanvasTranscript {
+            guard let block = canvas.qaPresentedBlock(for: blockID), case .toolCall = block.payload else { return nil }
+            return block
+        }
+        return listTranscript?.qaPresentedToolBlock(for: blockID)
+    }
+
+    /// The presented diff payload for a document block, as the transcript drew it.
+    func qaPresentedDiffPayload(for blockID: AgentNodeID) -> AgentDiffPayload? {
+        if let canvas = qaCanvasTranscript {
+            guard case let .diff(payload)? = canvas.qaPresentedBlock(for: blockID)?.payload else { return nil }
+            return payload
+        }
+        return listTranscript?.qaPresentedDiffPayload(for: blockID)
+    }
+
+    /// Waits for the tool-detail snapshot in flight in whichever transcript.
+    func qaWaitForToolDetailRefresh() async {
+        if let canvas = qaCanvasTranscript { await canvas.qaWaitForToolDetailRefresh() }
+        await listTranscript?.qaWaitForToolDetailRefresh()
+    }
+
+    /// Everything the tile's host-local tool-detail store holds (shared by both
+    /// renderers).
+    func qaToolDetailRecords() async -> [AgentToolDetailRecord] { await toolDetailStore.allDetails() }
+}

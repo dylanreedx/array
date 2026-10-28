@@ -59,14 +59,15 @@ enum FileCardChecks {
     private static func settle(_ tile: ManagedAgentTileNSView) async throws {
         func snapshot() -> [AgentDiffPayload] {
             diffBlocks(tile).compactMap {
-                tile.qaTranscriptForChecks?.qaPresentedDiffPayload(for: $0.blockID)
+                tile.qaPresentedDiffPayload(for: $0.blockID)
             }
         }
         let deadline = Date().addingTimeInterval(5)
         var previous = snapshot()
         var stableRounds = 0
         while Date() < deadline {
-            await tile.qaTranscriptForChecks?.qaWaitForToolDetailRefresh()
+            await tile.qaWaitForToolDetailRefresh()
+            tile.layoutSubtreeIfNeeded()
             try? await Task.sleep(nanoseconds: 5_000_000)
             let current = snapshot()
             stableRounds = current == previous ? stableRounds + 1 : 0
@@ -78,8 +79,10 @@ enum FileCardChecks {
         throw fail("settle: the presented change cards never stopped changing within 5s")
     }
 
+    /// Framed and laid out as a tile on screen is: the drawn transcript lays out
+    /// (and presents) its rows only at a real width.
     private static func makeTile(_ title: String) -> ManagedAgentTileNSView {
-        ManagedAgentTileNSView(tile: Tile(
+        let tile = ManagedAgentTileNSView(tile: Tile(
             id: UUID(),
             kind: .managedAgent,
             title: title,
@@ -88,6 +91,9 @@ enum FileCardChecks {
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "managed")
         ))
+        tile.frame = NSRect(x: 0, y: 0, width: 560, height: 420)
+        tile.layoutSubtreeIfNeeded()
+        return tile
     }
 
     /// The diff blocks this tile's document holds, in order, with the provider
@@ -111,7 +117,7 @@ enum FileCardChecks {
     private static func checkRestoredEditCardNamesItsFileAndCounts() async throws {
         let tile = makeTile("tr01-restored")
         // The order attach uses: identity first, then the restored history.
-        tile.qaTranscriptForChecks?.bindToolDetailAgent(AgentID(rawValue: UUID()))
+        tile.qaTranscriptSurface?.bindToolDetailAgent(AgentID(rawValue: UUID()))
         // "one\ntwo" → "one\nTWO\nthree" is +2 −1 once the shared first line is
         // peeled off — the count git would report for this hunk.
         let transcript = ClaudeSessionTranscriptReader.parse(
@@ -127,7 +133,7 @@ enum FileCardChecks {
         guard blocks.count == 1, let blockID = blocks.first?.blockID else {
             throw fail("restored edit: expected exactly one change card, got \(blocks.count)")
         }
-        guard let payload = tile.qaTranscriptForChecks?.qaPresentedDiffPayload(for: blockID) else {
+        guard let payload = tile.qaPresentedDiffPayload(for: blockID) else {
             throw fail("restored edit: the card presented no diff payload at all")
         }
         guard payload.files.count == 1, let file = payload.files.first else {
@@ -145,7 +151,9 @@ enum FileCardChecks {
                 + "+\(String(describing: file.addedLineCount)) −\(String(describing: file.removedLineCount))"
             )
         }
-        // The sentence the user actually reads, off the real card.
+        // The sentence the user actually reads, off the real card. The drawn
+        // transcript composes its card's counts line with the same
+        // `AgentDiffSummaryView.countsText` over this same presented payload.
         let card = AgentDiffSummaryView()
         card.frame = NSRect(x: 0, y: 0, width: 520, height: 160)
         card.apply(
@@ -171,7 +179,7 @@ enum FileCardChecks {
     /// real edit, and it is the shape the reported screenshot actually showed.
     private static func checkTwoEditsToOnePathStayTwoCards() async throws {
         let tile = makeTile("tr01-repeat")
-        tile.qaTranscriptForChecks?.bindToolDetailAgent(AgentID(rawValue: UUID()))
+        tile.qaTranscriptSurface?.bindToolDetailAgent(AgentID(rawValue: UUID()))
         let path = "/repo/Sources/App/Main.swift"
         let transcript = ClaudeSessionTranscriptReader.parse(
             lines: claudeSessionLines(
@@ -192,7 +200,7 @@ enum FileCardChecks {
             throw fail("repeated edits: cards lost their provider identity: \(blocks.map(\.itemID))")
         }
         let presented = blocks.compactMap {
-            tile.qaTranscriptForChecks?.qaPresentedDiffPayload(for: $0.blockID)
+            tile.qaPresentedDiffPayload(for: $0.blockID)
         }
         guard presented.count == 2,
               presented.allSatisfy({ $0.files.map(\.displayName) == ["…/App/Main.swift"] }) else {
