@@ -86,7 +86,7 @@ final class InboxFilterPill: NSView, TokenThemed {
 
     private func setUp() {
         wantsLayer = true
-        layer?.cornerRadius = Self.height / 2
+        layer?.applyCapsule()
         let size = NSFont.token(.caption).pointSize
         titleLabel.font = .systemFont(ofSize: size, weight: .medium)
         countLabel.font = .monospacedDigitSystemFont(ofSize: size, weight: .regular)
@@ -134,6 +134,8 @@ final class InboxFilterPill: NSView, TokenThemed {
 
     override func layout() {
         super.layout()
+        // The corner style (Settings › Appearance): a capsule, or square when Sharp.
+        layer?.applyCapsule()
         let h = bounds.height
         var x = Self.padding
         if model?.symbol != nil {
@@ -157,7 +159,8 @@ final class InboxFilterPill: NSView, TokenThemed {
     /// On wears the selected-row fill; off is bare, faded text. Resting off
     /// paints nil, never `.clear`.
     func applyTokens() {
-        layer?.cornerRadius = Self.height / 2
+        // Corner style is re-resolved on every repaint, like the nudge's.
+        layer?.applyCapsule()
         if isPressed {
             layer?.backgroundColor = SidebarControlRole.pressed.color.cgColor(in: self)
         } else {
