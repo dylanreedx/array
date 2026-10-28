@@ -335,6 +335,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     var qaContentHeight: CGFloat { contentHeight }
     var qaPlacedBlockIDs: [AgentNodeID] { placed.map(\.blockID) }
     var qaGyroIsAnimating: Bool { gyro.isAnimating }
+    var qaThinkingIndicatorAnimating: Bool { !gyro.isHidden && gyro.qaInstalledAnimationCount > 0 }
     var qaGyroLayer: CALayer { gyro }
 
     // MARK: Init
@@ -355,6 +356,13 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Agent transcript")
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+    }
+
+    @objc private func accessibilityDisplayOptionsDidChange(_ notification: Notification) {
+        reconcileGyro()
     }
 
     @available(*, unavailable)
@@ -711,13 +719,21 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
 
     // MARK: Gyro
 
-    /// The tail's working gyro: animated only while a turn is working, the view is
-    /// in a window and not hidden. A settled tail keeps its words, not the gyro.
+    /// The tail's working gyro: shown only while a turn is working, the view is
+    /// in a window and not hidden; animated unless the reader prefers reduced
+    /// motion, which holds the list gyro's fixed pose instead. A settled tail
+    /// keeps its words, not the gyro.
     private func reconcileGyro() {
-        let animate = tailVisible && !tailSettled && window != nil && !isHiddenOrHasHiddenAncestor
-        gyro.isHidden = !animate
-        if animate { gyro.start() } else { gyro.stop() }
+        let show = tailVisible && !tailSettled && window != nil && !isHiddenOrHasHiddenAncestor
+        gyro.isHidden = !show
         positionGyro()
+        if !show {
+            gyro.stop()
+        } else if AgentTranscriptMotion.prefersReducedMotion() {
+            gyro.holdStill()
+        } else {
+            gyro.start()
+        }
     }
 
     private func positionGyro() {

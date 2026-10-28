@@ -34,6 +34,8 @@ protocol AgentTranscriptSurface: NSView {
     var qaTailStatusText: String { get }
     /// The tail's working indicator is showing: the turn reads as in progress.
     var qaThinkingIndicatorVisible: Bool { get }
+    /// The working indicator has motion installed on the compositor right now.
+    var qaThinkingIndicatorAnimating: Bool { get }
 }
 
 extension AgentTranscriptListView: AgentTranscriptSurface {

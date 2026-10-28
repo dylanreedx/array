@@ -21,6 +21,8 @@ final class AgentTranscriptCanvasGyroLayer: CALayer {
     private var theme: TokenTheme = .dark
     private var animatedBounds: CGRect = .null
     private(set) var isAnimating = false
+    /// Showing the fixed Reduce Motion pose instead of animating.
+    private(set) var isHeldStill = false
     /// Turns (0..1) this agent sits ahead on the shared cycle.
     var phaseOffset: CGFloat = 0 {
         didSet { if isAnimating { restart() } }
@@ -74,20 +76,39 @@ final class AgentTranscriptCanvasGyroLayer: CALayer {
     }
 
     func start() {
+        isHeldStill = false
         guard !isAnimating || animatedBounds != bounds else { return }
         restart()
     }
 
     func stop() {
+        isHeldStill = false
         guard isAnimating else { return }
         nodes.forEach { $0.removeAllAnimations() }
         isAnimating = false
         applyPose(phase: DualPlaneGyroIndicatorModel.reducedMotionPhase)
     }
 
+    /// Reduce Motion: the gyro stays on screen in the one fixed pose
+    /// `DualPlaneGyroTiltedThinkingIndicatorView` takes, with no animation, so
+    /// the reader keeps the signal without the motion.
+    func holdStill() {
+        nodes.forEach { $0.removeAllAnimations() }
+        isAnimating = false
+        animatedBounds = .null
+        isHeldStill = true
+        applyPose(phase: DualPlaneGyroIndicatorModel.reducedMotionPhase)
+    }
+
     override func layoutSublayers() {
         super.layoutSublayers()
         if isAnimating, animatedBounds != bounds { restart() }
+        if isHeldStill { applyPose(phase: DualPlaneGyroIndicatorModel.reducedMotionPhase) }
+    }
+
+    /// Keyframe animations installed on the nodes right now.
+    var qaInstalledAnimationCount: Int {
+        nodes.reduce(0) { $0 + ($1.animationKeys()?.count ?? 0) }
     }
 
     private func applyPose(phase: CGFloat) {

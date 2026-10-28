@@ -1125,16 +1125,58 @@ extension AgentFirstPaintChecks {
             )
         }
 
-        // A reduce-motion reader gets the same INFORMATION. The gyro falls back
-        // to a fixed pose rather than disappearing, so the signal must not be
-        // conditioned on motion being available.
-        AgentTranscriptMotion.qaWithMotion(enabled: true, reducedMotion: true) {
-            tile.qaTranscriptSurface?.setThinkingIndicatorVisible(true)
+        // A reduce-motion reader gets the same INFORMATION without the MOTION.
+        // The gyro falls back to a fixed pose rather than disappearing, so the
+        // signal must not be conditioned on motion being available — and the
+        // pose must actually be still. Both are read in a window, the only place
+        // either renderer animates its gyro; parked off every display.
+        let motionTile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "streaming-liveness-motion",
+            frame: TileFrame(x: 0, y: 0, width: 560, height: 460),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = motionTile
+        window.orderFrontOffscreenForChecks()
+        guard let surface = motionTile.qaTranscriptSurface else {
+            throw fail("streaming liveness: the tile has no transcript surface")
         }
-        guard tile.qaThinkingIndicatorVisible else {
+        func settle() {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            window.layoutIfNeeded()
+            motionTile.layoutSubtreeIfNeeded()
+            surface.layoutSubtreeIfNeeded()
+            motionTile.qaTranscriptForChecks?.collectionView.layoutSubtreeIfNeeded()
+        }
+        // Positive control: with motion available the same tail animates, so
+        // "not animating" below cannot pass for want of a window or a gyro.
+        AgentTranscriptMotion.qaWithMotion(enabled: true, reducedMotion: false) {
+            surface.setThinkingIndicatorVisible(true)
+            settle()
+        }
+        guard surface.qaThinkingIndicatorAnimating else {
+            throw fail(
+                "streaming liveness: the working tail did not animate with motion available, "
+                + "so the reduce-motion assertion below would prove nothing"
+            )
+        }
+        AgentTranscriptMotion.qaWithMotion(enabled: true, reducedMotion: true) {
+            surface.setThinkingIndicatorVisible(true)
+            settle()
+        }
+        guard motionTile.qaThinkingIndicatorVisible else {
             throw fail(
                 "streaming liveness: the tail vanished under reduce-motion — the fixed-pose "
                 + "fallback exists so the signal survives without the animation"
+            )
+        }
+        guard !surface.qaThinkingIndicatorAnimating else {
+            throw fail(
+                "streaming liveness: the working gyro kept animating under Reduce Motion — it "
+                + "must hold its fixed pose"
             )
         }
     }
