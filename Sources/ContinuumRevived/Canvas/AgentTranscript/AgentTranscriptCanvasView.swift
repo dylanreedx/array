@@ -450,7 +450,13 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             || context.tokens != renderContext.tokens
         renderContext = contextWithDisclosureState(context)
         gyro.apply(theme: context.appearance)
-        guard moved else { return }
+        guard moved else {
+            // A new live source (a chip's status, an image's state) changes no
+            // signature; the rebuild re-lays exactly the units whose live
+            // variant it moved and answers the rest from the cache.
+            preservingTail { rebuild() }
+            return
+        }
         cache.removeAll()
         preservingTail { rebuild() }
     }
@@ -625,6 +631,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         var text = 0
         var previousEntryID: AgentNodeID?
         let entries = document.entries
+        chipFold = Self.foldDelegations(entries)
         for (entryIndex, entry) in entries.enumerated() {
             var units: [Unit] = []
             if entry.role == .reasoning {
@@ -632,7 +639,15 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                 guard entry.lifecycle == .finished, !entry.blocks.isEmpty else { continue }
                 units = [.reasoning(entry, duration: Self.reasoningDuration(entries, at: entryIndex))]
             } else {
-                units = entry.blocks.map { .block($0, entry) }
+                units = entry.blocks.compactMap { block in
+                    // A delegation is one row: its superseded tool row and the
+                    // chips that follow a run's first chip draw nowhere else.
+                    if chipFold.superseded.contains(block.id) || chipFold.leaderByFollower[block.id] != nil { return nil }
+                    if let followers = chipFold.followersByLeader[block.id] {
+                        return .block(Self.presentedChipRun(block, followers: followers), entry)
+                    }
+                    return .block(block, entry)
+                }
             }
             for unit in units {
                 let (revision, presented, variant) = identity(of: unit)
@@ -668,6 +683,88 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let liveBlocks = Set(next.keys)
         regionOffsets = regionOffsets.filter { liveBlocks.contains($0.key.blockID) }
     }
+
+    // MARK: Delegations
+
+    /// How the transcript folds delegations, as `AgentTranscriptListView` does
+    /// (`supersededID`, `rebuildChipRuns`, `presentedChipRun`).
+    struct ChipFold {
+        /// Tool rows a chip stands for: the provider call that spawned it.
+        var superseded: Set<AgentNodeID> = []
+        /// A run's first chip → the chips after it, in order.
+        var followersByLeader: [AgentNodeID: [AgentBlock]] = [:]
+        var leaderByFollower: [AgentNodeID: AgentNodeID] = [:]
+    }
+
+    private var chipFold = ChipFold()
+
+    /// A chip whose `sourceItemID` is the provider's call id supersedes the first
+    /// row that call produced (never itself), and consecutive chips — rows
+    /// already superseded are transparent, any other row ends the run — share
+    /// the first chip's row. A document with no chip costs one scan.
+    static func foldDelegations(_ entries: [AgentEntry]) -> ChipFold {
+        var fold = ChipFold()
+        guard entries.contains(where: { entry in
+            entry.role != .reasoning && entry.blocks.contains { if case .agentReference = $0.payload { return true }; return false }
+        }) else { return fold }
+        var order: [(id: AgentNodeID, chip: AgentBlock?)] = []
+        var unitBySource: [String: AgentNodeID] = [:]
+        for entry in entries {
+            var source: String?
+            if case let .providerItem(_, itemID?) = entry.provenance { source = itemID }
+            if entry.role == .reasoning {
+                guard entry.lifecycle == .finished, !entry.blocks.isEmpty else { continue }
+                order.append((entry.id, nil))
+                if let source, unitBySource[source] == nil { unitBySource[source] = entry.id }
+                continue
+            }
+            for block in entry.blocks {
+                var chip: AgentBlock?
+                if case .agentReference = block.payload { chip = block }
+                order.append((block.id, chip))
+                if let source, unitBySource[source] == nil { unitBySource[source] = block.id }
+            }
+        }
+        for unit in order {
+            guard let chip = unit.chip, case let .agentReference(payload) = chip.payload,
+                  let source = payload.sourceItemID, !source.isEmpty,
+                  let mapped = unitBySource[source], mapped != chip.id else { continue }
+            fold.superseded.insert(mapped)
+        }
+        var leader: AgentNodeID?
+        for unit in order where !fold.superseded.contains(unit.id) {
+            guard let chip = unit.chip else {
+                leader = nil
+                continue
+            }
+            if let leader {
+                fold.followersByLeader[leader, default: []].append(chip)
+                fold.leaderByFollower[chip.id] = leader
+            } else {
+                leader = chip.id
+            }
+        }
+        return fold
+    }
+
+    /// The run's first chip carrying its followers as presentation-only
+    /// `children` for the chip flow. Membership is folded into the revision so
+    /// the cache re-lays the row when the run changes; live statuses are in the
+    /// unit's variant.
+    static func presentedChipRun(_ block: AgentBlock, followers: [AgentBlock]) -> AgentBlock {
+        var presented = block
+        presented.children = followers
+        var identity = Hasher()
+        for member in [block] + followers {
+            identity.combine(member.id)
+            identity.combine(member.revision)
+        }
+        presented.revision = UInt64(bitPattern: Int64(identity.finalize()))
+        return presented
+    }
+
+    var qaSupersededBlockIDs: Set<AgentNodeID> { chipFold.superseded }
+    var qaChipRunLeaderByFollower: [AgentNodeID: AgentNodeID] { chipFold.leaderByFollower }
 
     /// The parts of a unit's identity the cache compares.
     private func identity(of unit: Unit) -> (revision: UInt64, presented: AgentBlockPayload?, variant: Int) {
@@ -1492,7 +1589,8 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
 
     /// A mouse down and up at `point` (view coordinates), handed to this view's
     /// own handlers: hit testing, press state, and what a click there does.
-    private func qaSendClick(at point: NSPoint) -> Bool {
+    @discardableResult
+    func qaSendClick(at point: NSPoint) -> Bool {
         let location = convert(point, to: nil)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             guard let event = NSEvent.mouseEvent(
@@ -1502,6 +1600,92 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             if type == .leftMouseDown { mouseDown(with: event) } else { mouseUp(with: event) }
         }
         return true
+    }
+
+    /// The pointer moving to `point` (view coordinates), or leaving the view,
+    /// through this view's own tracking handlers.
+    func qaSendHover(at point: NSPoint?) {
+        let location = point.map { convert($0, to: nil) } ?? .zero
+        if point != nil, let event = NSEvent.mouseEvent(
+            with: .mouseMoved, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window?.windowNumber ?? 0, context: nil, eventNumber: 0, clickCount: 0, pressure: 0) {
+            mouseMoved(with: event)
+        } else if point == nil, let event = NSEvent.enterExitEvent(
+            with: .mouseExited, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window?.windowNumber ?? 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil) {
+            mouseExited(with: event)
+        }
+    }
+
+    /// The control the pointer is over, if it paints a hover state.
+    var qaHoveredControlTitle: String? { hoveredControl.flatMap { control(for: $0)?.title } }
+
+    /// The enabled control at a view point, if any.
+    func qaControlTitle(at point: NSPoint) -> String? { control(at: point).map(\.control.title) }
+
+    /// One drawn subagent chip, in its run's coordinates.
+    struct QAChip {
+        let blockID: AgentNodeID
+        let agentID: UUID
+        let rect: CGRect
+        let title: String
+        /// The title line as drawn.
+        let titleRect: CGRect
+        let titleLine: CTLine
+        /// The whole title is drawn: the line was not truncated to fit.
+        let titleFits: Bool
+        let glyphRect: CGRect?
+        /// The capsule's drawn outline.
+        let strokeRadius: CGFloat?
+        let strokeWidth: CGFloat?
+    }
+
+    /// One drawn chip run: a placed block whose controls reveal subagents.
+    struct QAChipRun {
+        let leaderID: AgentNodeID
+        /// The run's (0, 0) in view coordinates.
+        let origin: CGPoint
+        let size: CGSize
+        let chips: [QAChip]
+    }
+
+    /// Every chip run as laid and drawn, in document order. Read from the laid
+    /// block itself: each chip appends one reveal control and one title row,
+    /// in order, plus its outline and glyph decorations.
+    var qaChipRuns: [QAChipRun] {
+        placed.compactMap { item -> QAChipRun? in
+            let block = item.block
+            let reveals: [(rect: CGRect, agentID: UUID, blockID: AgentNodeID)] = block.controls.compactMap { control in
+                guard case let .perform(.revealAgent(blockID, agentID, _)) = control.action else { return nil }
+                return (control.rect, agentID, blockID)
+            }
+            guard !reveals.isEmpty, block.rows.count == reveals.count else { return nil }
+            let chips = reveals.enumerated().map { index, reveal -> QAChip in
+                let row = block.rows[index]
+                let line = row.lines.first
+                let full = Self.width(of: CTLineCreateWithAttributedString(Self.coreTextString(row.string)))
+                var glyph: CGRect?
+                var stroke: (CGFloat, CGFloat)?
+                for decoration in block.decorations {
+                    switch decoration {
+                    case let .symbol(_, rect) where reveal.rect.contains(CGPoint(x: rect.midX, y: rect.midY)):
+                        glyph = rect
+                    case let .stroke(rect, _, radius, width) where rect == reveal.rect:
+                        stroke = (radius, width)
+                    default:
+                        break
+                    }
+                }
+                return QAChip(
+                    blockID: reveal.blockID, agentID: reveal.agentID, rect: reveal.rect, title: row.string.string,
+                    titleRect: line.map { CGRect(x: $0.x, y: $0.top, width: $0.width, height: $0.height) } ?? .zero,
+                    titleLine: line?.ctLine ?? CTLineCreateWithAttributedString(NSAttributedString()),
+                    titleFits: line.map { $0.width >= full - 0.5 } ?? false,
+                    glyphRect: glyph, strokeRadius: stroke?.0, strokeWidth: stroke?.1)
+            }
+            return QAChipRun(leaderID: item.blockID, origin: CGPoint(x: insets.left, y: item.y - scrollOffset),
+                             size: CGSize(width: block.width, height: block.height), chips: chips)
+        }
     }
 
     /// Every semantic link laid out on a drawn line, in document order, with
