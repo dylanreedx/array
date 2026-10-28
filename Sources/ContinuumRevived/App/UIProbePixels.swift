@@ -111,6 +111,12 @@ enum UIProbePixels {
 
     /// `rect`, given in `view`'s coordinates, in `probe.hostRep` pixels.
     static func bitmapRect(of view: NSView, rect viewRect: NSRect, in probe: UIProbe.Probed) throws -> PixelRect {
+        try bitmapRect(hostRect: view.convert(viewRect, to: probe.host), label: describe(view), in: probe)
+    }
+
+    /// A rect already in the probe host's coordinates (a drawn line, or a view a
+    /// resting tile draws from outside its subtree), in bitmap pixels.
+    static func bitmapRect(hostRect rect: NSRect, label: String, in probe: UIProbe.Probed) throws -> PixelRect {
         let host = probe.host
         let rep = probe.hostRep
         guard host.bounds.width > 0, host.bounds.height > 0 else {
@@ -126,18 +132,17 @@ enum UIProbePixels {
                 format: "%@: non-uniform bitmap scale (%.3f x %.3f)", probe.spec.id, scaleX, scaleY
             ))
         }
-        let rect = view.convert(viewRect, to: host)
         let x = Int((rect.minX * scaleX).rounded())
         // Flip: the bitmap's row 0 is the host's top edge.
         let y = Int(((host.bounds.height - rect.maxY) * scaleY).rounded())
         let width = Int((rect.width * scaleX).rounded())
         let height = Int((rect.height * scaleY).rounded())
         guard width > 0, height > 0 else {
-            throw fail("\(probe.spec.id): \(describe(view)) maps to a \(width)x\(height)px rect")
+            throw fail("\(probe.spec.id): \(label) maps to a \(width)x\(height)px rect")
         }
         guard x >= 0, y >= 0, x + width <= rep.pixelsWide, y + height <= rep.pixelsHigh else {
             throw fail(
-                "\(probe.spec.id): \(describe(view)) maps outside the bitmap — "
+                "\(probe.spec.id): \(label) maps outside the bitmap — "
                     + "\(width)x\(height) at (\(x),\(y)) in \(rep.pixelsWide)x\(rep.pixelsHigh)px"
             )
         }
@@ -155,7 +160,11 @@ enum UIProbePixels {
     /// caller can report the worst one it saw.
     @discardableResult
     static func expectLegibleText(in view: NSView, probe: UIProbe.Probed, label: String) throws -> Double {
-        let rect = try renderedRect(of: view, in: probe)
+        try expectLegibleText(at: try renderedRect(of: view, in: probe), probe: probe, label: label)
+    }
+
+    @discardableResult
+    static func expectLegibleText(at rect: PixelRect, probe: UIProbe.Probed, label: String) throws -> Double {
         // Bounded cost on a large wrapping label, same idea as VisualSnapshot's grid.
         let step = rect.width * rect.height > 40_000 ? 2 : 1
         var minimum = Double.infinity
@@ -200,9 +209,16 @@ enum UIProbePixels {
         guard isFullyRendered(view) else {
             throw fail("\(label): view is clipped (\(visiblePortion(of: view)) of \(view.bounds)), so its border edges are not all in the bitmap")
         }
-        let rect = try bitmapRect(of: view, rect: view.bounds, in: probe)
+        return try expectVisibleBorder(width: layer.borderWidth, at: try bitmapRect(of: view, rect: view.bounds, in: probe),
+                                       probe: probe, label: label)
+    }
+
+    /// The border probe over a rect already in bitmap pixels.
+    @discardableResult
+    static func expectVisibleBorder(width borderWidth: CGFloat, at rect: PixelRect, probe: UIProbe.Probed,
+                                    label: String) throws -> Double {
         let scale = Double(probe.hostRep.pixelsWide) / probe.host.bounds.width
-        let borderPixels = max(1, Int((Double(layer.borderWidth) * scale).rounded()))
+        let borderPixels = max(1, Int((Double(borderWidth) * scale).rounded()))
         // The skip exists to step over the antialiased OUTER edge pixel, so it can
         // only be spent when the border is thicker than that one pixel. A 1pt border
         // at scale 1 IS a single pixel at offset 0: skipping it sampled the fill on
@@ -386,6 +402,60 @@ enum UIProbePixels {
                 } else {
                     result.skippedBorders += 1
                 }
+            }
+        }
+        // What the walk above cannot reach: a resting agent tile draws its body
+        // and title-bar controls from views outside its subtree (a hidden host
+        // window, detached controls), and the drawn transcript has no text views.
+        // Their pixels are probed where they are drawn.
+        var tiles: [ManagedAgentTileNSView] = []
+        var transcripts: [AgentTranscriptCanvasView] = []
+        try walk(probe.view) { view in
+            if let tile = view as? ManagedAgentTileNSView { tiles.append(tile) }
+            if let transcript = view as? AgentTranscriptCanvasView { transcripts.append(transcript) }
+        }
+        for tile in tiles {
+            for root in tile.qaPresentedViewRoots where root !== tile {
+                try walk(root) { view in
+                    let key = drawnText(of: view).map { "\(label) drawn \(describe(view)) \"\($0.prefix(40))\"" }
+                        ?? "\(label) drawn \(describe(view))"
+                    if drawnText(of: view) != nil {
+                        if renderedFraction(of: view) >= minimumVisibleTextFraction,
+                           let rect = tile.qaPresentedRect(of: view, visiblePortion(of: view)) {
+                            let pixels = try bitmapRect(hostRect: tile.convert(rect, to: probe.host), label: key, in: probe)
+                            let spread = try expectLegibleText(at: pixels, probe: probe, label: key)
+                            if spread < result.worstText.spread { result.worstText = (spread, key) }
+                            result.textProbes += 1
+                        } else {
+                            result.skippedText += 1
+                        }
+                    }
+                    if let layer = view.layer, layer.borderWidth > 0, layer.borderColor != nil {
+                        if isFullyRendered(view), let rect = tile.qaPresentedRect(of: view) {
+                            let pixels = try bitmapRect(hostRect: tile.convert(rect, to: probe.host), label: key, in: probe)
+                            let delta = try expectVisibleBorder(width: layer.borderWidth, at: pixels, probe: probe, label: key)
+                            if delta < result.worstBorder.delta { result.worstBorder = (delta, key) }
+                            result.borderProbes += 1
+                        } else {
+                            result.skippedBorders += 1
+                        }
+                    }
+                }
+            }
+        }
+        for transcript in transcripts where isPartlyRendered(transcript) {
+            for line in transcript.qaVisibleTextLines
+            where !line.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let key = "\(label) drawn transcript line \"\(line.text.prefix(40))\""
+                let visible = line.rect.intersection(transcript.visibleRect)
+                guard visible.width * visible.height >= line.rect.width * line.rect.height * minimumVisibleTextFraction else {
+                    result.skippedText += 1
+                    continue
+                }
+                let pixels = try bitmapRect(hostRect: transcript.convert(visible, to: probe.host), label: key, in: probe)
+                let spread = try expectLegibleText(at: pixels, probe: probe, label: key)
+                if spread < result.worstText.spread { result.worstText = (spread, key) }
+                result.textProbes += 1
             }
         }
         return result
