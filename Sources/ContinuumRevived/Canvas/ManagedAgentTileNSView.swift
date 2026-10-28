@@ -4718,6 +4718,16 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     @discardableResult
     func qaClickV2RequestChoice(requestID: String, value: String) -> Bool {
+        if let canvas = transcriptCollectionFixture as? AgentTranscriptCanvasView {
+            canvas.flushPendingVisualUpdate()
+            canvas.layoutSubtreeIfNeeded()
+            if canvas.qaPressRequestChoice(requestID: requestID, value: value) { return true }
+            // No drawn choice (no transport draws none): the same semantic
+            // fallback the list takes below.
+            guard v2RequestPayload(requestID)?.choices.contains(value) == true else { return false }
+            performV2RenderAction(.submitResponse(requestID: requestID, value: value))
+            return true
+        }
         guard let transcriptCollectionFixture = listTranscript else { return false }
         transcriptCollectionFixture.layoutSubtreeIfNeeded()
         transcriptCollectionFixture.collectionView.layoutSubtreeIfNeeded()

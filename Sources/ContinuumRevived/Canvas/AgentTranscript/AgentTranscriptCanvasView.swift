@@ -1456,6 +1456,32 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         }
     }
 
+    /// Clicks the drawn choice that answers `requestID` with `value`: reveals its
+    /// block, then sends a mouse down and up at the choice's centre through the
+    /// view's own hit testing and press handling (a disabled choice ignores it,
+    /// as a disabled button does). False when no such choice is drawn.
+    @discardableResult
+    func qaPressRequestChoice(requestID: String, value: String) -> Bool {
+        guard let item = placed.first(where: { item in
+            item.block.controls.contains { control in
+                guard case let .perform(.submitResponse(id, choice)) = control.action else { return false }
+                return id == requestID && choice == value
+            }
+        }) else { return false }
+        qaReveal(blockID: item.blockID)
+        guard let target = qaControls.first(where: { $0.blockID == item.blockID
+            && $0.title == ApprovalDecision.displayTitle(forChoice: value) && $0.kind == "choice" }) else { return false }
+        let location = convert(target.center, to: nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(
+                with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window?.windowNumber ?? 0, context: nil, eventNumber: 0, clickCount: 1,
+                pressure: type == .leftMouseDown ? 1 : 0) else { return false }
+            if type == .leftMouseDown { mouseDown(with: event) } else { mouseUp(with: event) }
+        }
+        return true
+    }
+
     /// Scrolls so the given block's top is in view.
     func qaReveal(blockID: AgentNodeID) {
         guard let item = placed.first(where: { $0.blockID == blockID }) else { return }

@@ -198,8 +198,14 @@ enum ProviderRequestResponseChecks {
             tile.qaV2RequestStatus("req-no-transport") != nil,
             "TR-06 W2: a request with no transport vanished instead of remaining readable"
         )
-        // And a press cannot dispatch, because the tile's own seam refuses.
+        // No controls at all: the transcript draws the request without choices.
         tile.layoutSubtreeIfNeeded()
+        let offered = tile.qaV2RequestChoiceTitles("req-no-transport")
+        try expect(
+            offered.isEmpty,
+            "TR-06 W2: a request with no transport presented choices \(offered) — they would press into nothing"
+        )
+        // And a press cannot dispatch, because the tile's own seam refuses.
         _ = tile.qaClickV2RequestChoice(
             requestID: "req-no-transport", value: ApprovalDecision.accept.rawValue)
         try expect(
