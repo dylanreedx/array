@@ -4444,7 +4444,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// The compact row is exposed only as a deterministic geometry/AX witness;
     /// production updates it through `refreshCompactStatus` above.
     var qaCompactStatusRow: AgentCompactStatusRowView { compactStatusRow }
-    var qaThinkingIndicatorVisible: Bool { listTranscript?.qaThinkingIndicatorVisible == true }
+    var qaThinkingIndicatorVisible: Bool { transcriptCollectionFixture?.qaThinkingIndicatorVisible == true }
     // `.plans/45` S6 — deterministic seams for the optimistic-window witness.
     func qaBeginOptimisticSubmissionForChecks(_ text: String) {
         beginOptimisticSubmission(AgentPrompt(text))

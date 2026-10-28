@@ -1129,7 +1129,7 @@ extension AgentFirstPaintChecks {
         // to a fixed pose rather than disappearing, so the signal must not be
         // conditioned on motion being available.
         AgentTranscriptMotion.qaWithMotion(enabled: true, reducedMotion: true) {
-            tile.qaTranscriptForChecks?.setThinkingIndicatorVisible(true)
+            tile.qaTranscriptSurface?.setThinkingIndicatorVisible(true)
         }
         guard tile.qaThinkingIndicatorVisible else {
             throw fail(

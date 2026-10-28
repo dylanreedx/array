@@ -502,6 +502,13 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
 
     var qaTailStatusText: String { tailText }
 
+    /// The working tail is placed in the drawn document (gyro and words), not
+    /// settled; in a window, its gyro layer is showing too. The list's reading
+    /// of the same state is `tailThinkingIndicatorIsVisible && !gyro.isHidden`.
+    var qaThinkingIndicatorVisible: Bool {
+        tailVisible && !tailSettled && tailLine != nil && (window == nil || !gyro.isHidden)
+    }
+
     var transcriptScrollOrigin: CGPoint { CGPoint(x: 0, y: scrollOffset) }
 
     func scrollTranscript(toY y: CGFloat) {
