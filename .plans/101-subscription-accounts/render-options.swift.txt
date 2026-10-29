@@ -1,0 +1,459 @@
+import AppKit
+import ContinuumRevivedAgentUI
+import ContinuumRevivedCore
+
+// Design-round render for .plans/101-subscription-accounts. NOT a witness and not
+// shipped: it draws three candidate usage displays above a composer, with their
+// hover cards, from Array's own pill/meter views and tokens, in light and dark.
+
+@MainActor
+enum AccountUsageOptionsRender {
+    struct Failure: Error { let description: String }
+
+    static let sceneWidth: CGFloat = 600
+    static let sceneHeight: CGFloat = 400
+
+    // Fixture, taken from the live readings of 2026-10-29 (get_usage / account read).
+    struct Account {
+        let name: String, plan: String, email: String
+        let fiveHourLeft: Double, weekLeft: Double
+        let fiveHourReset: String, weekReset: String
+    }
+    static let personal = Account(name: "Personal", plan: "Max", email: "personal@example.com",
+                                  fiveHourLeft: 0.84, weekLeft: 0.93,
+                                  fiveHourReset: "3:10 PM · in 2h 17m", weekReset: "Thu 5 Nov, 1:00 AM")
+    static let personalLow = Account(name: "Personal", plan: "Max", email: "personal@example.com",
+                                     fiveHourLeft: 0.06, weekLeft: 0.81,
+                                     fiveHourReset: "3:10 PM · in 41m", weekReset: "Thu 5 Nov, 1:00 AM")
+    static let team = Account(name: "Work", plan: "Team", email: "dylan@company.com",
+                              fiveHourLeft: 0.60, weekLeft: 0.38,
+                              fiveHourReset: "4:40 PM · in 3h 47m", weekReset: "Mon 2 Nov, 9:00 AM")
+
+    static func run(outputDirectory: URL) async throws -> String {
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        var written: [String] = []
+        for option in 1...3 {
+            var columns: [(String, [CGImage])] = []
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                var shots: [CGImage] = []
+                for nearLimit in [false, true] {
+                    shots.append(try await shoot(option: option, nearLimit: nearLimit, appearance: appearance))
+                }
+                columns.append((appearance == .darkAqua ? "dark" : "light", shots))
+            }
+            let names = [1: "option-1-quiet-pills", 2: "option-2-account-bars", 3: "option-3-account-gauge"]
+            let url = outputDirectory.appendingPathComponent("\(names[option]!).png")
+            try writeSheet(columns, to: url)
+            written.append(url.path)
+        }
+        return written.joined(separator: "\n")
+    }
+
+    // MARK: - Scene
+
+    private static func shoot(option: Int, nearLimit: Bool, appearance: NSAppearance.Name) async throws -> CGImage {
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: sceneWidth, height: sceneHeight))
+        root.appearance = NSAppearance(named: appearance)
+        let window = NSWindow(contentRect: root.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: appearance)
+        window.contentView = root
+        window.ignoresMouseEvents = true
+        window.orderFrontOffscreenForChecks()
+        defer { window.orderOut(nil) }
+        let theme = root.effectiveTokenTheme
+
+        root.wantsLayer = true
+        root.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(for: theme)
+
+        // Transcript tail, so the row reads in place rather than floating.
+        let tail = label("Done — the five-hour reader now names the account it read.", .body, TextToken.textSecondary, theme)
+        tail.frame.origin = CGPoint(x: 16, y: sceneHeight - 30)
+        root.addSubview(tail)
+
+        // Compose strip.
+        let strip = NSView(frame: NSRect(x: 0, y: 0, width: sceneWidth, height: 104))
+        strip.wantsLayer = true
+        strip.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
+        root.addSubview(strip)
+        let field = NSView(frame: NSRect(x: 12, y: 12, width: sceneWidth - 24, height: 56))
+        field.wantsLayer = true
+        field.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(for: theme)
+        field.layer?.borderColor = LineToken.separator.color.cgColor(for: theme)
+        field.layer?.borderWidth = 1
+        field.layer?.cornerRadius = CGFloat(Radius.card)
+        strip.addSubview(field)
+        let placeholder = label("Ask Claude…", .body, TextToken.textSecondary, theme)
+        placeholder.frame.origin = CGPoint(x: 12, y: 30)
+        field.addSubview(placeholder)
+
+        // Status row, centred like today's.
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = CGFloat(Space.s)
+        let ring = AgentRadialContextMeterView(frame: .zero)
+        ring.apply(.init(state: .known, fraction: 0.27, label: "27%", accessibilityLabel: "", detailText: "", warningMarker: nil))
+        row.addArrangedSubview(ring)
+
+        let account = nearLimit && option != 3 ? personalLow : personal
+        var anchor: NSView?
+        switch option {
+        case 1:
+            let five = AgentStatusPillView()
+            five.apply(quota(.fiveHour, left: account.fiveHourLeft, label: "5h"))
+            let week = AgentStatusPillView()
+            week.apply(quota(.sevenDay, left: account.weekLeft, label: "7d"))
+            row.addArrangedSubview(five)
+            row.addArrangedSubview(week)
+            anchor = five
+        case 2:
+            let chip = AgentStatusPillView()
+            chip.apply(symbolName: "person.crop.circle", value: account.plan, detail: "")
+            row.addArrangedSubview(chip)
+            row.addArrangedSubview(BarPill(label: "5h", left: account.fiveHourLeft, theme: theme))
+            row.addArrangedSubview(BarPill(label: "7d", left: account.weekLeft, theme: theme))
+            anchor = chip
+            if nearLimit {
+                let suggest = AgentStatusPillView()
+                suggest.apply(symbolName: "arrow.triangle.swap", value: "Work next turn?", detail: "")
+                row.addArrangedSubview(suggest)
+            }
+        default:
+            let gauge = AccountGauge(account: nearLimit ? team : personal, auto: nearLimit, theme: theme)
+            row.addArrangedSubview(gauge)
+            anchor = gauge
+        }
+        let cost = AgentStatusPillView()
+        cost.apply(cost: AgentCostElementPresentation(text: "$6.73 est", accessibilityLabel: "", detailText: ""))
+        row.addArrangedSubview(cost)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        strip.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.centerXAnchor.constraint(equalTo: strip.centerXAnchor),
+            row.centerYAnchor.constraint(equalTo: strip.topAnchor, constant: 18),
+        ])
+        root.layoutSubtreeIfNeeded()
+
+        // Hover card above the row (normal state only; the near-limit frame shows the row).
+        let card: NSView
+        switch option {
+        case 1: card = singleAccountCard(account, theme: theme, nearLimit: nearLimit)
+        case 2: card = twoAccountCard(active: account, other: team, theme: theme, nearLimit: nearLimit)
+        default: card = switcherCard(active: nearLimit ? team : personal, other: nearLimit ? personalLow : team,
+                                     theme: theme, auto: nearLimit)
+        }
+        root.addSubview(card)
+        let size = card.fittingSize
+        let anchorFrame = anchor.map { root.convert($0.bounds, from: $0) } ?? .zero
+        let x = min(max(12, anchorFrame.minX - 8), sceneWidth - size.width - 12)
+        card.frame = NSRect(x: x, y: strip.frame.maxY + 4, width: size.width, height: size.height)
+        root.layoutSubtreeIfNeeded()
+        // Real views themed before they joined the window; re-resolve in place.
+        func retheme(_ view: NSView) {
+            (view as? TokenThemed)?.applyTokens()
+            view.subviews.forEach(retheme)
+        }
+        retheme(root)
+        root.display()
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber),
+                                                  [.boundsIgnoreFraming, .bestResolution])
+        else { throw Failure(description: "window capture failed") }
+        return image
+    }
+
+    // MARK: - Pieces
+
+    private static func quota(_ kind: AgentQuotaWindowKind, left: Double, label: String) -> AgentQuotaElementPresentation {
+        let used = 1 - left
+        let state: AgentQuotaElementState = used >= 0.9 ? .critical : used >= 0.75 ? .warning : .known
+        return AgentQuotaElementPresentation(
+            element: kind == .fiveHour ? .quotaFiveHour : .quotaSevenDay, state: state, fraction: used,
+            symbolName: kind == .fiveHour ? "clock" : "calendar", shortLabel: label,
+            valueText: "\(Int((left * 100).rounded()))% left", accessibilityLabel: "", detailText: "")
+    }
+
+    static func label(_ text: String, _ role: TextRole, _ token: TextToken, _ theme: TokenTheme) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = .token(role)
+        field.textColor = token.color.nsColor(for: theme)
+        field.sizeToFit()
+        return field
+    }
+
+    static func barColor(left: Double, theme: TokenTheme) -> NSColor {
+        if left <= 0.10 { return AccentToken.accentFailed.color.nsColor(for: theme) }
+        if left <= 0.25 { return AccentToken.accentApproval.color.nsColor(for: theme) }
+        return TextToken.textPrimary.color.nsColor(for: theme)
+    }
+
+    private static func cardShell(theme: TokenTheme) -> (NSView, NSStackView) {
+        let card = NSView()
+        card.wantsLayer = true
+        card.layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
+        card.layer?.cornerRadius = CGFloat(Radius.container)
+        card.layer?.borderWidth = LineWidth.hairline
+        card.layer?.borderColor = LineToken.separator.color.cgColor(for: theme)
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = CGFloat(Space.m)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: CGFloat(Inset.card.left)),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -CGFloat(Inset.card.right)),
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: CGFloat(Inset.card.top)),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -CGFloat(Inset.card.bottom)),
+            stack.widthAnchor.constraint(equalToConstant: 280),
+        ])
+        return (card, stack)
+    }
+
+    private static func header(_ account: Account, inUse: Bool, theme: TokenTheme) -> NSView {
+        let icon = NSImageView(image: NSImage(systemSymbolName: "person.crop.circle", accessibilityDescription: nil)!)
+        icon.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
+        let title = label("Claude · \(account.name) \(account.plan)", .label, .textPrimary, theme)
+        let email = label(account.email, .caption, .textSecondary, theme)
+        let column = NSStackView(views: [title, email])
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = CGFloat(Space.xs)
+        let row = NSStackView(views: [icon, column])
+        row.spacing = CGFloat(Space.m)
+        row.alignment = .centerY
+        if inUse {
+            let tag = label("in use", .caption, .textSecondary, theme)
+            row.addArrangedSubview(tag)
+        }
+        return row
+    }
+
+    /// One window: name, remaining, bar, reset. The two windows share one layout
+    /// so 5h and weekly are always read the same way.
+    private static func meter(_ name: String, left: Double, reset: String, theme: TokenTheme, width: CGFloat = 256) -> NSView {
+        let percent = label("\(Int((left * 100).rounded()))% left", .label, .textPrimary, theme)
+        percent.textColor = left <= 0.25 ? barColor(left: left, theme: theme) : TextToken.textPrimary.color.nsColor(for: theme)
+        let title = label(name, .label, .textSecondary, theme)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let top = NSStackView(views: [title, spacer, percent])
+        top.orientation = .horizontal
+        top.widthAnchor.constraint(equalToConstant: width).isActive = true
+        let bar = Bar(left: left, theme: theme)
+        bar.widthAnchor.constraint(equalToConstant: width).isActive = true
+        bar.heightAnchor.constraint(equalToConstant: 4).isActive = true
+        let foot = label("Resets \(reset)", .caption, .textSecondary, theme)
+        let column = NSStackView(views: [top, bar, foot])
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = CGFloat(Space.s)
+        return column
+    }
+
+    private static func note(_ text: String, theme: TokenTheme, token: TextToken = .textSecondary) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: text)
+        field.font = .token(.caption)
+        field.textColor = token.color.nsColor(for: theme)
+        field.preferredMaxLayoutWidth = 256
+        return field
+    }
+
+    private static func separator(theme: TokenTheme) -> NSView {
+        let line = NSView()
+        line.wantsLayer = true
+        line.layer?.backgroundColor = LineToken.separator.color.cgColor(for: theme)
+        line.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        line.widthAnchor.constraint(equalToConstant: 256).isActive = true
+        return line
+    }
+
+    private static func actionRow(_ text: String, symbol: String, theme: TokenTheme) -> NSView {
+        let pill = AgentStatusPillView()
+        pill.apply(symbolName: symbol, value: text, detail: "")
+        return pill
+    }
+
+    private static func singleAccountCard(_ a: Account, theme: TokenTheme, nearLimit: Bool) -> NSView {
+        let (card, stack) = cardShell(theme: theme)
+        stack.addArrangedSubview(header(a, inUse: false, theme: theme))
+        stack.addArrangedSubview(meter("5-hour", left: a.fiveHourLeft, reset: a.fiveHourReset, theme: theme))
+        stack.addArrangedSubview(meter("Weekly", left: a.weekLeft, reset: a.weekReset, theme: theme))
+        if nearLimit {
+            stack.addArrangedSubview(note("Under 10% left. New turns may stop until 3:10 PM. Sign in to another account in Claude to continue.",
+                                          theme: theme, token: .textPrimary))
+            stack.addArrangedSubview(actionRow("Open Claude sign-in…", symbol: "person.badge.key", theme: theme))
+        }
+        stack.addArrangedSubview(separator(theme: theme))
+        stack.addArrangedSubview(note("Shared by every Claude agent on this Mac. Checked 1 min ago.", theme: theme))
+        return card
+    }
+
+    private static func otherAccountRow(_ a: Account, theme: TokenTheme) -> NSView {
+        let name = label("\(a.name) \(a.plan)", .label, .textPrimary, theme)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let five = BarPill(label: "5h", left: a.fiveHourLeft, theme: theme)
+        let week = BarPill(label: "7d", left: a.weekLeft, theme: theme)
+        let row = NSStackView(views: [name, spacer, five, week])
+        row.orientation = .horizontal
+        row.spacing = CGFloat(Space.s)
+        row.widthAnchor.constraint(equalToConstant: 256).isActive = true
+        return row
+    }
+
+    private static func twoAccountCard(active: Account, other: Account, theme: TokenTheme, nearLimit: Bool) -> NSView {
+        let (card, stack) = cardShell(theme: theme)
+        stack.addArrangedSubview(header(active, inUse: true, theme: theme))
+        stack.addArrangedSubview(meter("5-hour", left: active.fiveHourLeft, reset: active.fiveHourReset, theme: theme))
+        stack.addArrangedSubview(meter("Weekly", left: active.weekLeft, reset: active.weekReset, theme: theme))
+        stack.addArrangedSubview(separator(theme: theme))
+        stack.addArrangedSubview(otherAccountRow(other, theme: theme))
+        stack.addArrangedSubview(actionRow(nearLimit ? "Continue on Work from next turn" : "Use Work for this agent",
+                                           symbol: "arrow.triangle.swap", theme: theme))
+        stack.addArrangedSubview(note("Limits are per account, shared by every agent on it. A switch waits for the current turn to finish.",
+                                      theme: theme))
+        return card
+    }
+
+    private static func switcherCard(active: Account, other: Account, theme: TokenTheme, auto: Bool) -> NSView {
+        let (card, stack) = cardShell(theme: theme)
+        stack.addArrangedSubview(header(active, inUse: true, theme: theme))
+        stack.addArrangedSubview(meter("5-hour", left: active.fiveHourLeft, reset: active.fiveHourReset, theme: theme))
+        stack.addArrangedSubview(meter("Weekly", left: active.weekLeft, reset: active.weekReset, theme: theme))
+        stack.addArrangedSubview(separator(theme: theme))
+        stack.addArrangedSubview(otherAccountRow(other, theme: theme))
+        if auto {
+            stack.addArrangedSubview(note("Moved from Personal at 2:29 PM: its 5-hour window was at 94%. Returns to Personal after 3:10 PM.",
+                                          theme: theme, token: .textPrimary))
+        }
+        stack.addArrangedSubview(actionRow("Auto-switch at turn end: on", symbol: "arrow.triangle.2.circlepath", theme: theme))
+        return card
+    }
+
+    // MARK: - Sheet
+
+    private static func writeSheet(_ columns: [(String, [CGImage])], to url: URL) throws {
+        guard let first = columns.first?.1.first else { throw Failure(description: "no frames") }
+        let cellW = CGFloat(first.width), cellH = CGFloat(first.height)
+        let scale = cellW / sceneWidth
+        let gap = 16 * scale, header = 24 * scale
+        let rows = columns.map(\.1.count).max() ?? 0
+        let sheetW = gap + (cellW + gap) * CGFloat(columns.count)
+        let sheetH = gap + (header + cellH + gap) * CGFloat(rows)
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int(sheetW), pixelsHigh: Int(sheetH),
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: rep) else { throw Failure(description: "bitmap") }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        let cg = context.cgContext
+        cg.setFillColor(CGColor(gray: 0.42, alpha: 1))
+        cg.fill(CGRect(x: 0, y: 0, width: sheetW, height: sheetH))
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12 * scale, weight: .semibold), .foregroundColor: NSColor.white]
+        for (c, column) in columns.enumerated() {
+            let x = gap + CGFloat(c) * (cellW + gap)
+            for (r, shot) in column.1.enumerated() {
+                let top = sheetH - gap - CGFloat(r) * (header + cellH + gap)
+                let title = (r == 0 ? "Normal, hover open" : "Near a limit") + " — \(column.0)"
+                (title as NSString).draw(at: CGPoint(x: x, y: top - header + 4 * scale), withAttributes: attrs)
+                cg.draw(shot, in: CGRect(x: x, y: top - header - cellH, width: cellW, height: cellH))
+            }
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        guard let png = rep.representation(using: .png, properties: [:]) else { throw Failure(description: "png") }
+        try png.write(to: url)
+    }
+}
+
+/// A thin remaining-bar. Track = separator, fill = primary text, amber/red near the end.
+@MainActor
+private final class Bar: NSView {
+    init(left: Double, theme: TokenTheme) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.backgroundColor = LineToken.separator.color.cgColor(for: theme)
+        layer?.cornerRadius = 2
+        let fill = CALayer()
+        fill.backgroundColor = AccountUsageOptionsRender.barColor(left: left, theme: theme).cgColor
+        fill.cornerRadius = 2
+        fill.name = "fill"
+        layer?.addSublayer(fill)
+        self.left = left
+    }
+    private var left: Double = 0
+    required init?(coder: NSCoder) { fatalError() }
+    override func layout() {
+        super.layout()
+        layer?.sublayers?.first { $0.name == "fill" }?.frame =
+            CGRect(x: 0, y: 0, width: bounds.width * CGFloat(max(0.02, left)), height: bounds.height)
+    }
+}
+
+/// Pill with label + tiny remaining bar + percent, on the same capsule as `AgentStatusPillView`.
+@MainActor
+private final class BarPill: NSStackView {
+    init(label text: String, left: Double, theme: TokenTheme) {
+        super.init(frame: .zero)
+        let name = AccountUsageOptionsRender.label(text, .caption, .textSecondary, theme)
+        let bar = Bar(left: left, theme: theme)
+        bar.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        bar.heightAnchor.constraint(equalToConstant: 4).isActive = true
+        let value = NSTextField(labelWithString: "\(Int((left * 100).rounded()))%")
+        value.font = .token(.captionMono)
+        value.textColor = left <= 0.25 ? AccountUsageOptionsRender.barColor(left: left, theme: theme)
+            : TextToken.textPrimary.color.nsColor(for: theme)
+        setViews([name, bar, value], in: .leading)
+        orientation = .horizontal
+        alignment = .centerY
+        spacing = CGFloat(Space.s)
+        edgeInsets = NSEdgeInsets(top: 0, left: CGFloat(Space.m), bottom: 0, right: CGFloat(Space.m))
+        wantsLayer = true
+        layer?.backgroundColor = SurfaceToken.cardMessage.color.cgColor(for: theme)
+        layer?.cornerRadius = AgentStatusPillView.preferredHeight / 2
+        heightAnchor.constraint(equalToConstant: AgentStatusPillView.preferredHeight).isActive = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+/// One capsule for the whole account: name, then 5h and weekly as two stacked
+/// bars sharing one width, then the two numbers.
+@MainActor
+private final class AccountGauge: NSStackView {
+    init(account: AccountUsageOptionsRender.Account, auto: Bool, theme: TokenTheme) {
+        super.init(frame: .zero)
+        let icon = NSImageView(image: NSImage(systemSymbolName: auto ? "arrow.triangle.2.circlepath" : "person.crop.circle",
+                                              accessibilityDescription: nil)!)
+        icon.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
+        icon.widthAnchor.constraint(equalToConstant: 10).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 10).isActive = true
+        let name = AccountUsageOptionsRender.label(account.name, .caption, .textSecondary, theme)
+        let five = Bar(left: account.fiveHourLeft, theme: theme)
+        let week = Bar(left: account.weekLeft, theme: theme)
+        for bar in [five, week] {
+            bar.widthAnchor.constraint(equalToConstant: 30).isActive = true
+            bar.heightAnchor.constraint(equalToConstant: 3).isActive = true
+        }
+        let bars = NSStackView(views: [five, week])
+        bars.orientation = .vertical
+        bars.spacing = 2
+        let value = NSTextField(labelWithString:
+            "5h \(Int((account.fiveHourLeft * 100).rounded())) · 7d \(Int((account.weekLeft * 100).rounded()))% left")
+        value.font = .token(.captionMono)
+        value.textColor = TextToken.textPrimary.color.nsColor(for: theme)
+        setViews([icon, name, bars, value], in: .leading)
+        orientation = .horizontal
+        alignment = .centerY
+        spacing = CGFloat(Space.s)
+        edgeInsets = NSEdgeInsets(top: 0, left: CGFloat(Space.m), bottom: 0, right: CGFloat(Space.m))
+        wantsLayer = true
+        layer?.backgroundColor = SurfaceToken.cardMessage.color.cgColor(for: theme)
+        layer?.cornerRadius = AgentStatusPillView.preferredHeight / 2
+        heightAnchor.constraint(equalToConstant: AgentStatusPillView.preferredHeight).isActive = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+}
