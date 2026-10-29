@@ -41,4 +41,27 @@ extension WorkspaceAPIService {
             return .result(object)
         }
     }
+
+    /// `.plans/102` P2a: the hook reply. Off ("Ask helpers for short reports"
+    /// unset, the default), every event gets the P1 reply, an empty result, and
+    /// the command prints nothing.
+    func hookReply(for record: AgentRecord, payload: [String: Any]) -> [String: Any] {
+        guard shortReportsEnabled(),
+              let output = WorkspaceAgentHook.reportPushBack(payload: payload, callerHasParent: record.parentAgentID != nil) else {
+            return [:]
+        }
+        return [WorkspaceAgentHook.hookOutputKey: output]
+    }
+
+    /// `operation.get`'s child result. Off, exactly the courier plus any
+    /// filed `report`. On, a filed report takes the final text's place, so the
+    /// parent reads the short form; the full text stays on the child's tile.
+    func childResultForParent(_ file: SpawnResultFile) -> OperationChildResult {
+        var result = OperationChildResult(file)
+        if result.report != nil, shortReportsEnabled() {
+            result.finalText = nil
+            result.finalTextTruncated = nil
+        }
+        return result
+    }
 }

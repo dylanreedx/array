@@ -202,3 +202,21 @@ public struct AgentReportResult: Codable, Equatable, Sendable {
     public var recorded: Bool
     public init(recorded: Bool) { self.recorded = recorded }
 }
+
+/// Settings ▸ Agents ▸ "Ask helpers for short reports" (D1: off by default).
+/// On, Array pushes back once on a helper's long final message (`Stop` for an
+/// agent created by `array_delegate`, `SubagentStop` for Claude's own
+/// subagents), and `wait_agents` returns a filed report in place of the
+/// child's final text.
+public enum AgentShortReportConfig {
+    public static let enabledKey = "agents.shortReports.enabled"
+    public static let enabledDefault = false
+    /// Longer than this, a helper's final message is pushed back once.
+    public static let pushBackWordLimit = 450
+    /// The length the push-back asks for.
+    public static let targetWords = 300
+
+    public static func enabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: enabledKey) as? Bool ?? enabledDefault
+    }
+}

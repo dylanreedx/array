@@ -1650,7 +1650,7 @@ enum ContinuumApp {
             }
         }
         // `.plans/102` P2a: array_report / array_status through the real binary
-        // and host, and wait_agents returning the report.
+        // and host, and wait_agents returning the report (setting off and on).
         if CommandLine.arguments.contains("--workspace-agent-report-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -1664,6 +1664,19 @@ enum ContinuumApp {
                 }
             }
             NSApp.run()
+        }
+        // `.plans/102` P2a: the opt-in report push-back through the real hook
+        // command: silent when off, one block when on, fails open.
+        if CommandLine.arguments.contains("--workspace-hook-pushback-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAgentReportChecks.runPushBack()
+                print("ContinuumRevivedWorkspaceHookPushBackChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
         }
         if CommandLine.arguments.contains("--workspace-api-agent-rename-check") {
             do {
@@ -20824,6 +20837,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         agentSupervisor.workspaceToolsPermission = { [weak self] in
             WorkspaceToolsConfig.permission(defaults: self?.settingsDefaults ?? .standard)
+        }
+        workspaceAPI.shortReportsEnabled = { [weak self] in
+            AgentShortReportConfig.enabled(defaults: self?.settingsDefaults ?? .standard)
         }
         wireAgentProcessTracker()
         // `.plans/79` review 14: a launch's sends wait for discovery's first pass,

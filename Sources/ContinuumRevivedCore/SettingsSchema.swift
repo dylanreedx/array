@@ -221,6 +221,10 @@ public enum SettingsSchema {
                 SettingsRow(.number(key: AgentSpawnLimitConfig.maximumActiveChildrenKey, label: "Sub-agents at once", range: Double(AgentSpawnLimitConfig.supportedRange.lowerBound)...Double(AgentSpawnLimitConfig.supportedRange.upperBound), default: Double(AgentSpawnLimitConfig.defaultMaximumActiveChildren), unit: "agents", step: 1),
                             help: "How many child agents one agent may run at the same time.",
                             keywords: ["children", "spawn", "limit", "max"], zeroTitle: "No limit"),
+                SettingsRow(.toggle(key: AgentShortReportConfig.enabledKey, label: "Ask helpers for short reports",
+                                    default: AgentShortReportConfig.enabledDefault),
+                            help: "A helper agent whose final message runs over \(AgentShortReportConfig.pushBackWordLimit) words is asked once to cut it to about \(AgentShortReportConfig.targetWords) and save the rest to a file. The agent that delegated the work gets the helper's short report instead of its full reply. The push-back works with Claude agents for now.",
+                            keywords: ["report", "summary", "subagents", "helpers", "delegate", "context", "short"]),
             ]),
         ])
     }

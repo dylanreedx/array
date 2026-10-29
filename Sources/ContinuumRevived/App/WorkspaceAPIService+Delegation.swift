@@ -755,7 +755,7 @@ extension WorkspaceAPIService {
             // `wait_agents` reads; the MCP `wait_agents` polls this instead.
             var childResult: OperationChildResult?
             if record.op == .agentDelegate, childRunning == false, let parentCwd = supervisor.records[agentId]?.cwd {
-                childResult = SpawnResultFile.read(parentCwd: parentCwd, handle: record.operationId).map(OperationChildResult.init)
+                childResult = SpawnResultFile.read(parentCwd: parentCwd, handle: record.operationId).map(childResultForParent)
             }
             result = OperationGetResult(
                 operationId: record.operationId, op: record.op, status: record.status, steps: record.steps,

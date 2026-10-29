@@ -1,13 +1,15 @@
 import Foundation
 
 /// P1 of the agent communication layer (`.plans/102-managed-agent-mode`): the
-/// hook bridge, Claude Code side, OBSERVATION ONLY.
+/// hook bridge, Claude Code side.
 ///
 /// Array registers one command, `array-workspace-mcp hook …`, for a fixed set
 /// of Claude hook events through a per-session `--settings` value. The command
 /// posts the hook's stdin JSON to the app over the workspace endpoint, and the
-/// app keeps a short receipt. Nothing reads a receipt to change behaviour yet,
-/// and the command never prints a decision.
+/// app keeps a short receipt. Nothing reads a receipt to change behaviour.
+/// The command prints a decision only when the app returns one: P2a's report
+/// push-back, behind an opt-in setting (`reportPushBack`). Otherwise it prints
+/// nothing, exactly as in P1.
 ///
 /// Deliberately not a `WorkspaceAPIOp`: those are the model-facing operations
 /// (the MCP tool catalogue and pi's bridge). This one is reachable only from
@@ -63,6 +65,46 @@ public enum WorkspaceAgentHook {
 
     static func shellQuoted(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+    }
+
+    // MARK: P2a: the report push-back
+
+    /// The app's answer rides here in the hook reply's `result`; the command
+    /// prints it verbatim. Absent, the command prints nothing (P1 behaviour).
+    public static let hookOutputKey = "hookOutput"
+    /// Set by the command when it trims a body, so the app can still count
+    /// `last_assistant_message` (`bulkyFields`).
+    public static let trimmedWordCountKey = "array_last_assistant_message_words"
+
+    /// The decision for one hook event while "Ask helpers for short reports" is
+    /// on, or nil for "say nothing". Only a helper's hand-back qualifies: `Stop`
+    /// from an agent that has a parent (created by `array_delegate`), and
+    /// `SubagentStop` (Claude's own subagents, inside any Array agent). Once:
+    /// a continuation Claude marks `stop_hook_active` is never pushed back.
+    public static func reportPushBack(payload: [String: Any], callerHasParent: Bool) -> [String: Any]? {
+        let event = payload["hook_event_name"] as? String
+        let isHelperHandBack = (event == "Stop" && callerHasParent) || event == "SubagentStop"
+        guard isHelperHandBack, payload["stop_hook_active"] as? Bool != true else { return nil }
+        let words = (payload[trimmedWordCountKey] as? Int)
+            ?? (payload["last_assistant_message"] as? String).map(AgentReport.wordCount) ?? 0
+        guard words > AgentShortReportConfig.pushBackWordLimit else { return nil }
+        return ["decision": "block", "reason": pushBackReason(words: words, offersReportTool: event == "Stop")]
+    }
+
+    /// Reaches the helper as `Stop hook feedback:` + this, as an instruction
+    /// (P0 V4). It must never contradict the helper's brief: a brief that said
+    /// "no files" made a helper refuse the file and only half-shorten (P0
+    /// finding 5), so the brief is named as the one that wins. `array_report`
+    /// is offered only on `Stop`: a Claude subagent shares its parent's
+    /// workspace token, so its report would land on the parent.
+    public static func pushBackReason(words: Int, offersReportTool: Bool) -> String {
+        let keep = offersReportTool
+            ? "Save the full details to a file and give its path, or call array_report with them."
+            : "Save the full details to a file and give its path."
+        return "Array: your final message is about \(words) words, and the agent that asked for this work reads all of it. "
+            + "Please end with a shorter report of about \(AgentShortReportConfig.targetWords) words: the outcome, what you checked, and anything left open. "
+            + keep + " "
+            + "If your task says not to write files, just shorten it. If your task asks for the full text, return it unchanged."
     }
 }
 

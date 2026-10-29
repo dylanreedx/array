@@ -14,8 +14,15 @@ import Foundation
 ///   child and nowhere else; the parent's token cannot write the child's; the
 ///   status comes back and is stored labelled `declared`, and the observed
 ///   status does not move.
-/// - `wait_agents` over the parent's registration: today's entry plus
-///   `report`; a later turn that filed nothing carries no report.
+/// - `wait_agents` over the parent's registration: setting off, today's entry
+///   plus `report`; setting on, the report in the final text's place; a later
+///   turn that filed nothing carries no report.
+///
+/// `--workspace-hook-pushback-check`: the hook command with the setting off
+/// prints nothing for a 600-word hand-back; on, it prints the block JSON once
+/// for a delegated child's `Stop` and any `SubagentStop`, and nothing for a
+/// continuation (`stop_hook_active`), a 200-word message, a top-level `Stop`,
+/// or an app that is down or silent.
 @MainActor
 enum WorkspaceAgentReportChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
@@ -219,8 +226,10 @@ enum WorkspaceAgentReportChecks {
     static func runReports() async throws {
         let bench = try makeBench(label: "agent-report")
         defer { bench.tearDown() }
-        let f = bench.f, supervisor = bench.supervisor
+        let f = bench.f, supervisor = bench.supervisor, settings = bench.settings
         let parent = f.agentId
+        try expect(!AgentShortReportConfig.enabled(defaults: settings) && !f.api.shortReportsEnabled(),
+                   "with nothing set, short reports must be off (D1)")
 
         // A child mid-turn: its runner has the task and holds the turn open.
         let child = try bench.delegate("REPORT-CHILD-HOLD")
@@ -332,7 +341,7 @@ enum WorkspaceAgentReportChecks {
         }
         try expect(courier.report == stored && courier.finalText == childFinalText, "the courier must carry this turn's report and final text: \(courier)")
 
-        // (e) wait_agents: today's entry, plus `report`.
+        // (e) wait_agents, setting OFF: today's entry, plus `report`.
         func waitEntry() async throws -> (whole: [String: Any], entry: [String: Any]) {
             let waited = try await call(parentConfig, WorkspaceMCPToolCatalog.waitAgentsName, ["handles": [operation], "timeoutSeconds": 10])
             let result = waited.reply["result"] as? [String: Any] ?? [:]
@@ -351,12 +360,22 @@ enum WorkspaceAgentReportChecks {
         try expect(Set(offWithoutReport.keys) == todaysKeys && offWithoutReport["finalText"] as? String == childFinalText
                    && offWithoutReport["status"] as? String == "completed" && offWithoutReport["handle"] as? String == operation
                    && offWithoutReport["childAgentId"] as? String == child.rawValue.uuidString,
-                   "the entry minus report must be today's entry: \(off.entry)")
+                   "setting off, the entry minus report must be today's entry: \(off.entry)")
         let storedJSON = try encoded(stored)
-        try expect(jsonEqual(offReport, storedJSON), "wait_agents must add the filed report: \(off.entry)")
+        try expect(jsonEqual(offReport, storedJSON), "setting off, wait_agents must add the filed report: \(off.entry)")
 
-        // (f) A later turn that files nothing: no report, and the final text
-        // comes back. The earlier turn's report is stale.
+        // (f) Setting ON: the report takes the final text's place.
+        settings.set(true, forKey: AgentShortReportConfig.enabledKey)
+        try expect(f.api.shortReportsEnabled(), "the mount must read the setting live")
+        let on = try await waitEntry()
+        var offWithoutText = off.entry
+        offWithoutText.removeValue(forKey: "finalText")
+        try expect(on.entry["finalText"] == nil && on.entry["finalTextTruncated"] == nil && jsonEqual(on.entry["report"], offReport),
+                   "setting on, the report must replace finalText: \(on.entry)")
+        try expect(jsonEqual(on.entry, offWithoutText), "setting on, nothing but finalText may change: \(on.entry) vs \(off.entry)")
+
+        // (g) A later turn that files nothing: no report, and the final text
+        // comes back, setting on or not. The earlier turn's report is stale.
         let messaged = f.api.dispatch(agentId: parent, requestId: "report-msg", op: "agent.message",
                                       payload: ["agentId": child.rawValue.uuidString, "text": "SECOND-TURN: one more look",
                                                 "idempotencyKey": "report-msg-1"])
@@ -366,5 +385,109 @@ enum WorkspaceAgentReportChecks {
         let second = try await waitEntry()
         try expect(second.entry["report"] == nil && second.entry["finalText"] as? String == childFinalText
                    && Set(second.entry.keys) == todaysKeys, "a turn that filed no report must carry none: \(second.entry)")
+        settings.removeObject(forKey: AgentShortReportConfig.enabledKey)
+        let secondOff = try await waitEntry()
+        try expect(jsonEqual(secondOff.entry, second.entry), "with no report, the setting must change nothing: \(secondOff.entry)")
+    }
+
+    // MARK: - --workspace-hook-pushback-check
+
+    static func words(_ count: Int) -> String { (1...count).map { "word\($0)" }.joined(separator: " ") }
+
+    /// The fields claude 2.1.312 sends on `Stop` / `SubagentStop`
+    /// (`p0-claude.md`, stdin fields), with a chosen hand-back.
+    static func stopBody(_ event: String, message: String, stopHookActive: Bool = false) throws -> String {
+        var body: [String: Any] = [
+            "session_id": "37e85ba0-1530-440d-8017-867d34b452b4",
+            "transcript_path": "/Users/qa/.claude/projects/-private-tmp-array-p2a/37e85ba0-1530-440d-8017-867d34b452b4.jsonl",
+            "cwd": "/private/tmp/array-p2a", "prompt_id": "24ca0f59-014f-4423-b736-cbe44673d9ea",
+            "permission_mode": "bypassPermissions", "effort": ["level": "medium"], "hook_event_name": event,
+            "stop_hook_active": stopHookActive, "last_assistant_message": message,
+            "background_tasks": [] as [Any], "session_crons": [] as [Any],
+        ]
+        if event == "SubagentStop" {
+            body["agent_id"] = "a8b6a5e972481a99f"
+            body["agent_type"] = "general-purpose"
+            body["agent_transcript_path"] = "/Users/qa/.claude/projects/-private-tmp-array-p2a/subagents/agent-a8b6a5e972481a99f.jsonl"
+        }
+        return String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self)
+    }
+
+    static func runPushBack() throws {
+        let bench = try makeBench(label: "hook-pushback")
+        defer { bench.tearDown() }
+        let f = bench.f, supervisor = bench.supervisor, settings = bench.settings
+        let child = try bench.delegate("PUSHBACK-CHILD")
+        let childConfig = try bench.configuration(for: child)
+        let parentConfig = try bench.configuration(for: f.agentId)
+        let long = try stopBody("Stop", message: words(600))
+        func hook(_ config: WorkspaceMCPConfiguration, _ body: String, endpoint: String? = nil, tokenFile: String? = nil) throws -> WorkspaceHookBridgeChecks.HookRun {
+            try WorkspaceHookBridgeChecks.runHook(bench.helper, endpoint: endpoint ?? config.endpoint, agentID: config.agentID,
+                                                  tokenFile: tokenFile ?? config.tokenFilePath, body: body, marker: true)
+        }
+        func silent(_ run: WorkspaceHookBridgeChecks.HookRun, _ what: String) throws {
+            try expect(run.status == 0 && run.stdout.isEmpty, "\(what): the hook must exit 0 and print nothing, got \(run.status) \(String(decoding: run.stdout, as: UTF8.self))")
+        }
+        /// Exactly one JSON object on one line: a block with a reason.
+        func block(_ run: WorkspaceHookBridgeChecks.HookRun, _ what: String) throws -> String {
+            let text = String(decoding: run.stdout, as: UTF8.self)
+            let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+            guard run.status == 0, lines.count == 1,
+                  let object = try? JSONSerialization.jsonObject(with: Data(lines[0].utf8)) as? [String: Any],
+                  Set(object.keys) == ["decision", "reason"], object["decision"] as? String == "block",
+                  let reason = object["reason"] as? String else {
+                throw Failure(description: "\(what): the hook must print one block decision, got \(run.status) \(text)")
+            }
+            try expect(run.seconds < WorkspaceAgentHook.postTimeoutSeconds, "\(what): the push-back took \(run.seconds) s")
+            return reason
+        }
+
+        // Off (the default): P1 exactly. Observed, and silent.
+        try expect(!f.api.shortReportsEnabled(), "with nothing set, short reports must be off (D1)")
+        try silent(try hook(childConfig, long), "setting off, a 600-word Stop")
+        try silent(try hook(childConfig, try stopBody("SubagentStop", message: words(600))), "setting off, a 600-word SubagentStop")
+        WorkspaceHookBridgeChecks.drainMain()
+        try expect((supervisor.hookReceipts[child] ?? []).map(\.event) == ["Stop", "SubagentStop"],
+                   "setting off, the events must still be observed: \(supervisor.hookReceipts[child] ?? [])")
+
+        // On.
+        settings.set(true, forKey: AgentShortReportConfig.enabledKey)
+        let stopReason = try block(try hook(childConfig, long), "setting on, a delegated child's 600-word Stop")
+        try expect(stopReason.contains("about 600 words") && stopReason.contains("about \(AgentShortReportConfig.targetWords) words")
+                   && stopReason.contains("file") && stopReason.contains("array_report")
+                   && stopReason.contains("If your task says not to write files"),
+                   "the Stop reason must ask for ~300 words, a file or array_report, and defer to the brief: \(stopReason)")
+        try silent(try hook(childConfig, try stopBody("Stop", message: words(600), stopHookActive: true)),
+                   "setting on, the continuation after a push-back (stop_hook_active)")
+        try silent(try hook(childConfig, try stopBody("Stop", message: words(200))), "setting on, a 200-word Stop")
+        try silent(try hook(childConfig, try stopBody("Stop", message: words(AgentShortReportConfig.pushBackWordLimit))),
+                   "setting on, a Stop at exactly the limit")
+        try silent(try hook(parentConfig, long), "setting on, a top-level agent's own Stop")
+        let subagentReason = try block(try hook(parentConfig, try stopBody("SubagentStop", message: words(600))),
+                                       "setting on, a Claude subagent's 600-word SubagentStop")
+        try expect(!subagentReason.contains("array_report") && subagentReason.contains("file"),
+                   "a subagent shares its parent's token, so its reason must not offer array_report: \(subagentReason)")
+        try silent(try hook(parentConfig, try stopBody("SubagentStop", message: words(600), stopHookActive: true)),
+                   "setting on, a subagent's continuation")
+        // A body over the post limit is sent without its message; the count
+        // still arrives.
+        let huge = try stopBody("Stop", message: words(600) + String(repeating: " x", count: 300_000))
+        try expect(huge.utf8.count > WorkspaceAgentHook.maxPostedPayloadBytes, "the huge body must exceed the post limit")
+        _ = try block(try hook(childConfig, huge), "setting on, a trimmed body")
+
+        // Fails open, still on: down, silent, refused.
+        let down = try hook(childConfig, long, endpoint: "http://127.0.0.1:\(try WorkspaceHookBridgeChecks.unusedLoopbackPort())/workspace-mcp")
+        try silent(down, "setting on, Array down")
+        try expect(down.seconds < WorkspaceAgentHook.postTimeoutSeconds + 1, "with Array down the hook took \(down.seconds) s")
+        let listener = try WorkspaceHookBridgeChecks.SilentListener()
+        defer { listener.close() }
+        let slow = try hook(childConfig, long, endpoint: "http://127.0.0.1:\(listener.port)/workspace-mcp")
+        try silent(slow, "setting on, Array silent")
+        try expect(slow.seconds < WorkspaceAgentHook.postTimeoutSeconds + 1, "with Array silent the hook took \(slow.seconds) s")
+        try silent(try hook(childConfig, long, tokenFile: parentConfig.tokenFilePath), "setting on, another agent's token")
+
+        // Off again: silent again.
+        settings.removeObject(forKey: AgentShortReportConfig.enabledKey)
+        try silent(try hook(childConfig, long), "setting off again, a 600-word Stop")
     }
 }

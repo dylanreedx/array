@@ -283,10 +283,11 @@ struct ArrayWorkspaceMCP {
 /// `array-workspace-mcp hook --endpoint <url> --agent-id <id> --token-file <path>`:
 /// one Claude hook event, posted to the app (`WorkspaceAgentHook`, `.plans/102`).
 ///
-/// Observation only, so it can never change what the agent does: it prints
-/// nothing (Claude would read stdout as a decision) and the caller always exits
-/// 0. It fails open: no marker, bad arguments, an unreadable token, an app that
-/// is down or slow all end the same way, within `postTimeoutSeconds`.
+/// It prints only what the app returns as `result.hookOutput` (P2a's report
+/// push-back, opt-in); otherwise nothing, because Claude reads stdout as a
+/// decision. The caller always exits 0. It fails open: no marker, bad
+/// arguments, an unreadable token, an app that is down or slow all print
+/// nothing and end within `postTimeoutSeconds`.
 private enum HookMode {
     static func run(arguments: [String]) async {
         // Inert outside Array: Array sets the marker on every managed agent.
@@ -309,6 +310,9 @@ private enum HookMode {
         let input = FileHandle.standardInput.readDataToEndOfFile()
         guard var payload = try? JSONSerialization.jsonObject(with: input) as? [String: Any] else { return }
         if input.count > WorkspaceAgentHook.maxPostedPayloadBytes {
+            if let message = payload["last_assistant_message"] as? String {
+                payload[WorkspaceAgentHook.trimmedWordCountKey] = AgentReport.wordCount(message)
+            }
             for key in WorkspaceAgentHook.bulkyFields { payload.removeValue(forKey: key) }
             payload["array_trimmed"] = true
         }
@@ -329,6 +333,11 @@ private enum HookMode {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = data
-        _ = try? await URLSession(configuration: configuration).data(for: request)
+        guard let (reply, _) = try? await URLSession(configuration: configuration).data(for: request),
+              let object = try? JSONSerialization.jsonObject(with: reply) as? [String: Any],
+              object["status"] as? String == "ok",
+              let output = (object["result"] as? [String: Any])?[WorkspaceAgentHook.hookOutputKey] as? [String: Any],
+              let decision = try? JSONSerialization.data(withJSONObject: output) else { return }
+        FileHandle.standardOutput.write(decision + Data("\n".utf8))
     }
 }

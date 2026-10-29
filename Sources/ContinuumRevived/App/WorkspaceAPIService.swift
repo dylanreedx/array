@@ -212,6 +212,9 @@ final class WorkspaceAPIService {
     /// companion diagnostics; nothing here is persisted.
     var companionNotifyDelivery: () -> AgentNotifyResult.PhoneDelivery = { .unknown }
     static let idempotencyCapacity = 64
+    /// Settings ▸ Agents ▸ "Ask helpers for short reports" (`.plans/102` P2a).
+    /// The boot mount points this at the app's settings; off until then.
+    var shortReportsEnabled: () -> Bool = { false }
     private static let recentOperationsCapacity = 16
 
     init(
@@ -328,11 +331,14 @@ final class WorkspaceAPIService {
         // `.plans/102` P1: a Claude hook event from the agent's own hook command.
         // Recorded and acknowledged, never dispatched: it is no `WorkspaceAPIOp`,
         // so neither the MCP tool list nor pi's bridge can reach it, and it is
-        // not gated on workspace grants because it changes nothing.
+        // not gated on workspace grants because it changes nothing in Array.
+        // P2a: the reply may carry a report push-back for the agent itself,
+        // only while "Ask helpers for short reports" is on.
         if op == WorkspaceAgentHook.op {
             if let receipt = AgentHookReceipt(hookPayload: payload, receivedAt: Date()) {
                 supervisor.recordHookReceipt(receipt, for: record.id)
-                completion(["schema": WorkspaceAPISchema.v1, "requestId": requestID, "status": "ok", "result": [:] as [String: Any]])
+                completion(["schema": WorkspaceAPISchema.v1, "requestId": requestID, "status": "ok",
+                            "result": hookReply(for: record, payload: payload)])
             } else {
                 completion(["schema": WorkspaceAPISchema.v1, "requestId": requestID, "status": "error",
                             "error": ["code": "invalid_request", "message": "A hook event needs hook_event_name"]])
