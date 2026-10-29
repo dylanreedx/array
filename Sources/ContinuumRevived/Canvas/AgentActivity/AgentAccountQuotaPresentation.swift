@@ -31,8 +31,15 @@ enum AgentQuotaElementState: String, Equatable, CaseIterable {
 struct AgentQuotaElementPresentation: Equatable {
     let element: AgentStatusElement
     let state: AgentQuotaElementState
-    /// Raw fraction, uncapped. A spend limit above 1.0 stays above 1.0.
+    /// Raw fraction USED, uncapped. A spend limit above 1.0 stays above 1.0.
     let fraction: Double?
+    /// What is LEFT, 0...1, for the bar. Remaining is what the row shows,
+    /// because remaining is what Dylan asked to see; used stays in `fraction`
+    /// for the thresholds, which are defined on it.
+    var remainingFraction: Double? {
+        guard state == .known || state == .warning || state == .critical, let fraction else { return nil }
+        return max(0, min(1, 1 - fraction))
+    }
     /// This element's OWN glyph. Not a shared account glyph: three chips
     /// carrying one repeated icon was half the reason the row read as a single
     /// string, because a repeated mark implies sameness.
@@ -45,6 +52,40 @@ struct AgentQuotaElementPresentation: Equatable {
     var text: String { valueText.isEmpty ? shortLabel : "\(shortLabel) \(valueText)" }
     let accessibilityLabel: String
     let detailText: String
+}
+
+/// The account a tile is spending: the row chip, and the hover card that
+/// replaced the plain-text tooltip (.plans/101, Option 2).
+struct AgentAccountUsagePresentation: Equatable {
+    /// `Max`. The plan, because that is the word that tells two logins apart
+    /// at a glance; the provider when the plan is unknown.
+    let chipText: String
+    let chipAccessibilityLabel: String
+    let card: AgentAccountUsageCardPresentation
+}
+
+struct AgentAccountUsageCardPresentation: Equatable {
+    struct Window: Equatable {
+        let kind: AgentQuotaWindowKind
+        /// `5-hour`, `Weekly`.
+        let title: String
+        /// `84% left`, or an em dash when the provider stated none.
+        let valueText: String
+        /// 0...1 left, nil when unknown. Drives the bar.
+        let remainingFraction: Double?
+        let state: AgentQuotaElementState
+        /// `Resets 3:10 PM · in 2h 17m`.
+        let resetText: String
+    }
+
+    /// `Claude · Max`.
+    let title: String
+    /// The login's email (or organisation), so two accounts on one plan
+    /// still read apart.
+    let subtitle: String?
+    let statusText: String
+    let windows: [Window]
+    let footnote: String
 }
 
 struct AgentCostElementPresentation: Equatable {
@@ -139,21 +180,11 @@ enum AgentAccountQuotaPresenter {
         }
 
         let percent = Int((fraction * 100).rounded())
-        let state: AgentQuotaElementState
-        let marker: String
-        if fraction >= criticalThreshold {
-            state = .critical
-            marker = "! "
-        } else if fraction >= warningThreshold {
-            state = .warning
-            marker = "⚠︎ "
-        } else {
-            state = .known
-            marker = ""
-        }
+        let left = Self.percentLeft(used: fraction)
+        let state = Self.state(used: fraction)
 
         var detail = [
-            "Account \(kind.spokenLabel): \(percent)% used",
+            "Account \(kind.spokenLabel): \(left)% left (\(percent)% used)",
         ]
         if kind.allowsOverage, fraction > 1 {
             detail.append("Over the limit — a spend limit is reported past 100% rather than capped.")
@@ -169,8 +200,10 @@ enum AgentAccountQuotaPresenter {
             fraction: fraction,
             symbolName: symbolName(for: kind),
             shortLabel: kind.shortLabel,
-            valueText: "\(marker)\(percent)%",
-            accessibilityLabel: "Account \(kind.spokenLabel) \(percent) percent used"
+            // LEFT, not used: `84%` beside a full bar. The bar and the colour
+            // carry the state, so the old `!`/`⚠︎` prefixes are gone.
+            valueText: "\(left)%",
+            accessibilityLabel: "Account \(kind.spokenLabel) \(left) percent left"
                 + (window.resetsAt.map { ", resets \(relative($0, from: now))" } ?? "")
                 + ".",
             detailText: detail.joined(separator: "\n"))
@@ -194,6 +227,108 @@ enum AgentAccountQuotaPresenter {
             text: "\(amountText) \(basis == .listPriceEstimate ? "est" : "")".trimmingCharacters(in: .whitespaces),
             accessibilityLabel: "Session cost \(amountText), \(basis.disclosureLabel).",
             detailText: "Session cost: \(amountText) (\(basis.disclosureLabel))\n\(basis.detailSentence)")
+    }
+
+    /// Whole percent left, never negative: a spend limit past 100% has 0 left.
+    static func percentLeft(used: Double) -> Int {
+        max(0, Int(((1 - used) * 100).rounded()))
+    }
+
+    static func state(used: Double) -> AgentQuotaElementState {
+        if used >= criticalThreshold { return .critical }
+        if used >= warningThreshold { return .warning }
+        return .known
+    }
+
+    /// The account the tile is spending, for the row chip and the hover card.
+    /// Nil when there is nothing to say: no login was read and no window was
+    /// reported, which is pi's permanent state.
+    static func presentAccount(
+        identity: AgentAccountIdentity?,
+        quota: AgentAccountQuotaSnapshot?,
+        now: Date
+    ) -> AgentAccountUsagePresentation? {
+        guard let harness = identity?.harness ?? quota?.harness else { return nil }
+        let plan = identity?.planDisplayName
+            ?? quota?.credits?.planLabel.flatMap {
+                AgentAccountIdentity(harness: harness, plan: $0, observedAt: now).planDisplayName
+            }
+        let provider = providerName(harness)
+        let chip = plan ?? provider
+        let kinds: [AgentQuotaWindowKind] = [.fiveHour, .sevenDay]
+        let windows: [AgentAccountUsageCardPresentation.Window] = kinds.compactMap { kind in
+            guard let window = quota?.window(kind) else { return nil }
+            return presentCardWindow(window, now: now)
+        }
+        var footnote = "Limits are per account, shared by every agent on it."
+        if let quota {
+            footnote += " Read \(ago(quota.observedAt, now: now))."
+        } else {
+            footnote += " No reading yet."
+        }
+        let who = identity?.email ?? identity?.organizationName
+        return AgentAccountUsagePresentation(
+            chipText: chip,
+            chipAccessibilityLabel: "Account: \(provider) \(plan ?? "")\(who.map { ", \($0)" } ?? "")."
+                .replacingOccurrences(of: " .", with: "."),
+            card: AgentAccountUsageCardPresentation(
+                title: plan.map { "\(provider) · \($0)" } ?? provider,
+                subtitle: who,
+                statusText: "in use",
+                windows: windows,
+                footnote: footnote))
+    }
+
+    private static func presentCardWindow(
+        _ window: AgentQuotaWindow,
+        now: Date
+    ) -> AgentAccountUsageCardPresentation.Window {
+        let title = window.kind == .fiveHour ? "5-hour" : "Weekly"
+        if window.isExpired(at: now) {
+            return .init(kind: window.kind, title: title, valueText: "—", remainingFraction: nil,
+                         state: .expired, resetText: "Reset passed · waiting for a new reading")
+        }
+        let reset = window.resetsAt.map { resetText($0, now: now) } ?? "Reset time unknown"
+        guard let used = window.utilization else {
+            return .init(kind: window.kind, title: title, valueText: "—", remainingFraction: nil,
+                         state: .unknown, resetText: reset)
+        }
+        return .init(
+            kind: window.kind, title: title, valueText: "\(percentLeft(used: used))% left",
+            remainingFraction: max(0, min(1, 1 - used)), state: state(used: used), resetText: reset)
+    }
+
+    private static func providerName(_ harness: AgentHarness) -> String {
+        switch harness {
+        case .claudeCode: return "Claude"
+        case .codex: return "Codex"
+        case .pi: return "Pi"
+        }
+    }
+
+    /// `Resets 3:10 PM · in 2h 17m` inside a day; `Resets Thu 5 Nov, 1:00 AM`
+    /// beyond it, where a countdown in days and hours reads worse than a date.
+    static func resetText(_ date: Date, now: Date) -> String {
+        let seconds = date.timeIntervalSince(now)
+        if seconds > 0, seconds < 86_400 {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .none
+            formatter.timeStyle = .short
+            return "Resets \(formatter.string(from: date)) · \(relative(date, from: now))"
+        }
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("EEE d MMM j:mm")
+        return "Resets \(formatter.string(from: date))"
+    }
+
+    private static func ago(_ date: Date, now: Date) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        if seconds < 60 { return "just now" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h ago" }
+        return "\(hours / 24)d ago"
     }
 
     // MARK: - helpers

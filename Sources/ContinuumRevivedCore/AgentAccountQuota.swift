@@ -197,12 +197,20 @@ public enum AgentQuotaTelemetrySource: Equatable, Sendable, Codable {
     /// codex app-server `account/rateLimits/updated`, whose shape is declared
     /// by codex's own `app-server generate-json-schema` output.
     case codexAccountRateLimits
+    /// claude's `get_usage` control request, asked on demand with no model
+    /// turn. Marked experimental by the CLI, so every field stays optional.
+    case claudeUsageRequest
+    /// codex app-server `account/rateLimits/read`, the on-demand twin of
+    /// `account/rateLimits/updated`, with the same `rateLimits` body.
+    case codexRateLimitsRead
     case unknown(String)
 
     private var encodedValue: String {
         switch self {
         case .claudeRateLimitEvent: return "claudeRateLimitEvent"
         case .codexAccountRateLimits: return "codexAccountRateLimits"
+        case .claudeUsageRequest: return "claudeUsageRequest"
+        case .codexRateLimitsRead: return "codexRateLimitsRead"
         case .unknown(let raw): return raw
         }
     }
@@ -212,6 +220,8 @@ public enum AgentQuotaTelemetrySource: Equatable, Sendable, Codable {
         switch raw {
         case "claudeRateLimitEvent": self = .claudeRateLimitEvent
         case "codexAccountRateLimits": self = .codexAccountRateLimits
+        case "claudeUsageRequest": self = .claudeUsageRequest
+        case "codexRateLimitsRead": self = .codexRateLimitsRead
         default: self = .unknown(raw)
         }
     }
@@ -225,6 +235,8 @@ public enum AgentQuotaTelemetrySource: Equatable, Sendable, Codable {
         switch self {
         case .claudeRateLimitEvent: return "Claude account rate limits"
         case .codexAccountRateLimits: return "Codex account rate limits"
+        case .claudeUsageRequest: return "Claude usage, read on demand"
+        case .codexRateLimitsRead: return "Codex rate limits, read on demand"
         case .unknown(let raw): return "unknown (\(raw))"
         }
     }
@@ -323,7 +335,8 @@ public enum AgentAccountQuota {
     /// would mislabel it.
     public static func codexSnapshot(
         rateLimits: [String: Any],
-        observedAt: Date
+        observedAt: Date,
+        source: AgentQuotaTelemetrySource = .codexAccountRateLimits
     ) -> AgentAccountQuotaSnapshot? {
         var windows: [AgentQuotaWindow] = []
         for key in ["primary", "secondary"] {
@@ -352,8 +365,52 @@ public enum AgentAccountQuota {
             windows: windows,
             credits: credits,
             observedAt: observedAt,
-            source: .codexAccountRateLimits)
+            source: source)
         return snapshot.isVacant && snapshot.windows.isEmpty ? nil : snapshot
+    }
+
+    /// claude's `get_usage` control response body (`response.response`).
+    ///
+    /// UNITS AGAIN: here `rate_limits.<window>.utilization` is 0-100 (`11`),
+    /// unlike the 0-1 fraction the same word means in `rate_limit_event`, and
+    /// `resets_at` is an ISO-8601 string with microseconds rather than epoch
+    /// seconds. `extra_usage` is overage credit, not a window: it is not read
+    /// as one (its own `utilization` is also a percent, `0.37` meaning 0.37%).
+    ///
+    /// A signed-out config dir answers `rate_limits_available: false` with no
+    /// windows; that is nil, never a row of zeros.
+    public static func claudeUsageSnapshot(
+        getUsageResponse response: [String: Any],
+        observedAt: Date
+    ) -> AgentAccountQuotaSnapshot? {
+        guard (response["rate_limits_available"] as? Bool) != false,
+              let limits = response["rate_limits"] as? [String: Any] else { return nil }
+        var windows: [AgentQuotaWindow] = []
+        for name in ["five_hour", "seven_day"] {
+            guard let body = limits[name] as? [String: Any] else { continue }
+            windows.append(AgentQuotaWindow(
+                kind: AgentQuotaWindowKind(providerName: name),
+                utilization: fraction(fromPercent: body["utilization"]),
+                resetsAt: isoDate(body["resets_at"])))
+        }
+        let plan = response["subscription_type"] as? String
+        let snapshot = AgentAccountQuotaSnapshot(
+            harness: .claudeCode,
+            windows: windows,
+            credits: plan.map { AgentQuotaCredits(planLabel: $0) },
+            observedAt: observedAt,
+            source: .claudeUsageRequest)
+        return windows.isEmpty || snapshot.isVacant ? nil : snapshot
+    }
+
+    /// codex app-server `account/rateLimits/read` result. Its `rateLimits`
+    /// object is the notification's body, so the same parser reads it.
+    public static func codexReadSnapshot(
+        rateLimitsReadResult result: [String: Any],
+        observedAt: Date
+    ) -> AgentAccountQuotaSnapshot? {
+        guard let body = result["rateLimits"] as? [String: Any] else { return nil }
+        return codexSnapshot(rateLimits: body, observedAt: observedAt, source: .codexRateLimitsRead)
     }
 
     // MARK: - value helpers
@@ -375,6 +432,18 @@ public enum AgentAccountQuota {
     private static func epochSeconds(_ raw: Any?) -> Date? {
         guard let value = doubleValue(raw), value > 0 else { return nil }
         return Date(timeIntervalSince1970: value)
+    }
+
+    /// `2026-10-30T03:40:00.131578+00:00`. Foundation's ISO-8601 formatter
+    /// reads at most milliseconds, so the fraction is dropped before parsing;
+    /// a reset instant does not need sub-second precision.
+    private static func isoDate(_ raw: Any?) -> Date? {
+        guard var text = raw as? String, !text.isEmpty else { return nil }
+        if let dot = text.firstIndex(of: "."),
+           let zone = text[dot...].firstIndex(where: { $0 == "+" || $0 == "-" || $0 == "Z" }) {
+            text.removeSubrange(dot..<zone)
+        }
+        return ISO8601DateFormatter().date(from: text)
     }
 
     private static func doubleValue(_ raw: Any?) -> Double? {

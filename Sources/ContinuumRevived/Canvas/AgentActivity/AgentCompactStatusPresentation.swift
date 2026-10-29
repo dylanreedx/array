@@ -73,6 +73,10 @@ struct AgentCompactStatusPresentation: Equatable {
     let quotas: [AgentQuotaElementPresentation]
     /// ST-01 — cost, when enabled and reported. Always carries its basis.
     let cost: AgentCostElementPresentation?
+    /// .plans/101 — which account this tile is spending, and the hover card
+    /// for its limits. Nil for pi, which reports neither, and when every
+    /// account element is turned off.
+    let account: AgentAccountUsagePresentation?
     /// Which elements the user has turned on, in presentation order. The row
     /// needs this even for elements that produced no presentation, so an
     /// enabled-but-silent element is distinguishable from a disabled one.
@@ -89,7 +93,7 @@ struct AgentCompactStatusPresentation: Equatable {
     /// what it had before the feature existed, and no check caught it because
     /// the witnesses called `row.apply` directly and never crossed the rebuild.
     ///
-    /// Requiring all six arguments makes that omission a compile error. Any
+    /// Requiring every argument makes that omission a compile error. Any
     /// future field belongs here too, without a default, for the same reason.
     init(
         location: Location,
@@ -97,6 +101,7 @@ struct AgentCompactStatusPresentation: Equatable {
         context: AgentRadialContextMeterPresentation,
         quotas: [AgentQuotaElementPresentation],
         cost: AgentCostElementPresentation?,
+        account: AgentAccountUsagePresentation?,
         enabledElements: [AgentStatusElement]
     ) {
         self.location = location
@@ -104,6 +109,7 @@ struct AgentCompactStatusPresentation: Equatable {
         self.context = context
         self.quotas = quotas
         self.cost = cost
+        self.account = account
         self.enabledElements = enabledElements
     }
 
@@ -120,6 +126,7 @@ struct AgentCompactStatusPresentation: Equatable {
         contextWindow: AgentContextWindowSnapshot?,
         contextPolicy: AgentRadialContextMeterPolicy = .productionDefault,
         accountQuota: AgentAccountQuotaSnapshot? = nil,
+        accountIdentity: AgentAccountIdentity? = nil,
         enabledElements: [AgentStatusElement] = AgentStatusElementConfig.visibleElements()
     ) -> AgentCompactStatusPresentation {
         present(
@@ -130,6 +137,7 @@ struct AgentCompactStatusPresentation: Equatable {
             contextWindow: contextWindow,
             contextPolicy: contextPolicy,
             accountQuota: accountQuota,
+            accountIdentity: accountIdentity,
             enabledElements: enabledElements)
     }
 
@@ -141,6 +149,7 @@ struct AgentCompactStatusPresentation: Equatable {
         contextWindow: AgentContextWindowSnapshot?,
         contextPolicy: AgentRadialContextMeterPolicy = .productionDefault,
         accountQuota: AgentAccountQuotaSnapshot? = nil,
+        accountIdentity: AgentAccountIdentity? = nil,
         enabledElements: [AgentStatusElement] = AgentStatusElementConfig.visibleElements()
     ) -> AgentCompactStatusPresentation {
         let locationDetail = AgentLocationStatusPresenter.present(snapshot, projectName: projectName)
@@ -156,7 +165,21 @@ struct AgentCompactStatusPresentation: Equatable {
             context: AgentRadialContextMeterPresenter.present(contextWindow, policy: contextPolicy),
             quotas: quotas,
             cost: cost,
+            account: presentAccount(identity: accountIdentity, quota: accountQuota, now: now, enabledElements: enabledElements),
             enabledElements: enabledElements)
+    }
+
+    /// The account chip and card ride with the account elements: turning off
+    /// every 5h/7d/cap element turns the account off too, rather than adding
+    /// a toggle of its own.
+    static func presentAccount(
+        identity: AgentAccountIdentity?,
+        quota: AgentAccountQuotaSnapshot?,
+        now: Date,
+        enabledElements: [AgentStatusElement]
+    ) -> AgentAccountUsagePresentation? {
+        guard enabledElements.contains(where: \.isAccountScoped) else { return nil }
+        return AgentAccountQuotaPresenter.presentAccount(identity: identity, quota: quota, now: now)
     }
 
     static func activityInput(

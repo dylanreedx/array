@@ -77,6 +77,19 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     /// so toggling one costs no view churn.
     private var quotaPills: [AgentStatusElement: AgentStatusPillView] = [:]
     private let quotaGroup: NSStackView
+    /// .plans/101 — which account the tile is spending (`◉ Max`), first in the
+    /// account group. Hovering the group opens `accountCard`.
+    private let accountPill = AgentStatusPillView()
+    private var accountCard: AgentAccountUsageCardView?
+    private var accountCardDwell: DispatchWorkItem?
+    private var accountHoverArea: NSTrackingArea?
+    /// Called when the card opens, so the host can ask for a fresh reading.
+    var onAccountCardShown: (() -> Void)?
+    /// The whole-row tooltip text: everything the row can drop, minus the
+    /// account windows, which the card carries. Served per point by
+    /// `view(_:stringForToolTip:point:userData:)` so it never opens over the
+    /// pills on top of the card.
+    private var rowDetailText = ""
     /// 0.7.30 — what the agent left running. Clickable: it opens the menu that
     /// lists each job with its ports and a Stop.
     private let processesPill = AgentStatusPillView()
@@ -260,6 +273,14 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         quotaGroup.detachesHiddenViews = true
         quotaGroup.setContentHuggingPriority(.required, for: .horizontal)
         quotaGroup.setContentCompressionResistancePriority(.required, for: .horizontal)
+        accountPill.isHidden = true
+        quotaGroup.addArrangedSubview(accountPill)
+        let hover = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self, userInfo: nil)
+        quotaGroup.addTrackingArea(hover)
+        accountHoverArea = hover
         for element in AgentStatusElement.presentationOrder
         where element.isAccountScoped || element == .cost {
             let pill = AgentStatusPillView()
@@ -313,6 +334,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
             // elements and there is no reading of any kind yet.
             quotas: [],
             cost: nil,
+            account: nil,
             enabledElements: [.location, .activity, .contextMeter]))
         applyTokens()
     }
@@ -396,12 +418,11 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         contextLabel.setAccessibilityLabel(next.context.accessibilityLabel)
         applyQuotaElements(next)
         actionButton.toolTip = next.location.detailText + "\nLocation actions"
-        // Everything the row can drop under width pressure survives here, so a
-        // dropped element is never unreachable — only unshown.
-        toolTip = ([next.location.detailText, next.activity.detailText, next.context.detailText]
-            + next.quotas.map(\.detailText)
-            + [next.cost?.detailText, backgroundJobs?.detail].compactMap { $0 })
-            .joined(separator: "\n\n")
+        if let account = next.account {
+            accountCard?.apply(account.card)
+        } else {
+            dismissAccountCard()
+        }
         // A silent activity contributes nothing to speech either — VoiceOver must
         // not announce a phase the row is deliberately not showing.
         let spokenActivity = next.activity.isSilent ? "" : " \(next.activity.accessibilityLabel)"
@@ -413,9 +434,11 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         let spokenQuotas = next.quotas.map { " \($0.accessibilityLabel)" }.joined()
         let spokenCost = next.cost.map { " \($0.accessibilityLabel)" } ?? ""
         let spokenJobs = backgroundJobs.map { " \($0.spoken)" } ?? ""
+        // Which account, before its windows: the card says it to the eye.
+        let spokenAccount = next.account.map { " \($0.chipAccessibilityLabel)" } ?? ""
         setAccessibilityLabel(
-            "Agent compact status. \(next.location.accessibilityLabel)\(spokenActivity)\(spokenJobs)\(spokenContext)\(spokenQuotas)\(spokenCost)")
-        setAccessibilityHelp(toolTip)
+            "Agent compact status. \(next.location.accessibilityLabel)\(spokenActivity)\(spokenJobs)\(spokenContext)\(spokenAccount)\(spokenQuotas)\(spokenCost)")
+        setAccessibilityHelp(rowDetailText)
         // Parent owns the combined Home/Where/What/activity/context announcement;
         // only actionable controls are separately reachable.
         updateActionAccessibilityChildren()
@@ -463,6 +486,13 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         } else {
             processesPill.isHidden = true
         }
+        if let account = next.account {
+            accountPill.apply(account: account)
+            accountPill.setAccessibilityLabel(account.chipAccessibilityLabel)
+            accountPill.isHidden = false
+        } else {
+            accountPill.isHidden = true
+        }
         // Whole groups follow their own toggles.
         locationGroup.isHidden = !enabled.contains(.location)
         contextGroup.isHidden = !enabled.contains(.contextMeter)
@@ -477,7 +507,16 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         // right to: a stack view with no visible arranged subview still claims a
         // slot and its spacing, so the row gains a phantom gap at exactly the
         // narrow widths where every chip has been dropped.
-        quotaGroup.isHidden = quotaPills.values.allSatisfy(\.isHidden)
+        quotaGroup.isHidden = quotaPills.values.allSatisfy(\.isHidden) && accountPill.isHidden
+        // Everything the row can drop under width pressure survives here, so a
+        // dropped element is never unreachable — only unshown. An account
+        // window still ON screen is the exception: the account card that opens
+        // over its pill carries it (.plans/101).
+        rowDetailText = ([next.location.detailText, next.activity.detailText, next.context.detailText]
+            + next.quotas.filter { quotaPills[$0.element]?.isHidden ?? true }.map(\.detailText)
+            + [next.cost?.detailText, backgroundJobs?.detail].compactMap { $0 })
+            .joined(separator: "\n\n")
+        installRowToolTip()
         invalidateIntrinsicContentSize()
         rootStack.needsLayout = true
         needsLayout = true
@@ -605,6 +644,104 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
             default: quotaPills[element]?.isHidden = true
             }
         }
+        // The account chip is no element of its own and it gives way FIRST: the
+        // 5-hour and weekly numbers are what matter, so the chip only takes
+        // room the kept elements left over, and leaves with the last window.
+        if !accountPill.isHidden {
+            let shown = kept.filter { (widths[$0] ?? 0) > 0 }
+            let used = shown.reduce(CGFloat(0)) { $0 + (widths[$1] ?? 0) }
+                + CGFloat(max(0, shown.count - 1)) * rootStack.spacing
+            let windowsShown = presentation.enabledElements.filter(\.isAccountScoped)
+                .contains { !(quotaPills[$0]?.isHidden ?? true) }
+            if !windowsShown || used + accountPill.fittingSize.width + quotaGroup.spacing > available {
+                accountPill.isHidden = true
+            }
+        }
+    }
+
+    // MARK: - .plans/101 account card
+
+    /// One tooltip rect over the whole row, answered per point: the pills get
+    /// the card instead of text.
+    private func installRowToolTip() {
+        removeAllToolTips()
+        toolTip = nil
+        addToolTip(bounds, owner: self, userData: nil)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard event.trackingArea === accountHoverArea else { return super.mouseEntered(with: event) }
+        accountPillsPointerEntered(dwell: 0.15)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard event.trackingArea === accountHoverArea else { return super.mouseExited(with: event) }
+        accountCardDwell?.cancel()
+        accountCardDwell = nil
+        dismissAccountCard()
+    }
+
+    private func accountPillsPointerEntered(dwell: TimeInterval) {
+        accountCardDwell?.cancel()
+        guard presentation?.account != nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.presentAccountCard() }
+        }
+        accountCardDwell = work
+        if dwell <= 0 {
+            work.perform()
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + dwell, execute: work)
+        }
+    }
+
+    /// Hosted in the window's content view, above the pills, for the reasons
+    /// `InboxHoverCardView` gives: inside the tile it would be clipped by the
+    /// tile and scaled by the canvas.
+    private func presentAccountCard() {
+        accountCardDwell = nil
+        guard let account = presentation?.account, !quotaGroup.isHidden,
+              let contentView = window?.contentView else { return }
+        let card = accountCard ?? AgentAccountUsageCardView(frame: .zero)
+        accountCard = card
+        card.apply(account.card)
+        if card.superview !== contentView {
+            card.removeFromSuperview()
+            contentView.addSubview(card)
+        }
+        card.layoutSubtreeIfNeeded()
+        let size = card.intrinsicContentSize
+        let anchor = quotaGroup.convert(quotaGroup.bounds, to: contentView)
+        let gap = CGFloat(Space.m)
+        var origin = NSPoint(x: anchor.midX - size.width / 2, y: 0)
+        origin.x = max(gap, min(origin.x, contentView.bounds.maxX - size.width - gap))
+        if contentView.isFlipped {
+            origin.y = anchor.minY - gap - size.height
+            if origin.y < gap { origin.y = anchor.maxY + gap }
+        } else {
+            origin.y = anchor.maxY + gap
+            if origin.y + size.height > contentView.bounds.maxY - gap { origin.y = anchor.minY - gap - size.height }
+        }
+        card.frame = NSRect(origin: origin, size: size)
+        onAccountCardShown?()
+    }
+
+    func dismissAccountCard() {
+        accountCardDwell?.cancel()
+        accountCardDwell = nil
+        accountCard?.removeFromSuperview()
+    }
+
+    /// The pointer path a hover takes, minus the dwell: a witness drives the
+    /// same handler the tracking area calls.
+    func qaHoverAccountPills() { accountPillsPointerEntered(dwell: 0) }
+    var qaAccountCard: AgentAccountUsageCardView? { accountCard?.superview == nil ? nil : accountCard }
+    var qaAccountChipText: String? { accountPill.isHidden ? nil : accountPill.qaValueText }
+    var qaAccountPresentation: AgentAccountUsagePresentation? { presentation?.account }
+    var qaAccountPillsFrame: NSRect? { quotaGroup.isHidden ? nil : frame(of: quotaGroup) }
+    /// What the row's tooltip says at a point in row coordinates.
+    func qaToolTip(at point: NSPoint) -> String {
+        view(self, stringForToolTip: 0, point: point, userData: nil)
     }
 
     /// The chip's value as drawn, or nil when it is not on screen.
@@ -619,7 +756,9 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
 
     override func setFrameSize(_ newSize: NSSize) {
         let changedWidth = abs(newSize.width - frame.width) > 0.5
+        let changedSize = newSize != frame.size
         super.setFrameSize(newSize)
+        if changedSize { installRowToolTip() }
         guard changedWidth, let presentation else { return }
         // Re-apply from the presentation so an element the last, narrower pass
         // dropped can come back when the tile widens.
@@ -644,6 +783,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         // Each pill owns its own fill and value tint; the row only has to ask.
         contextLabel.textColor = contextLabelColor(for: presentation?.context.state ?? .unknown, theme: theme)
         for pill in quotaPills.values { pill.applyTokens() }
+        accountPill.applyTokens()
     }
 
     /// Re-derives every metric this row owns from `zoom`. Same contract as
@@ -659,6 +799,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         elapsedLabel.font = .token(.captionMono, zoom: pageZoom)
         contextLabel.font = .token(.captionMono, zoom: pageZoom)
         for pill in quotaPills.values { pill.applyPageZoom(pageZoom) }
+        accountPill.applyPageZoom(pageZoom)
         quotaGroup.spacing = CGFloat(pageZoom.scaled(Space.m))
         locationGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
         activityGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
@@ -706,6 +847,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow == nil { stopThinkingIndicatorIfNeeded() }
+        if newWindow !== window { dismissAccountCard() }
         super.viewWillMove(toWindow: newWindow)
     }
 
@@ -725,6 +867,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
 
     override func viewDidHide() {
         super.viewDidHide()
+        dismissAccountCard()
         stopThinkingIndicatorIfNeeded()
     }
 
@@ -869,7 +1012,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     }
     var qaDroppedElements: Set<AgentStatusElement> { droppedElements }
     var qaEnabledElements: [AgentStatusElement] { presentation?.enabledElements ?? [] }
-    var qaToolTip: String { toolTip ?? "" }
+    var qaToolTip: String { rowDetailText }
     var qaContextState: AgentRadialContextMeterState { contextMeter.qaState }
     var qaContextFraction: Double? { contextMeter.qaFraction }
     var qaContextDetail: String { contextMeter.qaDetail }
@@ -967,5 +1110,21 @@ final class HonestWidthLabel: NSTextField {
         size.width = ceil(max(size.width, cell?.cellSize(forBounds:
             NSRect(x: 0, y: 0, width: .greatestFiniteMagnitude, height: bounds.height)).width ?? size.width))
         return size
+    }
+}
+
+
+extension AgentCompactStatusRowView: NSViewToolTipOwner {
+    func view(
+        _ view: NSView,
+        stringForToolTip tag: NSView.ToolTipTag,
+        point: NSPoint,
+        userData data: UnsafeMutableRawPointer?
+    ) -> String {
+        if !quotaGroup.isHidden, presentation?.account != nil,
+           quotaGroup.convert(quotaGroup.bounds, to: self).contains(point) {
+            return ""
+        }
+        return rowDetailText
     }
 }

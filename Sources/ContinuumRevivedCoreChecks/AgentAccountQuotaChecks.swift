@@ -248,6 +248,9 @@ func runAgentAccountQuotaChecks() {
            "the context meter ships visible")
     expect(AgentStatusElementConfig.isVisible(.quotaFiveHour, defaults: defaults),
            "the 5-hour account window ships visible")
+    // .plans/101: 5h AND weekly are the numbers Dylan watches.
+    expect(AgentStatusElementConfig.isVisible(.quotaSevenDay, defaults: defaults),
+           "the weekly account window ships visible")
     expect(!AgentStatusElementConfig.isVisible(.cost, defaults: defaults),
            "cost ships hidden — it is an estimate that reads as a bill")
 
@@ -263,7 +266,7 @@ func runAgentAccountQuotaChecks() {
            "an explicit true must show a default-hidden element")
 
     let visible = AgentStatusElementConfig.visibleElements(defaults: defaults)
-    expect(visible == [.location, .activity, .processes, .contextMeter, .cost],
+    expect(visible == [.location, .activity, .processes, .contextMeter, .quotaSevenDay, .cost],
            "visible elements must come back in fixed presentation order, got \(visible)")
 
     // Every element owns a registered setting AND a field in the schema the

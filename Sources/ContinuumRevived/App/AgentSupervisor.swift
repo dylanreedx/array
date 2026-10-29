@@ -299,6 +299,17 @@ struct AgentNameTitler: Equatable, Sendable {
 /// pattern `AgentModelCatalog.enableLiveRefresh()` set. A supervisor built by a
 /// check without an injected command can therefore never spend a real provider
 /// call on a fixture agent.
+/// .plans/101 — the same opt-in rule as titling: only the real app's startup
+/// enables live account reads, so no check can ever spawn a provider CLI to ask
+/// about a real login.
+final class AgentAccountUsageLiveGate: @unchecked Sendable {
+    static let shared = AgentAccountUsageLiveGate()
+    private let lock = NSLock()
+    private var enabled = false
+    func enable() { lock.withLock { enabled = true } }
+    var isEnabled: Bool { lock.withLock { enabled } }
+}
+
 final class AgentNameTitlerLiveGate: @unchecked Sendable {
     static let shared = AgentNameTitlerLiveGate()
     private let lock = NSLock()
@@ -1640,6 +1651,10 @@ final class AgentSupervisor {
         AgentNameTitlerLiveGate.shared.enable()
     }
 
+    static func enableLiveAccountUsage() {
+        AgentAccountUsageLiveGate.shared.enable()
+    }
+
     static let maximumConcurrentNameGenerations = 2
 
     // MARK: - Identity
@@ -2031,6 +2046,111 @@ final class AgentSupervisor {
         return accountQuotas[harness]
     }
 
+    // MARK: - .plans/101 live account usage
+
+    /// Which login each harness is spending. In memory only: it is re-read on
+    /// demand, and a stale identity carried across a relaunch would name an
+    /// account the CLI may no longer be signed into.
+    private var accountIdentities: [AgentHarness: AgentAccountIdentity] = [:]
+    private var accountUsageInFlight: Set<AgentHarness> = []
+    private var accountUsageLastStarted: [AgentHarness: Date] = [:]
+    private var accountUsagePollTimer: Timer?
+    static let accountUsageDidChangeNotification = Notification.Name("AgentSupervisor.accountUsageDidChange")
+    /// Reads one harness's account off the main thread. Production's reads
+    /// nothing until `enableLiveAccountUsage()`; a check injects a fixture.
+    var accountUsageReader: @Sendable (AgentHarness) -> AgentAccountUsageProbe.Reading? = { harness in
+        guard AgentAccountUsageLiveGate.shared.isEnabled else { return nil }
+        switch harness {
+        case .claudeCode:
+            let command = ClaudeAgentRunner.liveResolvedCommand()
+            // A bare-name fallback proves the CLI is not installed.
+            guard command.prefixArgs.isEmpty else { return nil }
+            return AgentAccountUsageProbe.readClaude(command: command, configDirectory: nil, timeout: 8)
+        case .codex:
+            let command = CodexAgentRunner.liveResolvedCommand()
+            guard command.prefixArgs.isEmpty else { return nil }
+            return AgentAccountUsageProbe.readCodex(command: command, timeout: 8)
+        case .pi:
+            // Pi reports no identity and no limits; there is nothing to ask.
+            return nil
+        }
+    }
+
+    func accountIdentity(for id: AgentID) -> AgentAccountIdentity? {
+        guard let harness = records[id]?.harness else { return nil }
+        return accountIdentities[harness]
+    }
+
+    /// Ask the CLI for this agent's account limits now, unless a read started
+    /// within `minimumInterval` or one is still out. Opening the hover card asks
+    /// with a short interval; an idle row asks with a long one.
+    @discardableResult
+    func refreshAccountUsage(for id: AgentID, minimumInterval: TimeInterval) -> Bool {
+        guard let harness = records[id]?.harness else { return false }
+        return refreshAccountUsage(harness: harness, minimumInterval: minimumInterval)
+    }
+
+    @discardableResult
+    func refreshAccountUsage(harness: AgentHarness, minimumInterval: TimeInterval, now: Date = Date()) -> Bool {
+        guard harness != .pi, !accountUsageInFlight.contains(harness),
+              AgentModelCatalog.refreshDue(
+                lastStartedAt: accountUsageLastStarted[harness], minimumInterval: minimumInterval, now: now)
+        else { return false }
+        accountUsageInFlight.insert(harness)
+        accountUsageLastStarted[harness] = now
+        let reader = accountUsageReader
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let reading = reader(harness)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.accountUsageInFlight.remove(harness)
+                if let reading { self.applyAccountUsageReading(reading, harness: harness) }
+            }
+        }
+        startAccountUsagePollingIfLive()
+        return true
+    }
+
+    /// Every harness an agent here runs on, at most once per `minimumInterval`.
+    /// App activation and the slow poll call this.
+    func refreshAccountUsageForAgents(minimumInterval: TimeInterval) {
+        for harness in Set(records.values.compactMap(\.harness)) {
+            refreshAccountUsage(harness: harness, minimumInterval: minimumInterval)
+        }
+    }
+
+    /// A reading that names no login is not applied: a timeout and a sign-out
+    /// look the same from here, and blanking the row on a slow CLI would hide
+    /// a real reading. A reading for a DIFFERENT login than before drops the old
+    /// login's windows, which are no longer this harness's.
+    func applyAccountUsageReading(_ reading: AgentAccountUsageProbe.Reading, harness: AgentHarness) {
+        guard let identity = reading.identity else { return }
+        restoreAccountQuotasIfNeeded()
+        let previous = accountIdentities[harness]
+        accountIdentities[harness] = identity
+        if let quota = reading.quota {
+            accountQuotas[harness] = quota
+            accountQuotaStore?.save(accountQuotas)
+        } else if let previous,
+                  previous.organizationId != identity.organizationId || previous.email != identity.email {
+            accountQuotas[harness] = nil
+            accountQuotaStore?.save(accountQuotas)
+        }
+        NotificationCenter.default.post(name: Self.accountUsageDidChangeNotification, object: self)
+    }
+
+    /// Five minutes, and only while the app is in front: the row's numbers stay
+    /// live without a turn, and a background Array spawns nothing.
+    private func startAccountUsagePollingIfLive() {
+        guard accountUsagePollTimer == nil, AgentAccountUsageLiveGate.shared.isEnabled else { return }
+        accountUsagePollTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard NSApp?.isActive == true else { return }
+                self?.refreshAccountUsageForAgents(minimumInterval: 240)
+            }
+        }
+    }
+
     /// Refuse only a fresh, unexpired account-wide exhausted window. Unknown
     /// windows may be model-specific, so they cannot block an arbitrary model.
     func delegationQuotaRefusal(for harness: AgentHarness, now: Date = Date()) -> String? {
@@ -2063,6 +2183,8 @@ final class AgentSupervisor {
     func qaDeliverAccountQuota(_ snapshot: AgentAccountQuotaSnapshot) {
         accountQuotas[snapshot.harness] = snapshot
     }
+
+    var qaAccountUsageInFlight: Set<AgentHarness> { accountUsageInFlight }
 
     /// True once there is user/session work that makes Home retargeting unsafe.
     /// Used by the native Home action surface: zero-turn agents may be reassigned;

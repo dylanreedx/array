@@ -175,7 +175,7 @@ func runAgentCompactionUIChecks() async throws {
         location: .init(symbolName: "house", text: "project root", accessibilityLabel: "Home and Where: project root.", detailText: "project root", isExternal: false),
         activity: .silent(detailText: "Activity phase: idle."),
         context: warningContext,
-        quotas: [], cost: nil,
+        quotas: [], cost: nil, account: nil,
         enabledElements: [.location, .activity, .contextMeter])
     let compactRow = AgentCompactStatusRowView()
     compactRow.frame = NSRect(x: 0, y: 0, width: 420, height: AgentCompactStatusRowView.preferredHeight)
@@ -197,7 +197,7 @@ func runAgentCompactionUIChecks() async throws {
         context: AgentRadialContextMeterPresentation(
             state: .known, fraction: 0.50, label: "50%", accessibilityLabel: "Context window 50 percent used.",
             detailText: "50 percent used", warningMarker: nil),
-        quotas: [], cost: nil, enabledElements: warningPresentation.enabledElements)
+        quotas: [], cost: nil, account: nil, enabledElements: warningPresentation.enabledElements)
     compactRow.apply(normalPresentation)
     guard !compactRow.qaCompactContextButtonVisible else {
         throw Failure(description: "native Compact action remained visible below the warning threshold")

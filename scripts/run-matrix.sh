@@ -756,6 +756,7 @@ run_leg scripts/capture-cli-fixtures.sh check
 # and a witness only counts if the gate reports IT rather than the first red
 # thing ahead of it.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-usage-check
 # 0.7.30: which agent owns a running process (owner tag, then ancestry), its
 # listening ports, Stop, and that agents no longer inherit the app's
 # descriptors. Real processes: a setsid'd job and a scrubbed-environment job.
@@ -991,6 +992,7 @@ run_app_check .build/debug/Array --agent-tile-reference-check
 # that direct `mouseDown` calls skipped while all four regressed in 0.7.31.
 run_app_check .build/debug/Array --canvas-pointer-path-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
+run_app_check .build/debug/Array --agent-account-usage-check
 # Real installed-provider warning/compaction/task-retention acceptance spends
 # subscription usage. Opt in explicitly; ordinary matrix runs stay offline.
 if [[ "${CONTINUUM_CHECK_CONTEXT_LIVE_COMPACTION:-0}" == "1" ]]; then

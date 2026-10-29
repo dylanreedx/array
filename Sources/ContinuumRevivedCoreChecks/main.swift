@@ -540,6 +540,11 @@ if CommandLine.arguments.contains("--agent-account-quota-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--agent-account-usage-check") {
+    runAgentAccountUsageChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--codex-agent-backend-check") {
     runCodexAgentBackendChecks()
     Foundation.exit(0)
@@ -11590,6 +11595,8 @@ runAgentContextOccupancyChecks()
 // account/rateLimits/updated) and the compact-status element toggles. Replayed
 // from committed sanitized fixtures; no credentials, no live provider.
 runAgentAccountQuotaChecks()
+// .plans/101 — live limits and identity, read with no model turn.
+runAgentAccountUsageChecks()
 
 // Plan: .plans/01-provider-cli-backends.md (claude CLI backend)
 runClaudeAgentBackendChecks()

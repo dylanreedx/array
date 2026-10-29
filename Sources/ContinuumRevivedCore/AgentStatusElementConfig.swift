@@ -71,14 +71,15 @@ public enum AgentStatusElement: String, CaseIterable, Equatable, Hashable, Senda
     }
 
     /// The default-on set. Location, activity and the context meter are the
-    /// shipped row. The 5-hour window joins them because it is the number that
-    /// predicts a stall; the 7-day window, spend limit and cost stay off,
-    /// because they either rarely change within a session or, in cost's case,
-    /// are an estimate that is easy to misread as a bill.
+    /// shipped row. The 5-hour AND weekly windows join them: Dylan named both
+    /// as the numbers he watches (.plans/101), and a weekly window that runs
+    /// out stalls every agent on the login for days, not hours. The spend
+    /// limit and cost stay off, because the first is rare and the second is an
+    /// estimate that is easy to misread as a bill.
     public var defaultVisible: Bool {
         switch self {
-        case .location, .activity, .processes, .contextMeter, .quotaFiveHour: return true
-        case .quotaSevenDay, .quotaSpendLimit, .cost: return false
+        case .location, .activity, .processes, .contextMeter, .quotaFiveHour, .quotaSevenDay: return true
+        case .quotaSpendLimit, .cost: return false
         }
     }
 

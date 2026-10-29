@@ -2334,6 +2334,26 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // .plans/101: account identity and live limits, read with no turn,
+        // through a real supervisor into real attached tiles.
+        if CommandLine.arguments.contains("--agent-account-usage-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentAccountUsageAppChecks()
+                    if let capture = ProcessInfo.processInfo.environment["CONTINUUM_ACCOUNT_USAGE_CAPTURE_DIR"],
+                       !capture.isEmpty {
+                        try captureAccountUsageForReview(to: URL(fileURLWithPath: capture, isDirectory: true))
+                    }
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-compaction-ui-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -5206,6 +5226,7 @@ enum ContinuumApp {
         } else {
             AgentModelCatalog.shared.enableLiveRefresh()
             AgentSupervisor.enableLiveNameTitling()
+            AgentSupervisor.enableLiveAccountUsage()
         }
         #else
         // Live model catalogue: opt in to bounded `pi --list-models` probes
@@ -5216,6 +5237,9 @@ enum ContinuumApp {
         // Session titles: each harness titles with its own CLI. Same opt-in rule
         // as the catalogue, so no check can ever spend a real provider call.
         AgentSupervisor.enableLiveNameTitling()
+        // .plans/101: account identity and 5h/weekly limits, read from each
+        // CLI on demand. Same opt-in rule: no check ever asks a real login.
+        AgentSupervisor.enableLiveAccountUsage()
         #endif
 
         // Every `--*-check` flag is handled above and exits. Reaching here with
@@ -21670,6 +21694,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         focusBroker.applicationDidBecomeActive()
         refreshAgentSurfaces()
+        // A login changed in a terminal while Array was in the background, or
+        // the 5-hour window rolled over: re-read on the way back in.
+        agentSupervisor.refreshAccountUsageForAgents(minimumInterval: 60)
     }
 
     func applicationDidResignActive(_ notification: Notification) {

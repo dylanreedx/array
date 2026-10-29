@@ -397,7 +397,7 @@ enum ManagedAgentPageZoomChecks {
                 state: .warning, fraction: 0.82, label: "82%",
                 accessibilityLabel: "Context window 82 percent used.",
                 detailText: "82 percent used", warningMarker: "⚠︎"),
-            quotas: [], cost: nil,
+            quotas: [], cost: nil, account: nil,
             enabledElements: [.location, .activity, .contextMeter])
 
         // An NSButton's own title field is AppKit's: the inline bezel lays it

@@ -230,6 +230,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private var localNoticeObserverToken: UUID?
     private var outsideHistoryObserverToken: UUID?
     private var runtimeObservationObserverToken: UUID?
+    /// .plans/101 — a live account read (no turn involved) repaints the row.
+    private var accountUsageObserver: NSObjectProtocol?
     private var displayNameObserverToken: UUID?
     /// 0.7.30 — the process tracker's change notification, while attached.
     private var backgroundJobsObserver: NSObjectProtocol?
@@ -478,6 +480,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         }
         compactStatusRow.onBackgroundJobsMenuRequested = { [weak self] anchor in
             self?.showBackgroundProcesses(from: anchor)
+        }
+        // .plans/101 — opening the account card asks for a fresh reading, so
+        // the numbers it shows are at most half a minute old.
+        compactStatusRow.onAccountCardShown = { [weak self] in
+            guard let self, let id = self.projectedAgentID else { return }
+            self.agentSource?.refreshAccountUsage(for: id, minimumInterval: 30)
         }
         v2Composer?.onDraftChange = { [weak self] _ in self?.updateV2ComposerPresentation() }
         v2Composer?.onDraftApplied = { [weak self] in self?.updateV2ComposerPresentation() }
@@ -838,6 +846,14 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             // S3: a retry changes what the tail says without any runtime event.
             if case .providerRetry = observation { self?.refreshCompactStatus() }
         }
+        accountUsageObserver = NotificationCenter.default.addObserver(
+            forName: AgentSupervisor.accountUsageDidChangeNotification, object: supervisor, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshCompactStatus() }
+        }
+        // An idle tile still shows live limits: ask once on attach, throttled
+        // per harness so a canvas of agents spawns one read, not one each.
+        supervisor.refreshAccountUsage(for: agentID, minimumInterval: 300)
         hydrateManagedImagesFromDocument()
         // The render context reads `agentSource` (a chip's live status, an agent
         // message's sender), and the app binds the composer — the context's
@@ -1932,6 +1948,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             agentSource?.removeTurnCapabilitiesObserver(capabilityObserverToken)
             self.capabilityObserverToken = nil
         }
+        if let accountUsageObserver {
+            NotificationCenter.default.removeObserver(accountUsageObserver)
+            self.accountUsageObserver = nil
+        }
         if let runtimeObservationObserverToken, let agentID = attachedAgentID {
             agentSource?.removeRuntimeObservationObserver(runtimeObservationObserverToken, for: agentID)
             self.runtimeObservationObserverToken = nil
@@ -2823,6 +2843,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 now: now,
                 contextWindow: compactContextWindow,
                 accountQuota: currentAccountQuota(),
+                accountIdentity: currentAccountIdentity(),
                 enabledElements: AgentStatusElementConfig.visibleElements())
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
             // A running compaction names itself; the silence and tool
@@ -2842,6 +2863,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             context: AgentRadialContextMeterPresenter.present(compactContextWindow),
             quotas: currentQuotaPresentations(at: now),
             cost: currentCostPresentation(),
+            account: currentAccountPresentation(at: now),
             enabledElements: AgentStatusElementConfig.visibleElements())))
         setLiveTailStatusText(Self.tailStatusText(
             for: activity, liveToolVerb: liveToolVerb?.text, compacting: compactionSessionFact != nil))
@@ -3002,6 +3024,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 context: AgentRadialContextMeterPresenter.present(nil),
                 quotas: currentQuotaPresentations(at: now),
                 cost: currentCostPresentation(),
+                account: currentAccountPresentation(at: now),
                 enabledElements: AgentStatusElementConfig.visibleElements())))
         } else {
             applyUnknownCompactStatus()
@@ -3026,6 +3049,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             // tile currently knows about its own location.
             quotas: currentQuotaPresentations(at: Date()),
             cost: currentCostPresentation(),
+            account: currentAccountPresentation(at: Date()),
             enabledElements: AgentStatusElementConfig.visibleElements())))
     }
 
@@ -3051,6 +3075,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 context: presentation.context,
                 quotas: presentation.quotas,
                 cost: presentation.cost,
+                account: presentation.account,
                 enabledElements: presentation.enabledElements)
         }
         return AgentCompactStatusPresentation(
@@ -3066,6 +3091,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             context: presentation.context,
             quotas: presentation.quotas,
             cost: presentation.cost,
+            account: presentation.account,
             enabledElements: presentation.enabledElements)
     }
 
@@ -3166,6 +3192,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         location: AgentLocationSnapshot,
         contextWindow: AgentContextWindowSnapshot? = nil,
         accountQuota: AgentAccountQuotaSnapshot? = nil,
+        accountIdentity: AgentAccountIdentity? = nil,
         enabledElements: [AgentStatusElement]? = nil,
         now: Date
     ) {
@@ -3185,6 +3212,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 now: now,
                 contextWindow: contextWindow,
                 accountQuota: accountQuota ?? currentAccountQuota(),
+                accountIdentity: accountIdentity ?? currentAccountIdentity(),
                 // An explicit set keeps a probe deterministic. Reading live
                 // defaults here would make the witness depend on whichever
                 // toggles the developer happens to have set.
@@ -3212,6 +3240,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                     .compactMap { AgentAccountQuotaPresenter.present(
                         accountQuota ?? currentAccountQuota(), element: $0, now: now) },
                 cost: currentCostPresentation(),
+                account: AgentCompactStatusPresentation.presentAccount(
+                    identity: accountIdentity ?? currentAccountIdentity(),
+                    quota: accountQuota ?? currentAccountQuota(),
+                    now: now,
+                    enabledElements: AgentStatusElementConfig.visibleElements()),
                 enabledElements: AgentStatusElementConfig.visibleElements())))
             setLiveTailStatusText(Self.tailStatusText(for: activity, liveToolVerb: liveToolVerb?.text))
             syncCompactStatusTick(for: activity)
@@ -3232,6 +3265,20 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private func currentAccountQuota() -> AgentAccountQuotaSnapshot? {
         guard let id = projectedAgentID else { return nil }
         return agentSource?.accountQuota(for: id)
+    }
+
+    /// Which login this agent's harness is spending, read by the supervisor.
+    private func currentAccountIdentity() -> AgentAccountIdentity? {
+        guard let id = projectedAgentID else { return nil }
+        return agentSource?.accountIdentity(for: id)
+    }
+
+    private func currentAccountPresentation(at now: Date) -> AgentAccountUsagePresentation? {
+        AgentCompactStatusPresentation.presentAccount(
+            identity: currentAccountIdentity(),
+            quota: currentAccountQuota(),
+            now: now,
+            enabledElements: AgentStatusElementConfig.visibleElements())
     }
 
     private func currentQuotaPresentations(at now: Date) -> [AgentQuotaElementPresentation] {
@@ -4882,6 +4929,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             // number ends up in a design review.
             quotas: [],
             cost: nil,
+            account: nil,
             enabledElements: [.location, .activity, .contextMeter]))
     }
 

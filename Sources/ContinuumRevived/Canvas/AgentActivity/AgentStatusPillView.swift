@@ -33,6 +33,10 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
     private let icon = NSImageView()
     private let labelField = NSTextField(labelWithString: "")
     private let valueField = NSTextField(labelWithString: "")
+    /// .plans/101 — what is left of a window, between its name and its number.
+    /// Only quota pills show it.
+    private let bar = AgentUsageBarView(preferredSize: NSSize(width: 24, height: 3))
+    private var barWidth: NSLayoutConstraint?
     private let stack: NSStackView
 
     /// The tint the value carries. Held rather than read back off the label so
@@ -46,7 +50,7 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
     private var iconSize: [NSLayoutConstraint] = []
 
     init() {
-        stack = NSStackView(views: [icon, labelField, valueField])
+        stack = NSStackView(views: [icon, labelField, bar, valueField])
         super.init(frame: .zero)
 
         wantsLayer = true
@@ -62,6 +66,14 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
             icon.heightAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(10))),
         ]
         NSLayoutConstraint.activate(iconSize)
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.isHidden = true
+        let barWidth = bar.widthAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(24)))
+        NSLayoutConstraint.activate([
+            barWidth,
+            bar.heightAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(6))),
+        ])
+        self.barWidth = barWidth
 
         // The label is prose-weight metadata; the value must not reflow as its
         // digits change, which is exactly what `captionMono` is for.
@@ -113,13 +125,33 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
             right: CGFloat(zoom.scaled(Space.m)))
     }
 
+    /// A window: `5h ▬▬ 84%`, the figure being what is LEFT. No glyph — the
+    /// bar is what tells two windows' pills apart now — and no tooltip: the
+    /// account card opens over these pills instead (.plans/101).
     func apply(_ presentation: AgentQuotaElementPresentation) {
         state = presentation.state
         hasReading = true
-        applySymbol(presentation.symbolName)
+        applySymbol("")
+        labelField.isHidden = false
         labelField.stringValue = presentation.shortLabel
+        bar.isHidden = false
+        bar.state = presentation.state
+        bar.remaining = presentation.remainingFraction
         valueField.stringValue = presentation.valueText
-        toolTip = presentation.detailText
+        toolTip = nil
+        applyTokens()
+    }
+
+    /// The account a tile is spending: glyph and plan, `◉ Max`.
+    func apply(account: AgentAccountUsagePresentation) {
+        state = .known
+        hasReading = true
+        applySymbol("person.crop.circle")
+        labelField.stringValue = ""
+        labelField.isHidden = true
+        bar.isHidden = true
+        valueField.stringValue = account.chipText
+        toolTip = nil
         applyTokens()
     }
 
@@ -130,6 +162,7 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
         applySymbol("dollarsign.circle")
         labelField.stringValue = ""
         labelField.isHidden = true
+        bar.isHidden = true
         valueField.stringValue = cost.text
         toolTip = cost.detailText
         applyTokens()
@@ -143,6 +176,7 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
         applySymbol(symbolName)
         labelField.stringValue = ""
         labelField.isHidden = true
+        bar.isHidden = true
         valueField.stringValue = value
         toolTip = detail
         applyTokens()
@@ -200,6 +234,7 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
         stack.spacing = CGFloat(zoom.scaled(Space.s))
         stack.edgeInsets = Self.insets(zoom: zoom)
         heightConstraint?.constant = Self.preferredHeight(zoom: zoom)
+        barWidth?.constant = CGFloat(zoom.scaled(24))
         for constraint in iconSize { constraint.constant = CGFloat(zoom.scaled(10)) }
         // Symbols are rasterized at a point size, so re-make rather than re-pin.
         applySymbol(currentSymbolName)
@@ -228,6 +263,8 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
 
     var qaLabelText: String { labelField.isHidden ? "" : labelField.stringValue }
     var qaValueText: String { valueField.stringValue }
+    /// The bar's remaining fraction, nil when the pill shows no bar.
+    var qaBarRemaining: Double? { bar.isHidden ? nil : bar.remaining }
     var qaSymbolName: String { currentSymbolName }
     var qaIconHasImage: Bool { icon.image != nil }
     var qaHasFill: Bool { layer?.backgroundColor != nil }

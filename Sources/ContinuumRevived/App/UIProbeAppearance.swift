@@ -411,6 +411,26 @@ enum UIProbeAppearance {
                 LabCatalog.makeTranscriptReviewSurface(
                     state: .compactionBoundary, size: NSSize(width: 480, height: 720), theme: .dark)
             }),
+            // .plans/101: the account card, near a limit so the red value and
+            // bar are in the sweep as well as the resting text.
+            ("appearance.agentAccountUsageCard", NSSize(width: 320, height: 260), {
+                let now = Date(timeIntervalSince1970: 1_787_700_000)
+                let card = AgentAccountUsageCardView(frame: NSRect(x: 0, y: 0, width: 300, height: 220))
+                if let account = AgentAccountQuotaPresenter.presentAccount(
+                    identity: AgentAccountIdentity(
+                        harness: .claudeCode, email: "personal@example.com", plan: "max", observedAt: now),
+                    quota: AgentAccountQuotaSnapshot(
+                        harness: .claudeCode,
+                        windows: [
+                            AgentQuotaWindow(kind: .fiveHour, utilization: 0.94, resetsAt: now.addingTimeInterval(2_460)),
+                            AgentQuotaWindow(kind: .sevenDay, utilization: 0.19, resetsAt: now.addingTimeInterval(518_400)),
+                        ],
+                        observedAt: now, source: .claudeUsageRequest),
+                    now: now) {
+                    card.apply(account.card)
+                }
+                return card
+            }),
             ("appearance.inboxHoverCard", NSSize(width: 360, height: 220), {
                 let card = InboxHoverCardView(frame: .zero)
                 card.apply(
@@ -1032,6 +1052,10 @@ enum UIProbeAppearance {
         // no probed surface renders it today; it is listed here so that the first
         // surface which does cannot arrive unregistered.
         "InboxHoverCardView",
+        // .plans/101. The account card over a tile's usage pills: the inbox
+        // card's surface and pair (popover material, `controlBoundary` outline).
+        // Its bars draw from tokens at draw time and paint no layer colour.
+        "AgentAccountUsageCardView",
         // P3.11. The bulk-action bar, the same pair as the pill above it:
         // `SurfaceToken.overlay` fill with a `LineToken.border` outline. It paints only
         // while two or more rows are selected, so what puts it under this gate is the
@@ -1843,6 +1867,24 @@ enum UIProbeAppearance {
                         .init(symbol: "terminal", text: "Claude Code"),
                         .init(symbol: "cpu", text: "openai-codex/gpt-5.6-sol"),
                     ])
+                return card
+            }),
+            AdoptedSurface(id: "agentAccountUsageCard", size: NSSize(width: 320, height: 260), make: {
+                let now = Date(timeIntervalSince1970: 1_787_700_000)
+                let card = AgentAccountUsageCardView(frame: NSRect(x: 0, y: 0, width: 300, height: 220))
+                if let account = AgentAccountQuotaPresenter.presentAccount(
+                    identity: AgentAccountIdentity(
+                        harness: .claudeCode, email: "personal@example.com", plan: "max", observedAt: now),
+                    quota: AgentAccountQuotaSnapshot(
+                        harness: .claudeCode,
+                        windows: [
+                            AgentQuotaWindow(kind: .fiveHour, utilization: 0.94, resetsAt: now.addingTimeInterval(2_460)),
+                            AgentQuotaWindow(kind: .sevenDay, utilization: 0.19, resetsAt: now.addingTimeInterval(518_400)),
+                        ],
+                        observedAt: now, source: .claudeUsageRequest),
+                    now: now) {
+                    card.apply(account.card)
+                }
                 return card
             }),
             AdoptedSurface(id: "kanbanTile", size: NSSize(width: 480, height: 320), make: makeKanbanTile),
