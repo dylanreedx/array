@@ -53,6 +53,7 @@ enum TranscriptRhythmChecks {
         try checkFillsAndEdges()
         try checkRealClaudeTurn()
         try checkClustering()
+        try checkBrowserToolClustering()
         try checkFilledSurfacesPadTheirText()
         try checkDiffStatDensity()
         try checkDiffSummaryReusesFileRows()
@@ -1578,6 +1579,35 @@ enum TranscriptRhythmChecks {
                 + "measurement(s) across 10 unchanged layout passes -- layout() is measuring "
                 + "the body text instead of reusing bodyHeightCache"
             )
+        }
+    }
+
+    /// A real transcript with consecutive browser calls presents a browser
+    /// summary, not a generic count of anonymous tool steps.
+    private static func checkBrowserToolClustering() throws {
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: "browser-fold-" + value)! }
+        let blocks = ["Read", "array_browser_snapshot", "array_browser_click", "array_browser_type", "Bash"].enumerated().map { index, name in
+            AgentBlock(id: id("tool-\(index)"), revision: 1, kind: .toolCall,
+                       payload: .toolCall(.init(name: name, summary: "done", status: .completed)))
+        }
+        let entry = AgentEntry(id: id("entry"), revision: 1, role: .assistant,
+            provenance: .providerItem(provider: "fixture", itemID: "browser"), lifecycle: .finished, blocks: blocks)
+        let document = AgentDocument(version: 1, entries: [entry])
+        let list = AgentTranscriptListView()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 480),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        let host = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        host.addSubview(list)
+        window.contentView = host
+        list.frame = host.bounds
+        list.layoutSubtreeIfNeeded()
+        try list.apply(document: document, patch: AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: blocks.map(\.id)))
+        list.layout()
+        list.collectionView.layout()
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let summaries = descendants(list).compactMap { ($0 as? AgentToolClusterHeaderView)?.summaryLabel.stringValue }
+        guard summaries.contains(where: { $0.hasPrefix("Used browser 3 times") }) else {
+            throw fail("browser action fold must name its browser use, got \(summaries)")
         }
     }
 

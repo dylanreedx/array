@@ -121,6 +121,13 @@ final class TileSpawner {
     /// invisible to the browser cap and to teardown.
     var browserRuntimeSpawnedHandler: ((WKWebViewBrowserRuntime) -> Void)?
 
+    /// Boot restoration may load only locally safe destinations until an
+    /// explicit agent action installs its interactive domain-approval gate.
+    var agentBrowserRestorePolicy: ((AgentID, URL) -> Bool)?
+    /// The agent whose restore gate a rehydrating browser gets, or nil for
+    /// none. Unset, every Agents-profile owner stamp is gated.
+    var agentBrowserRestoreGateOwner: ((Tile) -> AgentID?)?
+
     /// Called after every note text change so the AppDelegate can schedule a
     /// debounced note body + index save. A view captures it when wired: it
     /// outlives this spawner, which the next project-changing arm replaces.
@@ -1015,11 +1022,17 @@ final class TileSpawner {
 
     func updateBrowserProfiles(_ profiles: [BrowserProfile]) {
         browserProfiles = RegistrySettings.normalizedBrowserProfilesForApp(profiles)
+        for view in canvasView?.allWorkspaceTiles().compactMap({ canvasView?.tileView(for: $0.id) as? BrowserTileNSView }) ?? [] {
+            view.refreshBrowserProfileLabel()
+        }
     }
 
     private func availableBrowserProfiles() -> [BrowserProfile] {
         RegistrySettings.normalizedBrowserProfilesForApp(browserProfileMenuProvider?() ?? browserProfiles)
     }
+
+    /// The profile a browser tile actually uses, by name, for approval text.
+    func browserProfileName(forTile tile: Tile) -> String { browserProfile(for: tile.metadata.browserProfileId).name }
 
     private func browserProfile(for id: UUID?) -> BrowserProfile {
         let requested = id ?? project.settings.defaultBrowserProfileId
@@ -1040,6 +1053,8 @@ final class TileSpawner {
         view.onCreateBrowserProfile = { [weak self] in self?.browserProfileCreateHandler?(tileId) }
         view.onRenameBrowserProfile = { [weak self] profileId in self?.browserProfileRenameHandler?(tileId, profileId) }
         view.onDeleteBrowserProfile = { [weak self] profileId in self?.browserProfileDeleteHandler?(tileId, profileId) }
+        view.onSignOutAgents = { [weak self] in self?.browserEngine.signOutAgents(completion: {}) }
+        view.refreshBrowserProfileLabel()
     }
 
     private func configureBrowserInspectorMenu(_ view: BrowserTileNSView, tileId: UUID) {
@@ -1063,6 +1078,14 @@ final class TileSpawner {
         beside anchorTileId: UUID? = nil,
         targetZoneId explicitTargetZoneId: UUID? = nil
     ) -> BrowserOutcome {
+        spawnBrowserImpl(url: url, at: worldPoint, beside: anchorTileId,
+                         targetZoneId: explicitTargetZoneId, agentOwner: nil)
+    }
+
+    private func spawnBrowserImpl(
+        url: String?, at worldPoint: CGPoint? = nil, beside anchorTileId: UUID? = nil,
+        targetZoneId explicitTargetZoneId: UUID? = nil, agentOwner: AgentID?
+    ) -> BrowserOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         let urlString = url ?? Self.defaultBrowserURL
         guard URL(string: urlString) != nil else {
@@ -1085,7 +1108,10 @@ final class TileSpawner {
         let size = CanvasEngine.defaultFrame(for: .browser)
         let frame: TileFrame
         if let anchor {
-            let world = Self.anchoredFrame(size: size, anchor: anchor.frame, siblings: worldSiblings)
+            let placementSiblings = agentOwner != nil
+                ? (targetZoneId.flatMap { canvasView.tilesInWorldFrames(forZoneId: $0) } ?? [])
+                : worldSiblings
+            let world = Self.anchoredFrame(size: size, anchor: anchor.frame, siblings: placementSiblings)
             frame = targetZoneId
                 .flatMap { canvasView.installedZonePlacement(for: $0) }
                 .map { CanvasEngine.worldToZoneLocal(world, zoneOrigin: $0.origin) }
@@ -1107,7 +1133,9 @@ final class TileSpawner {
             zPosition: nextZ,
             zoneId: targetZoneId,
             runtimeRef: nil,
-            metadata: TileMetadata(url: urlString, browserProfileId: browserProfile(for: nil).id)
+            metadata: TileMetadata(url: urlString,
+                browserProfileId: agentOwner == nil ? browserProfile(for: nil).id : BrowserProfile.agentsProfileId,
+                browserOwnerAgentId: agentOwner)
         )
 
         let profile = browserProfile(for: tile.metadata.browserProfileId)
@@ -1209,6 +1237,16 @@ final class TileSpawner {
                 view.showPersistenceError()
             }
         }
+    }
+
+    func spawnAgentBrowser(url: String, owner: AgentID, anchorTileId: UUID, targetZoneId: UUID) -> BrowserOutcome {
+        guard let canvasView,
+              canvasView.projectId(forZone: targetZoneId) == project.id,
+              canvasView.installedZonePlacement(for: targetZoneId) != nil,
+              canvasView.installedZoneIds(containing: anchorTileId) == [targetZoneId] else {
+            return .failure(SpawnError.canvasUnavailable)
+        }
+        return spawnBrowserImpl(url: url, beside: anchorTileId, targetZoneId: targetZoneId, agentOwner: owner)
     }
 
     private func configureBrowserRuntime(_ runtime: WKWebViewBrowserRuntime, profileId: UUID) {
@@ -1318,7 +1356,7 @@ final class TileSpawner {
 
     /// Re-resolve an existing browser tile's URL and replace its view with a
     /// fresh runtime. Reuses tile id, frame, and z-index.
-    func restartBrowserTile(tileId: UUID) -> BrowserRestartOutcome {
+    func restartBrowserTile(tileId: UUID, deferNavigation: Bool = false) -> BrowserRestartOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         guard let existing = canvasView.tileRecord(for: tileId) else {
             return .tileNotFound
@@ -1379,7 +1417,20 @@ final class TileSpawner {
 
         // Apply persisted interactionState (back/forward history, scroll, forms)
         // when available, restoring richer session state than URL-only.
-        if let interactionState = persistedBrowserTile?.interactionState {
+        if deferNavigation {
+            // The workspace API installs its domain gate before explicitly
+            // loading the saved URL. No session state may auto-navigate first.
+        } else if let owner = agentBrowserRestoreGateOwner.map({ $0(existing) }) ?? existing.metadata.browserControllingAgentId {
+            // Interaction state can initiate navigation during restoration, so
+            // do not hand opaque history to WebKit before a gate exists. Remote
+            // pages wait for an explicit agent reload and domain approval.
+            let policy = agentBrowserRestorePolicy
+            runtime.agentNavigationDecision = { url, reply in
+                let blank = url.absoluteString.lowercased() == "about:blank"
+                reply(blank || (policy?(owner, url) ?? false))
+            }
+            runtime.loadURL(urlString)
+        } else if let interactionState = persistedBrowserTile?.interactionState {
             runtime.restoreInteractionState(interactionState)
         } else {
             runtime.loadURL(urlString)
@@ -3340,6 +3391,7 @@ final class TileSpawner {
         defer { try? FileManager.default.removeItem(at: registryRoot) }
         let registryStore = RegistryStore(applicationSupportDirectory: registryRoot, retainedBackups: 1)
         var registry = Registry.empty()
+        try expect(registry.settings.browserProfiles.contains(where: { $0.name == "Agents" }), "built-in Agents profile is available in a fresh registry")
         guard let createdProfile = BrowserProfilePersistenceActions.createProfile(
             named: "QA Created",
             in: &registry,
@@ -3347,8 +3399,21 @@ final class TileSpawner {
         ) else {
             throw CheckError.failed("profile create helper accepts custom profile")
         }
+        let agents = BrowserProfile.builtInAgents()
+        try expect(agents.dataStoreIdentifier != BrowserProfile.defaultDataStoreIdentifier, "Agents and Default stores are distinct")
+        try expect(!BrowserProfilePersistenceActions.renameProfile(id: agents.id, to: "Changed", in: &registry), "Agents rename refused")
+        var noBrowser: BrowserState?
+        var noCanvas: CanvasState?
+        try expect(!BrowserProfilePersistenceActions.deleteProfile(id: agents.id, in: &registry, browserState: &noBrowser, canvasState: &noCanvas).registryDeleted, "Agents deletion refused")
+        var forged = agents
+        forged.name = "Forged"
+        forged.dataStoreIdentifier = BrowserProfile.defaultDataStoreIdentifier
+        try expect(!registry.settings.upsertBrowserProfile(forged), "Agents identity cannot be overwritten")
+        let repaired = RegistrySettings.normalizedBrowserProfilesForApp([forged, forged])
+        try expect(repaired.filter { $0.id == agents.id } == [agents], "normalization restores the canonical Agents identity exactly once")
         try registryStore.save(registry)
         var persistedRegistry = try registryStore.loadOrEmpty()
+        try expect(persistedRegistry.settings.browserProfiles.first(where: { $0.id == agents.id }) == agents, "Agents identity survives registry reload")
         try expect(persistedRegistry.settings.browserProfiles.contains(where: { $0.id == createdProfile.id && $0.name == "QA Created" }), "created profile persists to registry store")
         try expect(BrowserProfilePersistenceActions.renameProfile(id: createdProfile.id, to: "QA Created Renamed", in: &persistedRegistry), "profile rename helper accepts custom profile")
         try registryStore.save(persistedRegistry)
@@ -3443,6 +3508,36 @@ final class TileSpawner {
         try loadFixture(isolatedB)
         let isolatedValue = try eval("localStorage.getItem('continuumProfileCheck')", in: isolatedB) as? String
         try expect(isolatedValue == nil, "profile B localStorage is isolated from profile A")
+
+        // Exercise the real sign-out owner with disposable stores injected at
+        // the factory boundary; never clear the user's built-in profile stores.
+        let agentStore = WKWebsiteDataStore.nonPersistent()
+        let personalStore = WKWebsiteDataStore.nonPersistent()
+        let signOutEngine = BrowserEngineContext(dataStoreFactory: { id in
+            id == BrowserProfile.agentsDataStoreIdentifier ? agentStore : personalStore
+        })
+        let agentPage = signOutEngine.makeWebView(storageGroupId: agents.dataStoreIdentifier)
+        let personalPage = signOutEngine.makeWebView(storageGroupId: BrowserProfile.defaultDataStoreIdentifier)
+        try expect(agentPage.configuration.websiteDataStore === agentStore, "Agents resolves to its own store")
+        try expect(personalPage.configuration.websiteDataStore === personalStore, "Default resolves to its own store")
+        try loadFixture(agentPage)
+        try loadFixture(personalPage)
+        _ = try eval("localStorage.setItem('arraySession','agents')", in: agentPage)
+        _ = try eval("localStorage.setItem('arraySession','personal')", in: personalPage)
+        let recreated = signOutEngine.makeWebView(storageGroupId: agents.dataStoreIdentifier)
+        try loadFixture(recreated)
+        let recreatedSession = try eval("localStorage.getItem('arraySession')", in: recreated) as? String
+        try expect(recreatedSession == "agents", "Agents session survives web view recreation")
+        var signOutFinished = false
+        signOutEngine.signOutAgents { signOutFinished = true }
+        try expect(runLoopUntil(signOutFinished), "sign-out completes")
+        try loadFixture(agentPage)
+        try loadFixture(personalPage)
+        let clearedSession = try eval("localStorage.getItem('arraySession')", in: agentPage) as? String
+        try expect(clearedSession == nil, "sign-out clears Agents session")
+        let personalSession = try eval("localStorage.getItem('arraySession')", in: personalPage) as? String
+        try expect(personalSession == "personal", "sign-out preserves Default session")
+        signOutEngine.shutdown()
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("continuum-browser-profile-switch-\(UUID().uuidString)", isDirectory: true)

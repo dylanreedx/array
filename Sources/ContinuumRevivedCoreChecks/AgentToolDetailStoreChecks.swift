@@ -1355,6 +1355,9 @@ func runArrayWorkspaceToolRowChecks() async {
         ("claude canvas_query", claude("mcp__array_workspace__array_canvas_query", #"{"limit":20}"#),
          "Looked around the canvas", "eye"),
         ("pi canvas_query", pi("array_canvas_query", "{}"), "Looked around the canvas", "eye"),
+        ("pi browser click", pi("array_browser_click", #"{"tileId":"tile","ref":"e1","idempotencyKey":"k"}"#), "Clicked in a browser", "globe"),
+        ("claude browser type", claude("mcp__array_workspace__array_browser_type", #"{"text":"SECRET-PASSWORD"}"#), "Typed in a browser", "globe"),
+        ("codex browser screenshot", codex("array_browser_take_screenshot"), "Captured a browser screenshot", "globe"),
         ("claude workspace_context", claude("mcp__array_workspace__array_workspace_context", "{}"),
          "Checked its workspace", "scope"),
         // pi's input names the op but carries ids only: specific, never invented.
@@ -1367,6 +1370,26 @@ func runArrayWorkspaceToolRowChecks() async {
          "Handed work to an agent", "person.2"),
     ]
     var failures: [String] = []
+    for detail in [pi("array_browser_navigate", #"{"url":"https://example.test/?token=SECRET"}"#),
+                   claude("mcp__array_workspace__array_browser_type", #"{"text":"SECRET","url":"https://example.test/?token=SECRET"}"#)] {
+        if detail?.fields.isEmpty != true { failures.append("browser arguments must not enter transcript details") }
+    }
+    let piResultBox = Box()
+    var piResultTranslator = PiEventTranslator()
+    piResultTranslator.onRuntimeObservation = piResultBox.append
+    _ = piResultTranslator.translate(stream: [
+        #"{"type":"tool_execution_start","toolCallId":"pi-browser-secret","toolName":"array_browser_evaluate","args":{}}"#,
+        #"{"type":"tool_execution_end","toolCallId":"pi-browser-secret","toolName":"array_browser_evaluate","result":{"content":[{"type":"text","text":"SECRET-BROWSER-RESULT"}]}}"#,
+    ])
+    let claudeResultBox = Box()
+    var claudeResultTranslator = ClaudeEventTranslator(runToken: "browser-secret")
+    claudeResultTranslator.onRuntimeObservation = claudeResultBox.append
+    _ = claudeResultTranslator.translate(line: claudeLine("mcp__array_workspace__array_browser_evaluate", "{}"))
+    _ = claudeResultTranslator.translate(line: #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu-ws-mcp__array_workspace__array_browser_evaluate","content":"SECRET-BROWSER-RESULT"}]}}"#)
+    if piResultBox.endedDetails.first?.outputPreview != nil || claudeResultBox.endedDetails.first?.outputPreview != nil ||
+       piResultBox.endedDetails.isEmpty || claudeResultBox.endedDetails.isEmpty {
+        failures.append("browser output must not be copied into transcript previews")
+    }
     for item in cases {
         guard let presented = await row(item.detail) else {
             failures.append("\(item.label): the translator published no started tool detail"); continue

@@ -46,7 +46,7 @@ enum BrowserAutomationError: Error, Equatable, CustomStringConvertible {
         case .focusRefused(let what):
             return "Clicking \(what) did not focus it, so nothing was typed. Take a fresh snapshot and check what took focus."
         case .userTyping:
-            return "The user is typing in this browser. Wait, then try again."
+            return "The user is typing or took control of this browser. Wait, then take a fresh snapshot."
         case .unknownKey(let key):
             return "\(key) is not a key this tool knows. Use names like Enter, Tab, Escape, Backspace, ArrowDown, or one character, with Shift+, Control+, Alt+ or Meta+."
         case .timedOut(let what, let throttled):
@@ -107,7 +107,19 @@ final class BrowserAutomation {
     /// Bumped by every real mouse-down or key-down the user makes in this
     /// tile. S3's takeover rule reads it.
     private(set) var userInputCount = 0
+    var onUserInput: (() -> Void)?
+    var onAgentClick: ((NSPoint) -> Void)?
+    var _screenshotStarted: (() -> Void)?
     private(set) var lastUserKeyAt: Date?
+    private var inputSurfaceIds: Set<ObjectIdentifier> = []
+    private var agentDeliveryDepth = 0
+    private struct AgentInputFingerprint: Hashable {
+        let type: NSEvent.EventType
+        let timestamp: TimeInterval
+        let windowNumber: Int
+        let keyCode: UInt16?
+    }
+    private var agentInputFingerprints: [AgentInputFingerprint] = []
     private var lastOutline: Set<String>?
     private var outlineURL: String?
     private var dialogs: [String] = []
@@ -123,7 +135,23 @@ final class BrowserAutomation {
 
     func detach() {
         Self.registry[ObjectIdentifier(webView)] = nil
+        for id in inputSurfaceIds where Self.registry[id]?.engine === self { Self.registry[id] = nil }
+        inputSurfaceIds.removeAll()
+        onUserInput = nil
+        onAgentClick = nil
+        _screenshotStarted = nil
+        for fingerprint in agentInputFingerprints where Self.syntheticInputs[fingerprint]?.engine === self {
+            Self.syntheticInputs[fingerprint] = nil
+        }
+        agentInputFingerprints.removeAll()
         isEngaged = false
+    }
+
+    /// Include the tile chrome as well as the web view in takeover detection.
+    func trackInputSurface(_ surface: NSView) {
+        let id = ObjectIdentifier(surface)
+        inputSurfaceIds.insert(id)
+        Self.registry[id] = WeakEngine(engine: self)
     }
 
     // MARK: - Reading the page
@@ -165,6 +193,7 @@ final class BrowserAutomation {
         }
         let scale = webView.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         configuration.snapshotWidth = NSNumber(value: Double(min(pointWidth, CGFloat(Self.screenshotMaxPixelWidth) / scale)))
+        _screenshotStarted?()
         let image = try await takeSnapshot(configuration, deadline: deadline)
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             throw BrowserAutomationError.script("the snapshot had no bitmap")
@@ -191,21 +220,25 @@ final class BrowserAutomation {
     // MARK: - Acting
 
     func click(ref: String, doubleClick: Bool = false, deadline: Date) async throws -> BrowserAutomationOutcome {
-        try await act(deadline: deadline) {
+        let inputAtStart = userInputCount
+        return try await act(deadline: deadline) {
             let window = try self.liveWindow()
             let target = try await self.world("target", ["ref": ref], deadline: deadline)
             try Self.requireTarget(target, ref: ref, mustLand: true)
             try await self.settleIfRevealed()
+            try self.requireInputControl(inputAtStart, deadline: deadline)
             self.deliverClick(cssX: Self.double(target["x"]), cssY: Self.double(target["y"]), window: window, count: doubleClick ? 2 : 1)
             return ("Clicked \(target["what"] as? String ?? ref)", nil)
         }
     }
 
     func click(x: Double, y: Double, doubleClick: Bool = false, deadline: Date) async throws -> BrowserAutomationOutcome {
-        try await act(deadline: deadline) {
+        let inputAtStart = userInputCount
+        return try await act(deadline: deadline) {
             let window = try self.liveWindow()
             let hit = try await self.world("at", ["x": x, "y": y], deadline: deadline)
             try await self.settleIfRevealed()
+            try self.requireInputControl(inputAtStart, deadline: deadline)
             self.deliverClick(cssX: x, cssY: y, window: window, count: doubleClick ? 2 : 1)
             return ("Clicked at \(Int(x)),\(Int(y)), on \(hit["what"] as? String ?? "nothing")", nil)
         }
@@ -216,10 +249,11 @@ final class BrowserAutomation {
     /// presses Enter afterwards.
     func type(_ text: String, ref: String?, clear: Bool = false, submit: Bool = false, deadline: Date) async throws -> BrowserAutomationOutcome {
         try await waitForUserQuiet(deadline: deadline)
+        let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
             let window = try self.liveWindow()
             let responder = window.firstResponder
-            defer { self.restore(responder, in: window) }
+            defer { if self.userInputCount == inputAtStart { self.restore(responder, in: window) } }
             var what = "the focused element"
             if let ref {
                 let target = try await self.world("target", ["ref": ref], deadline: deadline)
@@ -227,14 +261,26 @@ final class BrowserAutomation {
                 what = target["what"] as? String ?? ref
                 guard target["editable"] as? Bool == true else { throw BrowserAutomationError.notEditable(what) }
                 try await self.settleIfRevealed()
+                try self.requireInputControl(inputAtStart, deadline: deadline)
                 self.deliverClick(cssX: Self.double(target["x"]), cssY: Self.double(target["y"]), window: window, count: 1)
                 try await self.pause(0.05, deadline: deadline)
                 let focus = try await self.world("focusedIs", ["ref": ref], deadline: deadline)
                 guard focus["focused"] as? Bool == true else { throw BrowserAutomationError.focusRefused(what) }
-                if clear { _ = try await self.world("select", ["ref": ref], deadline: deadline) }
+                if clear {
+                    try self.requireInputControl(inputAtStart, deadline: deadline)
+                    _ = try await self.world("select", ["ref": ref], deadline: deadline)
+                }
             }
+            try self.requireInputControl(inputAtStart, deadline: deadline)
             if clear && text.isEmpty { self.deliverKey(Self.namedKeys["Backspace"]!, flags: [], window: window) }
-            for character in text { self.deliverCharacter(character, window: window) }
+            for character in text {
+                try self.requireInputControl(inputAtStart, deadline: deadline)
+                self.deliverCharacter(character, window: window)
+                // WebKit consumes trusted input asynchronously. A small yield
+                // keeps long bursts from losing keys and lets user input win.
+                try await self.pause(0.005, deadline: deadline)
+            }
+            try self.requireInputControl(inputAtStart, deadline: deadline)
             if submit { self.deliverKey(Self.namedKeys["Enter"]!, flags: [], window: window) }
             var value: String?
             if let ref {
@@ -271,10 +317,12 @@ final class BrowserAutomation {
             throw BrowserAutomationError.unknownKey(combo)
         }
         try await waitForUserQuiet(deadline: deadline)
+        let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
             let window = try self.liveWindow()
             let responder = window.firstResponder
             defer { self.restore(responder, in: window) }
+            try self.requireInputControl(inputAtStart, deadline: deadline)
             // A Cmd+A key event selects nothing in a web view (probe p2); the
             // responder action does.
             if flags == .command, keyName.lowercased() == "a" {
@@ -287,7 +335,9 @@ final class BrowserAutomation {
     }
 
     func scroll(ref: String? = nil, dx: Double = 0, dy: Double = 0, deadline: Date) async throws -> BrowserAutomationOutcome {
-        try await act(deadline: deadline) {
+        let inputAtStart = userInputCount
+        return try await act(deadline: deadline) {
+            try self.requireInputControl(inputAtStart, deadline: deadline)
             var arguments: [String: Any] = ["dx": dx, "dy": dy]
             if let ref { arguments["ref"] = ref }
             let result = try await self.world("scroll", arguments, deadline: deadline)
@@ -412,6 +462,11 @@ final class BrowserAutomation {
 
     // MARK: - Input delivery
 
+    private func requireInputControl(_ inputAtStart: Int, deadline: Date) throws {
+        guard userInputCount == inputAtStart else { throw BrowserAutomationError.userTyping }
+        guard Date() < deadline else { throw BrowserAutomationError.timedOut("before sending browser input", throttled: isThrottled) }
+    }
+
     private func liveWindow() throws -> NSWindow {
         guard let runtime, !runtime.isTerminated, let window = webView.window else { throw BrowserAutomationError.notLive }
         return window
@@ -426,15 +481,20 @@ final class BrowserAutomation {
     }
 
     private func deliverClick(cssX: Double, cssY: Double, window: NSWindow, count: Int) {
+        agentDeliveryDepth += 1
+        defer { agentDeliveryDepth -= 1 }
         let zoom = webView.pageZoom
         let local = NSPoint(x: cssX * zoom, y: webView.isFlipped ? cssY * zoom : webView.bounds.height - cssY * zoom)
         let point = webView.convert(local, to: nil)
         let responder = window.firstResponder
         for clickCount in 1...count {
-            webView.mouseDown(with: Self.mouseEvent(.leftMouseDown, at: point, window: window, clickCount: clickCount))
+            let down = Self.mouseEvent(.leftMouseDown, at: point, window: window, clickCount: clickCount)
+            rememberAgentInput(down)
+            webView.mouseDown(with: down)
             webView.mouseUp(with: Self.mouseEvent(.leftMouseUp, at: point, window: window, clickCount: clickCount))
         }
         restore(responder, in: window)
+        onAgentClick?(local)
     }
 
     private func restore(_ responder: NSResponder?, in window: NSWindow) {
@@ -450,6 +510,8 @@ final class BrowserAutomation {
     }
 
     private func deliverKey(_ key: Key, flags: NSEvent.ModifierFlags, window: NSWindow) {
+        agentDeliveryDepth += 1
+        defer { agentDeliveryDepth -= 1 }
         var flags = flags.union(key.flags)
         if key.shifted { flags.insert(.shift) }
         let characters = flags.contains(.shift) && key.characters.count == 1 ? key.characters.uppercased() : key.characters
@@ -460,6 +522,7 @@ final class BrowserAutomation {
                 context: nil, characters: characters, charactersIgnoringModifiers: key.ignoringModifiers,
                 isARepeat: false, keyCode: key.code
             ) else { continue }
+            if type == .keyDown { rememberAgentInput(event) }
             if type == .keyDown { webView.keyDown(with: event) } else { webView.keyUp(with: event) }
         }
     }
@@ -470,6 +533,31 @@ final class BrowserAutomation {
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
             context: nil, eventNumber: 0, clickCount: clickCount, pressure: type == .leftMouseDown ? 1 : 0
         )!
+    }
+
+    private func rememberAgentInput(_ event: NSEvent) {
+        let expired = agentInputFingerprints.filter { event.timestamp - $0.timestamp > 5 }
+        for fingerprint in expired where Self.syntheticInputs[fingerprint]?.engine === self { Self.syntheticInputs[fingerprint] = nil }
+        agentInputFingerprints.removeAll { event.timestamp - $0.timestamp > 5 }
+        let fingerprint = Self.fingerprint(event)
+        agentInputFingerprints.append(fingerprint)
+        Self.syntheticInputs[fingerprint] = WeakEngine(engine: self)
+        while agentInputFingerprints.count > 256 {
+            let oldest = agentInputFingerprints.removeFirst()
+            if Self.syntheticInputs[oldest]?.engine === self { Self.syntheticInputs[oldest] = nil }
+        }
+    }
+
+    private static func fingerprint(_ event: NSEvent) -> AgentInputFingerprint {
+        AgentInputFingerprint(type: event.type, timestamp: event.timestamp, windowNumber: event.windowNumber,
+                              keyCode: event.type == .keyDown ? event.keyCode : nil)
+    }
+
+    private static func consumeAgentInput(_ event: NSEvent) -> Bool {
+        let fingerprint = fingerprint(event)
+        guard let owner = syntheticInputs.removeValue(forKey: fingerprint)?.engine else { return false }
+        owner.agentInputFingerprints.removeAll { $0 == fingerprint }
+        return true
     }
 
     struct Key {
@@ -524,6 +612,7 @@ final class BrowserAutomation {
 
     private struct WeakEngine { weak var engine: BrowserAutomation? }
     private static var registry: [ObjectIdentifier: WeakEngine] = [:]
+    private static var syntheticInputs: [AgentInputFingerprint: WeakEngine] = [:]
     private static var monitor: Any?
 
     private static func register(_ engine: BrowserAutomation) {
@@ -538,7 +627,9 @@ final class BrowserAutomation {
     }
 
     private static func noteUserEvent(_ event: NSEvent) {
-        guard !registry.isEmpty, let window = event.window else { return }
+        guard !registry.isEmpty else { return }
+        if consumeAgentInput(event) { return }
+        guard let window = event.window else { return }
         var view: NSView?
         if event.type == .keyDown {
             view = window.firstResponder as? NSView
@@ -546,10 +637,11 @@ final class BrowserAutomation {
             view = content.hitTest(content.superview?.convert(event.locationInWindow, from: nil) ?? event.locationInWindow)
         }
         while let current = view {
-            if current is WKWebView {
-                guard let engine = registry[ObjectIdentifier(current)]?.engine else { return }
+            if let engine = registry[ObjectIdentifier(current)]?.engine {
+                guard engine.agentDeliveryDepth == 0 else { return }
                 engine.userInputCount += 1
                 if event.type == .keyDown { engine.lastUserKeyAt = Date() }
+                engine.onUserInput?()
                 return
             }
             view = current.superview

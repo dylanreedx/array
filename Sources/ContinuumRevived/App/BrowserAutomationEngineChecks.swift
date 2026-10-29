@@ -51,6 +51,14 @@ private final class BrowserAutomationEngineCheck {
         func presentTLSChallengePrompt(host: String, window: NSWindow?, completion: @escaping (Bool) -> Void) { shown += 1; completion(false) }
     }
 
+    final class ChallengeSender: NSObject, URLAuthenticationChallengeSender {
+        func use(_ credential: URLCredential, for challenge: URLAuthenticationChallenge) {}
+        func continueWithoutCredential(for challenge: URLAuthenticationChallenge) {}
+        func cancel(_ challenge: URLAuthenticationChallenge) {}
+        func performDefaultHandling(for challenge: URLAuthenticationChallenge) {}
+        func rejectProtectionSpaceAndContinue(with challenge: URLAuthenticationChallenge) {}
+    }
+
     static let page = """
     <!doctype html><html><head><title>Engine fixture</title>
     <style>body{margin:0;font:14px -apple-system} #red{position:absolute;left:600px;top:20px;width:100px;height:80px;background:rgb(255,0,0)}</style>
@@ -59,6 +67,7 @@ private final class BrowserAutomationEngineCheck {
     <form onsubmit="event.preventDefault(); window.submitted = (window.submitted || 0) + 1;">
       <label for="email">Email</label> <input id="email">
       <label for="pw">Password</label> <input id="pw" type="password">
+      <label for="upload">Upload</label> <input id="upload" type="file">
       <button id="go" type="button">Create account</button>
     </form>
     <p>Already have an <b>account</b>? Sign in.</p>
@@ -257,6 +266,22 @@ private final class BrowserAutomationEngineCheck {
         try expect(dialog.dialogs == ["confirm \"Delete everything?\": cancelled"] && presenter.shown == 0,
                    "the confirm was not answered for the agent: \(dialog.dialogs), sheets=\(presenter.shown)")
         try expect(try await page("() => window.confirmAnswer") as? Bool == false, "the page did not see the confirm cancelled")
+        let uploadSnapshot = try await engine.snapshot(deadline: soon)
+        let upload = try ref("Upload", in: uploadSnapshot.text)
+        engine.isEngaged = true
+        let chooser = try await engine.click(ref: upload, deadline: soon)
+        engine.isEngaged = false
+        try expect(presenter.shown == 0 && chooser.dialogs.contains(where: { $0.contains("file chooser") && $0.contains("refused") }),
+                   "file upload must be refused without an Open panel: \(chooser.dialogs)")
+        let protection = URLProtectionSpace(host: "fixture.example", port: 80, protocol: "http", realm: "private", authenticationMethod: NSURLAuthenticationMethodHTTPBasic)
+        let challenge = URLAuthenticationChallenge(protectionSpace: protection, proposedCredential: nil, previousFailureCount: 0,
+            failureResponse: nil, error: nil, sender: ChallengeSender())
+        var authDisposition: URLSession.AuthChallengeDisposition?
+        engine.isEngaged = true
+        runtime.handleAuthenticationChallenge(challenge) { disposition, _ in authDisposition = disposition }
+        engine.isEngaged = false
+        try expect(presenter.shown == 0 && authDisposition == .cancelAuthenticationChallenge,
+                   "HTTP authentication during agent control must cancel without an unattended prompt")
 
         // 10. A page error thrown after a click comes back with that click.
         let thrown = try await engine.click(ref: try ref("Throw", in: fresh.text), deadline: soon)
@@ -302,9 +327,215 @@ private final class BrowserAutomationEngineCheck {
                                               console: ["error 1"], dialogs: [])
         try expect(small.cut.isEmpty && small.text.contains("error 1"), "a small snapshot was cut: \(small.cut)")
 
+        // The host action adapter must return the actual page's result, not a
+        // synthesized outcome. Browser API dispatch and grants are tested separately.
+        let toolSnapshot = await BrowserActionExecutor.perform(.snapshot(tile: runtime.tileId, key: nil), runtime: runtime, deadline: soon)
+        guard case let .result(snapshotFields) = toolSnapshot,
+              snapshotFields["text"]?.string?.contains("Sign up") == true else {
+            throw BrowserAutomationEngineCheckError("browser action adapter did not return the real outline")
+        }
+        let toolEval = await BrowserActionExecutor.perform(.evaluate(tile: runtime.tileId, script: "() => ({ title: document.title })", key: nil), runtime: runtime, deadline: soon)
+        guard case let .result(evalFields) = toolEval,
+              evalFields["value"]?.object?["title"]?.string == "Engine fixture" else {
+            throw BrowserAutomationEngineCheckError("browser action adapter did not return page evaluation")
+        }
+        let previousConsoleSequence = runtime.consoleEntrySequence
+        _ = try await page("() => { console.error('adapter-' + 'x'.repeat(800)); return true; }")
+        let consoleDeadline = Date().addingTimeInterval(2)
+        while runtime.consoleEntrySequence == previousConsoleSequence && Date() < consoleDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let toolConsole = await BrowserActionExecutor.perform(.console(tile: runtime.tileId, level: "error", key: nil), runtime: runtime, deadline: soon)
+        guard case let .result(consoleFields) = toolConsole, consoleFields["pageSupplied"]?.bool == true,
+              consoleFields["truncated"]?.bool == true,
+              consoleFields["entries"]?.array?.contains(where: { $0.object?["message"]?.string?.hasPrefix("adapter-") == true }) == true else {
+            throw BrowserAutomationEngineCheckError("browser console adapter must label and bound page-supplied messages")
+        }
+        let toolShot = await BrowserActionExecutor.perform(.screenshot(tile: runtime.tileId, ref: nil, key: nil), runtime: runtime, deadline: soon)
+        guard case let .result(shotFields) = toolShot,
+              shotFields["image"]?.object?["mimeType"]?.string == "image/png",
+              let bytes = shotFields["image"]?.object?["data"]?.string,
+              Data(base64Encoded: bytes)?.starts(with: [137, 80, 78, 71]) == true else {
+            throw BrowserAutomationEngineCheckError("browser action adapter must return a real PNG")
+        }
+        let wrongTile = await BrowserActionExecutor.perform(.click(tile: UUID(), target: .ref(go), key: nil), runtime: runtime, deadline: soon)
+        guard case .error = wrongTile else { throw BrowserAutomationEngineCheckError("adapter must reject the wrong runtime") }
+        let toolClick = await BrowserActionExecutor.perform(.click(tile: runtime.tileId, target: .ref(go), key: nil), runtime: runtime, deadline: soon)
+        guard case .result = toolClick,
+              try await events().filter({ $0.hasPrefix("go:") }).count == clicks + 2 else {
+            throw BrowserAutomationEngineCheckError("browser adapter click did not reach the page")
+        }
+        let toolType = await BrowserActionExecutor.perform(.type(tile: runtime.tileId, text: "adapter", ref: email, clear: true, submit: false, key: nil), runtime: runtime, deadline: soon)
+        guard case .result = toolType, try await page("() => window.model") as? String == "adapter" else {
+            throw BrowserAutomationEngineCheckError("browser adapter typing did not reach the page")
+        }
+        // The user can take over while WebKit is still resolving a target or
+        // while a long type is in flight. No later agent key may be delivered.
+        window.makeFirstResponder(userField)
+        let takeoverKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, characters: "z", charactersIgnoringModifiers: "z", isARepeat: false, keyCode: 6)!
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+            self.window.makeFirstResponder(self.runtime.webView)
+            NSApp.sendEvent(takeoverKey)
+        }
+        try await expectError({ $0 == .userTyping }, "an in-flight type after user takeover") {
+            _ = try await self.engine.type(String(repeating: "a", count: 100), ref: email, clear: true, deadline: self.soon)
+        }
+        let afterUserTakeover = try await page("() => window.model") as? String ?? ""
+        try expect(afterUserTakeover.filter({ $0 == "a" }).count < 100 && window.firstResponder === runtime.webView,
+                   "agent typing continued or moved the user's focus after takeover")
+        var checkedNavigation = false
+        var decisionReturned = false
+        let urlBeforeDenial = runtime.url
+        var publishedURLs: [String] = []
+        let priorStateChange = runtime.onStateChange
+        runtime.onStateChange = { publishedURLs.append(self.runtime.url) }
+        runtime.agentNavigationDecision = { _, complete in
+            checkedNavigation = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { complete(false); decisionReturned = true }
+        }
+        runtime.loadURL("about:blank")
+        let navigationDeadline = Date().addingTimeInterval(2)
+        while !checkedNavigation && Date() < navigationDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try expect(checkedNavigation && !decisionReturned && runtime.webView.title == "Engine fixture",
+                   "agent navigation must wait for the host decision")
+        while !decisionReturned && Date() < navigationDeadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        try expect(decisionReturned && runtime.webView.title == "Engine fixture", "agent navigation must obey denial")
+        try expect(runtime.url == urlBeforeDenial && !publishedURLs.contains("about:blank"),
+                   "a denied destination must never be published or persisted as the browser URL")
+        var pendingDecision: (@MainActor (Bool) -> Void)?
+        runtime.agentNavigationDecision = { _, complete in pendingDecision = complete }
+        runtime.loadURL("about:blank")
+        let pendingDeadline = Date().addingTimeInterval(2)
+        while pendingDecision == nil && Date() < pendingDeadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        try expect(pendingDecision != nil, "the next navigation must reach the decision gate")
+        runtime.agentNavigationDecision = { _, complete in complete(false) }
+        pendingDecision?(true)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        try expect(runtime.url == urlBeforeDenial && runtime.webView.title == "Engine fixture",
+                   "an approval from a replaced gate must not authorize navigation")
+        runtime.agentNavigationDecision = { _, complete in complete(true) }
+        runtime.loadURL("about:blank")
+        let allowedDeadline = Date().addingTimeInterval(2)
+        while runtime.url != "about:blank" && Date() < allowedDeadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        try expect(runtime.url == "about:blank" && publishedURLs.contains("about:blank"),
+                   "an allowed committed navigation must publish its URL")
+        try await checkRedirectGate()
+        runtime.onStateChange = priorStateChange
+        runtime.agentNavigationDecision = nil
+
         window.orderOut(nil)
         runtime.terminate(policy: .force)
         return "outline read past page tampering with passwords masked; trusted clicks at 1x, 0.5x and 2x with the user's field kept first responder; controlled input typed; the user's key held a type \(String(format: "%.2f", held)) s; covered and stale refused; dialog answered for the agent; page error reported; screenshots \(notes.joined(separator: ", "))"
+    }
+
+    private func checkRedirectGate() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("array-browser-redirect-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let portFile = directory.appendingPathComponent("port")
+        let logFile = directory.appendingPathComponent("requests")
+        let source = """
+        import http.server, sys
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                with open(sys.argv[2], 'a') as log: log.write(self.path + '\\n')
+                if self.path == '/redirect':
+                    self.send_response(302)
+                    self.send_header('Location', '/blocked')
+                    self.end_headers()
+                elif self.path == '/download':
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/octet-stream')
+                    self.send_header('Content-Disposition', 'attachment; filename="fixture.txt"')
+                    self.end_headers()
+                    self.wfile.write(b'private browser download')
+                elif self.path == '/iframe':
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html')
+                    self.end_headers()
+                    self.wfile.write(b'<iframe src="/child"></iframe>')
+                else:
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'blocked destination')
+            def log_message(self, *args): pass
+        server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+        with open(sys.argv[1], 'w') as port: port.write(str(server.server_port))
+        server.serve_forever()
+        """
+        let server = Process()
+        server.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        server.arguments = ["-c", source, portFile.path, logFile.path]
+        server.standardOutput = FileHandle.nullDevice
+        server.standardError = FileHandle.nullDevice
+        try server.run()
+        defer { if server.isRunning { server.terminate(); server.waitUntilExit() } }
+        let startupDeadline = Date().addingTimeInterval(5)
+        var port: Int?
+        while port == nil && Date() < startupDeadline {
+            port = (try? String(contentsOf: portFile, encoding: .utf8)).flatMap(Int.init)
+            if port == nil { try await Task.sleep(nanoseconds: 20_000_000) }
+        }
+        guard let port else { throw BrowserAutomationEngineCheckError("redirect fixture server failed to start") }
+        var seen: [String] = []
+        runtime.agentNavigationDecision = { url, complete in
+            seen.append(url.path)
+            complete(url.path == "/redirect")
+        }
+        runtime.loadURL("http://127.0.0.1:\(port)/redirect")
+        let redirectDeadline = Date().addingTimeInterval(5)
+        while !seen.contains("/blocked") && Date() < redirectDeadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let requests = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
+        try expect(seen.contains("/redirect") && seen.contains("/blocked") && requests.contains("/redirect")
+                   && !requests.contains("/blocked") && runtime.url == "about:blank",
+                   "a redirected destination must be checked and denied before its request or URL is published: seen=\(seen), requests=\(requests)")
+        seen.removeAll()
+        runtime.agentNavigationDecision = { url, complete in
+            seen.append(url.path)
+            complete(url.path == "/iframe")
+        }
+        runtime.loadURL("http://127.0.0.1:\(port)/iframe")
+        let frameDeadline = Date().addingTimeInterval(3)
+        var frameRequests = ""
+        while Date() < frameDeadline {
+            frameRequests = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
+            if frameRequests.contains("/child") { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try expect(frameRequests.contains("/child") && !seen.contains("/child"),
+                   "child frames must load without a top-level navigation approval: seen=\(seen), requests=\(frameRequests)")
+        let redirectRoot = directory.appendingPathComponent("redirected-downloads", isDirectory: true)
+        let outside = directory.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: redirectRoot, withDestinationURL: outside)
+        try expect(BrowserArtifactStore.downloadDestination(root: redirectRoot, tileId: runtime.tileId, suggestedFilename: "bad") == nil,
+                   "a symlink must not redirect agent downloads")
+        let downloadRoot = directory.appendingPathComponent("downloads", isDirectory: true)
+        var destination: URL?
+        runtime.agentDownloadDestination = { filename in
+            destination = BrowserArtifactStore.downloadDestination(root: downloadRoot, tileId: self.runtime.tileId, suggestedFilename: filename)
+            return destination
+        }
+        let sheetsBeforeDownload = presenter.shown
+        engine.isEngaged = true
+        runtime.agentNavigationDecision = { _, complete in complete(true) }
+        runtime.loadURL("http://127.0.0.1:\(port)/download")
+        let downloadDeadline = Date().addingTimeInterval(3)
+        while Date() < downloadDeadline {
+            if let destination, (try? Data(contentsOf: destination)) == Data("private browser download".utf8) { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        engine.isEngaged = false
+        let mode = destination.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.deletingLastPathComponent().path)[.posixPermissions] as? NSNumber }
+        try expect(presenter.shown == sheetsBeforeDownload && destination != nil && mode?.intValue == 0o700 &&
+                   destination.flatMap { try? Data(contentsOf: $0) } == Data("private browser download".utf8),
+                   "an agent download must reach a private tile directory without a Save panel")
     }
 
     private static func pixel(_ shot: BrowserAutomationScreenshot, cssX: Double, cssY: Double, cssWidth: Double) throws -> (red: Int, green: Int, blue: Int) {

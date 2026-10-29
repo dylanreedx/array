@@ -3,6 +3,14 @@ import ContinuumRevivedCore
 import Foundation
 import WebKit
 
+enum AgentBrowserNavigationResult {
+    case completed
+    case denied
+    case notLive
+    case unavailable
+    case failed(String)
+}
+
 enum BrowserElementContextCaptureError: Error, Equatable, CustomStringConvertible {
     case elementNotFound(String)
 
@@ -179,6 +187,25 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     /// WKWebView so WebKit can continue the navigation with its supplied configuration.
     var onNewWindowRequest: ((URLRequest, WKWebViewConfiguration, WKNavigationAction, WKWindowFeatures) -> WKWebView?)?
 
+    /// Optional host-owned navigation gate for an agent-controlled runtime.
+    /// The callback may answer later, for example after a domain approval.
+    /// A nil gate preserves ordinary user-browser navigation.
+    var agentPopupRequest: ((URLRequest) -> Void)?
+    /// An open's initiating request must still be authorized when an async
+    /// navigation decision returns, not merely when it was requested.
+    var agentNavigationAdmission: (() -> Bool)?
+    var agentNavigationDecision: ((URL, @escaping @MainActor (Bool) -> Void) -> Void)? {
+        didSet { agentNavigationGeneration &+= 1 }
+    }
+    private var agentNavigationGeneration: UInt64 = 0
+    private struct AgentNavigationWaiter {
+        let navigation: WKNavigation
+        let continuation: CheckedContinuation<AgentBrowserNavigationResult, Never>
+        let deadline: Date
+        var sentRequest = false
+    }
+    private var agentNavigationWaiter: AgentNavigationWaiter?
+
     private var didNotifyContentProcessTerminated = false
     private(set) var isTerminated = false
     private var faviconRequestGeneration = 0
@@ -188,6 +215,8 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     private let uiDialogPresenter: BrowserUIDialogPresenting
     private var observers: [NSKeyValueObservation] = []
     private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
+    private var agentDownloads: Set<ObjectIdentifier> = []
+    var agentDownloadDestination: ((String) -> URL?)?
     private var downloadsWithRecordedNetworkEvent: Set<ObjectIdentifier> = []
     private var consoleLogBuffer = BrowserConsoleLogBuffer()
     /// Counts every console entry ever received, so a reader can ask for the
@@ -320,6 +349,9 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         observers.append(webView.observe(\.url, options: [.new]) { [weak self] _, _ in
             Task { @MainActor in
                 guard let self else { return }
+                // WebKit can expose a provisional URL before policy has
+                // answered. Guarded runtimes publish only committed URLs.
+                guard self.agentNavigationDecision == nil else { return }
                 if let next = self.webView.url?.absoluteString, !next.isEmpty {
                     self.url = next
                     self.onStateChange?()
@@ -413,14 +445,16 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
             onStateChange?()
             return
         }
-        self.url = urlString
+        if agentNavigationDecision == nil { self.url = urlString }
         // A WKWebView keeps reporting the previous document title until the new
         // load commits. Clear the runtime title at navigation start so tab
         // snapshots do not stamp the previous page title onto a newly selected
         // or newly-created tab before the destination page has a title.
-        self.title = ""
-        faviconRequestGeneration += 1
-        faviconURL = nil
+        if agentNavigationDecision == nil {
+            self.title = ""
+            faviconRequestGeneration += 1
+            faviconURL = nil
+        }
         loadingState = .loading(progress: 0)
         onStateChange?()
         webView.load(URLRequest(url: url))
@@ -430,6 +464,62 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     func goForward() { webView.goForward() }
     func reload() { webView.reload() }
     func stop() { webView.stopLoading() }
+
+    /// Wait for the matching WebKit navigation, including an asynchronous policy
+    /// decision and redirects. The queue retains its barrier after its own
+    /// deadline until WebKit finishes or this runtime is explicitly terminated.
+    func navigateForAgent(_ destination: BrowserNavigation, checkoutRoot: URL, deadline: Date) async -> AgentBrowserNavigationResult {
+        guard !isTerminated, agentNavigationDecision != nil, deadline > Date() else { return .notLive }
+        guard agentNavigationWaiter == nil else { return .unavailable }
+        // Before the load: WebKit moves `url` synchronously for a same-document one.
+        let startURL = webView.url
+        let navigation: WKNavigation?
+        switch destination {
+        case .url(let raw):
+            guard let url = URL(string: raw) else { return .failed("Invalid URL.") }
+            loadingState = .loading(progress: 0)
+            onStateChange?()
+            if url.isFileURL { navigation = webView.loadFileURL(url, allowingReadAccessTo: checkoutRoot) }
+            else { navigation = webView.load(URLRequest(url: url)) }
+        case .back: navigation = webView.goBack()
+        case .forward: navigation = webView.goForward()
+        case .reload: navigation = webView.reload()
+        }
+        guard let navigation else { return .unavailable }
+        return await withCheckedContinuation { continuation in
+            agentNavigationWaiter = AgentNavigationWaiter(navigation: navigation, continuation: continuation, deadline: deadline)
+            watchAgentNavigation(ObjectIdentifier(navigation), startURL: startURL, deadline: deadline)
+        }
+    }
+
+    /// WebKit sends no didFinish for a same-document navigation (a fragment,
+    /// or history across pushState entries), and a waiter left pending refuses
+    /// every later navigation on this tile. So poll while one is pending: an
+    /// idle view whose URL moved finished in place, and the deadline always
+    /// settles the wait.
+    private func watchAgentNavigation(_ navigationId: ObjectIdentifier, startURL: URL?, deadline: Date) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self, let pending = self.agentNavigationWaiter, ObjectIdentifier(pending.navigation) == navigationId else { return }
+            if !self.webView.isLoading && self.webView.url != startURL {
+                // No didFinish will clear the loading state set at the start.
+                self.loadingState = .idle
+                self.onStateChange?()
+                self.finishAgentNavigation(navigationId, result: .completed)
+            } else if Date() >= deadline {
+                self.finishAgentNavigation(navigationId, result: .failed(self.webView.isLoading
+                    ? "The page did not finish loading before the deadline"
+                    : "The navigation did not start before the deadline"))
+            } else {
+                self.watchAgentNavigation(navigationId, startURL: startURL, deadline: deadline)
+            }
+        }
+    }
+
+    private func finishAgentNavigation(_ navigationId: ObjectIdentifier?, result: AgentBrowserNavigationResult) {
+        guard let pending = agentNavigationWaiter, let navigationId, ObjectIdentifier(pending.navigation) == navigationId else { return }
+        agentNavigationWaiter = nil
+        pending.continuation.resume(returning: result)
+    }
 
     func captureElementContext(selector: String, completion: @escaping (Result<BrowserElementContext, Error>) -> Void) {
         let selectorLiteral: String
@@ -794,6 +884,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         // half-torn-down runtime.
         if !isTerminated { Self.qaUnterminatedCount -= 1 }
         isTerminated = true
+        if let navigation = agentNavigationWaiter?.navigation { finishAgentNavigation(ObjectIdentifier(navigation), result: .notLive) }
         automationEngine?.detach()
         webView.stopLoading()
         cancelActiveDownloads()
@@ -836,13 +927,50 @@ extension WKWebViewBrowserRuntime: WKScriptMessageHandler {
 extension WKWebViewBrowserRuntime: WKNavigationDelegate {
     nonisolated func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
         MainActor.assumeIsolated {
-            if navigationAction.targetFrame?.isMainFrame == true {
-                self.pendingMainFrameRequestURL = navigationAction.request.url?.absoluteString
+            let finish: @MainActor (Bool) -> Void = { allowed in
+                let withinDeadline = self.agentNavigationWaiter.map { $0.deadline > Date() } ?? true
+                let admitted = self.agentNavigationDecision == nil || (self.agentNavigationAdmission?() ?? true)
+                guard allowed, withinDeadline, admitted, !self.isTerminated else {
+                    if navigationAction.targetFrame?.isMainFrame == true {
+                        self.loadingState = .idle
+                        self.onStateChange?()
+                    }
+                    decisionHandler(.cancel)
+                    if navigationAction.targetFrame?.isMainFrame == true, let pending = self.agentNavigationWaiter {
+                        self.finishAgentNavigation(ObjectIdentifier(pending.navigation),
+                            result: pending.sentRequest ? .failed("A redirect was not approved; the original request may have taken effect") : .denied)
+                    }
+                    return
+                }
+                if navigationAction.targetFrame?.isMainFrame == true {
+                    self.pendingMainFrameRequestURL = navigationAction.request.url?.absoluteString
+                    self.agentNavigationWaiter?.sentRequest = true
+                }
+                if #available(macOS 11.3, *), navigationAction.shouldPerformDownload {
+                    decisionHandler(.download)
+                } else {
+                    decisionHandler(.allow)
+                }
             }
-            if #available(macOS 11.3, *), navigationAction.shouldPerformDownload {
-                decisionHandler(.download)
-            } else {
-                decisionHandler(.allow)
+            guard let gate = self.agentNavigationDecision else { finish(true); return }
+            // The domain boundary applies to top-level visits. Subframes are
+            // part of the approved page and must not stall on host prompts.
+            if let frame = navigationAction.targetFrame, !frame.isMainFrame { finish(true); return }
+            // WebKit requires a synchronous child-view return, but opening a
+            // scoped browser can require asynchronous approval. Cancel this
+            // navigation and hand the request to the host's guarded open path.
+            if navigationAction.targetFrame == nil {
+                self.agentPopupRequest?(navigationAction.request)
+                finish(false)
+                return
+            }
+            guard let url = navigationAction.request.url else { finish(false); return }
+            let generation = self.agentNavigationGeneration
+            var answered = false
+            gate(url) { [weak self] allowed in
+                guard !answered else { return }
+                answered = true
+                finish(allowed && self?.agentNavigationGeneration == generation)
             }
         }
     }
@@ -858,32 +986,41 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
 
     nonisolated func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         Task { @MainActor in
+            if self.agentNavigationDecision != nil, let committed = self.webView.url?.absoluteString, !committed.isEmpty {
+                self.url = committed
+                self.onStateChange?()
+            }
             self.appendNetworkLiteEvent(kind: .committed, statusCode: self.pendingMainFrameStatusCode)
         }
     }
 
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        let navigationId = navigation.map(ObjectIdentifier.init)
         Task { @MainActor in
             self.appendNetworkLiteEvent(kind: .finished, statusCode: self.pendingMainFrameStatusCode)
             self.pendingMainFrameStatusCode = nil
             self.loadingState = .idle
             self.refreshFaviconURL(for: self.url)
             self.onStateChange?()
+            self.finishAgentNavigation(navigationId, result: .completed)
         }
     }
 
     nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         let message = error.localizedDescription
+        let navigationId = navigation.map(ObjectIdentifier.init)
         Task { @MainActor in
             self.appendNetworkLiteEvent(kind: .failed, statusCode: self.pendingMainFrameStatusCode, errorDescription: message)
             self.pendingMainFrameStatusCode = nil
             self.loadingState = .failed(message: message)
             self.onStateChange?()
+            self.finishAgentNavigation(navigationId, result: .failed(message))
         }
     }
 
     nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         let message = error.localizedDescription
+        let navigationId = navigation.map(ObjectIdentifier.init)
         Task { @MainActor in
             let failedURL = self.pendingMainFrameRequestURL
             self.pendingMainFrameRequestURL = nil
@@ -891,6 +1028,7 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
             self.pendingMainFrameStatusCode = nil
             self.loadingState = .failed(message: message)
             self.onStateChange?()
+            self.finishAgentNavigation(navigationId, result: .failed(message))
         }
     }
 
@@ -949,7 +1087,9 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
 extension WKWebViewBrowserRuntime: WKDownloadDelegate {
     func beginDownload(_ download: WKDownload) {
         guard !isTerminated else { return }
-        activeDownloads[ObjectIdentifier(download)] = download
+        let id = ObjectIdentifier(download)
+        activeDownloads[id] = download
+        if engagedAutomation != nil || agentNavigationDecision != nil { agentDownloads.insert(id) }
         download.delegate = self
         loadingState = .loading(progress: 0)
         onStateChange?()
@@ -961,12 +1101,14 @@ extension WKWebViewBrowserRuntime: WKDownloadDelegate {
 
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping @MainActor @Sendable (URL?) -> Void) {
         recordDownloadStartedIfNeeded(download, url: response.url?.absoluteString, statusCode: (response as? HTTPURLResponse)?.statusCode)
-        handleDownloadDestination(suggestedFilename: suggestedFilename, completion: completionHandler)
+        handleDownloadDestination(suggestedFilename: suggestedFilename,
+                                  agentInitiated: agentDownloads.contains(ObjectIdentifier(download)), completion: completionHandler)
     }
 
     func downloadDidFinish(_ download: WKDownload) {
         let id = ObjectIdentifier(download)
         activeDownloads.removeValue(forKey: id)
+        agentDownloads.remove(id)
         downloadsWithRecordedNetworkEvent.remove(id)
         loadingState = activeDownloads.isEmpty ? .idle : .loading(progress: 0)
         onStateChange?()
@@ -975,6 +1117,7 @@ extension WKWebViewBrowserRuntime: WKDownloadDelegate {
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         let id = ObjectIdentifier(download)
         activeDownloads.removeValue(forKey: id)
+        agentDownloads.remove(id)
         downloadsWithRecordedNetworkEvent.remove(id)
         loadingState = .failed(message: error.localizedDescription)
         onStateChange?()
@@ -990,10 +1133,18 @@ extension WKWebViewBrowserRuntime {
             }
         }
         activeDownloads.removeAll()
+        agentDownloads.removeAll()
         downloadsWithRecordedNetworkEvent.removeAll()
     }
 
-    func handleDownloadDestination(suggestedFilename: String, completion: @escaping (URL?) -> Void) {
+    func handleDownloadDestination(suggestedFilename: String, agentInitiated: Bool = false, completion: @escaping (URL?) -> Void) {
+        if agentInitiated || engagedAutomation != nil {
+            let destination = agentDownloadDestination?(suggestedFilename)
+            automationEngine?.noteDialog("download", message: Self.sanitizedDownloadFilename(suggestedFilename),
+                                         answer: destination.map { "saving to " + $0.path } ?? "refused; private download storage unavailable")
+            completion(destination)
+            return
+        }
         uiDialogPresenter.presentDownloadSavePanel(suggestedFilename: Self.sanitizedDownloadFilename(suggestedFilename), window: dialogWindow) { url in
             completion(url)
         }
@@ -1007,6 +1158,11 @@ extension WKWebViewBrowserRuntime {
         let space = challenge.protectionSpace
         switch space.authenticationMethod {
         case NSURLAuthenticationMethodHTTPBasic, NSURLAuthenticationMethodHTTPDigest:
+            if let engine = engagedAutomation {
+                engine.noteDialog("authentication", message: space.host, answer: "cancelled; user sign-in required")
+                completion(.cancelAuthenticationChallenge, nil)
+                return
+            }
             uiDialogPresenter.presentHTTPAuthenticationPrompt(host: space.host, realm: space.realm, previousFailureCount: challenge.previousFailureCount, window: dialogWindow) { credentials in
                 guard let credentials else {
                     completion(.cancelAuthenticationChallenge, nil)
@@ -1030,6 +1186,11 @@ extension WKWebViewBrowserRuntime {
     }
 
     func handleRejectedServerTrust(host: String, credential: URLCredential, completion: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if let engine = engagedAutomation {
+            engine.noteDialog("certificate", message: host, answer: "cancelled; certificate was not trusted")
+            completion(.cancelAuthenticationChallenge, nil)
+            return
+        }
         uiDialogPresenter.presentTLSChallengePrompt(host: host, window: dialogWindow) { accepted in
             completion(accepted ? .useCredential : .cancelAuthenticationChallenge, accepted ? credential : nil)
         }
@@ -1116,6 +1277,7 @@ extension WKWebViewBrowserRuntime: WKUIDelegate {
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard navigationAction.targetFrame == nil else { return nil }
+        guard agentNavigationDecision == nil else { return nil }
         let childWebView = onNewWindowRequest?(navigationAction.request, configuration, navigationAction, windowFeatures)
         if childWebView != nil {
             appendNetworkLiteEvent(kind: .childOpened, url: navigationAction.request.url?.absoluteString)

@@ -17,6 +17,7 @@ public extension WorkspaceAPIOp {
     static let sessionPresetOperations: Set<WorkspaceAPIOp> = [
         .workspaceContext, .artifactOpen, .agentFind, .agentInspect,
         .canvasQuery, .agentReveal, .operationGet, .boardQuery, .boardApply, .agentUpdate,
+        .browserSnapshot, .browserScreenshot, .browserConsole,
     ]
 
     /// Outside the preset, but not refused: the service asks the user through
@@ -25,6 +26,8 @@ public extension WorkspaceAPIOp {
     static let approvalGatedOperations: Set<WorkspaceAPIOp> = [
         .canvasApply, .agentDelegate, .agentMessage,
         .deviceList, .deviceOpen, .deviceObserve, .deviceAct, .deviceClose, .deviceBuildRun,
+        .browserOpen, .browserNavigate,
+        .browserClick, .browserType, .browserPressKey, .browserScroll, .browserWaitFor, .browserEvaluate,
     ]
 }
 

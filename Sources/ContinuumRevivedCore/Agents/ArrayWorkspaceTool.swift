@@ -34,6 +34,19 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     case deviceAct = "array_device_act"
     case deviceClose = "array_device_close"
     case deviceBuildRun = "array_device_build_run"
+    case browserOpen = "array_browser_open"
+    case browserNavigate = "array_browser_navigate"
+    case browserSnapshot = "array_browser_snapshot"
+    case browserClick = "array_browser_click"
+    case browserType = "array_browser_type"
+    case browserPressKey = "array_browser_press_key"
+    case browserScroll = "array_browser_scroll"
+    case browserWaitFor = "array_browser_wait_for"
+    case browserScreenshot = "array_browser_take_screenshot"
+    case browserEvaluate = "array_browser_evaluate"
+    case browserConsole = "array_browser_console"
+
+    public var isBrowser: Bool { rawValue.hasPrefix("array_browser_") }
 
     /// claude's prefix for a tool served by the `array_workspace` MCP server
     /// (`WorkspaceMCPConfiguration`).
@@ -52,7 +65,9 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .canvasApply, .boardApply, .updateAgent, .deviceOpen, .deviceAct, .deviceClose, .deviceBuildRun: return .edit
         case .findAgent: return .search
         case .delegate: return .delegate
-        case .revealAgent, .messageAgent: return .unknown
+        case .revealAgent, .messageAgent, .browserOpen, .browserNavigate, .browserSnapshot,
+             .browserClick, .browserType, .browserPressKey, .browserScroll, .browserWaitFor,
+             .browserScreenshot, .browserEvaluate, .browserConsole: return .unknown
         }
     }
 
@@ -69,6 +84,8 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .delegate: return "person.2"
         case .messageAgent: return "bubble.left"
         case .getOperation: return "clock"
+        case .browserOpen, .browserNavigate, .browserSnapshot, .browserClick, .browserType,
+             .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole: return "globe"
         }
     }
 
@@ -101,6 +118,17 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .boardQuery: return "Read the board"
         case .boardApply: return "Updated the board"
         case .updateAgent: return "Changed an agent’s colour"
+        case .browserOpen: return "Opened a browser"
+        case .browserNavigate: return "Navigated in a browser"
+        case .browserSnapshot: return "Read a browser page"
+        case .browserClick: return "Clicked in a browser"
+        case .browserType: return "Typed in a browser"
+        case .browserPressKey: return "Pressed a key in a browser"
+        case .browserScroll: return "Scrolled a browser page"
+        case .browserWaitFor: return "Waited for a browser page"
+        case .browserScreenshot: return "Captured a browser screenshot"
+        case .browserEvaluate: return "Ran JavaScript in a browser"
+        case .browserConsole: return "Read a browser console"
         }
     }
 

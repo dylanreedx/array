@@ -12,6 +12,10 @@ private let piOnlyToolNames: [String: String] = [
 ]
 
 func runWorkspaceMCPChecks() {
+    let browserNames = ["array_browser_open", "array_browser_navigate", "array_browser_snapshot", "array_browser_click", "array_browser_type", "array_browser_press_key", "array_browser_scroll", "array_browser_wait_for", "array_browser_take_screenshot", "array_browser_evaluate", "array_browser_console"]
+    expect(browserNames.allSatisfy { WorkspaceMCPToolCatalog.tool(named: $0) != nil }, "all eleven browser operations must be published to both transports")
+    expect(WorkspaceContextResponse.encodedByteCeiling >= 2048, "workspace context must accommodate the browser capability list")
+
     // MARK: Catalog parity — one definition, read by both transports
 
     let tools = WorkspaceMCPToolCatalog.tools

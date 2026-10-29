@@ -232,6 +232,7 @@ public actor AgentComposerAttachmentStore {
     private let writeManifest: @Sendable (AgentComposerAttachmentManifest, URL) throws -> Void
     private let writeImportCleanupJournal: @Sendable (AgentComposerImportCleanupJournal, URL) throws -> Void
     private let removeItem: @Sendable (URL) throws -> Void
+    private var unpublishedBrowserImages: [AgentImageAttachmentID: AgentID] = [:]
 
     public init(
         applicationSupportDirectory: URL? = nil,
@@ -301,6 +302,37 @@ public actor AgentComposerAttachmentStore {
         let url = try fileURL(for: manifest)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         return AgentComposerStoredAttachment(manifest: manifest, fileURL: url)
+    }
+
+    /// Stage a screenshot until the caller has rechecked control and published it.
+    public func stageBrowserScreenshot(_ data: Data, for agentID: AgentID) throws -> AgentComposerStoredAttachment {
+        let validation = try AgentComposerImageValidation(validatedContentType: "image/png", byteCount: UInt64(data.count))
+        let stored = try importValidatedPastedImage(data, displayName: "Browser screenshot", validation: validation, forDraftOf: agentID)
+        let id = stored.manifest.id
+        unpublishedBrowserImages[id] = agentID
+        do {
+            try transferDraftAttachmentsToSent(for: agentID, attachmentIDs: [id])
+            guard let sent = try storedAttachment(for: id) else { throw AgentComposerAttachmentStoreError.missingAttachment(id) }
+            return sent
+        } catch {
+            try discardBrowserScreenshot(id, for: agentID)
+            throw error
+        }
+    }
+
+    public func commitBrowserScreenshot(_ id: AgentImageAttachmentID, for agentID: AgentID) {
+        if unpublishedBrowserImages[id] == agentID { unpublishedBrowserImages[id] = nil }
+    }
+
+    public func discardBrowserScreenshot(_ id: AgentImageAttachmentID, for agentID: AgentID) throws {
+        guard unpublishedBrowserImages[id] == agentID else { return }
+        guard let manifest = try loadManifest(for: id), manifest.ownership.agentID == agentID else {
+            throw AgentComposerAttachmentStoreError.missingAttachment(id)
+        }
+        let object = try fileURL(for: manifest)
+        if FileManager.default.fileExists(atPath: object.path) { try removeItem(object) }
+        try removeItem(layout.manifestFile(for: id))
+        unpublishedBrowserImages[id] = nil
     }
 
     public func fileURL(for id: AgentImageAttachmentID) throws -> URL? {

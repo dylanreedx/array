@@ -819,6 +819,10 @@ run_app_check .build/debug/Array --workspace-mcp-host-check
 # zooms without moving the user's focus, typing, the user-typing hold, refusals,
 # dialogs answered for the agent, and screenshots hidden and off-window.
 run_app_check .build/debug/Array --browser-automation-engine-check
+run_app_check .build/debug/Array --workspace-api-browser-check
+run_app_check .build/debug/Array --agent-browser-spawn-check
+run_app_check .build/debug/Array --browser-action-queue-check
+run_app_check .build/debug/Array --browser-lease-check
 run_app_check .build/debug/Array --palette-first-responder-restore-check
 run_app_check .build/debug/Array --settings-panel-check
 # Launch polish: settings as an in-window modal, and its search.
@@ -1193,6 +1197,7 @@ run_app_check .build/debug/Array --window-chrome-check
 run_app_check .build/debug/Array --top-bar-icons-check
 run_app_check .build/debug/Array --workspace-selector-check
 run_app_check .build/debug/Array --browser-profile-persistence-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --browser-profile-registry-check
 # Hidden note autosave plus Preview/Edit and same-identity Save-as-Markdown conversion.
 run_app_check .build/debug/Array --note-file-tile-spawn-check
 run_app_check .build/debug/Array --run-artifacts-tile-check

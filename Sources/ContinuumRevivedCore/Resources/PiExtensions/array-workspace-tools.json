@@ -1278,6 +1278,449 @@
           }
         ]
       }
+    },
+    {
+      "name": "array_browser_open",
+      "label": "Array Browser Open",
+      "op": "browser.open",
+      "description": "Open an agent-owned browser tile beside you at a URL.",
+      "promptSnippet": "Open an agent-owned browser tile beside you at a URL.",
+      "promptGuidelines": [
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "description": "Reuse for a retry of the same action."
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "array_browser_navigate",
+      "label": "Array Browser Navigate",
+      "op": "browser.navigate",
+      "description": "Navigate a browser by URL, back, forward or reload.",
+      "promptSnippet": "Navigate a browser by URL, back, forward or reload.",
+      "promptGuidelines": [
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tileId": {
+            "type": "string",
+            "description": "Explicit browser tile ID returned by Array."
+          },
+          "url": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "back",
+              "forward",
+              "reload"
+            ]
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "description": "Reuse for a retry of the same action."
+          }
+        },
+        "required": [
+          "tileId"
+        ],
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "required": [
+              "url"
+            ]
+          },
+          {
+            "required": [
+              "action"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "array_browser_snapshot",
+      "label": "Array Browser Snapshot",
+      "op": "browser.snapshot",
+      "description": "Read the page outline and element refs.",
+      "promptSnippet": "Read the page outline and element refs.",
+      "promptGuidelines": [
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tileId": {
+            "type": "string",
+            "description": "Explicit browser tile ID returned by Array."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "description": "Reuse for a retry of the same action."
+          }
+        },
+        "required": [
+          "tileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "array_browser_click",
+      "label": "Array Browser Click",
+      "op": "browser.click",
+      "description": "Click an element ref or CSS coordinates.",
+      "promptSnippet": "Click an element ref or CSS coordinates.",
+      "promptGuidelines": [
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tileId": {
+            "type": "string",
+            "description": "Explicit browser tile ID returned by Array."
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Element ref from the latest snapshot."
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "description": "Reuse for a retry of the same action."
+          }
+        },
+        "required": [
+          "tileId"
+        ],
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "required": [
+              "ref"
+            ]
+          },
+          {
+            "required": [
+              "x",
+              "y"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "array_browser_type",
+      "label": "Array Browser Type",
+      "op": "browser.type",
+      "description": "Type text into an element or the focused field.",
+      "promptSnippet": "Type text into an element or the focused field.",
+      "promptGuidelines": [
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tileId": {
+            "type": "string",
+            "description": "Explicit browser tile ID returned by Array."
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 16384
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Element ref from the latest snapshot."
+          },
+          "clear": {
+            "type": "boolean"
+          },
+          "submit": {
+            "type": "boolean"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "description": "Reuse for a retry of the same action."
+          }
+        },
+        "required": [
+          "tileId",
+          "text"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "array_browser_press_key",
+      "label": "Array Browser Press Key",
+      "op": "browser.press_key",
+      "description": "Send a named key or shortcut.",
+      "promptSnippet": "Send a named key or shortcut.",
+      "promptGuidelines": [
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tileId": {
+            "type": "string",
+            "description": "Explicit browser tile ID returned by Array."
+          },
+          "keyName": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "description": "Reuse for a retry of the same action."
+          }
+        },
+        "required": [
+          "tileId",
+          "keyName"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "array_browser_scroll",
+      "label": "Array Browser Scroll",
+      "op": "browser.scroll",
+      "description": "Scroll by CSS pixels or bring an element into view.",
+      "promptSnippet": "Scroll by CSS pixels or bring an element into view.",
+      "promptGuidelines": [
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tileId": {
+            "type": "string",
+            "description": "Explicit browser tile ID returned by Array."
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Element ref from the latest snapshot."
+          },
+          "dx": {
+            "type": "number"
+          },
+          "dy": {
+            "type": "number"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "description": "Reuse for a retry of the same action."
+          }
+        },
+        "required": [
+          "tileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "array_browser_wait_for",
+      "label": "Array Browser Wait For",
+      "op": "browser.wait_for",
+      "description": "Wait for text, an element ref, or page idle.",
+      "promptSnippet": "Wait for text, an element ref, or page idle.",
+      "promptGuidelines": [
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tileId": {
+            "type": "string",
+            "description": "Explicit browser tile ID returned by Array."
+          },
+          "condition": {
+            "type": "string",
+            "enum": [
+              "textAppears",
+              "textGone",
+              "refAppears",
+              "refGone",
+              "idle"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 16384
+          },
+          "timeout": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 30
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "description": "Reuse for a retry of the same action."
+          }
+        },
+        "required": [
+          "tileId",
+          "condition"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "array_browser_take_screenshot",
+      "label": "Array Browser Take Screenshot",
+      "op": "browser.take_screenshot",
+      "description": "Take a PNG screenshot of the browser or an element.",
+      "promptSnippet": "Take a PNG screenshot of the browser or an element.",
+      "promptGuidelines": [
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tileId": {
+            "type": "string",
+            "description": "Explicit browser tile ID returned by Array."
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Element ref from the latest snapshot."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "description": "Reuse for a retry of the same action."
+          }
+        },
+        "required": [
+          "tileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "array_browser_evaluate",
+      "label": "Array Browser Evaluate",
+      "op": "browser.evaluate",
+      "description": "Evaluate JavaScript in the page and return its JSON value.",
+      "promptSnippet": "Evaluate JavaScript in the page and return its JSON value.",
+      "promptGuidelines": [
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tileId": {
+            "type": "string",
+            "description": "Explicit browser tile ID returned by Array."
+          },
+          "script": {
+            "type": "string",
+            "maxLength": 65536
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "description": "Reuse for a retry of the same action."
+          }
+        },
+        "required": [
+          "tileId",
+          "script"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "array_browser_console",
+      "label": "Array Browser Console",
+      "op": "browser.console",
+      "description": "Read page-supplied console messages and errors.",
+      "promptSnippet": "Read page-supplied console messages and errors.",
+      "promptGuidelines": [
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tileId": {
+            "type": "string",
+            "description": "Explicit browser tile ID returned by Array."
+          },
+          "level": {
+            "type": "string",
+            "enum": [
+              "log",
+              "info",
+              "warn",
+              "error",
+              "debug"
+            ]
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "description": "Reuse for a retry of the same action."
+          }
+        },
+        "required": [
+          "tileId"
+        ],
+        "additionalProperties": false
+      }
     }
   ]
 }

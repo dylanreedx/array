@@ -30,7 +30,7 @@ enum BrowserProfilePersistenceActions {
 
     @discardableResult
     static func renameProfile(id: UUID, to name: String, in registry: inout Registry) -> Bool {
-        guard id != BrowserProfile.defaultProfileId,
+        guard !BrowserProfile.isBuiltIn(id),
               let index = registry.settings.browserProfiles.firstIndex(where: { $0.id == id }) else {
             return false
         }

@@ -4750,6 +4750,49 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-lease-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserLeaseCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-action-queue-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserActionQueueCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--workspace-api-browser-check") {
+            do {
+                _ = NSApplication.shared
+                try runWorkspaceAPIBrowserCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--agent-browser-spawn-check") {
+            do {
+                try AgentBrowserSpawnChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--tile-project-scope-check") {
             do {
                 _ = NSApplication.shared
@@ -5790,7 +5833,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     let hostEpoch = UUID().uuidString
     /// CX-01: the host-owned workspace API. Reads the mounted scene through the
     /// same private properties the app uses; never a second store.
-    lazy var workspaceAPI = WorkspaceAPIService(
+    lazy var workspaceAPI: WorkspaceAPIService = WorkspaceAPIService(
         runtime: { [weak self] in self?.workspaceRuntime },
         canvas: { [weak self] in self?.canvasView },
         focusBroker: { [weak self] in self?.focusBroker },
@@ -5806,8 +5849,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         },
         epoch: hostEpoch,
         approvalHandler: { [weak self] prompt in self?.presentWorkspaceToolApproval(prompt) ?? .deny },
-        tileWiring: { [weak self] tileId, agentId in self?.wireManagedAgentTile(tileId, agentID: agentId) }
+        tileWiring: { [weak self] tileId, agentId in self?.wireManagedAgentTile(tileId, agentID: agentId) },
+        browserDomainApprovalHandler: { [weak self] agentId, tileId, host, reply in
+            guard let self else { reply(.deny); return {} }
+            return self.presentBrowserDomainApproval(agentId: agentId, tileId: tileId, host: host, completion: reply)
+        },
+        browserHandOverApprovalHandler: { [weak self] agentId, tileId, evaluate, reply in
+            guard let self else { reply(false); return {} }
+            return self.presentBrowserHandOverApproval(agentId: agentId, tileId: tileId, evaluate: evaluate, completion: reply)
+        },
+        browserRuntimeWiring: { [weak self] browser, projectId in
+            guard let self, let controller = self.workspaceRuntime?.controller(for: projectId) else { return }
+            self.wireContentProcessTerminationHandler(browser)
+            controller.browserRuntimes.append(browser)
+            self.workspaceRuntime?.registerLiveBrowser(tileId: browser.tileId)
+        },
+        browserIdleClose: { [weak self] tile, owner in self?.closeIdleAgentBrowser(tileId: tile, agentId: owner) ?? false },
+        browserControlPresentation: { [weak self] tile, agent, engaged, userDriving in
+            self?.presentBrowserControl(tileId: tile, agentId: agent, engaged: engaged, userDriving: userDriving)
+        },
+        browserAuditPresentation: { [weak self] tile, entries in self?.presentBrowserActivity(tileId: tile, entries: entries) }
     )
+    private func presentBrowserControl(tileId: UUID, agentId: AgentID, engaged: Bool, userDriving: Bool) {
+        guard let view = canvasView?.tileView(for: tileId) as? BrowserTileNSView else { return }
+        let record = agentSupervisor.records[agentId]
+        view.setAgentControl(name: record?.displayName ?? "Agent",
+            colour: record?.identityColor.map { ZoneChromeNSView.color(named: $0) }, engaged: engaged, userDriving: userDriving,
+            takeControl: { [weak self] in self?.workspaceAPI.takeBackBrowser(tileId: tileId) },
+            revealAgent: { [weak self] in _ = self?.revealAgentFromInbox(agentId.rawValue) },
+            close: { [weak self] in self?.deleteTile(id: tileId) })
+    }
+
+    private func presentBrowserActivity(tileId: UUID, entries: [WorkspaceAPIService.BrowserAuditEntry]) {
+        guard let view = canvasView?.tileView(for: tileId) as? BrowserTileNSView else { return }
+        let lines = entries.map { entry in
+            let name = agentSupervisor.displayName(forAgent: entry.agentId) ?? "Agent"
+            let toolName = "array_" + entry.operation.rawValue.replacingOccurrences(of: ".", with: "_")
+            let action = ArrayWorkspaceTool(toolName: toolName)?.actionLine(fileBasename: nil) ?? "Used a browser"
+            return name + " · " + action + (entry.outcome == "ok" ? "" : " · " + entry.outcome)
+        }
+        view.setBrowserActivity(lines)
+    }
+
     lazy var workspaceMCPHost = WorkspaceMCPHost()
 
     /// Internal so the delegation leg launches the same helper production does.
@@ -7926,7 +8009,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         } else { deleteTileAfterEditorBarrier(id: id, parksAgent: parksAgent) }
     }
 
-    private func deleteTileAfterEditorBarrier(id: UUID, parksAgent: Bool = true) {
+    private func deleteTileAfterEditorBarrier(id: UUID, parksAgent: Bool = true, automaticBrowserSweep: Bool = false) {
         guard let canvasView else { return }
         // `projectTiles()`, not the flat collection: once the active project's tiles
         // live in a ZoneLayer, looking a tile up here found nothing and deleteTile
@@ -7982,7 +8065,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let policy = DeleteConfirmPolicy.current
-        if !zoneDeleteConfirmed, policy.requiresConfirmation(for: tile.kind) {
+        if !automaticBrowserSweep, !zoneDeleteConfirmed, policy.requiresConfirmation(for: tile.kind) {
             let configuration = policy.alertConfiguration(for: tile.kind)
             let alert = NSAlert()
             alert.messageText = configuration.message
@@ -8024,6 +8107,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try? owner?.managedSessionStore.delete(tileId: id)
             reconciledManagedSessionSource.invalidateCache()
         case .browser:
+            workspaceAPI.browserLeaseLedger?.release(tileId: id)
+            workspaceAPI.browserHandOvers[id] = nil
+            workspaceAPI.browserUserTakenOver.remove(id)
+            workspaceAPI.clearBrowserAudit(for: id)
+            workspaceAPI.browserGateInstallations[id] = nil
             if let owner, let runtime = owner.browserRuntimes.first(where: { $0.tileId == id }) {
                 owner.browserRuntimes.removeAll { $0.id == runtime.id }
                 runtime.terminate(policy: .force)
@@ -8111,8 +8199,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?.detach()
         }
 
-        canvasView.closeTile(id: id)
-        recoverFocusAfterTileRemoval(deletedTileId: id, in: canvasView)
+        if automaticBrowserSweep {
+            canvasView.removeTile(id: id)
+        } else {
+            canvasView.closeTile(id: id)
+            recoverFocusAfterTileRemoval(deletedTileId: id, in: canvasView)
+        }
         // The OWNER's canvas file: it is the one still holding the tile.
         if let owner {
             owner.scheduleCanvasSave()
@@ -8125,6 +8217,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // A closed watch or Move here tile never owned anything to keep.
         dropDetachedExternalSessionAgents()
         refreshAgentSurfaces()
+    }
+
+    /// Never sweep user tiles, focused or selected tiles, or browsers with an
+    /// inspector. A non-live project is left alone until it is hydrated again.
+    private func closeIdleAgentBrowser(tileId: UUID, agentId: AgentID) -> Bool {
+        guard let canvasView, let tile = canvasView.tileRecord(for: tileId),
+              tile.kind == .browser, tile.metadata.browserControllingAgentId == agentId,
+              !agentSupervisor.isRunning(agentId), focusBroker.activeSurface != .tile(tileId),
+              !canvasView.tileSelection.ids.contains(tileId), !canvasView.tileSelection.ownsPointer,
+              !canvasView.isGeometryGestureActive, let owner = controller(owningTile: tileId),
+              let state = try? owner.projectStore.loadBrowserState(),
+              !state.inspectorStates.contains(where: { $0.inspectedBrowserTileId == tileId }) else { return false }
+        deleteTileAfterEditorBarrier(id: tileId, automaticBrowserSweep: true)
+        return canvasView.tileRecord(for: tileId) == nil
     }
 
     private func killTmuxWindowForDeletedTerminalTile(tileId: UUID, owner: ZoneRuntimeController?) {
@@ -8837,6 +8943,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             wireContentProcessTerminationHandler(runtime)
             controller(owning: spawner)?.browserRuntimes.append(runtime)
             workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+            workspaceAPI.trackHydratedOwnedBrowser(runtime)
             workspaceRuntime?.enforceBrowserRuntimeBudget()
         case let .invalidURL(url):
             installBrowserRestartPlaceholder(
@@ -8887,6 +8994,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             wireContentProcessTerminationHandler(runtime)
             owner.browserRuntimes.append(runtime)
             workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+            workspaceAPI.trackHydratedOwnedBrowser(runtime)
             workspaceRuntime?.enforceBrowserRuntimeBudget()
         case let .invalidURL(url):
             fputs("Browser restart: invalid URL '\(url)'\n", stderr)
@@ -17929,6 +18037,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             wireContentProcessTerminationHandler(runtime)
             owner.browserRuntimes.append(runtime)
             workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+            workspaceAPI.browserProfileDidChange(tileId: runtime.tileId)
             workspaceRuntime?.enforceBrowserRuntimeBudget()
             focusSpawnedTile(runtime.tileId)
         case let .unknownProfile(id):
@@ -17957,7 +18066,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func renameBrowserProfile(tileId: UUID, profileId: UUID) {
-        guard profileId != BrowserProfile.defaultProfileId, let registryStore else { return }
+        guard !BrowserProfile.isBuiltIn(profileId), let registryStore else { return }
         do {
             var registry = try registryStore.loadOrEmpty()
             guard let existing = registry.settings.browserProfiles.first(where: { $0.id == profileId }) else { return }
@@ -17971,7 +18080,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func deleteBrowserProfile(tileId: UUID, profileId: UUID) {
-        guard profileId != BrowserProfile.defaultProfileId, let registryStore else { return }
+        guard !BrowserProfile.isBuiltIn(profileId), let registryStore else { return }
         let alert = NSAlert()
         alert.messageText = "Delete Browser Profile?"
         alert.informativeText = "Tiles using this profile will switch to Default. WebKit data for the deleted profile is not removed."
@@ -19819,10 +19928,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         alert.runModal()
     }
 
-    /// CX-01 (§14.1): the TRUSTED host UI that mints extra scope. Modal and
-    /// synchronous, so it fits the service's synchronous dispatch; the model can
-    /// neither answer it nor substitute a payload after it. Only this handler
-    /// (or a check's injected stand-in) ever produces a grant beyond the preset.
+    /// The browser hand-over and per-call JavaScript approval. A sheet, never
+    /// `runModal`: the request waits asynchronously. The model can neither
+    /// answer it nor choose its wording, and the sheet names the page and
+    /// profile so the user knows which browser they are handing over.
+    func presentBrowserHandOverApproval(agentId: AgentID, tileId: UUID, evaluate: Bool,
+                                        completion: @escaping @MainActor (Bool) -> Void) -> WorkspaceAPIService.BrowserApprovalDismissal {
+        guard let window = canvasView?.window, let agent = agentSupervisor.records[agentId],
+              let subject = browserApprovalSubject(tileId: tileId) else { completion(false); return {} }
+        let alert = NSAlert()
+        alert.messageText = evaluate ? "Allow \(agent.displayName) to run JavaScript in this browser?" : "Hand this browser over to \(agent.displayName)?"
+        alert.informativeText = subject + "\n\n" + (evaluate
+            ? "JavaScript can read and change this page using its signed-in session. This approval is for one action."
+            : "The agent can read and interact with this browser using its existing signed-in accounts. Click or type in the browser to take it back.")
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Allow")
+        alert.addButton(withTitle: "Deny")
+        alert.beginSheetModal(for: window) { response in completion(response == .alertFirstButtonReturn) }
+        return Self.browserApprovalDismissal(alert, on: window)
+    }
+
+    func presentBrowserDomainApproval(agentId: AgentID, tileId: UUID, host: String,
+                                      completion: @escaping @MainActor (WorkspaceAPIService.BrowserDomainDecision) -> Void) -> WorkspaceAPIService.BrowserApprovalDismissal {
+        guard let window = canvasView?.window, let agent = agentSupervisor.records[agentId] else { completion(.deny); return {} }
+        let alert = NSAlert()
+        alert.messageText = "Allow \(agent.displayName) to visit \(String(host.prefix(253)))?"
+        alert.informativeText = (browserApprovalSubject(tileId: tileId).map { "Asked from " + $0 + ".\n\n" } ?? "")
+            + "The agent can read and interact with this site in its browser. Session approval lasts until Array quits or this agent's Workspace Tools are turned off."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Allow Once")
+        alert.addButton(withTitle: "Allow for This Agent Session")
+        alert.addButton(withTitle: "Deny")
+        alert.beginSheetModal(for: window) { response in
+            switch response {
+            case .alertFirstButtonReturn: completion(.allowOnce)
+            case .alertSecondButtonReturn: completion(.allowForSession)
+            default: completion(.deny)
+            }
+        }
+        return Self.browserApprovalDismissal(alert, on: window)
+    }
+
+    /// "“Billing dashboard” (localhost) on the Default profile".
+    private func browserApprovalSubject(tileId: UUID) -> String? {
+        guard let tile = canvasView?.tileRecord(for: tileId), tile.kind == .browser else { return nil }
+        let live = (canvasView?.tileView(for: tileId) as? BrowserTileNSView)?.runtime
+        let title = live?.title.isEmpty == false ? live?.title ?? tile.title : tile.title
+        let host = URL(string: live?.url ?? tile.metadata.url ?? "")?.host
+        let profile = controller(owningTile: tileId)?.tileSpawner?.browserProfileName(forTile: tile) ?? "Default"
+        return "“" + String(title.prefix(120)) + "”" + (host.map { " (" + $0 + ")" } ?? "") + " on the " + profile + " profile"
+    }
+
+    /// Ends the sheet as a denial if it is still up; a no-op once answered.
+    private static func browserApprovalDismissal(_ alert: NSAlert, on window: NSWindow) -> WorkspaceAPIService.BrowserApprovalDismissal {
+        { [weak alert, weak window] in
+            guard let alert, let window, window.sheets.contains(alert.window) else { return }
+            window.endSheet(alert.window, returnCode: .abort)
+        }
+    }
+
     func presentWorkspaceToolApproval(_ prompt: WorkspaceAPIService.ScopeApprovalPrompt) -> WorkspaceAPIService.ScopeApprovalDecision {
         let alert = NSAlert()
         var detail: String
@@ -19841,6 +20005,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let target = prompt.targetAgentDisplayName ?? "another agent"
             alert.messageText = "Allow \(prompt.agentDisplayName) to send a message to \(target)?"
             detail = "The agent asked Array to start a new turn on \(target), in \(prompt.checkoutDisplayName), using text the agent wrote.\n\nWhile you are asked first, an agent can message only the children it created and the agent that created it. It never interrupts a turn that is running."
+        } else if [.browserOpen, .browserNavigate, .browserClick, .browserType, .browserPressKey, .browserScroll, .browserWaitFor, .browserEvaluate].contains(prompt.op) {
+            alert.messageText = "Allow \(prompt.agentDisplayName) to use a browser in \(prompt.checkoutDisplayName)?"
+            detail = "The agent can open its own browser tiles, read pages, and interact with them. Your browser tiles require a separate hand-over, and other domains require separate approval."
         } else if prompt.op == .canvasApply {
             // CX-01 Phase 4: geometry is never in the session preset, so the first
             // move/resize of the agent's OWN checkout lands here.
@@ -19917,6 +20084,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 targetZoneId: source.zoneId
             ) {
             case let .spawned(runtime):
+                wireContentProcessTerminationHandler(runtime)
                 owner.browserRuntimes.append(runtime)
                 workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
                 workspaceRuntime?.enforceBrowserRuntimeBudget()
@@ -20426,6 +20594,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// M1.4: the detach-sweep leg needs a real agent record bound to a tile, and
     /// then needs to read the supervisor's observer counts back.
     var qaAgentSupervisor: AgentSupervisor { agentSupervisor }
+    func qaBindAgentComposerState(_ view: ManagedAgentTileNSView) {
+        view.bindV2ComposerState(draftStore: agentComposerDraftStore, promptHistory: agentPromptHistory,
+                                 attachmentStore: agentComposerAttachmentStore)
+    }
 
     /// CX-01: the workspace API witnesses dispatch through the REAL service the
     /// bridge uses, with an injected approval handler.
@@ -20792,13 +20964,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    private func configureBrowserHydrationCallback(on controller: ZoneRuntimeController) {
+        controller.onBrowserRuntimeHydrated = { [weak self] runtime in
+            guard let self else { return }
+            self.wireContentProcessTerminationHandler(runtime)
+            self.workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+            self.workspaceAPI.trackHydratedOwnedBrowser(runtime)
+            self.workspaceRuntime?.enforceBrowserRuntimeBudget()
+        }
+    }
+
     private func configureActiveControllerRuntimeCallbacks() {
         guard let controller = workspaceRuntime?.activeController else { return }
-        controller.onBrowserRuntimeHydrated = { [weak self] runtime in
-            self?.wireContentProcessTerminationHandler(runtime)
-            self?.workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
-            self?.workspaceRuntime?.enforceBrowserRuntimeBudget()
-        }
+        configureBrowserHydrationCallback(on: controller)
         controller.onAgentStatusWritten = { [weak self] _, _ in
             guard let self else { return }
             self.refreshAgentSurfaces()
@@ -20829,7 +21007,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Production calls this once, after `bootTileSpawner` is configured.
     func configureWorkspaceRuntimeHooks() {
         workspaceRuntime?.onSpawnerCreated = { [weak self] arriving in
-            self?.configureCreationAndRuntimeRoutes(on: arriving)
+            guard let self else { return }
+            self.configureCreationAndRuntimeRoutes(on: arriving)
+            if let controller = self.workspaceRuntime?.controller(for: arriving.spawnerProjectId) {
+                self.configureBrowserHydrationCallback(on: controller)
+            }
         }
         // A project whose zone cannot be mounted (its canvas is unreadable, or
         // its `.array/` is held elsewhere) used to go stderr-only.
@@ -21123,6 +21305,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 if case let .restarted(runtime) = spawner.restartBrowserTile(tileId: tile.id) {
                     controller.browserRuntimes.append(runtime)
                     wireContentProcessTerminationHandler(runtime)
+                    workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+                    workspaceAPI.trackHydratedOwnedBrowser(runtime)
                 }
             case .fileTree:
                 if case .restarted = spawner.restartFileTreeTile(tileId: tile.id),
@@ -21179,6 +21363,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func configureCreationAndRuntimeRoutes(on spawner: TileSpawner) {
+        spawner.agentBrowserRestoreGateOwner = { [weak self] tile in
+            // nil from the service means "taken over": no fallback to the stamp.
+            guard let self else { return tile.metadata.browserControllingAgentId }
+            return self.workspaceAPI.browserRestoreGateOwner(for: tile)
+        }
+        spawner.agentBrowserRestorePolicy = { [weak self] owner, url in
+            guard let record = self?.agentSupervisor.records[owner] else { return false }
+            return BrowserAgentNavigationPolicy.classify(url, checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)) == .local
+        }
         // Every spawn reads its scope here, before framing and installing its tile,
         // so this is where an armed zone below the live tier gets the layer the
         // tile must install into. Without one it fell to the retired flat model.

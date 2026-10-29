@@ -7,13 +7,17 @@ import WebKit
 final class BrowserEngineContext {
     private var dataStores: [String: WKWebsiteDataStore] = [:]
     private(set) var webViewCreationCountForQA = 0
+    private let dataStoreFactory: ((String) -> WKWebsiteDataStore)?
     private let inspectionPolicyProvider: () -> BrowserInspectionPolicy
 
     init(inspectionPolicy: BrowserInspectionPolicy) {
+        self.dataStoreFactory = nil
         self.inspectionPolicyProvider = { inspectionPolicy }
     }
 
-    init(inspectionPolicyProvider: @escaping () -> BrowserInspectionPolicy = { .resolved() }) {
+    init(inspectionPolicyProvider: @escaping () -> BrowserInspectionPolicy = { .resolved() },
+         dataStoreFactory: ((String) -> WKWebsiteDataStore)? = nil) {
+        self.dataStoreFactory = dataStoreFactory
         self.inspectionPolicyProvider = inspectionPolicyProvider
     }
 
@@ -25,7 +29,9 @@ final class BrowserEngineContext {
     func dataStore(for storageGroupId: String) -> WKWebsiteDataStore {
         if let cached = dataStores[storageGroupId] { return cached }
         let store: WKWebsiteDataStore
-        if storageGroupId == BrowserState.sharedStorageGroupId {
+        if let dataStoreFactory {
+            store = dataStoreFactory(storageGroupId)
+        } else if storageGroupId == BrowserState.sharedStorageGroupId {
             store = WKWebsiteDataStore.default()
         } else if let uuid = UUID(uuidString: storageGroupId) {
             store = WKWebsiteDataStore(forIdentifier: uuid)
@@ -35,6 +41,14 @@ final class BrowserEngineContext {
         }
         dataStores[storageGroupId] = store
         return store
+    }
+
+    /// Clears only the persistent Agents session. The completion means WebKit
+    /// finished removing website data; the profile and its stable identity remain.
+    func signOutAgents(completion: @escaping () -> Void) {
+        dataStore(for: BrowserProfile.agentsDataStoreIdentifier).removeData(
+            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast,
+            completionHandler: completion)
     }
 
     /// Builds a fresh `WKWebView` bound to the project's data store. WebKit

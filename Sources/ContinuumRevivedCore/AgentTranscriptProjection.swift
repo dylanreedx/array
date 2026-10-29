@@ -614,6 +614,22 @@ public struct AgentTranscriptProjection: Sendable {
         return patches
     }
 
+    @discardableResult
+    public mutating func appendBrowserScreenshot(id: AgentNodeID, metadata: AgentImageAttachmentMetadata) throws -> [AgentDocumentPatch] {
+        guard !document.entries.contains(where: { $0.id == id }) else { return [] }
+        var patches = try applyReturningPatches(closeStreamingRun())
+        compatibilityIDs[id] = id.rawValue
+        patches += try applyReturningPatches([
+            .beginEntry(id: id, role: .system, provenance: .localNotice(reason: id.rawValue)),
+            .upsertStructured(entryID: id, block: AgentBlock(
+                id: childID(of: id, key: "image"), kind: .image,
+                payload: .image(AgentImagePayload(attachment: metadata, caption: [.text("Browser screenshot")]))
+            )),
+            .finishEntry(id: id)
+        ])
+        return patches
+    }
+
     /// Adds an idempotent session boundary (`.plans/79`): the turns that follow
     /// were taken outside this tile — its Terminal face, or the shell the
     /// session was opened from.

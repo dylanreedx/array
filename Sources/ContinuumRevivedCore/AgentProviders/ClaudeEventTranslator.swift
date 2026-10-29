@@ -40,6 +40,7 @@ public struct ClaudeEventTranslator {
     /// and outcome. `itemKinds` cannot say: every unknown tool is
     /// `.commandExecution` there.
     private var shellToolUseIDs = Set<String>()
+    private var browserToolUseIDs = Set<String>()
     /// Every Claude child this SESSION has opened and not yet closed. Owned by
     /// the runner, not by one turn: a background child outlives the result
     /// that launched it, and the runner builds a fresh translator on every
@@ -398,6 +399,7 @@ public struct ClaudeEventTranslator {
             // (query/url/pattern/basename/description, and a SHELL's command),
             // bound at construction and store-sanitized on top.
             if !isSubagent, AgentShellObservation.isShellTool(name) { shellToolUseIDs.insert(id) }
+            if !isSubagent, ArrayWorkspaceTool(toolName: name)?.isBrowser == true { browserToolUseIDs.insert(id) }
             if let onRuntimeObservation, !isSubagent {
                 onRuntimeObservation(.toolDetail(itemId: id, detail: AgentToolDetailObservation(
                     phase: .started,
@@ -479,11 +481,12 @@ public struct ClaudeEventTranslator {
                   let toolUseId = block["tool_use_id"] as? String
             else { continue }
             let isError = (block["is_error"] as? Bool) ?? false
+            let browserResult = browserToolUseIDs.remove(toolUseId) != nil
             // `.plans/45` S2 — a bounded output preview for the expanded pane.
             // Emitted BEFORE `.itemCompleted` (observation delivery is FIFO),
             // so the host can fold it into the one recordEnd it issues there.
             if let onRuntimeObservation, !isSubagent {
-                let preview = Self.toolResultPreview(block["content"])
+                let preview = browserResult ? nil : Self.toolResultPreview(block["content"])
                 // A shell's exit code is the result's "Exit code N" first
                 // line; the row badges it, so the output keeps the rest.
                 let shell = shellToolUseIDs.remove(toolUseId) != nil
@@ -818,6 +821,9 @@ public struct ClaudeEventTranslator {
         input: [String: Any],
         settingsDefaults: UserDefaults
     ) -> [(key: String, value: String)] {
+        // Browser arguments may contain credentials, page data or secret URLs.
+        // The transcript needs only the fixed action sentence.
+        if ArrayWorkspaceTool(toolName: toolName)?.isBrowser == true { return [] }
         func string(_ key: String) -> String? {
             guard let value = input[key] as? String else { return nil }
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -7660,6 +7660,17 @@ final class CanvasNSView: NSView, TokenThemed {
         zoneLayers.filter { $0.tiles.contains(where: { $0.id == tileId }) }.map(\.placement.zoneId)
     }
 
+    /// Update only the persisted URL, without running geometry or auto-layout.
+    /// The caller has already checked project scope and owns persistence.
+    func setBrowserURL(_ url: String, tileId: UUID) -> Bool {
+        let layers = zoneLayers.filter { $0.tiles.contains(where: { $0.id == tileId }) }
+        guard layers.count == 1, let layer = layers.first,
+              let index = layer.tiles.firstIndex(where: { $0.id == tileId }),
+              layer.tiles[index].kind == .browser else { return false }
+        layer.tiles[index].metadata.url = url
+        return true
+    }
+
     /// A pointer gesture owns the geometry right now: a tile move/resize between
     /// `beginGeometryEdit` and its commit, or a pointer pan. The workspace API
     /// must not apply behind it (§14.2: never queue a write behind a drag).

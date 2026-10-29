@@ -45,6 +45,8 @@ enum AgentTranscriptClusterPlanner {
         var isReasoning: Bool = false
         /// A file-change block: work in the log, a chip in the outcome.
         var isDiff: Bool = false
+        /// Browser use folds separately from neighboring non-browser tools.
+        var isBrowserAction: Bool = false
 
         /// What the turn's work strip folds: steps, thoughts and file changes.
         var isWork: Bool { isToolRow || isReasoning || isDiff }
@@ -421,7 +423,8 @@ enum AgentTranscriptClusterPlanner {
             while next < facts.count,
                   facts[next].isToolRow,
                   !facts[next].isFailure,
-                  !facts[next].startsTurn {
+                  !facts[next].startsTurn,
+                  facts[next].isBrowserAction == fact.isBrowserAction {
                 run.append(next)
                 next += 1
             }

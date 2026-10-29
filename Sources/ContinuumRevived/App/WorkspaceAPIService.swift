@@ -81,6 +81,11 @@ final class WorkspaceAPIService {
     /// or cancellation at the exact seam.
     var _beforeCommitHook: (() -> Void)?
     var _beforePresentationHook: (() -> Void)?
+    /// Checks-only: hold a completed browser inventory so concurrent open
+    /// admissions can be interleaved deterministically.
+    var _browserInventoryReadHook: (() async -> Void)?
+    var _afterBrowserScreenshotSaveHook: (() async -> Void)?
+    var _afterBrowserScreenshotImportHook: (() async -> Void)?
     /// Checks-only: makes the presentation step of `agent.delegate` FAIL for the
     /// given tile with the returned message (§10.3 partial-failure witness).
     var _injectPresentationFailure: ((UUID) -> String?)?
@@ -133,6 +138,73 @@ final class WorkspaceAPIService {
     struct CachedAgentUpdate { let payloadHash: String; let result: AgentUpdateResult }
     var agentUpdateIdempotency: [AgentID: [String: CachedAgentUpdate]] = [:]
     var agentUpdateIdempotencyOrder: [AgentID: [String]] = [:]
+    struct BrowserAuditEntry {
+        let agentId: AgentID
+        let operation: WorkspaceAPIOp
+        let outcome: String
+        let at: Date
+    }
+    private var browserAudits: [UUID: [BrowserAuditEntry]] = [:]
+    var browserAuditPresentation: ((UUID, [BrowserAuditEntry]) -> Void)?
+    func browserAudit(for tileId: UUID) -> [BrowserAuditEntry] { browserAudits[tileId] ?? [] }
+    func clearBrowserAudit(for tileId: UUID) { browserAudits[tileId] = nil }
+    let browserActionQueue = BrowserActionQueue()
+    let browserOpenAdmission = BrowserOpenAdmission()
+    struct BrowserHandOver {
+        let agentId: AgentID
+        let generation: UInt64
+        let runtimeId: UUID
+        let userInputCount: Int
+    }
+    var browserHandOvers: [UUID: BrowserHandOver] = [:]
+    var browserUserTakenOver: Set<UUID> = []
+    enum BrowserDomainDecision { case deny, allowOnce, allowForSession }
+    /// Closes a browser approval that is still on screen. Its request answers
+    /// "denied" on its own; this only removes the stale sheet.
+    typealias BrowserApprovalDismissal = @MainActor () -> Void
+    /// (agent, tile, host, reply): which tile is asking travels with the host.
+    typealias BrowserDomainApprovalHandler = (AgentID, UUID, String, @escaping @MainActor (BrowserDomainDecision) -> Void) -> BrowserApprovalDismissal
+    var browserDomainApprovalHandler: BrowserDomainApprovalHandler = { _, _, _, reply in reply(.deny); return {} }
+    typealias BrowserHandOverApprovalHandler = (AgentID, UUID, Bool, @escaping @MainActor (Bool) -> Void) -> BrowserApprovalDismissal
+    var browserHandOverApprovalHandler: BrowserHandOverApprovalHandler = { _, _, _, reply in reply(false); return {} }
+    var browserDomainApprovals: [AgentID: Set<String>] = [:]
+    /// Tiles with a browser approval on screen. One per tile: page script
+    /// must not be able to stack a sheet per navigation.
+    var browserPromptsPending: Set<UUID> = []
+    var browserRuntimeWiring: ((WKWebViewBrowserRuntime, UUID) -> Void)?
+    var browserIdleClose: ((UUID, AgentID) -> Bool)?
+    var browserControlPresentation: ((UUID, AgentID, Bool, Bool) -> Void)?
+    struct BrowserGateInstallation { let runtimeId: UUID; let generation: UInt64; let agentId: AgentID; let inputCount: Int }
+    var browserGateInstallations: [UUID: BrowserGateInstallation] = [:]
+    var browserLeaseLedger: BrowserLeaseLedger?
+    private var browserLeaseEventObserver: UUID?
+
+    @discardableResult
+    func installBrowserLeaseLedger(_ ledger: BrowserLeaseLedger) -> Bool {
+        guard let mounted = runtimeProvider(), browserLeaseLedger == nil || browserLeaseLedger === ledger else { return false }
+        browserLeaseLedger = ledger
+        ledger.onEngagementChanged = { [weak self] tile, agent, engaged in
+            self?.browserControlPresentation?(tile, agent, engaged, false)
+        }
+        if browserLeaseEventObserver == nil {
+            browserLeaseEventObserver = supervisor.addDeliveredEventObserver { [weak self] agentId, event in
+                let changed: Bool
+                switch event {
+                case .turnStarted: changed = self?.browserLeaseLedger?.observeTurn(agentId, running: true) ?? false
+                case .turnCompleted: changed = self?.browserLeaseLedger?.observeTurn(agentId, running: false) ?? false
+                default: changed = false
+                }
+                if changed { DispatchQueue.main.async { [weak self] in self?.runtimeProvider()?.reconcileHydration(rearmForCamera: false) } }
+            }
+        }
+        mounted.browserLeaseProtectionProvider = { [weak self] in
+            self?.browserLeaseLedger?.protectedTileIds() ?? []
+        }
+        mounted.browserLeaseRunningTileIdsProvider = { [weak self] in
+            self?.browserLeaseLedger?.runningTileIds() ?? []
+        }
+        return true
+    }
     static let idempotencyCapacity = 64
     private static let recentOperationsCapacity = 16
 
@@ -145,7 +217,13 @@ final class WorkspaceAPIService {
         boardRuntime: @escaping (UUID) -> BoardRuntime? = { _ in nil },
         epoch: String,
         approvalHandler: @escaping ApprovalHandler,
-        tileWiring: ((UUID, AgentID) -> Void)? = nil
+        tileWiring: ((UUID, AgentID) -> Void)? = nil,
+        browserDomainApprovalHandler: BrowserDomainApprovalHandler? = nil,
+        browserHandOverApprovalHandler: BrowserHandOverApprovalHandler? = nil,
+        browserRuntimeWiring: ((WKWebViewBrowserRuntime, UUID) -> Void)? = nil,
+        browserIdleClose: ((UUID, AgentID) -> Bool)? = nil,
+        browserControlPresentation: ((UUID, AgentID, Bool, Bool) -> Void)? = nil,
+        browserAuditPresentation: ((UUID, [BrowserAuditEntry]) -> Void)? = nil
     ) {
         self.runtimeProvider = runtime
         self.canvasProvider = canvas
@@ -156,6 +234,20 @@ final class WorkspaceAPIService {
         self.epoch = epoch
         self.approvalHandler = approvalHandler
         self.tileWiring = tileWiring
+        if let browserDomainApprovalHandler { self.browserDomainApprovalHandler = browserDomainApprovalHandler }
+        if let browserHandOverApprovalHandler { self.browserHandOverApprovalHandler = browserHandOverApprovalHandler }
+        self.browserRuntimeWiring = browserRuntimeWiring
+        self.browserIdleClose = browserIdleClose
+        self.browserControlPresentation = browserControlPresentation
+        self.browserAuditPresentation = browserAuditPresentation
+    }
+
+    deinit {
+        MainActor.assumeIsolated {
+            if let browserLeaseEventObserver {
+                supervisor.removeDeliveredEventObserver(browserLeaseEventObserver)
+            }
+        }
     }
 
     // MARK: - Revocation (§14.1)
@@ -174,6 +266,8 @@ final class WorkspaceAPIService {
     func revoke(agentId: AgentID) {
         grants[agentId] = nil
         deviceAPI.sessions.revoke(principal: agentId.rawValue)
+        browserDomainApprovals[agentId] = nil
+        releaseHandedOverBrowsers(revoking: agentId)
         revocationGenerations[agentId] = revocationGeneration(for: agentId) &+ 1
     }
 
@@ -277,6 +371,17 @@ final class WorkspaceAPIService {
             }
             return
         }
+        if let operation = WorkspaceAPIOp(rawValue: op), operation == .browserOpen {
+            dispatchBrowserOpen(agentId: agentId, requestId: requestId, payload: payload,
+                                isCancelled: isCancelled, completion: completion)
+            return
+        }
+        if let operation = WorkspaceAPIOp(rawValue: op), [.browserNavigate, .browserSnapshot, .browserClick, .browserType,
+            .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole].contains(operation) {
+            dispatchBrowserAction(agentId: agentId, requestId: requestId, operation: operation, payload: payload,
+                                  isCancelled: isCancelled, completion: completion)
+            return
+        }
         completion(dispatch(agentId: agentId, requestId: requestId, op: op, payload: payload, isCancelled: isCancelled))
     }
 
@@ -346,6 +451,9 @@ final class WorkspaceAPIService {
             return boardApply(agentId: agentId, record: record, ownHandle: ownHandle,
                               requestId: requestId, payload: payload, runtime: runtime,
                               isCancelled: isCancelled)
+        case .browserOpen, .browserNavigate, .browserSnapshot, .browserClick, .browserType,
+             .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole:
+            return .error(WorkspaceAPIError(code: .unsupported, message: "Browser tools are not available yet."))
         }
     }
 
@@ -941,6 +1049,12 @@ final class WorkspaceAPIService {
     }
 
     func remember(agentId: AgentID, _ operation: WorkspaceRecentOperation) {
+        if operation.op.rawValue.hasPrefix("browser."), let tileId = operation.tileId {
+            browserAudits[tileId, default: []].append(BrowserAuditEntry(
+                agentId: agentId, operation: operation.op, outcome: operation.outcome, at: Date()))
+            if (browserAudits[tileId]?.count ?? 0) > 64 { browserAudits[tileId]?.removeFirst() }
+            browserAuditPresentation?(tileId, browserAudits[tileId] ?? [])
+        }
         recentOperations[agentId, default: []].append(operation)
         while (recentOperations[agentId]?.count ?? 0) > Self.recentOperationsCapacity {
             recentOperations[agentId]?.removeFirst()

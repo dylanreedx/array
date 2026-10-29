@@ -51,6 +51,17 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     case deviceAct = "device.act"
     case deviceClose = "device.close"
     case deviceBuildRun = "device.build_run"
+    case browserOpen = "browser.open"
+    case browserNavigate = "browser.navigate"
+    case browserSnapshot = "browser.snapshot"
+    case browserClick = "browser.click"
+    case browserType = "browser.type"
+    case browserPressKey = "browser.press_key"
+    case browserScroll = "browser.scroll"
+    case browserWaitFor = "browser.wait_for"
+    case browserScreenshot = "browser.take_screenshot"
+    case browserEvaluate = "browser.evaluate"
+    case browserConsole = "browser.console"
 }
 
 // MARK: - Identity
@@ -347,7 +358,7 @@ public struct WorkspaceContextResponse: Codable, Equatable, Sendable {
     /// and must be complete, so each preset op spends fixed bytes, and the
     /// ceiling otherwise sheds `recentOperations` — the only way a caller
     /// cancelled after a committed effect learns the identity it produced.
-    public static let encodedByteCeiling = 1536
+    public static let encodedByteCeiling = 4096
 }
 
 // MARK: - artifact.open
@@ -558,6 +569,8 @@ public struct WorkspaceAPIError: Error, Codable, Equatable, Sendable, CustomStri
         case cursorExpired = "cursor_expired"
         /// A user gesture currently owns the same board object.
         case busy
+        /// The tile's browser runtime was evicted or terminated; explicit reload is required.
+        case browserNotLive = "browser_not_live"
         /// The owner rejected or rolled back the write because it could not be
         /// made durable. The result was never published as committed state.
         case durabilityFailed = "durability_failed"

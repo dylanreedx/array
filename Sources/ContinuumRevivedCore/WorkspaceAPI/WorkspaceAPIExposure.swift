@@ -81,10 +81,11 @@ public enum WorkspaceAPIExposure {
         "tile.metadata": .internal, // Its fields are audited individually below.
         "tile.metadata.launchProfileId": .notExposed("Retargeting an existing terminal is native UI only."),
         "tile.metadata.projectRelativeCwd": .notExposed("Retargeting an existing terminal is native UI only."),
-        "tile.metadata.url": .notExposed("Editing an existing browser's URL is native UI only."),
+        "tile.metadata.url": .exposed(.browserNavigate),
         "tile.metadata.noteId": .internal,
         "tile.metadata.filePath": .internal,
         "tile.metadata.documentLocation": .internal,
+        "tile.metadata.browserOwnerAgentId": .internal,
         "tile.metadata.browserProfileId": .notExposed("Browser-profile selection is native UI only."),
         "tile.metadata.iosPreviewAutomationOwnership": .internal,
         "tile.metadata.iosPreviewDeviceID": .notExposed("Selection changes remain native UI; device.open fixes the device when creating an owned tile."),

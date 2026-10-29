@@ -49,6 +49,21 @@ protocol BrowserRuntime: AnyObject {
 }
 
 final class BrowserHostView: NSView {
+    private let rippleOverlay = BrowserRippleOverlay()
+    private(set) var qaAgentRippleCount = 0
+    private(set) var qaLastAgentRipplePoint: NSPoint?
+
+    func showAgentRipple(at point: NSPoint, colour: NSColor) {
+        guard bounds.contains(point) else { return }
+        if rippleOverlay.superview == nil {
+            rippleOverlay.frame = bounds
+            rippleOverlay.autoresizingMask = [.width, .height]
+            addSubview(rippleOverlay, positioned: .above, relativeTo: nil)
+        }
+        qaAgentRippleCount += 1
+        qaLastAgentRipplePoint = point
+        rippleOverlay.show(at: point, colour: colour)
+    }
     private weak var runtime: BrowserRuntime?
     var reservedShortcutHandler: ((NSEvent) -> Bool)?
     var browserFindShortcutHandler: (() -> Bool)?
@@ -82,5 +97,40 @@ final class BrowserHostView: NSView {
             return true
         }
         return super.performKeyEquivalent(with: event)
+    }
+}
+
+/// One non-interactive overlay per browser host. Short-lived layers mark
+/// agent clicks without intercepting the user's pointer or keyboard.
+private final class BrowserRippleOverlay: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func show(at point: NSPoint, colour: NSColor) {
+        guard let layer else { return }
+        let ring = CAShapeLayer()
+        ring.bounds = CGRect(x: 0, y: 0, width: 20, height: 20)
+        ring.position = point
+        ring.path = CGPath(ellipseIn: ring.bounds.insetBy(dx: 1, dy: 1), transform: nil)
+        ring.fillColor = NSColor.clear.cgColor
+        ring.strokeColor = colour.cgColor
+        ring.lineWidth = 2
+        ring.opacity = 0
+        layer.addSublayer(ring)
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.9
+        fade.toValue = 0
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = 0.6
+        scale.toValue = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.6 : 2.0
+        let group = CAAnimationGroup()
+        group.animations = [fade, scale]
+        group.duration = 0.55
+        ring.add(group, forKey: "agent-click")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak ring] in ring?.removeFromSuperlayer() }
     }
 }

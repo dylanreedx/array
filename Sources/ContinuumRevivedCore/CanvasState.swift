@@ -284,6 +284,8 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     /// Machine-local simulator identity. Connections and helper endpoints are ephemeral.
     public var iosPreviewDeviceID: String?
     public var iosPreviewAutomationOwnership: IOSPreviewAutomationOwnership?
+    /// Host-stamped owner of an agent-created browser; never model-controlled.
+    public var browserOwnerAgentId: AgentID?
     public var linearTeamKey: String?
     public var linearTeamId: String?
     public var linearQuery: String?
@@ -322,6 +324,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         browserProfileId: UUID? = nil,
         iosPreviewDeviceID: String? = nil,
         iosPreviewAutomationOwnership: IOSPreviewAutomationOwnership? = nil,
+        browserOwnerAgentId: AgentID? = nil,
         linearTeamKey: String? = nil,
         linearTeamId: String? = nil,
         linearQuery: String? = nil,
@@ -349,6 +352,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.browserProfileId = browserProfileId
         self.iosPreviewDeviceID = iosPreviewDeviceID
         self.iosPreviewAutomationOwnership = iosPreviewAutomationOwnership
+        self.browserOwnerAgentId = browserOwnerAgentId
         self.linearTeamKey = linearTeamKey
         self.linearTeamId = linearTeamId
         self.linearQuery = linearQuery
@@ -378,6 +382,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case browserProfileId
         case iosPreviewDeviceID
         case iosPreviewAutomationOwnership
+        case browserOwnerAgentId
         case linearTeamKey
         case linearTeamId
         case linearQuery
@@ -408,6 +413,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(browserProfileId, forKey: .browserProfileId)
         try container.encodeIfPresent(iosPreviewDeviceID, forKey: .iosPreviewDeviceID)
         try container.encodeIfPresent(iosPreviewAutomationOwnership, forKey: .iosPreviewAutomationOwnership)
+        try container.encodeIfPresent(browserOwnerAgentId, forKey: .browserOwnerAgentId)
         try container.encodeIfPresent(linearTeamKey, forKey: .linearTeamKey)
         try container.encodeIfPresent(linearTeamId, forKey: .linearTeamId)
         try container.encodeIfPresent(linearQuery, forKey: .linearQuery)
@@ -425,6 +431,14 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(markdownDocumentMode, forKey: .markdownDocumentMode)
         try container.encodeIfPresent(fileEditorViewState, forKey: .fileEditorViewState)
         try container.encodeIfPresent(boardId, forKey: .boardId)
+    }
+
+    /// The agent that may drive this browser without a hand-over. The owner
+    /// stamp counts only while the tile stays on the Agents profile: moving it
+    /// to Default or a custom profile gives it the user's sessions, so control
+    /// then needs the same explicit hand-over as any user tile.
+    public var browserControllingAgentId: AgentID? {
+        browserProfileId == BrowserProfile.agentsProfileId ? browserOwnerAgentId : nil
     }
 }
 

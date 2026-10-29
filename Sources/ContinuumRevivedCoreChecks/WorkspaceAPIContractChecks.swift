@@ -6,6 +6,10 @@ import Foundation
 // evaluator behave mechanically, and the pi bridge value types encode what the
 // extension parses. Pure — no processes, no filesystem.
 func runWorkspaceAPIContractChecks() {
+    expect(WorkspaceContextResponse.encodedByteCeiling == 4096, "browser capability list needs a 4096-byte workspace context ceiling")
+    checkBrowserNavigationPolicy()
+    checkBrowserRequests()
+    checkBrowserNotLiveError()
     checkAgentUpdateCoding()
     checkCheckoutHandleDerivation()
     checkArtifactHandleWireForm()
@@ -15,6 +19,14 @@ func runWorkspaceAPIContractChecks() {
     checkGrantEvaluator()
     checkBridgeParseAndEncode()
     print("WorkspaceAPIContractChecks passed")
+}
+
+private func checkBrowserNotLiveError() {
+    let error = WorkspaceAPIError(code: .browserNotLive, message: "Reload the tile.")
+    let encoded = try? JSONEncoder().encode(error)
+    let decoded = encoded.flatMap { try? JSONDecoder().decode(WorkspaceAPIError.self, from: $0) }
+    expect(error.code.rawValue == "browser_not_live" && decoded == error,
+           "browser_not_live must keep its distinct wire code and round-trip")
 }
 
 private let contractEncoder: JSONEncoder = {
@@ -138,7 +150,7 @@ private func checkResultRoundTrip() {
         observedAt: Date(timeIntervalSince1970: 1_900_000_000))
     let contextData = try! contractEncoder.encode(context)
     expect(contextData.count < WorkspaceContextResponse.encodedByteCeiling,
-           "a full context with one recent operation fits the ~256-token ceiling (\(contextData.count) bytes)")
+           "a full context with one recent operation fits the published byte ceiling (\(contextData.count) bytes)")
     let decodedContext = try! contractDecoder.decode(WorkspaceContextResponse.self, from: contextData)
     expect(decodedContext == context, "WorkspaceContextResponse round-trips")
     expect(!context.coverage.complete, "coverage with an unhydrated zone is not complete")
@@ -307,4 +319,65 @@ private func checkAgentUpdateCoding() {
            "the tool guidance tells an agent to check nameSource before a proactive rename")
     expect(ArrayWorkspaceTool(toolName: "array_update_agent")?.kind == .edit
            && ArrayWorkspaceTool(toolName: "mcp__array_workspace__array_update_agent") == .updateAgent, "new tool has native transcript presentation")
+}
+
+private func checkBrowserRequests() {
+    let tile = UUID()
+    func decode(_ op: String, _ payload: [String: Any]) -> BrowserToolRequest? {
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        return try? BrowserToolRequest.decode(operation: op, data: data)
+    }
+    let id = tile.uuidString
+    expect(decode("browser.open", ["url": "http://localhost:3000"]) == .open(url: "http://localhost:3000", key: nil), "browser open decodes")
+    expect(decode("browser.click", ["tileId": id, "ref": "e1"]) == .click(tile: tile, target: .ref("e1"), key: nil), "browser click ref decodes")
+    expect(decode("browser.click", ["tileId": id, "x": 12, "y": 4]) == .click(tile: tile, target: .point(12, 4), key: nil), "browser click coordinates decode")
+    expect(decode("browser.click", ["tileId": id, "ref": "e1", "x": 12, "y": 4]) == nil, "ambiguous click is rejected")
+    expect(decode("browser.snapshot", [:]) == nil, "browser actions require a tile")
+    expect(decode("browser.navigate", ["tileId": id, "url": "https://example.com", "action": "reload"]) == nil, "ambiguous navigation is rejected")
+    expect(decode("browser.wait_for", ["tileId": id, "condition": "idle", "timeout": 31]) == nil, "wait is bounded")
+    expect(decode("browser.type", ["tileId": id, "text": "hello"]) == .type(tile: tile, text: "hello", ref: nil, clear: false, submit: false, key: nil), "browser type defaults decode")
+    expect(decode("browser.wait_for", ["tileId": id, "condition": "textAppears", "value": "Ready", "timeout": 3]) == .waitFor(tile: tile, condition: .textAppears("Ready"), timeout: 3, key: nil), "browser wait decodes")
+    expect(decode("browser.navigate", ["tileId": id, "action": "reload", "idempotencyKey": "retry"]) == .navigate(tile: tile, destination: .reload, key: "retry"), "reload and retry key decode")
+    expect(decode("browser.navigate", ["tileId": id, "url": "http://localhost"]) == .navigate(tile: tile, destination: .url("http://localhost"), key: nil), "navigation URL decodes")
+    expect(decode("browser.snapshot", ["tileId": id]) == .snapshot(tile: tile, key: nil), "snapshot decodes")
+    expect(decode("browser.press_key", ["tileId": id, "keyName": "Enter"]) == .pressKey(tile: tile, keyName: "Enter", key: nil), "key decodes")
+    expect(decode("browser.scroll", ["tileId": id, "dy": 50]) == .scroll(tile: tile, ref: nil, dx: 0, dy: 50, key: nil), "scroll defaults decode")
+    expect(decode("browser.take_screenshot", ["tileId": id, "ref": "e2"]) == .screenshot(tile: tile, ref: "e2", key: nil), "screenshot decodes")
+    expect(decode("browser.evaluate", ["tileId": id, "script": "1+1"]) == .evaluate(tile: tile, script: "1+1", key: nil), "evaluate decodes")
+    expect(decode("browser.console", ["tileId": id, "level": "error"]) == .console(tile: tile, level: "error", key: nil), "console filter decodes")
+    expect(decode("browser.console", ["tileId": id, "level": "unknown"]) == nil, "unknown console filter is rejected")
+    expect(decode("browser.snapshot", ["tileId": id, "extra": true]) == nil, "unknown fields are rejected")
+    expect(decode("browser.click", ["tileId": id, "x": -1, "y": 0]) == nil, "negative coordinates are rejected")
+    expect(decode("browser.wait_for", ["tileId": id, "condition": "idle", "value": "ignored"]) == nil, "idle wait rejects an unused value")
+    expect(decode("browser.type", ["tileId": id, "text": "", "clear": "true"]) == nil, "wrong field types are rejected")
+    expect(decode("browser.snapshot", ["tileId": id, "idempotencyKey": ""]) == nil, "empty retry key is rejected")
+}
+
+private func checkBrowserNavigationPolicy() {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("array-browser-policy-" + UUID().uuidString, isDirectory: true)
+    let checkout = root.appendingPathComponent("checkout", isDirectory: true)
+    let other = root.appendingPathComponent("other", isDirectory: true)
+    try! fm.createDirectory(at: checkout, withIntermediateDirectories: true)
+    try! fm.createDirectory(at: other, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    try! Data("ok".utf8).write(to: checkout.appendingPathComponent("index.html"))
+    try! Data("secret".utf8).write(to: other.appendingPathComponent("secret"))
+    try! Data("outside".utf8).write(to: root.appendingPathComponent("secret"))
+    try! Data("inside".utf8).write(to: checkout.appendingPathComponent("secret"))
+    try! fm.createSymbolicLink(at: checkout.appendingPathComponent("escape"), withDestinationURL: other)
+    func classify(_ raw: String) -> BrowserAgentNavigationPolicy.Verdict {
+        BrowserAgentNavigationPolicy.classify(URL(string: raw)!, checkoutRoot: checkout)
+    }
+    expect(classify("http://localhost:3000/") == .local, "localhost is local")
+    expect(classify("https://app.localhost/") == .local, "localhost subdomains are local")
+    expect(classify("http://127.9.8.7/") == .local && classify("http://[::1]/") == .local, "loopback is local")
+    expect(classify("https://localhost.example.com/") == .approvalRequired(host: "localhost.example.com"), "localhost prefix is not local")
+    expect(classify("https://EXAMPLE.com/a") == .approvalRequired(host: "example.com"), "remote hosts need approval")
+    expect(classify("javascript:alert(1)") == .denied && classify("data:text/html,hi") == .denied, "active opaque schemes are denied")
+    expect(BrowserAgentNavigationPolicy.classify(checkout.appendingPathComponent("index.html"), checkoutRoot: checkout) == .local, "checkout file is local")
+    expect(BrowserAgentNavigationPolicy.classify(other.appendingPathComponent("secret"), checkoutRoot: checkout) == .denied, "outside checkout file is denied")
+    expect(BrowserAgentNavigationPolicy.classify(checkout.appendingPathComponent("escape/secret"), checkoutRoot: checkout) == .denied, "symlink escape is denied")
+    let traversal = URL(fileURLWithPath: checkout.path + "/escape/../secret")
+    expect(BrowserAgentNavigationPolicy.classify(traversal, checkoutRoot: checkout) == .denied, "symlink followed by parent traversal is denied")
 }

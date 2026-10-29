@@ -479,6 +479,20 @@ enum TileProjectScopeChecks {
         try expect(a2New.count == 1, "project A2's canvas.json gained \(a2New.count) tile(s) for the opened link, not 1")
         let a2 = try controller(fixture, Fixture.projectA2, "link")
         try expect(a2.browserRuntimes.contains { a2New.contains($0.tileId) }, "the opened browser's runtime is not held by project A2's controller")
+        guard let browser = a2.browserRuntimes.first(where: { a2New.contains($0.tileId) }) else {
+            throw Failure(message: "the opened link has no browser runtime")
+        }
+        let worldFrame = m.canvas.navigationTileSnapshot(for: browser.tileId)?.worldFrame
+        // Deliver WebKit's real delegate callback without crashing a process.
+        browser.webViewWebContentProcessDidTerminate(browser.webView)
+        fixture.drain(0.3)
+        try expect(m.canvas.tileView(for: browser.tileId) is BrowserRestartTileNSView,
+                   "a transcript-link browser crash must show the Restart tile")
+        try expect(!a2.browserRuntimes.contains(where: { $0.id == browser.id }), "the terminated browser must release its runtime")
+        m.delegate.qaRestartBrowserTile(browser.tileId)
+        try expect(m.canvas.tileView(for: browser.tileId) is BrowserTileNSView, "Restart must restore the transcript-link browser")
+        try expect(m.canvas.navigationTileSnapshot(for: browser.tileId)?.worldFrame == worldFrame,
+                   "crash and restart must preserve the browser's world frame")
         return ["opened": a2New.first?.uuidString ?? ""]
     }
 

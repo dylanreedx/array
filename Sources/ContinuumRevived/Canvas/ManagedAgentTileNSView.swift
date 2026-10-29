@@ -807,7 +807,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             if let token = localNoticeObserverToken { supervisor.removeLocalNoticeObserver(token, for: agentID) }
             localNoticeObserverToken = supervisor.addLocalNoticeObserver(for: agentID) { [weak self] notice in
                 guard let self, self.attachedAgentID == agentID else { return }
-                self.model.appendNotice(id: notice.id, title: notice.title, text: notice.body)
+                if let image = notice.screenshot {
+                    try? self.model.appendBrowserScreenshot(id: notice.id, metadata: image)
+                } else {
+                    self.model.appendNotice(id: notice.id, title: notice.title, text: notice.body)
+                }
                 self.synchronizeV2Transcript(final: true)
                 self.refreshCompactStatus()
                 self.refreshTranscriptThinkingIndicator()

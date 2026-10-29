@@ -499,6 +499,18 @@ public struct ProjectEntry: Codable, Equatable, Sendable {
 public struct BrowserProfile: Codable, Equatable, Sendable {
     public static let defaultProfileId = UUID(uuidString: "B0000000-0000-4000-8000-000000000001")!
     public static let defaultDataStoreIdentifier = UUID(uuidString: "B0000000-0000-4000-8000-000000000002")!.uuidString
+    public static let agentsProfileId = UUID(uuidString: "B0000000-0000-4000-8000-000000000003")!
+    public static let agentsDataStoreIdentifier = UUID(uuidString: "B0000000-0000-4000-8000-000000000004")!.uuidString
+
+    public static func isBuiltIn(_ id: UUID) -> Bool {
+        id == defaultProfileId || id == agentsProfileId
+    }
+
+    public static func builtInAgents() -> BrowserProfile {
+        BrowserProfile(id: agentsProfileId, name: "Agents",
+                       dataStoreIdentifier: agentsDataStoreIdentifier, createdAt: defaultCreatedAt)
+    }
+
     public static let defaultCreatedAt = Date(timeIntervalSince1970: 0)
 
     public let id: UUID
@@ -570,7 +582,7 @@ public struct RegistrySettings: Codable, Equatable, Sendable {
 
     @discardableResult
     public mutating func upsertBrowserProfile(_ profile: BrowserProfile) -> Bool {
-        guard profile.id != BrowserProfile.defaultProfileId,
+        guard !BrowserProfile.isBuiltIn(profile.id),
               UUID(uuidString: profile.dataStoreIdentifier) != nil else {
             return false
         }
@@ -584,7 +596,7 @@ public struct RegistrySettings: Codable, Equatable, Sendable {
 
     @discardableResult
     public mutating func deleteBrowserProfile(id: UUID) -> Bool {
-        guard id != BrowserProfile.defaultProfileId,
+        guard !BrowserProfile.isBuiltIn(id),
               let index = browserProfiles.firstIndex(where: { $0.id == id }) else {
             return false
         }
@@ -603,14 +615,12 @@ public struct RegistrySettings: Codable, Equatable, Sendable {
     }
 
     public static func normalizedBrowserProfilesForApp(_ profiles: [BrowserProfile]) -> [BrowserProfile] {
-        var normalized = profiles.filter { profile in
-            profile.id == BrowserProfile.defaultProfileId || UUID(uuidString: profile.dataStoreIdentifier) != nil
+        let custom = profiles.filter { profile in
+            guard !BrowserProfile.isBuiltIn(profile.id),
+                  UUID(uuidString: profile.dataStoreIdentifier) != nil else { return false }
+            return true
         }
-        if let defaultIndex = normalized.firstIndex(where: { $0.id == BrowserProfile.defaultProfileId }) {
-            normalized[defaultIndex] = BrowserProfile.builtInDefault()
-        } else {
-            normalized.insert(BrowserProfile.builtInDefault(), at: 0)
-        }
+        let normalized = [BrowserProfile.builtInDefault(), BrowserProfile.builtInAgents()] + custom
         return normalized
     }
 }

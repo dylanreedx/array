@@ -1039,6 +1039,8 @@ final class AgentSupervisor {
     private var companionQueueHydrationPending: Set<AgentID> = []
     private var companionHeldStarts: [AgentID: CompanionTaskRunHandle] = [:]
     var onCompanionTasksChanged: (() -> Void)?
+    /// Channel-local storage for browser images produced by this agent.
+    var browserArtifactRoot: URL { store.layout.applicationSupportDirectory.appendingPathComponent("agent-browser-artifacts", isDirectory: true) }
     private let makeRunner: (AgentRunnerLaunch) -> AgentRunning
     private let warn: (String) -> Void
     /// The production writer is `AgentStore.upsert`. The optional seam exists only
@@ -6428,6 +6430,34 @@ final class AgentSupervisor {
         transcriptProjections[id]?.document
     }
 
+    func stageBrowserScreenshot(_ data: Data, for id: AgentID) async throws -> AgentComposerStoredAttachment {
+        try await attachmentStore.stageBrowserScreenshot(data, for: id)
+    }
+
+    func qaStoredBrowserImage(_ id: AgentImageAttachmentID) async throws -> AgentComposerStoredAttachment? {
+        try await attachmentStore.storedAttachment(for: id)
+    }
+
+    func discardBrowserScreenshot(_ image: AgentImageAttachmentID, for id: AgentID) async throws {
+        try await attachmentStore.discardBrowserScreenshot(image, for: id)
+    }
+
+    func commitBrowserScreenshot(_ image: AgentImageAttachmentID, for id: AgentID) async {
+        await attachmentStore.commitBrowserScreenshot(image, for: id)
+    }
+
+    func publishBrowserScreenshot(_ metadata: AgentImageAttachmentMetadata, for id: AgentID) throws {
+        let noticeID = "browser-screenshot-\(UUID().uuidString)"
+        guard transcriptStore != nil else { throw AgentComposerAttachmentStoreError.storageReadFailed("transcript unavailable") }
+        var projection = transcriptProjection(for: id)
+        try projection.appendBrowserScreenshot(id: noticeID, metadata: metadata)
+        transcriptProjections[id] = projection
+        scheduleTranscriptPersist(for: id, final: true)
+        for observe in (localNoticeObservers[id] ?? [:]).values {
+            observe(AgentLocalNotice(id: noticeID, title: "", body: "", screenshot: metadata))
+        }
+    }
+
     /// The newest line of the agent's latest assistant message, for the sidebar's
     /// hover card: the last line with words in it, leading list, heading and quote
     /// markers dropped, code fences skipped. A read of the same projection as above (an open stream
@@ -9461,6 +9491,7 @@ struct AgentLocalNotice: Equatable {
     let id: String
     let title: String
     let body: String
+    var screenshot: AgentImageAttachmentMetadata? = nil
 }
 
 /// A runner that emits a fixed script instead of spawning Pi. `holdUntilStopped`

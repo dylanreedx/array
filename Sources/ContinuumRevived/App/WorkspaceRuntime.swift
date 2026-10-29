@@ -2507,6 +2507,9 @@ final class WorkspaceRuntime {
     // MARK: - Browser Runtime Budget (T07)
 
     private var browserRuntimeBudget = BrowserRuntimeBudget(maxLive: BrowserRuntimeBudget.resolveMaxLive())
+    /// A workspace API lease protects its browser from budget eviction.
+    var browserLeaseProtectionProvider: (() -> Set<UUID>)?
+    var browserLeaseRunningTileIdsProvider: (() -> Set<UUID>)?
 
     /// QA (`.plans/67` ARC-4a): lower the WKWebView cap so a leg can reach a real
     /// eviction with two browsers instead of seven.
@@ -2533,6 +2536,7 @@ final class WorkspaceRuntime {
                 protected.insert(tileId)
             }
         }
+        protected.formUnion(browserLeaseProtectionProvider?() ?? [])
         return protected
     }
 
@@ -2650,7 +2654,7 @@ final class WorkspaceRuntime {
     }
 
     /// Re-plan + apply hydration tiers across the registry based on the current viewport.
-    func reconcileHydration() {
+    func reconcileHydration(rearmForCamera: Bool = true) {
         reconcileCount += 1
         guard let canvasView else { return }
         let mountedZones = document.zones.filter { !foreignZoneIds.contains($0.zoneId) }
@@ -2667,8 +2671,14 @@ final class WorkspaceRuntime {
                 return controller.canvasView?.canvasState.tiles.contains { $0.id == activeTileId } ?? false
             })?.zoneId
         }()
+        let runningZones = Set((browserLeaseRunningTileIdsProvider?() ?? []).flatMap { canvasView.installedZoneIds(containing: $0) })
+        let planningZones = mountedZones.map { zone in
+            var copy = zone
+            if runningZones.contains(zone.zoneId) { copy.hydrationPolicy = .pinnedLive }
+            return copy
+        }
         let plan = ZoneHydrationOrchestrator.plan(
-            zones: mountedZones,
+            zones: planningZones,
             viewport: viewport,
             visibleSize: visibleSize,
             focusedTileZone: focusedTileZone,
@@ -2727,7 +2737,7 @@ final class WorkspaceRuntime {
         // (656,0,5644x824) with the document still saying (5020,0,1280x720). Asking
         // the document "is the camera inside this zone" then answers about a
         // rectangle the user cannot see, so panning onto a zone did not arm it.
-        if let armed = CanvasEngine.cameraArmedZone(
+        if rearmForCamera, let armed = CanvasEngine.cameraArmedZone(
             zones: canvasView.renderedZonesInZOrder,
             viewport: viewport,
             visibleSize: visibleSize

@@ -323,7 +323,7 @@ public struct PiEventTranslator {
                 // pi's bash tool states its exit as the result's last line
                 // ("Command exited with code 2"); the row badges it, so the
                 // output keeps everything above it.
-                let preview = Self.resultPreview(object["result"])
+                let preview = ArrayWorkspaceTool(toolName: toolName)?.isBrowser == true ? nil : Self.resultPreview(object["result"])
                 let shell = AgentShellObservation.isShellTool(toolName)
                     ? AgentShellObservation.piResult(text: preview)
                     : AgentShellObservation.ShellResult(output: preview)
@@ -682,6 +682,9 @@ public struct PiEventTranslator {
         args: [String: Any],
         settingsDefaults: UserDefaults
     ) -> [(key: String, value: String)] {
+        // Browser arguments may contain credentials, page data or secret URLs.
+        // The transcript needs only the fixed action sentence.
+        if ArrayWorkspaceTool(toolName: toolName)?.isBrowser == true { return [] }
         func string(_ key: String) -> String? {
             guard let value = args[key] as? String else { return nil }
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)

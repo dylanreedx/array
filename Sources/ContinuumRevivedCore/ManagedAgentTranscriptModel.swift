@@ -217,6 +217,11 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         semanticProjection.appendNotice(id: id, title: title, text: text)
     }
 
+    public mutating func appendBrowserScreenshot(id: String, metadata: AgentImageAttachmentMetadata) throws {
+        guard let nodeID = AgentNodeID(rawValue: id) else { throw AgentComposerAttachmentStoreError.storageReadFailed("invalid transcript identifier") }
+        _ = try semanticProjection.appendBrowserScreenshot(id: nodeID, metadata: metadata)
+    }
+
     /// "In Terminal · 2 turns" (`.plans/79`): what follows was taken outside
     /// this tile.
     public mutating func appendSessionBoundary(id: String, text: String, symbolName: String?) {

@@ -2628,12 +2628,14 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         var isFailure = false
         var isLive = false
         var isDiff = false
+        var isBrowserAction = false
         if let block = row.block {
             switch block.payload {
             case .diff:
                 isDiff = true
             case let .toolCall(payload):
                 isToolRow = true
+                isBrowserAction = ArrayWorkspaceTool(toolName: payload.name)?.isBrowser == true
                 isFailure = payload.status == .failed || payload.status == .interrupted
                     || payload.status == .cancelled
                 isLive = payload.status == .pending || payload.status == .inProgress
@@ -2657,7 +2659,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             isUserProse: row.role == .user
                 && row.block.map { UserPromptRenderer.supportedKinds.contains($0.kind) } == true,
             isReasoning: row.entry != nil,
-            isDiff: isDiff
+            isDiff: isDiff,
+            isBrowserAction: isBrowserAction
         )
     }
 
@@ -3051,12 +3054,17 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         }
 
         let count = header.memberIndexes.count
-        var parts = ["\(count) step\(count == 1 ? "" : "s")"]
+        let onlyBrowserActions = count > 0 && header.memberIndexes.allSatisfy { index in
+            guard rows.indices.contains(index), let block = rows[index].block,
+                  case let .toolCall(payload) = block.payload else { return false }
+            return ArrayWorkspaceTool(toolName: payload.name)?.isBrowser == true
+        }
+        var parts = [onlyBrowserActions ? "Used browser \(count) \(count == 1 ? "time" : "times")" : "\(count) step\(count == 1 ? "" : "s")"]
         let buckets = nounOrder.map { noun -> String in
             let n = nounCounts[noun] ?? 0
             return "\(n) \(noun)\(n == 1 ? "" : (noun.hasSuffix("h") ? "es" : "s"))"
         }
-        if !buckets.isEmpty, buckets != ["\(count) step\(count == 1 ? "" : "s")"] {
+        if !onlyBrowserActions, !buckets.isEmpty, buckets != ["\(count) step\(count == 1 ? "" : "s")"] {
             parts.append(buckets.joined(separator: ", "))
         }
         // Falls back to the entry span when the detail records have expired: a

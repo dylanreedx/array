@@ -24,13 +24,19 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     var onCreateBrowserProfile: (() -> Void)?
     var onRenameBrowserProfile: ((UUID) -> Void)?
     var onDeleteBrowserProfile: ((UUID) -> Void)?
+    var onSignOutAgents: (() -> Void)?
     var onOpenInspector: (() -> Void)?
 
     private let urlField: NSTextField
     private let backButton: NSButton
     private let forwardButton: NSButton
     private let reloadButton: NSButton
-    private let profileMenuButton: NSButton
+    private let profileMenuButton: ChoiceButton
+    private let agentControlButton: ChoiceButton
+    private(set) var agentControlTitleForQA: String?
+    private var agentControlActions: [ChoiceItem] = []
+    private var browserActivityLines: [String] = []
+    var qaBrowserActivity: [String] { agentControlButton.items.filter { $0.id.hasPrefix("activity-") }.map(\.title) }
     private let faviconLabel: NSTextField
     private let progressIndicator: NSProgressIndicator
     private let findField: NSSearchField
@@ -62,7 +68,8 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         self.backButton = NSButton(title: "‹", target: nil, action: nil)
         self.forwardButton = NSButton(title: "›", target: nil, action: nil)
         self.reloadButton = NSButton(title: "↻", target: nil, action: nil)
-        self.profileMenuButton = NSButton(title: "⋯", target: nil, action: nil)
+        self.profileMenuButton = ChoiceButton(title: "Default")
+        self.agentControlButton = ChoiceButton(title: "Agent")
         self.faviconLabel = NSTextField(labelWithString: "◌")
         self.progressIndicator = NSProgressIndicator()
         self.findField = NSSearchField()
@@ -106,11 +113,16 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         reloadButton.bezelStyle = .rounded
         reloadButton.translatesAutoresizingMaskIntoConstraints = false
 
-        profileMenuButton.target = self
-        profileMenuButton.action = #selector(showProfileMenu(_:))
-        profileMenuButton.bezelStyle = .rounded
+        profileMenuButton.keepsSelectionForItem = { UUID(uuidString: $0.id) == nil }
+        profileMenuButton.onSelection = { [weak self] item in self?.chooseBrowserProfile(item) }
         profileMenuButton.toolTip = "Browser profiles"
         profileMenuButton.translatesAutoresizingMaskIntoConstraints = false
+
+        agentControlButton.isHidden = true
+        agentControlButton.popoverPresentation = .commands
+        agentControlButton.keepsSelectionForItem = { _ in true }
+        agentControlButton.toolTip = "Browser control"
+        agentControlButton.translatesAutoresizingMaskIntoConstraints = false
 
         urlField.delegate = self
         urlField.translatesAutoresizingMaskIntoConstraints = false
@@ -145,7 +157,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         tabStrip.distribution = .fill
         tabStrip.translatesAutoresizingMaskIntoConstraints = false
 
-        let navRow = NSStackView(views: [backButton, forwardButton, reloadButton, faviconLabel, urlField, progressIndicator, profileMenuButton])
+        let navRow = NSStackView(views: [backButton, forwardButton, reloadButton, faviconLabel, urlField, progressIndicator, agentControlButton, profileMenuButton])
         navRow.orientation = .horizontal
         navRow.spacing = 4
         navRow.alignment = .centerY
@@ -400,6 +412,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     }
 
     private func refresh() {
+        refreshBrowserProfileLabel()
         // Don't clobber a URL the user is actively typing.
         if urlField.currentEditor() == nil {
             urlField.stringValue = runtime.url
@@ -532,53 +545,87 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         findResultLabel.stringValue = ""
     }
 
-    @objc private func showProfileMenu(_ sender: NSButton) {
-        profileMenuForQA().popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 2), in: sender)
-    }
-
-    func profileMenuForQA() -> NSMenu {
-        let profiles = browserProfilesProvider?() ?? [BrowserProfile.builtInDefault()]
-        let activeId = activeBrowserProfileProvider?() ?? BrowserProfile.defaultProfileId
-        let menu = NSMenu()
-        for profile in profiles.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) {
-            let item = NSMenuItem(title: profile.name, action: #selector(selectBrowserProfile(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = profile.id
-            item.state = profile.id == activeId ? .on : .off
-            menu.addItem(item)
+    /// The shared choice control exposes the current driver and explicit user
+    /// actions without adding a second, platform-styled menu to the tile.
+    func setAgentControl(name: String, colour: NSColor?, engaged: Bool, userDriving: Bool,
+                         takeControl: @escaping () -> Void, revealAgent: @escaping () -> Void,
+                         close: @escaping () -> Void) {
+        let visible = engaged || userDriving || !browserActivityLines.isEmpty
+        agentControlButton.isHidden = !visible
+        guard visible else { agentControlTitleForQA = nil; return }
+        let title = userDriving ? "You’re driving" : (engaged ? "Driven by \(name)" : "Browser activity")
+        agentControlTitleForQA = title
+        agentControlActions = (userDriving || !engaged ? [] : [ChoiceItem(id: "take", title: "Take control")]) + [
+            ChoiceItem(id: "reveal", title: "Reveal agent"), ChoiceItem(id: "close", title: "Close browser", destructive: true)
+        ]
+        agentControlButton.leadingSwatches = colour.map { [$0] } ?? []
+        agentControlButton.onSelection = { item in
+            switch item.id {
+            case "take": takeControl()
+            case "reveal": revealAgent()
+            case "close": close()
+            default: break
+            }
         }
-        menu.addItem(.separator())
-        let create = NSMenuItem(title: "Create Profile…", action: #selector(createBrowserProfile(_:)), keyEquivalent: "")
-        create.target = self
-        menu.addItem(create)
-        if activeId != BrowserProfile.defaultProfileId {
-            let rename = NSMenuItem(title: "Rename Current Profile…", action: #selector(renameBrowserProfile(_:)), keyEquivalent: "")
-            rename.target = self
-            rename.representedObject = activeId
-            menu.addItem(rename)
-            let delete = NSMenuItem(title: "Delete Current Profile…", action: #selector(deleteBrowserProfile(_:)), keyEquivalent: "")
-            delete.target = self
-            delete.representedObject = activeId
-            menu.addItem(delete)
+        refreshBrowserActivityMenu()
+    }
+
+    func setBrowserActivity(_ lines: [String]) {
+        browserActivityLines = Array(lines.suffix(8).reversed())
+        refreshBrowserActivityMenu()
+    }
+
+    private func refreshBrowserActivityMenu() {
+        var activity = browserActivityLines.enumerated().map { index, line in
+            ChoiceItem(id: "activity-\(index)", title: line, enabled: false)
         }
-        return menu
+        if !activity.isEmpty { activity[0].separatorBefore = true }
+        agentControlButton.items = agentControlActions + activity
+        if let title = agentControlTitleForQA { agentControlButton.setPresentationTitle(title) }
     }
 
-    @objc private func selectBrowserProfile(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? UUID else { return }
-        onSwitchBrowserProfile?(id)
+    func qaChooseAgentControl(_ id: String) {
+        guard let item = agentControlButton.items.first(where: { $0.id == id }) else { return }
+        agentControlButton.handleSelection(item)
     }
 
-    @objc private func createBrowserProfile(_ sender: NSMenuItem) { onCreateBrowserProfile?() }
-
-    @objc private func renameBrowserProfile(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? UUID else { return }
-        onRenameBrowserProfile?(id)
+    func refreshBrowserProfileLabel() {
+        let activeId = activeBrowserProfileProvider?() ?? tile.metadata.browserProfileId ?? BrowserProfile.defaultProfileId
+        profileMenuButton.items = browserProfileChoices()
+        profileMenuButton.selectedID = activeId.uuidString
     }
 
-    @objc private func deleteBrowserProfile(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? UUID else { return }
-        onDeleteBrowserProfile?(id)
+    func browserProfileChoices() -> [ChoiceItem] {
+        let profiles = RegistrySettings.normalizedBrowserProfilesForApp(browserProfilesProvider?() ?? [])
+        let activeId = activeBrowserProfileProvider?() ?? tile.metadata.browserProfileId ?? BrowserProfile.defaultProfileId
+        var items = profiles.map { ChoiceItem(id: $0.id.uuidString, title: $0.name) }
+        var create = ChoiceItem(id: "create", title: "Create Profile…")
+        create.separatorBefore = true
+        items.append(create)
+        if !BrowserProfile.isBuiltIn(activeId) {
+            items.append(ChoiceItem(id: "rename", title: "Rename Current Profile…"))
+            items.append(ChoiceItem(id: "delete", title: "Delete Current Profile…", destructive: true))
+        }
+        if activeId == BrowserProfile.agentsProfileId {
+            items.append(ChoiceItem(id: "signOut", title: "Sign out of everything", destructive: true))
+        }
+        return items
+    }
+
+    func chooseBrowserProfile(_ item: ChoiceItem) {
+        guard browserProfileChoices().contains(where: { $0.id == item.id }) else { return }
+        let activeId = activeBrowserProfileProvider?() ?? tile.metadata.browserProfileId ?? BrowserProfile.defaultProfileId
+        if let id = UUID(uuidString: item.id) { onSwitchBrowserProfile?(id) }
+        else {
+            switch item.id {
+            case "create": onCreateBrowserProfile?()
+            case "rename": onRenameBrowserProfile?(activeId)
+            case "delete": onDeleteBrowserProfile?(activeId)
+            case "signOut": onSignOutAgents?()
+            default: break
+            }
+        }
+        refreshBrowserProfileLabel()
     }
 
     private func focusBrowserContent() {
@@ -740,34 +787,73 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         browserTile.onCreateBrowserProfile = { createRequested = true }
         browserTile.onRenameBrowserProfile = { renamedProfileId = $0 }
         browserTile.onDeleteBrowserProfile = { deletedProfileId = $0 }
-        let profileMenu = browserTile.profileMenuForQA()
-        try expect(profileMenu.items.contains(where: { $0.title == "QA Custom" && $0.state == .on }), "profile menu marks active custom profile")
-        try expect(profileMenu.items.contains(where: { $0.title == "Default" }), "profile menu includes Default")
-        try expect(profileMenu.items.contains(where: { $0.title == "Create Profile…" }), "profile menu includes create action")
-        try expect(profileMenu.items.contains(where: { $0.title == "Rename Current Profile…" }), "profile menu includes rename action for custom active profile")
-        try expect(profileMenu.items.contains(where: { $0.title == "Delete Current Profile…" }), "profile menu includes delete action for custom active profile")
-        if let defaultItem = profileMenu.items.first(where: { $0.title == "Default" }) { browserTile.selectBrowserProfile(defaultItem) }
-        try expect(switchedProfileId == BrowserProfile.defaultProfileId, "profile menu switch callback carries selected profile id")
-        if let createItem = profileMenu.items.first(where: { $0.title == "Create Profile…" }) { browserTile.createBrowserProfile(createItem) }
-        try expect(createRequested, "profile menu create callback fires")
-        if let renameItem = profileMenu.items.first(where: { $0.title == "Rename Current Profile…" }) { browserTile.renameBrowserProfile(renameItem) }
-        try expect(renamedProfileId == customProfile.id, "profile menu rename callback carries active custom profile id")
-        if let deleteItem = profileMenu.items.first(where: { $0.title == "Delete Current Profile…" }) { browserTile.deleteBrowserProfile(deleteItem) }
-        try expect(deletedProfileId == customProfile.id, "profile menu delete callback carries active custom profile id")
+        browserTile.refreshBrowserProfileLabel()
+        let choices = browserTile.browserProfileChoices()
+        try expect(choices.contains(where: { $0.title == "QA Custom" && $0.id == activeProfileId.uuidString }), "profile choices include active custom profile")
+        try expect(choices.contains(where: { $0.title == "Default" }), "profile choices include Default")
+        try expect(choices.contains(where: { $0.title == "Agents" }), "profile choices always include Agents")
+        for (id, title) in [("create", "Create Profile…"), ("rename", "Rename Current Profile…"), ("delete", "Delete Current Profile…")] {
+            try expect(choices.contains(where: { $0.id == id && $0.title == title }), "profile choices include management action")
+        }
+        for id in ["create", "rename", "delete", BrowserProfile.defaultProfileId.uuidString] {
+            browserTile.profileMenuButton.handleSelection(choices.first(where: { $0.id == id })!)
+        }
+        try expect(switchedProfileId == BrowserProfile.defaultProfileId, "choice switch carries selected profile id")
+        try expect(createRequested && renamedProfileId == customProfile.id && deletedProfileId == customProfile.id, "choice management callbacks carry current profile")
+        activeProfileId = BrowserProfile.agentsProfileId
+        var signedOut = false
+        browserTile.onSignOutAgents = { signedOut = true }
+        let agentChoices = browserTile.browserProfileChoices()
+        try expect(!agentChoices.contains(where: { $0.id == "rename" || $0.id == "delete" }), "Agents cannot be renamed or deleted")
+        browserTile.profileMenuButton.handleSelection(agentChoices.first(where: { $0.id == "signOut" })!)
+        try expect(signedOut, "Agents sign-out choice reaches its handler")
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
-            styleMask: [.titled],
+            styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
         window.contentView = browserTile
-        window.makeKeyAndOrderFront(nil)
+        window.orderFrontOffscreenForChecks()
         defer {
             runtime.terminate(policy: .requestClose)
             window.close()
         }
 
+        // Render the actual profile trigger and its production choice rows in
+        // both appearances, on off-screen fixture windows only.
+        let captures = URL(fileURLWithPath: "qa-runs/browser-agents-profile", isDirectory: true)
+        try FileManager.default.createDirectory(at: captures, withIntermediateDirectories: true)
+        browserTile.refreshBrowserProfileLabel()
+        try expect(browserTile.profileMenuButton.selectedID == BrowserProfile.agentsProfileId.uuidString, "header identifies Agents profile")
+        browserTile.setAgentControl(name: "Scout", colour: ZoneChromeNSView.color(named: "purple"), engaged: true, userDriving: false,
+                                    takeControl: {}, revealAgent: {}, close: {})
+        let list = ChoiceListView(items: browserTile.browserProfileChoices(), selectedID: activeProfileId.uuidString)
+        list.frame = NSRect(origin: .zero, size: list.intrinsicContentSize)
+        let menuWindow = NSWindow(contentRect: list.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        menuWindow.contentView = list
+        menuWindow.orderFrontOffscreenForChecks()
+        defer { menuWindow.close() }
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            window.appearance = NSAppearance(named: appearance)
+            menuWindow.appearance = NSAppearance(named: appearance)
+            browserTile.profileMenuButton.applyTokens()
+            list.applyTokens()
+            browserTile.layoutSubtreeIfNeeded()
+            list.layoutSubtreeIfNeeded()
+            for (suffix, view) in [("header", browserTile.profileMenuButton as NSView), ("menu", list as NSView),
+                                   ("browser", browserTile as NSView), ("agent-control", browserTile.agentControlButton as NSView)] {
+                guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                    throw CheckError.failed("profile capture failed")
+                }
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                try bitmap.representation(using: .png, properties: [:])!.write(to: captures.appendingPathComponent(name + "-" + suffix + ".png"))
+            }
+        }
+
+        browserTile.setAgentControl(name: "Scout", colour: nil, engaged: false, userDriving: false,
+                                    takeControl: {}, revealAgent: {}, close: {})
         browserTile.urlField.stringValue = dataPage
         try expect(
             browserTile.performURLFieldCommandForQA(#selector(NSResponder.insertNewline(_:))),
