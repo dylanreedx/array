@@ -17,6 +17,7 @@ func runBrowserControlHardeningChecks() throws {
         ("the real hand-over sheet names the page and expires", runProductionSheetScenario),
         ("Ask-first approval time does not spend the action deadline", runSlowApprovalScenario),
         ("revocation releases a handed-over user tile", runRevocationReleaseScenario),
+        ("a reload in an unloaded zone leaves one runtime when the zone returns", runUnloadedZoneReloadScenario),
     ]
     var failures: [String] = []
     for (name, scenario) in scenarios {
@@ -276,4 +277,33 @@ private func runRevocationReleaseScenario() throws {
     h.f.api.revoke(agentId: h.f.agentId)
     try expect(user.agentNavigationDecision == nil && !user.automation.isEngaged,
                "revocation must release the user's tile: gate=\(user.agentNavigationDecision != nil) engaged=\(user.automation.isEngaged)")
+}
+
+/// Review point: an agent reloads its browser while its zone is unloaded.
+/// The production hydration pass then brings the zone back; the tile must end
+/// with exactly one live runtime (hydration restarts tiles without one, and a
+/// second runtime would be an orphan). An off-camera zone staying live during
+/// the agent's turn is `--browser-lease-check`'s running pin; between turns it
+/// may unload by design, and the next call answers browser_not_live.
+@MainActor
+private func runUnloadedZoneReloadScenario() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tileId, _) = try h.ownedBrowser()
+    guard let controller = h.f.runtime.controller(for: h.f.projectPb) else {
+        throw WorkspaceAPIChecks.Failure(message: "the agent's project has no controller")
+    }
+    try controller.setTier(.snapshot, allowDehydratingFocusedZone: true)
+    try expect(h.live(tileId) == nil, "unloading the zone must retire the browser runtime")
+    let dead = try h.raw("browser.snapshot", ["tileId": tileId.uuidString])
+    try expect(h.errorCode(dead) == "browser_not_live", "an unloaded browser must report browser_not_live: \(dead)")
+    _ = try h.ok("browser.navigate", ["tileId": tileId.uuidString, "action": "reload"])
+    try expect(h.live(tileId) != nil, "reload must restart the browser")
+    h.f.runtime.reconcileHydration(rearmForCamera: false)
+    h.pump(1)
+    try expect(h.live(tileId) != nil, "the hydration pass must keep the browser the agent just reloaded")
+    _ = try h.ok("browser.snapshot", ["tileId": tileId.uuidString])
+    try controller.setTier(.live)
+    let runtimes = h.f.runtime.liveControllers.flatMap(\.browserRuntimes).filter { $0.tileId == tileId && !$0.isTerminated }
+    try expect(runtimes.count == 1, "reloading the zone must leave the tile exactly one live runtime, found \(runtimes.count)")
 }
