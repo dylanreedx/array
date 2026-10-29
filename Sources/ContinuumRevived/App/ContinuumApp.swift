@@ -1635,6 +1635,20 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // `.plans/102` P1: the real hook command against the production
+        // listener and supervisor — inert without the marker, fails open, and
+        // a recorded subagent pair becomes receipts that change nothing else.
+        if CommandLine.arguments.contains("--workspace-hook-bridge-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceHookBridgeChecks.run()
+                print("ContinuumRevivedWorkspaceHookBridgeChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-api-agent-rename-check") {
             do {
                 _ = NSApplication.shared

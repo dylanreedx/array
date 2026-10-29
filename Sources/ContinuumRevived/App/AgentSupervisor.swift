@@ -5148,6 +5148,20 @@ final class AgentSupervisor {
     private var lastSpawnRefusals: [AgentID: SpawnRefusal] = [:]
     func spawnRefusal(for parentId: AgentID) -> SpawnRefusal? { lastSpawnRefusals[parentId] }
 
+    /// `.plans/102` P1: what each agent's Claude hooks reported, newest last,
+    /// at most `AgentHookReceipt.ringCapacity` per agent. Observation only:
+    /// nothing reads a receipt to change behaviour, and recording one touches
+    /// no record, transcript or child. In memory; gone with the record.
+    private(set) var hookReceipts: [AgentID: [AgentHookReceipt]] = [:]
+
+    func recordHookReceipt(_ receipt: AgentHookReceipt, for id: AgentID) {
+        guard records[id] != nil else { return }
+        var ring = hookReceipts[id, default: []]
+        ring.append(receipt)
+        if ring.count > AgentHookReceipt.ringCapacity { ring.removeFirst(ring.count - AgentHookReceipt.ringCapacity) }
+        hookReceipts[id] = ring
+    }
+
     /// The agents this one spawned.
     func children(of id: AgentID) -> [AgentID] {
         records.values.filter { $0.parentAgentID == id }.map(\.id)
@@ -5648,6 +5662,7 @@ final class AgentSupervisor {
         }
 
         records.removeValue(forKey: id)
+        hookReceipts.removeValue(forKey: id)
         runnerGenerationTokens.removeValue(forKey: id)
         history.removeValue(forKey: id)
         rehydratedTranscripts.removeValue(forKey: id)

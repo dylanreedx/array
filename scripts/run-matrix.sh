@@ -57,6 +57,7 @@ IOS_PREVIEW_TILE_ONLY=0
 COMPANION_TASKS_ONLY=0
 NOTIFICATIONS_ONLY=0
 NOTIFICATIONS_LINUX_ONLY=0
+HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
     --sidebar-refinements)
@@ -115,9 +116,13 @@ if [[ $# -gt 0 ]]; then
       NOTIFICATIONS_LINUX_ONLY=1
       shift
       ;;
+    --hook-bridge)
+      HOOK_BRIDGE_ONLY=1
+      shift
+      ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux]
+Usage: scripts/run-matrix.sh [--fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge]
 
 Runs the project verification matrix. --fast skips the slower packaging bundle
 probe and keeps the build/check/app-flag/git hygiene gates used by the opt-in
@@ -139,6 +144,9 @@ remains required.
 --agent-tile-menu rebuilds the app and reports native agent menus, chrome
 scaling, page zoom, face switching, identity color, tile rename and location actions.
 It is a targeted development gate, not the full release matrix.
+--hook-bridge rebuilds the app, CoreChecks and array-workspace-mcp, then reports
+the Claude observation-hook argv and the hook command against the production
+listener (.plans/102 P1). A targeted development gate, not the full matrix.
 --codex-permissions rebuilds CoreChecks and verifies Full Access launch arguments
 for fresh/resumed exec and production app-server runs using an offline stand-in.
 --ios-preview-proof builds the standalone native fixture harness and reports
@@ -577,6 +585,17 @@ if [[ "$NOTIFICATIONS_ONLY" -eq 1 ]]; then
   matrix_report 'Notifications matrix (targeted)'
   exit $?
 fi
+if [[ "$HOOK_BRIDGE_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+  run swift build --disable-sandbox --skip-update --product array-workspace-mcp
+  run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+  run_app_check .build/debug/Array --workspace-hook-bridge-check
+  run_app_check .build/debug/Array --workspace-mcp-host-check
+  matrix_report 'Hook bridge matrix (targeted)'
+  exit $?
+fi
 if [[ "$IOS_PREVIEW_TILE_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
@@ -753,6 +772,10 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 # of every agent's environment, argv and config. Its own arm because the bare
 # CoreChecks run is KNOWN-RED and never reached this section.
 run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+# .plans/102 P1: a Claude agent with workspace tools gets Array's observation
+# hooks through one --settings value: exactly seven events, a short timeout,
+# earlier flags unchanged, never --setting-sources (it drops the user's hooks).
+run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
 # T5 (0.7.26): steering, interrupt-not-kill and the persistent Claude process,
 # through the production Claude/Codex/Pi runners against reactive fakes of each
 # CLI that record the exact argv and stdin frames. Its own arm for the same
@@ -819,6 +842,11 @@ run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 # main keeps running, and that a reply's picture leaves as an MCP image item.
 # The leg existed since T3 (0.7.26) but was never registered, so it never ran.
 run_app_check .build/debug/Array --workspace-mcp-host-check
+# .plans/102 P1: the real `array-workspace-mcp hook` command against the same
+# production listener: inert without the marker, exits 0 silently when Array is
+# down or silent, refuses a wrong token, and records a recorded claude
+# SubagentStart/SubagentStop pair on the calling agent without changing it.
+run_app_check .build/debug/Array --workspace-hook-bridge-check
 # S2 (.plans/80-browser-computer-use): the engine an agent drives a browser
 # tile through. Outline past a tampering page, trusted clicks at three canvas
 # zooms without moving the user's focus, typing, the user-typing hold, refusals,

@@ -325,6 +325,20 @@ final class WorkspaceAPIService {
                         "error": ["code": "invalid_request", "message": "Malformed workspace request"]])
             return
         }
+        // `.plans/102` P1: a Claude hook event from the agent's own hook command.
+        // Recorded and acknowledged, never dispatched: it is no `WorkspaceAPIOp`,
+        // so neither the MCP tool list nor pi's bridge can reach it, and it is
+        // not gated on workspace grants because it changes nothing.
+        if op == WorkspaceAgentHook.op {
+            if let receipt = AgentHookReceipt(hookPayload: payload, receivedAt: Date()) {
+                supervisor.recordHookReceipt(receipt, for: record.id)
+                completion(["schema": WorkspaceAPISchema.v1, "requestId": requestID, "status": "ok", "result": [:] as [String: Any]])
+            } else {
+                completion(["schema": WorkspaceAPISchema.v1, "requestId": requestID, "status": "error",
+                            "error": ["code": "invalid_request", "message": "A hook event needs hook_event_name"]])
+            }
+            return
+        }
         dispatchAsync(agentId: record.id, requestId: requestID, op: op, payload: payload) { reply in
             let encoded = Self.transportResponse(for: reply).encodedValue(requestId: requestID)
             completion((try? JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any]) ??

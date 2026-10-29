@@ -303,9 +303,15 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             // `--allowedTools mcp__array_workspace` names the server, so Array's
             // own approval is the only gate; `--disallowedTools ListAgents`
             // removes the tool that listed tmux peers as if they were tiles.
+            // `--settings` adds Array's observation hooks for this session
+            // only (`WorkspaceAgentHook`, `.plans/102`). It merges with the
+            // user's and the project's hooks; `--setting-sources` would drop
+            // theirs, so it is never passed here. It sits before the MCP pair
+            // so the config path stays last.
             args += ["--append-system-prompt", WorkspaceMCPConfiguration.agentGuidance,
                      "--allowedTools", "mcp__array_workspace",
                      "--disallowedTools", "ListAgents",
+                     "--settings", workspaceMCP.claudeHookSettingsJSON,
                      "--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigPath]
         }
         return args

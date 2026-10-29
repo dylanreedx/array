@@ -197,6 +197,11 @@ if CommandLine.arguments.contains("--workspace-mcp-check") {
     runWorkspaceMCPChecks()
     Foundation.exit(0)
 }
+// `.plans/102` P1: Array's observation hooks in the Claude argv.
+if CommandLine.arguments.contains("--claude-hook-bridge-check") {
+    runClaudeHookBridgeChecks()
+    Foundation.exit(0)
+}
 // CX-01 hardening: the transport's write serialisation, runnable without the
 // load-sensitive legs ahead of it in the full run.
 if CommandLine.arguments.contains("--pi-rpc-transport-check") {

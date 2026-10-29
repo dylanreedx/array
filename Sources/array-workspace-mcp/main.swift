@@ -39,6 +39,10 @@ private actor ResponseWriter {
 @main
 struct ArrayWorkspaceMCP {
     static func main() async {
+        if CommandLine.arguments.dropFirst().first == WorkspaceAgentHook.subcommand {
+            await HookMode.run(arguments: Array(CommandLine.arguments.dropFirst(2)))
+            Foundation.exit(0)
+        }
         do {
             let server = try Server(arguments: CommandLine.arguments)
             try await server.run()
@@ -273,5 +277,58 @@ struct ArrayWorkspaceMCP {
         func encode(_ object: WorkspaceMCPJSON) -> Data {
             Data(object.jsonString.utf8)
         }
+    }
+}
+
+/// `array-workspace-mcp hook --endpoint <url> --agent-id <id> --token-file <path>`:
+/// one Claude hook event, posted to the app (`WorkspaceAgentHook`, `.plans/102`).
+///
+/// Observation only, so it can never change what the agent does: it prints
+/// nothing (Claude would read stdout as a decision) and the caller always exits
+/// 0. It fails open: no marker, bad arguments, an unreadable token, an app that
+/// is down or slow all end the same way, within `postTimeoutSeconds`.
+private enum HookMode {
+    static func run(arguments: [String]) async {
+        // Inert outside Array: Array sets the marker on every managed agent.
+        guard ProcessInfo.processInfo.environment[PiAgentRunner.arrayHostedEnvironmentKey] == "1" else { return }
+        var options: [String: String] = [:]
+        var index = arguments.startIndex
+        while index + 1 < arguments.endIndex {
+            options[arguments[index]] = arguments[index + 1]
+            index += 2
+        }
+        guard let endpointText = options["--endpoint"], let endpoint = URL(string: endpointText),
+              let agentID = options["--agent-id"], !agentID.isEmpty,
+              let tokenPath = options["--token-file"],
+              let tokenData = FileManager.default.contents(atPath: tokenPath),
+              case let token = String(decoding: tokenData, as: UTF8.self), !token.isEmpty else { return }
+        // A hard stop besides the request timeout: nothing here may outlive it.
+        DispatchQueue.global().asyncAfter(deadline: .now() + WorkspaceAgentHook.postTimeoutSeconds + 0.5) {
+            Foundation.exit(0)
+        }
+        let input = FileHandle.standardInput.readDataToEndOfFile()
+        guard var payload = try? JSONSerialization.jsonObject(with: input) as? [String: Any] else { return }
+        if input.count > WorkspaceAgentHook.maxPostedPayloadBytes {
+            for key in WorkspaceAgentHook.bulkyFields { payload.removeValue(forKey: key) }
+            payload["array_trimmed"] = true
+        }
+        let body: [String: Any] = [
+            "schema": WorkspaceAPISchema.v1,
+            "kind": "request",
+            "requestId": UUID().uuidString,
+            "agentId": agentID,
+            "token": token,
+            "op": WorkspaceAgentHook.op,
+            "payload": payload,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = WorkspaceAgentHook.postTimeoutSeconds
+        configuration.timeoutIntervalForResource = WorkspaceAgentHook.postTimeoutSeconds
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        _ = try? await URLSession(configuration: configuration).data(for: request)
     }
 }
