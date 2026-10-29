@@ -309,6 +309,7 @@ check --workspace-api-agents-check
 check --workspace-api-board-check
 check --workspace-api-browser-check
 check --workspace-api-canvas-check
+check --workspace-api-cross-harness-delegation-check
 check --workspace-api-delegation-check
 check --workspace-api-device-check
 check --workspace-api-exposure-check
@@ -374,6 +375,7 @@ leg run git diff --check
 leg run scripts/check-agent-tile-ux-program.sh
 leg run scripts/check-sidebar-native-ux-program.sh
 leg run swift build
+leg run swift build --disable-sandbox --skip-update
 leg run swift build --disable-sandbox --skip-update --product Array
 leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp
 leg run swift build --disable-sandbox --skip-update --product continuum-relay
@@ -652,6 +654,7 @@ leg run_app_check .build/debug/Array --workspace-api-agents-check
 leg run_app_check .build/debug/Array --workspace-api-board-check
 leg run_app_check .build/debug/Array --workspace-api-browser-check
 leg run_app_check .build/debug/Array --workspace-api-canvas-check
+leg run_app_check .build/debug/Array --workspace-api-cross-harness-delegation-check
 leg run_app_check .build/debug/Array --workspace-api-delegation-check
 leg run_app_check .build/debug/Array --workspace-api-device-check
 leg run_app_check .build/debug/Array --workspace-api-free-permissions-check
