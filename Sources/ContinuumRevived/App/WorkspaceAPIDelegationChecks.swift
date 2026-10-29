@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -290,6 +291,23 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
             try expect(child.harness == target && child.model == expectedModel, "child owns selected harness and catalogue model")
             try expect(child.parentAgentID == parent && child.workspaceToolsEnabled && child.tileId != nil, "cross child retains parent, tools and visible tile")
             try expect(created["provider"]?.string == target.rawValue, "result reports actual child provider")
+            delegate.wireManagedAgentTile(child.tileId!, agentID: childId)
+            guard let childView = canvas.tileView(for: child.tileId!) as? ManagedAgentTileNSView,
+                  let composer = childView.qaComposerForChecks else { throw Failure(message: "missing child composer") }
+            await composer.qaAwaitDraftRestore()
+            let reference = AgentPromptReference(agentID: parent, displayName: source.rawValue)
+            try expect(childView.handleAgentReference(reference, commit: true), "cross child accepts parent reference")
+            await childView.qaAwaitReferenceDrop()
+            try expect(composer.draft.agentReferences.contains(where: { $0.agentID == parent }), "cross reference reaches child's draft")
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                var windows: [NSWindow] = []
+                let inbox = InboxParentFoldChecks.makeInbox([
+                    AgentInboxRow(id: parent.rawValue, title: source.rawValue, state: .ready, createdAt: InboxParentFoldChecks.epoch),
+                    AgentInboxRow(id: childId.rawValue, title: target.rawValue, state: .ready, depth: 1, createdAt: InboxParentFoldChecks.epoch, parentId: child.parentAgentID?.rawValue)
+                ], appearance: appearance, windows: &windows)
+                try expect(inbox.collapsedParentsForQA.contains(parent.rawValue) && !inbox.rowIdsForQA.contains(childId.rawValue), "cross child folds under actual parent in \(appearance.rawValue)")
+                windows.forEach { $0.orderOut(nil) }
+            }
             let stream = supervisor.events(for: parent)
             var chipMatches: Bool?
             let chip = Task { @MainActor in
