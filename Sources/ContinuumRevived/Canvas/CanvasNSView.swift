@@ -580,6 +580,7 @@ final class CanvasNSView: NSView, TokenThemed {
     private func applyLayoutTransaction(
         _ transaction: CanvasLayoutTransaction,
         activeTileId: UUID? = nil,
+        activeTileIds: Set<UUID> = [],
         activeZoneId: UUID? = nil,
         preservingLayerMemberWorldFramesIn preservedZoneIds: Set<UUID> = [],
         preservingZoneSizes: Bool = false
@@ -798,7 +799,7 @@ final class CanvasNSView: NSView, TokenThemed {
             context.duration = 0.11
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             context.allowsImplicitAnimation = true
-            for (id, oldOrigin) in oldTileOrigins where id != activeTileId && !activeZoneMembers.contains(id) {
+            for (id, oldOrigin) in oldTileOrigins where id != activeTileId && !activeTileIds.contains(id) && !activeZoneMembers.contains(id) {
                 guard let view = tileView(for: id), view.frame.origin != oldOrigin else { continue }
                 let target = view.frame.origin
                 view.setFrameOrigin(oldOrigin)
@@ -3039,9 +3040,9 @@ final class CanvasNSView: NSView, TokenThemed {
         if notifyChange { delegate?.canvasDidChange(self, tileId: tile.id) }
     }
 
-    /// Group transforms are explicit manual placement: preserve the arrangement
-    /// and source memberships even when automatic layout is on. Stage all local
-    /// conversions before writing, then do one presentation pass, never K solves.
+    /// Resolve a selection as one arrangement per source zone. Selected members
+    /// never push or snap against each other; residents use the ordinary solver.
+    /// Stage local conversions before applying one batch and one history entry.
     @discardableResult
     func applySelectionFrames(_ frames: [UUID: TileFrame]) -> Bool {
         var seen = Set<UUID>()
@@ -3065,6 +3066,22 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         }
         guard seen.count == frames.count else { return false }
+        if isAutoLayoutEnabled {
+            let scene = autoLayoutGestureBaseline ?? autoLayoutScene()
+            let transaction = TileSelectionPlacement.solve(
+                scene: scene, frames: frames,
+                gap: TileGapResolver.resolvedGap(defaults: autoLayoutDefaults),
+                zonePadding: ZoneBoundsConfig.padding(defaults: autoLayoutDefaults),
+                headerHeight: Double(ZoneChromeNSView.headerHeight),
+                latched: autoLayoutMoveLatch, pointer: autoLayoutMovePointer,
+                preferSwap: autoLayoutPreferSwap)
+            autoLayoutMoveLatch = transaction.moveLatch
+            autoLayoutLatchedSlot = transaction.latchedSlot
+            autoLayoutBlockedZoneIds = transaction.blockedZoneIds
+            applyLayoutTransaction(transaction, activeTileIds: Set(frames.keys),
+                preservingLayerMemberWorldFramesIn: Set(transaction.zonePlacements.keys))
+            return true
+        }
         for (index, frame) in flat where canvasState.tiles[index].frame != frame {
             canvasState.tiles[index].frame = frame
         }
@@ -3089,6 +3106,35 @@ final class CanvasNSView: NSView, TokenThemed {
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             view.animator().setFrameOrigin(destination)
         }
+    }
+
+    func selectionMagneticPlacement(free: TileFrame, excluding ids: Set<UUID>,
+                                    previous: MagneticPlacement.Target?) -> MagneticPlacement.Result {
+        guard DragMagnetizeConfig.enabled(defaults: dragMagnetizeDefaults) else {
+            return .init(frame: free, target: nil)
+        }
+        let neighbors = (autoLayoutGestureBaseline ?? autoLayoutScene()).tiles
+            .filter { !ids.contains($0.id) }
+            .map { MagneticPlacement.Neighbor(id: $0.id, frame: $0.frame) }
+        return MagneticPlacement.resolve(free: free, neighbors: neighbors, previous: previous,
+            gap: TileGapResolver.resolvedGap(defaults: autoLayoutDefaults), zoom: viewport.zoom)
+    }
+
+    func settleSelectionAfterMove(_ ids: Set<UUID>, honorSnap: Bool) {
+        guard isAutoLayoutEnabled else { return }
+        let before = autoLayoutScene()
+        let zones = Set(before.tiles.filter { ids.contains($0.id) }.compactMap(\.zoneId))
+        for id in zones { expandZoneToContainMembers(id) }
+        let scene = autoLayoutScene()
+        let frames = Dictionary(uniqueKeysWithValues: scene.tiles.filter { ids.contains($0.id) }.map { ($0.id, $0.frame) })
+        let transaction = TileSelectionPlacement.solve(
+            scene: scene, frames: frames,
+            gap: TileGapResolver.resolvedGap(defaults: autoLayoutDefaults),
+            zonePadding: ZoneBoundsConfig.padding(defaults: autoLayoutDefaults),
+            headerHeight: Double(ZoneChromeNSView.headerHeight),
+            settle: true, honorSnap: honorSnap)
+        applyLayoutTransaction(transaction, activeTileIds: ids,
+            preservingLayerMemberWorldFramesIn: Set(transaction.zonePlacements.keys))
     }
 
     func magneticPlacement(freeWorldFrame: TileFrame, tileId: UUID, previous: MagneticPlacement.Target?) -> MagneticPlacement.Result {
@@ -3625,10 +3671,68 @@ final class CanvasNSView: NSView, TokenThemed {
         return (Self.focusBorderColor(named: config.color).withAlphaComponent(0.7), CGFloat(config.gap))
     }
 
+    private var resolvedTileOutlineItems: [TileOutlineGeometry.Item] = []
+    private(set) var qaResolvedTileOutlines: [UUID: TileOutlineGeometry.Result] = [:]
+
+    var qaFocusBorderVisibleStrokePath: CGPath? { focusBorderOverlay?.qaVisibleStrokePath }
+
+    func qaAttentionBorderVisibleStrokePath(for id: UUID) -> CGPath? {
+        attentionBorderOverlays[id]?.qaVisibleStrokePath
+    }
+
+    func qaTileOutlineMaskPath(for id: UUID) -> CGPath? {
+        if attentionTileIds.contains(id) { return attentionBorderOverlays[id]?.qaMaskPath }
+        return id == borderedTileId ? focusBorderOverlay?.qaMaskPath : nil
+    }
+
+    /// Resolve all currently painted tile outlines together in screen space.
+    /// Selected frames are already WORLD frames, including a live group preview.
+    /// Existing focus/attention layers keep their animation and appearance; this
+    /// changes only their geometry and the portions hidden by higher tiles.
+    func resolveTileOutlineGeometry(selected: [(id: UUID, frame: TileFrame)]) -> [UUID: TileOutlineGeometry.Result] {
+        let config = FocusBorderConfig.resolvedFromDefaults(defaults: focusBorderDefaults)
+        var candidates: [UUID: (tile: Tile, rect: CGRect, gap: CGFloat)] = [:]
+        for member in selected {
+            guard let tile = tileRecord(for: member.id) else { continue }
+            candidates[member.id] = (tile, CanvasEngine.tileScreenFrame(member.frame, viewport: viewport), CGFloat(config.gap))
+        }
+        if config.enabled, let id = borderedTileId, !attentionTileIds.contains(id),
+           let tile = tileRecord(for: id), let view = tileView(for: id) {
+            candidates[id] = (tile, tileRectInCanvasSpace(view), CGFloat(config.gap))
+        }
+        for id in attentionTileIds {
+            guard let tile = tileRecord(for: id), let view = tileView(for: id) else { continue }
+            candidates[id] = (tile, tileRectInCanvasSpace(view), CGFloat(FocusBorderConfig.defaultGap))
+        }
+        // Tile positions are fractional, so rank the same (position, id) order
+        // used by canvas hit-testing rather than converting a position to Int.
+        let ordered = candidates.values.sorted {
+            if $0.tile.zPosition != $1.tile.zPosition { return $0.tile.zPosition < $1.tile.zPosition }
+            return $0.tile.id.uuidString < $1.tile.id.uuidString
+        }
+        let items = ordered.enumerated().map { rank, candidate in
+            TileOutlineGeometry.Item(id: candidate.tile.id, rect: candidate.rect, gap: candidate.gap, zIndex: rank)
+        }
+        if items != resolvedTileOutlineItems {
+            resolvedTileOutlineItems = items
+            qaResolvedTileOutlines = Dictionary(uniqueKeysWithValues: TileOutlineGeometry.resolve(items).map { ($0.id, $0) })
+        }
+        let results = qaResolvedTileOutlines
+        if let id = borderedTileId, let result = results[id],
+           let overlay = focusBorderOverlay, !overlay.isHidden {
+            overlay.applyResolvedGeometry(result)
+        }
+        for (id, overlay) in attentionBorderOverlays where !overlay.isHidden {
+            if let result = results[id] { overlay.applyResolvedGeometry(result) }
+        }
+        return results
+    }
+
     /// Resolve `FocusBorderConfig` and show/hide + style the overlay for the
     /// current `borderedTileId`. Re-runnable (no dedupe) so a live config change
     /// re-applies immediately.
     private func applyFocusBorder() {
+        defer { tileSelection.updatePresentation() }
         let config = FocusBorderConfig.resolvedFromDefaults(defaults: focusBorderDefaults)
         guard config.enabled, let targetId = borderedTileId, let view = tileView(for: targetId) else {
             focusBorderOverlay?.hide()
@@ -3717,6 +3821,7 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     private func applyAttentionBorders() {
+        defer { tileSelection.updatePresentation() }
         let color = Self.attentionAccent.nsColor(in: self)
         let gap = CGFloat(FocusBorderConfig.defaultGap)
         for tileId in Array(attentionBorderOverlays.keys) where !attentionTileIds.contains(tileId) {
@@ -5295,6 +5400,9 @@ final class CanvasNSView: NSView, TokenThemed {
     private func repositionTrackingOverlaysForCamera() {
         if let tileId = borderedTileId { repositionFocusBorderIfNeeded(for: tileId) }
         for tileId in attentionTileIds { repositionAttentionBorderIfNeeded(for: tileId) }
+        // Resolve after the whole tracking pass so camera commits keep shared
+        // clearance, selection hover positions and masks.
+        tileSelection.updatePresentation()
     }
 
     /// A tile view's rect in CANVAS (screen) coordinates.
@@ -5670,6 +5778,33 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Returns the topmost tile id at a screen-space point according to the
     /// semantic canvas model, not AppKit subview insertion order.
     func tileId(at screenPoint: CGPoint) -> UUID? {
+        // Idle selected tiles have a temporary presentation origin. Focus must
+        // hit the visible tile, including the few points outside its rest frame.
+        let posed = tileSelection.presentationFrames
+        if !posed.isEmpty {
+            let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: viewport)
+            if !zoneLayers.isEmpty {
+                let layers = zoneLayers.sorted {
+                    if $0.placement.zPosition != $1.placement.zPosition { return $0.placement.zPosition > $1.placement.zPosition }
+                    return $0.placement.zoneId.uuidString > $1.placement.zoneId.uuidString
+                }
+                for layer in layers where !layer.placement.collapsed {
+                    let tiles = layer.tiles.map { tile -> Tile in
+                        var visible = tile
+                        visible.frame = posed[tile.id] ?? CanvasEngine.worldFrame(tile: tile, in: layer.placement)
+                        return visible
+                    }
+                    if let hit = CanvasEngine.hitTest(worldPoint: worldPoint, tiles: tiles) { return hit.id }
+                }
+                return nil
+            }
+            let tiles = worldFrameTiles().map { tile -> Tile in
+                var visible = tile
+                visible.frame = posed[tile.id] ?? tile.frame
+                return visible
+            }
+            return CanvasEngine.hitTest(worldPoint: worldPoint, tiles: tiles)?.id
+        }
         // Multi-layer path (T05): hit-test across all installed ZoneLayers.
         if !zoneLayers.isEmpty {
             let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
@@ -13600,6 +13735,17 @@ final class FocusBorderOverlayView: NSView, CornerStyled {
     }
 
     private let shape = CAShapeLayer()
+    private let outlineMask = CAShapeLayer()
+    private(set) var qaResolvedGeometry: TileOutlineGeometry.Result?
+    var qaMaskPath: CGPath? { shape.mask == nil ? nil : outlineMask.path }
+    /// Filled screen-space stroke envelope after the actual drawing mask.
+    var qaVisibleStrokePath: CGPath? {
+        guard !isHidden, let path = shape.path else { return nil }
+        var visible = path.copy(strokingWithWidth: Self.lineWidth, lineCap: .butt, lineJoin: .miter, miterLimit: 10)
+        if let mask = qaMaskPath { visible = visible.intersection(mask) }
+        var translation = CGAffineTransform(translationX: frame.minX, y: frame.minY)
+        return visible.copy(using: &translation)
+    }
 
     override var isFlipped: Bool { true }
 
@@ -13627,7 +13773,9 @@ final class FocusBorderOverlayView: NSView, CornerStyled {
     /// Apply resolved appearance config (the canvas maps the color name to an
     /// `NSColor` and applies alpha). Safe to call before each `show`.
     func configure(color: NSColor, gap: CGFloat, animationDuration: CFTimeInterval) {
+        let gapChanged = self.gap != gap
         self.gap = gap
+        if gapChanged { layoutShape() }
         if animationDuration != self.animationDuration {
             // A running loop keeps its old duration; drop it so the next `show`
             // re-attaches at the configured speed.
@@ -13664,11 +13812,14 @@ final class FocusBorderOverlayView: NSView, CornerStyled {
     /// Position the overlay around `tileScreenFrame` (the focused tile's frame),
     /// outset by `gap`, show it, and make sure the marching animation is attached.
     func show(around tileScreenFrame: CGRect, tileScale: CGFloat = 1) {
-        let next = tileScreenFrame.insetBy(dx: -gap, dy: -gap)
+        // Keep the resolved frame until the shared presentation pass below
+        // supplies its new geometry. A camera commit must not first expand to
+        // the default ring and then shrink back, rebuilding both paths twice.
+        let next = qaResolvedGeometry?.rect ?? tileScreenFrame.insetBy(dx: -gap, dy: -gap)
         let rescaled = tileScale != self.tileScale
         self.tileScale = tileScale
         if frame != next || rescaled {
-            frame = next
+            if frame != next { frame = next }
             layoutShape()
         }
         isHidden = false
@@ -13680,6 +13831,14 @@ final class FocusBorderOverlayView: NSView, CornerStyled {
         if !marchingSuspended, shape.animation(forKey: Self.animationKey) == nil {
             startMarchingAnts()
         }
+    }
+
+    /// Apply screen-space clearance without restarting the marching phase.
+    func applyResolvedGeometry(_ result: TileOutlineGeometry.Result) {
+        guard qaResolvedGeometry != result || frame != result.rect else { return }
+        qaResolvedGeometry = result
+        if frame != result.rect { frame = result.rect }
+        layoutShape()
     }
 
     func hide() {
@@ -13703,6 +13862,19 @@ final class FocusBorderOverlayView: NSView, CornerStyled {
         CATransaction.setDisableActions(true)
         shape.frame = bounds
         shape.path = CGPath(roundedRect: rect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
+        if let geometry = qaResolvedGeometry, !geometry.occluders.isEmpty {
+            var visible = CGPath(rect: bounds, transform: nil)
+            for occluder in geometry.occluders {
+                let local = occluder.offsetBy(dx: -frame.minX, dy: -frame.minY)
+                visible = visible.subtracting(CGPath(rect: local, transform: nil))
+            }
+            outlineMask.frame = bounds
+            outlineMask.fillColor = NSColor.black.cgColor
+            outlineMask.path = visible
+            shape.mask = outlineMask
+        } else {
+            shape.mask = nil
+        }
         CATransaction.commit()
     }
 

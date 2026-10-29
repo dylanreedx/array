@@ -10,6 +10,8 @@ final class CanvasTileSelection {
     private var overlay: TileSelectionOverlay?
     private var consumedHeaderClick = false
     private var worldFrames: [(id: UUID, frame: TileFrame)] = []
+    private let hover = SelectionHoverPresentation()
+    private(set) var presentationFrames: [UUID: TileFrame] = [:]
     private struct Gesture {
         let snapshot: TileSelectionGeometry.Snapshot
         let start: NSPoint
@@ -19,6 +21,8 @@ final class CanvasTileSelection {
         let pressedTileId: UUID?
         var moved = false
         var lastDelta: CGSize = .zero
+        var magneticTarget: MagneticPlacement.Target?
+        var dropBounds: TileFrame?
     }
     private var gesture: Gesture?
     var ownsPointer: Bool { consumedHeaderClick || gesture != nil }
@@ -87,20 +91,41 @@ final class CanvasTileSelection {
         // A click and tiny pointer jitter must not create a layout transaction.
         if !gesture.moved, hypot(delta.width, delta.height) * gesture.zoom < 3 { return true }
         if gesture.moved, delta == gesture.lastDelta { return true }
+        if !gesture.moved {
+            _ = hover.apply(canvas: canvas, frames: worldFrames, enabled: false, animated: false)
+            canvas.beginAutoLayoutGesture()
+        }
         gesture.moved = true
         gesture.lastDelta = delta
         self.gesture = gesture
+        canvas.setAutoLayoutMovePointer(windowPoint: event.locationInWindow,
+                                        preferSwap: event.modifierFlags.contains(.option))
         let frames: [UUID: TileFrame]?
         if let edge = gesture.edge {
             frames = gesture.snapshot.resized(byWorldDelta: delta, edge: edge)
         } else {
-            frames = gesture.snapshot.translated(byWorldDelta: delta)
+            var free = gesture.snapshot.bounds
+            free.x += delta.width
+            free.y += delta.height
+            let placement = canvas.selectionMagneticPlacement(free: free, excluding: ids,
+                                                              previous: gesture.magneticTarget)
+            gesture.magneticTarget = placement.target
+            frames = gesture.snapshot.translated(byWorldDelta: CGSize(
+                width: placement.frame.x - gesture.snapshot.bounds.x,
+                height: placement.frame.y - gesture.snapshot.bounds.y))
         }
+        self.gesture = gesture
         guard let frames else { cancel(); return true }
         worldFrames = frames.map { ($0.key, $0.value) }
         guard canvas.applySelectionFrames(frames) else {
             cancel()
             return true
+        }
+        if gesture.edge == nil {
+            gesture.dropBounds = canvas.autoLayoutLatchedSlot ?? gesture.magneticTarget?.frame
+            if let target = gesture.dropBounds { canvas.showDragGhost(at: target) }
+            else { canvas.hideDragGhost() }
+            self.gesture = gesture
         }
         batchUpdates += 1
         return true
@@ -121,6 +146,18 @@ final class CanvasTileSelection {
             resolveClick(on: pressed)
             return true
         }
+        if gesture.moved, gesture.edge == nil {
+            if let target = gesture.dropBounds,
+               let frames = gesture.snapshot.translated(byWorldDelta: CGSize(
+                width: target.x - gesture.snapshot.bounds.x,
+                height: target.y - gesture.snapshot.bounds.y)) {
+                worldFrames = frames.map { ($0.key, $0.value) }
+                _ = canvas.applySelectionFrames(frames)
+            }
+            canvas.settleSelectionAfterMove(ids, honorSnap: gesture.dropBounds != nil)
+        }
+        canvas.hideDragGhost()
+        _ = canvas.finishAutoLayoutGesture()
         self.gesture = nil
         _ = canvas.commitGeometryEdit()
         refresh()
@@ -131,6 +168,8 @@ final class CanvasTileSelection {
         guard gesture != nil else { return }
         gesture = nil
         consumedHeaderClick = true
+        canvas?.hideDragGhost()
+        _ = canvas?.finishAutoLayoutGesture()
         canvas?.cancelGeometryEdit()
         refresh()
     }
@@ -181,7 +220,7 @@ final class CanvasTileSelection {
         if gesture != nil { updatePresentation(); return }
         guard !ids.isEmpty else {
             worldFrames = []
-            overlay?.isHidden = true
+            updatePresentation()
             return
         }
         let tiles = selectedWorldTiles()
@@ -193,6 +232,12 @@ final class CanvasTileSelection {
     /// A camera change touches selected rectangles only, never the tile index.
     func updatePresentation() {
         guard let canvas else { return }
+        let hovering = worldFrames.count > 1 && gesture?.moved != true
+        let presented = hover.apply(canvas: canvas, frames: worldFrames, enabled: hovering)
+        presentationFrames = hovering ? Dictionary(uniqueKeysWithValues: presented.map { ($0.id, $0.frame) }) : [:]
+        // Resolve all outline owners together, even after clearing selection:
+        // the focus/attention overlays must recover their ordinary clearance.
+        let resolved = canvas.resolveTileOutlineGeometry(selected: presented.count > 1 ? presented : [])
         // One tile draws nothing: the focus ants already mark it.
         guard worldFrames.count > 1 else {
             overlay?.isHidden = true
@@ -205,7 +250,8 @@ final class CanvasTileSelection {
         }
         guard let overlay else { return }
         if overlay.frame != canvas.bounds { overlay.frame = canvas.bounds }
-        overlay.rects = worldFrames.map { CanvasEngine.tileScreenFrame($0.frame, viewport: canvas.viewport) }
+        overlay.rects = presented.map { CanvasEngine.tileScreenFrame($0.frame, viewport: canvas.viewport) }
+        overlay.outlines = worldFrames.compactMap { resolved[$0.id] }
         overlay.ringed = worldFrames.map { !canvas.tileWearsRing($0.id) }
         overlay.style = canvas.focusRingStyle
         overlay.tileScale = CGFloat(canvas.viewport.zoom)
@@ -239,6 +285,7 @@ final class CanvasTileSelection {
 final class TileSelectionOverlay: NSView {
     weak var selection: CanvasTileSelection?
     var rects: [CGRect] = []
+    var outlines: [TileOutlineGeometry.Result] = []
     /// Parallel to `rects`: false where the tile already wears a ring.
     var ringed: [Bool] = []
     var style: (color: NSColor, gap: CGFloat) = (.controlAccentColor, CGFloat(FocusBorderConfig.defaultGap))
@@ -269,6 +316,35 @@ final class TileSelectionOverlay: NSView {
                 (.left, CGPoint(x: r.minX, y: r.midY))]
         return positions.map { ($0.0, CGRect(x: $0.1.x - 4, y: $0.1.y - 4, width: 8, height: 8)) }
     }
+    /// The full stroke bounds actually painted for the non-focus members.
+    var qaMemberRingBounds: [CGRect] {
+        zip(outlines, ringed).filter { $0.1 }.map { $0.0.rect }
+    }
+    private func ringPath(_ outline: TileOutlineGeometry.Result) -> NSBezierPath {
+        let width = FocusBorderOverlayView.lineWidth
+        let radius = FocusBorderOverlayView.ringRadius(tileScale: tileScale, gap: style.gap)
+        return NSBezierPath(roundedRect: outline.rect.insetBy(dx: width / 2, dy: width / 2),
+                            xRadius: radius, yRadius: radius)
+    }
+
+    /// The same clipping area is used by drawing and the overlap witness.
+    private func visibleArea(_ outline: TileOutlineGeometry.Result) -> CGPath {
+        var area = CGPath(rect: outline.rect, transform: nil)
+        for occluder in outline.occluders {
+            area = area.subtracting(CGPath(rect: occluder, transform: nil))
+        }
+        return area
+    }
+
+    var qaVisibleStrokePaths: [CGPath] {
+        guard !isHidden else { return [] }
+        return zip(outlines, ringed).filter { $0.1 && !$0.0.rect.isEmpty }.map { outline, _ in
+            ringPath(outline).cgPath.copy(strokingWithWidth: FocusBorderOverlayView.lineWidth,
+                                         lineCap: .butt, lineJoin: .miter, miterLimit: 10)
+                .intersection(visibleArea(outline))
+        }
+    }
+
     /// QA: how many member rings the overlay draws right now.
     var qaDrawnRingCount: Int { isHidden || rects.count < 2 ? 0 : ringed.filter { $0 }.count }
     func edge(at point: NSPoint) -> ResizeEdge? {
@@ -286,14 +362,17 @@ final class TileSelectionOverlay: NSView {
         let dash = FocusBorderOverlayView.dashPattern.map { CGFloat($0.doubleValue) }
         let ringRadius = FocusBorderOverlayView.ringRadius(tileScale: tileScale, gap: style.gap)
         style.color.setStroke()
-        for (rect, ringed) in zip(rects, ringed) where ringed {
-            // The ants' own geometry: the stroke sits inside the gap-outset rect.
-            let ring = rect.insetBy(dx: -style.gap + lineWidth / 2, dy: -style.gap + lineWidth / 2)
-            guard ring.insetBy(dx: -lineWidth, dy: -lineWidth).intersects(dirtyRect) else { continue }
-            let path = NSBezierPath(roundedRect: ring, xRadius: ringRadius, yRadius: ringRadius)
+        for (outline, ringed) in zip(outlines, ringed) where ringed {
+            guard !outline.rect.isEmpty, outline.rect.intersects(dirtyRect),
+                  let context = NSGraphicsContext.current?.cgContext else { continue }
+            context.saveGState()
+            context.addPath(visibleArea(outline))
+            context.clip()
+            let path = ringPath(outline)
             path.lineWidth = lineWidth
             path.setLineDash(dash, count: dash.count, phase: 0)
             path.stroke()
+            context.restoreGState()
         }
         let groupRadius = ringRadius == 0 ? 0 : ringRadius + Self.groupInset
         let group = NSBezierPath(roundedRect: groupRect.insetBy(dx: 0.5, dy: 0.5), xRadius: groupRadius, yRadius: groupRadius)

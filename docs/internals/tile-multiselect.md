@@ -1,10 +1,33 @@
 # Tile selection and group transforms
 
-Status: implementation prepared for local landing on `array/integration` for
-0.7.31; not released. Dylan explicitly authorized direct-checkout work after this session's
-read-only `.git` sandbox prevented worktree creation. Do not stage unrelated
-changes. The release owner must review this change together with concurrent
-agent-reference dragging and file-preview work.
+Status: preview approved by Dylan on 2026-10-28. Prepared on
+`array/integration` for inclusion in the next release after the other features
+are ready. No release version/build number is assigned by this change.
+
+## Next-release handoff
+
+Suggested release note: “Selecting multiple tiles now gives them a subtle lift
+and breathing room. Drag groups with the same snapping and automatic layout as
+individual tiles, including neighbour pushes and one-step undo.”
+
+The scoped change contains the selection presentation, shared outline geometry,
+collective placement, production-mounted witnesses and this document. There are
+no new dependencies, settings, file formats or migrations. Selection lift and
+spacing are temporary; real moves/resizes use the existing geometry transaction
+and persistence paths. Groups retain source project/zone ownership.
+
+Verified: RED-before/GREEN-after `scripts/run-matrix.sh --tile-selection` (all
+4 legs reported), plus rebuilt-binary `--focus-border-check` and
+`--canvas-pointer-path-check`. The extended app witness covers hover and visible
+hit-testing, magnetic destinations, neighbour pushes, cancellation, undo/redo,
+failed-save rollback and remount. Light/dark renders were inspected and the
+isolated signed dev preview was launched and approved. Local evidence:
+`qa-runs/selection-hover-placement/`; preview:
+`~/array-scratch/apps/Array Selection Preview.app`.
+
+Before publishing the combined release, run the full release matrix and bundle
+verification from `RELEASE.md`; optimized performance profiling remains unrun.
+Do not commit local QA stores, preview bundles, or generated release artifacts.
 
 ## Interaction contract
 
@@ -23,6 +46,23 @@ agent-reference dragging and file-preview work.
   already wearing the ants or the attention ring. (0.7.31 drew a second, solid
   ring on every selected tile at a fixed 8pt radius, so a clicked tile wore two
   outlines that never lined up.)
+- An idle multi-selection lifts 4 screen points and opens a small temporary
+  gutter using the same 0.11s ease-out motion as layout pushes. Separation is
+  capped at 12 screen points per axis; heavily overlapping arrangements retain
+  clipped outlines rather than jumping apart. Actual view origins follow the
+  pose, so controls and focus hit-testing follow the visible tiles. Tile model
+  frames and native content bounds stay unchanged. Reduce Motion settles
+  immediately. The pose returns to rest at the drag threshold and clears when
+  deselected; it never becomes the baseline for persistence, snapping or Undo.
+- Outline clearance adapts in screen space. Exposed edges keep the configured
+  gap; facing edges share the available space with a 2pt gutter. Touching bodies
+  inset their facing outlines slightly. When bodies overlap, the lower tile's
+  outline is clipped behind the higher tile's outline, preserving a clear gutter.
+  Focus, attention and selected-member outlines use the same resolution, with
+  stacking resolved by `(zPosition, id)`. Selection and camera changes never move
+  or persist tile bodies. Only currently outlined tiles participate; ordinary
+  unselected bodies are not collision obstacles. Group handle bounds stay fixed
+  relative to the original tile arrangement, independent of adaptive clearance.
 - One outer selection rectangle has eight resize handles. Edges scale one axis;
   corners scale both independently. The opposite edge/corner stays fixed. Tile
   frames and gaps scale; native text/browser/terminal content reflows at its new
@@ -43,29 +83,41 @@ agent-reference dragging and file-preview work.
 ## Zone and automatic-layout policy
 
 Selection can span installed workspace tiles and project stores. Each tile
-keeps its project and source zone membership during a group transform. Group
-drop is manual placement: no implicit transfer across projects/zones, no
-single-tile swap/insert/settle solver, and no independent member snapping.
-This policy applies with automatic layout enabled or disabled. Later explicit
-Tidy operations can rearrange the result. Existing single-tile gestures keep
-their existing snapping, transfer, and automatic-layout behavior.
+keeps its project and source zone membership during a group transform.
+Magnetic placement treats the selection's rest-frame envelope as one object,
+excludes every selected member from snap candidates, and uses the existing
+acquire/release hysteresis and configured gap. The ghost is the exact collective
+drop destination. Drag Snapping still applies when automatic layout is disabled.
 
-Group movement/resizing does not resize zone containers. A selected member can
-extend outside its original zone; it retains the source membership. Collective
-drop adoption, group snapping, and resizing zone envelopes are follow-up design
-work rather than accidental per-member behavior.
+With automatic layout enabled, a temporary envelope per source zone goes
+through the existing solver. Residents use the existing push and slot behaviour;
+selected members keep their sizes and relative arrangement. A single-zone group
+can latch to a swap/insertion slot collectively. Multi-zone groups keep a common
+requested translation and source membership rather than independently latching
+their zone subsets. Envelopes conservatively reserve the spaces between group
+members. Selected tiles follow the pointer directly while displaced neighbours
+use the existing motion. Drop settling/containment and any displaced neighbours
+are captured in the same persistence/Undo transaction. Escape restores the whole
+baseline, including bystanders and zone geometry.
 
 ## Implementation ownership
 
 - `CanvasTileSelection.swift`: one canvas-owned ephemeral selection and gesture
   session; shared viewport-sized overlay; only outer handles consume hit tests.
+- `TileOutlineGeometry.swift`: pure screen-space edge clearance and z-ordered
+  clipping; cached for unchanged outlined members. Pairwise work is O(K²) in
+  outlined tiles, not the canvas population. No per-frame animation callback or
+  native content measurement is added.
 - `TileSelectionGeometry.swift`: pure immutable WORLD-frame snapshot, rigid
   translation, affine resize, kind minimums, validation; O(selected tiles).
 - `TileNSView`: three forwarding hooks after camera-pan classification. Native
   content and title controls do not enter group gesture tracking.
-- `CanvasNSView.applySelectionFrames`: stage all zone-local conversions before
-  changing any model, apply all frames, then one changed-tile presentation pass.
-  It never calls `updateTile` once per member or invokes the single-tile solver.
+- `CanvasSelectionHover.swift`: cached, bounded idle selection pose and finite
+  compositor motion; updates origins only, never native content sizes.
+- `TileSelectionPlacement.swift`: per-zone rigid envelopes over the existing
+  solver, expanded back to real members before applying/persisting.
+- `CanvasNSView.applySelectionFrames`: stage zone-local conversions, solve the
+  group, and apply one transaction. It never calls `updateTile` per member.
 - `AppDelegate.installTileFocusMonitor`: pre-dispatch mouse-up routing yields
   while the selection owner is tracking. Bringing a view forward on mouse-down
   must remain forbidden: reparenting breaks AppKit drag tracking.
@@ -211,3 +263,45 @@ profile group resizing with representative live agents/terminals/browsers.
 The deterministic selection witnesses use real notes/file views and geometry
 work counters; they do not establish a hardware frame-time budget for many rich
 surfaces. The preview bundle has not been rebuilt or installed.
+
+### Adaptive outline clearance verified on 2026-10-28
+
+The extended production-mounted `--tile-multiselect-check` was RED against the
+previous rendering: an 8pt tile gap produced outline bounds overlapping by 8pt
+at zoom 1. The rebuilt targeted matrix then passed all 4 reported legs with the
+shared outline resolver. It asserts 2pt focus/member clearance at zoom 1/.35,
+focus transfer, configured-gap recovery, touching bodies, vertical/diagonal
+neighbours, overlapping/nested actual stroke masks, attention ownership/removal,
+selection-clear restoration and unchanged tile models/disk during selection and
+camera changes. Close, touching, overlapping and nested captures are written to
+`qa-runs/tile-multiselect/outline-*.png`; light/dark close and overlap captures
+were visually inspected.
+
+Additional rebuilt-binary `--focus-border-check` and
+`--canvas-pointer-path-check` both passed. Logs are in
+`qa-runs/selection-adaptive/`. One intermediate rebuild refused a check source
+modified during compilation; the successful run followed settled source writes.
+The full release matrix and optimized performance profiling were not run for
+this debug preview. No new animation loop, tile body layout, or geometry
+persistence is introduced by adaptive outline drawing.
+
+### Hover and collective placement verified on 2026-10-28
+
+Dylan requested a small lifted/space-separated idle selection and the existing
+magnetic/automatic layout behaviour during group drags. The mounted hover
+witness was RED against the prior implementation (8pt body gap rather than
+18pt). The updated targeted matrix passed all 4 reported legs. Its app leg now
+checks 4-screen-point lift and clearance at zoom 1/.35, protruding-edge focus
+hit-testing, unchanged model/disk during selection, exact collective magnetic
+ghost commit, live resident pushing, Escape restoration and one-step undo/redo.
+The existing group resize, failed-save rollback, remount and multi-project
+ownership witnesses also passed. Existing pointer/focus checks passed on the
+rebuilt binary; light/dark close-selection renders were visually inspected.
+
+One intermediate build was rejected because a concurrent SettingsPanes edit
+changed during compilation; rerunning after that edit settled passed. Logs live
+in `qa-runs/selection-hover-placement/`. The full release matrix and optimized
+performance profiling were not run for this debug preview. Large existing
+body overlaps retain outline clipping because idle separation is deliberately
+capped. Group envelopes conservatively reserve internal empty space; group
+drops retain source ownership rather than transferring projects/zones.
