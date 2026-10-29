@@ -64,6 +64,10 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     case browserConsole = "browser.console"
     // `WorkspaceAPIContracts+Notify.swift`: the caller's own task alert.
     case agentNotify = "agent.notify"
+    // `.plans/102` P2a (`WorkspaceAPIContracts+Reports.swift`): what an agent
+    // says about its own work. Self-only. Appended last.
+    case agentReport = "agent.report"
+    case agentStatus = "agent.status"
 }
 
 // MARK: - Identity

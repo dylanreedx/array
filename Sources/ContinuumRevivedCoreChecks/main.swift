@@ -197,6 +197,12 @@ if CommandLine.arguments.contains("--workspace-mcp-check") {
     runWorkspaceMCPChecks()
     Foundation.exit(0)
 }
+// `.plans/102` P2a: report and status bounds, the push-back decision, the
+// courier, the catalogue entries and the Settings toggle.
+if CommandLine.arguments.contains("--agent-report-contract-check") {
+    runAgentReportContractChecks()
+    Foundation.exit(0)
+}
 // `.plans/102` P1: Array's observation hooks in the Claude argv.
 if CommandLine.arguments.contains("--claude-hook-bridge-check") {
     runClaudeHookBridgeChecks()

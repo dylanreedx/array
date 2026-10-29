@@ -1759,6 +1759,127 @@
           "message"
         ]
       }
+    },
+    {
+      "name": "array_report",
+      "label": "Report",
+      "op": "agent.report",
+      "description": "File a short report on the work you just finished. If another agent delegated your task, it receives this with your result. Calling again replaces your report for this turn.",
+      "promptSnippet": "File a short structured report on finished work",
+      "promptGuidelines": [
+        "Use it when you finish delegated work: summary of 60 words or fewer, the checks you ran, ranked findings, the next step, and detailsPath for a file holding anything longer."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 600,
+            "description": "The outcome, in 60 words or fewer."
+          },
+          "checks": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "properties": {
+                "what": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "result": {
+                  "type": "string",
+                  "enum": [
+                    "pass",
+                    "fail",
+                    "info"
+                  ]
+                }
+              },
+              "required": [
+                "what",
+                "result"
+              ]
+            }
+          },
+          "findings": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "properties": {
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "blocker",
+                    "issue",
+                    "minor",
+                    "note"
+                  ]
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                },
+                "where": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "level",
+                "text"
+              ]
+            }
+          },
+          "next": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "detailsPath": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "A file with the full details."
+          }
+        },
+        "required": [
+          "summary"
+        ]
+      }
+    },
+    {
+      "name": "array_status",
+      "label": "Status",
+      "op": "agent.status",
+      "description": "Say what you are doing, in short lines Array shows as declared by you. Each call replaces the last.",
+      "promptSnippet": "Declare what you are doing now, next, and what you need",
+      "promptGuidelines": [
+        "Post it when your focus changes, not on every step. needsYou is only for something the user must do or decide."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "now": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 140
+          },
+          "next": {
+            "type": "string",
+            "maxLength": 140
+          },
+          "needsYou": {
+            "type": "string",
+            "maxLength": 140
+          }
+        },
+        "required": [
+          "now"
+        ]
+      }
     }
   ]
 }

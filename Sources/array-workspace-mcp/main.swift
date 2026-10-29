@@ -263,7 +263,7 @@ struct ArrayWorkspaceMCP {
                   case .object(let result)? = operation["childResult"],
                   case .string(let status)? = result["status"], status != "spawned" else { return nil }
             entry["status"] = .string(status)
-            for key in ["finalText", "finalTextTruncated", "reason", "endedAt"] {
+            for key in ["finalText", "finalTextTruncated", "reason", "endedAt", "report"] {
                 if let value = result[key] { entry[key] = value }
             }
             return .object(entry)

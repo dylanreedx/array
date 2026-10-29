@@ -431,6 +431,8 @@ public struct OperationChildResult: Codable, Equatable, Sendable {
     public var finalTextTruncated: Bool?
     public var reason: String?
     public var endedAt: Date?
+    /// `.plans/102` P2a: the `array_report` the child filed during this turn.
+    public var report: AgentReport?
 
     public init(_ file: SpawnResultFile) {
         status = file.status.rawValue
@@ -438,6 +440,7 @@ public struct OperationChildResult: Codable, Equatable, Sendable {
         finalTextTruncated = file.finalTextTruncated
         reason = file.reason
         endedAt = file.endedAt
+        report = file.report
     }
 }
 

@@ -146,7 +146,8 @@ scaling, page zoom, face switching, identity color, tile rename and location act
 It is a targeted development gate, not the full release matrix.
 --hook-bridge rebuilds the app, CoreChecks and array-workspace-mcp, then reports
 the Claude observation-hook argv and the hook command against the production
-listener (.plans/102 P1). A targeted development gate, not the full matrix.
+listener (.plans/102 P1), plus array_report/array_status and wait_agents'
+report (P2a). A targeted development gate, not the full matrix.
 --codex-permissions rebuilds CoreChecks and verifies Full Access launch arguments
 for fresh/resumed exec and production app-server runs using an offline stand-in.
 --ios-preview-proof builds the standalone native fixture harness and reports
@@ -591,8 +592,10 @@ if [[ "$HOOK_BRIDGE_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product array-workspace-mcp
   run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
   run_app_check .build/debug/Array --workspace-hook-bridge-check
   run_app_check .build/debug/Array --workspace-mcp-host-check
+  run_app_check .build/debug/Array --workspace-agent-report-check
   matrix_report 'Hook bridge matrix (targeted)'
   exit $?
 fi
@@ -776,6 +779,9 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
 # hooks through one --settings value: exactly seven events, a short timeout,
 # earlier flags unchanged, never --setting-sources (it drops the user's hooks).
 run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
+# .plans/102 P2a: array_report/array_status bounds, the declared label, and the
+# courier unchanged without a report.
+run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
 # T5 (0.7.26): steering, interrupt-not-kill and the persistent Claude process,
 # through the production Claude/Codex/Pi runners against reactive fakes of each
 # CLI that record the exact argv and stdin frames. Its own arm for the same
@@ -847,6 +853,11 @@ run_app_check .build/debug/Array --workspace-mcp-host-check
 # down or silent, refuses a wrong token, and records a recorded claude
 # SubagentStart/SubagentStop pair on the calling agent without changing it.
 run_app_check .build/debug/Array --workspace-hook-bridge-check
+# .plans/102 P2a: array_report/array_status through the real binary and host
+# (bounds, the right agent, another agent's token refused, status declared),
+# and wait_agents: today's entry plus report; a later turn without one carries
+# none.
+run_app_check .build/debug/Array --workspace-agent-report-check
 # S2 (.plans/80-browser-computer-use): the engine an agent drives a browser
 # tile through. Outline past a tampering page, trusted clicks at three canvas
 # zooms without moving the user's focus, typing, the user-typing hold, refusals,

@@ -48,6 +48,10 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
     /// True when `finalText` was cut at `finalTextByteCap`.
     public var finalTextTruncated: Bool?
     public var endedAt: Date?
+    /// `.plans/102` P2a: the `array_report` the child filed during the turn
+    /// this result settles. Absent (and not encoded) when it filed none, so a
+    /// courier without a report is the same file as before.
+    public var report: AgentReport?
 
     public init(
         schema: Int = SpawnResultFile.currentSchema,
@@ -58,7 +62,8 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
         reason: String? = nil,
         finalText: String? = nil,
         finalTextTruncated: Bool? = nil,
-        endedAt: Date? = nil
+        endedAt: Date? = nil,
+        report: AgentReport? = nil
     ) {
         self.schema = schema
         self.toolCallId = toolCallId
@@ -69,6 +74,7 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
         self.finalText = finalText
         self.finalTextTruncated = finalTextTruncated
         self.endedAt = endedAt
+        self.report = report
     }
 
     /// `<parent cwd>/.array/spawn-results` — the directory the extension polls.

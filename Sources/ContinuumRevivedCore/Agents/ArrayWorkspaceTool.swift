@@ -45,8 +45,10 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     case browserScreenshot = "array_browser_take_screenshot"
     case browserEvaluate = "array_browser_evaluate"
     case browserConsole = "array_browser_console"
-
     case notify = "array_notify"
+    case report = "array_report"
+    case status = "array_status"
+
     public var isBrowser: Bool { rawValue.hasPrefix("array_browser_") }
 
     /// claude's prefix for a tool served by the `array_workspace` MCP server
@@ -63,7 +65,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     public var kind: AgentToolKind {
         switch self {
         case .workspaceContext, .openDocument, .canvasQuery, .inspectAgent, .getOperation, .boardQuery, .deviceList, .deviceObserve: return .read
-        case .canvasApply, .boardApply, .updateAgent, .deviceOpen, .deviceAct, .deviceClose, .deviceBuildRun: return .edit
+        case .canvasApply, .boardApply, .updateAgent, .deviceOpen, .deviceAct, .deviceClose, .deviceBuildRun, .report, .status: return .edit
         case .findAgent: return .search
         case .delegate: return .delegate
         case .revealAgent, .messageAgent, .browserOpen, .browserNavigate, .browserSnapshot,
@@ -89,6 +91,8 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .browserOpen, .browserNavigate, .browserSnapshot, .browserClick, .browserType,
              .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole: return "globe"
         case .notify: return "bell"
+        case .report: return "doc.text"
+        case .status: return "text.bubble"
         }
     }
 
@@ -133,6 +137,8 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .browserEvaluate: return "Ran JavaScript in a browser"
         case .browserConsole: return "Read a browser console"
         case .notify: return "Notified you"
+        case .report: return "Filed a report"
+        case .status: return "Posted its status"
         }
     }
 

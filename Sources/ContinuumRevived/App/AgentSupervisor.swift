@@ -5162,6 +5162,33 @@ final class AgentSupervisor {
         hookReceipts[id] = ring
     }
 
+    /// `.plans/102` P2a: each agent's latest `array_report`, with when it was
+    /// filed. A delegated child's report is handed to its parent with the turn
+    /// it was filed in (`writeTerminalSpawnResult`), never with a later one.
+    /// In memory; gone with the record.
+    private(set) var agentReports: [AgentID: (report: AgentReport, filedAt: Date)] = [:]
+    /// When each delegated child's last turn settled: a report filed before
+    /// this belongs to an earlier turn.
+    private var lastSettledAt: [AgentID: Date] = [:]
+    /// `.plans/102` P2a: what each agent last DECLARED through `array_status`.
+    /// Kept apart from every observed status on purpose (principle 6); nothing
+    /// here feeds the stream status, the presence row or the record.
+    private(set) var declaredStatuses: [AgentID: AgentDeclaredStatus] = [:]
+
+    @discardableResult
+    func fileReport(_ report: AgentReport, for id: AgentID, at date: Date = Date()) -> Bool {
+        guard records[id] != nil else { return false }
+        agentReports[id] = (report, date)
+        return true
+    }
+
+    @discardableResult
+    func declareStatus(_ status: AgentDeclaredStatus, for id: AgentID) -> Bool {
+        guard records[id] != nil else { return false }
+        declaredStatuses[id] = status
+        return true
+    }
+
     /// The agents this one spawned.
     func children(of id: AgentID) -> [AgentID] {
         records.values.filter { $0.parentAgentID == id }.map(\.id)
@@ -5663,6 +5690,9 @@ final class AgentSupervisor {
 
         records.removeValue(forKey: id)
         hookReceipts.removeValue(forKey: id)
+        agentReports.removeValue(forKey: id)
+        lastSettledAt.removeValue(forKey: id)
+        declaredStatuses.removeValue(forKey: id)
         runnerGenerationTokens.removeValue(forKey: id)
         history.removeValue(forKey: id)
         rehydratedTranscripts.removeValue(forKey: id)
@@ -9132,6 +9162,11 @@ final class AgentSupervisor {
             finalText = capped.text
             finalTextTruncated = capped.truncated ? true : nil
         }
+        // P2a: the report this turn filed, and only this turn's.
+        let settledAt = Date()
+        var report: AgentReport?
+        if let filed = agentReports[id], filed.filedAt > (lastSettledAt[id] ?? .distantPast) { report = filed.report }
+        lastSettledAt[id] = settledAt
         SpawnResultFile.write(
             SpawnResultFile(
                 toolCallId: handle,
@@ -9141,7 +9176,8 @@ final class AgentSupervisor {
                 reason: errorMessage,
                 finalText: finalText,
                 finalTextTruncated: finalTextTruncated,
-                endedAt: Date()
+                endedAt: settledAt,
+                report: report
             ),
             parentCwd: parent.cwd,
             warn: warn

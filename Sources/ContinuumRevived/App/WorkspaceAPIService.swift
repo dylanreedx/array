@@ -478,6 +478,10 @@ final class WorkspaceAPIService {
         case .browserOpen, .browserNavigate, .browserSnapshot, .browserClick, .browserType,
              .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole:
             return .error(WorkspaceAPIError(code: .unsupported, message: "Browser tools are not available yet."))
+        case .agentReport:
+            return fileReport(agentId: agentId, ownHandle: ownHandle, payload: payload)
+        case .agentStatus:
+            return declareStatus(agentId: agentId, ownHandle: ownHandle, payload: payload)
         }
     }
 
