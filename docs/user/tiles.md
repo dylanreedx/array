@@ -19,7 +19,13 @@ A terminal can execute real commands. Its scrollback is not a managed-agent conv
 
 ## Browser
 
-A web surface for a URL or local development preview. Run your server in a terminal, then open its address here. A browser tile does not start the server for you. Website authentication and page state belong to the browser context; putting a page beside an agent does not give the model automatic access to its contents.
+A web surface for a URL or local development preview. Run your server in a terminal, then open its address here. A browser tile does not start the server for you.
+
+Managed agents with workspace tools enabled can open and use browser tiles in their project. Agent-created browsers use the shared **Agents** profile, separate from your Default profile. You can select Agents on a browser tile to sign in to a development app for agents to use. An agent must ask before taking control of one of your own browser tiles, and control returns to you when you interact with it. The browser header shows who is driving and offers **Take control**. Moving a tile off the Agents profile also takes it back.
+
+With Agent permissions set to Free, an agent can read and screenshot any browser tile in its project, including yours. With Ask first, reading one of your tiles asks first, like taking control.
+
+Localhost, loopback addresses, and files in the agent’s checkout can be opened without a domain prompt. Other domains ask for your approval, including when a navigation redirects. Domain approvals last only for the current session. Screenshots and agent downloads are saved in Array’s private application-support storage.
 
 ## Inspector
 
