@@ -38,6 +38,7 @@ check --agent-tile-chrome-consolidation-check
 check --agent-tile-click-focus-check
 check --agent-tile-file-mention-check
 check --agent-tile-reference-check
+check --agent-tool-detail-store-check
 check --agent-transcript-projection-check
 check --ambient-tile-frame-space-check
 check --app-support-channel-check
@@ -211,6 +212,7 @@ check --resize-dimensions-hud-check
 check --resize-snap-check
 check --retired-flat-write-check
 check --reveal-in-finder-check
+check --role-registry-check
 check --run-artifacts-tile-check
 check --session-observer-check
 check --session-resume-check
@@ -297,6 +299,7 @@ check --workspace-api-agents-check
 check --workspace-api-board-check
 check --workspace-api-canvas-check
 check --workspace-api-delegation-check
+check --workspace-api-device-check
 check --workspace-api-exposure-check
 check --workspace-api-free-permissions-check
 check --workspace-api-grants-check
@@ -359,11 +362,12 @@ leg run scripts/check-agent-tile-ux-program.sh
 leg run scripts/check-sidebar-native-ux-program.sh
 leg run swift build
 leg run swift build --disable-sandbox --skip-update --product Array
+leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp
+leg run swift build --disable-sandbox --skip-update --product continuum-relay
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedSyncChecks
-leg run swift build --disable-sandbox --skip-update --product continuum-relay
 leg run swift build --product Array
 leg run swift build --product ContinuumRevivedCoreChecks
 leg run swift run ContinuumRevivedSyncIntegrationChecks
@@ -626,6 +630,7 @@ leg run_app_check .build/debug/Array --workspace-api-agents-check
 leg run_app_check .build/debug/Array --workspace-api-board-check
 leg run_app_check .build/debug/Array --workspace-api-canvas-check
 leg run_app_check .build/debug/Array --workspace-api-delegation-check
+leg run_app_check .build/debug/Array --workspace-api-device-check
 leg run_app_check .build/debug/Array --workspace-api-free-permissions-check
 leg run_app_check .build/debug/Array --workspace-api-grants-check
 leg run_app_check .build/debug/Array --workspace-api-open-check
@@ -689,6 +694,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-message-transcript-c
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-process-tracking-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-prompt-image-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-tool-detail-store-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-transcript-projection-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --board-task-transcript-check
@@ -716,6 +722,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --onboarding-foundation-chec
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --pi-provider-failure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --registry-ownership-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-lifecycle-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --tile-selection-geometry-check
@@ -728,8 +735,8 @@ leg run_leg bash scripts/check-relay-linux.sh
 leg run_leg node Tools/IOSPreviewProof/check-bridge.cjs
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
-leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 leg run_leg python3 scripts/check-notification-map.py --self-test
+leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 leg run_leg scripts/capture-cli-fixtures.sh check
 leg run_leg scripts/check-app-bundle.sh --configuration debug
 leg run_leg scripts/check-color-hygiene.sh
@@ -761,14 +768,14 @@ bundle-check --palette-duplicate-root-check
 bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
-count ContinuumRevivedAgentUIChecks 21
-count ContinuumRevivedCoreChecks 188
+count ContinuumRevivedAgentUIChecks 22
+count ContinuumRevivedCoreChecks 190
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
 count ContinuumRevivedRelayChecks 0
-count ContinuumRevivedRelayCoreChecks 0
-count ContinuumRevivedRelayIntegrationChecks 0
+count ContinuumRevivedRelayCoreChecks 2
+count ContinuumRevivedRelayIntegrationChecks 3
 count ContinuumRevivedRelayProtocolChecks 0
-count ContinuumRevivedSyncChecks 11
+count ContinuumRevivedSyncChecks 12
 count ContinuumRevivedSyncIntegrationChecks 1
