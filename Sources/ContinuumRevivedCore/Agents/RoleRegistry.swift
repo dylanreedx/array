@@ -74,16 +74,7 @@ public struct RoleRegistry: Sendable {
     /// sends no `--tools` and already has them.
     public static func hostToolNames(for harness: AgentHarness) -> [String] {
         switch harness {
-        case .pi: return ["array_workspace_context", "array_open_document",
-                          "array_find_agent", "array_inspect_agent",
-                          "array_canvas_query", "array_canvas_apply",
-                          "array_board_query", "array_board_apply",
-                          // Delegation is authorized per request by the host grant
-                          // table, not by withholding the tool.
-                          "array_delegate", "array_reveal_agent", "array_get_operation",
-                          // Messaging is scoped to the caller's OWN children and
-                          // authorized per request, like delegation.
-                          "array_message_agent", "array_update_agent"]
+        case .pi: return WorkspaceMCPToolCatalog.tools.map(\.name)
         case .claudeCode, .codex: return []
         }
     }

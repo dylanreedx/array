@@ -28,6 +28,12 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     case boardQuery = "array_board_query"
     case boardApply = "array_board_apply"
     case updateAgent = "array_update_agent"
+    case deviceList = "array_device_list"
+    case deviceOpen = "array_device_open"
+    case deviceObserve = "array_device_observe"
+    case deviceAct = "array_device_act"
+    case deviceClose = "array_device_close"
+    case deviceBuildRun = "array_device_build_run"
 
     /// claude's prefix for a tool served by the `array_workspace` MCP server
     /// (`WorkspaceMCPConfiguration`).
@@ -42,8 +48,8 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     /// The kind the row is counted as in a fold header and described by.
     public var kind: AgentToolKind {
         switch self {
-        case .workspaceContext, .openDocument, .canvasQuery, .inspectAgent, .getOperation, .boardQuery: return .read
-        case .canvasApply, .boardApply, .updateAgent: return .edit
+        case .workspaceContext, .openDocument, .canvasQuery, .inspectAgent, .getOperation, .boardQuery, .deviceList, .deviceObserve: return .read
+        case .canvasApply, .boardApply, .updateAgent, .deviceOpen, .deviceAct, .deviceClose, .deviceBuildRun: return .edit
         case .findAgent: return .search
         case .delegate: return .delegate
         case .revealAgent, .messageAgent: return .unknown
@@ -54,6 +60,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     /// glyph (the kanban tile's), not the generic edit pencil.
     public var symbolName: String {
         switch self {
+        case .deviceList, .deviceOpen, .deviceObserve, .deviceAct, .deviceClose, .deviceBuildRun: return "iphone"
         case .workspaceContext: return "scope"
         case .openDocument, .canvasQuery: return "eye"
         case .canvasApply: return "arrow.up.and.down.and.arrow.left.and.right"
@@ -73,6 +80,12 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     /// the op.
     public func actionLine(fileBasename: String?) -> String {
         switch self {
+        case .deviceList: return "Checked iOS simulators"
+        case .deviceOpen: return "Opened an iOS preview"
+        case .deviceObserve: return "Observed an iOS simulator"
+        case .deviceAct: return "Requested a simulator tap"
+        case .deviceClose: return "Released an iOS simulator"
+        case .deviceBuildRun: return "Managed an iOS build"
         case .workspaceContext: return "Checked its workspace"
         case .openDocument:
             guard let fileBasename, !fileBasename.isEmpty else { return "Opened a file on the canvas" }

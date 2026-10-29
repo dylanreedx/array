@@ -241,6 +241,32 @@ enum IOSPreviewChecks {
                    "warm return must create one helper without booting")
         restored.runtime.disconnect()
 
+        // The app-owned attachment survives a real cold scene round trip.
+        // Hydration must re-host the retained runtime, never create a helper.
+        workspace.warmSceneCapacity = 0
+        restored.runtime.connect(allowBoot: false)
+        try settle { restored.runtime.state == .connected }
+        let retainedRuntime = restored.runtime
+        let retainedNative = sessions.last!
+        let retainedCount = sessions.count
+        let scope = IOSPreviewAutomationSessions.Scope(principal: UUID(), project: projectID,
+            checkout: CheckoutHandle.derive(canonicalRoot: CheckoutHandle.canonicalRoot(projectRoot.path)))
+        let attachment = try IOSPreviewAutomationSessions.shared.attach(runtime: retainedRuntime, scope: scope)
+        try workspace.switchWorkspace(to: workspaceB)
+        try expect(!retainedNative.stopped && retainedRuntime.state == .connected,
+            "cold workspace switch must preserve the agent's one shared helper")
+        try workspace.switchWorkspace(to: workspaceA)
+        canvas.layoutSubtreeIfNeeded()
+        guard let rehosted = canvas.tileView(for: tileA) as? IOSPreviewTileNSView else { throw Failure(description: "retained preview did not hydrate") }
+        try expect(rehosted.runtime === retainedRuntime && controller.iosPreviewRuntimes[tileA] === retainedRuntime && sessions.count == retainedCount,
+            "Phase B must re-host exactly the retained runtime without a second helper")
+        retainedNative.onFrame?(image())
+        try expect(rehosted.screen.image != nil, "new human viewer must subscribe to the retained capture")
+        controller.releaseRuntimes(tileId: tileA)
+        try expect(retainedNative.stopped && IOSPreviewAutomationSessions.shared.attachments[attachment.id] == nil,
+            "explicit tile close must release the app attachment and native helper")
+        print("IOSPreviewChecks automation scene passed: production cold switch/re-host shares one helper; explicit close releases it")
+
         // A retiring helper may still drain HID work after stop() returns. A
         // replacement must wait for real completion, even across another tile.
         let fenceDevice = UUID().uuidString
@@ -317,11 +343,18 @@ enum IOSPreviewChecks {
         try expect(!oversizeDelivered, "oversized JPEG dimensions must be rejected before bitmap decoding")
 
         try IOSPreviewStreamChecks.run()
+        try IOSPreviewObservationChecks.run()
 
         var buildCheckFinished = false
         var buildCheckError: Error?
         Task { @MainActor in
-            do { try await IOSPreviewBuildChecks.run() } catch { buildCheckError = error }
+            do {
+                try await IOSPreviewActionChecks.run()
+                try await IOSPreviewSessionChecks.run()
+                try await IOSPreviewManagedDeviceChecks.run()
+                try await IOSPreviewBuildChecks.run()
+                try await IOSPreviewBuildJobChecks.run()
+            } catch { buildCheckError = error }
             buildCheckFinished = true
         }
         try settle { buildCheckFinished }
@@ -331,11 +364,12 @@ enum IOSPreviewChecks {
         let output = ProcessInfo.processInfo.environment["CONTINUUM_QA_OUTPUT_DIR"].map { URL(fileURLWithPath: $0) }
         if let output {
             try fm.createDirectory(at: output, withIntermediateDirectories: true)
+            let rendered = (canvas.tileView(for: tileA) as? IOSPreviewTileNSView) ?? restored
             for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-                restored.appearance = NSAppearance(named: appearance)
-                restored.applyTokens(); restored.layoutSubtreeIfNeeded()
-                let rep = restored.bitmapImageRepForCachingDisplay(in: restored.bounds)!
-                restored.cacheDisplay(in: restored.bounds, to: rep)
+                rendered.appearance = NSAppearance(named: appearance)
+                rendered.applyTokens(); rendered.layoutSubtreeIfNeeded()
+                let rep = rendered.bitmapImageRepForCachingDisplay(in: rendered.bounds)!
+                rendered.cacheDisplay(in: rendered.bounds, to: rep)
                 try rep.representation(using: .png, properties: [:])!.write(to: output.appendingPathComponent("ios-preview-\(name).png"))
             }
         }

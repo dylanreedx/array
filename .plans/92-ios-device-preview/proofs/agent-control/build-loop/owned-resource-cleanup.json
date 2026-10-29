@@ -1,0 +1,33 @@
+{
+  "exactOwnedDevices": [
+    "2499DCB1-AA9A-458F-BFF9-5133A8B34D88",
+    "4B810887-ECF2-4817-AFC7-5C9AC460AEB8",
+    "6D46F766-6510-42F6-B6E3-581A758167D4",
+    "914E18D8-29D5-44BB-9391-74556801CE1A",
+    "C802DB7F-FFF4-492C-9A00-7F7603247161",
+    "F6782709-9717-4E61-B7A0-CFBC2807EF74"
+  ],
+  "remaining": {},
+  "managedLedgers": {
+    "slice4-api-live": {},
+    "slice4-api-live-prepared": {},
+    "slice4-final-live": {}
+  },
+  "buildArtifacts": [
+    {
+      "run": "slice4-api-live-prepared",
+      "directory": "1C2994D2-8A3A-4C22-A143-4AEF7EE45C29",
+      "derivedDataPresent": false,
+      "logBytes": 524288,
+      "receiptPresent": true
+    },
+    {
+      "run": "slice4-final-live",
+      "directory": "68B507AE-91D2-482F-A8D4-C013123F30C7",
+      "derivedDataPresent": false,
+      "logBytes": 524288,
+      "receiptPresent": true
+    }
+  ],
+  "pass": true
+}

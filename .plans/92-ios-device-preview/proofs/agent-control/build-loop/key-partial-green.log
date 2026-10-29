@@ -1,0 +1,2 @@
+PASS: internal bounded swipe/text/key/Home/rotation; validation, native completion and mid-swipe controller-loss release
+iOS preview bridge checks passed: correlated atomic tap, deferred native end, duplicate rejection, invalid action/no-frame/held-input rejection, partial-effect uncertainty, authentication, route restriction, frame backpressure, frame-rate validation, controller ownership, modifier-safe Unicode paste, malformed/oversized socket errors, drag coalescing, disconnect input release, late-input fencing and finite startup/shutdown.

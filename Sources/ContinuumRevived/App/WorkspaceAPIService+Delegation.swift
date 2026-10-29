@@ -762,7 +762,8 @@ extension WorkspaceAPIService {
                 childAgentId: record.childAgentId, tileId: record.tileId,
                 childRunning: childRunning,
                 failureCode: record.failureCode, failureMessage: record.failureMessage, createdAt: record.createdAt,
-                childResult: childResult)
+                childResult: childResult,
+                deviceBuild: record.op == .deviceBuildRun ? deviceBuildResult(operationId: record.operationId, agentId: agentId, checkout: ownHandle) : nil)
         case let .expired(tombstone):
             result = OperationGetResult(
                 operationId: tombstone.operationId, op: nil, status: .expired, steps: nil,

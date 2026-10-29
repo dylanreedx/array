@@ -24,6 +24,7 @@ public extension WorkspaceAPIOp {
     /// `agent.message`), and "allow for session" covers the rest.
     static let approvalGatedOperations: Set<WorkspaceAPIOp> = [
         .canvasApply, .agentDelegate, .agentMessage,
+        .deviceList, .deviceOpen, .deviceObserve, .deviceAct, .deviceClose, .deviceBuildRun,
     ]
 }
 

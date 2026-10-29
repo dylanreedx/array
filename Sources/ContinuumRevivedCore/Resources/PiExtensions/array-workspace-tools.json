@@ -102,8 +102,16 @@
           }
         },
         "anyOf": [
-          { "required": ["relativePath"] },
-          { "required": ["artifactHandle"] }
+          {
+            "required": [
+              "relativePath"
+            ]
+          },
+          {
+            "required": [
+              "artifactHandle"
+            ]
+          }
         ]
       }
     },
@@ -317,25 +325,53 @@
         "allOf": [
           {
             "if": {
-              "properties": { "op": { "const": "move" } },
-              "required": ["op"]
+              "properties": {
+                "op": {
+                  "const": "move"
+                }
+              },
+              "required": [
+                "op"
+              ]
             },
             "then": {
               "anyOf": [
-                { "required": ["origin"] },
-                { "required": ["worldFrame"] }
+                {
+                  "required": [
+                    "origin"
+                  ]
+                },
+                {
+                  "required": [
+                    "worldFrame"
+                  ]
+                }
               ]
             }
           },
           {
             "if": {
-              "properties": { "op": { "const": "resize" } },
-              "required": ["op"]
+              "properties": {
+                "op": {
+                  "const": "resize"
+                }
+              },
+              "required": [
+                "op"
+              ]
             },
             "then": {
               "anyOf": [
-                { "required": ["size"] },
-                { "required": ["worldFrame"] }
+                {
+                  "required": [
+                    "size"
+                  ]
+                },
+                {
+                  "required": [
+                    "worldFrame"
+                  ]
+                }
               ]
             }
           }
@@ -626,8 +662,16 @@
           }
         },
         "anyOf": [
-          { "required": ["operationId"] },
-          { "required": ["idempotencyKey"] }
+          {
+            "required": [
+              "operationId"
+            ]
+          },
+          {
+            "required": [
+              "idempotencyKey"
+            ]
+          }
         ]
       }
     },
@@ -739,6 +783,485 @@
         "required": [
           "agentId",
           "identityColor"
+        ]
+      }
+    },
+    {
+      "name": "array_device_list",
+      "label": "Device List",
+      "op": "device.list",
+      "description": "List project iOS Preview tiles and device templates available in Xcode without connecting or booting. New agent previews use host-created disposable simulators; listing a human simulator does not grant control. Results explicitly report truncation.",
+      "promptSnippet": "List project iOS Preview tiles and available Xcode simulators without connecting or booting",
+      "promptGuidelines": [
+        "Use Array device tools for the iOS Preview tile; do not fall back to desktop computer use or shell HID.",
+        "A simulator grant covers the whole selected simulator, including system UI and other apps.",
+        "Human takeover wins. After the user reclaims a simulator, only their Preview menu can allow agent control again."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "checkoutHandle": {
+            "type": "string",
+            "description": "Your explicit Home checkoutHandle from array_workspace_context. No active-project fallback."
+          }
+        },
+        "required": [
+          "checkoutHandle"
+        ]
+      }
+    },
+    {
+      "name": "array_device_open",
+      "label": "Device Open",
+      "op": "device.open",
+      "description": "Create a host-owned disposable simulator and canvas tile using zoneId plus templateId, or reconnect your owned tileId. Never adopts arbitrary existing simulator UUIDs. Preserves camera, workspace, focus and armed zone. Returns exact deviceId, sessionId and a 30-second idle budget. One active attachment per agent, two per app; managed-device inventory is capped at two per agent/eight per app. Existing human tiles cannot be adopted.",
+      "promptSnippet": "Open an explicitly selected simulator in an agent-owned canvas tile, or reconnect your owned tile",
+      "promptGuidelines": [
+        "Use Array device tools for the iOS Preview tile; do not fall back to desktop computer use or shell HID.",
+        "A simulator grant covers the whole selected simulator, including system UI and other apps.",
+        "Human takeover wins. After the user reclaims a simulator, only their Preview menu can allow agent control again.",
+        "Prefer a disposable QA simulator. Never reset, erase or shut down a borrowed device.",
+        "Reuse the same idempotencyKey to retry creation, or reconnect using the returned owned tileId.",
+        "Prefer reopening your owned tileId. New creation is bounded; unused Array Agent devices may be removed in Xcode to free inventory. Never erase or shut down borrowed devices."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "checkoutHandle": {
+            "type": "string",
+            "description": "Your explicit Home checkoutHandle from array_workspace_context. No active-project fallback."
+          },
+          "tileId": {
+            "type": "string",
+            "description": "Your existing owned tile from array_device_list."
+          },
+          "zoneId": {
+            "type": "string",
+            "description": "Explicit already-mounted zone in your project, required for creation."
+          },
+          "deviceId": {
+            "type": "string",
+            "description": "An exact UUID constraint for an owned tile, or a receipt-owned device from managedDevices when restoring its tile. Arbitrary existing simulators cannot be adopted."
+          },
+          "allowBoot": {
+            "type": "boolean",
+            "description": "Explicit true is required to create/start a fresh disposable simulator, or restart a stopped owned simulator."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Reuse for the same creation intent; a changed payload conflicts. Persisted creation digests prevent duplicate tiles after restart."
+          },
+          "templateId": {
+            "type": "string",
+            "description": "A templateId returned by array_device_list; required when creating a fresh disposable simulator."
+          }
+        },
+        "required": [
+          "checkoutHandle"
+        ],
+        "anyOf": [
+          {
+            "required": [
+              "tileId"
+            ]
+          },
+          {
+            "required": [
+              "zoneId",
+              "templateId",
+              "allowBoot"
+            ]
+          },
+          {
+            "required": [
+              "zoneId",
+              "deviceId"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "array_device_observe",
+      "label": "Device Observe",
+      "op": "device.observe",
+      "description": "Obtain a fresh upright screenshot of your exact device session. Returns one image block plus observationId, pixel dimensions, orientation, geometry generation and sequence. Waits for a helper emission after the request. Native capture age is unknown and reported as such. Observations expire after 30 seconds.",
+      "promptSnippet": "Obtain a fresh upright screenshot of your exact device session",
+      "promptGuidelines": [
+        "Use Array device tools for the iOS Preview tile; do not fall back to desktop computer use or shell HID.",
+        "A simulator grant covers the whole selected simulator, including system UI and other apps.",
+        "Human takeover wins. After the user reclaims a simulator, only their Preview menu can allow agent control again.",
+        "Observe before tapping. Coordinates refer to the returned upright image, independent of canvas zoom and letterboxing.",
+        "A new explicit observation replaces the previous frame handle; ordinary live video frames do not invalidate stable geometry."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "checkoutHandle": {
+            "type": "string",
+            "description": "Your explicit Home checkoutHandle from array_workspace_context. No active-project fallback."
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "A sessionId returned by array_device_open; bound to your identity, checkout and exact simulator."
+          }
+        },
+        "required": [
+          "checkoutHandle",
+          "sessionId"
+        ]
+      }
+    },
+    {
+      "name": "array_device_act",
+      "label": "Device Act",
+      "op": "device.act",
+      "description": "Perform one bounded tap, swipe, guest Unicode text, named key, Home or rotation using a fresh observation. Native completion is not application success: observe again. Swipe lasts 100–1500ms; text is at most 16384 UTF-8 bytes. Text uses only the guest pasteboard. No shell, eval, raw HID or Mac clipboard access.",
+      "promptSnippet": "Perform one bounded simulator action using a fresh observation",
+      "promptGuidelines": [
+        "Use Array device tools for the iOS Preview tile; do not fall back to desktop computer use or shell HID.",
+        "A simulator grant covers the whole selected simulator, including system UI and other apps.",
+        "Human takeover wins. After the user reclaims a simulator, only their Preview menu can allow agent control again.",
+        "After outcome_unknown, observe/reconnect explicitly; never retry the effect with a new key. Reusing the same key retrieves a known result or uncertainty.",
+        "A session holds 128 action retry records; close/reopen your owned tile when its record budget is full.",
+        "Tap needs x/y. Swipe needs x/y/endX/endY in upright image pixels plus milliseconds (100–1500). Text needs text (1–16384 UTF-8 bytes). Key needs one named key. Rotate needs orientation (1 portrait, 2 upside down, 3 landscape left, 4 landscape right).",
+        "After rotation get a new observation and wait for app layout to settle before choosing a target; native completion does not mean UIKit animation finished."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "checkoutHandle": {
+            "type": "string",
+            "description": "Your explicit Home checkoutHandle from array_workspace_context. No active-project fallback."
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "A sessionId returned by array_device_open; bound to your identity, checkout and exact simulator."
+          },
+          "observationId": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "tap",
+              "swipe",
+              "text",
+              "key",
+              "home",
+              "rotate"
+            ]
+          },
+          "x": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Pixel x in the upright observation image, less than image width."
+          },
+          "y": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Pixel y in the upright observation image, less than image height."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Required retry identity. Same key and effective payload never repeat the input; a different payload conflicts."
+          },
+          "endX": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Swipe destination x in upright image pixels, less than width."
+          },
+          "endY": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Swipe destination y in upright image pixels, less than height."
+          },
+          "milliseconds": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 1500
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+            "description": "Guest Unicode text, at most 16384 UTF-8 bytes."
+          },
+          "key": {
+            "type": "string",
+            "enum": [
+              "return",
+              "tab",
+              "backspace",
+              "escape",
+              "left",
+              "right",
+              "up",
+              "down"
+            ]
+          },
+          "orientation": {
+            "type": "integer",
+            "enum": [
+              1,
+              2,
+              3,
+              4
+            ]
+          }
+        },
+        "required": [
+          "checkoutHandle",
+          "sessionId",
+          "observationId",
+          "kind",
+          "idempotencyKey"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "tap"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "anyOf": [
+                {
+                  "required": [
+                    "x",
+                    "y"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "swipe"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "anyOf": [
+                {
+                  "required": [
+                    "x",
+                    "y",
+                    "endX",
+                    "endY",
+                    "milliseconds"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "text"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "anyOf": [
+                {
+                  "required": [
+                    "text"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "key"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "anyOf": [
+                {
+                  "required": [
+                    "key"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "rotate"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "anyOf": [
+                {
+                  "required": [
+                    "orientation"
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "array_device_close",
+      "label": "Device Close",
+      "op": "device.close",
+      "description": "Release your automation attachment. Leaves the running simulator/app and any human viewer intact. Does not delete the canvas tile, simulator, or ownership. Reopen the same tileId to reuse it.",
+      "promptSnippet": "Release your automation attachment",
+      "promptGuidelines": [
+        "Use Array device tools for the iOS Preview tile; do not fall back to desktop computer use or shell HID.",
+        "A simulator grant covers the whole selected simulator, including system UI and other apps.",
+        "Human takeover wins. After the user reclaims a simulator, only their Preview menu can allow agent control again."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "checkoutHandle": {
+            "type": "string",
+            "description": "Your explicit Home checkoutHandle from array_workspace_context. No active-project fallback."
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "A sessionId returned by array_device_open; bound to your identity, checkout and exact simulator."
+          }
+        },
+        "required": [
+          "checkoutHandle",
+          "sessionId"
+        ]
+      }
+    },
+    {
+      "name": "array_device_build_run",
+      "label": "Device Build & Run",
+      "op": "device.build_run",
+      "description": "Start or cancel a service-owned Debug iOS Simulator build/install/launch job on your exact preview session. Returns an operationId immediately; poll array_get_operation for tagged deviceBuild state and a bounded private log tail. Uses a fresh build directory, verifies one simulator app, and never installs after a failed or cancelled compilation. 900-second job budget; no archive, signing, upload, arbitrary argv/env, shell or eval.",
+      "promptSnippet": "Build and run an iOS app on your exact simulator; poll its operationId",
+      "promptGuidelines": [
+        "Use your explicit Home checkout and an owned session. projectFile is a checkout-relative .xcodeproj or .xcworkspace path; scheme must exist in that exact container.",
+        "Under Ask first, visual preview approval does not authorize building. Use the existing build approval flow.",
+        "Start requires a stable idempotencyKey. Success, failure and cancellation retain the original operation identity; a changed payload conflicts. Never blindly repeat an uncertain installation with a new key.",
+        "kind cancel requires your owned operationId and does not require a current preview lease. Cancellation settles asynchronously; poll until terminal.",
+        "Native build completion is separate from app correctness. Observe the resulting screen. Logs are private project diagnostics: do not echo sensitive values.",
+        "Human takeover, closed/revoked sessions, ended agent turns and deadlines cancel the job. Partial install/launch can be outcome_unknown. Older operation results may expire; do not treat expiry as permission to replay."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "checkoutHandle": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "start",
+              "cancel"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "projectFile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "scheme": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "checkoutHandle",
+          "kind"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "start"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "anyOf": [
+                {
+                  "required": [
+                    "sessionId",
+                    "projectFile",
+                    "scheme",
+                    "idempotencyKey"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "cancel"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "anyOf": [
+                {
+                  "required": [
+                    "operationId"
+                  ]
+                }
+              ]
+            }
+          }
         ]
       }
     }

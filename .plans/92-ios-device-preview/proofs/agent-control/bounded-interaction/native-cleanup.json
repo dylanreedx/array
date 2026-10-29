@@ -1,0 +1,9 @@
+{
+  "scope": "exact two disposable devices created by this native proof",
+  "devices": [
+    "231B015E-AD64-48B4-93BD-D5D41A63107B",
+    "B1561FAD-A977-4395-B9F6-44A6B5ED4E6D"
+  ],
+  "remaining": {},
+  "pass": true
+}

@@ -1,0 +1,99 @@
+{
+  "date": "2026-10-29",
+  "offlineLegsPassed": 12,
+  "liveLegsPassed": 2,
+  "bundleGate": "FAILED terminal-theme-fidelity-check; other seven bundle checks/signing/launch/pollution pass",
+  "records": [
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-final-live-matrix.log",
+      "artifact": "live-matrix.log",
+      "sha256": "275e4c9fc03cd086d4d0aca1dc4a38452015f748645635a0f3bd9a7a49aa6eff"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-core-contract.log",
+      "artifact": "core-contract.log",
+      "sha256": "f5cf2170943ef6988392a7a2d3cb8b6459153e2268c027db0e5793a29e0dac35"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-owned-device-cleanup.json",
+      "artifact": "owned-resource-cleanup.json",
+      "sha256": "3edce7e0d46e97e0dd8792ba42a5f3aea904658c9f6496e63522696a489c6881"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice3-key-partial-red.log",
+      "artifact": "key-partial-red.log",
+      "sha256": "f2d44f9ce20c1c597dc5a020b87909d3fe55b8548e73b1b7a01230127e7b28ed"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice3-key-partial-green.log",
+      "artifact": "key-partial-green.log",
+      "sha256": "d876b8ce547337a87f6b475a305df56462cbbeb656d064841ed1c3cd5f3deee3"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-capture-profile-negative.log",
+      "artifact": "capture-profile-negative.log",
+      "sha256": "3ec3ee93ad9878d9aa69f6b91a6e6fc37e5557c80175ff1feaf7a17e4cecebce"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-render-check.log",
+      "artifact": "appearance-check.log",
+      "sha256": "e9302a1433bb1e9b07a334d85355182c53edbe2f3f3689def8c33bd209648075"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-bundle-check-retry/manifest.json",
+      "artifact": "dev-bundle-manifest.json",
+      "sha256": "aa38ad7f56163f5064661b530e1b97ea7323dc8cf4027a29123ea4843173f507"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-dev-bundle.log",
+      "artifact": "dev-bundle-build.log",
+      "sha256": "ba120c4374d0e3131a9ad7503198529e52bdaacad386bb5448a5eaa8a68c91af"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-final-live/canvas/workspace-api/device-build-report.json",
+      "artifact": "device-build-report.json",
+      "sha256": "a93b10c02f6ac65b2beba5b32373e3ef7e5a81a4299d41561dbfcee601dfed86"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-final-live/canvas/workspace-api/device-api-report.json",
+      "artifact": "device-api-report.json",
+      "sha256": "4cb4c68a88333c668dcc9c3e9f8665b63fb3fa2ef69732343cd20ce5879b7d19"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-final-live/canvas/workspace-api/device-built-companion.jpg",
+      "artifact": "device-built-companion.jpg",
+      "sha256": "c513d062ea57a62472b42eb6e10749295de431bf0004425120213fa22c010a7a"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-final-live/canvas/workspace-api/device-api-after-tap.jpg",
+      "artifact": "device-api-after-tap.jpg",
+      "sha256": "a8b3a85f45c8ea869e20e256af9e4de5ca2bc5b05d416ce5662e91544aa9dbd2"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-final-live/canvas/workspace-api/device-api-landscape-after-tap.jpg",
+      "artifact": "device-api-landscape-after-tap.jpg",
+      "sha256": "910557ca964465af8f6f435664c7dabb2c4e556a2644d2a76ddc7b8868598136"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/rendered-slice4/ios-preview-light.png",
+      "artifact": "ios-preview-light.png",
+      "sha256": "6832ce2ebcda8fec1c3ba064ee0b98cbf7da6e50c6adf9e46b7f2ad7e66e8cca"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/rendered-slice4/ios-preview-dark.png",
+      "artifact": "ios-preview-dark.png",
+      "sha256": "07c73a35a713db62495e5a90a46bbb049cdb34aace4d1bd4826344f30ee592ed"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-capture-profile-matrix.log",
+      "artifact": "offline-matrix-checks.log",
+      "sha256": "60911809cfdc77e1290d065d836b7462955108f2724b458684d343fdd131da05",
+      "extraction": "verbatim suffix beginning at first app-check invocation; compile diagnostics omitted"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice4-bundle-check-retry/self-checks.txt",
+      "artifact": "dev-bundle-self-checks.log",
+      "sha256": "a738c4e14c88b26924510cc608e4adfbfb319e3a1dc247af4cc80a62e165ac4f"
+    }
+  ]
+}

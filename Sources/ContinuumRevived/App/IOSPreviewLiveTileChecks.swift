@@ -21,6 +21,16 @@ enum IOSPreviewLiveTileChecks {
               let outPath = env["CONTINUUM_QA_OUTPUT_DIR"] else {
             throw IOSPreviewChecks.Failure(description: "Run through the isolated iOS preview live matrix with an owned device/state file.")
         }
+        var apiFinished = false
+        var apiError: Error?
+        Task { @MainActor in
+            do { try await WorkspaceAPIDeviceLiveChecks.run(device: device, statePath: statePath,
+                output: URL(fileURLWithPath: outPath).appendingPathComponent("workspace-api")) }
+            catch { apiError = error }
+            apiFinished = true
+        }
+        try wait("live workspace device API completes", seconds: 150) { apiFinished }
+        if let apiError { throw apiError }
         let fm = FileManager.default
         let out = URL(fileURLWithPath: outPath)
         try fm.createDirectory(at: out, withIntermediateDirectories: true)

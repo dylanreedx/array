@@ -1533,6 +1533,20 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--workspace-api-device-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await WorkspaceAPIDeviceChecks.run()
+                    print("ContinuumRevivedWorkspaceAPIDeviceChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--ios-preview-tile-check") {
             do {
                 _ = NSApplication.shared
@@ -21111,7 +21125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Terminate before detach, inside `releaseRuntimes`: detaching first let
         // go of the view `terminate` reaches the surface through, so the old
         // surface was never freed.
-        controller.releaseRuntimes(tileId: tileId)
+        controller.releaseRuntimes(tileId: tileId, preservingIOSAutomation: true)
     }
 
     private func configureCreationAndRuntimeRoutes(on spawner: TileSpawner) {

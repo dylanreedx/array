@@ -115,10 +115,11 @@ try:
         environment.update(CONTINUUM_APP_SUPPORT=str(out / "array-support"),
                            CONTINUUM_QA_OUTPUT_DIR=str(out / "canvas"),
                            CONTINUUM_IOS_PREVIEW_DEVICE_ID=device,
-                           CONTINUUM_IOS_PREVIEW_STATE_PATH=state_path)
+                           CONTINUUM_IOS_PREVIEW_STATE_PATH=state_path,
+                           CONTINUUM_IOS_PREVIEW_WITNESS_APP=str(app))
         run("production-canvas", [str(args.array_bin.resolve()), args.array_check,
             "-continuum.terminal.tmux.enabled", "NO", "-continuum.terminal.tmux.path", ""], environment=environment,
-            timeout=1100 if environment.get("IOS_PREVIEW_LIVE_BUILD_PROJECT") else (600 if environment.get("IOS_PREVIEW_LIVE_PERFORMANCE") else 240))
+            timeout=1100 if (environment.get("IOS_PREVIEW_LIVE_BUILD_PROJECT") or environment.get("IOS_PREVIEW_LIVE_AGENT_BUILD_PROJECT")) else (600 if environment.get("IOS_PREVIEW_LIVE_PERFORMANCE") else 240))
         print("PASS: production Array canvas tile rendered and accepted real simulator input")
     before = json.loads(Path(state_path).read_text())
     origin = start_backend("backend-restarted")

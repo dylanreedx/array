@@ -392,6 +392,7 @@ public struct OperationGetResult: Codable, Equatable, Sendable {
     /// last settled with, read from the spawn-result courier the supervisor
     /// writes for `wait_agents`. A running child has no settled answer yet.
     public var childResult: OperationChildResult?
+    public var deviceBuild: DeviceBuildOperationResult?
 
     public init(
         operationId: String,
@@ -404,7 +405,8 @@ public struct OperationGetResult: Codable, Equatable, Sendable {
         failureCode: String? = nil,
         failureMessage: String? = nil,
         createdAt: Date? = nil,
-        childResult: OperationChildResult? = nil
+        childResult: OperationChildResult? = nil,
+        deviceBuild: DeviceBuildOperationResult? = nil
     ) {
         self.operationId = operationId
         self.op = op
@@ -417,6 +419,7 @@ public struct OperationGetResult: Codable, Equatable, Sendable {
         self.failureMessage = failureMessage
         self.createdAt = createdAt
         self.childResult = childResult
+        self.deviceBuild = deviceBuild
     }
 }
 

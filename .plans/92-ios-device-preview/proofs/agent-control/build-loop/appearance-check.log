@@ -1,0 +1,25 @@
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+IOSPreviewInputChecks passed: pre-held modifiers, window/app deactivation releases, touch cleanup and duplicate-release suppression
+IOSPreviewEdgeChecks input passed: 12 zoom/orientation cases, letterbox rejection, clamped drag release and focus-loss release
+IOSPreviewEdgeChecks rollback passed: failed selection save retains disk, canvas, runtime and visible chooser identity
+IOSPreviewChecks automation scene passed: production cold switch/re-host shares one helper; explicit close releases it
+IOSPreviewStreamChecks passed: 257 frames assembled while main blocked, newest-only presentation, bounded chunks, worker queue, malformed HTTP/MIME/length, overflow and synchronous stop fence
+IOSPreviewObservationChecks passed: upright pixels and shared HID transform for all orientations; finite bounds, bounded JPEG, HTTP and metadata validation, distinct timestamps
+IOSPreviewActionChecks passed: correlated completion, wrong/late IDs, bounded admission, rejected dispatch, timeout, cancellation, disconnect, partial effect and malformed acknowledgement; no replay
+IOSPreviewSessionChecks passed: shared helper, exact owner, hidden retention, image-space tap, forged frame/owner rejection, takeover, revoked image delivery and finite idle teardown
+IOSPreviewManagedDeviceChecks passed: fresh owned creation, durable scoped receipts, two/eight inventory bounds under concurrency, borrowed deletion denied, exact cleanup and external deletion recovery
+IOSPreviewBuildChecks passed: exact scheme/device, fresh products, verified bundle, provenance, missing/mismatched product rejection, install/launch failure barriers, build failure barrier, cancellation barrier, stale-product rejection, connection-status precedence and scoped product cleanup
+IOSPreviewBuildJobChecks passed: service lifetime, exact device, hidden retention, fresh products, failed/cancelled/ended/revoked no-install, per-owner capacity, human/agent device exclusion, scoped results and cleanup
+IOSPreviewChecks passed: production mount, world-frame placement, persisted choice, frame/input delivery, exclusive ownership, parking, stale frames, workspace round trip, failed-save rollback, command cancellation and latest-frame decode
+ContinuumRevivedIOSPreviewTileChecks passed

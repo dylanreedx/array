@@ -1,0 +1,10 @@
+AssertionError [ERR_ASSERTION]: bridge operation did not settle
+    at settle (/Users/dylan/Documents/personal/Array/Tools/IOSPreviewProof/check-bridge.cjs:11:135)
+    at async /Users/dylan/Documents/personal/Array/Tools/IOSPreviewProof/check-bridge.cjs:164:74 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: undefined,
+  expected: undefined,
+  operator: 'fail',
+  diff: 'simple'
+}

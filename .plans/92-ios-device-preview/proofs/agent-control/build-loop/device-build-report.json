@@ -1,0 +1,17 @@
+{
+  "bundleId" : "dev.dylanreedx.continuum",
+  "deliveredFramesInHiddenThreeSeconds" : 4,
+  "deviceId" : "F6782709-9717-4E61-B7A0-CFBC2807EF74",
+  "elapsedSeconds" : 67.590783958000003,
+  "freshProducts" : true,
+  "helperIdentityPreserved" : true,
+  "hiddenBuildCaptureFramesPerSecond" : 1,
+  "interactiveRateRestored" : true,
+  "nativeMCPExecutable" : "PASS",
+  "operationId" : "D1A0ED57-22BA-42E7-B8F3-0D17FCDB2156",
+  "providerModelTurn" : "NOT_RUN",
+  "sameKeyReplay" : "SAME_OPERATION",
+  "source" : "isolated copy of actual companion sources",
+  "state" : "PASS",
+  "workspaceSwitchDuringBuild" : true
+}

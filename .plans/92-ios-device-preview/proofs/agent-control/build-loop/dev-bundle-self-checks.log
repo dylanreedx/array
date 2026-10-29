@@ -1,0 +1,32 @@
+==> --palette-duplicate-root-check
+ContinuumRevivedPaletteChecks passed
+<== --palette-duplicate-root-check exit 0
+==> --file-tree-boot-persistence-check
+ContinuumRevivedFileTreeBootPersistenceChecks passed: /Users/dylan/Documents/personal/Array/qa-runs/2026-10-29T075859Z/file-tree-boot-persistence/manifest.json
+<== --file-tree-boot-persistence-check exit 0
+==> --menu-contract-check
+ContinuumRevivedMenuContractChecks passed
+<== --menu-contract-check exit 0
+==> --delete-confirm-policy-defaults-check
+deleteConfirmPolicy missing: policy=runtimes source=fallback-default raw=nil
+deleteConfirmPolicy new-domain-never: policy=never source=standard-domain raw=never
+deleteConfirmPolicy new-domain-runtimes: policy=runtimes source=standard-domain raw=runtimes
+deleteConfirmPolicy new-domain-always: policy=always source=standard-domain raw=always
+deleteConfirmPolicy new-domain-invalid: policy=runtimes source=standard-domain raw=invalid
+deleteConfirmPolicy legacy-only-valid: policy=never source=legacy-domain-migrated raw=never
+deleteConfirmPolicy new-domain-wins: policy=always source=standard-domain raw=always
+deleteConfirmPolicy legacy-invalid: policy=runtimes source=fallback-default raw=nil
+ContinuumRevivedDeleteConfirmPolicyDefaultsChecks passed
+<== --delete-confirm-policy-defaults-check exit 0
+==> --tool-path-bootstrap-check
+ContinuumRevivedToolPathBootstrapChecks passed
+<== --tool-path-bootstrap-check exit 0
+==> --app-support-channel-check
+ContinuumRevivedAppSupportChannelChecks passed: Array Dev
+<== --app-support-channel-check exit 0
+==> --agent-awareness-check
+Agent awareness checks passed: 20 assets, import lifecycle, accessible visuals, deduped completion, master sound ON when unset and OFF when set off, a fresh install silent until one event is enabled
+<== --agent-awareness-check exit 0
+==> --terminal-theme-fidelity-check
+FAIL: spawned terminal surface missing
+<== --terminal-theme-fidelity-check exit 1

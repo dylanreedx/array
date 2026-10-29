@@ -14,7 +14,7 @@ final class WitnessApp: UIResponder, UIApplicationDelegate {
     }
 }
 
-final class WitnessController: UIViewController {
+final class WitnessController: UIViewController, UITextFieldDelegate {
     private let field = UITextField()
     private let button = UIButton(type: .system)
     private let countLabel = UILabel()
@@ -24,10 +24,17 @@ final class WitnessController: UIViewController {
     private let activityMarker = UIView()
     private var displayLink: CADisplayLink?
     private var animationTick = 0
+    private var transitioning = false
+    private var swipes = 0
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(swiped(_:)))
+        pan.cancelsTouchesInView = false
+        view.addGestureRecognizer(pan)
+        NotificationCenter.default.addObserver(self, selector: #selector(changed), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(changed), name: UIApplication.didBecomeActiveNotification, object: nil)
         latencyMarker.backgroundColor = .red
         latencyMarker.isUserInteractionEnabled = false
         activityMarker.isUserInteractionEnabled = false
@@ -51,6 +58,7 @@ final class WitnessController: UIViewController {
         button.addTarget(self, action: #selector(tapped), for: .touchUpInside)
         countLabel.text = "Touches received: 0"
         countLabel.font = .monospacedSystemFont(ofSize: 18, weight: .medium)
+        field.delegate = self
         field.placeholder = "Type through the preview"
         field.borderStyle = .roundedRect
         field.autocorrectionType = .no
@@ -75,6 +83,18 @@ final class WitnessController: UIViewController {
         ])
         timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in self?.record() }
     }
+    override func viewWillTransition(to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator) {
+        transitioning = true
+        record()
+        super.viewWillTransition(to: size, with: coordinator)
+        if !coordinator.animate(alongsideTransition: nil, completion: { [weak self] _ in
+            self?.transitioning = false
+            self?.record()
+        }) {
+            transitioning = false
+            record()
+        }
+    }
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         latencyMarker.frame = CGRect(x: view.bounds.width - 38, y: view.safeAreaInsets.top + 4, width: 24, height: 24)
@@ -90,6 +110,8 @@ final class WitnessController: UIViewController {
         countLabel.text = "Touches received: \(taps)"
         record()
     }
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool { textField.resignFirstResponder(); record(); return true }
+    @objc private func swiped(_ gesture: UIPanGestureRecognizer) { if gesture.state == .ended { swipes += 1; record() } }
     @objc private func changed() { record() }
     private func record() {
         guard let window = view.window else { return }
@@ -98,9 +120,9 @@ final class WitnessController: UIViewController {
             return ["x": r.midX / window.bounds.width, "y": r.midY / window.bounds.height]
         }
         let state: [String: Any] = [
-            "taps": taps, "text": field.text ?? "", "fieldFocused": field.isFirstResponder,
+            "taps": taps, "swipes": swipes, "active": UIApplication.shared.applicationState == .active, "text": field.text ?? "", "fieldFocused": field.isFirstResponder,
             "button": rect(button), "field": rect(field), "latencyMarker": rect(latencyMarker),
-            "performanceAnimation": displayLink != nil,
+            "performanceAnimation": displayLink != nil, "transitioning": transitioning,
             "width": window.bounds.width, "height": window.bounds.height,
             "orientation": window.windowScene?.interfaceOrientation.rawValue ?? 0,
         ]

@@ -235,7 +235,7 @@ final class ZoneRuntimeController {
             fputs("ZoneRuntimeController: closing with an unsaved canvas: \(error)\n", stderr)
         }
         detachUI()
-        releaseRuntimes()
+        releaseRuntimes(preservingIOSAutomation: true)
 
         projectLock?.release()
     }
@@ -250,10 +250,10 @@ final class ZoneRuntimeController {
     /// freeing the surface only ends the attached client; the session survives
     /// (D16). Called by `close()`, by the quit teardown for every live controller,
     /// and before Phase B restarts a tile.
-    func releaseRuntimes(tileId: UUID? = nil) {
+    func releaseRuntimes(tileId: UUID? = nil, preservingIOSAutomation: Bool = false) {
         let previews = iosPreviewRuntimes.filter { tileId == nil || $0.key == tileId }
         for (id, runtime) in previews {
-            runtime.disconnect()
+            if preservingIOSAutomation { runtime.retireViewer() } else { runtime.disconnect() }
             iosPreviewRuntimes.removeValue(forKey: id)
         }
         // Browsers first: WKWebView's process-pool teardown is independent of

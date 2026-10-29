@@ -7,16 +7,30 @@ import Darwin
 @MainActor
 protocol IOSPreviewSession: AnyObject {
     var helperPID: Int32? { get }
+    var encodedFrameRate: Int? { get }
+    func setReducedCapture(_ reduced: Bool)
     var onFrame: ((CGImage) -> Void)? { get set }
     var onFailure: ((String) -> Void)? { get set }
     func start(deviceID: String, allowBoot: Bool, orientation: Int) async throws
     func send(tag: UInt8, payload: [String: Any])
+    func observe() async throws -> IOSPreviewObservation
+    func acknowledgedTap(x: Double, y: Double, geometryGeneration: Int?) async throws
+    func acknowledgedAction(_ action: IOSPreviewBoundedAction, geometryGeneration: Int?) async throws
     func stop()
     func stop(completion: @escaping @MainActor () -> Void)
 }
 
 extension IOSPreviewSession {
     var helperPID: Int32? { nil }
+    var encodedFrameRate: Int? { nil }
+    func setReducedCapture(_ reduced: Bool) {}
+    func observe() async throws -> IOSPreviewObservation { throw IOSPreviewObservation.Failure.unavailable }
+    func acknowledgedTap(x: Double, y: Double, geometryGeneration: Int?) async throws { throw IOSPreviewActionChannel.Failure.rejected }
+    func acknowledgedAction(_ action: IOSPreviewBoundedAction, geometryGeneration: Int?) async throws {
+        if case let .tap(x, y) = action {
+            try await acknowledgedTap(x: x, y: y, geometryGeneration: geometryGeneration)
+        } else { throw IOSPreviewActionChannel.Failure.rejected }
+    }
     func stop(completion: @escaping @MainActor () -> Void) { stop(); completion() }
 }
 
@@ -32,6 +46,7 @@ final class IOSPreviewRuntime {
     let id = UUID()
     let tileID: UUID
     var helperPID: Int32? { session?.helperPID }
+    var encodedFrameRate: Int? { session?.encodedFrameRate }
     private(set) var state: State = .disconnected { didSet { onChange?() } }
     private(set) var deviceID: String?
     private(set) var receivedFrames = 0
@@ -43,15 +58,29 @@ final class IOSPreviewRuntime {
     private var generation = 0
     private var wantsConnection = false
     private var suspended = false
+    private var automationRetained = false
+    private var automationBuildActive = false
+    private(set) var automationController: String?
+    private(set) var connectionID = UUID()
+    private(set) var controlGeneration: UInt64 = 0
+    var onAutomationInvalidated: (() -> Void)?
+    var onHumanTakeover: (() -> Void)?
 
     init(tileID: UUID, deviceID: String?) { self.tileID = tileID; self.deviceID = deviceID }
 
+    static func waitForRetirement(deviceID: String) async {
+        await withCheckedContinuation { continuation in
+            if retiringDevices.contains(deviceID) { retirementWaiters[deviceID, default: []].append { continuation.resume() } }
+            else { continuation.resume() }
+        }
+    }
     func select(_ deviceID: String?) {
         disconnect(); self.deviceID = deviceID; orientation = 1; onChange?()
     }
 
-    func connect(allowBoot: Bool = true) {
+    func connect(allowBoot: Bool = true, retainingForAutomation: Bool = false, controllerName: String? = nil) {
         disconnect()
+        if retainingForAutomation { automationRetained = true; automationController = controllerName }
         guard let deviceID, UUID(uuidString: deviceID) != nil else {
             state = .failed("Choose a simulator first."); return
         }
@@ -95,6 +124,10 @@ final class IOSPreviewRuntime {
     }
 
     func disconnect() {
+        connectionID = UUID()
+        automationRetained = false; automationBuildActive = false; automationController = nil
+        let invalidated = onAutomationInvalidated; onAutomationInvalidated = nil
+        onHumanTakeover = nil; invalidated?()
         generation += 1; task?.cancel(); task = nil
         let retiring = session; session = nil
         retiring?.onFrame = nil; retiring?.onFailure = nil
@@ -114,12 +147,64 @@ final class IOSPreviewRuntime {
     }
     func suspend() {
         guard !suspended else { return }
+        suspended = true
+        updateCaptureDemand()
+        guard !automationRetained else { return }
         let wanted = wantsConnection
         disconnect(); wantsConnection = wanted; suspended = true
     }
     func resume() {
         guard suspended else { return }; suspended = false
-        if wantsConnection { connect(allowBoot: false) }
+        updateCaptureDemand()
+        if wantsConnection, state != .connected, state != .connecting { connect(allowBoot: false) }
+    }
+    func setAutomationRetained(_ retained: Bool, controllerName: String? = nil) {
+        guard automationRetained != retained else { return }
+        automationRetained = retained
+        automationController = retained ? controllerName : nil
+        updateCaptureDemand()
+        defer { onChange?() }
+        if !retained, suspended {
+            let wanted = wantsConnection
+            disconnect(); wantsConnection = wanted; suspended = true
+        }
+    }
+    func retireViewer() {
+        onFrame = nil; onChange = nil
+        suspended = true
+        updateCaptureDemand()
+        if !automationRetained { disconnect() }
+    }
+    func setAutomationBuildActive(_ active: Bool) {
+        automationBuildActive = active
+        updateCaptureDemand()
+    }
+    private func updateCaptureDemand() {
+        session?.setReducedCapture(automationRetained && automationBuildActive && suspended)
+    }
+    func allowAutomationHandover() {
+        IOSPreviewAutomationSessions.shared.allowAutomation(deviceID: deviceID)
+        onChange?()
+    }
+    func humanInputBegan() {
+        controlGeneration &+= 1
+        onHumanTakeover?()
+    }
+    func observe() async throws -> IOSPreviewObservation {
+        guard state == .connected, let session else { throw IOSPreviewObservation.Failure.unavailable }
+        let connection = connectionID
+        let observation = try await session.observe()
+        guard connectionID == connection, state == .connected else { throw IOSPreviewObservation.Failure.unavailable }
+        return observation
+    }
+    func acknowledgedTap(x: Double, y: Double, geometryGeneration: Int) async throws {
+        guard state == .connected, let session else { throw IOSPreviewActionChannel.Failure.rejected }
+        try await session.acknowledgedTap(x: x, y: y, geometryGeneration: geometryGeneration)
+    }
+    func acknowledgedAction(_ action: IOSPreviewBoundedAction, geometryGeneration: Int) async throws {
+        guard state == .connected, let session else { throw IOSPreviewActionChannel.Failure.rejected }
+        try await session.acknowledgedAction(action, geometryGeneration: geometryGeneration)
+        if case let .rotate(value) = action { orientation = value; onChange?() }
     }
     func send(tag: UInt8, payload: [String: Any]) {
         guard state == .connected else { return }
@@ -141,13 +226,37 @@ final class IOSPreviewProcessSession: NSObject, IOSPreviewSession {
     var onFrame: ((CGImage) -> Void)?
     var onFailure: ((String) -> Void)?
     var helperPID: Int32? { process?.isRunning == true ? process?.processIdentifier : nil }
+    private(set) var encodedFrameRate: Int?
+    private var reducedCapture = false
+    private var captureProfileGeneration = 0
+    private var captureProfileAcknowledged = 0
+    private var captureProfileTask: Task<Void, Never>?
+    func setReducedCapture(_ reduced: Bool) {
+        guard active, admitted, reducedCapture != reduced else { return }
+        reducedCapture = reduced
+        captureProfileGeneration += 1
+        let expected = captureProfileGeneration
+        captureProfileTask?.cancel()
+        guard enqueue(tag: 0x21, payload: ["profile": reduced ? "build_idle" : "interactive", "generation": expected]) else {
+            fail("Simulator capture profile failed. Reconnect the preview."); return
+        }
+        captureProfileTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            guard let self, self.active, self.captureProfileAcknowledged < expected else { return }
+            self.fail("Simulator capture profile timed out. Reconnect the preview.")
+        }
+    }
     private var process: Process?
     private var directory: URL?
     private var session: URLSession?
     private var stream: URLSessionDataTask?
     private var socket: URLSessionWebSocketTask?
     private var token = ""
+    private var observationURL: URL?
+    private var observationTask: Task<IOSPreviewObservation, Error>?
+    private var observationSession: URLSession?
     private var active = false
+    private let actions = IOSPreviewActionChannel()
     private var admitted = false
     private var waitingImage: CGImage?
     private var openedAt = Date()
@@ -161,6 +270,9 @@ final class IOSPreviewProcessSession: NSObject, IOSPreviewSession {
 
     func start(deviceID: String, allowBoot: Bool, orientation: Int) async throws {
         active = true
+        actions.onUncertain = { [weak self] in
+            self?.fail("Simulator action completion is unknown. Reconnect and observe before acting again.")
+        }
         let devices = try await IOSPreviewTools.devices()
         try Task.checkCancellation()
         guard let device = devices.first(where: { $0.id == deviceID }) else {
@@ -222,6 +334,11 @@ final class IOSPreviewProcessSession: NSObject, IOSPreviewSession {
         guard let origin, origin.host == "127.0.0.1", origin.scheme == "http" else {
             throw IOSPreviewError.unavailable("Preview helper returned an invalid local address.")
         }
+        observationURL = origin.appendingPathComponent("helper/\(deviceID)/fresh.jpg")
+        let snapshotConfiguration = URLSessionConfiguration.ephemeral
+        snapshotConfiguration.timeoutIntervalForRequest = 5
+        snapshotConfiguration.timeoutIntervalForResource = 5
+        observationSession = URLSession(configuration: snapshotConfiguration)
         let configuration = URLSessionConfiguration.ephemeral
         let receiver = IOSPreviewStreamReceiver(decoder: decoder, onFrame: { [weak self] image in
             guard let self, self.active else { return }
@@ -260,6 +377,20 @@ final class IOSPreviewProcessSession: NSObject, IOSPreviewSession {
                         self.admitted = true
                         if let image = self.waitingImage { self.waitingImage = nil; self.onFrame?(image) }
                     }
+                    if data.first == 0x85 {
+                        guard let value = try? JSONSerialization.jsonObject(with: Data(data.dropFirst())) as? [String: Any],
+                              let rate = value["frameRate"] as? Int, [1, 15, 30, 60].contains(rate),
+                              let generation = value["generation"] as? Int, generation >= self.captureProfileAcknowledged,
+                              generation <= self.captureProfileGeneration else {
+                            self.fail("Simulator capture profile failed. Reconnect the preview."); return
+                        }
+                        self.encodedFrameRate = rate
+                        self.captureProfileAcknowledged = generation
+                        if generation == self.captureProfileGeneration { self.captureProfileTask?.cancel(); self.captureProfileTask = nil }
+                    }
+                    if let tag = data.first, self.actions.receive(tag: tag, body: Data(data.dropFirst())) {
+                        self.receive(); return
+                    }
                     if data.first == 0x91 {
                         self.fail("Simulator input failed. Reconnect the preview."); return
                     }
@@ -268,11 +399,51 @@ final class IOSPreviewProcessSession: NSObject, IOSPreviewSession {
             } catch { self?.fail("Preview disconnected. Connect to try again.") }
         }
     }
+    func observe() async throws -> IOSPreviewObservation {
+        guard active, admitted, let url = observationURL, let transport = observationSession else { throw IOSPreviewObservation.Failure.unavailable }
+        guard observationTask == nil else { throw IOSPreviewObservation.Failure.busy }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        let task = Task {
+            let (data, response) = try await transport.data(for: request)
+            try Task.checkCancellation()
+            let receivedAt = Date()
+            return try await Task.detached(priority: .userInitiated) {
+                try IOSPreviewObservation.decode(data, response: response, receivedAt: receivedAt)
+            }.value
+        }
+        observationTask = task
+        defer { observationTask = nil }
+        return try await withTaskCancellationHandler {
+            let observation = try await task.value
+            try Task.checkCancellation()
+            guard active else { throw IOSPreviewObservation.Failure.unavailable }
+            return observation
+        } onCancel: { task.cancel() }
+    }
+    /// Raw normalized framebuffer coordinates. The host device adapter owns
+    /// image-space transforms, observation epochs, grants and human takeover.
+    func acknowledgedTap(x: Double, y: Double, geometryGeneration: Int? = nil) async throws {
+        try await acknowledgedAction(.tap(x: x, y: y), geometryGeneration: geometryGeneration)
+    }
+    func acknowledgedAction(_ action: IOSPreviewBoundedAction, geometryGeneration: Int?) async throws {
+        guard active, admitted, var payload = action.payload else { throw IOSPreviewActionChannel.Failure.rejected }
+        if let geometryGeneration { payload["geometryGeneration"] = geometryGeneration }
+        try await actions.perform { id in
+            payload["requestID"] = id
+            return enqueue(tag: 0x20, payload: payload)
+        }
+    }
     func send(tag: UInt8, payload: [String: Any]) {
-        guard active, admitted, let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
-        guard outgoing.count < 128, body.count < 60000 else { fail("Preview input is too large or fell behind. Reconnect to continue."); return }
+        _ = enqueue(tag: tag, payload: payload)
+    }
+    @discardableResult
+    private func enqueue(tag: UInt8, payload: [String: Any]) -> Bool {
+        guard active, admitted, let body = try? JSONSerialization.data(withJSONObject: payload) else { return false }
+        guard outgoing.count < 128, body.count < 60000 else { fail("Preview input is too large or fell behind. Reconnect to continue."); return false }
         outgoing.append(Data([tag]) + body)
-        guard !sending else { return }; sending = true
+        guard !sending else { return true }; sending = true
         let socket = self.socket
         Task { [weak self] in
             guard let self else { return }; defer { self.sending = false }
@@ -282,10 +453,20 @@ final class IOSPreviewProcessSession: NSObject, IOSPreviewSession {
                 catch { self.fail("Preview input disconnected. Connect to try again."); break }
             }
         }
+        return true
     }
-    private func fail(_ message: String) { guard active else { return }; onFailure?(message) }
+    private func fail(_ message: String) {
+        guard active else { return }
+        actions.invalidate()
+        onFailure?(message)
+        if active { stop() }
+    }
     func stop() { stop(completion: {}) }
     func stop(completion: @escaping @MainActor () -> Void) {
+        captureProfileTask?.cancel(); captureProfileTask = nil
+        actions.invalidate()
+        observationTask?.cancel(); observationTask = nil
+        observationSession?.invalidateAndCancel(); observationSession = nil; observationURL = nil
         active = false; admitted = false; waitingImage = nil
         streamReceiver?.stop(); streamReceiver = nil; decoder.reset(); outgoing.removeAll()
         timer?.invalidate(); timer = nil

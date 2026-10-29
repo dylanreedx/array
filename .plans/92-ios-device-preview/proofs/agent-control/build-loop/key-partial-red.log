@@ -1,0 +1,12 @@
+AssertionError [ERR_ASSERTION]: ambiguous native key down must attempt key up before helper termination
+
+1 !== 0
+
+    at /Users/dylan/Documents/personal/Array/Tools/IOSPreviewProof/check-bridge.cjs:171:10 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: 1,
+  expected: 0,
+  operator: 'strictEqual',
+  diff: 'simple'
+}

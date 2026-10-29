@@ -1,0 +1,1 @@
+FAIL: Failure(message: "a new tile cannot adopt an arbitrary existing simulator by UUID")

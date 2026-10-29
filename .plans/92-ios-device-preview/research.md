@@ -1,9 +1,15 @@
 # iOS development preview in Array
 
 Research date: 2026-10-28. Requested exploration used 16 subagents. The first
-production canvas tile and its Build & Run workflow are implemented; agent device
-controls and the wider development workflow below remain proposals. See
+production canvas tile, Build & Run workflow and initial agent visual-control
+slice are implemented; the wider development workflow below contains proposals. See
 [Build & Run](build-and-run.md) for the current implementation contract.
+
+Agent automation is specified separately in the [agent-control plan](agent-control-plan.md).
+Agent visual control, bounded swipe/text/key/Home/rotation and service-owned
+build/install/launch jobs are implemented;
+see [progress and evidence](agent-control-progress.md). This remains uncommitted follow-up to the preview release baseline; see the
+[implemented API contract](../../docs/internals/workspace-ios-preview.md).
 
 Follow-up: [executable proofs](proofs.md) records the production tile, offline
 scene gate, bundled live simulator checks, real touch/typing/paste, rotated hit

@@ -1156,15 +1156,15 @@ final class TileSpawner {
         return .spawned(runtime)
     }
 
-    func spawnIOSPreview(targetZoneId explicitZoneID: UUID? = nil, at worldPoint: CGPoint? = nil) -> Result<IOSPreviewRuntime, Error> {
+    func spawnIOSPreview(targetZoneId explicitZoneID: UUID? = nil, at worldPoint: CGPoint? = nil, deviceID: String? = nil, ownership: IOSPreviewAutomationOwnership? = nil) -> Result<IOSPreviewRuntime, Error> {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         let targetZoneID = explicitZoneID ?? creationScopeProvider?()?.zoneId
         let frame = makeProjectTilePlacement(worldPoint: worldPoint, size: CanvasEngine.defaultFrame(for: .iosPreview),
                                              in: canvasView, targetZoneId: targetZoneID)
         let tile = Tile(id: UUID(), kind: .iosPreview, title: "iOS Preview", frame: frame,
                         zPosition: CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneID)),
-                        zoneId: targetZoneID, runtimeRef: nil, metadata: TileMetadata())
-        let runtime = IOSPreviewRuntime(tileID: tile.id, deviceID: nil)
+                        zoneId: targetZoneID, runtimeRef: nil, metadata: TileMetadata(iosPreviewDeviceID: deviceID, iosPreviewAutomationOwnership: ownership))
+        let runtime = IOSPreviewRuntime(tileID: tile.id, deviceID: deviceID)
         let view = IOSPreviewTileNSView(tile: tile, runtime: runtime)
         configureIOSPreview(view)
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneID)
@@ -1175,7 +1175,9 @@ final class TileSpawner {
 
     func restoreIOSPreviewTile(tileID: UUID) -> IOSPreviewRuntime? {
         guard let canvasView, let tile = canvasView.tileRecord(for: tileID), tile.kind == .iosPreview else { return nil }
-        let runtime = IOSPreviewRuntime(tileID: tile.id, deviceID: tile.metadata.iosPreviewDeviceID)
+        let runtime = IOSPreviewAutomationSessions.shared.retainedRuntime(tileID: tile.id, deviceID: tile.metadata.iosPreviewDeviceID)
+            ?? IOSPreviewRuntime(tileID: tile.id, deviceID: tile.metadata.iosPreviewDeviceID)
+        runtime.resume()
         let view = IOSPreviewTileNSView(tile: tile, runtime: runtime)
         configureIOSPreview(view)
         canvasView.materializeProjectTile(tileView: view, for: tile)
@@ -1190,6 +1192,10 @@ final class TileSpawner {
                   let previous = canvas.tileRecord(for: view.tile.id) else { return }
             var tile = previous
             tile.metadata.iosPreviewDeviceID = deviceID
+            if previous.metadata.iosPreviewDeviceID != deviceID, let owner = previous.metadata.iosPreviewAutomationOwnership {
+                tile.metadata.iosPreviewAutomationOwnership = IOSPreviewAutomationOwnership(agentId: owner.agentId, checkout: owner.checkout,
+                    creationKeyDigest: owner.creationKeyDigest, creationPayloadDigest: owner.creationPayloadDigest, managedSimulator: false)
+            }
             canvas.updateTile(tile, recalculateZoneBounds: false, notifyChange: false)
             let target: CanvasNSView.ProjectTileTarget = tile.zoneId.flatMap {
                 canvas.installedZoneLayerIds.contains($0) ? .zoneLayer($0) : nil

@@ -503,7 +503,13 @@ fi
 if [[ "$IOS_PREVIEW_TILE_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+  run swift build --disable-sandbox --skip-update --product array-workspace-mcp
   run_app_check .build/debug/Array --ios-preview-tile-check
+  run_app_check .build/debug/Array --workspace-api-device-check
+  run_app_check .build/debug/Array --workspace-mcp-host-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --agent-tool-detail-store-check
   run_leg node Tools/IOSPreviewProof/check-bridge.cjs
   run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
@@ -1146,6 +1152,7 @@ run_app_check .build/debug/Array --zone-tile-hydration-check
 # calls, and never install(into:).
 run_app_check .build/debug/Array --workspace-scene-owner-check
 run_app_check .build/debug/Array --ios-preview-tile-check
+run_app_check .build/debug/Array --workspace-api-device-check
 run_leg node Tools/IOSPreviewProof/check-bridge.cjs
 run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 # .plans/67 slice 0: the workspace invariants fixture every later workspace

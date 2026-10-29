@@ -1,0 +1,2 @@
+PASS: live workspace device API completes
+FAIL: Failure(message: "live API guest readback timed out: landscape tap counter; state=[\"button\": {\n    x = \"0.5\";\n    y = \"0.4096185737976782\";\n}, \"height\": 402, \"taps\": 1, \"text\": , \"performanceAnimation\": 0, \"latencyMarker\": {\n    x = \"0.9702517162471396\";\n    y = \"0.039800995024875621\";\n}, \"orientation\": 3, \"field\": {\n    x = \"0.5\";\n    y = \"0.7271973466003316\";\n}, \"width\": 874, \"fieldFocused\": 0]")

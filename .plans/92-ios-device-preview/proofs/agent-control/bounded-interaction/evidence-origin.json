@@ -1,0 +1,48 @@
+{
+  "date": "2026-10-29",
+  "nativeLiveLegs": 2,
+  "apiLiveLegs": 2,
+  "offlineFinal": "slice3-schema-offline-retry-matrix.log: 12/12 PASS",
+  "records": [
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice3-api-live-matrix.log",
+      "artifact": "api-live-matrix.log",
+      "sha256": "b09c993d2921374b33fc9a7d27c6dabcf5ffe0b50add1bd8c06a78409575a574"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice3-native-live-retry-matrix.log",
+      "artifact": "native-live-matrix.log",
+      "sha256": "537efe37c01e6c06b55724c71b408df631b151aba24077ed2598a98e50fe6fdd"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice3-native-bridge-green.log",
+      "artifact": "native-bridge-green.log",
+      "sha256": "d876b8ce547337a87f6b475a305df56462cbbeb656d064841ed1c3cd5f3deee3"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice3-negative.log",
+      "artifact": "native-negative.log",
+      "sha256": "94a070cbb36e50a957b1416868b55f990a3b7791dd6acab4a1d49ff720880d80"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice3-native-cleanup-verification.json",
+      "artifact": "native-cleanup.json",
+      "sha256": "b87da71ed4854de05539d8ee00cd528dac1cd0d08f69f68746f4bf18eee6cded"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice3-api-live/canvas/workspace-api/device-api-report.json",
+      "artifact": "device-api-report.json",
+      "sha256": "fb15b2a17acc21442d1f0f061a63b4583af948e1d651d2ea0a3a98b3f38f3e45"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice3-api-live/canvas/workspace-api/device-api-after-tap.jpg",
+      "artifact": "device-api-after-tap.jpg",
+      "sha256": "696e8b2fee5a45bee41017fce122996a46f35a8acbb2645fec24080bad46a696"
+    },
+    {
+      "source": "qa-runs/overnight-2026-10-29/ios-control/slice3-api-live/canvas/workspace-api/device-api-landscape-after-tap.jpg",
+      "artifact": "device-api-landscape-after-tap.jpg",
+      "sha256": "1a873f6daaf52e8f505b9210fb59a58f8497f9475f8f1ac155227a04e59d552a"
+    }
+  ]
+}

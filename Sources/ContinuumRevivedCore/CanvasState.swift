@@ -283,6 +283,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     public var browserProfileId: UUID?
     /// Machine-local simulator identity. Connections and helper endpoints are ephemeral.
     public var iosPreviewDeviceID: String?
+    public var iosPreviewAutomationOwnership: IOSPreviewAutomationOwnership?
     public var linearTeamKey: String?
     public var linearTeamId: String?
     public var linearQuery: String?
@@ -320,6 +321,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         documentLocation: DocumentLocation? = nil,
         browserProfileId: UUID? = nil,
         iosPreviewDeviceID: String? = nil,
+        iosPreviewAutomationOwnership: IOSPreviewAutomationOwnership? = nil,
         linearTeamKey: String? = nil,
         linearTeamId: String? = nil,
         linearQuery: String? = nil,
@@ -346,6 +348,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.documentLocation = documentLocation
         self.browserProfileId = browserProfileId
         self.iosPreviewDeviceID = iosPreviewDeviceID
+        self.iosPreviewAutomationOwnership = iosPreviewAutomationOwnership
         self.linearTeamKey = linearTeamKey
         self.linearTeamId = linearTeamId
         self.linearQuery = linearQuery
@@ -374,6 +377,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case documentLocation
         case browserProfileId
         case iosPreviewDeviceID
+        case iosPreviewAutomationOwnership
         case linearTeamKey
         case linearTeamId
         case linearQuery
@@ -403,6 +407,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(documentLocation, forKey: .documentLocation)
         try container.encodeIfPresent(browserProfileId, forKey: .browserProfileId)
         try container.encodeIfPresent(iosPreviewDeviceID, forKey: .iosPreviewDeviceID)
+        try container.encodeIfPresent(iosPreviewAutomationOwnership, forKey: .iosPreviewAutomationOwnership)
         try container.encodeIfPresent(linearTeamKey, forKey: .linearTeamKey)
         try container.encodeIfPresent(linearTeamId, forKey: .linearTeamId)
         try container.encodeIfPresent(linearQuery, forKey: .linearQuery)

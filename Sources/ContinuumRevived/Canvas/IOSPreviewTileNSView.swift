@@ -58,7 +58,10 @@ final class IOSPreviewTileNSView: TileNSView {
         actions.setPresentationTitle("Preview")
         actions.onSelection = { [weak self] item in
             guard let self else { return }
+            if ["home", "rotate"].contains(item.id) { self.recordHumanInput() }
             switch item.id {
+            case "stop-agent": self.recordHumanInput(); self.screen.releaseInput()
+            case "allow-agent": self.runtime.allowAutomationHandover()
             case "home": self.runtime.home()
             case "rotate": self.runtime.rotate()
             case "build": self.findBuildChoices()
@@ -83,12 +86,22 @@ final class IOSPreviewTileNSView: TileNSView {
         refresh(); applyTokens()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) unavailable") }
+    func recordHumanInput() {
+        if tile.metadata.iosPreviewAutomationOwnership != nil, let deviceID = runtime.deviceID {
+            IOSPreviewAutomationSessions.shared.reclaim(deviceID: deviceID, tileID: tile.id)
+        }
+        runtime.humanInputBegan()
+    }
     func selectDevice(id: String, name: String) {
         cancelBuild()
         if !devices.items.contains(where: { $0.id == id }) {
             devices.items.insert(ChoiceItem(id: id, title: name), at: 0)
         }
         devices.selectedID = id
+        if tile.metadata.iosPreviewAutomationOwnership != nil {
+            recordHumanInput()
+            IOSPreviewAutomationSessions.shared.reclaim(deviceID: id, tileID: tile.id)
+        }
         runtime.select(id); screen.image = nil
         refresh(); onDeviceSelection?(id)
     }
@@ -111,6 +124,7 @@ final class IOSPreviewTileNSView: TileNSView {
         place(screen, NSRect(x: 12, y: top + 82, width: max(0, width - 24), height: max(0, body.bounds.height - top - 94)))
     }
     @objc func toggleConnection() {
+        recordHumanInput()
         if runtime.state == .connected || runtime.state == .connecting { cancelBuild(); runtime.disconnect() }
         else { runtime.connect(); startVisibilityTimer() }
     }
@@ -146,7 +160,7 @@ final class IOSPreviewTileNSView: TileNSView {
         if case .failed = runtime.state, buildTask != nil { cancelBuild() }
         if let id = runtime.deviceID, devices.items.contains(where: { $0.id == id }) { devices.selectedID = id }
         else { devices.setPresentationTitle("Choose simulator") }
-        status.stringValue = Self.statusText(state: runtime.state, buildMessage: buildMessage)
+        status.stringValue = Self.statusText(state: runtime.state, buildMessage: buildMessage, controllerName: runtime.automationController)
         let connected = runtime.state == .connected || runtime.state == .connecting
         connectButton.presentation = Self.buttonPresentation(title: connected ? "Disconnect" : "Connect", symbol: connected ? "pause.fill" : "play.fill")
         var presentation = connectButton.presentation
@@ -158,15 +172,19 @@ final class IOSPreviewTileNSView: TileNSView {
         actions.items += [ChoiceItem(id: "build", title: "Build & Run…", enabled: runtime.state == .connected && buildTask == nil && buildProjectRoot != nil)]
         if buildTask != nil { actions.items.append(ChoiceItem(id: "cancel-build", title: "Cancel Build")) }
         if buildDirectory != nil { actions.items.append(ChoiceItem(id: "build-log", title: "Show Build Files…")) }
+        if runtime.automationController != nil { actions.items.insert(ChoiceItem(id: "stop-agent", title: "Take Control"), at: 0) }
+        if IOSPreviewAutomationSessions.shared.isReclaimed(deviceID: runtime.deviceID) {
+            actions.items.insert(ChoiceItem(id: "allow-agent", title: "Allow Agent Control"), at: 0)
+        }
         actions.setPresentationTitle("Preview")
         screen.orientation = runtime.orientation
         screen.needsDisplay = true
     }
-    static func statusText(state: IOSPreviewRuntime.State, buildMessage: String?) -> String {
+    static func statusText(state: IOSPreviewRuntime.State, buildMessage: String?, controllerName: String? = nil) -> String {
         switch state {
         case .disconnected: return "Choose a simulator and Connect. Closing the preview leaves it running."
         case .connecting: return "Connecting to simulator…"
-        case .connected: return buildMessage ?? "Live · Click the screen to interact. Escape returns to the canvas."
+        case .connected: return buildMessage ?? controllerName.map { "Live · \($0) controls this simulator. Click to take control." } ?? "Live · Click the screen to interact. Escape returns to the canvas."
         case .failed(let message): return message
         }
     }
@@ -204,6 +222,7 @@ final class IOSPreviewTileNSView: TileNSView {
     }
     func startBuild(_ choice: IOSPreviewBuildChoice) {
         guard buildTask == nil, runtime.state == .connected, let deviceID = runtime.deviceID else { return }
+        recordHumanInput()
         let directory = IOSPreviewBuild.newDirectory()
         let generation = buildGeneration
         buildDirectory = directory
@@ -258,7 +277,7 @@ final class IOSPreviewTileNSView: TileNSView {
         cancelBuild()
         retired = true; deviceTask?.cancel(); deviceTask = nil
         visibilityTimer?.invalidate(); visibilityTimer = nil
-        screen.releaseInput(); runtime.disconnect()
+        screen.releaseInput(); runtime.retireViewer()
     }
     override func applyTokens() {
         super.applyTokens()
@@ -321,12 +340,7 @@ final class IOSPreviewScreenView: NSView {
         guard rect.width > 0, rect.height > 0, clamp || rect.contains(point) else { return nil }
         let x = min(1, max(0, (point.x - rect.minX) / rect.width))
         let y = min(1, max(0, (point.y - rect.minY) / rect.height))
-        switch orientation {
-        case 3: return CGPoint(x: 1 - y, y: x)
-        case 4: return CGPoint(x: y, y: 1 - x)
-        case 2: return CGPoint(x: 1 - x, y: 1 - y)
-        default: return CGPoint(x: x, y: y)
-        }
+        return IOSPreviewImageGeometry.rawPoint(x: Double(x), y: Double(y), orientation: orientation)
     }
     private func pointer(_ phase: String, event: NSEvent) {
         guard phase == "begin" || contact != nil,
@@ -335,6 +349,7 @@ final class IOSPreviewScreenView: NSView {
         owner?.runtime.send(tag: 3, payload: ["type": phase, "x": point.x, "y": point.y])
     }
     override func mouseDown(with event: NSEvent) {
+        owner?.recordHumanInput()
         window?.makeFirstResponder(self)
         if let owner { owner.canvas?.focusBroker?.acceptExistingFocus(.tile(owner.tile.id), reason: .userClick) }
         pointer("begin", event: event)
@@ -349,6 +364,7 @@ final class IOSPreviewScreenView: NSView {
     }
     override func resignFirstResponder() -> Bool { releaseInput(); return true }
     override func keyDown(with event: NSEvent) {
+        owner?.recordHumanInput()
         if event.keyCode == 53 { releaseInput(); window?.makeFirstResponder(owner?.canvas); return }
         if owner?.reservedShortcutHandler?(event) == true { releaseInput(); return }
         // Modifiers may have been pressed before this surface gained focus,
@@ -360,7 +376,7 @@ final class IOSPreviewScreenView: NSView {
         key(event, phase: "down")
     }
     override func keyUp(with event: NSEvent) { key(event, phase: "up") }
-    override func flagsChanged(with event: NSEvent) { synchronizeModifiers(event.modifierFlags) }
+    override func flagsChanged(with event: NSEvent) { owner?.recordHumanInput(); synchronizeModifiers(event.modifierFlags) }
     private func synchronizeModifiers(_ flags: NSEvent.ModifierFlags) {
         guard owner?.runtime.state == .connected else { modifiers.removeAll(); return }
         let values: [(NSEvent.ModifierFlags, Int)] = [(.shift, 225), (.control, 224), (.option, 226), (.command, 227)]

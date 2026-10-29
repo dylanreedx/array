@@ -1,0 +1,68 @@
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.fwK7PS CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.Hs2O5x .build/debug/Array --ios-preview-tile-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+IOSPreviewInputChecks passed: pre-held modifiers, window/app deactivation releases, touch cleanup and duplicate-release suppression
+IOSPreviewEdgeChecks input passed: 12 zoom/orientation cases, letterbox rejection, clamped drag release and focus-loss release
+IOSPreviewEdgeChecks rollback passed: failed selection save retains disk, canvas, runtime and visible chooser identity
+IOSPreviewChecks automation scene passed: production cold switch/re-host shares one helper; explicit close releases it
+IOSPreviewStreamChecks passed: 257 frames assembled while main blocked, newest-only presentation, bounded chunks, worker queue, malformed HTTP/MIME/length, overflow and synchronous stop fence
+IOSPreviewObservationChecks passed: upright pixels and shared HID transform for all orientations; finite bounds, bounded JPEG, HTTP and metadata validation, distinct timestamps
+IOSPreviewActionChecks passed: correlated completion, wrong/late IDs, bounded admission, rejected dispatch, timeout, cancellation, disconnect, partial effect and malformed acknowledgement; no replay
+IOSPreviewSessionChecks passed: shared helper, exact owner, hidden retention, image-space tap, forged frame/owner rejection, takeover, revoked image delivery and finite idle teardown
+IOSPreviewManagedDeviceChecks passed: fresh owned creation, durable scoped receipts, two/eight inventory bounds under concurrency, borrowed deletion denied, exact cleanup and external deletion recovery
+IOSPreviewBuildChecks passed: exact scheme/device, fresh products, verified bundle, provenance, missing/mismatched product rejection, install/launch failure barriers, build failure barrier, cancellation barrier, stale-product rejection, connection-status precedence and scoped product cleanup
+IOSPreviewChecks passed: production mount, world-frame placement, persisted choice, frame/input delivery, exclusive ownership, parking, stale frames, workspace round trip, failed-save rollback, command cancellation and latest-frame decode
+ContinuumRevivedIOSPreviewTileChecks passed
+
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.RFdwvB CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.Z14Ya3 .build/debug/Array --workspace-api-device-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+WorkspaceAPIDeviceChecks native MCP passed: real executable, authenticated HTTP, owned open, image item, exactly-one tap and close
+WorkspaceAPIDeviceChecks passed: production mount and async MCP open/observe/tap/observe, exact-once retry, persistent owner/world geometry, no presentation, image blocks, stale/scope/takeover/revocation denial, Free and Ask-first
+ContinuumRevivedWorkspaceAPIDeviceChecks passed
+
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.ITE44S CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.A2VpxP .build/debug/Array --workspace-mcp-host-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+Workspace MCP host check passed: authenticated calls routed with bound identity; a reply answered 0.6 s later arrived while main ran 31 timer ticks; a reply's picture left as an MCP image item with no base64 in the text or structuredContent
+
+==> .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+Workspace MCP checks passed: 18 shared tools + wait_agents match pi minus ["delegate_agent", "spawn_agent"], Claude/Codex guidance, allowances and timeouts, and the token out of argv, config and agent env
+
+==> .build/debug/ContinuumRevivedCoreChecks --role-registry-check
+RoleRegistry harness convergence checks passed: three roots read independently, pi default preserved, and Array's depth cap withholds the spawn verb instead of refusing it
+RoleRegistry checks passed: 12 roles listed from this repository (all 5 the ticket names, code-scout's frontmatter verbatim), a nameless .md excluded, an unknown id nil-and-throwing, no role inheriting verbatim, and the harness/managed-agent paths agreeing on 3 flags
+
+==> .build/debug/ContinuumRevivedCoreChecks --agent-tool-detail-store-check
+AgentToolDetail privacy over-window fail-closed: 0.000083s (budget 0.100000s)
+AgentToolDetail privacy under-window retained: 0.066299s (budget 0.100000s)
+AgentToolDetail encoded disclosure bound: 0.016158s (budget 0.100000s)
+Agent tool detail store checks passed: privacy redaction/fail-closed output, scoped cross-agent/turn identity, path-title retention/AX witnesses, implicit-path and compound-argv secret witnesses, cross-store reversed-arrival ties, provider ID bounds, argument/file bounds, truncation caps, start/end ordering, local expiry, same-ID concurrency, one tool taxonomy behind icon/sentence/fold, the supply contract behind shell and delegation rows, and source boundaries
+
+==> node Tools/IOSPreviewProof/check-bridge.cjs
+iOS preview bridge checks passed: correlated atomic tap, deferred native end, duplicate rejection, invalid action/no-frame/held-input rejection, partial-effect uncertainty, authentication, route restriction, frame backpressure, frame-rate validation, controller ownership, modifier-safe Unicode paste, malformed/oversized socket errors, drag coalescing, disconnect input release, late-input fencing and finite startup/shutdown.
+
+==> python3 Tools/IOSPreviewProof/check-command-process-tree.py
+Command process tree: stdoutToFile=false, cancellationCompleted=true, cancellationError=true, elapsedSeconds=2.0195839405059814, survivingOwnedPIDs=[]
+PASS: owned shell and child killed; pipe reaches EOF; captured stdout, retained stdout/stderr, timeout and 10MB stderr with bounded error tail preserved
+Command process tree: stdoutToFile=true, cancellationCompleted=true, cancellationError=true, elapsedSeconds=2.0235179662704468, survivingOwnedPIDs=[]
+PASS: owned shell and child killed; pipe reaches EOF; captured stdout, retained stdout/stderr, timeout and 10MB stderr with bounded error tail preserved
+
+==> .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
+WorkspaceAPIContractChecks passed
+WorkspaceAPIExposureChecks passed: 97 real coding keys classified
+
+==> .build/debug/ContinuumRevivedCoreChecks --command-center-check
+CommandCenterChecks passed
+
+==> scripts/check-color-hygiene.sh
+Colour hygiene passed: 27 allowlisted violation line(s), 0 new; 1 status→appearance mapping; 1 iOS colour bridge (theme resolution + explicit-colour-space construction); 7 zone tints agreeing across platforms.
+
+---- iOS preview tile matrix (targeted): 12 leg(s) run ----
+
+iOS preview tile matrix (targeted) passed.

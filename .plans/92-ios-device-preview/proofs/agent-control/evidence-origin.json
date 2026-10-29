@@ -1,0 +1,12 @@
+{
+  "date": "2026-10-29",
+  "offlineGate": "scripts/run-matrix.sh --ios-preview-tile",
+  "offlineLegsPassed": 12,
+  "rawLog": "qa-runs/overnight-2026-10-29/ios-control/completion-matrix.log",
+  "rawLogSHA256": "dac38fddcb7162e2a4f8858450cafdaefacd2b348ceca5f081f4d051de2b1bd3",
+  "checkLogIsExcerpt": true,
+  "providerModelTurn": "NOT_RUN",
+  "fullReleaseMatrix": "NOT_RUN",
+  "liveGate": "scripts/run-matrix.sh --ios-preview-live",
+  "liveLegsPassed": 2
+}

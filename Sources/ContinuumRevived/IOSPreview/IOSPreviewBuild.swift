@@ -12,6 +12,7 @@ struct IOSPreviewBuildChoice: Equatable, Sendable {
 /// device destination; a successful build is required before any installation.
 @MainActor
 final class IOSPreviewBuild {
+    private static var activeDevices: Set<String> = []
     typealias Command = ([String], URL?) async throws -> Data
     var command: Command = { arguments, log in
         try await IOSPreviewCommands.run(arguments, outputURL: log, timeoutSeconds: 900)
@@ -64,6 +65,10 @@ final class IOSPreviewBuild {
 
     func run(choice: IOSPreviewBuildChoice, deviceID: String, directory: URL) async throws -> Product {
         guard UUID(uuidString: deviceID) != nil else { throw IOSPreviewError.unavailable("Choose a simulator first.") }
+        guard Self.activeDevices.insert(deviceID).inserted else {
+            throw IOSPreviewError.unavailable("This simulator already has a build in progress. Wait for its owned commands to stop.")
+        }
+        defer { Self.activeDevices.remove(deviceID) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let derived = directory.appendingPathComponent("DerivedData")
         // No reuse: callers allocate a fresh UUID directory for every invocation.

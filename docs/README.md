@@ -38,6 +38,8 @@ hard rules are the same file — `CLAUDE.md` symlinks to it.
   pi bridge is `Sources/ContinuumRevivedCore/AgentProviders/PiHostToolBridge.swift`
   plus `Resources/PiExtensions/continuum-workspace-tools.ts`. Design and status:
   `.plans/59-parallel-product-investigations/canvas-awareness-api-design.md`.
+- [Workspace iOS Preview control](./internals/workspace-ios-preview.md) — scoped
+  device ownership, fresh images, acknowledged taps, human takeover and witnesses
 - [Performance on the canvas](./internals/performance.md) — the traps that froze
   the Markdown tile, and how to get evidence instead of theories
 - [Performance budgets](./internals/performance-budgets.md) — deterministic work

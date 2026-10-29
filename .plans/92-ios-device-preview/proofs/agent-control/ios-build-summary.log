@@ -1,0 +1,12 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -project ios/Continuum.xcodeproj -scheme Continuum -sdk iphonesimulator -destination "generic/platform=iOS Simulator" -derivedDataPath qa-runs/overnight-2026-10-29/ios-control/ios-derived-data build
+
+Build settings from command line:
+    SDKROOT = iphonesimulator26.5
+[compiler output omitted; full log in dated QA handoff]
+Touch /Users/dylan/Documents/personal/Array/qa-runs/overnight-2026-10-29/ios-control/ios-derived-data/Build/Products/Debug-iphonesimulator/Continuum.app (in target 'Continuum' from project 'Continuum')
+    cd /Users/dylan/Documents/personal/Array/ios
+    /usr/bin/touch -c /Users/dylan/Documents/personal/Array/qa-runs/overnight-2026-10-29/ios-control/ios-derived-data/Build/Products/Debug-iphonesimulator/Continuum.app
+
+** BUILD SUCCEEDED **
+

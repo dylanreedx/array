@@ -61,13 +61,13 @@ func runWorkspaceMCPChecks() {
             return Set(values.compactMap { if case .string(let key) = $0 { return key } else { return nil } })
         })
     }
-    func operationCondition(_ value: WorkspaceMCPJSON?, _ op: String) -> WorkspaceMCPJSON? {
+    func operationCondition(_ value: WorkspaceMCPJSON?, _ op: String, field: String = "op") -> WorkspaceMCPJSON? {
         guard case .array(let clauses)? = value else { return nil }
         for clause in clauses {
             guard case .object(let condition) = clause,
                   case .object(let ifSchema)? = condition["if"],
                   case .object(let properties)? = ifSchema["properties"],
-                  case .object(let operation)? = properties["op"],
+                  case .object(let operation)? = properties[field],
                   operation["const"] == .string(op),
                   case .object(let thenSchema)? = condition["then"] else { continue }
             return thenSchema["anyOf"]
@@ -77,6 +77,23 @@ func runWorkspaceMCPChecks() {
     let openSchema = WorkspaceMCPToolCatalog.tool(named: "array_open_document")?.inputSchema
     let operationSchema = WorkspaceMCPToolCatalog.tool(named: "array_get_operation")?.inputSchema
     let canvasSchema = WorkspaceMCPToolCatalog.tool(named: "array_canvas_apply")?.inputSchema
+    let deviceSchema = WorkspaceMCPToolCatalog.tool(named: "array_device_open")?.inputSchema
+    expect(requiredAlternatives(deviceSchema?["anyOf"]) == [["tileId"], ["zoneId", "templateId", "allowBoot"], ["zoneId", "deviceId"]],
+           "device.open must distinguish reconnect, fresh-template creation and receipt-owned restoration")
+    expect(required("array_device_observe") == ["checkoutHandle", "sessionId"] &&
+           required("array_device_act") == ["checkoutHandle", "sessionId", "observationId", "kind", "idempotencyKey"],
+           "visual device actions must require explicit scope, a host observation and retry identity")
+    let actionSchema = WorkspaceMCPToolCatalog.tool(named: "array_device_act")?.inputSchema
+    for (kind, fields) in [("tap", ["x", "y"]), ("swipe", ["x", "y", "endX", "endY", "milliseconds"]),
+                            ("text", ["text"]), ("key", ["key"]), ("rotate", ["orientation"])] {
+        expect(requiredAlternatives(operationCondition(actionSchema?["allOf"], kind, field: "kind")) == [Set(fields)],
+               "bounded device \(kind) must require its typed fields in every provider schema")
+    }
+    let buildSchema = WorkspaceMCPToolCatalog.tool(named: "array_device_build_run")?.inputSchema
+    expect(required("array_device_build_run") == ["checkoutHandle", "kind"] &&
+           requiredAlternatives(operationCondition(buildSchema?["allOf"], "start", field: "kind")) == [["sessionId", "projectFile", "scheme", "idempotencyKey"]] &&
+           requiredAlternatives(operationCondition(buildSchema?["allOf"], "cancel", field: "kind")) == [["operationId"]],
+           "build schema must require explicit start identity/scope and permit scoped cancellation without a preview session")
     expect(requiredAlternatives(openSchema?["anyOf"]) == [["relativePath"], ["artifactHandle"]],
            "artifact.open must require a path or artifactHandle in its shared schema")
     expect(requiredAlternatives(operationSchema?["anyOf"]) == [["operationId"], ["idempotencyKey"]],

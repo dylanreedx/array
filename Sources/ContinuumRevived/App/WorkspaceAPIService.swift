@@ -97,6 +97,10 @@ final class WorkspaceAPIService {
     /// CX-01 Phase 2b (§10.3): the bounded operation store behind
     /// `agent.delegate` / `operation.get`.
     var operations = WorkspaceOperationStore()
+    let deviceAPI = IOSPreviewWorkspaceAPIState()
+    lazy var deviceBuildJobs = IOSPreviewBuildJobs(sessions: deviceAPI.sessions, ownerIsRunning: { [weak self] id in
+        self?.supervisor.isRunning(AgentID(rawValue: id)) == true
+    })
     /// Encoded `agent.delegate` results by operationId, for same-key replays;
     /// pruned with the store's eviction.
     var delegateReplayResults: [String: [String: AnyHashableJSON]] = [:]
@@ -169,6 +173,7 @@ final class WorkspaceAPIService {
     /// effect — and no other agent's grants are touched.
     func revoke(agentId: AgentID) {
         grants[agentId] = nil
+        deviceAPI.sessions.revoke(principal: agentId.rawValue)
         revocationGenerations[agentId] = revocationGeneration(for: agentId) &+ 1
     }
 
@@ -254,10 +259,10 @@ final class WorkspaceAPIService {
 
     // MARK: - Dispatch (§14.2)
 
-    /// The answer-later entry both transports use (`.plans/80`, S1). Every op
-    /// today answers synchronously, so this is `dispatch` with a completion;
-    /// browser ops will answer when WebKit calls back. `completion` runs
-    /// exactly once, on the main actor.
+    /// The answer-later entry both transports use (`.plans/80`, S1). Native
+    /// device operations validate grants and await their own bounded transport;
+    /// synchronous operations continue through `dispatch`. Completion runs
+    /// exactly once on the main actor.
     func dispatchAsync(
         agentId: AgentID,
         requestId: String,
@@ -266,6 +271,12 @@ final class WorkspaceAPIService {
         isCancelled: @escaping () -> Bool = { false },
         completion: @escaping (Reply) -> Void
     ) {
+        if let operation = WorkspaceAPIOp(rawValue: op), WorkspaceAPIOp.deviceOperations.contains(operation) {
+            Task { @MainActor in
+                completion(await self.deviceDispatch(agentId: agentId, requestId: requestId, op: operation, payload: payload, isCancelled: isCancelled))
+            }
+            return
+        }
         completion(dispatch(agentId: agentId, requestId: requestId, op: op, payload: payload, isCancelled: isCancelled))
     }
 
@@ -298,6 +309,8 @@ final class WorkspaceAPIService {
         dropPolicyGrantsUnlessFree(agentId: agentId)
 
         switch op {
+        case .deviceList, .deviceOpen, .deviceObserve, .deviceAct, .deviceClose, .deviceBuildRun:
+            return .error(WorkspaceAPIError(code: .unsupported, message: "Device operations require the asynchronous workspace entry."))
         case .workspaceContext:
             return context(agentId: agentId, record: record, ownHandle: ownHandle, runtime: runtime, canvas: canvas)
         case .artifactOpen:

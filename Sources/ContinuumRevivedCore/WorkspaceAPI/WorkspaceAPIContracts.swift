@@ -45,6 +45,12 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     case boardQuery = "board.query"
     case boardApply = "board.apply"
     case agentUpdate = "agent.update"
+    case deviceList = "device.list"
+    case deviceOpen = "device.open"
+    case deviceObserve = "device.observe"
+    case deviceAct = "device.act"
+    case deviceClose = "device.close"
+    case deviceBuildRun = "device.build_run"
 }
 
 // MARK: - Identity
@@ -333,7 +339,7 @@ public struct WorkspaceContextResponse: Codable, Equatable, Sendable {
     /// and must be complete, so each preset op spends fixed bytes, and the
     /// ceiling otherwise sheds `recentOperations` — the only way a caller
     /// cancelled after a committed effect learns the identity it produced.
-    public static let encodedByteCeiling = 1280
+    public static let encodedByteCeiling = 1536
 }
 
 // MARK: - artifact.open

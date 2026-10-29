@@ -138,6 +138,48 @@ enum IOSPreviewCommands {
         } onCancel: { task.cancel() }
     }
 
+    /// Agent build logs have a fixed memory/disk budget while the command is
+    /// running. Keep the newest tail; never buffer the entire compiler stream.
+    static func runBoundedLog(_ arguments: [String], outputURL: URL, timeoutSeconds: Double = 900) async throws {
+        guard timeoutSeconds.isFinite, timeoutSeconds > 0, timeoutSeconds <= 900 else {
+            throw IOSPreviewError.unavailable("Invalid build deadline.")
+        }
+        let task = IOSPreviewCommandTask()
+        try await withTaskCancellationHandler {
+            try await Task.detached(priority: .utility) {
+                let pipe = Pipe()
+                defer { try? pipe.fileHandleForReading.close(); try? pipe.fileHandleForWriting.close() }
+                var tail = Data()
+                let maximumBytes = 512 * 1024
+                var nextWrite = ContinuousClock.now
+                try Data().write(to: outputURL, options: .atomic)
+                defer { try? tail.write(to: outputURL, options: .atomic) }
+                try task.launch(arguments: arguments, environment: ToolEnvironment.shared.environment(),
+                    stdout: pipe.fileHandleForWriting.fileDescriptor, stderr: pipe.fileHandleForWriting.fileDescriptor)
+                var reaped = false
+                defer { if !reaped { task.cancel(); _ = try? task.waitForExit() } }
+                try pipe.fileHandleForWriting.close()
+                let timeout = DispatchWorkItem { task.cancel(timedOut: true) }
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds, execute: timeout)
+                defer { timeout.cancel() }
+                while let chunk = try pipe.fileHandleForReading.read(upToCount: 64 * 1024), !chunk.isEmpty {
+                    tail.append(chunk)
+                    if tail.count > maximumBytes { tail.removeFirst(tail.count - maximumBytes) }
+                    if ContinuousClock.now >= nextWrite {
+                        // Logging failure must not abandon a running owned tree.
+                        try? tail.write(to: outputURL, options: .atomic)
+                        nextWrite = .now.advanced(by: .seconds(1))
+                    }
+                }
+                let status = try task.waitForExit()
+                reaped = true
+                if task.didTimeOut { throw IOSPreviewError.unavailable("Build timed out; owned commands stopped.") }
+                if task.didCancel { throw CancellationError() }
+                guard status == 0 else { throw IOSPreviewError.unavailable("Build failed. See the bounded build log.") }
+            }.value
+        } onCancel: { task.cancel() }
+    }
+
     /// A noisy compiler may write megabytes of stderr. Retain it on disk and
     /// read only a fixed tail when forming the short in-tile failure message.
     private static func errorTail(at url: URL) -> String {
@@ -157,6 +199,14 @@ struct IOSPreviewDevice: Equatable, Sendable {
     let name: String
     let runtime: String
     let isBooted: Bool
+    let typeIdentifier: String?
+    var template: IOSPreviewDeviceTemplate? {
+        guard let typeIdentifier else { return nil }
+        return IOSPreviewDeviceTemplate(typeIdentifier: typeIdentifier, runtime: runtime)
+    }
+    init(id: String, name: String, runtime: String, isBooted: Bool, typeIdentifier: String? = nil) {
+        self.id = id; self.name = name; self.runtime = runtime; self.isBooted = isBooted; self.typeIdentifier = typeIdentifier
+    }
 }
 
 /// Installation happens only after an explicit Connect. Hashes pin the exact
@@ -230,7 +280,7 @@ actor IOSPreviewTools {
                 guard let id = value["udid"] as? String, UUID(uuidString: id) != nil,
                       let name = value["name"] as? String, value["isAvailable"] as? Bool == true else { return nil }
                 return IOSPreviewDevice(id: id, name: name, runtime: runtime,
-                    isBooted: value["state"] as? String == "Booted")
+                    isBooted: value["state"] as? String == "Booted", typeIdentifier: value["deviceTypeIdentifier"] as? String)
             }
         }.sorted { ($0.name, $0.runtime, $0.id) < ($1.name, $1.runtime, $1.id) }
     }

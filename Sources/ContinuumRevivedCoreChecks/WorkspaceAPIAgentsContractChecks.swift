@@ -63,6 +63,7 @@ private func checkAgentOpsAndPreset() {
         .agentDelegate, .agentReveal, .operationGet,
         .agentMessage,
         .boardQuery, .boardApply, .agentUpdate,
+        .deviceList, .deviceOpen, .deviceObserve, .deviceAct, .deviceClose, .deviceBuildRun,
     ], "ops are appended to the enum, never reordered: \(WorkspaceAPIOp.allCases.map(\.rawValue))")
     expect(WorkspaceAPIOp(rawValue: "agent.message") == .agentMessage
             && !WorkspaceAPIOp.sessionPresetOperations.contains(.agentMessage),

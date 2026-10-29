@@ -20,8 +20,22 @@ struct ToolEnvironment {
 }
 @main struct CommandProcessTreeProbe {
     @MainActor static func main() async {
-        do { try await check(outputToFile: false); try await check(outputToFile: true) }
+        do { try await check(outputToFile: false); try await check(outputToFile: true); try await checkBoundedLog() }
         catch { print("FAIL: \(error)"); Darwin.exit(1) }
+    }
+    @MainActor static func checkBoundedLog() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("array-bounded-build-log-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = directory.appendingPathComponent("build.log")
+        try await IOSPreviewCommands.runBoundedLog(["/usr/bin/awk", "BEGIN { for(i=0;i<1048576;i++) printf \"x\"; printf \"END\" }"], outputURL: log, timeoutSeconds: 5)
+        let data = try Data(contentsOf: log)
+        guard data.count == 512 * 1024, data.suffix(3) == Data("END".utf8) else { throw NSError(domain: "bounded-log-tail", code: 1) }
+        do {
+            try await IOSPreviewCommands.runBoundedLog(["/bin/sleep", "30"], outputURL: log, timeoutSeconds: 0.02)
+            throw NSError(domain: "bounded-log-timeout-not-enforced", code: 1)
+        } catch is IOSPreviewError {}
+        print("PASS: production bounded build log keeps newest 512KiB, finite timeout stops owned command")
     }
     @MainActor static func check(outputToFile: Bool) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-command-tree-\(UUID())")
@@ -95,7 +109,7 @@ struct ToolEnvironment {
 '''
 path = out / 'command-process-tree.swift'
 path.write_text('import Foundation\nimport Darwin\n' + runner + harness)
-compiled = subprocess.run(['xcrun', 'swiftc', '-parse-as-library', '-swift-version', '5', str(path), '-o', str(out / 'command-process-tree')], text=True, capture_output=True)
+compiled = subprocess.run(['xcrun', '--sdk', 'macosx', 'swiftc', '-parse-as-library', '-swift-version', '5', str(path), '-o', str(out / 'command-process-tree')], text=True, capture_output=True)
 (out / 'compile.log').write_text(compiled.stdout + compiled.stderr)
 if compiled.returncode:
     print(compiled.stderr)
