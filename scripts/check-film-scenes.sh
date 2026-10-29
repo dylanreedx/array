@@ -24,6 +24,17 @@ built=$SECONDS
 iso=$(mktemp -d /tmp/array-film-scenes.XXXXXX)
 trap 'rm -rf "$iso"' EXIT
 mkdir -p "$iso/support" "$iso/root" "$iso/tmux"
+# This leg creates its own namespace instead of inheriting the matrix's.
+# Verify tmux honored it before any staged terminal can start.
+if command -v tmux >/dev/null 2>&1; then
+  film_socket=$(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$iso/tmux" tmux start-server \; display-message -p '#{socket_path}')
+  film_root=$(cd "$iso/tmux" && pwd -P)
+  film_socket_dir=$(cd "$(dirname "$film_socket")" && pwd -P)
+  case "$film_socket_dir/" in
+    "$film_root"/*) ;;
+    *) printf 'Refusing Film check: tmux socket is outside its disposable namespace.\n' >&2; exit 1 ;;
+  esac
+fi
 status=0
 env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$iso/tmux" CONTINUUM_APP_SUPPORT="$iso/support" \
   CONTINUUM_PROJECT_ROOT="$iso/root" .build-film/debug/Array --film-scene-check || status=$?

@@ -30,6 +30,19 @@ export TMUX_TMPDIR="$MATRIX_TMUX_TMPDIR"
 unset TMUX TMUX_PANE
 trap 'rm -rf "$MATRIX_TMUX_TMPDIR"' EXIT
 
+# Verify the server tmux actually selected before any matrix leg can drive it.
+# Canonicalize /tmp on macOS, where tmux can report /private/tmp.
+MATRIX_TMUX_BIN=$(command -v tmux || true)
+if [[ -n "$MATRIX_TMUX_BIN" ]]; then
+  MATRIX_TMUX_SOCKET=$("$MATRIX_TMUX_BIN" start-server \; display-message -p '#{socket_path}')
+  MATRIX_TMUX_ROOT=$(cd "$MATRIX_TMUX_TMPDIR" && pwd -P)
+  MATRIX_TMUX_SOCKET_DIR=$(cd "$(dirname "$MATRIX_TMUX_SOCKET")" && pwd -P)
+  case "$MATRIX_TMUX_SOCKET_DIR/" in
+    "$MATRIX_TMUX_ROOT"/*) ;;
+    *) printf 'Refusing matrix: tmux socket is outside the disposable namespace.\n' >&2; exit 1 ;;
+  esac
+fi
+
 SIDEBAR_REFINEMENTS_ONLY=0
 FAST=0
 CODEX_PERMISSIONS_ONLY=0
