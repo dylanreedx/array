@@ -2711,6 +2711,16 @@ final class CanvasNSView: NSView, TokenThemed {
         return transaction
     }
 
+    /// Stand down a move preview while a reference card owns the pointer.
+    /// Keep the original transaction open so leaving the target resumes from
+    /// the same baseline; no persistence or history entry is produced here.
+    @discardableResult
+    func restoreGeometryEditPreview() -> Bool {
+        guard let pending = pendingGeometryEdit else { return false }
+        resetAutoLayoutMoveLatch()
+        return applyGeometrySnapshot(pending.before, notifyCommit: false)
+    }
+
     func cancelGeometryEdit() {
         guard let pending = pendingGeometryEdit else { return }
         pendingGeometryEdit = nil

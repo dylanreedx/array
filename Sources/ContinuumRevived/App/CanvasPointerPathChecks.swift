@@ -12,6 +12,7 @@ enum CanvasPointerPathChecks {
     private static let agentA = TileInsertSlideChecks.tileA
     private static let agentB = TileInsertSlideChecks.tileB
     private static let noteC = TileInsertSlideChecks.tileC
+    private static let agentD = TileInsertSlideChecks.tileD
 
     /// The user's window is key when they click it. Activating the check app
     /// would take the user's keyboard, so the window says it is key instead,
@@ -66,11 +67,11 @@ enum CanvasPointerPathChecks {
         let root = fixture.projectRoots[WorkspaceInvariantsFixture.projectA1]!
         let projectStore = ProjectStore(projectRoot: root)
         var state = try projectStore.loadCanvas()
-        state.tiles.removeAll { $0.id == TileInsertSlideChecks.tileD }
         let layout: [(UUID, TileFrame, Bool)] = [
             (agentA, TileFrame(x: 600, y: 520, width: 320, height: 260), true),
             (agentB, TileFrame(x: 1300, y: 520, width: 320, height: 260), true),
             (noteC, TileFrame(x: 2000, y: 520, width: 600, height: 260), false),
+            (agentD, TileFrame(x: 600, y: 900, width: 320, height: 260), true),
         ]
         for (id, frame, agent) in layout {
             let index = state.tiles.firstIndex { $0.id == id }!
@@ -87,7 +88,7 @@ enum CanvasPointerPathChecks {
             delegate.agentSupervisor = AgentSupervisor(
                 store: AgentStore(applicationSupportDirectory: appSupport),
                 makeRunner: { _ in ScriptedAgentRunner(script: [], holdUntilStopped: true) })
-            for (id, name) in [(agentA, "Alpha"), (agentB, "Beta")] {
+            for (id, name) in [(agentA, "Alpha"), (agentB, "Beta"), (agentD, "Delta")] {
                 agents.append(delegate.agentSupervisor.spawn(
                     role: nil, prompt: nil, cwd: root, harness: .claudeCode,
                     model: "fixture/pointer", thinking: "medium",
@@ -108,6 +109,7 @@ enum CanvasPointerPathChecks {
         defer { window.orderOut(nil) }
         mounted.delegate.wireManagedAgentTile(agentA, agentID: agents[0])
         mounted.delegate.wireManagedAgentTile(agentB, agentID: agents[1])
+        mounted.delegate.wireManagedAgentTile(agentD, agentID: agents[2])
         mounted.delegate.qaInstallTileFocusMonitor()
         defer { mounted.delegate.qaRemoveTileFocusMonitor() }
         canvas.layoutSubtreeIfNeeded()
@@ -119,7 +121,8 @@ enum CanvasPointerPathChecks {
             throw TileInsertSlideChecks.Failure(message: "\(label): production mount did not hydrate agent B")
         }
         await composer.qaAwaitDraftRestore()
-        composer.bindDraftStore(AgentComposerDraftStore(applicationSupportDirectory: fixture.appSupport), agentID: agents[1])
+        let composerDrafts = AgentComposerDraftStore(applicationSupportDirectory: fixture.appSupport)
+        composer.bindDraftStore(composerDrafts, agentID: agents[1])
         await composer.qaAwaitDraftRestore()
         canvas.layoutSubtreeIfNeeded()
         if autoLayout { _ = mounted.delegate.agentSupervisor.setIdentityColor(agentID: agents[0], "teal") }
@@ -359,6 +362,95 @@ enum CanvasPointerPathChecks {
             check(autoLayout ? a.x > b.x : a != restA,
                 "\(label): the title-bar drop did not \(autoLayout ? "swap" : "move") A: A \(a) B \(b)")
         }
+        // 7. Two selected agents drop as one reference batch through real
+        // window dispatch. Previous move previews must roll back completely.
+        canvas.tileSelection.clear()
+        reseat()
+        try click(try header(agentA))
+        try click(try header(agentD), [.shift])
+        check(canvas.tileSelection.ids == [agentA, agentD], "\(label): batch selection failed")
+        let batchRest = canvas.allTilesInWorldFrames()
+        try mounted.runtime.controller(for: WorkspaceInvariantsFixture.projectA1)?.flushCanvasSave()
+        let batchDisk = try projectStore.loadCanvas().tiles
+        let draftText = composer.draft.text
+        let referencesBeforeBatch = composer.draft.agentReferences
+        let batchStart = try header(agentA)
+        try send(.leftMouseDown, batchStart)
+        try send(.leftMouseDragged, onTitle)
+        try send(.leftMouseDragged, onBody)
+        check(canvas.allTilesInWorldFrames() == batchRest,
+              "\(label): batch reference hover must restore selected and pushed tiles")
+        check(composer.referenceDropHighlighted, "\(label): batch drop did not highlight recipient")
+        let batchCards = canvas.subviews.compactMap { $0 as? AgentReferenceDragCard }.filter { !$0.isHidden }
+        check(batchCards.count == 1 && batchCards.first?.qaText == "Reference 2 agents",
+              "\(label): batch card must identify both agents: \(batchCards.map(\.qaText))")
+        // Option changes intent at the SAME coordinate, without a pointer move.
+        try send(.leftMouseDragged, onBody, [.option])
+        check(!composer.referenceDropHighlighted, "\(label): Option must keep a batch drag as layout")
+        check(composer.draft.agentReferences == referencesBeforeBatch,
+              "\(label): hover or Option must never insert references")
+        try send(.leftMouseDragged, onBody)
+        check(composer.referenceDropHighlighted && canvas.allTilesInWorldFrames() == batchRest,
+              "\(label): returning from Option must restore reference hover at the same point")
+        if zoom == 1 {
+            let directory = URL(fileURLWithPath: "qa-runs/canvas-pointer-path", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let region = (batchCards.first?.frame ?? canvas.bounds).insetBy(dx: -160, dy: -80).intersection(canvas.bounds)
+            for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                window.appearance = NSAppearance(named: appearance)
+                canvas.layoutSubtreeIfNeeded()
+                canvas.displayIfNeeded()
+                if let image = canvas.bitmapImageRepForCachingDisplay(in: region) {
+                    canvas.cacheDisplay(in: region, to: image)
+                    try image.representation(using: .png, properties: [:])?
+                        .write(to: directory.appendingPathComponent("batch-reference-\(autoLayout)-\(name).png"))
+                }
+            }
+            window.appearance = nil
+        }
+        try send(.leftMouseUp, onBody)
+        await recipient.qaAwaitReferenceDrop()
+        let expectedReferences = Set([agents[0], agents[2]])
+        check(Set(composer.draft.agentReferences.map(\.agentID)) == expectedReferences
+                && composer.draft.agentReferences.count == 2,
+              "\(label): batch drop must add both stable identities, deduplicating the existing Alpha chip")
+        check(composer.draft.text == draftText, "\(label): batch reference drop changed draft text")
+        check(canvas.allTilesInWorldFrames() == batchRest, "\(label): batch reference drop changed canvas geometry")
+        let batchDiskAfter = try projectStore.loadCanvas().tiles
+        check(batchDiskAfter == batchDisk, "\(label): batch reference drop persisted tile changes")
+        check(!canvas.isGeometryGestureActive && !composer.referenceDropHighlighted
+                && !canvas.subviews.contains { $0 is AgentReferenceDragCard },
+              "\(label): batch drop leaked gesture chrome or a geometry edit")
+        try await composerDrafts.flushReportingFailure(agentID: agents[1])
+        let drafts = AgentComposerDraftStore(applicationSupportDirectory: fixture.appSupport)
+        let restoredDraft = await drafts.load(for: agents[1])
+        check(Set(restoredDraft?.agentReferences.map(\.agentID) ?? []) == expectedReferences,
+              "\(label): both references must survive draft-store reload")
+
+        // Escape cancels the pending reference intent; a mixed tile selection
+        // remains a layout gesture rather than silently dropping only its agents.
+        canvas.tileSelection.clear()
+        reseat()
+        try click(try header(agentA))
+        try click(try header(agentD), [.shift])
+        let cancelStart = try header(agentA)
+        let beforeCancel = canvas.allTilesInWorldFrames()
+        try send(.leftMouseDown, cancelStart)
+        try send(.leftMouseDragged, onBody)
+        canvas.cancelOperation(nil)
+        try send(.leftMouseUp, onBody)
+        await recipient.qaAwaitReferenceDrop()
+        check(canvas.allTilesInWorldFrames() == beforeCancel && !composer.referenceDropHighlighted
+                && !canvas.subviews.contains { $0 is AgentReferenceDragCard },
+              "\(label): cancelling batch reference must restore geometry and remove its highlight/card")
+        try click(try header(noteC), [.shift])
+        let mixedStart = try header(agentA)
+        try send(.leftMouseDown, mixedStart)
+        try send(.leftMouseDragged, onBody)
+        check(!composer.referenceDropHighlighted, "\(label): mixed agent/note selection must remain a move")
+        canvas.cancelOperation(nil)
+        try send(.leftMouseUp, onBody)
+        print("CanvasPointerPathChecks batch reference scenarios exercised \(label)")
         print("CanvasPointerPathChecks ran \(label)")
     }
 }

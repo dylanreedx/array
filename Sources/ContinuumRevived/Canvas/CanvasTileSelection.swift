@@ -2,7 +2,8 @@ import AppKit
 import ContinuumRevivedCore
 
 /// Ephemeral workspace selection. Keyboard focus continues to belong to one
-/// surface. Native body events and reference dragging never enter this owner.
+/// surface. Native body events stay native; an all-agent group can hand its
+/// header drag to the same reference-drop interaction as a single agent.
 @MainActor
 final class CanvasTileSelection {
     weak var canvas: CanvasNSView?
@@ -23,6 +24,8 @@ final class CanvasTileSelection {
         var lastDelta: CGSize = .zero
         var magneticTarget: MagneticPlacement.Target?
         var dropBounds: TileFrame?
+        var referenceDrag: AgentReferenceDrag?
+        var holdingReference = false
     }
     private var gesture: Gesture?
     var ownsPointer: Bool { consumedHeaderClick || gesture != nil }
@@ -78,6 +81,13 @@ final class CanvasTileSelection {
         consumedHeaderClick = false
         gesture = Gesture(snapshot: snapshot, start: event.locationInWindow,
                           zoom: canvas.viewport.zoom, edge: edge, pressedTileId: pressedTileId)
+        if edge == nil, pressedTileId != nil {
+            let views = canvas.tileViewsInVisualOrder.filter { ids.contains($0.tile.id) }
+            let sources = views.compactMap { $0 as? ManagedAgentTileNSView }
+            if sources.count == ids.count {
+                gesture?.referenceDrag = AgentReferenceDrag(sources: sources, canvas: canvas)
+            }
+        }
         canvas.window?.makeFirstResponder(canvas)
         return true
     }
@@ -90,7 +100,7 @@ final class CanvasTileSelection {
                            height: (gesture.start.y - event.locationInWindow.y) / gesture.zoom)
         // A click and tiny pointer jitter must not create a layout transaction.
         if !gesture.moved, hypot(delta.width, delta.height) * gesture.zoom < 3 { return true }
-        if gesture.moved, delta == gesture.lastDelta { return true }
+        if gesture.moved, delta == gesture.lastDelta, gesture.referenceDrag == nil { return true }
         if !gesture.moved {
             _ = hover.apply(canvas: canvas, frames: worldFrames, enabled: false, animated: false)
             canvas.beginAutoLayoutGesture()
@@ -98,6 +108,27 @@ final class CanvasTileSelection {
         gesture.moved = true
         gesture.lastDelta = delta
         self.gesture = gesture
+        if let referenceDrag = gesture.referenceDrag {
+            let pointer = CanvasEngine.screenToWorld(canvas.convert(event.locationInWindow, from: nil), viewport: canvas.viewport)
+            referenceDrag.setRecipient(referenceDrag.recipient(atWorld: pointer, event: event))
+            if referenceDrag.recipient != nil {
+                gesture.magneticTarget = nil
+                gesture.dropBounds = nil
+                if !gesture.holdingReference {
+                    gesture.holdingReference = true
+                    worldFrames = gesture.snapshot.frames.map { ($0.key, $0.value) }
+                    self.gesture = gesture
+                    guard canvas.restoreGeometryEditPreview() else { cancel(); return true }
+                }
+                self.gesture = gesture
+                canvas.hideDragGhost()
+                referenceDrag.showCard(atWindowPoint: event.locationInWindow, in: canvas)
+                updatePresentation()
+                return true
+            }
+            gesture.holdingReference = false
+            self.gesture = gesture
+        }
         canvas.setAutoLayoutMovePointer(windowPoint: event.locationInWindow,
                                         preferSwap: event.modifierFlags.contains(.option))
         let frames: [UUID: TileFrame]?
@@ -146,6 +177,20 @@ final class CanvasTileSelection {
             resolveClick(on: pressed)
             return true
         }
+        if gesture.moved, let referenceDrag = gesture.referenceDrag {
+            let pointer = CanvasEngine.screenToWorld(canvas.convert(event.locationInWindow, from: nil), viewport: canvas.viewport)
+            if let recipient = referenceDrag.recipient(atWorld: pointer, event: event) {
+                referenceDrag.end()
+                self.gesture = nil
+                canvas.hideDragGhost()
+                _ = canvas.finishAutoLayoutGesture()
+                canvas.cancelGeometryEdit()
+                refresh()
+                referenceDrag.commit(to: recipient)
+                return true
+            }
+        }
+        gesture.referenceDrag?.end()
         if gesture.moved, gesture.edge == nil {
             if let target = gesture.dropBounds,
                let frames = gesture.snapshot.translated(byWorldDelta: CGSize(
@@ -165,8 +210,9 @@ final class CanvasTileSelection {
     }
 
     func cancel() {
-        guard gesture != nil else { return }
-        gesture = nil
+        guard let gesture else { return }
+        gesture.referenceDrag?.end()
+        self.gesture = nil
         consumedHeaderClick = true
         canvas?.hideDragGhost()
         _ = canvas?.finishAutoLayoutGesture()
@@ -195,6 +241,7 @@ final class CanvasTileSelection {
     /// Ends an unmoved member press as a click on that member. The tile's own
     /// mouse-up then has nothing left to do.
     private func resolveClick(on id: UUID) {
+        gesture?.referenceDrag?.end()
         gesture = nil
         canvas?.cancelGeometryEdit()
         consumedHeaderClick = true

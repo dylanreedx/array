@@ -149,12 +149,25 @@ Later build/completion follow-ups were refused because that agent was mid-turn;
 Array does not queue or interrupt a running agent for this operation. This
 document is the durable completion handoff; the initial notification succeeded.
 
-Selection/group geometry owns selected headers within a group and the outer
-handles; a group transform never references. A single agent's header drag is
-the ordinary live move, and reads as a reference only while the pointer is over
-another agent's composer or the middle of its body (`AgentReferenceDrag`). The
-explicit "@" handle and the frozen-layout header drag of 0.7.31 are gone.
-Native title accessory controls keep hit-test precedence.
+Selected headers and group resize handles belong to the selection owner.
+An all-agent selection can reference another agent: while its header drag is
+over a compatible recipient's composer or middle body, all selected members
+and any pushed neighbours return to the transaction baseline. One “Reference
+N agents” card rides the pointer and the recipient composer highlights. Leaving
+the target resumes the group move from the original pointer baseline; holding
+Option keeps it a move, even when intent changes at the same pointer coordinate.
+
+Every selected tile must be an attached managed agent, and the recipient must
+accept every referenced identity (including the existing same-project rule).
+Selected sources cannot receive their own batch. Mixed agent/non-agent
+selections and group resize gestures remain layout operations. No partial
+reference batch is inferred from an incompatible selection.
+
+On drop, the geometry edit is cancelled, then the recipient's existing draft
+restore/append queue receives every stable reference. Existing chips deduplicate,
+draft text remains intact, and no message is sent. Cancellation, tile retirement
+and workspace switching remove the highlight and pointer card. A single agent's
+header drag retains its existing reference/move interaction.
 
 ## Witnesses and evidence
 
@@ -305,3 +318,22 @@ performance profiling were not run for this debug preview. Large existing
 body overlaps retain outline clipping because idle separation is deliberately
 capped. Group envelopes conservatively reserve internal empty space; group
 drops retain source ownership rather than transferring projects/zones.
+
+### Batch agent references verified on 2026-10-28
+
+The group header drag now shares the existing agent reference recipient/card
+interaction. The real-window pointer witness was RED first: selected agents
+moved and no reference batch reached the draft. The reference matrix then
+passed all 8 reported legs after implementation. `--canvas-pointer-path-check`
+selects two agents through their headers and drops onto a third, at zoom 1/.5
+with automatic layout off/on. It asserts baseline restoration after layout
+previews, the “Reference 2 agents” card, Option intent changes at the same
+coordinate, both stable IDs in the draft/store with existing-chip deduplication,
+unchanged draft text and tile models/disk, Escape cleanup and mixed-selection
+move fallback. Single-agent reference/send/harness checks and selection
+move/resize/rollback witnesses remain green.
+
+Light/dark batch-card captures were inspected in
+`qa-runs/canvas-pointer-path/batch-reference-*.png`. Matrix logs are in
+`qa-runs/batch-agent-reference/`. The full release matrix was not rerun for
+this extension; release verification remains the combined release's gate.
