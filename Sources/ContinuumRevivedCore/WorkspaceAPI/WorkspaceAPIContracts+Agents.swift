@@ -34,6 +34,9 @@ public enum AgentObservedStatus: String, Codable, Sendable, CaseIterable {
 public struct AgentProjectionIdentity: Codable, Equatable, Sendable {
     public var agentId: AgentID
     public var displayName: String
+    /// Where `displayName` came from; a `user` name only yields to a requested
+    /// rename. Optional so older encodings still decode.
+    public var nameSource: AgentNameSource?
     public var role: String?
     /// `AgentHarness.rawValue` ("Pi", "Claude Code", "Codex").
     public var harness: String
@@ -49,10 +52,12 @@ public struct AgentProjectionIdentity: Codable, Equatable, Sendable {
     public init(
         agentId: AgentID, displayName: String, role: String?, harness: String,
         checkoutHandle: CheckoutHandle, projectId: UUID?, zoneId: UUID?, tileId: UUID?,
-        parentAgentId: AgentID?, status: AgentObservedStatus, observedAt: Date
+        parentAgentId: AgentID?, status: AgentObservedStatus, observedAt: Date,
+        nameSource: AgentNameSource? = nil
     ) {
         self.agentId = agentId
         self.displayName = displayName
+        self.nameSource = nameSource
         self.role = role
         self.harness = harness
         self.checkoutHandle = checkoutHandle
@@ -429,33 +434,74 @@ public extension WorkspaceToolGrantEvaluator {
 
 /// Identity belongs to the record, independently of tile geometry/hydration.
 /// Missing is not a reset: clearing requires an explicit JSON null.
+/// Why an agent is renaming. The distinction is the rule: a name somebody chose
+/// (`AgentDisplayNameSource.refusesProactiveRename`) only yields to a request.
+public enum AgentRenameIntent: String, Codable, Sendable {
+    /// The user, or another agent, explicitly asked for this name.
+    case requested
+    /// The agent's own initiative: the automatic title is wrong, or the task
+    /// has clearly changed. Refused on a name the user typed.
+    case proactive
+}
+
+/// Sets the identity colour, the display name, or both. A field that is absent
+/// is left alone; `identityColor: null` clears the colour.
 public struct AgentUpdateRequest: Codable, Equatable, Sendable {
     public var agentId: AgentID
     public var identityColor: String?
+    /// Whether the request carried `identityColor` at all — `null` clears, a
+    /// missing key leaves the colour alone.
+    public var setsIdentityColor: Bool
+    public var displayName: String?
+    /// Required with `displayName`.
+    public var nameIntent: AgentRenameIntent?
     public var idempotencyKey: String?
 
     public init(agentId: AgentID, identityColor: String?, idempotencyKey: String? = nil) {
         self.agentId = agentId
         self.identityColor = identityColor
+        self.setsIdentityColor = true
+        self.displayName = nil
+        self.nameIntent = nil
         self.idempotencyKey = idempotencyKey
     }
 
-    private enum CodingKeys: String, CodingKey { case agentId, identityColor, idempotencyKey }
+    public init(agentId: AgentID, displayName: String, nameIntent: AgentRenameIntent, idempotencyKey: String? = nil) {
+        self.agentId = agentId
+        self.identityColor = nil
+        self.setsIdentityColor = false
+        self.displayName = displayName
+        self.nameIntent = nameIntent
+        self.idempotencyKey = idempotencyKey
+    }
+
+    private enum CodingKeys: String, CodingKey { case agentId, identityColor, displayName, nameIntent, idempotencyKey }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         agentId = try c.decode(AgentID.self, forKey: .agentId)
-        guard c.contains(.identityColor) else {
-            throw DecodingError.keyNotFound(CodingKeys.identityColor,
-                .init(codingPath: decoder.codingPath, debugDescription: "identityColor is required; use null to clear"))
-        }
+        setsIdentityColor = c.contains(.identityColor)
         identityColor = try c.decodeIfPresent(String.self, forKey: .identityColor)
+        displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
+        nameIntent = try c.decodeIfPresent(AgentRenameIntent.self, forKey: .nameIntent)
         idempotencyKey = try c.decodeIfPresent(String.self, forKey: .idempotencyKey)
+        guard setsIdentityColor || displayName != nil else {
+            throw DecodingError.keyNotFound(CodingKeys.identityColor,
+                .init(codingPath: decoder.codingPath, debugDescription: "identityColor or displayName is required; use identityColor null to clear"))
+        }
+        guard (displayName == nil) == (nameIntent == nil) else {
+            throw DecodingError.keyNotFound(CodingKeys.nameIntent,
+                .init(codingPath: decoder.codingPath, debugDescription: "displayName and nameIntent go together"))
+        }
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(agentId, forKey: .agentId)
-        if let identityColor { try c.encode(identityColor, forKey: .identityColor) }
-        else { try c.encodeNil(forKey: .identityColor) }
+        if setsIdentityColor {
+            if let identityColor { try c.encode(identityColor, forKey: .identityColor) }
+            else { try c.encodeNil(forKey: .identityColor) }
+        }
+        try c.encodeIfPresent(displayName, forKey: .displayName)
+        try c.encodeIfPresent(nameIntent, forKey: .nameIntent)
         try c.encodeIfPresent(idempotencyKey, forKey: .idempotencyKey)
     }
 }
@@ -466,18 +512,28 @@ public struct AgentUpdateResult: Codable, Equatable, Sendable {
     public var operationId: String
     public var agentId: AgentID
     public var identityColor: String?
+    /// The target's actual name and where it came from after the update,
+    /// whichever fields the request carried.
+    public var displayName: String
+    public var nameSource: AgentNameSource
     public var revision: WorkspaceRevision
     public var durability: Durability
 
-    public init(operationId: String, agentId: AgentID, identityColor: String?, revision: WorkspaceRevision, durability: Durability) {
+    public init(
+        operationId: String, agentId: AgentID, identityColor: String?,
+        displayName: String, nameSource: AgentNameSource,
+        revision: WorkspaceRevision, durability: Durability
+    ) {
         self.operationId = operationId
         self.agentId = agentId
         self.identityColor = identityColor
+        self.displayName = displayName
+        self.nameSource = nameSource
         self.revision = revision
         self.durability = durability
     }
 
-    private enum CodingKeys: String, CodingKey { case schema, operationId, agentId, identityColor, revision, durability }
+    private enum CodingKeys: String, CodingKey { case schema, operationId, agentId, identityColor, displayName, nameSource, revision, durability }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(schema, forKey: .schema)
@@ -485,6 +541,8 @@ public struct AgentUpdateResult: Codable, Equatable, Sendable {
         try c.encode(agentId, forKey: .agentId)
         if let identityColor { try c.encode(identityColor, forKey: .identityColor) }
         else { try c.encodeNil(forKey: .identityColor) }
+        try c.encode(displayName, forKey: .displayName)
+        try c.encode(nameSource, forKey: .nameSource)
         try c.encode(revision, forKey: .revision)
         try c.encode(durability, forKey: .durability)
     }

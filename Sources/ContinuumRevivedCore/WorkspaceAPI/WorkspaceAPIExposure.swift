@@ -21,7 +21,7 @@ public enum WorkspaceAPIExposure {
     public static let decisions: [String: Decision] = [
         "agent.schemaVersion": .internal,
         "agent.id": .internal,
-        "agent.displayName": .notExposed("Renaming existing agents is native UI only."),
+        "agent.displayName": .exposed(.agentUpdate),
         "agent.displayNameSource": .internal,
         "agent.namingRequest": .internal,
         "agent.role": .notExposed("Changing an existing agent's role is not an API update."),

@@ -74,6 +74,16 @@ public enum AgentDisplayNameSource: String, Codable, Sendable {
     case harness
     /// A model was asked, on this conversation, for a short name for it.
     case generated
+    /// An agent named itself, or another agent, on its own initiative through
+    /// the workspace API (`agent.update` with `nameIntent: proactive`). It
+    /// outranks every automatic namer, so the titler never undoes it, and a
+    /// person's rename still replaces it.
+    case agent
+    /// An agent set this name because it was explicitly asked to — by the user
+    /// in conversation, or by another agent (`nameIntent: requested`). Like
+    /// `.manual`, it is a name somebody chose, so a later PROACTIVE rename may
+    /// not replace it; unlike `.manual`, an agent wrote it.
+    case requested
 
     /// How strong a claim this provenance has on the title.
     ///
@@ -104,6 +114,8 @@ public enum AgentDisplayNameSource: String, Codable, Sendable {
         case .harness: return 3
         case .generated: return 4
         case .sourceItem: return 5
+        case .agent: return 6
+        case .requested: return 7
         case .manual: return .max
         }
     }
@@ -111,6 +123,34 @@ public enum AgentDisplayNameSource: String, Codable, Sendable {
     /// Whether this title was chosen by a person. Everything else is a proposal
     /// some later, better proposal may replace.
     public var isManual: Bool { self == .manual }
+
+    /// Whether somebody deliberately chose this title, so an agent's own
+    /// initiative may not replace it: typed by a person, or set on an explicit
+    /// request. An explicit request may still replace either.
+    public var refusesProactiveRename: Bool { self == .manual || self == .requested }
+
+    /// The workspace API's coarse vocabulary for where a name came from, so an
+    /// agent can follow the proactive-rename rule without learning every namer.
+    public var workspaceAPINameSource: AgentNameSource {
+        switch self {
+        case .manual: return .user
+        case .requested: return .requested
+        case .agent: return .agent
+        case .sentinel, .prompt, .sourceItem, .parent, .harness, .generated: return .automatic
+        }
+    }
+}
+
+/// `AgentDisplayNameSource` as the workspace API reports it.
+public enum AgentNameSource: String, Codable, Sendable {
+    /// The user typed it in Array. Only an explicit request may replace it.
+    case user
+    /// An agent set it because it was explicitly asked to.
+    case requested
+    /// An agent chose it on its own initiative.
+    case agent
+    /// Array derived it (the prompt, the CLI's own title, a generated name).
+    case automatic
 }
 
 /// The result of the one precedence ladder used by every derived spawn path.
@@ -832,8 +872,10 @@ public struct AgentRecord: Codable, Equatable, Sendable {
             // title. Keep even a malformed sentinel record redacted at the
             // boundary; a decoded unknown source is normalized to this case.
             return Self.defaultAgentName
-        case .harness, .generated:
-            // OPEN DECISION, deliberately fail-closed for now.
+        case .harness, .generated, .agent, .requested:
+            // OPEN DECISION, deliberately fail-closed for now. An agent-set
+            // name (`.agent`, `.requested`) is model-authored text too, so it
+            // takes the same side.
             //
             // Both of these ARE model-authored summaries rather than slices of
             // the user's own text, which is the distinction I5 actually cares

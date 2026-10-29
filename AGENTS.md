@@ -307,7 +307,9 @@ preview. Dylan's explicit design direction in this chat governs this rule.
    keys; a new unclassified field is RED. An exposed property also owes a
    published operation and a witness through the production workspace API,
    including grants, persistence and visible outcomes. Agent identity colour
-   uses `agent.update`; see [the API note](docs/internals/workspace-agent-colour.md).
+   and agent names use `agent.update`; see [the colour note](docs/internals/workspace-agent-colour.md)
+   and [the rename note](docs/internals/workspace-agent-rename.md). A proactive
+   agent rename never replaces a name the user typed.
 
 ## Running the app while Dylan is using it
 

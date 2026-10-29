@@ -38,6 +38,7 @@ check --agent-tile-chrome-consolidation-check
 check --agent-tile-click-focus-check
 check --agent-tile-file-mention-check
 check --agent-tile-reference-check
+check --agent-tile-rename-check
 check --agent-tool-detail-store-check
 check --agent-transcript-projection-check
 check --ambient-tile-frame-space-check
@@ -295,6 +296,7 @@ check --unreadable-canvas-store-check
 check --viewport-sanitize-check
 check --window-chrome-check
 check --workspace-api-agent-colour-check
+check --workspace-api-agent-rename-check
 check --workspace-api-agents-check
 check --workspace-api-board-check
 check --workspace-api-canvas-check
@@ -404,6 +406,7 @@ leg run_app_check .build/debug/Array --agent-tile-chrome-consolidation-check
 leg run_app_check .build/debug/Array --agent-tile-click-focus-check
 leg run_app_check .build/debug/Array --agent-tile-file-mention-check
 leg run_app_check .build/debug/Array --agent-tile-reference-check
+leg run_app_check .build/debug/Array --agent-tile-rename-check
 leg run_app_check .build/debug/Array --ambient-tile-frame-space-check
 leg run_app_check .build/debug/Array --app-support-channel-check
 leg run_app_check .build/debug/Array --attention-notification-check
@@ -626,6 +629,7 @@ leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
 leg run_app_check .build/debug/Array --window-chrome-check
 leg run_app_check .build/debug/Array --workspace-api-agent-colour-check
+leg run_app_check .build/debug/Array --workspace-api-agent-rename-check
 leg run_app_check .build/debug/Array --workspace-api-agents-check
 leg run_app_check .build/debug/Array --workspace-api-board-check
 leg run_app_check .build/debug/Array --workspace-api-canvas-check

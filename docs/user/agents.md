@@ -39,6 +39,12 @@ Dictation runs on one composer at a time; starting it in another agent ends the 
 
 Dictation needs macOS 26 or later; on earlier versions the microphone button does not appear. The first time, macOS asks for microphone and speech recognition access, and the speech model may download before listening starts. Turn dictation off with **Settings → Agents → Dictation → Dictate into the composer**.
 
+## Rename an agent
+
+Array names an agent from its first prompt or the CLI's own title, and that guess is sometimes slightly off. To fix it, double-click the name in the agent tile's title bar, or choose **Rename** from the tile's menu, type the new name and press **Return**. **Esc** cancels, and an empty name keeps the old one. You can also double-click the agent's row in the Activity Dock. The name belongs to the agent, so the tile and the row change together and it survives a relaunch.
+
+Agents with workspace tools can rename themselves, or another agent in the same project, through `array_update_agent`. Ask one ("rename yourself to Parser fix") and it will. An agent may also retitle itself when its automatic name is wrong or its task has clearly changed, but it never replaces a name you typed or asked for. Renaming another agent needs the canvas-change permission, as colours do. [Canvas tools](/docs/canvas-tools/).
+
 ## Give an agent a colour
 
 An agent has no colour until you choose one. Open the agent tile’s menu, choose **Color**, then pick Teal, Blue, Mint, Purple, Orange, Yellow, or Red, or **None** to clear it. The Activity Dock’s row actions offer the same choice, for several selected agents at once.

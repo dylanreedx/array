@@ -399,7 +399,9 @@ final class WorkspaceAPIService {
             capabilities: capabilities,
             approvalRequired: approvalRequired,
             recentOperations: recentOperations[agentId] ?? [],
-            observedAt: Date())
+            observedAt: Date(),
+            displayName: record.humanDisplayName,
+            nameSource: record.displayNameSource.workspaceAPINameSource)
         // Enforce the byte ceiling by shedding history, newest kept, never by
         // truncating identity.
         while let data = try? Self.encoder.encode(response),

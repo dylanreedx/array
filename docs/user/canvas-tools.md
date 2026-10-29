@@ -45,7 +45,7 @@ This teaches the agent that a workspace API exists. It does not give the agent a
 
 Canvas movement uses the same geometry route and undo history as a user drag. It does not change the camera, focus, selection, or armed zone.
 
-`array_update_agent` sets or clears an agent’s [identity colour](/docs/agents/#give-an-agent-a-colour). An agent can change its own colour; changing another agent’s in the same checkout needs the canvas-change permission.
+`array_update_agent` sets or clears an agent’s [identity colour](/docs/agents/#give-an-agent-a-colour) and [renames](/docs/agents/#rename-an-agent) it. An agent can change its own colour and name; changing another agent’s in the same checkout needs the canvas-change permission. A rename says whether it was asked for (`requested`) or the agent's own idea (`proactive`); a proactive rename is refused on a name you typed or asked for.
 
 ## Work with boards
 

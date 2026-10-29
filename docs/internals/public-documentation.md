@@ -39,6 +39,7 @@ The initial content was checked against these authorities on 2026-10-16, and rec
 | Companion (coming soon; the page claims nothing else) | `Sources/ContinuumRevivedCore/SettingsSchema.swift` (`iPhone` pane) |
 | Composer dictation | `Sources/ContinuumRevived/Canvas/AgentComposer/ComposerDictation*.swift`, `AgentComposerView.swift`, `SettingsSchema.swift` (`agents.dictation`) |
 | Agent identity colour | `ManagedAgentTileNSView.swift` (`Color` menu), `BuiltInSettingRegistry.swift` (palette, style), `docs/internals/workspace-agent-colour.md` |
+| Agent rename | `ManagedAgentTileNSView.swift` (`Rename` menu, `beginTitleRename`), `TileNSView.swift` (`beginTitleEdit`), `AgentRecord.swift` (`AgentDisplayNameSource`), `docs/internals/workspace-agent-rename.md` |
 
 Provider policy statements link to current official sources in the public CLI
 guide. Re-check those sources when updating claims; another app's architecture

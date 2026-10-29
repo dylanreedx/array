@@ -111,6 +111,12 @@ func runWorkspaceMCPChecks() {
            && WorkspaceMCPToolCatalog.serverInstructions.contains(WorkspaceMCPToolCatalog.waitAgentsName)
            && WorkspaceMCPToolCatalog.serverInstructions.contains("first delegation"),
            "MCP initialize instructions must carry Array tile, delegation, approval, and wait guidance")
+    for (surface, text) in [("MCP initialize instructions", WorkspaceMCPToolCatalog.serverInstructions),
+                            ("Claude's appended prompt", WorkspaceMCPConfiguration.agentGuidance)] {
+        expect(text.contains("array_update_agent") && text.contains("nameIntent proactive")
+               && text.contains("nameIntent requested") && text.contains("never replace a name the user typed"),
+               "\(surface) must tell agents to retitle themselves and when not to")
+    }
 
     // MARK: Provider launch projections
 

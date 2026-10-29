@@ -13,5 +13,6 @@ func runWorkspaceAPIExposureChecks() {
     expect(!WorkspaceAPIExposure.violations(fields: sample, decisions: ["field": .notExposed(" \n")]).isEmpty, "exposure audit rejects blank reasons")
     expect(!WorkspaceAPIExposure.violations(fields: sample, decisions: ["field": .exposed(.agentUpdate)], exposedOperations: []).isEmpty, "exposure audit requires a callable tool")
     expect(WorkspaceAPIExposure.decisions["agent.identityColor"] == .exposed(.agentUpdate), "agent colour remains exposed")
+    expect(WorkspaceAPIExposure.decisions["agent.displayName"] == .exposed(.agentUpdate), "agent name is exposed through agent.update")
     if failures.isEmpty { print("WorkspaceAPIExposureChecks passed: \(WorkspaceAPIExposure.fields.count) real coding keys classified") }
 }

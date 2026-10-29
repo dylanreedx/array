@@ -240,12 +240,54 @@ private func checkAgentUpdateCoding() {
         expect(try! contractDecoder.decode(AgentUpdateRequest.self, from: encoded) == request, "agent.update request round-trips")
         let object = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
         expect(object.keys.contains("identityColor"), "clear encodes an explicit null")
+        expect(object["displayName"] == nil && object["nameIntent"] == nil, "a colour-only update carries no name")
         let result = AgentUpdateResult(operationId: "colour", agentId: id, identityColor: color,
+            displayName: "Parser fix", nameSource: .agent,
             revision: WorkspaceRevision(epoch: "colour", structure: 7), durability: .committed)
         expect(try! contractDecoder.decode(AgentUpdateResult.self, from: contractEncoder.encode(result)) == result, "agent.update result round-trips")
+        let resultObject = try! JSONSerialization.jsonObject(with: contractEncoder.encode(result)) as! [String: Any]
+        expect(resultObject["displayName"] as? String == "Parser fix" && resultObject["nameSource"] as? String == "agent",
+               "agent.update result reports the name and its source")
     }
-    for payload: [String: Any] in [["agentId": id.rawValue.uuidString], ["agentId": id.rawValue.uuidString, "identityColor": 42]] {
-        expect((try? contractDecoder.decode(AgentUpdateRequest.self, from: JSONSerialization.data(withJSONObject: payload))) == nil, "missing and mistyped identityColor refuse")
+    // A rename alone: the colour key is ABSENT (leave it), not null (clear it).
+    for intent in [AgentRenameIntent.requested, .proactive] {
+        let rename = AgentUpdateRequest(agentId: id, displayName: "Parser fix", nameIntent: intent)
+        let encoded = try! contractEncoder.encode(rename)
+        let object = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        let decoded = try! contractDecoder.decode(AgentUpdateRequest.self, from: encoded)
+        expect(decoded == rename && !decoded.setsIdentityColor && !object.keys.contains("identityColor")
+               && object["nameIntent"] as? String == intent.rawValue, "agent.update rename round-trips without touching the colour")
+    }
+    let both = try? contractDecoder.decode(AgentUpdateRequest.self, from: JSONSerialization.data(withJSONObject: [
+        "agentId": id.rawValue.uuidString, "identityColor": NSNull(), "displayName": "Both", "nameIntent": "requested"]))
+    expect(both?.setsIdentityColor == true && both?.identityColor == nil && both?.displayName == "Both", "colour clear and rename decode together")
+    for payload: [String: Any] in [
+        ["agentId": id.rawValue.uuidString],
+        ["agentId": id.rawValue.uuidString, "identityColor": 42],
+        ["agentId": id.rawValue.uuidString, "displayName": "No intent"],
+        ["agentId": id.rawValue.uuidString, "displayName": "Bad intent", "nameIntent": "maybe"],
+        ["agentId": id.rawValue.uuidString, "nameIntent": "requested"],
+        ["agentId": id.rawValue.uuidString, "displayName": 7, "nameIntent": "requested"],
+    ] {
+        expect((try? contractDecoder.decode(AgentUpdateRequest.self, from: JSONSerialization.data(withJSONObject: payload))) == nil,
+               "agent.update refuses \(payload.keys.sorted())")
+    }
+    // The proactive rule's vocabulary: a name somebody chose refuses it.
+    expect(AgentDisplayNameSource.manual.refusesProactiveRename && AgentDisplayNameSource.requested.refusesProactiveRename
+           && !AgentDisplayNameSource.agent.refusesProactiveRename && !AgentDisplayNameSource.generated.refusesProactiveRename,
+           "only user-typed and requested names refuse a proactive rename")
+    expect(AgentDisplayNameSource.agent.authority > AgentDisplayNameSource.sourceItem.authority
+           && AgentDisplayNameSource.requested.authority > AgentDisplayNameSource.agent.authority
+           && AgentDisplayNameSource.manual.authority > AgentDisplayNameSource.requested.authority,
+           "agent-set names outrank every automatic namer and yield to a person")
+    var named = AgentRecord(id: id, displayName: "Agent chose", displayNameSource: .agent, role: nil, harness: .pi,
+                            model: "fixture/model", thinking: "high", cwd: "/tmp",
+                            createdAt: Date(), lastActivityAt: Date())
+    expect(!named.adoptAutomaticName("Harness title", source: .harness) && !named.acceptsAutomaticName(from: .generated)
+           && named.displayName == "Agent chose", "the automatic titler never replaces an agent-set name")
+    expect(named.syncDisplayName == AgentRecord.defaultAgentName, "an agent-set name stays out of the sync payload")
+    for (source, api) in [(AgentDisplayNameSource.manual, AgentNameSource.user), (.requested, .requested), (.agent, .agent), (.harness, .automatic), (.sentinel, .automatic)] {
+        expect(source.workspaceAPINameSource == api, "\(source) reports as \(api)")
     }
     let tool = WorkspaceMCPToolCatalog.tool(named: "array_update_agent")
     expect(tool?.operation == .agentUpdate && RoleRegistry.hostToolNames(for: .pi).contains("array_update_agent"), "both transports expose agent.update, including roled Pi")
@@ -255,6 +297,14 @@ private func checkAgentUpdateCoding() {
         expect(Set(values.compactMap { if case let .string(name) = $0 { return name }; return nil }) == Set(ZoneColorConfig.palette)
                && values.contains(.null), "catalog palette matches the UI and permits null")
     } else { expect(false, "agent.update palette schema missing") }
+    if case let .object(properties)? = tool?.inputSchema["properties"],
+       case let .object(intent)? = properties["nameIntent"], case let .array(intents)? = intent["enum"],
+       case .object? = properties["displayName"], case let .array(required)? = tool?.inputSchema["required"] {
+        expect(Set(intents.compactMap { if case let .string(name) = $0 { return name }; return nil }) == ["requested", "proactive"]
+               && required == [.string("agentId")], "catalog offers displayName with both intents, and requires only agentId")
+    } else { expect(false, "agent.update rename schema missing") }
+    expect(tool?.promptGuidelines.contains { $0.contains("proactive") && $0.contains("nameSource") } == true,
+           "the tool guidance tells an agent to check nameSource before a proactive rename")
     expect(ArrayWorkspaceTool(toolName: "array_update_agent")?.kind == .edit
            && ArrayWorkspaceTool(toolName: "mcp__array_workspace__array_update_agent") == .updateAgent, "new tool has native transcript presentation")
 }

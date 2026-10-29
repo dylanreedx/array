@@ -285,6 +285,10 @@ public struct WorkspaceRecentOperation: Codable, Equatable, Sendable {
 public struct WorkspaceContextResponse: Codable, Equatable, Sendable {
     public var schema: String = WorkspaceAPISchema.v1
     public var agentId: AgentID
+    /// The caller's own title and where it came from, so it can follow the
+    /// rename rule: a `user` name only yields to a requested rename.
+    public var displayName: String?
+    public var nameSource: AgentNameSource?
     public var checkoutHandle: CheckoutHandle?
     public var projectId: UUID?
     public var workspaceId: UUID
@@ -316,9 +320,13 @@ public struct WorkspaceContextResponse: Codable, Equatable, Sendable {
         capabilities: [WorkspaceAPIOp],
         approvalRequired: [WorkspaceAPIOp] = [],
         recentOperations: [WorkspaceRecentOperation],
-        observedAt: Date
+        observedAt: Date,
+        displayName: String? = nil,
+        nameSource: AgentNameSource? = nil
     ) {
         self.agentId = agentId
+        self.displayName = displayName
+        self.nameSource = nameSource
         self.checkoutHandle = checkoutHandle
         self.projectId = projectId
         self.workspaceId = workspaceId

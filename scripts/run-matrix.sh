@@ -124,7 +124,7 @@ filter recovery and row-action checks. Full release verification remains require
 management, shared choice geometry and appearance gates. Full release verification
 remains required.
 --agent-tile-menu rebuilds the app and reports native agent menus, chrome
-scaling, page zoom, face switching, identity color and location actions.
+scaling, page zoom, face switching, identity color, tile rename and location actions.
 It is a targeted development gate, not the full release matrix.
 --codex-permissions rebuilds CoreChecks and verifies Full Access launch arguments
 for fresh/resumed exec and production app-server runs using an offline stand-in.
@@ -603,6 +603,7 @@ if [[ "$AGENT_TILE_MENU_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --managed-agent-page-zoom-check
   run_app_check .build/debug/Array --agent-face-switch-check
   run_app_check .build/debug/Array --agent-identity-color-check
+  run_app_check .build/debug/Array --agent-tile-rename-check
   run_app_check .build/debug/Array --location-action-surface-check
   run_app_check .build/debug/Array --camera-chrome-redraw-check
   run_app_check .build/debug/Array --choice-geometry-check
@@ -1298,6 +1299,13 @@ run_app_check .build/debug/Array --workspace-api-grants-check
 # preset, other-agent approval, byte caps, zero lifecycle side effects.
 # Agent colour: durable record update through the real workspace API.
 run_app_check .build/debug/Array --workspace-api-agent-colour-check
+# Agent rename: agent.update displayName — self without approval, another agent
+# under the canvas-write grant, a proactive rename refused on a name the user
+# typed, a requested one allowed, the titler yielding to an agent-set name.
+run_app_check .build/debug/Array --workspace-api-agent-rename-check
+# Agent rename from the tile: double-click the title (or the menu's Rename),
+# type, Enter / Escape / empty, through NSApp.sendEvent into a production mount.
+run_app_check .build/debug/Array --agent-tile-rename-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
 run_app_check .build/debug/Array --workspace-api-agents-check
 # CX-01 Phase 4: canvas.query paging/coverage/byte cap, and canvas.apply through

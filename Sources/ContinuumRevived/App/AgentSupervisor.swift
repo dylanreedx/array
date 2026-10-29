@@ -1127,6 +1127,9 @@ final class AgentSupervisor {
     /// The host's half of an identity-colour change: the sidebar rows derive the
     /// dot from the record on every build, so the host only has to rebuild them.
     var onIdentityColorChanged: ((AgentID, String?) -> Void)?
+    /// A deliberate rename landed (sidebar, tile title or workspace API). The
+    /// sidebar rows are rebuilt from the record, so the host re-pushes them.
+    var onDisplayNameRenamed: ((AgentID) -> Void)?
     /// The runner for the prompt currently in flight, if any.
     private var runners: [AgentID: AgentRunning] = [:]
     /// The latest runner generation to own each agent. Unlike `runners`, this is
@@ -5885,28 +5888,36 @@ final class AgentSupervisor {
     /// have or for a name that sanitises to nothing. A valid manual rename always
     /// disarms the in-flight automatic proposal, including an explicit choice of the
     /// unchanged sentinel; a late completion must then fail its request marker check.
+    ///
+    /// `source` is `.manual` for every person's rename — the sidebar row and the
+    /// tile title. The workspace API passes `.agent` or `.requested` for a name an
+    /// agent set; the API, not this method, owns the rule about which of those may
+    /// replace which. Nothing changes in memory unless the store write succeeds,
+    /// so a false return after a valid name means the save failed.
     @discardableResult
-    func rename(agentID id: AgentID, to name: String) -> Bool {
+    func rename(agentID id: AgentID, to name: String, source: AgentDisplayNameSource = .manual) -> Bool {
         guard var record = records[id] else {
             warn("AgentSupervisor.rename: no agent \(id.rawValue.uuidString)")
             return false
         }
         guard let label = AgentSupervisor.sanitizedDisplayName(name) else { return false }
-        // A human rename disarms both the durable CAS marker and the best-effort
-        // process. The process may still be finishing, but its request id and
-        // expected title can no longer land it.
+        // A deliberate rename disarms both the durable CAS marker and the
+        // best-effort process. The process may still be finishing, but its
+        // request id and expected title can no longer land it.
         nameGenerationTasks[id]?.cancel()
         let changed = record.displayName != label
-            || record.displayNameSource != .manual
+            || record.displayNameSource != source
             || record.namingRequest != nil
         guard changed else { return false }
         record.displayName = label
-        record.displayNameSource = .manual
-        // A human title owns the record again. Clear the marker before persisting
+        record.displayNameSource = source
+        // A chosen title owns the record again. Clear the marker before persisting
         // so no already-started provider completion can find a live request.
         record.namingRequest = nil
-        records[id] = record
-        persist(record)
+        // `persist` installs the live copy on success, so a failed save leaves
+        // every view on the old name rather than showing one that is not on disk.
+        guard persist(record) else { return false }
+        onDisplayNameRenamed?(id)
         return true
     }
 

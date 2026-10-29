@@ -1635,6 +1635,32 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--workspace-api-agent-rename-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAPIAgentRenameChecks.run()
+                print("ContinuumRevivedWorkspaceAPIAgentRenameChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--agent-tile-rename-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let summary = try await AgentTileRenameChecks.run()
+                    print("AgentTileRenameChecks passed: \(summary)")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL --agent-tile-rename-check: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+            return
+        }
         if CommandLine.arguments.contains("--workspace-api-agents-check") {
             do {
                 _ = NSApplication.shared
@@ -9501,6 +9527,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
            shortcut != nil || matchesRegisteredGlobalShortcut(event) {
             canvasView?.commitZoneRename()
         }
+        // The same for an agent tile's title rename.
+        if TileNSView.isAnyTitleEditOpen,
+           shortcut != nil || matchesRegisteredGlobalShortcut(event) {
+            TileNSView.commitActiveTitleEdit()
+        }
         // Text entry owns ordinary typing, while every app-reserved command and
         // inbox jump is withheld before it can open a modal, spawn, or navigate.
         // Unmatched keys still return false below and reach the field editor.
@@ -12322,6 +12353,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.configureInboxRename { [weak self] agentId, name in
             self?.renameAgentFromInbox(agentId, to: name)
         }
+        // Every rename re-pushes the rows, whichever surface made it: this row,
+        // the tile title or an agent through the workspace API.
+        agentSupervisor.onDisplayNameRenamed = { [weak self] _ in
+            self?.reloadWorkspaceSidebar()
+        }
         // P3.15: the row menu and the bulk bar reach the supervisor. Until this call
         // existed the shipped app assigned neither callback, so every destructive item
         // was greyed and a stale agent could not be removed by any route.
@@ -12916,10 +12952,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// renaming one means is undefined until a ticket rules on it. So that half is
     /// refused out loud rather than half-written.
     ///
-    /// The re-push is the whole point of doing it here: the row's title is derived from
-    /// the record on every build (`AgentInboxRowBuilder`), so one reload puts the new
-    /// name on the row, in the scope popup's join and in anything else the snapshot
-    /// feeds.
+    /// The row's title is derived from the record on every build
+    /// (`AgentInboxRowBuilder`), so the supervisor's `onDisplayNameRenamed` reload puts
+    /// the new name on the row, in the scope popup's join and in anything else the
+    /// snapshot feeds — for this route, the tile title and the workspace API alike.
     @discardableResult
     func renameAgentFromInbox(_ rowId: UUID, to name: String) -> Bool {
         let agentId = AgentID(rawValue: rowId)
@@ -12927,9 +12963,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             fputs("Rename ignored: \(rowId.uuidString) is not a managed agent\n", stderr)
             return false
         }
-        guard agentSupervisor.rename(agentID: agentId, to: name) else { return false }
-        reloadWorkspaceSidebar()
-        return true
+        // `onDisplayNameRenamed` re-pushes the rows, for every rename route.
+        return agentSupervisor.rename(agentID: agentId, to: name)
     }
 
     // MARK: - Inbox row and bulk actions (P3.15)
@@ -19810,7 +19845,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // CX-01 Phase 4: geometry is never in the session preset, so the first
             // move/resize of the agent's OWN checkout lands here.
             alert.messageText = "Allow \(prompt.agentDisplayName) to arrange tiles and change agent colours in \(prompt.checkoutDisplayName)?"
-            detail = "This grants canvas writes in this checkout: moving or resizing tiles, and changing another agent’s identity colour. Geometry changes use the same undo history as a drag. These operations preserve the camera, focus and selection."
+            detail = "This grants canvas writes in this checkout: moving or resizing tiles, and changing another agent’s identity colour or name. Geometry changes use the same undo history as a drag. These operations preserve the camera, focus and selection."
         } else {
             alert.messageText = "Allow \(prompt.agentDisplayName) to open files in \(prompt.checkoutDisplayName)?"
             detail = "The agent asked Array to open a document outside its own checkout."

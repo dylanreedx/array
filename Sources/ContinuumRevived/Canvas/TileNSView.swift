@@ -296,6 +296,39 @@ class TileNSView: NSView, TokenThemed {
 
     func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] { [] }
 
+    // MARK: Title rename
+
+    /// Rename this tile's subject from its title. Only a managed agent has one
+    /// (its record's name); every other tile answers false and keeps today's
+    /// double-click.
+    @discardableResult
+    func beginTitleRename() -> Bool { false }
+
+    /// Open the title bar's inline editor. Used by `beginTitleRename` overrides.
+    @discardableResult
+    func beginTitleEdit(text: String, onCommit: @escaping (String) -> Void) -> Bool {
+        titleBar?.beginTitleEdit(text: text, onCommit: onCommit) ?? false
+    }
+
+    func endTitleEdit(commit: Bool) { titleBar?.endTitleEdit(commit: commit) }
+    var isEditingTitle: Bool { titleBar?.isEditingTitle ?? false }
+    var qaTitleEditor: NSTextField? { titleBar?.titleEditorForQA }
+
+    /// Commit whichever title rename is open, as losing focus would. The key
+    /// monitor calls this before an app chord consumes the key.
+    static func commitActiveTitleEdit() { TitleBarView.activeTitleEditBar?.endTitleEdit(commit: true) }
+    static var isAnyTitleEditOpen: Bool { TitleBarView.activeTitleEditBar != nil }
+
+    var titleRectInTileSpaceForQA: NSRect {
+        titleBar.map { $0.convert($0.qaTitleRect(), to: self) } ?? .zero
+    }
+
+    /// Whether a point in this tile's space is on the drawn title text's rect.
+    func titleContains(localPoint: NSPoint) -> Bool {
+        guard let titleBar else { return false }
+        return titleBar.convert(titleBar.qaTitleRect(), to: self).contains(localPoint)
+    }
+
     /// "Reveal in Finder" for a tile with a backing file: enabled with an action
     /// only while that file exists, disabled (no action) otherwise.
     func makeRevealInFinderMenuItem() -> NSMenuItem {
@@ -1094,6 +1127,14 @@ class TileNSView: NSView, TokenThemed {
             return
         }
         let local = convert(event.locationInWindow, from: nil)
+        // A double-click on the title renames what the tile shows, before the
+        // selection or a drag can claim the press. Anything else on the bar
+        // (and every tile with nothing to rename) keeps the old behaviour.
+        if event.clickCount == 2, event.modifierFlags.intersection(.deviceIndependentFlagsMask).isDisjoint(with: [.shift, .command, .option, .control]),
+           local.y < grabHeightInLocalCoordinates, titleContains(localPoint: local), beginTitleRename() {
+            dragKind = .none
+            return
+        }
         if canvas?.tileSelection.mouseDown(on: self, event: event,
                                           isHeader: local.y < grabHeightInLocalCoordinates,
                                           isResize: resizeEdge(at: local) != nil) == true {
@@ -2277,6 +2318,7 @@ private final class TitleBarView: NSView, TokenThemed {
         layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(in: self)
         closeButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         providerMarkView.contentTintColor = BrandMark96.foreground(in: self)
+        if let titleEditor { styleTitleEditor(titleEditor) }
         needsDisplay = true
     }
 
@@ -2454,6 +2496,10 @@ private final class TitleBarView: NSView, TokenThemed {
     /// after corner overlay + close button were added.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard bounds.contains(point) else { return nil }
+        // An open title rename takes its own clicks (caret placement, selection).
+        if let titleEditor, titleEditor.frame.contains(point) {
+            return titleEditor.hitTest(point) ?? titleEditor
+        }
         // Drawn controls are not in the window; never hand one to AppKit.
         if drawsControlsInline { return self }
         if closeButton.frame.contains(point) {
@@ -2516,6 +2562,108 @@ private final class TitleBarView: NSView, TokenThemed {
         super.rightMouseDown(with: event)
     }
 
+
+    // MARK: - Inline title rename
+
+    /// The bar whose title is being edited, if any. One editor app-wide, like a
+    /// zone rename: the key monitor commits it before an app chord consumes the key.
+    private(set) static weak var activeTitleEditBar: TitleBarView?
+    private var titleEditor: NSTextField?
+    private var titleEditInitialText = ""
+    private var titleEditCommit: ((String) -> Void)?
+    /// `selectText(_:)` ends any current editing synchronously; that end belongs
+    /// to the setup, not to the user.
+    private var isOpeningTitleEdit = false
+
+    var isEditingTitle: Bool { titleEditor != nil }
+    fileprivate var isOpeningTitleEditForDelegate: Bool { isOpeningTitleEdit }
+    var titleEditorForQA: NSTextField? { titleEditor }
+
+    /// Open a field over the drawn title, holding `text` selected. Enter or focus
+    /// loss commits, Escape cancels, and an empty or unchanged name keeps the old
+    /// one — the sidebar row's rules (`AgentInboxView.endRename`).
+    @discardableResult
+    func beginTitleEdit(text: String, onCommit: @escaping (String) -> Void) -> Bool {
+        guard titleEditor == nil, window != nil else { return false }
+        Self.activeTitleEditBar?.endTitleEdit(commit: true)
+        let theme = effectiveTokenTheme
+        let scale = chromeScale
+        let title = titleRect(theme: theme)
+        let inset = CGFloat(Space.xs) * scale
+        let height = min(bounds.height - 2, title.height + 2 * inset)
+        // At least the title's guaranteed width, so a narrow pill-crowded bar
+        // still gets a usable field; never past the bar.
+        let leading = max(0, title.minX - inset)
+        let width = min(bounds.width - leading, max(title.width + 2 * inset, Self.titleMinimumWidth * scale))
+        let field = NSTextField(frame: NSRect(
+            x: leading, y: (bounds.height - height) / 2, width: max(1, width), height: height))
+        field.stringValue = text
+        field.font = NSFont.systemFont(ofSize: titleFontWorldSize, weight: .medium)
+        field.isBezeled = false
+        field.isBordered = false
+        field.drawsBackground = true
+        field.focusRingType = .none
+        field.usesSingleLineMode = true
+        field.lineBreakMode = .byTruncatingTail
+        field.cell?.isScrollable = true
+        field.wantsLayer = true
+        field.layer?.applyCorner(.control)
+        field.layer?.masksToBounds = true
+        field.layer?.borderWidth = CGFloat(LineWidth.hairline)
+        field.delegate = self
+        field.setAccessibilityIdentifier("ContinuumAgentTileRenameField")
+        field.setAccessibilityLabel("Agent name")
+        styleTitleEditor(field)
+        addSubview(field, positioned: .above, relativeTo: nil)
+        titleEditor = field
+        titleEditInitialText = text
+        titleEditCommit = onCommit
+        Self.activeTitleEditBar = self
+        isOpeningTitleEdit = true
+        defer { isOpeningTitleEdit = false }
+        window?.makeFirstResponder(field)
+        field.selectText(nil)
+        return true
+    }
+
+    /// The sidebar's and the zone's pair: an editable field floating over chrome
+    /// is an `overlay` surface carrying `textPrimary`, ringed in `focusRing`.
+    private func styleTitleEditor(_ field: NSTextField) {
+        let text = TextToken.textPrimary.color.nsColor(in: self)
+        let surface = SurfaceToken.overlay.color.nsColor(in: self)
+        field.textColor = text
+        field.backgroundColor = surface
+        field.layer?.borderColor = AgentLineRole.focusRing.color.cgColor(in: self)
+        // The field editor copied the colours when editing began and paints
+        // over the field while it is open; an appearance change must reach it.
+        if let editor = field.currentEditor() as? NSTextView {
+            editor.textColor = text
+            editor.backgroundColor = surface
+            editor.insertionPointColor = text
+            (editor.enclosingScrollView?.contentView ?? editor.superview as? NSClipView)?.backgroundColor = surface
+        }
+    }
+
+    /// Close the editor. State is cleared BEFORE the field leaves the bar:
+    /// removing a field that holds the field editor posts
+    /// `controlTextDidEndEditing` synchronously, which must find nothing to do.
+    func endTitleEdit(commit: Bool) {
+        guard let field = titleEditor else { return }
+        let typed = field.currentEditor()?.string ?? field.stringValue
+        let initial = titleEditInitialText
+        let onCommit = titleEditCommit
+        titleEditor = nil
+        titleEditCommit = nil
+        if Self.activeTitleEditBar === self { Self.activeTitleEditBar = nil }
+        let hadFocus = window?.firstResponder === field.currentEditor()
+        field.removeFromSuperview()
+        // Hand the keyboard back to the tile rather than leaving it nowhere.
+        if hadFocus, let tile = superview { window?.makeFirstResponder(tile) }
+        guard commit else { return }
+        let trimmed = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != initial else { return }
+        onCommit?(trimmed)
+    }
 
     func makeTileContextMenu() -> NSMenu {
         let menu = NSMenu(title: "Tile")
@@ -3027,4 +3175,26 @@ private final class AffordanceOverlayView: NSView {
     }
 
     private func px(_ value: CGFloat) -> String { "\(Int(value.rounded()))px" }
+}
+
+extension TitleBarView: NSTextFieldDelegate {
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === titleEditorForQA else { return false }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            endTitleEdit(commit: true)
+            return true
+        }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            endTitleEdit(commit: false)
+            return true
+        }
+        return false
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        // Focus loss commits; the transient end `selectText(_:)` posts while the
+        // field is being installed does not.
+        guard !isOpeningTitleEditForDelegate, (obj.object as? NSTextField) === titleEditorForQA else { return }
+        endTitleEdit(commit: true)
+    }
 }

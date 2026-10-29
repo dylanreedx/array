@@ -1162,7 +1162,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let locationItems = location?.items ?? []
         locationItems.forEach { location?.removeItem($0) }
         return makeFaceMenuItems() + locationItems + (locationItems.isEmpty ? [] : [.separator()]) + makePageZoomMenuItems() + [root]
-            + makeIdentityColorMenuItems() + makeWorkspaceToolsMenuItems() + makeBackgroundProcessesMenuItems()
+            + makeRenameMenuItems() + makeIdentityColorMenuItems() + makeWorkspaceToolsMenuItems() + makeBackgroundProcessesMenuItems()
     }
 
     // MARK: - Terminal face (.plans/79-session-handoff)
@@ -1727,6 +1727,36 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
         }
         setTitleBarTint(style == .topBar ? identityColor?.withAlphaComponent(Self.identityBarAlpha) : nil)
+    }
+
+    /// "Rename" — the title's inline editor, for when a double-click is not what
+    /// the user reaches for. ABSENT for a tile with no agent: the name belongs to
+    /// the agent's record, never to the tile.
+    private func makeRenameMenuItems() -> [NSMenuItem] {
+        guard let agentID = attachedAgentID, agentSource?.records[agentID] != nil else { return [] }
+        let item = NSMenuItem(title: "Rename", action: #selector(renameFromMenu(_:)), keyEquivalent: "")
+        item.target = self
+        item.identifier = NSUserInterfaceItemIdentifier("agentTile.rename")
+        return [item]
+    }
+
+    @objc private func renameFromMenu(_ sender: NSMenuItem) {
+        beginTitleRename()
+    }
+
+    /// Edit the agent's name in place over the title. It commits through the
+    /// supervisor's one rename path, as the sidebar row does, so the record, the
+    /// row and this title change together and persist; a person's rename is
+    /// `.manual`, which nothing automatic and no proactive agent may replace.
+    @discardableResult
+    override func beginTitleRename() -> Bool {
+        guard let agentID = attachedAgentID, let supervisor = agentSource,
+              let record = supervisor.records[agentID] else { return false }
+        // The real controls must be in the window to host a field.
+        wakeChrome()
+        return beginTitleEdit(text: record.humanDisplayName) { [weak supervisor] name in
+            _ = supervisor?.rename(agentID: agentID, to: name)
+        }
     }
 
     /// "Color" — None and the zone palette, the current one checked. The same

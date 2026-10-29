@@ -1,8 +1,11 @@
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
 extension WorkspaceAPIService {
     /// Record mutation only: never opens, hydrates, navigates or touches a runner.
+    /// Sets the identity colour, the display name, or both; the name follows the
+    /// proactive/requested rule (`AgentRenameIntent`).
     func updateAgent(
         agentId: AgentID, record: AgentRecord, ownHandle: CheckoutHandle, requestId: String,
         payload: [String: Any], runtime: WorkspaceRuntime, canvas: CanvasNSView,
@@ -13,11 +16,18 @@ extension WorkspaceAPIService {
             request = try JSONDecoder().decode(AgentUpdateRequest.self,
                 from: JSONSerialization.data(withJSONObject: payload))
         } catch {
-            return .error(WorkspaceAPIError(code: .invalidRequest, message: "agentId and an explicit identityColor (palette name or null) are required."))
+            return .error(WorkspaceAPIError(code: .invalidRequest, message: "agentId and at least one of identityColor (palette name or null) or displayName with nameIntent (requested or proactive) are required."))
         }
-        if let color = request.identityColor, !ZoneColorConfig.palette.contains(color) {
+        if request.setsIdentityColor, let color = request.identityColor, !ZoneColorConfig.palette.contains(color) {
             return .error(WorkspaceAPIError(code: .invalidRequest, message: "identityColor must be a palette name or null. Allowed: \(ZoneColorConfig.palette.joined(separator: ", "))."))
         }
+        // The sidebar's and the tile's own rule (same sanitiser, same cap), so an
+        // agent cannot store a name a person could not have typed.
+        let label = request.displayName.flatMap(AgentSupervisor.sanitizedDisplayName)
+        if request.displayName != nil, label == nil {
+            return .error(WorkspaceAPIError(code: .invalidRequest, message: "displayName must contain visible text. Nothing was changed."))
+        }
+        let nameSource: AgentDisplayNameSource = request.nameIntent == .requested ? .requested : .agent
         let key = request.idempotencyKey ?? requestId
         var normalized = request
         normalized.idempotencyKey = nil
@@ -49,9 +59,24 @@ extension WorkspaceAPIService {
             }
             return target
         }
-        guard targetInScope() != nil else {
+        guard let scopedTarget = targetInScope() else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "This agent may not change that agent."))
         }
+        // A name somebody chose only yields to a request. Checked before any
+        // approval prompt, so the user is never asked to allow a refusal, and
+        // again at commit in case a person renamed it meanwhile.
+        func nameRefusal(_ target: AgentRecord) -> Reply? {
+            guard let label else { return nil }
+            if AgentName.isIdentifier(label, model: target.model, role: target.role, id: target.id.rawValue) {
+                return .error(WorkspaceAPIError(code: .invalidRequest, message: "displayName must be a human title, not a model, role or agent id. Nothing was changed."))
+            }
+            if request.nameIntent == .proactive, target.displayNameSource.refusesProactiveRename {
+                let who = target.displayNameSource == .manual ? "the user typed" : "was set on request"
+                return .error(WorkspaceAPIError(code: .targetConflict, message: "This name \(who), so a proactive rename may not replace it. Rename only when the user (or the agent that asked) explicitly requests it, with nameIntent requested. Nothing was changed."))
+            }
+            return nil
+        }
+        if let refusal = nameRefusal(scopedTarget) { return refusal }
         let generation = revocationGeneration(for: agentId)
         if !isSelf {
             // The exact canvas-write grant, not an inspect/delegate permission.
@@ -90,18 +115,27 @@ extension WorkspaceAPIService {
               let target = targetInScope() else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "Access or target scope changed before the update."))
         }
-        let durability: AgentUpdateResult.Durability
-        if target.identityColor == request.identityColor {
-            durability = .unchanged
-        } else {
+        if let refusal = nameRefusal(target) { return refusal }
+        var durability = AgentUpdateResult.Durability.unchanged
+        if request.setsIdentityColor, target.identityColor != request.identityColor {
             guard supervisor.setIdentityColor(agentID: request.agentId, request.identityColor) else {
                 remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .agentUpdate, outcome: "durabilityFailed"))
                 return .error(WorkspaceAPIError(code: .outcomeUnknown, message: "durability_failed: the colour could not be saved. Re-query before retrying."))
             }
             durability = .committed
         }
+        if let label, target.displayName != label || target.displayNameSource != nameSource {
+            guard supervisor.rename(agentID: request.agentId, to: label, source: nameSource) else {
+                remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .agentUpdate, outcome: "durabilityFailed"))
+                let colour = durability == .committed ? " The colour change was saved." : ""
+                return .error(WorkspaceAPIError(code: .outcomeUnknown, message: "durability_failed: the name could not be saved.\(colour) Re-query before retrying."))
+            }
+            durability = .committed
+        }
+        let updated = supervisor.records[request.agentId] ?? target
         let result = AgentUpdateResult(
-            operationId: requestId, agentId: request.agentId, identityColor: supervisor.records[request.agentId]?.identityColor,
+            operationId: requestId, agentId: request.agentId, identityColor: updated.identityColor,
+            displayName: updated.humanDisplayName, nameSource: updated.displayNameSource.workspaceAPINameSource,
             revision: WorkspaceRevision(epoch: epoch, structure: runtime.structuralRevision), durability: durability)
         remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .agentUpdate, outcome: durability.rawValue))
         agentUpdateIdempotency[agentId, default: [:]][key] = CachedAgentUpdate(payloadHash: hash, result: result)

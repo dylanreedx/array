@@ -232,7 +232,8 @@ extension WorkspaceAPIService {
             tileId: record.tileId,
             parentAgentId: record.parentAgentID,
             status: observedStatus(for: record.id),
-            observedAt: record.lastActivityAt)
+            observedAt: record.lastActivityAt,
+            nameSource: record.displayNameSource.workspaceAPINameSource)
     }
 
     private func observedStatus(for id: AgentID) -> AgentObservedStatus {
