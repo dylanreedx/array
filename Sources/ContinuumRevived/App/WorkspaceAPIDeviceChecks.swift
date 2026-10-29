@@ -67,6 +67,14 @@ enum WorkspaceAPIDeviceChecks {
         let supervisor = f.delegate.qaAgentSupervisor
         defer { supervisor.stopAll() }
         supervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
+        let missingCheckout = await call(f.api, agent: f.agentId, op: "device.build_run", payload: [
+            "kind": "start", "sessionId": UUID().uuidString, "projectFile": "App.xcodeproj",
+            "scheme": "App", "idempotencyKey": "missing-checkout"])
+        let diagnostic = (missingCheckout["error"] as? [String: Any])?["message"] as? String ?? ""
+        try expect(code(missingCheckout) == "invalid_request" && diagnostic.contains("checkoutHandle") && diagnostic.contains("array_workspace_context"),
+            "a missing checkout must identify the required field and recovery tool, got \(missingCheckout)")
+        try expect(f.api.deviceBuildJobs.jobs.isEmpty, "a malformed request must start no build")
+        print("PASS: missing device build checkout returns actionable invalid_request before effects")
         let factory = IOSPreviewRuntime.sessionFactory
         var native: [Native] = []
         var reclaimDuringStart = false

@@ -38,6 +38,9 @@ extension WorkspaceAPIService {
             guard let record = supervisor.records[agentId], record.workspaceToolsEnabled else {
                 throw WorkspaceAPIError(code: .permissionDenied, message: "Workspace tools are not enabled for this caller.")
             }
+            guard let checkoutText = payload["checkoutHandle"] as? String, CheckoutHandle(rawValue: checkoutText) != nil else {
+                throw WorkspaceAPIError(code: .invalidRequest, message: "checkoutHandle is required on every device call, including device.build_run. Copy your explicit Home checkoutHandle from array_workspace_context; sessionId does not replace it.")
+            }
             let request = try JSONDecoder().decode(DeviceRequest.self, from: JSONSerialization.data(withJSONObject: payload))
             let checkout = Self.ownCheckoutHandle(record)
             guard request.checkoutHandle == checkout, let known = knownCheckouts()[checkout], let project = known.projectId,

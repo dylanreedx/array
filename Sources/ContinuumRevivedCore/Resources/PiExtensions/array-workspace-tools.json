@@ -1193,6 +1193,7 @@
       "description": "Start or cancel a service-owned Debug iOS Simulator build/install/launch job on your exact preview session. Returns an operationId immediately; poll array_get_operation for tagged deviceBuild state and a bounded private log tail. Uses a fresh build directory, verifies one simulator app, and never installs after a failed or cancelled compilation. 900-second job budget; no archive, signing, upload, arbitrary argv/env, shell or eval.",
       "promptSnippet": "Build and run an iOS app on your exact simulator; poll its operationId",
       "promptGuidelines": [
+        "Always include checkoutHandle from array_workspace_context in every build_run call. A sessionId never replaces this required checkout scope.",
         "Use your explicit Home checkout and an owned session. projectFile is a checkout-relative .xcodeproj or .xcworkspace path; scheme must exist in that exact container.",
         "Under Ask first, visual preview approval does not authorize building. Use the existing build approval flow.",
         "Start requires a stable idempotencyKey. Success, failure and cancellation retain the original operation identity; a changed payload conflicts. Never blindly repeat an uncertain installation with a new key.",
@@ -1204,7 +1205,8 @@
         "type": "object",
         "properties": {
           "checkoutHandle": {
-            "type": "string"
+            "type": "string",
+            "description": "Required on every call: your explicit Home checkoutHandle from array_workspace_context, including when sessionId is present."
           },
           "kind": {
             "type": "string",
