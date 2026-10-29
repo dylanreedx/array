@@ -1,0 +1,2 @@
+{"type":"thread.started","thread_id":"<redacted>"}
+{"type":"turn.completed","usage":{"input_tokens":8872,"cached_input_tokens":6656,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}
