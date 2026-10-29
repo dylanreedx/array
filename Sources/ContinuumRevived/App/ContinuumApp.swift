@@ -2252,6 +2252,20 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--workspace-api-device-browser-live-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runWorkspaceAPIDeviceBrowserLiveChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--workspace-api-live-delegation-check") {
             _ = NSApplication.shared
             Task { @MainActor in
