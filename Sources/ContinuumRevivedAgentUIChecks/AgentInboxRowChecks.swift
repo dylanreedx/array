@@ -545,11 +545,11 @@ private func runRecededContrastCheck() {
     }
     expect(measured == pairs.count * TokenTheme.allCases.count,
            "both themes were measured for every faded pair — \(measured)")
-    // PINNED, like P1.3's own worst-case table: the fade's headroom is 0.08 over
+    // PINNED, like P1.3's own worst-case table: the fade's headroom is 0.06 over
     // the floor, so a palette tweak that still clears AA at full strength but
     // eats that headroom goes red here rather than shipping unreadable.
-    expect(abs(worst.ratio - 4.58) < 0.01,
-           "the worst faded pair is 4.58:1 (textSecondary on canvas, light), got "
+    expect(abs(worst.ratio - 4.56) < 0.01,
+           "the worst faded pair is 4.56:1 (textSecondary on canvas, light), got "
             + "\(String(format: "%.2f", worst.ratio)):1 at \(worst.label)")
 
     // THE TOKEN IS THE MEASURED MAXIMUM, not a number someone liked: one

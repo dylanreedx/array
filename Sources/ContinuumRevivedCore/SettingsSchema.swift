@@ -52,6 +52,14 @@ public enum SettingsSchema {
     private static func appearance() -> SettingsSection {
         SettingsSection(id: "appearance", title: "Appearance", iconSystemName: "paintbrush",
                         keywords: ["theme", "dark", "light", "look", "colour", "color"], groups: [
+            SettingsGroup(id: "appearance.theme", title: "Theme", rows: [
+                SettingsRow(.choice(key: AppTheme.defaultsKey, label: "App theme",
+                                    options: AppTheme.allCases.map(\.rawValue),
+                                    default: AppTheme.fallback.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: AppTheme.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "Ten neutral palettes. Changes apply immediately across the app.",
+                            keywords: ["neutral", "palette", "grey", "gray", "black", "white"]),
+            ]),
             SettingsGroup(id: "appearance.canvasBackground", title: "Canvas background", rows: [
                 SettingsRow(.custom(id: "canvasBackground", label: "Canvas background")),
             ]),

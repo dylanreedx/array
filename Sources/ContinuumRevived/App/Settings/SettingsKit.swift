@@ -427,3 +427,110 @@ struct EmbeddedAppKitView: NSViewRepresentable {
         return CGSize(width: width, height: height)
     }
 }
+
+
+/// Compact native theme cards, using the same semantic surfaces as the app.
+struct NeutralThemePickerRow: View {
+    let model: SettingsModel
+    let row: SettingsRow
+
+    var body: some View {
+        let binding = model.binding(for: row.field)
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
+            ForEach(AppTheme.allCases, id: \.self) { theme in
+                Button { binding.set(.string(theme.rawValue)) } label: {
+                    ThemePreviewCard(theme: theme, selected: binding.string == theme.rawValue)
+                        .environment(\.colorScheme, theme.appearance == .dark ? .dark : .light)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(theme.title), \(theme.appearance.rawValue) theme")
+                .accessibilityAddTraits(binding.string == theme.rawValue ? .isSelected : [])
+                .accessibilityIdentifier("ArraySettingsTheme.\(theme.rawValue)")
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct ThemePreviewCard: View {
+    let theme: AppTheme
+    let selected: Bool
+    @State private var cornerStyle = CornerStyle.current
+
+    private func surface(_ token: SurfaceToken) -> Color {
+        Color(nsColor: token.color(for: theme).nsColor(for: theme.appearance))
+    }
+
+    private var foreground: Color {
+        Color(nsColor: TextToken.textPrimary.color.nsColor(for: theme.appearance))
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            surface(.tileBody)
+            GeometryReader { geometry in
+                VStack(alignment: .leading, spacing: 8) {
+                    Rectangle().fill(surface(.tileChrome)).frame(width: geometry.size.width * 0.62, height: 11)
+                    Rectangle().fill(foreground.opacity(0.035)).frame(width: geometry.size.width * 0.23, height: 3)
+                    Rectangle().fill(foreground.opacity(0.035)).frame(width: geometry.size.width * 0.47, height: 3)
+                    Rectangle().fill(surface(.tileChrome)).frame(width: geometry.size.width * 0.74, height: 12).padding(.top, 6)
+                    Rectangle().fill(surface(.cardMessage)).frame(width: geometry.size.width * 0.82, height: 13)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 22)
+            }
+            LinearGradient(colors: [surface(.tileBody).opacity(0), surface(.tileBody)], startPoint: .top, endPoint: .bottom)
+                .frame(height: 94)
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(spacing: 6) {
+                    ThemeCardTitle(theme: theme).fixedSize()
+                    Spacer()
+                    if selected {
+                        Image(systemName: "checkmark.circle.fill").font(.system(size: 13))
+                    }
+                }
+                HStack(spacing: -3) {
+                    ForEach([SurfaceToken.canvas, .panel, .tileChrome, .cardMessage, .overlay], id: \.self) { token in
+                        Circle().fill(surface(token))
+                            .overlay(Circle().stroke(foreground.opacity(0.5), lineWidth: 0.5))
+                            .frame(width: 11, height: 11)
+                    }
+                }
+                .accessibilityHidden(true)
+            }
+            .foregroundStyle(foreground)
+            .padding(16)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 150)
+        .clipShape(RoundedRectangle(cornerRadius: cornerStyle.cgRadius(12), style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: cornerStyle.cgRadius(12), style: .continuous))
+        .onCornerStyleChange($cornerStyle)
+    }
+}
+
+
+/// Native label keeps its intrinsic width through AppKit appearance flips inside
+/// the mixed light/dark preview grid. The parent button owns accessibility.
+private struct ThemeCardTitle: NSViewRepresentable {
+    let theme: AppTheme
+
+    func makeNSView(context: Context) -> NSTextField {
+        let label = NSTextField(labelWithString: theme.title)
+        label.font = .systemFont(ofSize: 13, weight: .semibold)
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        label.setAccessibilityElement(false)
+        return label
+    }
+
+    func updateNSView(_ label: NSTextField, context: Context) {
+        label.stringValue = theme.title
+        label.appearance = NSAppearance(named: theme.appearance == .dark ? .darkAqua : .aqua)
+        label.textColor = TextToken.textPrimary.color.nsColor(for: theme.appearance)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextField, context: Context) -> CGSize? {
+        nsView.intrinsicContentSize
+    }
+}

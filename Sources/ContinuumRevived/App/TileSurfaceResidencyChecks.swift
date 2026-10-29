@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedCore
+import ContinuumRevivedAgentUI
 import Foundation
 
 /// Does surface residency actually hold its promises in PRODUCTION code?
@@ -1587,6 +1588,40 @@ enum TileSurfaceResidencyChecks {
             try expect(world.canvas.tileSurfaceStore.surface(for: tile.id)?.revision == wanted,
                        "a re-baked surface does not match the tile's current revision")
         }
+    }
+
+    /// A same-appearance theme switch must retire baked pixels, not just chrome.
+    static func checkThemeChangeGivesTheBodyBack() throws {
+        let previous = AppTheme.current
+        defer { AppThemeController.apply(previous) }
+        AppThemeController.apply(.neutral)
+        let world = World(tileCount: 4)
+        defer { world.teardown() }
+        world.window.appearance = NSAppearance(named: .darkAqua)
+        world.canvas.surfaceResidencyEnabled = true
+        world.quiesceAndSurface()
+        try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
+                   "theme witness requires all four real agent bodies surfaced")
+        let tile = world.tiles[0]
+        guard let before = world.canvas.tileSurfaceStore.surface(for: tile.id) else {
+            throw Failure(message: "theme witness has no original baked pixels")
+        }
+        let oldPixels = UIProbe.digest(of: NSBitmapImageRep(cgImage: before.image))
+        AppThemeController.apply(.black)
+        world.evaluateResidency()
+        try expect(world.canvas.qaSurfacedTileViews.isEmpty,
+                   "same-appearance theme switch left old baked pixels visible")
+        try expect(world.canvas.tileSurfaceStore.totalBytes == 0,
+                   "same-appearance theme switch retained stale surfaces")
+        world.evaluateResidency(passes: 4)
+        guard let after = world.canvas.tileSurfaceStore.surface(for: tile.id) else {
+            throw Failure(message: "theme witness did not rebake the agent body")
+        }
+        try expect(after.revision == world.agentViews[tile.id]?.currentSurfaceRevision,
+                   "rebaked theme does not match the current tile")
+        try expect(UIProbe.digest(of: NSBitmapImageRep(cgImage: after.image)) != oldPixels,
+                   "rebaked body still paints the previous theme")
+        print("AppTheme surface witness: Neutral → Black in darkAqua retired and repainted four real surfaced agents")
     }
 
     /// **A screen reader must find the real body, in the right place.**

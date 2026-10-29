@@ -1,0 +1,60 @@
+{
+  "status": "Feature complete and targeted checks pass; release gate incomplete and failing outside theme checks",
+  "date": "2026-10-29T04:12:34.440378+00:00",
+  "git_head": "18b0f3da1274e7ccff7ba672e56b5b913388e2b6",
+  "scope": "Native macOS app colours and Settings only; no website changes or publishing",
+  "themes": [
+    "Neutral",
+    "Black",
+    "Carbon",
+    "Ink",
+    "Graphite",
+    "Stone",
+    "Silver",
+    "Paper",
+    "Chalk",
+    "Contrast"
+  ],
+  "columns": 3,
+  "previews": "Native Settings cards using actual semantic palette values, names, swatches and selection state",
+  "persistence_key": "array.appearance.theme",
+  "default": "neutral",
+  "choices": {
+    "dark": 6,
+    "light": 4
+  },
+  "checks": {
+    "swift_run_ContinuumRevivedAgentUIChecks": "PASS; 4180 theme contrast measurements, including faded text and selected-appearance palette signatures",
+    "Array_--ui-probe-check": "PASS; native Settings writes, persistence, reset, twenty native-tile appearance/theme combinations, appearance census",
+    "same_appearance_surface_cache": "RED observed without theme ID; GREEN after cache revision includes selected theme, retiring and repainting four real agent bodies",
+    "Array_--ui-contrast-check": "PASS; 1474 rendered pairs",
+    "bundle": "PASS on final dev bundle; /tmp/array-themes-bundle-qa/manifest.json",
+    "colour_hygiene": "PASS; zero new violations",
+    "visual": "Reviewed real Settings in light and dark; live Paper \u2192 Black \u2192 Neutral switches preserve all visible card names. Native text labels avoid the SwiftUI clipping defect. Grid identity remains stable.",
+    "matrix": "INCOMPLETE: fast matrix with CONTINUUM_SKIP_UI_BASELINES=1 terminated before summary: scripts/run-matrix.sh: line 914: un_app_check: command not found. Theme and Settings checks reported PASS; display-dependent cache witness was separately run and passed.",
+    "live_switching": "PASS: Paper \u2192 Black \u2192 Neutral via the native Settings buttons; visible names remain legible after repeated switches. Production focus restored.",
+    "settings_gates": "PASS in matrix: SettingsSchemaChecks, SettingsPanelChecks, SettingsModalChecks, SettingsSearchChecks",
+    "matrix_ui": "PASS reported in matrix: theme suite, --ui-probe-check, --ui-geometry-check and --ui-pixel-check; display-dependent cache witness skip explicitly noted for matrix, separately passed with WindowServer"
+  },
+  "broader_matrix_failures_so_far": [
+    "FAILED: scripts/check-film-scenes.sh exited 1 \u2014 recorded; the matrix continues so one regression cannot hide the rest.",
+    "FAILED: scripts/capture-cli-fixtures.sh check exited 1 \u2014 recorded; the matrix continues so one regression cannot hide the rest.",
+    "FAILED: python3 scripts/check-notification-map.py --self-test exited 1 \u2014 recorded; the matrix continues so one regression cannot hide the rest.",
+    "FAILED: swift run ContinuumRevivedPaletteChecks exited 1 \u2014 recorded; the matrix continues so one regression cannot hide the rest.",
+    "FAILED: --agent-supervisor-check exited 1 \u2014 recorded; the matrix continues so one regression cannot hide the rest."
+  ],
+  "broader_matrix_log": "/tmp/array-themes-final-matrix.log",
+  "not_done": [
+    "No production build/sign/notarize/publish",
+    "No Git stage, commit or push",
+    "No baseline updates",
+    "Broader release gate is not green"
+  ],
+  "notes": [
+    "Several build attempts failed because source files changed while builds were running in the shared checkout; the final stable dev build passed.",
+    "A stale-colour surface regression and a real Settings label-clipping issue were found and fixed before the final validation.",
+    "The production app was not rebuilt or restarted; previews used the dev channel on ~/array-scratch.",
+    "On overnight handoff, the broad matrix process and its result watcher were no longer running. The script currently reads run_app_check at that location; concurrent script mutation may explain the truncated function name, but the cause is unverified. No gate rerun or other owner files modified."
+  ],
+  "broader_matrix_terminal_error": "scripts/run-matrix.sh: line 914: un_app_check: command not found"
+}

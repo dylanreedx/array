@@ -248,6 +248,7 @@ struct UIProbe {
     /// appearances of the same component actually differ.
     static func runUIProbeChecks() throws {
         _ = NSApplication.shared
+        try AppThemeChecks.run()
         // Reproduce production's app-level pin (`ContinuumApp` sets this at launch).
         // A probe that forgot to set its own appearance would inherit dark here, so
         // the `.aqua` assertions below can only pass if the probe really works.

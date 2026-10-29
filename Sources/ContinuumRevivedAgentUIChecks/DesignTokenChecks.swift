@@ -44,6 +44,20 @@ private func hueDrift(_ token: TokenColor) -> Double {
 private func f(_ value: Double) -> String { String(format: "%.2f", value) }
 
 func runDesignTokenChecks() {
+    // Inspect resolved app colours; status accents are intentionally separate.
+    let neutralTokens = SurfaceToken.allCases.map { ($0.rawValue, $0.color) }
+        + AgentSurfaceRole.allCases.map { ($0.rawValue, $0.color) }
+        + TextToken.allCases.map { ($0.rawValue, $0.color) }
+        + LineToken.allCases.map { ($0.rawValue, $0.color) }
+    for (name, token) in neutralTokens {
+        for theme in TokenTheme.allCases {
+            let color = token.resolved(for: theme)
+            expect(abs(color.r - color.g) < 0.000001 && abs(color.g - color.b) < 0.000001,
+                   "NeutralPalette: \(name) in \(theme.rawValue) retains a colour cast")
+        }
+    }
+    print("NeutralPalette: \(neutralTokens.count * TokenTheme.allCases.count) resolved app colours are achromatic")
+
     // 1. Totality — every token exists, in the expected number, and carries a
     //    DIFFERENT value per theme. An accidentally unthemed token is the way a
     //    "light mode" ends up being dark mode that does not crash.
@@ -195,21 +209,21 @@ func runDesignTokenChecks() {
     //    (the extremes of the surface ladder), which is the property that makes
     //    "clears its worst case" mean "clears all eleven".
     let pinnedWorst: [(foreground: String, theme: TokenTheme, background: String, ratio: Double)] = [
-        ("textPrimary", .light, "canvas", 15.05), ("textPrimary", .dark, "cardUserMessage", 12.09),
-        ("textSecondary", .light, "canvas", 5.99), ("textSecondary", .dark, "cardUserMessage", 6.53),
-        ("textOnAccent", .light, "accentFailed", 6.29), ("textOnAccent", .dark, "accentInput", 7.82),
-        ("border", .light, "canvas", 3.52), ("border", .dark, "cardUserMessage", 3.44),
-        ("borderStrong", .light, "canvas", 6.91), ("borderStrong", .dark, "cardUserMessage", 6.09),
-        ("accentWorking", .light, "canvas", 5.47), ("accentWorking", .dark, "cardUserMessage", 5.41),
-        ("accentApproval", .light, "canvas", 5.62), ("accentApproval", .dark, "cardUserMessage", 7.48),
-        ("accentInput", .light, "canvas", 6.32), ("accentInput", .dark, "cardUserMessage", 5.35),
-        ("accentFailed", .light, "canvas", 5.27), ("accentFailed", .dark, "cardUserMessage", 5.85),
-        ("accentDone", .light, "canvas", 5.90), ("accentDone", .dark, "cardUserMessage", 6.74),
+        ("textPrimary", .light, "canvas", 15.04), ("textPrimary", .dark, "cardUserMessage", 12.17),
+        ("textSecondary", .light, "canvas", 5.97), ("textSecondary", .dark, "cardUserMessage", 6.53),
+        ("textOnAccent", .light, "accentFailed", 6.29), ("textOnAccent", .dark, "accentInput", 7.81),
+        ("border", .light, "canvas", 3.50), ("border", .dark, "cardUserMessage", 3.44),
+        ("borderStrong", .light, "canvas", 6.87), ("borderStrong", .dark, "cardUserMessage", 6.10),
+        ("accentWorking", .light, "canvas", 5.48), ("accentWorking", .dark, "cardUserMessage", 5.44),
+        ("accentApproval", .light, "canvas", 5.63), ("accentApproval", .dark, "cardUserMessage", 7.52),
+        ("accentInput", .light, "canvas", 6.33), ("accentInput", .dark, "cardUserMessage", 5.38),
+        ("accentFailed", .light, "canvas", 5.28), ("accentFailed", .dark, "cardUserMessage", 5.88),
+        ("accentDone", .light, "canvas", 5.91), ("accentDone", .dark, "cardUserMessage", 6.78),
         // Program 96, round 8. The rose this replaced sat at 4.78 dark — the
         // tightest pair the table held, a quarter-point off the floor. The mint is
         // an ordinary member of the palette at both ends, and it handed
         // `textOnAccent`'s worst dark case back to `accentInput` on the way past.
-        ("accentReview", .light, "canvas", 5.41), ("accentReview", .dark, "cardUserMessage", 7.35)
+        ("accentReview", .light, "canvas", 5.42), ("accentReview", .dark, "cardUserMessage", 7.39)
     ]
     let gatedForegrounds = Set(pairs.map(\.foreground))
     expect(Set(pinnedWorst.map(\.foreground)) == gatedForegrounds,

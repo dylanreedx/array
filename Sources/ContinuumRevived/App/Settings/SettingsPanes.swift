@@ -7,6 +7,10 @@ import SwiftUI
 /// the selected pane.
 struct SettingsRootView: View {
     let model: SettingsModel
+    @State private var theme = AppTheme.current
+
+    @Environment(\.colorScheme) private var colorScheme
+    private var themeToken: TokenTheme { colorScheme == .dark ? .dark : .light }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -16,7 +20,11 @@ struct SettingsRootView: View {
             SettingsDetail(model: model)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color(nsColor: SurfaceToken.panel.color(for: theme).nsColor(for: themeToken)))
+        .tint(Color(nsColor: TextToken.textPrimary.color.nsColor(for: themeToken)))
+        .onReceive(NotificationCenter.default.publisher(for: AppThemeController.didChangeNotification)) { _ in
+            theme = AppTheme.current
+        }
     }
 }
 
@@ -92,12 +100,12 @@ private struct SettingsPaneList: View {
             model.selectPane(pane.id)
         } label: {
             Label(pane.title, systemImage: pane.iconSystemName ?? "gearshape")
-                .foregroundStyle(selected ? Color.white : Color.primary)
+                .foregroundStyle(selected ? Color(nsColor: .windowBackgroundColor) : Color.primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(RoundedRectangle(cornerRadius: cornerStyle.cgRadius(6), style: .continuous)
-                    .fill(selected ? Color.accentColor : Color.clear)
+                    .fill(selected ? Color.primary : Color.clear)
                     .onCornerStyleChange($cornerStyle))
                 .contentShape(Rectangle())
         }
@@ -160,18 +168,18 @@ private struct SettingsResultsList: View {
         } label: {
             VStack(alignment: .leading, spacing: 1) {
                 Text(result.entry.label)
-                    .foregroundStyle(selected ? Color.white : Color.primary)
+                    .foregroundStyle(selected ? Color(nsColor: .windowBackgroundColor) : Color.primary)
                 if let group = result.entry.groupTitle, group != result.entry.label {
                     Text(group)
                         .font(.caption)
-                        .foregroundStyle(selected ? Color.white.opacity(0.8) : Color.secondary)
+                        .foregroundStyle(selected ? Color(nsColor: .windowBackgroundColor).opacity(0.8) : Color.secondary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(RoundedRectangle(cornerRadius: cornerStyle.cgRadius(6))
-                .fill(selected ? Color.accentColor : Color.clear)
+                .fill(selected ? Color.primary : Color.clear)
                 .onCornerStyleChange($cornerStyle))
             .contentShape(Rectangle())
         }
@@ -338,6 +346,8 @@ struct SettingsFieldRow: View {
             ToggleRow(row: row, model: model)
         case let .choice(key, _, _, _, _) where key == AgentModelConfig.modelKey:
             SettingsModelPickerRow(model: model, row: row)
+        case let .choice(key, _, _, _, _) where key == AppTheme.defaultsKey:
+            NeutralThemePickerRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == CornerStyle.defaultsKey:
             PickerRow(row: row, model: model, segmented: true)
         case .choice:

@@ -1,69 +1,14 @@
 import Foundation
 
 // Ticket: docs/38-tickets/90-agent-ux/P1.3-surface-text-border-tokens.md
-//
-// The named palette. Today the "same" dark background exists as three different
-// values (desktop tile 0.08/0.10/0.13, its snapshot backing the same, iOS
-// 0.05/0.06/0.08), the tile border is white@0.25 on white@0.10 (1.68:1), and
-// muted text is Apple's `secondaryLabelColor` (3.95:1 on white) or
-// `tertiaryLabelColor` (2.07:1 on the message card) — both of which cannot clear
-// AA by construction. P0.4's gate measured 177 failing pairs over the real view
-// tree; `P0.4-FINDINGS.md` lists every one. Those failures are this file's input.
-//
-// Semantic names only, never colour names: `accentWorking`, not `blue`. Nothing
-// adopts these yet — P1.10 (tile) and P1.11 (chrome) do the adopting, P1.12 the
-// iOS side, and P1.6 turns `--ui-contrast-check` on against the real tree.
-//
-// HOW THE VALUES WERE CHOSEN — every one is a computed ratio, not taste:
-//
-//  * Dark surfaces start from the shipped literals (the transcript card fills are
-//    the existing 0.13/0.15/0.18 family, re-expressed on a hex grid) and are
-//    ordered canvas < panel < tileBody < tileChrome < overlay so a tile reads as
-//    an object sitting ON something.
-//  * Light surfaces are DESIGNED, not inverted (ruling 3): in light appearance
-//    the card fills become light tints carrying dark text. Keeping dark fills
-//    under Aqua is the shipped black-on-dark bug (~25 of the 177 pairs).
-//  * `textSecondary` is a house colour (ruling 1) — white-ish 0xAFB6C2 on dark,
-//    black-ish 0x54585F on light — verified against EVERY documented surface.
-//    Worst dark pair 6.53:1 (on `cardUserMessage`), worst light pair 5.99:1 (on
-//    `canvas`). Apple's semantic label colours are not used anywhere here.
-//  * Accents carry a darker light-appearance variant and a lighter dark one
-//    (ruling 2), with the hue held steady across themes so a status reads the
-//    same everywhere: measured hue drift is 0.9°–4.5° per accent, gated at ≤10°.
-//    Contrast is symmetric, so one value per theme serves accent-as-text AND
-//    accent-as-fill (with `textOnAccent`) — hence no separate `accentXText`.
-//    Worst accent-on-surface pair: 5.27:1 light, 5.35:1 dark.
-//  * `border` is 0x7A8290 / 0x767C86: worst 3.44:1 dark, 3.52:1 light. This is
-//    the tile outline, which delineates the tile as an object and therefore is
-//    NOT decorative (ruling 4) — the old white@0.25-on-white@0.10 at 1.68:1 is
-//    the "canvas looks like mush" defect, and it is a regression witness in
-//    `DesignTokenChecks`.
-//
-// MEASURED WORST CASE per foreground token, over its own legal backgrounds.
-// These are pinned to ±0.01 in `runDesignTokenChecks`, so a colour tweak that
-// still clears the floor goes red until this table is updated — the provenance
-// cannot go stale while the suite stays green:
-//
-//   token           light            dark               floor
-//   textPrimary     15.05 (canvas)   12.09 (cardUserMsg)  4.5
-//   textSecondary    5.99 (canvas)    6.53 (cardUserMsg)  4.5
-//   textOnAccent     6.29 (accFailed) 7.82 (accInput)      4.5
-//   border           3.52 (canvas)    3.44 (cardUserMsg)  3.0
-//   borderStrong     6.91 (canvas)    6.09 (cardUserMsg)  3.0
-//   accentWorking    5.47 (canvas)    5.41 (cardUserMsg)  4.5
-//   accentApproval   5.62 (canvas)    7.48 (cardUserMsg)  4.5
-//   accentInput      6.32 (canvas)    5.35 (cardUserMsg)  4.5
-//   accentFailed     5.27 (canvas)    5.85 (cardUserMsg)  4.5
-//   accentDone       5.90 (canvas)    6.74 (cardUserMsg)  4.5
-//   accentReview     5.41 (canvas)    7.35 (cardUserMsg)  4.5
-//
-// The worst background is `canvas` in light and `cardUserMessage` in dark for
-// every token — the two ends of the surface ladder — which is what makes
-// "clears its worst case" mean "clears all eleven surfaces".
-//
-// Every documented text/surface pair, both themes, is asserted in
-// `runDesignTokenChecks`. Pairing is explicit (`legalBackgrounds` /
-// `legalSurfaces`) so P1.6 gates real pairs rather than a cross-product.
+// Neutral app palette: shared by the native canvas, tiles, sidebar and controls.
+// Surface lightness retains the existing hierarchy; text and lines are neutral
+// too. Only semantic status accents carry hue. Transcript kinds keep distinct
+// neutral fills, with their labels and status accents carrying meaning.
+// Both appearances are measured by DesignTokenChecks and TokenContrastChecks:
+// text >= 4.5:1, semantic boundaries >= 3:1. Decorative separators are exempt.
+// Current worst-pair measurements are pinned in those checks, not historical
+// values copied from the former blue-tinted palette.
 
 /// A token's background: either a surface or an accent used as a fill. Text
 /// tokens name which of these they are legal on, which is what makes the
@@ -108,21 +53,22 @@ public enum SurfaceToken: String, CaseIterable, Sendable {
     case cardDiff
     case cardError
 
-    public var color: TokenColor {
+    public var color: TokenColor { color(for: AppTheme.current) }
+
+    public func color(for theme: AppTheme) -> TokenColor {
         switch self {
-        case .canvas: return TokenColor(light: srgb(0xE9EBEF), dark: srgb(0x0B0D10))
-        case .tileBody: return TokenColor(light: srgb(0xFAFBFC), dark: srgb(0x14171C))
-        case .tileChrome: return TokenColor(light: srgb(0xF1F3F6), dark: srgb(0x1C212A))
-        case .panel: return TokenColor(light: srgb(0xF5F6F9), dark: srgb(0x101318))
-        case .overlay: return TokenColor(light: srgb(0xFFFFFF), dark: srgb(0x232935))
-        case .cardMessage: return TokenColor(light: srgb(0xF0F2F5), dark: srgb(0x212630))
-        // Your own messages read as a distinct, slightly blue surface — the one
-        // card fill that carries a hue on purpose.
-        case .cardUserMessage: return TokenColor(light: srgb(0xE5EEFB), dark: srgb(0x26303F))
-        case .cardTool: return TokenColor(light: srgb(0xE8F3F5), dark: srgb(0x1F2A2D))
-        case .cardPlan: return TokenColor(light: srgb(0xEFEBFA), dark: srgb(0x262330))
-        case .cardDiff: return TokenColor(light: srgb(0xE6F4E9), dark: srgb(0x1F2B23))
-        case .cardError: return TokenColor(light: srgb(0xFBE9E9), dark: srgb(0x33191B))
+        case .canvas: return theme.surface(light: srgb(0xEBEBEB), dark: srgb(0x0D0D0D), role: rawValue)
+        case .tileBody: return theme.surface(light: srgb(0xFBFBFB), dark: srgb(0x171717), role: rawValue)
+        case .tileChrome: return theme.surface(light: srgb(0xF3F3F3), dark: srgb(0x212121), role: rawValue)
+        case .panel: return theme.surface(light: srgb(0xF6F6F6), dark: srgb(0x131313), role: rawValue)
+        case .overlay: return theme.surface(light: srgb(0xFFFFFF), dark: srgb(0x292929), role: rawValue)
+        case .cardMessage: return theme.surface(light: srgb(0xF2F2F2), dark: srgb(0x262626), role: rawValue)
+        // Your own messages retain a distinct neutral surface.
+        case .cardUserMessage: return theme.surface(light: srgb(0xEDEDED), dark: srgb(0x2F2F2F), role: rawValue)
+        case .cardTool: return theme.surface(light: srgb(0xF1F1F1), dark: srgb(0x282828), role: rawValue)
+        case .cardPlan: return theme.surface(light: srgb(0xECECEC), dark: srgb(0x252525), role: rawValue)
+        case .cardDiff: return theme.surface(light: srgb(0xF0F0F0), dark: srgb(0x272727), role: rawValue)
+        case .cardError: return theme.surface(light: srgb(0xEEEEEE), dark: srgb(0x202020), role: rawValue)
         }
     }
 
@@ -144,9 +90,9 @@ public enum TextToken: String, CaseIterable, Sendable {
 
     public var color: TokenColor {
         switch self {
-        case .textPrimary: return TokenColor(light: srgb(0x14171C), dark: srgb(0xF2F4F8))
-        case .textSecondary: return TokenColor(light: srgb(0x54585F), dark: srgb(0xAFB6C2))
-        case .textOnAccent: return TokenColor(light: srgb(0xFFFFFF), dark: srgb(0x0B0D10))
+        case .textPrimary: return TokenColor(light: srgb(0x171717), dark: srgb(0xF4F4F4))
+        case .textSecondary: return TokenColor(light: srgb(0x585858), dark: srgb(0xB5B5B5))
+        case .textOnAccent: return TokenColor(light: srgb(0xFFFFFF), dark: srgb(0x0D0D0D))
         }
     }
 
@@ -186,9 +132,9 @@ public enum LineToken: String, CaseIterable, Sendable {
 
     public var color: TokenColor {
         switch self {
-        case .border: return TokenColor(light: srgb(0x767C86), dark: srgb(0x7A8290))
-        case .borderStrong: return TokenColor(light: srgb(0x4A4F57), dark: srgb(0xA8B0BD))
-        case .separator: return TokenColor(light: srgb(0xDDE0E6), dark: srgb(0x2E343E))
+        case .border: return TokenColor(light: srgb(0x7C7C7C), dark: srgb(0x818181))
+        case .borderStrong: return TokenColor(light: srgb(0x4F4F4F), dark: srgb(0xAFAFAF))
+        case .separator: return TokenColor(light: srgb(0xE0E0E0), dark: srgb(0x343434))
         }
     }
 
@@ -221,100 +167,11 @@ public enum LineToken: String, CaseIterable, Sendable {
 }
 
 // Ticket: docs/38-tickets/91-agent-tile-ux/P0.3-semantic-tile-tokens.md
-//
-// The v2 agent tile's own vocabulary: five surfaces the shipped palette has no
-// name for (a composer field, a structured artifact, a fenced-code interior, a
-// selected row, a hovered row) and the four LINE ROLES `_DESIGN.md` §11 splits
-// meaning from decoration with.
-//
-// WHY THESE ARE NEW TYPES RATHER THAN NEW CASES. `SurfaceToken`/`LineToken` are
-// pinned by P1.3 down to a 22-token count, a 104-pair set and a per-token
-// worst-ratio table. Growing those enums would move numbers in
-// `DesignTokenChecks`/`TokenContrastChecks`, which this packet's file fence does
-// not include and which no v2 ticket has earned the right to renumber. So the
-// tile ladder is ADDITIVE and gated by its own pair set (`AgentTileTokens`),
-// leaving every shipped floor exactly where it is. The two sets merge into one
-// when the live tile migrates and the compatibility path is removed.
-//
-// NOTHING ADOPTS THESE HERE, by packet instruction ("no baseline moves"): P3.x
-// renderers and P4.x composer do the adopting.
-//
-// THE LINE-ROLE SPLIT is the point of the ticket. The prior pass applied WCAG
-// 1.4.11's 3:1 non-text floor to every edge, including decorative ones, which is
-// why the transcript reads as a stack of boxed cards. `_DESIGN.md` §11 splits:
-//
-//   decorativeHairline — containment and section separation. Conveys no state,
-//                        bounds no control, so 1.4.11 does not reach it. EXEMPT,
-//                        and measurably so: it does NOT clear 3:1 on any tile
-//                        surface (1.02–1.37:1), which is exactly why a semantic
-//                        role aliased onto it would be invisible as state.
-//   controlBoundary    — the outline of an interactive shape. Gated at 3.0.
-//   focusRing          — keyboard focus and selection. State-bearing, gated 3.0.
-//   attention          — approval, error, warning. Gated at the TEXT floor 4.5,
-//                        not 3.0, because the same accent labels the state in
-//                        words as well as drawing the ring (P1.6 made that call
-//                        for the approval dock; it holds here).
-//
-// Each role's colour IS a P1.3 token, never a fresh value: controlBoundary is
-// `border`, focusRing is `borderStrong`, attention takes its hue from the status
-// accent it reports, and only the decorative role resolves to the one exempt
-// token, `separator`. So every role is already gated on the eleven shipped
-// surfaces by P1.3's own sweep, and this file only has to gate it on the five new
-// ones. `runAgentTileTokenChecks` asserts that mapping by value, both themes,
-// which is what makes "a semantic line cannot be aliased to the hairline" a
-// measurement rather than a naming convention.
-//
-// MEASURED WORST CASE over the five new surfaces (pinned to ±0.01 in
-// `runAgentTileTokenChecks`, so a value tweak that still clears the floor goes
-// red until this table is updated):
-//
-//   foreground                 light            dark            floor
-//   textPrimary               13.98            11.20             4.5
-//   textSecondary              5.56             6.04             4.5
-//   controlBoundary            3.27             3.18             3.0
-//   focusRing                  6.42             5.64             3.0
-//   attention(approval)        5.23             6.92             4.5
-//   attention(error)           4.90             5.42             4.5
-//
-// The worst background is `rowSelected` in BOTH themes for every one of them —
-// it is the darkest light surface and the lightest dark one, i.e. the end of this
-// ladder — which is what makes "clears its worst case" mean "clears all five".
-//
-// HOW THE SURFACE VALUES WERE CHOSEN. Light luminance runs 0.767–0.920 and dark
-// 0.011–0.035, so every one is unambiguously a light surface under Aqua and a dark
-// one under dark (the rule P1.3 applies to `SurfaceToken`, asserted here too).
-// Where they land relative to the SHIPPED ladder, stated precisely because the
-// obvious claim — "all five sit inside it" — is FALSE and was caught in review:
-//
-//   * `composer`/`artifact`/`rowHover` do sit inside it, between `tileBody`
-//     (light 0.963466 / dark 0.008454) and the card fills.
-//   * `codeSubdued` light is 0.827565, a hair BELOW the shipped light floor
-//     `canvas` at 0.829723. Deliberate: a fenced-code interior is the most
-//     recessed thing in a tile, and it is still 15.01:1 under `textPrimary`.
-//   * `rowSelected` is past BOTH shipped ends — 0.767396 light against the
-//     shipped light minimum (`canvas`, 0.829723) and 0.035147 dark against the
-//     shipped dark maximum (`cardUserMessage`, 0.028849; `overlay.dark` is
-//     0.022002, so the dark extreme is a card fill, not the overlay). Also
-//     deliberate, and
-//     structural rather than incidental: a selected row has to out-step every card
-//     fill, which is exactly why it is every foreground's worst background in the
-//     pinned table above. `runAgentTileTokenChecks` asserts that extremity over
-//     all sixteen surfaces, so the pins cannot silently start describing a
-//     different surface. Note that this narrows an older claim without editing
-//     it: `SurfaceToken.canvas` is documented above as "the darkest/lightest
-//     extreme", and it remains exactly that for the ELEVEN shipped surfaces and
-//     for P1.3's own pinned table. Across all sixteen it is `rowSelected`, and
-//     P1.3's numbers are untouched because its pair set does not include these
-//     surfaces.
-//
-// `rowSelected`/`rowHover` are steps AWAY from `tileBody` measured against it:
-// 1.24/1.46:1 selected versus 1.06/1.10:1 hover (light/dark). Hover is
-// deliberately a whisper — it is transient pointer feedback — and selection is
-// deliberately the stronger step; neither carries state alone, since a selected
-// row also draws `focusRing`.
-
-/// The v2 tile's surfaces. Additive to `SurfaceToken`: these are the fills the
-/// shipped palette has no name for, and every one carries a light and a dark leaf.
+// Neutral tile surfaces. Selection remains the strongest step in both themes.
+// Line roles distinguish decorative containment from interactive boundaries,
+// focus, authorship and attention. AgentTileTokens measures the same text and
+// boundary floors on these additional surfaces; the check pins current margins.
+/// Surface roles used by the native agent tile and shared choice controls.
 public enum AgentSurfaceRole: String, CaseIterable, Sendable {
     /// The composer's editing field — a real surface, not a bezelled `NSTextField`.
     case composer
@@ -328,13 +185,15 @@ public enum AgentSurfaceRole: String, CaseIterable, Sendable {
     /// A hovered transcript row. Transient pointer feedback only.
     case rowHover
 
-    public var color: TokenColor {
+    public var color: TokenColor { color(for: AppTheme.current) }
+
+    public func color(for theme: AppTheme) -> TokenColor {
         switch self {
-        case .composer: return TokenColor(light: srgb(0xF4F6FA), dark: srgb(0x1A1F28))
-        case .artifact: return TokenColor(light: srgb(0xEDF0F5), dark: srgb(0x1E2430))
-        case .codeSubdued: return TokenColor(light: srgb(0xE7EBF1), dark: srgb(0x171C24))
-        case .rowSelected: return TokenColor(light: srgb(0xD8E4F6), dark: srgb(0x2B3547))
-        case .rowHover: return TokenColor(light: srgb(0xF2F4F7), dark: srgb(0x1B2028))
+        case .composer: return theme.surface(light: srgb(0xF5F5F5), dark: srgb(0x1F1F1F), role: rawValue)
+        case .artifact: return theme.surface(light: srgb(0xEFEFEF), dark: srgb(0x242424), role: rawValue)
+        case .codeSubdued: return theme.surface(light: srgb(0xE9E9E9), dark: srgb(0x1C1C1C), role: rawValue)
+        case .rowSelected: return theme.surface(light: srgb(0xE3E3E3), dark: srgb(0x353535), role: rawValue)
+        case .rowHover: return theme.surface(light: srgb(0xF4F4F4), dark: srgb(0x1E1E1E), role: rawValue)
         }
     }
 
@@ -468,75 +327,11 @@ public enum AgentTileTokens {
 }
 
 // Ticket: docs/38-tickets/94-sidebar-native-ux/P0.5-row-token-vocabulary.md
-//
-// The sidebar's interaction fill ladder: resting, multi-selected, hovered,
-// route-active. Queue 94's locked decision is that SURFACE IS RESERVED FOR
-// INTERACTION — a sidebar row paints no perimeter border and no status fill;
-// at rest it is the panel itself, and the only fills it ever takes are these
-// three, with SELECTION QUIETER THAN HOVER because hover is transient pointer
-// feedback and selection is a resting state you park on. That is T3 Code's
-// model (plan-sidebar-t3code-study.md: hover 8%, route-active 11%, selected 7%
-// foreground mixes), and it is deliberately the OPPOSITE loudness order from
-// the tile's `rowSelected`/`rowHover` above: a selected transcript row must
-// out-step every card fill and pairs with `focusRing`, so the tile ladder
-// steps 1.24/1.46:1 selected vs 1.06/1.10:1 hover. An inbox list has no card
-// fills to beat, and a selection you park on must not shout.
-//
-// WHY A NEW TYPE RATHER THAN NEW CASES. `AgentSurfaceRole` is pinned to five
-// cases in `runAgentTileTokenChecks`, its `rowSelected` extremity across the
-// sixteen-surface ladder is load-bearing for that suite's pinned worst-case
-// table, and its values are consumed live (ChoiceListView, ChoiceButton,
-// ComposerTextView, ApprovalRenderer) — so the tile enum must not grow and
-// its values must not move. Same call P0.3 made against P1.3's pinned enums;
-// `runSidebarSurfaceChecks` pins the tile row values to make it enforceable.
-//
-// NO INVENTED COLOURS. Every fill is `textPrimary` composited over `panel`
-// (the sidebar's own P1.3 surface) at a named alpha, using the same
-// `composited(over:alpha:)` model P3.5 gates the in-flight fade with. The
-// only new numbers are the three mix strengths, and they are T3 Code's, not
-// taste: selected 0.07 < hover 0.08 < active 0.11.
-//
-// MEASURED, both appearances, pinned to ±0.01 in `runSidebarSurfaceChecks`
-// (emphasis = contrast ratio of the resolved fill against the resting
-// `panel`):
-//
-//   role        alpha   light   dark    floor
-//   resting     0       1.00    1.00    —  (identity: it IS panel)
-//   selected    0.07    1.15    1.18    1.10
-//   hover       0.08    1.17    1.21    1.10
-//   active      0.11    1.25    1.32    1.20
-//
-// so hover > selected and active > hover hold BY MEASUREMENT in both themes,
-// and the suite asserts the strict ordering itself, not these pins alone.
-//
-// Every foreground the sidebar paints on the three fills is gated at its own
-// floor, worst case pinned (±0.01). The worst background is `sidebarActive`
-// in BOTH themes for every foreground — the strongest mix, the end of the
-// ladder:
-//
-//   foreground        light   dark    floor
-//   textPrimary       13.28   12.77    4.5
-//   textSecondary      5.28    6.89    4.5
-//   accentWorking      4.83    5.71    4.5
-//   accentApproval     4.96    7.89    4.5
-//   accentInput        5.58    5.65    4.5
-//   accentFailed       4.65    6.18    4.5
-//   accentDone         5.21    7.12    4.5
-//   accentReview       4.77    7.75    4.5
-//   controlBoundary    3.11    3.63    3.0
-//   focusRing          6.10    6.43    3.0
-//
-// `resting` contributes no pair: it resolves to `panel` exactly, and P1.3
-// already gates every text, accent, and line token there. Attention lines
-// are covered by value: `AgentLineRole.attentionAccents` are gated here as
-// status accents at the same 4.5 floor `attention` itself carries.
-//
-// NOTHING ADOPTS THESE YET, by packet instruction ("no baseline can move in
-// this packet"): the P1.x row work does the adopting.
-
-/// The sidebar row's interaction fills, quietest-first. Additive to
-/// `AgentSurfaceRole` for the reasons above; the two ladders serve different
-/// surfaces and deliberately disagree about selection loudness.
+// Sidebar interaction fills derive from the neutral foreground over panel.
+// Resting has no fill; selected (7%) < hover (8%) < route-active (11%).
+// SidebarTokens gates foreground contrast on each composite, and the checks
+// pin the resolved emphasis and current worst-case margins in both themes.
+/// The sidebar's neutral interaction ladder, quietest first.
 public enum SidebarSurfaceRole: String, CaseIterable, Sendable {
     /// A row at rest paints NO fill — this role resolves to `panel` itself,
     /// so "unfilled" is a measurable identity, not a view-layer promise.

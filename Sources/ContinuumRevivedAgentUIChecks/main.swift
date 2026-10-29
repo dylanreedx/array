@@ -46,6 +46,7 @@ runTokenContrastChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P1.3-surface-text-border-tokens.md
 runDesignTokenChecks()
+runAppThemeChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P1.4-type-scale.md
 runTypographyChecks()
@@ -927,19 +928,19 @@ func runAgentTileTokenChecks() {
     //    the table must name exactly the gated foregrounds — so a new foreground
     //    cannot skip it and a value tweak cannot silently invalidate it.
     let pinnedWorst: [(foreground: String, theme: TokenTheme, background: String, ratio: Double)] = [
-        ("textPrimary", .light, "rowSelected", 13.98), ("textPrimary", .dark, "rowSelected", 11.20),
-        ("textSecondary", .light, "rowSelected", 5.56), ("textSecondary", .dark, "rowSelected", 6.04),
-        ("controlBoundary", .light, "rowSelected", 3.27), ("controlBoundary", .dark, "rowSelected", 3.18),
+        ("textPrimary", .light, "rowSelected", 13.97), ("textPrimary", .dark, "rowSelected", 11.15),
+        ("textSecondary", .light, "rowSelected", 5.54), ("textSecondary", .dark, "rowSelected", 5.98),
+        ("controlBoundary", .light, "rowSelected", 3.25), ("controlBoundary", .dark, "rowSelected", 3.15),
         // A1's authorship rule. Identical to `controlBoundary` by construction —
         // both resolve to `LineToken.border`, so on the same worst background
         // they measure the same. Pinned separately anyway: if either role is ever
         // repointed at a different token, this is where that shows up.
-        ("authorship", .light, "rowSelected", 3.27), ("authorship", .dark, "rowSelected", 3.18),
-        ("focusRing", .light, "rowSelected", 6.42), ("focusRing", .dark, "rowSelected", 5.64),
+        ("authorship", .light, "rowSelected", 3.25), ("authorship", .dark, "rowSelected", 3.15),
+        ("focusRing", .light, "rowSelected", 6.38), ("focusRing", .dark, "rowSelected", 5.59),
         ("attention(accentApproval)", .light, "rowSelected", 5.23),
-        ("attention(accentApproval)", .dark, "rowSelected", 6.92),
+        ("attention(accentApproval)", .dark, "rowSelected", 6.89),
         ("attention(accentFailed)", .light, "rowSelected", 4.90),
-        ("attention(accentFailed)", .dark, "rowSelected", 5.42)
+        ("attention(accentFailed)", .dark, "rowSelected", 5.39)
     ]
     expect(Set(pinnedWorst.map(\.foreground)) == Set(pairs.map(\.foreground)),
            "AgentTileTokens: the pinned-margin table must cover exactly the gated foregrounds (table \(Set(pinnedWorst.map(\.foreground)).sorted()) vs gated \(Set(pairs.map(\.foreground)).sorted()))")
@@ -961,7 +962,7 @@ func runAgentTileTokenChecks() {
     //     into "absent" and hover cannot quietly overtake selection.
     let pinnedEmphasis: [(role: AgentSurfaceRole, theme: TokenTheme, ratio: Double, floor: Double)] = [
         (.rowSelected, .light, 1.24, 1.20), (.rowSelected, .dark, 1.46, 1.20),
-        (.rowHover, .light, 1.06, 1.05), (.rowHover, .dark, 1.10, 1.05)
+        (.rowHover, .light, 1.06, 1.05), (.rowHover, .dark, 1.08, 1.05)
     ]
     expect(Set(pinnedEmphasis.map(\.role)) == Set(AgentSurfaceRole.rowEmphases),
            "AgentTileTokens: the row-emphasis table must cover exactly the row emphases")
@@ -1073,11 +1074,11 @@ func runSidebarSurfaceChecks() {
     //    ApprovalRenderer) must not move under cover of this packet.
     expect(SidebarSurfaceRole.allCases.count == 4,
            "SidebarTokens: expected 4 sidebar roles, got \(SidebarSurfaceRole.allCases.count)")
-    expect(AgentSurfaceRole.rowSelected.color.light.hexKey == "D8E4F6"
-        && AgentSurfaceRole.rowSelected.color.dark.hexKey == "2B3547",
+    expect(AgentSurfaceRole.rowSelected.color.light.hexKey == "E3E3E3"
+        && AgentSurfaceRole.rowSelected.color.dark.hexKey == "353535",
            "SidebarTokens: the tile's adopted rowSelected moved (\(AgentSurfaceRole.rowSelected.color.light.hexKey)/\(AgentSurfaceRole.rowSelected.color.dark.hexKey)) — P0.5 adds a sidebar ladder, it does not retune the tile's")
-    expect(AgentSurfaceRole.rowHover.color.light.hexKey == "F2F4F7"
-        && AgentSurfaceRole.rowHover.color.dark.hexKey == "1B2028",
+    expect(AgentSurfaceRole.rowHover.color.light.hexKey == "F4F4F4"
+        && AgentSurfaceRole.rowHover.color.dark.hexKey == "1E1E1E",
            "SidebarTokens: the tile's adopted rowHover moved (\(AgentSurfaceRole.rowHover.color.light.hexKey)/\(AgentSurfaceRole.rowHover.color.dark.hexKey)) — P0.5 adds a sidebar ladder, it does not retune the tile's")
 
     // 2. Resting is the panel ITSELF — "at rest it is unfilled" as an
@@ -1247,19 +1248,19 @@ func runSidebarSurfaceChecks() {
     //     every foreground in both themes, so the pins cannot silently start
     //     describing a different fill.
     let pinnedWorst: [(foreground: String, theme: TokenTheme, ratio: Double)] = [
-        ("textPrimary", .light, 13.28), ("textPrimary", .dark, 12.77),
-        ("textSecondary", .light, 5.28), ("textSecondary", .dark, 6.89),
-        ("accentWorking", .light, 4.83), ("accentWorking", .dark, 5.71),
-        ("accentApproval", .light, 4.96), ("accentApproval", .dark, 7.89),
-        ("accentInput", .light, 5.58), ("accentInput", .dark, 5.65),
-        ("accentFailed", .light, 4.65), ("accentFailed", .dark, 6.18),
-        ("accentDone", .light, 5.21), ("accentDone", .dark, 7.12),
+        ("textPrimary", .light, 13.26), ("textPrimary", .dark, 12.74),
+        ("textSecondary", .light, 5.26), ("textSecondary", .dark, 6.83),
+        ("accentWorking", .light, 4.83), ("accentWorking", .dark, 5.69),
+        ("accentApproval", .light, 4.96), ("accentApproval", .dark, 7.87),
+        ("accentInput", .light, 5.58), ("accentInput", .dark, 5.63),
+        ("accentFailed", .light, 4.66), ("accentFailed", .dark, 6.16),
+        ("accentDone", .light, 5.21), ("accentDone", .dark, 7.10),
         // Program 96, round 8. The rose this replaced ran 4.75 against the
         // strongest fill — the tightest margin the table held. The mint is
         // ordinary at both ends; the failure red is now the tightest at 4.65.
-        ("accentReview", .light, 4.77), ("accentReview", .dark, 7.75),
-        ("controlBoundary", .light, 3.11), ("controlBoundary", .dark, 3.63),
-        ("focusRing", .light, 6.10), ("focusRing", .dark, 6.43)
+        ("accentReview", .light, 4.78), ("accentReview", .dark, 7.73),
+        ("controlBoundary", .light, 3.09), ("controlBoundary", .dark, 3.60),
+        ("focusRing", .light, 6.06), ("focusRing", .dark, 6.39)
     ]
     expect(Set(pinnedWorst.map(\.foreground)) == Set(pairs.map(\.foreground)),
            "SidebarTokens: the pinned-margin table must cover exactly the gated foregrounds (table \(Set(pinnedWorst.map(\.foreground)).sorted()) vs gated \(Set(pairs.map(\.foreground)).sorted()))")

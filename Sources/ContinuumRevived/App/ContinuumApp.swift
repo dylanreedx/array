@@ -5962,6 +5962,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // built. A check run keeps the Default so its geometry is the shipped one.
         if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) {
             CornerStyleController.adoptSavedStyle(defaults: settingsDefaults)
+            AppThemeController.adoptSavedTheme(defaults: settingsDefaults)
         }
 
         // Ticket 87: headless component snapshot for Layer-2 vision QA. Renders
@@ -16654,6 +16655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let center = NotificationCenter.default
         // Settings › Appearance › Corner style: re-render every window live.
         settingChangeObservers.append(CornerStyleController.observeSetting(defaults: settingsDefaults))
+        settingChangeObservers.append(AppThemeController.observeSetting(defaults: settingsDefaults))
         settingChangeObservers.append(center.addObserver(
             forName: SettingChangeEvent.name(for: SettingID(rawValue: BrowserInspectionPolicy.userDefaultsKey)),
             object: nil, queue: nil

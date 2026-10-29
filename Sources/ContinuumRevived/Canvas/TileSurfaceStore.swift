@@ -4,10 +4,9 @@ import ContinuumRevivedCore
 /// What a surface has to match to be admissible for a tile.
 ///
 /// Deliberately the smallest vector that can go stale: the content version the
-/// body was showing, the size it was laid out at, and the appearance it was drawn
-/// in. `.plans/34` B1 describes the full `RevisionVector` this grows into
-/// (resource and style epochs, scene generation); slice 1 needs three fields and
-/// gains nothing from the other three.
+/// body was showing, its laid-out size, macOS appearance, Array theme and accessory
+/// version. The theme is separate from appearance: Neutral and Black both use
+/// darkAqua, but their cached pixels cannot be interchanged.
 struct TileSurfaceRevision: Equatable {
     /// The family's own fingerprint of what its body renders — for an agent tile, a
     /// mix of `AgentDocument.version` and a counter over ingested events, because the
@@ -16,6 +15,7 @@ struct TileSurfaceRevision: Equatable {
     let contentVersion: UInt64
     let bodySize: CGSize
     let appearanceName: String
+    let appThemeID: String
     var accessoryVersion: UInt64 = 0
 }
 

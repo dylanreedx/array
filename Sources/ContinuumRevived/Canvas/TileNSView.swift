@@ -479,6 +479,7 @@ class TileNSView: NSView, TokenThemed {
             contentVersion: version,
             bodySize: body.bounds.size,
             appearanceName: body.effectiveAppearance.name.rawValue,
+            appThemeID: AppTheme.current.rawValue,
             accessoryVersion: accessoryVersion
         )
     }
