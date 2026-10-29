@@ -1,0 +1,53 @@
+{
+  "exports": [
+    "axFrontmost",
+    "SimCapture",
+    "axTypeKeyboardCharacter",
+    "setHardwareKeyboard",
+    "SimHID",
+    "axDescribe",
+    "axKeyboardVisible"
+  ],
+  "capture": [
+    "subscribe",
+    "start",
+    "stop",
+    "suspendForReboot",
+    "resumeAfterReboot",
+    "startRecording",
+    "stopRecording",
+    "updateStreamSettings",
+    "handleWebRTCOffer",
+    "closeWebRTCSession",
+    "webRTCSenderStats",
+    "activeScreenId",
+    "screenSize",
+    "subscribeScreenChanges",
+    "subscribeDeviceState",
+    "constructor"
+  ],
+  "input": [
+    "setScreen",
+    "touch",
+    "multiTouch",
+    "button",
+    "buttonHid",
+    "key",
+    "scroll",
+    "cancelScroll",
+    "digitalCrown",
+    "orientation",
+    "setHingeAngle",
+    "supportsHingeAngle",
+    "supportsPhysicalOrientation",
+    "hingeState",
+    "hingeControlEligibility",
+    "setHingePose",
+    "setPhysicalOrientation",
+    "setTableMode",
+    "memoryWarning",
+    "softwareKeyboard",
+    "caDebug",
+    "constructor"
+  ]
+}

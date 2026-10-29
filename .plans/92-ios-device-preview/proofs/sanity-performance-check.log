@@ -1,0 +1,18 @@
+PASS: production simulator connection settles
+PASS: real simulator frames reach the production canvas tile
+PERF: 15fps → 14.635042574950512 delivered fps, visual input p50 56.52833334170282ms / p95 75.3789166919887ms
+PERF: 30fps → 29.62016958188447 delivered fps, visual input p50 37.11704188026488ms / p95 55.459999945014715ms
+PERF: 60fps → 59.611441632954175 delivered fps, visual input p50 40.44183320365846ms / p95 65.17162499949336ms
+PASS: real iOS preview performance sweep completed at 15/30/60 fps
+PASS: production tile click reaches UIKit
+PASS: production tile focuses the iOS text field
+PASS: production keyboard events reach UIKit
+PASS: production paste path preserves Unicode/emoji
+PASS: production Rotate changes real iOS orientation
+PASS: rotated production tile maps touches correctly
+PASS: production tile reconnects in landscape
+PASS: portrait restored
+PASS: prepare device rotation
+PASS: device left in landscape
+PASS: fresh connection restores portrait before interaction
+IOSPreviewLiveTileChecks passed: production mount/palette, verified tool installation, authenticated helper, native frames, touch/paste/rotation and detach

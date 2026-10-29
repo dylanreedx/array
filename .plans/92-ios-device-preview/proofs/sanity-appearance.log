@@ -1,0 +1,14 @@
+UIProbe: probed 64 card/appearance pairs; 3 appearance-difference witnesses held; layer witness luminance aqua=1.000 darkAqua=0.118; rendered at declared scale 2.0x (host backing scale 2.0x — same as declared, so this host cannot witness display-independence)
+UIProbeAppearance: 386 layer colours + 454 non-layer colours across 63 adopted owners hold a DesignTokens value in both appearances (P1.10/P1.11)
+UIProbeAppearance: canvas SF Symbols are shared bitmap-only template images; NSImageView tint is included in the appearance census
+UIProbeAppearance: tile outline vs canvas — light 6.91:1; dark 8.90:1; witness (pre-ticket white@0.25 on white@0.10) 1.68:1 < 3.00 (P1.11 goal)
+UIProbeAppearance: 13 descriptor kinds x 2 appearances = 26 token fills; retired literals' widest pairwise ratio 1.13:1 (46 of 55 under 1.10:1), all 11 dark-only (P1.11 deviation, evidence pinned)
+UIProbeAppearance: 130 title-bar status-pill placements clear the drag handle and the tile title; 14 suppressed for want of room, title given the space instead (P1.11)
+UIProbeAppearance: 72 custom-composer assertions hold native editing, draft binding, empty/focus/selection states, paste/undo, accessibility, and light/dark tokens; stock-scroll-border mutation was rejected by the final custom-chrome assertion
+UIProbeAppearance: 22 semantic-transcript review assertions hold real light/dark propagation, quiet prose hierarchy, accessibility authorship, and custom-only controls
+UIProbeAppearance: 6 assistant-prose assertions hold tileBody inheritance, primary text, selection, and no card chrome in both appearances
+UIProbeAppearance: 10 rich-inline assertions hold nested native styles, link policy, theme repaint, and dual-format copy; unsafe-link negative witness remained inactive
+UIProbeAppearance: 10 user-prompt assertions hold no fill/no radius, the authorship rule, primary text, selection, no visual metadata, and non-color accessibility authorship in both appearances
+UIProbeAppearance: 330 TokenThemed views, 342 layer colours sentinelled and re-applied across a live flip (322 re-resolved to a different value); 6 hostile-current-appearance assertions held; token fixture holds both leaves; stale-fixture witness failed as required
+UIProbeAppearance: witness message — appearance.staleFixture after flip to .darkAqua: layer holds fill #FAFBFCFF / border #767C86FF, the dark leaves are #14171CFF / #7A8290FF — a CGColor assigned once at init does not follow the appearance
+ContinuumRevivedUIProbeChecks passed

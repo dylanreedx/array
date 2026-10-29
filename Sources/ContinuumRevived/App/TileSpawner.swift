@@ -1156,6 +1156,55 @@ final class TileSpawner {
         return .spawned(runtime)
     }
 
+    func spawnIOSPreview(targetZoneId explicitZoneID: UUID? = nil, at worldPoint: CGPoint? = nil) -> Result<IOSPreviewRuntime, Error> {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let targetZoneID = explicitZoneID ?? creationScopeProvider?()?.zoneId
+        let frame = makeProjectTilePlacement(worldPoint: worldPoint, size: CanvasEngine.defaultFrame(for: .iosPreview),
+                                             in: canvasView, targetZoneId: targetZoneID)
+        let tile = Tile(id: UUID(), kind: .iosPreview, title: "iOS Preview", frame: frame,
+                        zPosition: CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneID)),
+                        zoneId: targetZoneID, runtimeRef: nil, metadata: TileMetadata())
+        let runtime = IOSPreviewRuntime(tileID: tile.id, deviceID: nil)
+        let view = IOSPreviewTileNSView(tile: tile, runtime: runtime)
+        configureIOSPreview(view)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneID)
+        do { try persistThenArrange(tile.id, after: target, in: canvasView) }
+        catch { runtime.disconnect(); withdrawFailedSpawn(tile.id, target: target, in: canvasView); return .failure(error) }
+        return .success(runtime)
+    }
+
+    func restoreIOSPreviewTile(tileID: UUID) -> IOSPreviewRuntime? {
+        guard let canvasView, let tile = canvasView.tileRecord(for: tileID), tile.kind == .iosPreview else { return nil }
+        let runtime = IOSPreviewRuntime(tileID: tile.id, deviceID: tile.metadata.iosPreviewDeviceID)
+        let view = IOSPreviewTileNSView(tile: tile, runtime: runtime)
+        configureIOSPreview(view)
+        canvasView.materializeProjectTile(tileView: view, for: tile)
+        return runtime
+    }
+
+    private func configureIOSPreview(_ view: IOSPreviewTileNSView) {
+        view.buildProjectRoot = URL(fileURLWithPath: project.rootPath)
+        view.reservedShortcutHandler = reservedShortcutHandler
+        view.onDeviceSelection = { [weak self, weak view] deviceID in
+            guard let self, let canvas = self.canvasView, let view,
+                  let previous = canvas.tileRecord(for: view.tile.id) else { return }
+            var tile = previous
+            tile.metadata.iosPreviewDeviceID = deviceID
+            canvas.updateTile(tile, recalculateZoneBounds: false, notifyChange: false)
+            let target: CanvasNSView.ProjectTileTarget = tile.zoneId.flatMap {
+                canvas.installedZoneLayerIds.contains($0) ? .zoneLayer($0) : nil
+            } ?? .flatCanvasState
+            do {
+                try self.persistProjectCanvas(after: target, in: canvas)
+                view.tile = tile
+            } catch {
+                canvas.updateTile(previous, recalculateZoneBounds: false, notifyChange: false)
+                view.runtime.select(previous.metadata.iosPreviewDeviceID)
+                view.showPersistenceError()
+            }
+        }
+    }
+
     private func configureBrowserRuntime(_ runtime: WKWebViewBrowserRuntime, profileId: UUID) {
         runtime.reservedShortcutHandler = reservedShortcutHandler
         runtime.onNewWindowRequest = { [weak self, weak runtime] request, configuration, _, _ in

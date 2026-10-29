@@ -1,0 +1,1 @@
+FAIL: frame assembly/decode must not depend on the main queue

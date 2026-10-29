@@ -1,0 +1,7 @@
+PASS: live helper input admitted
+PASS: real simulator framebuffer decoded in AppKit
+PASS: AppKit click increments the real iOS button counter
+PASS: AppKit click focuses the real iOS text field
+PASS: native physical-key HID inserts text in the real iOS app
+PASS: Command-V pastes Unicode and emoji into the real iOS app
+IOS PREVIEW LIVE PROOF: touch, keyboard and Unicode paste PASS

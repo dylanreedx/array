@@ -163,6 +163,7 @@ extension Tile: Codable {
 public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
     case terminal
     case browser
+    case iosPreview
     case browserInspector
     case note
     case file
@@ -181,6 +182,7 @@ public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
         switch self {
         case .terminal: return "Terminal"
         case .browser: return "Browser"
+        case .iosPreview: return "iOS Preview"
         case .browserInspector: return "Inspector"
         case .note: return "Note"
         case .file: return "Editor"
@@ -279,6 +281,8 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     public var filePath: String?
     public var documentLocation: DocumentLocation?
     public var browserProfileId: UUID?
+    /// Machine-local simulator identity. Connections and helper endpoints are ephemeral.
+    public var iosPreviewDeviceID: String?
     public var linearTeamKey: String?
     public var linearTeamId: String?
     public var linearQuery: String?
@@ -315,6 +319,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         filePath: String? = nil,
         documentLocation: DocumentLocation? = nil,
         browserProfileId: UUID? = nil,
+        iosPreviewDeviceID: String? = nil,
         linearTeamKey: String? = nil,
         linearTeamId: String? = nil,
         linearQuery: String? = nil,
@@ -340,6 +345,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.filePath = filePath
         self.documentLocation = documentLocation
         self.browserProfileId = browserProfileId
+        self.iosPreviewDeviceID = iosPreviewDeviceID
         self.linearTeamKey = linearTeamKey
         self.linearTeamId = linearTeamId
         self.linearQuery = linearQuery
@@ -367,6 +373,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case filePath
         case documentLocation
         case browserProfileId
+        case iosPreviewDeviceID
         case linearTeamKey
         case linearTeamId
         case linearQuery
@@ -395,6 +402,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(filePath, forKey: .filePath)
         try container.encodeIfPresent(documentLocation, forKey: .documentLocation)
         try container.encodeIfPresent(browserProfileId, forKey: .browserProfileId)
+        try container.encodeIfPresent(iosPreviewDeviceID, forKey: .iosPreviewDeviceID)
         try container.encodeIfPresent(linearTeamKey, forKey: .linearTeamKey)
         try container.encodeIfPresent(linearTeamId, forKey: .linearTeamId)
         try container.encodeIfPresent(linearQuery, forKey: .linearQuery)

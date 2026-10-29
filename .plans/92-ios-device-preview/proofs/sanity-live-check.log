@@ -1,0 +1,18 @@
+PASS: production simulator connection settles
+PASS: real simulator frames reach the production canvas tile
+PASS: production tile click reaches UIKit
+PASS: production tile focuses the iOS text field
+PASS: production keyboard events reach UIKit
+PASS: production paste path preserves Unicode/emoji
+PASS: production Rotate changes real iOS orientation
+PASS: rotated production tile maps touches correctly
+PASS: production tile reconnects in landscape
+PASS: portrait restored
+PASS: prepare device rotation
+PASS: device left in landscape
+PASS: fresh connection restores portrait before interaction
+PASS: Xcode scheme discovery completes
+PASS: production Build & Run completes
+PASS: preview remains live after build
+PASS: production tile builds, verifies, installs and launches the requested scheme on its selected simulator
+IOSPreviewLiveTileChecks passed: production mount/palette, verified tool installation, authenticated helper, native frames, touch/paste/rotation and detach

@@ -1,0 +1,1 @@
+iOS preview bridge checks passed: authentication, route restriction, frame backpressure, frame-rate validation, controller ownership, modifier-safe Unicode paste, malformed/oversized socket errors, drag coalescing, disconnect input release, late-input fencing and finite startup/shutdown.

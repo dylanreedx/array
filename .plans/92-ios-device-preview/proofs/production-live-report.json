@@ -1,0 +1,23 @@
+{
+  "device" : "59B7AD8D-3B90-40A1-A308-72860A19A7C2",
+  "frames" : 28,
+  "frontmostAfter" : "com.tinyspeck.slackmacgap",
+  "frontmostBefore" : "com.tinyspeck.slackmacgap",
+  "result" : "PASS",
+  "state" : {
+    "button" : {
+      "x" : 0.5,
+      "y" : 0.25934401220442405
+    },
+    "field" : {
+      "x" : 0.5,
+      "y" : 0.40541571319603348
+    },
+    "fieldFocused" : true,
+    "height" : 874,
+    "orientation" : 1,
+    "taps" : 3,
+    "text" : "a Array café 🧪a canvas café 🧪",
+    "width" : 402
+  }
+}

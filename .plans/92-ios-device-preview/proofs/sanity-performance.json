@@ -1,0 +1,115 @@
+{
+  "device" : "BEAA9529-E921-4A73-A5FC-4CF3A97AE71D",
+  "limitations" : [
+    "Physical display scan-out is not measured",
+    "Injected AppKit event handlers, not human global focus routing",
+    "ps CPU deltas are coarse process totals and include all host QA work",
+    "No hard timing threshold: shared-machine load is recorded, behavioral marker\/counter outcomes are required"
+  ],
+  "method" : "12 native AppKit taps\/rate; first decoded UIKit red\/blue marker change; 3-second animated capture window",
+  "rates" : [
+    {
+      "deliveredFPS" : 14.635042574950512,
+      "deliveredFrames" : 44,
+      "frameIntervalMs" : {
+        "count" : 43,
+        "max" : 79.927625134587288,
+        "mean" : 67.038477712505781,
+        "min" : 65.094458404928446,
+        "p50" : 66.672124899923801,
+        "p95" : 68.542125169187784
+      },
+      "helper" : {
+        "available" : true,
+        "cpuPercent" : 8.7599426534502776,
+        "rssDeltaKB" : -9056,
+        "rssKB" : 86672
+      },
+      "host" : {
+        "available" : true,
+        "cpuPercent" : 17.836744733546343,
+        "rssDeltaKB" : -38240,
+        "rssKB" : 106416
+      },
+      "inputToDecodedVisualMs" : {
+        "count" : 12,
+        "max" : 75.378916691988707,
+        "mean" : 52.517440965554364,
+        "min" : 13.264124980196357,
+        "p50" : 56.528333341702819,
+        "p95" : 75.378916691988707
+      },
+      "requestedFPS" : 15,
+      "windowSeconds" : 3.0064825417939574
+    },
+    {
+      "deliveredFPS" : 29.620169581884468,
+      "deliveredFrames" : 89,
+      "frameIntervalMs" : {
+        "count" : 88,
+        "max" : 49.658583244308829,
+        "mean" : 33.711871685227379,
+        "min" : 29.148333473131061,
+        "p50" : 33.363416558131576,
+        "p95" : 35.980166867375374
+      },
+      "helper" : {
+        "available" : true,
+        "cpuPercent" : 15.984463971008637,
+        "rssDeltaKB" : -4464,
+        "rssKB" : 91664
+      },
+      "host" : {
+        "available" : true,
+        "cpuPercent" : 38.746931822896229,
+        "rssDeltaKB" : -32,
+        "rssKB" : 107504
+      },
+      "inputToDecodedVisualMs" : {
+        "count" : 12,
+        "max" : 55.459999945014715,
+        "mean" : 37.715201401927821,
+        "min" : 13.532291632145643,
+        "p50" : 37.117041880264878,
+        "p95" : 55.459999945014715
+      },
+      "requestedFPS" : 30,
+      "windowSeconds" : 3.0047093334142119
+    },
+    {
+      "deliveredFPS" : 59.611441632954175,
+      "deliveredFrames" : 179,
+      "frameIntervalMs" : {
+        "count" : 178,
+        "max" : 32.898708479478955,
+        "mean" : 16.764793773914239,
+        "min" : 14.144124928861856,
+        "p50" : 16.63279184140265,
+        "p95" : 17.868708353489637
+      },
+      "helper" : {
+        "available" : true,
+        "cpuPercent" : 25.896516293001795,
+        "rssDeltaKB" : -672,
+        "rssKB" : 95440
+      },
+      "host" : {
+        "available" : true,
+        "cpuPercent" : 75.063681211021333,
+        "rssDeltaKB" : -27904,
+        "rssKB" : 77488
+      },
+      "inputToDecodedVisualMs" : {
+        "count" : 12,
+        "max" : 65.171624999493361,
+        "mean" : 44.218968735852592,
+        "min" : 18.659666646271944,
+        "p50" : 40.441833203658462,
+        "p95" : 65.171624999493361
+      },
+      "requestedFPS" : 60,
+      "windowSeconds" : 3.0027792500331998
+    }
+  ],
+  "result" : "PASS"
+}

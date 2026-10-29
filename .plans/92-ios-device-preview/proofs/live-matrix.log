@@ -1,0 +1,13 @@
+agent-tile-program check: ok (50 packets, dependency order valid, 3 supervised gates)
+sidebar-native-ux program check: ok (40 packets, dependency order valid, 4 supervised gates; self-test and matrix wiring enforced)
+
+==> scripts/check-matrix-inventory.sh
+Matrix inventory checks passed (714 committed records).
+
+==> scripts/check-ios-preview-live.sh
+PASS: live touch, HID typing, Unicode paste, rotation and helper restart
+Artifacts: /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/matrix-run
+
+---- iOS preview live matrix (targeted): 2 leg(s) run ----
+
+iOS preview live matrix (targeted) passed.

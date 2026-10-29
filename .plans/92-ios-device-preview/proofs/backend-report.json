@@ -1,0 +1,18 @@
+{
+  "package": "expo-device-hub",
+  "version": "0.19.0-canary-20261023-1357114",
+  "integrity": "sha512-esQLuRBpA7YgUO3/Ikxo4g9lfdX6hBRimaDz2iZTNIZXq0b2+iN1Xok74TXnWV/hLwsEFJ+SF6nKMW5QXFgn8g==",
+  "nativeAddonLoad": {
+    "exitCode": 0,
+    "log": "native-addon.log"
+  },
+  "xcode": {
+    "exitCode": 0,
+    "log": "xcode.log"
+  },
+  "isolatedSimulatorDiscovery": {
+    "exitCode": 1,
+    "log": "simctl.log"
+  },
+  "liveFramesAndInput": "NOT_VERIFIED"
+}

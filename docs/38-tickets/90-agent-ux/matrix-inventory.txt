@@ -88,6 +88,7 @@ check --cli-update-runner-check
 check --cli-update-settings-check
 check --codex-appserver-parity-check
 check --codex-appserver-runner-check
+check --command-center-check
 check --companion-sync-health-check
 check --completion-awareness-check
 check --component-lab-check
@@ -140,6 +141,8 @@ check --hide-external-rows-check
 check --inbox-parent-fold-check
 check --inbox-reveal-project-check
 check --input-gate-check
+check --ios-preview-live-tile-check
+check --ios-preview-tile-check
 check --jelly-auto-layout-check
 check --keybind-edit-check
 check --language-server-release-check
@@ -475,6 +478,7 @@ leg run_app_check .build/debug/Array --hide-external-rows-check
 leg run_app_check .build/debug/Array --inbox-parent-fold-check
 leg run_app_check .build/debug/Array --inbox-reveal-project-check
 leg run_app_check .build/debug/Array --input-gate-check
+leg run_app_check .build/debug/Array --ios-preview-tile-check
 leg run_app_check .build/debug/Array --jelly-auto-layout-check
 leg run_app_check .build/debug/Array --keybind-edit-check
 leg run_app_check .build/debug/Array --language-server-release-check
@@ -684,6 +688,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --cli-install-owner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --cli-update-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-parity-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-runner-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --command-center-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --context-meter-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --dictation-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
@@ -707,13 +712,17 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --transcript-rehydration-che
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --unreadable-canvas-store-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+leg run_leg node Tools/IOSPreviewProof/check-bridge.cjs
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
+leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 leg run_leg scripts/capture-cli-fixtures.sh check
 leg run_leg scripts/check-app-bundle.sh --configuration debug
 leg run_leg scripts/check-color-hygiene.sh
 leg run_leg scripts/check-film-absent.sh
 leg run_leg scripts/check-film-scenes.sh
+leg run_leg scripts/check-ios-preview-live.sh
+leg run_leg scripts/check-ios-preview-proof.sh
 leg run_leg scripts/check-matrix-inventory.sh
 leg run_leg scripts/check-root-docs.sh
 leg run_leg swift run ContinuumRevivedAgentContentChecks

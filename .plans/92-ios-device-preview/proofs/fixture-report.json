@@ -1,0 +1,14 @@
+{
+  "fixture" : "PASS",
+  "framesDecoded" : 9,
+  "input" : "AppKit-injected mouse and physical A HID over WebSocket",
+  "liveSimulator" : "NOT_VERIFIED",
+  "notProven" : [
+    "real simulator input",
+    "human focus",
+    "Unicode\/IME\/paste",
+    "production canvas lifecycle",
+    "H264 performance"
+  ],
+  "renderer" : "native AppKit + ImageIO MJPEG"
+}

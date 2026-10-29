@@ -1,0 +1,28 @@
+ld/Intermediates.noindex/Continuum.build/Debug-iphonesimulator/Continuum.build/Objects-normal/x86_64/Continuum.SwiftFileList --metadata-file-list /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Intermediates.noindex/Continuum.build/Debug-iphonesimulator/Continuum.build/Continuum.DependencyMetadataFileList --static-metadata-file-list /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Intermediates.noindex/Continuum.build/Debug-iphonesimulator/Continuum.build/Continuum.DependencyStaticMetadataFileList --swift-const-vals-list /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Intermediates.noindex/Continuum.build/Debug-iphonesimulator/Continuum.build/Objects-normal/arm64/Continuum.SwiftConstValuesFileList --swift-const-vals-list /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Intermediates.noindex/Continuum.build/Debug-iphonesimulator/Continuum.build/Objects-normal/x86_64/Continuum.SwiftConstValuesFileList --compile-time-extraction --deployment-aware-processing --validate-assistant-intents --no-app-shortcuts-localization
+2026-10-28 14:23:52.351 appintentsmetadataprocessor[12565:68347575] Starting appintentsmetadataprocessor export
+2026-10-28 14:23:52.360 appintentsmetadataprocessor[12565:68347575] Extracted no relevant App Intents symbols, skipping writing output
+
+ValidateEmbeddedBinary /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Products/Debug-iphonesimulator/Continuum.app/PlugIns/ArrayStatusWidgets.appex (in target 'Continuum' from project 'Continuum')
+    cd /Users/dylan/Documents/personal/Array/ios
+    /Applications/Xcode.app/Contents/Developer/usr/bin/embeddedBinaryValidationUtility /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Products/Debug-iphonesimulator/Continuum.app/PlugIns/ArrayStatusWidgets.appex -info-plist-path /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Products/Debug-iphonesimulator/Continuum.app/Info.plist
+
+AppIntentsSSUTraining (in target 'Continuum' from project 'Continuum')
+    cd /Users/dylan/Documents/personal/Array/ios
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsnltrainingprocessor --infoplist-path /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Products/Debug-iphonesimulator/Continuum.app/Info.plist --temp-dir-path /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Intermediates.noindex/Continuum.build/Debug-iphonesimulator/Continuum.build/ssu --bundle-id dev.dylanreedx.continuum --product-path /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Products/Debug-iphonesimulator/Continuum.app --extracted-metadata-path /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Products/Debug-iphonesimulator/Continuum.app/Metadata.appintents --metadata-file-list /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Intermediates.noindex/Continuum.build/Debug-iphonesimulator/Continuum.build/Continuum.DependencyMetadataFileList --source-file /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Products/Debug-iphonesimulator/Continuum.app/Info.plist --archive-ssu-assets
+2026-10-28 14:23:52.384 appintentsnltrainingprocessor[12567:68347579] Parsing options for appintentsnltrainingprocessor
+2026-10-28 14:23:52.385 appintentsnltrainingprocessor[12567:68347579] Starting AppIntents SSU YAML Generation
+2026-10-28 14:23:52.385 appintentsnltrainingprocessor[12567:68347579] No AppShortcuts found - Skipping.
+
+RegisterExecutionPolicyException /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Products/Debug-iphonesimulator/Continuum.app (in target 'Continuum' from project 'Continuum')
+    cd /Users/dylan/Documents/personal/Array/ios
+    builtin-RegisterExecutionPolicyException /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Products/Debug-iphonesimulator/Continuum.app
+
+Validate /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Products/Debug-iphonesimulator/Continuum.app (in target 'Continuum' from project 'Continuum')
+    cd /Users/dylan/Documents/personal/Array/ios
+    builtin-validationUtility /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Products/Debug-iphonesimulator/Continuum.app -shallow-bundle -infoplist-subpath Info.plist
+
+Touch /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Products/Debug-iphonesimulator/Continuum.app (in target 'Continuum' from project 'Continuum')
+    cd /Users/dylan/Documents/personal/Array/ios
+    /usr/bin/touch -c /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-live/DerivedData/Build/Products/Debug-iphonesimulator/Continuum.app
+
+** BUILD SUCCEEDED **

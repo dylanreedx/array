@@ -1,0 +1,4 @@
+Command process tree: stdoutToFile=false, cancellationCompleted=true, cancellationError=true, elapsedSeconds=2.020409107208252, survivingOwnedPIDs=[]
+PASS: owned shell and child killed; pipe reaches EOF; captured stdout, retained stdout/stderr, timeout and 10MB stderr with bounded error tail preserved
+Command process tree: stdoutToFile=true, cancellationCompleted=true, cancellationError=true, elapsedSeconds=2.013748049736023, survivingOwnedPIDs=[]
+PASS: owned shell and child killed; pipe reaches EOF; captured stdout, retained stdout/stderr, timeout and 10MB stderr with bounded error tail preserved

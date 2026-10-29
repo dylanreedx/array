@@ -1,0 +1,15 @@
+PASS: production simulator connection settles
+PASS: real simulator frames reach the production canvas tile
+PASS: production tile click reaches UIKit
+PASS: production tile focuses the iOS text field
+PASS: production keyboard events reach UIKit
+PASS: production paste path preserves Unicode/emoji
+PASS: production Rotate changes real iOS orientation
+PASS: rotated production tile maps touches correctly
+PASS: production tile reconnects in landscape
+PASS: portrait restored
+PASS: prepare device rotation
+PASS: device left in landscape
+PASS: fresh connection restores portrait before interaction
+IOSPreviewLiveTileChecks passed: production mount/palette, verified tool installation, authenticated helper, native frames, touch/paste/rotation and detach
+2026-10-28 16:03:28.485 Array[72402:68787533] Using your own bundle identifier as an NSUserDefaults suite name does not make sense and will not work. Break on _NSUserDefaults_Log_Nonsensical_Suites to find this

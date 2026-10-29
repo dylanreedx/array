@@ -1,0 +1,110 @@
+{
+  "liveSimulator": "PASS",
+  "device": "7A98F285-D0B7-468B-8DB9-2061179D3101",
+  "helperRestart": "PASS",
+  "productionCanvas": "PASS",
+  "companion": "NOT_RUN",
+  "input": {
+    "captureHeight": 1400,
+    "captureWidth": 644,
+    "device": "7A98F285-D0B7-468B-8DB9-2061179D3101",
+    "hostFrontmostAfter": "dev.arrayapp.macos",
+    "hostFrontmostBefore": "dev.arrayapp.macos",
+    "input": "AppKit mouse/key events through native helper into UIKit with app-owned state readback",
+    "liveSimulator": "PASS",
+    "notProven": [
+      "human focus routing",
+      "production canvas lifecycle",
+      "H264 performance"
+    ],
+    "state": {
+      "button": {
+        "x": 0.5,
+        "y": 0.25934401220442405
+      },
+      "field": {
+        "x": 0.5,
+        "y": 0.4054157131960335
+      },
+      "fieldFocused": true,
+      "height": 874,
+      "latencyMarker": {
+        "x": 0.9353233830845771,
+        "y": 0.08924485125858124
+      },
+      "orientation": 1,
+      "performanceAnimation": false,
+      "taps": 1,
+      "text": "a Array caf\u00e9 \ud83e\uddea",
+      "width": 402
+    }
+  },
+  "orientation": {
+    "device": "7A98F285-D0B7-468B-8DB9-2061179D3101",
+    "initial": {
+      "button": {
+        "x": 0.5,
+        "y": 0.25934401220442405
+      },
+      "field": {
+        "x": 0.5,
+        "y": 0.4054157131960335
+      },
+      "fieldFocused": true,
+      "height": 874,
+      "latencyMarker": {
+        "x": 0.9353233830845771,
+        "y": 0.08924485125858124
+      },
+      "orientation": 1,
+      "performanceAnimation": false,
+      "taps": 1,
+      "text": "a Array caf\u00e9 \ud83e\uddea",
+      "width": 402
+    },
+    "landscape": {
+      "button": {
+        "x": 0.5,
+        "y": 0.40961857379767824
+      },
+      "field": {
+        "x": 0.5,
+        "y": 0.7271973466003316
+      },
+      "fieldFocused": true,
+      "height": 402,
+      "latencyMarker": {
+        "x": 0.9702517162471396,
+        "y": 0.03980099502487562
+      },
+      "orientation": 3,
+      "performanceAnimation": false,
+      "taps": 1,
+      "text": "a Array caf\u00e9 \ud83e\uddea",
+      "width": 874
+    },
+    "restored": {
+      "button": {
+        "x": 0.5,
+        "y": 0.25934401220442405
+      },
+      "field": {
+        "x": 0.5,
+        "y": 0.4054157131960335
+      },
+      "fieldFocused": true,
+      "height": 874,
+      "latencyMarker": {
+        "x": 0.9353233830845771,
+        "y": 0.08924485125858124
+      },
+      "orientation": 1,
+      "performanceAnimation": false,
+      "taps": 1,
+      "text": "a Array caf\u00e9 \ud83e\uddea",
+      "width": 402
+    },
+    "pass": true
+  },
+  "ownedDeviceDeleted": true
+}

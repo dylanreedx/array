@@ -49,7 +49,7 @@ public enum TileActionCatalog {
         case .managedAgent:
             // ⌘⌃T, beside the ⌘⌃1–4 size chords: ⌘T alone is New Terminal.
             map["agentToggleFace"] = (TileChord(keyCode: 17, modifiers: [.command, .control]), .agentToggleFace)
-        case .terminal, .browserInspector, .file, .fileTree, .ticketQueue, .conductorQueue, .diffReview, .runArtifacts, .kanban:
+        case .terminal, .browserInspector, .file, .fileTree, .ticketQueue, .conductorQueue, .diffReview, .runArtifacts, .kanban, .iosPreview:
             break
         }
         return map

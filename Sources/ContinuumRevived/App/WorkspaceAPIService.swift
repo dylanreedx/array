@@ -852,7 +852,7 @@ final class WorkspaceAPIService {
         case .fileTree: return .fileTree
         case .runArtifacts: return .runArtifacts
         case .managedAgent: return .managedAgent
-        case .ticketQueue, .conductorQueue, .diffReview, .kanban: return .tile
+        case .ticketQueue, .conductorQueue, .diffReview, .kanban, .iosPreview: return .tile
         }
     }
 

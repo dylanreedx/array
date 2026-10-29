@@ -53,6 +53,13 @@ enum UIProbeAppearance {
     /// probes).
     private static let sentinel = NSColor(srgbRed: 1, green: 0, blue: 1, alpha: 1).cgColor
 
+    private static func makeIOSPreviewTile() -> NSView {
+        let tile = Tile(id: UUID(), kind: .iosPreview, title: "iOS Preview",
+                        frame: TileFrame(x: 0, y: 0, width: 440, height: 700),
+                        zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        return IOSPreviewTileNSView(tile: tile, runtime: IOSPreviewRuntime(tileID: tile.id, deviceID: nil))
+    }
+
     /// KB-01: both resting and selected tasks, with wrapped text and metadata.
     private static func makeKanbanTile() -> NSView {
         let column = BoardColumn(id: UUID(), name: "To Do", position: .fromLegacyRank(0))
@@ -264,6 +271,11 @@ enum UIProbeAppearance {
     /// than sitting in that blind spot.
     private static func extraSlots(in root: NSView) -> [ColorSlot] {
         var slots: [ColorSlot] = []
+        if let tile = firstDescendant(IOSPreviewTileNSView.self, in: root) {
+            slots += tile.qaTokenPaintedLayers.map {
+                ColorSlot(ownerLabel: "IOSPreviewTileNSView.\($0.label)", layer: $0.layer, kind: .background)
+            }
+        }
         if let tile = firstDescendant(ManagedAgentTileNSView.self, in: root) {
             slots += tile.qaTokenPaintedLayers.map {
                 ColorSlot(ownerLabel: "ManagedAgentTileNSView.\($0.label)", layer: $0.layer, kind: .background)
@@ -324,6 +336,7 @@ enum UIProbeAppearance {
                 return makeTile()
             }),
             ("appearance.kanbanTile", NSSize(width: 480, height: 320), makeKanbanTile),
+            ("appearance.iosPreviewTile", NSSize(width: 440, height: 700), makeIOSPreviewTile),
             ("appearance.editorNavigator", NSSize(width: 260, height: 400), {
                 FileTreeBrowserView(rootURL: URL(fileURLWithPath: "/nonexistent-editor-navigator-probe-root"))
             }),
@@ -965,6 +978,8 @@ enum UIProbeAppearance {
         "DescriptorTileNSView.body",
         "NoteTileNSView",
         "KanbanTileNSView",
+        "IOSPreviewTileNSView",
+        "IOSPreviewTileNSView.body",
         "KanbanColumnView",
         "KanbanCardView",
         "FileTileNSView",
@@ -1112,6 +1127,10 @@ enum UIProbeAppearance {
         theme: TokenTheme
     ) -> Set<String> {
         var values = legalValues(for: kind, theme: theme)
+        if owner == "IOSPreviewTileNSView" || owner == "IOSPreviewTileNSView.body" {
+            return [hex((kind == .background || kind == .fill
+                         ? SurfaceToken.tileBody.color : LineToken.borderStrong.color).cgColor(for: theme))]
+        }
         if owner == "KanbanCardView" {
             return [hex((kind == .background || kind == .fill
                          ? SurfaceToken.overlay.color : LineToken.borderStrong.color).cgColor(for: theme))]
@@ -1827,6 +1846,7 @@ enum UIProbeAppearance {
                 return card
             }),
             AdoptedSurface(id: "kanbanTile", size: NSSize(width: 480, height: 320), make: makeKanbanTile),
+            AdoptedSurface(id: "iosPreviewTile", size: NSSize(width: 440, height: 700), make: makeIOSPreviewTile),
             AdoptedSurface(id: "noteTile", size: NSSize(width: 480, height: 320), make: {
                 NoteTileNSView(
                     tile: canned(kind: .note, title: "release notes"),
@@ -2064,10 +2084,9 @@ enum UIProbeAppearance {
     ]
 
     private static func runDescriptorTileFillCheck() throws -> String {
-        // Kanban was introduced on tokens: it has no retired literal to invent.
-        // Keep all eleven historical measurements and account explicitly for the
-        // new kind, whose current fill is rendered in both themes below.
-        let bornOnTokens: Set<TileKind> = [.kanban]
+        // These kinds were introduced on tokens: no retired literal to invent.
+        // Keep the historical measurements and render every current kind below.
+        let bornOnTokens: Set<TileKind> = [.kanban, .iosPreview]
         let covered = Set(retiredDescriptorFills.map(\.kind))
         guard covered.isDisjoint(with: bornOnTokens),
               covered.union(bornOnTokens) == Set(TileKind.allCases) else {

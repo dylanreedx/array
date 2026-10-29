@@ -1523,6 +1523,27 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--ios-preview-live-tile-check") {
+            do {
+                _ = NSApplication.shared
+                try IOSPreviewLiveTileChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--ios-preview-tile-check") {
+            do {
+                _ = NSApplication.shared
+                try IOSPreviewChecks.run()
+                print("ContinuumRevivedIOSPreviewTileChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-scene-owner-check") {
             do {
                 _ = NSApplication.shared
@@ -7960,6 +7981,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         case .browserInspector:
             owner?.tileSpawner?.deleteBrowserInspector(tileId: id)
+        case .iosPreview:
+            owner?.releaseRuntimes(tileId: id)
         case .note:
             if let noteId = tile.metadata.noteId {
                 owner?.noteViews.removeValue(forKey: noteId)
@@ -17784,6 +17807,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     @discardableResult
+    private func spawnIOSPreviewFromPalette() -> Bool {
+        guard let spawner = spawnerForFilesystemCreation() else {
+            if !offerCreationScope(then: { [weak self] in _ = self?.spawnIOSPreviewFromPalette() }) {
+                presentSpawnRefusal("Add a project to this workspace before opening an iOS preview.")
+            }
+            return false
+        }
+        switch spawner.spawnIOSPreview() {
+        case .success(let runtime):
+            controller(owning: spawner)?.iosPreviewRuntimes[runtime.tileID] = runtime
+            focusSpawnedTile(runtime.tileID)
+            return true
+        case .failure(let error):
+            presentSpawnRefusal(error.localizedDescription)
+            return false
+        }
+    }
+
+    @discardableResult
     private func spawnBrowserFromPalette(url: String?) -> Bool {
         // M1.11: same as the note path, same reason — this guarded only on
         // `tileSpawner`, so with no active controller it spawned into a departed
@@ -17976,6 +18018,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let before = tileCount()
             spawnBrowserDefault()
             return tileCount() > before
+        case .newIOSPreview:
+            return spawnIOSPreviewFromPalette()
         case let .openURL(url):
             let before = tileCount()
             spawnBrowserFromPalette(url: url)
@@ -20608,6 +20652,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 installInitialTerminalTile(tile, in: canvasView, via: spawner)
             case .browser:
                 installInitialBrowserTile(tile, in: canvasView, via: spawner)
+            case .iosPreview:
+                if let runtime = spawner.restoreIOSPreviewTile(tileID: tile.id) {
+                    controller(owning: spawner)?.iosPreviewRuntimes[tile.id] = runtime
+                }
             case .browserInspector:
                 installInitialBrowserInspectorTile(tile, in: canvasView, via: spawner)
             case .note:
@@ -20863,7 +20911,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         controller: ZoneRuntimeController
     ) -> TileNSView? {
         switch tile.kind {
-        case .terminal, .browser, .browserInspector, .fileTree:
+        case .terminal, .browser, .browserInspector, .fileTree, .iosPreview:
             return nil  // Phase B: needs a runtime.
 
         case .note:
@@ -20970,7 +21018,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let spawner = controller.tileSpawner else { return }
         let candidates = layer.tiles.filter { tile in
             switch tile.kind {
-            case .terminal, .browser, .fileTree: return true
+            case .terminal, .browser, .fileTree, .iosPreview: return true
             default: return false
             }
         }
@@ -21014,6 +21062,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 if case .restarted = spawner.restartFileTreeTile(tileId: tile.id),
                    let view = canvas.tileView(for: tile.id) as? FileTreeTileNSView {
                     controller.fileTreeViews[tile.id] = view
+                }
+            case .iosPreview:
+                retireOrphanedRuntimes(forTile: tile.id, controller: controller)
+                if let runtime = spawner.restoreIOSPreviewTile(tileID: tile.id) {
+                    controller.iosPreviewRuntimes[tile.id] = runtime
                 }
             default:
                 continue

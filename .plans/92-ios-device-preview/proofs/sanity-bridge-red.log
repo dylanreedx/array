@@ -1,0 +1,9 @@
+AssertionError [ERR_ASSERTION]: paste must preserve physically held Command for subsequent shortcuts
+    at /Users/dylan/Documents/personal/Array/Tools/IOSPreviewProof/check-bridge.cjs:88:5 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}

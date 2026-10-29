@@ -1,0 +1,55 @@
+agent-tile-program check: ok (50 packets, dependency order valid, 3 supervised gates)
+sidebar-native-ux program check: ok (40 packets, dependency order valid, 4 supervised gates; self-test and matrix wiring enforced)
+
+==> scripts/check-matrix-inventory.sh
+Matrix inventory checks passed (712 committed records).
+
+==> scripts/check-ios-preview-proof.sh
+Generated labeled fixture images
+PASS: binary input admission received
+PASS: MJPEG decoded into native image
+PASS: actual decoded frame dimensions
+PASS: rotation 0 maps to expected raw coordinates
+PASS: rotation 1 maps to expected raw coordinates
+PASS: rotation 2 maps to expected raw coordinates
+PASS: rotation 3 maps to expected raw coordinates
+PASS: letterboxed screen at scale 0.25 maps input
+PASS: letterbox rejects initial touch at scale 0.25
+PASS: letterboxed screen at scale 0.5 maps input
+PASS: letterbox rejects initial touch at scale 0.5
+PASS: letterboxed screen at scale 1.0 maps input
+PASS: letterbox rejects initial touch at scale 1.0
+PASS: letterboxed screen at scale 2.0 maps input
+PASS: letterbox rejects initial touch at scale 2.0
+PASS: multipart frame survives arbitrary network chunk boundaries
+PASS: oversized transport data rejected with bounded storage
+PASS: parser recovers after oversized input
+PASS: 1000-frame burst retains one pending frame
+PASS: prior-generation frame rejected after teardown
+PASS: input causes a changed frame over actual loopback transport
+PASS: fixture response events
+PASS: fixture received actual binary WebSocket messages
+PASS: AppKit mouse down reaches helper protocol at screen center
+PASS: drag leaving screen clamps the active contact
+PASS: mouse up releases touch through transport
+PASS: AppKit physical A key reaches HID protocol
+PASS: physical key release follows key down in order
+PASS: fixture response events
+PASS: focus loss delivers touch end
+PASS: native view snapshot native-light.png
+PASS: fixture response dark
+PASS: dark fixture frame decoded
+PASS: native view snapshot native-dark.png
+PASS: detach clears admission and prevents later frame presentation
+PASS: fixture response events
+PASS: fixture observes viewer connections released
+IOS PREVIEW PROOF: fixture PASS; live simulator NOT VERIFIED
+PASS: wrong rotation negative control rejected by behavior witness
+Artifacts: /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-proof/matrix-run
+MATRIX-NOTE: iOS preview uses labeled fixture frames; live simulator, paste and production canvas integration remain unverified.
+
+---- iOS preview proof matrix (targeted): 2 leg(s) run ----
+NOTES (1):
+  - Fixture transport only; live simulator, paste and production canvas integration remain unverified.
+
+iOS preview proof matrix (targeted) passed.

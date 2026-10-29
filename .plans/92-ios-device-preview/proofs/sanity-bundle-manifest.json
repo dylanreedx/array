@@ -1,0 +1,84 @@
+{
+  "bundleExecutable": "Array",
+  "bundleIdentifier": "dev.arrayapp.macos.dev",
+  "bundleName": "Array Dev",
+  "bundlePackageType": "APPL",
+  "bundlePath": "/Users/dylan/Desktop/Array Dev.app",
+  "bundleSelfChecks": [
+    {
+      "exitCode": 0,
+      "name": "--palette-duplicate-root-check"
+    },
+    {
+      "exitCode": 0,
+      "name": "--file-tree-boot-persistence-check"
+    },
+    {
+      "exitCode": 0,
+      "name": "--menu-contract-check"
+    },
+    {
+      "exitCode": 0,
+      "name": "--delete-confirm-policy-defaults-check"
+    },
+    {
+      "exitCode": 0,
+      "name": "--tool-path-bootstrap-check"
+    },
+    {
+      "exitCode": 0,
+      "name": "--app-support-channel-check"
+    },
+    {
+      "exitCode": 0,
+      "name": "--agent-awareness-check"
+    },
+    {
+      "exitCode": 0,
+      "name": "--terminal-theme-fidelity-check"
+    }
+  ],
+  "cfFixedUserHome": "/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-bundle-home.Y6RDx8",
+  "channel": "dev",
+  "codesignVerification": {
+    "exitCode": 0,
+    "log": "/Users/dylan/Documents/personal/Array/qa-runs/ios-preview-perf/bundle-check/codesign.txt"
+  },
+  "defaultsDomain": "dev.arrayapp.macos.dev",
+  "defaultsKey": "continuum.deleteConfirmPolicy",
+  "editMenuContract": {
+    "exitCode": 0,
+    "name": "--menu-contract-check"
+  },
+  "executable": "/Users/dylan/Desktop/Array Dev.app/Contents/MacOS/Array",
+  "fileLog": "/Users/dylan/Documents/personal/Array/qa-runs/ios-preview-perf/bundle-check/file.txt",
+  "ghosttyArtifactsLog": "/Users/dylan/Documents/personal/Array/qa-runs/ios-preview-perf/bundle-check/ghostty-artifacts.txt",
+  "ghosttyForbiddenSlicesAbsent": true,
+  "ghosttyResourcesEmbedded": true,
+  "ghosttyRuntimeDependency": false,
+  "iconFile": "AppIcon",
+  "infoPlist": "/Users/dylan/Desktop/Array Dev.app/Contents/Info.plist",
+  "isolatedHome": "/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-bundle-home.Y6RDx8",
+  "launchServicesProbe": {
+    "command": "open -n -W <bundle> --args --menu-contract-check --launch-probe-sentinel <path>",
+    "exitCode": 0,
+    "log": "/Users/dylan/Documents/personal/Array/qa-runs/ios-preview-perf/bundle-check/launchservices.txt",
+    "sentinel": "/Users/dylan/Documents/personal/Array/qa-runs/ios-preview-perf/bundle-check/launchservices-sentinel.txt"
+  },
+  "menuContract": {
+    "exitCode": 0,
+    "name": "--menu-contract-check"
+  },
+  "minimumSystemVersion": "14.0",
+  "oldDefaultsDomain": "continuum-revived",
+  "otoolLog": "/Users/dylan/Documents/personal/Array/qa-runs/ios-preview-perf/bundle-check/otool-L.txt",
+  "persistentAppSupportPollution": false,
+  "realDefaultsPollution": false,
+  "selfCheckLog": "/Users/dylan/Documents/personal/Array/qa-runs/ios-preview-perf/bundle-check/self-checks.txt",
+  "sparkle": {
+    "feedURL": "https://arrayapp.dev/appcast.xml",
+    "frameworkEmbedded": true,
+    "publicEDKeyPresent": true
+  },
+  "verdict": "passed"
+}

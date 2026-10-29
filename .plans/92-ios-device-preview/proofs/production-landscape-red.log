@@ -1,0 +1,7 @@
+PASS: production simulator connection settles
+PASS: real simulator frames reach the production canvas tile
+PASS: production tile click reaches UIKit
+PASS: production tile focuses the iOS text field
+PASS: production paste path preserves Unicode/emoji
+PASS: production Rotate changes real iOS orientation
+FAIL: rotated production tile maps touches correctly

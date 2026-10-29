@@ -1,0 +1,30 @@
+{
+  "captureHeight" : 1400,
+  "captureWidth" : 644,
+  "device" : "47D958A8-EEEE-4404-AD23-5DDC3D4FF2A2",
+  "hostFrontmostAfter" : "dev.arrayapp.macos",
+  "hostFrontmostBefore" : "dev.arrayapp.macos",
+  "input" : "AppKit mouse\/key events through native helper into UIKit with app-owned state readback",
+  "liveSimulator" : "PASS",
+  "notProven" : [
+    "human focus routing",
+    "production canvas lifecycle",
+    "H264 performance"
+  ],
+  "state" : {
+    "button" : {
+      "x" : 0.5,
+      "y" : 0.25934401220442405
+    },
+    "field" : {
+      "x" : 0.5,
+      "y" : 0.40541571319603348
+    },
+    "fieldFocused" : true,
+    "height" : 874,
+    "orientation" : 1,
+    "taps" : 1,
+    "text" : "a Array café 🧪",
+    "width" : 402
+  }
+}

@@ -79,6 +79,7 @@ public enum CanvasSceneGlyph {
         switch kind {
         case .terminal: return "terminal"
         case .browser: return "globe"
+        case .iosPreview: return "iphone"
         case .browserInspector: return "wrench.and.screwdriver"
         case .note: return "note.text"
         case .file: return "doc"

@@ -37,6 +37,8 @@ public enum TileGeometry {
             return terminalPreset(cell: terminalCell)
         case .browser:
             return TilePreset(defaultSize: CGSize(width: 1024, height: 640), aspect: .free, sizeQuantum: nil)
+        case .iosPreview:
+            return TilePreset(defaultSize: CGSize(width: 440, height: 880), aspect: .free, sizeQuantum: nil)
         case .browserInspector:
             return TilePreset(defaultSize: CGSize(width: 640, height: 420), aspect: .free, sizeQuantum: nil)
         case .note:
@@ -69,6 +71,8 @@ public enum TileGeometry {
             return CGSize(width: terminalCell.width * 20, height: terminalCell.height * 5 + terminalChromeHeight)
         case .browser:
             return CGSize(width: 320, height: 220)
+        case .iosPreview:
+            return CGSize(width: 300, height: 420)
         case .browserInspector:
             return CGSize(width: 520, height: 360)
         case .note:

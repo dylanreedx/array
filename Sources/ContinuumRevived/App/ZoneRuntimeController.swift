@@ -16,6 +16,7 @@ final class ZoneRuntimeController {
 
     var runtimes: [GhosttyTerminalRuntime] = []
     var browserRuntimes: [WKWebViewBrowserRuntime] = []
+    var iosPreviewRuntimes: [UUID: IOSPreviewRuntime] = [:]
     var noteViews: [UUID: NoteTileNSView] = [:]
     var fileTreeViews: [UUID: FileTreeTileNSView] = [:]
     /// KB-01. This project's board authority. Lazy so a controller for a project
@@ -250,6 +251,11 @@ final class ZoneRuntimeController {
     /// (D16). Called by `close()`, by the quit teardown for every live controller,
     /// and before Phase B restarts a tile.
     func releaseRuntimes(tileId: UUID? = nil) {
+        let previews = iosPreviewRuntimes.filter { tileId == nil || $0.key == tileId }
+        for (id, runtime) in previews {
+            runtime.disconnect()
+            iosPreviewRuntimes.removeValue(forKey: id)
+        }
         // Browsers first: WKWebView's process-pool teardown is independent of
         // GhosttyKit's, and the other order risks WebKit KVO callbacks firing
         // into a half-torn-down app.

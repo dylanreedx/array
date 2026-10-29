@@ -1,0 +1,130 @@
+Verified 20 reproducible sounds in /Users/dylan/Desktop/Array Dev.app/Contents/Resources/AgentSounds
+/Users/dylan/Desktop/Array Dev.app/Contents/MacOS/Array: Mach-O 64-bit executable arm64
+/Users/dylan/Desktop/Array Dev.app/Contents/MacOS/Array:
+	@rpath/Sparkle.framework/Versions/B/Sparkle (compatibility version 1.6.0, current version 2.9.5)
+	/System/Library/Frameworks/Carbon.framework/Versions/A/Carbon (compatibility version 2.0.0, current version 170.0.0)
+	/System/Library/Frameworks/CloudKit.framework/Versions/A/CloudKit (compatibility version 1.0.0, current version 2360.120.2)
+	/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2100.43.0)
+	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)
+	/System/Library/Frameworks/AVFAudio.framework/Versions/A/AVFAudio (compatibility version 1.0.0, current version 1.0.0)
+	/System/Library/Frameworks/AVFoundation.framework/Versions/A/AVFoundation (compatibility version 1.0.0, current version 2.0.0)
+	/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit (compatibility version 45.0.0, current version 2685.60.104)
+	/System/Library/Frameworks/CFNetwork.framework/Versions/A/CFNetwork (compatibility version 1.0.0, current version 3860.255.21)
+	/System/Library/Frameworks/Combine.framework/Versions/A/Combine (compatibility version 1.0.0, current version 3023.0.0)
+	/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 5026.5.4)
+	/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics (compatibility version 64.0.0, current version 1965.5.1)
+	/System/Library/Frameworks/CoreImage.framework/Versions/A/CoreImage (compatibility version 1.0.1, current version 7.0.0)
+	/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText (compatibility version 1.0.0, current version 877.4.0)
+	/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo (compatibility version 1.2.0, current version 734.4.0)
+	/System/Library/Frameworks/CryptoKit.framework/Versions/A/CryptoKit (compatibility version 1.0.0, current version 1.0.0)
+	/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation (compatibility version 300.0.0, current version 5026.5.4)
+	/System/Library/Frameworks/IOSurface.framework/Versions/A/IOSurface (compatibility version 1.0.0, current version 1.0.0)
+	/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO (compatibility version 1.0.0, current version 1.0.0)
+	/System/Library/Frameworks/Metal.framework/Versions/A/Metal (compatibility version 1.0.0, current version 373.2.0)
+	/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore (compatibility version 1.2.0, current version 1195.14.4)
+	/System/Library/Frameworks/QuickLookUI.framework/Versions/A/QuickLookUI (compatibility version 1.0.0, current version 0.0.0)
+	/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 61901.120.67)
+	/System/Library/Frameworks/Speech.framework/Versions/A/Speech (compatibility version 1.0.0, current version 1.0.0, weak)
+	/System/Library/Frameworks/SwiftUI.framework/Versions/A/SwiftUI (compatibility version 1.0.0, current version 7.5.3)
+	/System/Library/Frameworks/UserNotifications.framework/Versions/A/UserNotifications (compatibility version 1.0.0, current version 1.0.0)
+	/System/Library/Frameworks/WebKit.framework/Versions/A/WebKit (compatibility version 1.0.0, current version 624.2.5)
+	/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)
+	/usr/lib/libsqlite3.dylib (compatibility version 9.0.0, current version 382.0.0)
+	/usr/lib/swift/libswiftAVFoundation.dylib (compatibility version 1.0.0, current version 2420.7.1, weak)
+	/usr/lib/swift/libswiftCore.dylib (compatibility version 0.0.0, current version 0.0.0)
+	/usr/lib/swift/libswiftCoreAudio.dylib (compatibility version 1.0.0, current version 411.255.0, weak)
+	/usr/lib/swift/libswiftCoreFoundation.dylib (compatibility version 1.0.0, current version 120.100.0)
+	/usr/lib/swift/libswiftCoreImage.dylib (compatibility version 1.0.0, current version 2.2.0, weak)
+	/usr/lib/swift/libswiftCoreLocation.dylib (compatibility version 1.0.0, current version 53.0.0, weak)
+	/usr/lib/swift/libswiftCoreMIDI.dylib (compatibility version 1.0.0, current version 6.0.0, weak)
+	/usr/lib/swift/libswiftCoreMedia.dylib (compatibility version 1.0.0, current version 3320.8.5, weak)
+	/usr/lib/swift/libswiftDarwin.dylib (compatibility version 1.0.0, current version 377.120.8)
+	/usr/lib/swift/libswiftDispatch.dylib (compatibility version 1.0.0, current version 1542.100.32)
+	/usr/lib/swift/libswiftIOKit.dylib (compatibility version 1.0.0, current version 1.0.0, weak)
+	/usr/lib/swift/libswiftMetal.dylib (compatibility version 1.0.0, current version 373.2.0, weak)
+	/usr/lib/swift/libswiftOSLog.dylib (compatibility version 1.0.0, current version 10.0.0, weak)
+	/usr/lib/swift/libswiftObjectiveC.dylib (compatibility version 1.0.0, current version 951.7.0)
+	/usr/lib/swift/libswiftObservation.dylib (compatibility version 0.0.0, current version 0.0.0)
+	/usr/lib/swift/libswiftQuartzCore.dylib (compatibility version 1.0.0, current version 5.0.0)
+	/usr/lib/swift/libswiftQuickLookUI.dylib (compatibility version 1.0.0, current version 1018.5.5, weak)
+	/usr/lib/swift/libswiftSpatial.dylib (compatibility version 1.0.0, current version 1.0.0, weak)
+	/usr/lib/swift/libswiftUniformTypeIdentifiers.dylib (compatibility version 1.0.0, current version 877.5.1)
+	/usr/lib/swift/libswiftXPC.dylib (compatibility version 1.0.0, current version 128.120.2, weak)
+	/usr/lib/swift/libswift_Concurrency.dylib (compatibility version 0.0.0, current version 0.0.0)
+	/usr/lib/swift/libswiftos.dylib (compatibility version 1.0.0, current version 1082.0.0)
+	/usr/lib/swift/libswiftsimd.dylib (compatibility version 1.0.0, current version 23.0.0, weak)
+	/usr/lib/swift/libswiftCoreGraphics.dylib (compatibility version 1.0.0, current version 1.0.0)
+	/usr/lib/swift/libswiftWebKit.dylib (compatibility version 1.0.0, current version 624.2.5)
+	@rpath/libswiftCompatibilitySpan.dylib (compatibility version 0.0.0, current version 0.0.0, weak)
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/bash
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/bash/bash-preexec.sh
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/bash/ghostty.bash
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/elvish
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/elvish/lib
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/elvish/lib/ghostty-integration.elv
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/fish
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/fish/vendor_conf.d
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/nushell
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/nushell/vendor
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/nushell/vendor/autoload
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/nushell/vendor/autoload/ghostty.nu
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/zsh
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/zsh/.zshenv
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/ghostty/shell-integration/zsh/ghostty-integration
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/terminfo/67
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/terminfo/67/ghostty
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/terminfo/78
+/Users/dylan/Desktop/Array Dev.app/Contents/Resources/terminfo/78/xterm-ghostty
+==> --palette-duplicate-root-check
+ContinuumRevivedPaletteChecks passed
+<== --palette-duplicate-root-check exit 0
+==> --file-tree-boot-persistence-check
+ContinuumRevivedFileTreeBootPersistenceChecks passed: /Users/dylan/Documents/personal/Array/qa-runs/2026-10-28T200243Z/file-tree-boot-persistence/manifest.json
+<== --file-tree-boot-persistence-check exit 0
+==> --menu-contract-check
+ContinuumRevivedMenuContractChecks passed
+<== --menu-contract-check exit 0
+==> --delete-confirm-policy-defaults-check
+deleteConfirmPolicy missing: policy=runtimes source=fallback-default raw=nil
+deleteConfirmPolicy new-domain-never: policy=never source=standard-domain raw=never
+deleteConfirmPolicy new-domain-runtimes: policy=runtimes source=standard-domain raw=runtimes
+deleteConfirmPolicy new-domain-always: policy=always source=standard-domain raw=always
+deleteConfirmPolicy new-domain-invalid: policy=runtimes source=standard-domain raw=invalid
+deleteConfirmPolicy legacy-only-valid: policy=never source=legacy-domain-migrated raw=never
+deleteConfirmPolicy new-domain-wins: policy=always source=standard-domain raw=always
+deleteConfirmPolicy legacy-invalid: policy=runtimes source=fallback-default raw=nil
+ContinuumRevivedDeleteConfirmPolicyDefaultsChecks passed
+<== --delete-confirm-policy-defaults-check exit 0
+==> --tool-path-bootstrap-check
+ContinuumRevivedToolPathBootstrapChecks passed
+<== --tool-path-bootstrap-check exit 0
+==> --app-support-channel-check
+ContinuumRevivedAppSupportChannelChecks passed: Array Dev
+<== --app-support-channel-check exit 0
+==> --agent-awareness-check
+Agent awareness checks passed: 20 assets, import lifecycle, accessible visuals, deduped completion, master sound ON when unset and OFF when set off, a fresh install silent until one event is enabled
+<== --agent-awareness-check exit 0
+==> --terminal-theme-fidelity-check
+ContinuumRevivedTerminalThemeFidelityChecks passed: /Users/dylan/Documents/personal/Array/qa-runs/2026-10-28T200244Z/terminal-theme-fidelity/manifest.json
+<== --terminal-theme-fidelity-check exit 0
+==> preserve supplied bundle signature
+<== codesign sign skipped (supplied bundle)
+==> codesign --verify --deep --strict --verbose=2 /Users/dylan/Desktop/Array Dev.app
+--prepared:/Users/dylan/Desktop/Array Dev.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+--prepared:/Users/dylan/Desktop/Array Dev.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--validated:/Users/dylan/Desktop/Array Dev.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--prepared:/Users/dylan/Desktop/Array Dev.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--prepared:/Users/dylan/Desktop/Array Dev.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--prepared:/Users/dylan/Desktop/Array Dev.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--validated:/Users/dylan/Desktop/Array Dev.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--validated:/Users/dylan/Desktop/Array Dev.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--validated:/Users/dylan/Desktop/Array Dev.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--validated:/Users/dylan/Desktop/Array Dev.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+--prepared:/Users/dylan/Desktop/Array Dev.app/Contents/MacOS/array-workspace-mcp
+--validated:/Users/dylan/Desktop/Array Dev.app/Contents/MacOS/array-workspace-mcp
+/Users/dylan/Desktop/Array Dev.app: valid on disk
+/Users/dylan/Desktop/Array Dev.app: satisfies its Designated Requirement
+<== codesign verify exit 0
+Bundle check passed. Manifest: /Users/dylan/Documents/personal/Array/qa-runs/ios-preview-tile/bundle-check/manifest.json

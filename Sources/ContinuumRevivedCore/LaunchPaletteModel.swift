@@ -11,6 +11,7 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case newNote
     case newBoard
     case newBrowser
+    case newIOSPreview
     case openFile
     case openFileTree
     case newDiffReview
@@ -70,6 +71,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "New Board"
         case .newBrowser:
             return "New Browser"
+        case .newIOSPreview:
+            return "New iOS Preview"
         case .openFile:
             return "Open File..."
         case .openFileTree:
@@ -145,6 +148,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["new", "board", "kanban", "tasks", "cards"]
         case .newBrowser:
             return ["new", "browser", "web"]
+        case .newIOSPreview:
+            return ["new", "ios", "preview", "simulator", "iphone", "ipad", "device"]
         case .openFile:
             return ["open", "file"]
         case .openFileTree:
@@ -847,6 +852,7 @@ public enum LaunchPaletteModel {
         case .newNote: return item(row, .create, "Note", "Add a canvas note", "note.text", ["new"], true, true, "action:new-note")
         case .newBoard: return item(row, .create, "Board", "Add a kanban board", "rectangle.split.3x1", ["new", "kanban"], true, true, "action:new-board")
         case .newBrowser: return item(row, .create, "Browser", "Open a web tile", "globe", ["new", "web"], true, true, "action:new-browser")
+        case .newIOSPreview: return item(row, .create, "iOS Preview", "Run an iPhone or iPad simulator on the canvas", "iphone", ["simulator", "device", "ipad"], true, true, "action:ios-preview")
         case .openFile: return item(row, .create, "Editor", "Open a project file to edit", "doc", ["open file", "text editor", "code editor"], true, true, "action:open-file")
         case .openFileTree: return item(row, .create, "File tree", "Browse project files", "list.bullet.indent", ["open"], true, true, "action:file-tree")
         case .newDiffReview: return item(row, .create, "Diff review", "Review working changes", "plusminus", ["git", "new"], true, true, "action:diff-review")

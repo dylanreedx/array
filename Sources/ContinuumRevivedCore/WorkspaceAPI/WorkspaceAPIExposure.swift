@@ -86,6 +86,7 @@ public enum WorkspaceAPIExposure {
         "tile.metadata.filePath": .internal,
         "tile.metadata.documentLocation": .internal,
         "tile.metadata.browserProfileId": .notExposed("Browser-profile selection is native UI only."),
+        "tile.metadata.iosPreviewDeviceID": .notExposed("Simulator selection and connection are native UI only."),
         "tile.metadata.linearTeamKey": .notExposed("Ticket-queue configuration is native UI only."),
         "tile.metadata.linearTeamId": .internal,
         "tile.metadata.linearQuery": .notExposed("Ticket-queue configuration is native UI only."),

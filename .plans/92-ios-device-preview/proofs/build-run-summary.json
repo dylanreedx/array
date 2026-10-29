@@ -1,0 +1,90 @@
+{
+  "liveSimulator": "PASS",
+  "device": "2A4700B8-0888-4ED1-B96C-5FE2CFF1F35A",
+  "helperRestart": "PASS",
+  "productionCanvas": "PASS",
+  "companion": "NOT_RUN",
+  "input": {
+    "captureHeight": 1400,
+    "captureWidth": 644,
+    "device": "2A4700B8-0888-4ED1-B96C-5FE2CFF1F35A",
+    "hostFrontmostAfter": "dev.arrayapp.macos",
+    "hostFrontmostBefore": "dev.arrayapp.macos",
+    "input": "AppKit mouse/key events through native helper into UIKit with app-owned state readback",
+    "liveSimulator": "PASS",
+    "notProven": [
+      "human focus routing",
+      "production canvas lifecycle",
+      "H264 performance"
+    ],
+    "state": {
+      "button": {
+        "x": 0.5,
+        "y": 0.25934401220442405
+      },
+      "field": {
+        "x": 0.5,
+        "y": 0.4054157131960335
+      },
+      "fieldFocused": true,
+      "height": 874,
+      "orientation": 1,
+      "taps": 1,
+      "text": "a Array caf\u00e9 \ud83e\uddea",
+      "width": 402
+    }
+  },
+  "orientation": {
+    "device": "2A4700B8-0888-4ED1-B96C-5FE2CFF1F35A",
+    "initial": {
+      "button": {
+        "x": 0.5,
+        "y": 0.25934401220442405
+      },
+      "field": {
+        "x": 0.5,
+        "y": 0.4054157131960335
+      },
+      "fieldFocused": true,
+      "height": 874,
+      "orientation": 1,
+      "taps": 1,
+      "text": "a Array caf\u00e9 \ud83e\uddea",
+      "width": 402
+    },
+    "landscape": {
+      "button": {
+        "x": 0.5,
+        "y": 0.40961857379767824
+      },
+      "field": {
+        "x": 0.5,
+        "y": 0.7271973466003316
+      },
+      "fieldFocused": true,
+      "height": 402,
+      "orientation": 3,
+      "taps": 1,
+      "text": "a Array caf\u00e9 \ud83e\uddea",
+      "width": 874
+    },
+    "restored": {
+      "button": {
+        "x": 0.5,
+        "y": 0.25934401220442405
+      },
+      "field": {
+        "x": 0.5,
+        "y": 0.4054157131960335
+      },
+      "fieldFocused": true,
+      "height": 874,
+      "orientation": 1,
+      "taps": 1,
+      "text": "a Array caf\u00e9 \ud83e\uddea",
+      "width": 402
+    },
+    "pass": true
+  },
+  "ownedDeviceDeleted": true
+}

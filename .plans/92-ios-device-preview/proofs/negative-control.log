@@ -1,0 +1,5 @@
+FAIL: rotation 1 maps to expected raw coordinates
+PASS: binary input admission received
+PASS: MJPEG decoded into native image
+PASS: actual decoded frame dimensions
+PASS: rotation 0 maps to expected raw coordinates

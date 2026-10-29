@@ -1,0 +1,2 @@
+Command process tree: cancellationCompleted=false, cancellationError=false, elapsedSeconds=4.0031819343566895, survivingOwnedPIDs=[95747]
+FAIL: Error Domain=probe-process-tree-cancellation Code=1 "(null)"

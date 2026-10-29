@@ -62,6 +62,7 @@ public enum CommandRegistry {
             ]),
             definition("tile.newBoard", .newBoard, aliases: ["kanban", "board", "tasks"]),
             definition("tile.newBrowser", .newBrowser, aliases: ["web"]),
+            definition("tile.newIOSPreview", .newIOSPreview, aliases: ["ios", "simulator", "iphone", "ipad"]),
             definition("tile.openFile", .openFile, aliases: ["document"]),
             definition("tile.openFileTree", .openFileTree, aliases: ["directory", "folder"]),
             definition("tile.newDiffReview", .newDiffReview, aliases: ["git diff", "review"]),
@@ -204,6 +205,8 @@ public enum CommandRegistry {
             return FloatingToolbarItem(title: "Board", symbolName: "rectangle.split.3x1", action: .palette(action))
         case .newBrowser:
             return FloatingToolbarItem(title: "Browser", symbolName: "globe", action: .palette(action))
+        case .newIOSPreview:
+            return FloatingToolbarItem(title: "iOS Preview", symbolName: "iphone", action: .palette(action))
         case .openFile:
             return FloatingToolbarItem(title: "Editor", symbolName: "doc.text", action: .palette(action))
         case .openFileTree:

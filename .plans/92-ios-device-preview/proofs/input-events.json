@@ -1,0 +1,30 @@
+[
+  {
+    "tag" : 3,
+    "type" : "begin",
+    "x" : 0.5,
+    "y" : 0.5
+  },
+  {
+    "tag" : 3,
+    "type" : "move",
+    "x" : 1,
+    "y" : 1
+  },
+  {
+    "tag" : 3,
+    "type" : "end",
+    "x" : 0.5,
+    "y" : 0.5
+  },
+  {
+    "tag" : 6,
+    "type" : "down",
+    "usage" : 4
+  },
+  {
+    "tag" : 6,
+    "type" : "up",
+    "usage" : 4
+  }
+]

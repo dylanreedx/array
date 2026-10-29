@@ -1,0 +1,688 @@
+agent-tile-program check: ok (50 packets, dependency order valid, 3 supervised gates)
+sidebar-native-ux program check: ok (40 packets, dependency order valid, 4 supervised gates; self-test and matrix wiring enforced)
+
+==> scripts/check-matrix-inventory.sh
+Matrix inventory checks passed (727 committed records).
+
+==> swift build --disable-sandbox --skip-update --product Array
+warning: '--skip-update' option is deprecated and will be removed in a future release
+warning: 'array': Invalid Exclude '/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/UserInputCardView.swift': File not found.
+warning: 'array': found 1 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCore/Resources/ContextWindows.PROVENANCE.md
+warning: 'array': found 3 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedSyncChecks/Fixtures/baseline_ops.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedSyncChecks/Fixtures/canvas.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedSyncChecks/Fixtures/workspace.json
+warning: 'array': found 31 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/catalogs/codex-0.159.3.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/claude-delegation-two-agents.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-appserver-delegating-websearch.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/activity-log-pre-p2a8.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/claude-websearch-turn.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/claude-2.1.296.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/catalogs/claude-2.1.296.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/catalogs/manifest.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/pi-delegate-run-events.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/codex-0.159.3.meta.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/claude-subagent-turn.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/claude-2.1.300.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/pi-0.85.0.meta.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/pi-file-edit-live.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/codex-0.159.3.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/claude-2.1.296.meta.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/pi-0.85.0.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/pi-delegate-agent-turn.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/managed-session-with-approval.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-rollout-apply-patch-live.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/claude-2.1.291-opus-turn.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-appserver-single-agent.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/claude-compact-boundary.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-exec-file-change-live.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-appserver-delegating-turn.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/catalogs/pi-0.85.0.txt
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/claude-2.1.300.meta.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/pi-delegate-run-events-live.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-exec-single-agent-parity.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/spawn-agent-tool-call.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-appserver-mcp-delegate.jsonl
+warning: 'array': found 19 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/nested-lists.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/secrets-sentinel.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/prose-rich-inline.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/diff-unified.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/malformed-markup.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/notice-local.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/tool-call-arguments.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/error-runner-failure.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/user-question.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/fence-closed-code.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/headings-sections.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/links-policy.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/quotes-nested.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/fence-open-streaming.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/approval-request.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/plan-checklist.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/command-output-long.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/stream-5000-deltas.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/prose-plain.md
+warning: 'array': found 157 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/AgentComposerFooterView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/DiffSummaryRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/IOSPreview/IOSPreviewStreamReceiver.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentAccountQuotaPresentation.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/ApprovalRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasFrameRecorder.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentToolClusterHeaderItem.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptLayout.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitVariations/ChromaticRelayOrbitThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasHistoryController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/IOSPreviewTileNSView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/KanbanCardView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentReferenceDrag.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/AssistantProseRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerImageAttachmentRailView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerFileReferencePasteboardDecoder.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptUpdateScheduler.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileTileRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentPageZoomScaling.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/ErrorNoticeRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/BranchChipNSView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentLocationStatusView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/PrecessingPrismTiltedThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptScrollController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileContentCoordinator.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/PlanRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/CodeEditor/VIM-LICENSE.txt
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerReplyOptionRailView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerDictationStripView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasFrameHUDView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/TileSurfaceStore.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/TiltedVariationsGalleryView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/TileSurfaceHostView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileContentObservation.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/FileReferenceRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentLineageOverlayView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/CompactionRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitVariations/OrbitVariationsGalleryView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentRadialContextMeterView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentBlockHostView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerKeyPolicy.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTurnCards.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/AgentReferenceRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentStatusPillView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/DualPlaneGyroTiltedThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasBackgroundImageCache.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasBackgroundRendererView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ChoiceLabelMetrics.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerDictationButton.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/TaskEditor/index.html
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasWorldPlaneView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/UserPromptRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/DelimitedGridRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentBlockMeasurementCache.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/CompletionPopoverController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptMotion.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/KanbanColumnView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/TaskEditor/THIRD_PARTY_NOTICES.txt
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/SessionBoundaryRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentTerminalFace.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CodeEditorHostView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/TaskEditor/ASSET_VERSION
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ChoiceGeometryChecks.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/UnknownBlockRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/AgentComposerView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/TableRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/ImageRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/ThematicBreakRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/DocumentRelationshipOverlayView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerImagePasteboardDecoder.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/AgentMessageRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptCopyController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitVariations/TiltedPrismOrbitThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentBlockRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitVariations/SolarHandoffOrbitThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/ToolCallRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasTileSelection.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentBlockRendererRegistry.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/TaskEditor/editor.css
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTextStyleResolver.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentCompactStatusPresentation.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerDictationPillView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentTileHeaderView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerFileReferenceRailView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentTileStatePresenter.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/IOSPreview/bridge.cjs
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerSendChoiceView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ChoicePopoverController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/CodeTextView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ChoiceButton.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerPasteboardIntake.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/ZonePresentation.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/DrawingLoopIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/CodeEditor/index.html
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentThinkingIndicatorAnimating.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerTextView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/CodeEditor/ASSET_VERSION
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentCompactStatusRowView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileImageBackend.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/CompletedReasoningDisclosurePresenter.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/BoardCardGhostView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerQueuedMessageRailView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/KanbanTileNSView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/IOSPreview/IOSPreviewRuntime.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitVariations/AngularSlingshotOrbitThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/ThinkingWaveIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/GyroBrandDerivativeThinkingIndicatorViews.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ProviderModelPicker.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentSignalBadgeView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentSessionHandoffBanner.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileTreeBrowserView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/StatusChipNSView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitVariations/CounterCurrentOrbitThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/CommandOutputRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/IOSPreview/README.txt
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/TaskEditor/editor.js
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasShortcutRailView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerActionButton.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/AuroraRibbonTiltedThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/DisclosureStateStore.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/CompletedReasoningDisclosureView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/WorkbookGridRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentCompactStatusPhaseAdapter.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasSymbolImage.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/IOSPreview/IOSPreviewBuild.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerDictationController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerHeightController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/BreathingSparkIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/SpeechAnalyzerDictationEngine.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentImagePreviewController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/TaskReferenceRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasCameraDriver.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileImageRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitingTriadThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/ResizeDimensionsOverlayView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptClusterPlanner.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/CodeBlockRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/TileResidencyPolicy.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/ThrobberCandidateGalleryView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/QuestionRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/DiffReviewOffMainCheck.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileMarkdownDocumentView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/IOSPreview/IOSPreviewTools.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/CodeEditor/LICENSE.txt
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/CodeEditor/editor.js
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/BoardDragController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/ChromaticDepthRelayTiltedThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/RichInlineTextView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/PrismaticCometTiltedThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/ProjectFileOperationCoordinator.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ChoiceListView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/CodeEditor/editor.css
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerImageThumbnailPipeline.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptListView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasGettingStartedView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/BoardTaskDetailController.swift
+[0/1] Planning build
+Building for debugging...
+[0/6] Write sources
+[1/6] Copying IOSPreview
+[2/6] Write swift-version--58304C5D6DBC2206.txt
+[4/8] Emitting module ContinuumRevived
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/App/AgentSupervisor.swift:10392:20: warning: no 'async' operations occur within 'await' expression
+10390 |         let validation = try AgentComposerImageValidation(
+10391 |             validatedContentType: "image/png", pixelWidth: 80, pixelHeight: 60, byteCount: 123)
+10392 |         return try await store.importValidatedPastedImage(
+      |                    `- warning: no 'async' operations occur within 'await' expression
+10393 |             Data(repeating: 7, count: 123), displayName: displayName,
+10394 |             validation: validation, forDraftOf: agentID
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/App/AgentSupervisor.swift:10392:16: warning: no calls to throwing functions occur within 'try' expression
+10390 |         let validation = try AgentComposerImageValidation(
+10391 |             validatedContentType: "image/png", pixelWidth: 80, pixelHeight: 60, byteCount: 123)
+10392 |         return try await store.importValidatedPastedImage(
+      |                `- warning: no calls to throwing functions occur within 'try' expression
+10393 |             Data(repeating: 7, count: 123), displayName: displayName,
+10394 |             validation: validation, forDraftOf: agentID
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/App/AgentTileFileMentionChecks.swift:121:99: warning: capture of 'watch' with non-Sendable type 'ActivationWatch' in a '@Sendable' closure [#SendableClosureCaptures]
+116 |         // again, and says so; any other close, the editor moving included,
+117 |         // is the defect.
+118 |         final class ActivationWatch { var lost = false }
+    |                     `- note: class 'ActivationWatch' does not conform to the 'Sendable' protocol
+119 |         let watch = ActivationWatch()
+120 |         let activationObservers = [NSApplication.didResignActiveNotification, NSWindow.didResignKeyNotification].map {
+121 |             NotificationCenter.default.addObserver(forName: $0, object: nil, queue: .main) { _ in watch.lost = true }
+    |                                                                                                   `- warning: capture of 'watch' with non-Sendable type 'ActivationWatch' in a '@Sendable' closure [#SendableClosureCaptures]
+122 |         }
+123 |         defer { activationObservers.forEach(NotificationCenter.default.removeObserver) }
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/App/ContinuumApp.swift:27700:13: warning: initialization of immutable value 'expectedB' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+27698 |         let vpSize = CGSize(width: 800, height: 600)
+27699 |         let expectedA = CameraFraming.zoneOverviewViewport(for: CGRect(x: 0, y: 0, width: 300, height: 200), viewportSize: vpSize)
+27700 |         let expectedB = CameraFraming.zoneOverviewViewport(for: CGRect(x: 1000, y: 0, width: 300, height: 200), viewportSize: vpSize)
+      |             `- warning: initialization of immutable value 'expectedB' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+27701 |         let expectedC = CameraFraming.zoneOverviewViewport(for: CGRect(x: 0, y: 1000, width: 300, height: 200), viewportSize: vpSize)
+27702 |
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/App/ContinuumApp.swift:27743:13: warning: initialization of immutable value 'initialVP' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+27741 |
+27742 |         // 3. Auto-ordinal jump (key "1") pans/fits zone A; HUD dismisses.
+27743 |         let initialVP = canvas.viewport
+      |             `- warning: initialization of immutable value 'initialVP' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+27744 |         _ = app.handleHotkey(try keyDown("1", 18, mods: [.option]))
+27745 |         try expect(vpEqual(canvas.viewport, expectedA),
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/BoardTaskDetailController.swift:268:10: warning: instance method 'webView(_:decidePolicyFor:decisionHandler:)' nearly matches optional requirement 'webView(_:decidePolicyFor:decisionHandler:)' of protocol 'WKNavigationDelegate'
+266 |         }
+267 |     }
+268 |     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+    |          |- warning: instance method 'webView(_:decidePolicyFor:decisionHandler:)' nearly matches optional requirement 'webView(_:decidePolicyFor:decisionHandler:)' of protocol 'WKNavigationDelegate'
+    |          |- note: candidate has non-matching type '(WKWebView, WKNavigationAction, @escaping (WKNavigationActionPolicy) -> Void) -> ()'
+    |          |- note: move 'webView(_:decidePolicyFor:decisionHandler:)' to an extension to silence this warning
+    |          `- note: make 'webView(_:decidePolicyFor:decisionHandler:)' private to silence this warning
+269 |         decisionHandler(navigationAction.request.url?.isFileURL == true ? .allow : .cancel)
+270 |     }
+
+WebKit.WKNavigationDelegate.webView:3:28: note: requirement 'webView(_:decidePolicyFor:decisionHandler:)' declared here
+1 | protocol WKNavigationDelegate {
+2 | @available(macOS 10.10, *)
+3 |   @MainActor optional func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void)}
+  |                            `- note: requirement 'webView(_:decidePolicyFor:decisionHandler:)' declared here
+4 |
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasNSView.swift:7632:13: warning: use '#selector' instead of explicitly constructing a 'Selector'
+ 7630 |         // directly; the separate menu contract check proves Cmd-Z maps to undo:.
+ 7631 |         let commandZWasRouted = window.firstResponder?.tryToPerform(
+ 7632 |             Selector(("undo:")),
+      |             `- warning: use '#selector' instead of explicitly constructing a 'Selector'
+ 7633 |             with: nil
+ 7634 |         ) ?? false
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasNSView.swift:7711:69: warning: use '#selector' instead of explicitly constructing a 'Selector'
+ 7709 |         try expect(noteView.textView.undoManager !== inputCanvas.activeCanvasUndoManager,
+ 7710 |                    "text and canvas must use separate undo managers")
+ 7711 |         let textUndoWasRouted = window.firstResponder?.tryToPerform(Selector(("undo:")), with: nil) ?? false
+      |                                                                     `- warning: use '#selector' instead of explicitly constructing a 'Selector'
+ 7712 |         try expect(textUndoWasRouted && noteView.textView.string == "a",
+ 7713 |                    "Cmd-Z in a note should undo typing (routed=\(textUndoWasRouted), text=\(noteView.textView.string))")
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasNSView.swift:7718:69: warning: use '#selector' instead of explicitly constructing a 'Selector'
+ 7716 |         try expect(inputCanvas.activeCanvasUndoManager?.canUndo == true,
+ 7717 |                    "text undo must leave canvas history available")
+ 7718 |         let textRedoWasRouted = window.firstResponder?.tryToPerform(Selector(("redo:")), with: nil) ?? false
+      |                                                                     `- warning: use '#selector' instead of explicitly constructing a 'Selector'
+ 7719 |         try expect(textRedoWasRouted && noteView.textView.string == "ab", "Cmd-Shift-Z in a note should redo typing")
+ 7720 |         try expect(inputCanvas.canvasState.tiles[0].frame == movedInputTile.frame,
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasNSView.swift:7723:71: warning: use '#selector' instead of explicitly constructing a 'Selector'
+ 7721 |                    "text redo must not alter tile geometry")
+ 7722 |         try expect(window.makeFirstResponder(inputCanvas), "canvas chrome should regain first responder")
+ 7723 |         let canvasUndoWasRouted = window.firstResponder?.tryToPerform(Selector(("undo:")), with: nil) ?? false
+      |                                                                       `- warning: use '#selector' instead of explicitly constructing a 'Selector'
+ 7724 |         try expect(canvasUndoWasRouted && inputCanvas.canvasState.tiles[0].frame == inputFrame,
+ 7725 |                    "Cmd-Z should resume canvas undo after focus leaves the input")
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/TileNSView.swift:453:5: warning: '@discardableResult' declared on a function returning 'Void' is unnecessary
+ 451 |     /// is safe — already surfaced, no surfaceable body, or a body that is not
+ 452 |     /// actually the current content view. Callers treat false as "stay native".
+ 453 |     @discardableResult
+     |     `- warning: '@discardableResult' declared on a function returning 'Void' is unnecessary
+ 454 |     /// Swap the shown picture for a slimmed copy of itself WITHOUT leaving the
+ 455 |     /// surfaced state: no promote, no park round trip, no flip. The old host held
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/App/AgentSteeringRecoveryChecks.swift:265:18: warning: 'released' mutated after capture by sendable closure
+251 |         onPath(h)
+252 |         var entered = false
+253 |         var released = false
+    |             `- note: variable defined here
+254 |         defer { released = true; h.supervisor.qaBeforeQueueDrain = nil }
+255 |         h.supervisor.qaBeforeQueueDrain = {
+    |                                           `- note: variable captured by sendable closure
+256 |             entered = true
+257 |             while !released { try? await Task.sleep(for: .milliseconds(20)) }
+    |                    `- note: capturing use
+258 |         }
+259 |         try expect(h.supervisor.send("PLAIN seed", to: h.id), "drain pause: seed refused")
+    :
+263 |         try await eventually("drain pause: drain never reached suspended boundary") { entered }
+264 |         h.supervisor.stop(h.id)
+265 |         released = true
+    |                  `- warning: 'released' mutated after capture by sendable closure
+266 |         h.supervisor.qaBeforeQueueDrain = nil
+267 |         try await Task.sleep(for: .milliseconds(350))
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/App/ComposerDictationChecks.swift:361:21: warning: 'nextPrepare' mutated after capture by sendable closure
+ 42 |         defer { defaults.removePersistentDomain(forName: suiteName) }
+ 43 |         var engines: [FakeDictationEngine] = []
+ 44 |         var nextPrepare: FakeDictationEngine.PrepareOutcome = .succeeds
+    |             `- note: variable defined here
+ 45 |         var finishesOnStop = true
+ 46 |         ComposerDictationController.defaults = defaults
+ 47 |         ComposerDictationController.qaEngineFactory = {
+    |                                                       `- note: variable captured by sendable closure
+ 48 |             let engine = FakeDictationEngine()
+ 49 |             engine.prepareOutcome = nextPrepare
+    |                                   `- note: capturing use
+ 50 |             engine.emitsFinishedOnStop = finishesOnStop
+ 51 |             engines.append(engine)
+    :
+359 |         try expect(button.toolTip == DictationFailure.microphonePermissionDenied.composerMessage, "the button must say what to fix")
+360 |         try expect(composer.qaKeyHint == DictationFailure.microphonePermissionDenied.composerMessage, "the hint row must say what to fix")
+361 |         nextPrepare = .succeeds
+    |                     `- warning: 'nextPrepare' mutated after capture by sendable closure
+362 |
+363 |         // 13. Settings off: no button, and the chord is the text system's again.
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/App/ComposerDictationChecks.swift:311:24: warning: 'finishesOnStop' mutated after capture by sendable closure
+ 43 |         var engines: [FakeDictationEngine] = []
+ 44 |         var nextPrepare: FakeDictationEngine.PrepareOutcome = .succeeds
+ 45 |         var finishesOnStop = true
+    |             `- note: variable defined here
+ 46 |         ComposerDictationController.defaults = defaults
+ 47 |         ComposerDictationController.qaEngineFactory = {
+    |                                                       `- note: variable captured by sendable closure
+ 48 |             let engine = FakeDictationEngine()
+ 49 |             engine.prepareOutcome = nextPrepare
+ 50 |             engine.emitsFinishedOnStop = finishesOnStop
+    |                                        `- note: capturing use
+ 51 |             engines.append(engine)
+ 52 |             return engine
+    :
+309 |         try expect(text == "fix the login bug. hellox keep me", "focus loss must keep the words, got \(text.debugDescription)")
+310 |         try expect(storedText() == text, "the kept words must persist")
+311 |         finishesOnStop = true
+    |                        `- warning: 'finishesOnStop' mutated after capture by sendable closure
+312 |         window.makeFirstResponder(composer.textView)
+313 |         _ = settlePill()
+
+/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/App/AgentFirstPaintChecks.swift:1443:15: warning: will never be executed
+1433 |             if revealLog.revealed.count >= 2 { break }
+1434 |         }
+1435 |         guard exercisedChips >= 2 else {
+     |                              `- note: condition always evaluates to false
+1436 |             throw fail(
+1437 |                 "delegation chips: only \(exercisedChips) chip view(s) materialized in the "
+     :
+1441 |             )
+1442 |         }
+1443 |         guard revealLog.revealed.map(\.child.rawValue) == expectedChildIDs else {
+     |               `- warning: will never be executed
+1444 |             throw fail(
+1445 |                 "delegation chips: clicking the two chips reached onRevealAgent with "
+
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[5/8] Compiling ContinuumRevived IOSPreviewRuntime.swift
+[6/9] Compiling ContinuumRevived IOSPreviewPerformanceChecks.swift
+[6/9] Write Objects.LinkFileList
+warning: (arm64)  could not find symbol '_ImFontConfig_ImFontConfig' in object file '/Users/dylan/Documents/personal/Array/.build/arm64-apple-macosx/debug/libghostty.a(ext.o)'
+warning: (arm64)  could not find symbol '_ImGuiStyle_ImGuiStyle' in object file '/Users/dylan/Documents/personal/Array/.build/arm64-apple-macosx/debug/libghostty.a(ext.o)'
+[7/9] Linking Array
+[8/9] Applying Array
+Build of product 'Array' complete! (34.95s)
+
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+Another instance of SwiftPM (PID: 75498) is already running using '/Users/dylan/Documents/personal/Array/.build', waiting until that process has finished execution...warning: '--skip-update' option is deprecated and will be removed in a future release
+warning: 'array': Invalid Exclude '/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/UserInputCardView.swift': File not found.
+warning: 'array': found 1 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCore/Resources/ContextWindows.PROVENANCE.md
+warning: 'array': found 3 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedSyncChecks/Fixtures/workspace.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedSyncChecks/Fixtures/baseline_ops.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedSyncChecks/Fixtures/canvas.json
+warning: 'array': found 31 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/claude-2.1.296.meta.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-exec-file-change-live.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/claude-subagent-turn.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-exec-single-agent-parity.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/codex-0.159.3.meta.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/managed-session-with-approval.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/pi-delegate-agent-turn.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/pi-delegate-run-events-live.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/claude-delegation-two-agents.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/catalogs/manifest.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/claude-2.1.296.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-appserver-delegating-websearch.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/pi-0.85.0.meta.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-appserver-delegating-turn.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/catalogs/pi-0.85.0.txt
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-appserver-mcp-delegate.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/pi-delegate-run-events.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/spawn-agent-tool-call.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-rollout-apply-patch-live.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/codex-appserver-single-agent.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/claude-2.1.300.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/claude-websearch-turn.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/catalogs/claude-2.1.296.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/catalogs/codex-0.159.3.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/pi-file-edit-live.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/claude-compact-boundary.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/codex-0.159.3.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/claude-2.1.291-opus-turn.jsonl
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/activity-log-pre-p2a8.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/claude-2.1.300.meta.json
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedCoreChecks/Fixtures/context-meter/pi-0.85.0.jsonl
+warning: 'array': found 19 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/approval-request.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/command-output-long.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/diff-unified.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/fence-open-streaming.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/malformed-markup.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/notice-local.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/headings-sections.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/plan-checklist.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/fence-closed-code.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/links-policy.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/quotes-nested.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/prose-rich-inline.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/user-question.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/secrets-sentinel.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/error-runner-failure.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/nested-lists.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/tool-call-arguments.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/stream-5000-deltas.md
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevivedAgentContentChecks/Fixtures/prose-plain.md
+warning: 'array': found 157 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentTileHeaderView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/WorkbookGridRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/IOSPreview/IOSPreviewRuntime.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/TaskEditor/ASSET_VERSION
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/DualPlaneGyroTiltedThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerKeyPolicy.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/FileReferenceRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentSignalBadgeView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/CodeBlockRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasBackgroundImageCache.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitVariations/OrbitVariationsGalleryView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitVariations/SolarHandoffOrbitThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/IOSPreview/bridge.cjs
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/SpeechAnalyzerDictationEngine.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/ThinkingWaveIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/ProjectFileOperationCoordinator.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/CodeEditor/editor.js
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentLocationStatusView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerImageAttachmentRailView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerDictationButton.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitVariations/TiltedPrismOrbitThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/TaskEditor/editor.js
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/QuestionRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/AuroraRibbonTiltedThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasWorldPlaneView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/CompletionPopoverController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentThinkingIndicatorAnimating.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerImagePasteboardDecoder.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerPasteboardIntake.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/CompletedReasoningDisclosureView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasTileSelection.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerDictationController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/RichInlineTextView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileMarkdownDocumentView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/ResizeDimensionsOverlayView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/TileSurfaceStore.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/CodeEditor/ASSET_VERSION
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitingTriadThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/CommandOutputRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/CompactionRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/TaskReferenceRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/KanbanTileNSView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerFileReferenceRailView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/ToolCallRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasBackgroundRendererView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentCompactStatusPhaseAdapter.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/DiffReviewOffMainCheck.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerDictationStripView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentStatusPillView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/GyroBrandDerivativeThinkingIndicatorViews.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerDictationPillView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileImageBackend.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/IOSPreview/IOSPreviewBuild.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasShortcutRailView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerReplyOptionRailView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/PlanRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/BoardDragController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTurnCards.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerHeightController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentTerminalFace.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentCompactStatusPresentation.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptLayout.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerActionButton.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/AgentReferenceRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasSymbolImage.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ChoicePopoverController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentBlockRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/BoardTaskDetailController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/CodeEditor/index.html
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerQueuedMessageRailView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/IOSPreview/IOSPreviewTools.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/CodeEditor/LICENSE.txt
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentSessionHandoffBanner.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/ChromaticDepthRelayTiltedThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileTreeBrowserView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/TaskEditor/editor.css
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/AgentComposerView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentAccountQuotaPresentation.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/TaskEditor/index.html
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/UnknownBlockRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTextStyleResolver.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasGettingStartedView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentCompactStatusRowView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ChoiceButton.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptCopyController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasFrameRecorder.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptListView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/ThematicBreakRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerImageThumbnailPipeline.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentBlockMeasurementCache.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentToolClusterHeaderItem.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileImageRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/DrawingLoopIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/KanbanCardView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerTextView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/DiffSummaryRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/AgentMessageRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/DelimitedGridRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/TileResidencyPolicy.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentTileStatePresenter.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/PrismaticCometTiltedThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/ImageRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CodeEditorHostView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/BoardCardGhostView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/KanbanColumnView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/TaskEditor/THIRD_PARTY_NOTICES.txt
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileTileRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/DisclosureStateStore.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/IOSPreview/IOSPreviewStreamReceiver.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ChoiceGeometryChecks.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/AgentRadialContextMeterView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentBlockHostView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerSendChoiceView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/ThrobberCandidateGalleryView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ChoiceListView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptClusterPlanner.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/ApprovalRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/ErrorNoticeRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ChoiceLabelMetrics.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasFrameHUDView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/PrecessingPrismTiltedThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/StatusChipNSView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptMotion.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/DocumentRelationshipOverlayView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentImagePreviewController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptUpdateScheduler.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ProviderModelPicker.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitVariations/CounterCurrentOrbitThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptScrollController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitVariations/ChromaticRelayOrbitThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileContentCoordinator.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentReferenceDrag.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/UserPromptRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/SessionBoundaryRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/ZonePresentation.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/CodeEditor/VIM-LICENSE.txt
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/IOSPreviewTileNSView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/CodeEditor/editor.css
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Resources/IOSPreview/README.txt
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/TiltedVariations/TiltedVariationsGalleryView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTile/AgentPageZoomScaling.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/AssistantProseRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/AgentComposerFooterView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/FileContentObservation.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/BreathingSparkIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/TableRenderer.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/BranchChipNSView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentComposer/ComposerFileReferencePasteboardDecoder.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasHistoryController.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/AgentBlockRendererRegistry.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/Renderers/CompletedReasoningDisclosurePresenter.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/TileSurfaceHostView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentLineageOverlayView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentActivity/ThrobberCandidates/OrbitVariations/AngularSlingshotOrbitThinkingIndicatorView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/AgentTranscript/CodeTextView.swift
+    /Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/CanvasCameraDriver.swift
+[0/1] Planning build
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'ContinuumRevivedCoreChecks' complete! (1.28s)
+
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.DgKoqm CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.otmq2F .build/debug/Array --ios-preview-tile-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+agent activity: keeping the previous snapshot — managed-session listing refused: reconciliation has not committed yet (0 of 2 roots swept in this process)
+IOSPreviewInputChecks passed: pre-held modifiers, window/app deactivation releases, touch cleanup and duplicate-release suppression
+IOSPreviewEdgeChecks input passed: 12 zoom/orientation cases, letterbox rejection, clamped drag release and focus-loss release
+IOSPreviewEdgeChecks rollback passed: failed selection save retains disk, canvas, runtime and visible chooser identity
+IOSPreviewStreamChecks passed: 257 frames assembled while main blocked, newest-only presentation, bounded chunks, worker queue, malformed HTTP/MIME/length, overflow and synchronous stop fence
+IOSPreviewBuildChecks passed: exact scheme/device, fresh products, verified bundle, provenance, missing/mismatched product rejection, install/launch failure barriers, build failure barrier, cancellation barrier, stale-product rejection, connection-status precedence and scoped product cleanup
+IOSPreviewChecks passed: production mount, world-frame placement, persisted choice, frame/input delivery, exclusive ownership, parking, stale frames, workspace round trip, failed-save rollback, command cancellation and latest-frame decode
+ContinuumRevivedIOSPreviewTileChecks passed
+
+==> node Tools/IOSPreviewProof/check-bridge.cjs
+iOS preview bridge checks passed: authentication, route restriction, frame backpressure, frame-rate validation, controller ownership, modifier-safe Unicode paste, malformed/oversized socket errors, drag coalescing, disconnect input release, late-input fencing and finite startup/shutdown.
+
+==> python3 Tools/IOSPreviewProof/check-command-process-tree.py
+Command process tree: stdoutToFile=false, cancellationCompleted=true, cancellationError=true, elapsedSeconds=2.0122328996658325, survivingOwnedPIDs=[]
+PASS: owned shell and child killed; pipe reaches EOF; captured stdout, retained stdout/stderr, timeout and 10MB stderr with bounded error tail preserved
+Command process tree: stdoutToFile=true, cancellationCompleted=true, cancellationError=true, elapsedSeconds=2.014880061149597, survivingOwnedPIDs=[]
+PASS: owned shell and child killed; pipe reaches EOF; captured stdout, retained stdout/stderr, timeout and 10MB stderr with bounded error tail preserved
+
+==> .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
+WorkspaceAPIContractChecks passed
+WorkspaceAPIExposureChecks passed: 96 real coding keys classified
+
+==> .build/debug/ContinuumRevivedCoreChecks --command-center-check
+CommandCenterChecks passed
+
+==> scripts/check-color-hygiene.sh
+Colour hygiene passed: 27 allowlisted violation line(s), 0 new; 1 status→appearance mapping; 1 iOS colour bridge (theme resolution + explicit-colour-space construction); 7 zone tints agreeing across platforms.
+
+---- iOS preview tile matrix (targeted): 7 leg(s) run ----
+
+iOS preview tile matrix (targeted) passed.

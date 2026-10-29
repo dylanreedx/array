@@ -38,6 +38,9 @@ AGENT_REFERENCE_ONLY=0
 WORKSPACE_SELECTOR_ONLY=0
 AGENT_TILE_MENU_ONLY=0
 TRANSCRIPT_VIEWPORT_ONLY=0
+IOS_PREVIEW_PROOF_ONLY=0
+IOS_PREVIEW_LIVE_ONLY=0
+IOS_PREVIEW_TILE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
     --sidebar-refinements)
@@ -72,9 +75,21 @@ if [[ $# -gt 0 ]]; then
       TRANSCRIPT_VIEWPORT_ONLY=1
       shift
       ;;
+    --ios-preview-proof)
+      IOS_PREVIEW_PROOF_ONLY=1
+      shift
+      ;;
+    --ios-preview-live)
+      IOS_PREVIEW_LIVE_ONLY=1
+      shift
+      ;;
+    --ios-preview-tile)
+      IOS_PREVIEW_TILE_ONLY=1
+      shift
+      ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions]
+Usage: scripts/run-matrix.sh [--fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile]
 
 Runs the project verification matrix. --fast skips the slower packaging bundle
 probe and keeps the build/check/app-flag/git hygiene gates used by the opt-in
@@ -98,6 +113,12 @@ scaling, page zoom, face switching, identity color and location actions.
 It is a targeted development gate, not the full release matrix.
 --codex-permissions rebuilds CoreChecks and verifies Full Access launch arguments
 for fresh/resumed exec and production app-server runs using an offline stand-in.
+--ios-preview-proof builds the standalone native fixture harness and reports
+rendering/input/teardown assertions. It does not verify a live simulator.
+--ios-preview-live runs the opt-in real simulator witness, with the pinned backend
+and installed runtime configured via IOS_PREVIEW_LIVE_* environment variables.
+--ios-preview-tile rebuilds the app/CoreChecks and exercises production tile
+mount/spawn/restore with an offline transport, plus API exposure and palette checks.
 USAGE
       exit 0
       ;;
@@ -479,6 +500,34 @@ if [[ "$WORKSPACE_SELECTOR_ONLY" -eq 1 ]]; then
   exit $?
 fi
 
+if [[ "$IOS_PREVIEW_TILE_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+  run_app_check .build/debug/Array --ios-preview-tile-check
+  run_leg node Tools/IOSPreviewProof/check-bridge.cjs
+  run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --command-center-check
+  run_leg scripts/check-color-hygiene.sh
+  matrix_report 'iOS preview tile matrix (targeted)'
+  exit $?
+fi
+if [[ "$IOS_PREVIEW_LIVE_ONLY" -eq 1 ]]; then
+  if [[ "${IOS_PREVIEW_LIVE_TEST_CANVAS:-0}" == 1 ]]; then
+    run swift build --disable-sandbox --skip-update --product Array
+    export IOS_PREVIEW_LIVE_ARRAY_BIN="$ROOT_DIR/.build/debug/Array"
+    export IOS_PREVIEW_LIVE_ARRAY_CHECK=--ios-preview-live-tile-check
+  fi
+  run_leg scripts/check-ios-preview-live.sh
+  matrix_report 'iOS preview live matrix (targeted)'
+  exit $?
+fi
+if [[ "$IOS_PREVIEW_PROOF_ONLY" -eq 1 ]]; then
+  run_leg scripts/check-ios-preview-proof.sh
+  MATRIX_NOTES+=("Fixture transport only; this gate does not exercise live simulator, paste or production canvas integration.")
+  matrix_report 'iOS preview proof matrix (targeted)'
+  exit $?
+fi
 # The executable-prefix structural guards already ran above. The scoped
 # reference gate leaves their lengthy mutation self-tests to the full matrix.
 if [[ "$AGENT_TILE_MENU_ONLY" -eq 1 ]]; then
@@ -532,6 +581,7 @@ fi
 # packet structure, ledger rows, and supervised review gates from drifting.
 run scripts/check-agent-tile-ux-program.sh
 run scripts/check-sidebar-native-ux-program.sh
+run_leg scripts/check-ios-preview-proof.sh
 # Ticket P1.7: colour hygiene. A pure grep lint over the view layers, so it runs
 # before the build for the same reason as the inventory guard — a new raw colour
 # should be named in seconds, not after a full build. Red on any raw colour or
@@ -1092,6 +1142,9 @@ run_app_check .build/debug/Array --zone-tile-hydration-check
 # drives mountWorkspaceSceneAtBoot, the method applicationDidFinishLaunching
 # calls, and never install(into:).
 run_app_check .build/debug/Array --workspace-scene-owner-check
+run_app_check .build/debug/Array --ios-preview-tile-check
+run_leg node Tools/IOSPreviewProof/check-bridge.cjs
+run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 # .plans/67 slice 0: the workspace invariants fixture every later workspace
 # witness builds on. Two workspaces mounted through mountWorkspaceSceneAtBoot,
 # a StoreFileWriter fault seam, and negative controls (1pt shift, foreign zone,

@@ -1,0 +1,20 @@
+2026-10-28 12:51:03.610 simctl[68718:67700719] CoreSimulatorService connection became invalid.  Simulator services will no longer be available.
+2026-10-28 12:51:03.610 simctl[68718:67700720] Logging connecton invalid: <OS_xpc_error: <dictionary: 0x1f361cb60> { count = 1, transaction: 0, voucher = 0x0, contents =
+	"XPCErrorDescription" => <string: 0x1f361cca0> { string cache = 0x0, length = 18, contents = "Connection invalid" }
+}>
+2026-10-28 12:51:03.610 simctl[68718:67700720] Error opening log file (/Users/dylan/Library/Logs/CoreSimulator/CoreSimulator.com.apple.CoreSimulator.simctl.log): Operation not permitted
+[-[SimServiceContext sendRequest:]:1751] ERROR : Unable to deliver request ({
+    "developer_dir" = "/Applications/Xcode.app/Contents/Developer";
+    request = "set_developer_dir";
+}) because we are not connected to CoreSimulatorService.
+[-[SimServiceContext initWithDeveloperDir:connectionType:error:]:432] WARN  : Unable to discover any Simulator runtimes. Developer Directory is /Applications/Xcode.app/Contents/Developer.
+[-[SimDiskImageManager init]:175] ERROR : Could not kickstart simdiskimaged; SimDiskImageManager services will not be available: Error Domain=NSPOSIXErrorDomain Code=53 "Software caused connection abort" UserInfo={NSLocalizedDescription=Error returned in reply from CoreSimulatorService: Connection invalid}
+[-[SimDiskImageManager _onQueue_checkConnection:]:239] ERROR : simdiskimaged returned error (invalid), marking disconnected.
+[-[SimDiskImageManager _onQueue_checkConnection:]:219] ERROR : simdiskimaged connection is currently unavailable because connection became invalid
+[-[SimServiceContext initWithDeveloperDir:connectionType:error:]_block_invoke:468] ERROR : Could not get list of trusted mount directories: Error Domain=com.apple.CoreSimulator.SimError Code=409 "Cannot talk to the service used to manage runtime disk images (simdiskimaged) because its launchd job is not registered or was unloaded" UserInfo={NSLocalizedDescription=Cannot talk to the service used to manage runtime disk images (simdiskimaged) because its launchd job is not registered or was unloaded}
+[-[SimServiceContext sendRequest:reply:error:]:1771] ERROR : Unable to deliver request ({
+    request = "notification_subscription";
+    "set_path" = "/Users/dylan/Documents/personal/Array/qa-runs/ios-preview-proof/backend/device-set";
+}) because we are not connected to CoreSimulatorService.
+2026-10-28 12:51:03.699 simctl[68718:67700710] Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused" UserInfo={NSLocalizedDescription=CoreSimulatorService connection became invalid.  Simulator services will no longer be available.}
+Unable to locate device set: Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused" UserInfo={NSLocalizedFailureReason=Failed to subscribe to notifications from CoreSimulatorService., NSLocalizedDescription=Failed to initialize simulator device set., NSUnderlyingError=0x7b3aebca50 {Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused" UserInfo={NSLocalizedDescription=CoreSimulatorService connection became invalid.  Simulator services will no longer be available.}}}
