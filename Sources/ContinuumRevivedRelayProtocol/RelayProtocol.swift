@@ -2,6 +2,12 @@ import Foundation
 
 public enum RelayWire {
     public static let version = 2
+    /// Populated desktop inventories exceed the original 512 KiB ceiling.
+    public static let maximumEventPayloadBytes = 8 * 1024 * 1024
+    /// Includes worst-case escaped base64 plus envelope overhead. Bound ingress
+    /// separately so an invalid request cannot grow the HTTP accumulator forever.
+    public static let maximumRequestBodyBytes = 24 * 1024 * 1024
+    public static let maximumEventTailBytes = 16 * 1024 * 1024
     public static let companionCapabilities: Set<RelayCapability> = [
         .readActivity, .readWorkspaces, .readCanvas, .readTranscripts,
         .respondToApprovals, .stopAgents,
@@ -94,7 +100,16 @@ public struct RelayCommandReceipt: Codable, Sendable, Equatable {
 }
 public struct RelayHealth: Codable, Sendable, Equatable {
     public var status: String; public var schemaVersion: Int
-    public init(status: String = "ok", schemaVersion: Int) { self.status = status; self.schemaVersion = schemaVersion }
+    public var notificationPolicies: [String]
+    public init(status: String = "ok", schemaVersion: Int, notificationPolicies: [String] = []) {
+        self.status = status; self.schemaVersion = schemaVersion; self.notificationPolicies = notificationPolicies
+    }
+    private enum CodingKeys: String, CodingKey { case status, schemaVersion, notificationPolicies }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = try c.decode(String.self, forKey: .status); schemaVersion = try c.decode(Int.self, forKey: .schemaVersion)
+        notificationPolicies = try c.decodeIfPresent([String].self, forKey: .notificationPolicies) ?? []
+    }
 }
 public struct RelayErrorResponse: Codable, Sendable, Equatable {
     public var code: String

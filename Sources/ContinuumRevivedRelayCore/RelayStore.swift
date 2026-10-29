@@ -5,6 +5,7 @@ import ContinuumRevivedRelayProtocol
 
 public enum RelayStoreError: Error, Equatable {
     case unauthorized, forbidden, invalidOrExpiredCode, payloadTooLarge, invalidCommand
+    case invalidNotificationBatch, notificationOwnerRequired, notificationOwnerMismatch, notificationRevisionConflict
 }
 
 public struct RelayCredentialContext: Sendable, Equatable {
@@ -21,14 +22,23 @@ public struct RelayStoredPushRegistration: Sendable, Equatable {
 /// Durable, per-Mac relay state. All mutations are transactions and all externally
 /// supplied secrets are reduced to SHA-256 digests before storage.
 public actor RelayStore {
-    public static let schemaVersion = 1
-    private let database: DatabaseQueue
-    private let encryptionKey: SymmetricKey
+    public static let schemaVersion = 4
+    // Module-owned helpers implement the outbox transaction in a separate file.
+    let database: DatabaseQueue
+    let encryptionKey: SymmetricKey
+    let outboxTrace: @Sendable (RelayOutboxTrace) -> Void
     private let eventTailLimit: Int
 
-    public init(path: String, masterKey: Data, eventTailLimit: Int = 2_000) throws {
+    public init(path: String, masterKey: Data, eventTailLimit: Int = 2_000,
+                outboxTrace: @escaping @Sendable (RelayOutboxTrace) -> Void = RelayOutboxTrace.log) throws {
         guard masterKey.count >= 32 else { throw RelayStoreError.unauthorized }
-        database = try DatabaseQueue(path: path)
+        var configuration = Configuration()
+        // Old/new workers can overlap briefly during recovery. GRDB otherwise
+        // fails immediately on another connection's writer lock; bound the wait
+        // rather than losing a valid publication or notification preparation.
+        configuration.busyMode = .timeout(2)
+        database = try DatabaseQueue(path: path, configuration: configuration)
+        self.outboxTrace = outboxTrace
         // Deployment recovery material may be any high-entropy value of at least
         // 32 bytes. Normalize it to AES-256 instead of passing a non-AES key length
         // through to Crypto (which fails only when the first token is registered).
@@ -89,13 +99,60 @@ public actor RelayStore {
                 );
                 """)
         }
+        migrator.registerMigration("relay-notification-deduplication") { db in
+            try db.execute(sql: """
+                CREATE TABLE notification_claims (
+                  registration_id TEXT NOT NULL REFERENCES push_registrations(id) ON DELETE CASCADE,
+                  decision_key TEXT NOT NULL, claim_id TEXT NOT NULL,
+                  claimed_at DOUBLE NOT NULL, accepted_at DOUBLE,
+                  PRIMARY KEY(registration_id,decision_key)
+                );
+                UPDATE relay_metadata SET value='2' WHERE key='schema_version';
+                """)
+        }
+        migrator.registerMigration("relay-notification-outbox") { db in
+            try db.execute(sql: """
+                ALTER TABLE notification_claims ADD COLUMN disposition TEXT;
+                UPDATE notification_claims SET disposition='accepted' WHERE accepted_at IS NOT NULL;
+                CREATE TABLE notification_outbox (
+                  registration_id TEXT NOT NULL REFERENCES push_registrations(id) ON DELETE CASCADE,
+                  decision_key TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+                  event_sequence INTEGER NOT NULL, decision_path TEXT NOT NULL, subject_key TEXT NOT NULL, sealed_intent BLOB NOT NULL,
+                  created_at DOUBLE NOT NULL, expires_at DOUBLE NOT NULL,
+                  attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at DOUBLE NOT NULL,
+                  lease_id TEXT, lease_until DOUBLE,
+                  PRIMARY KEY(registration_id,decision_key)
+                );
+                CREATE INDEX notification_outbox_due ON notification_outbox(next_attempt_at,lease_until);
+                CREATE INDEX notification_outbox_instance ON notification_outbox(instance_id);
+                CREATE TABLE notification_backoff (
+                  registration_id TEXT PRIMARY KEY NOT NULL REFERENCES push_registrations(id) ON DELETE CASCADE,
+                  not_before DOUBLE NOT NULL
+                );
+                UPDATE relay_metadata SET value='3' WHERE key='schema_version';
+                """)
+        }
+        migrator.registerMigration("relay-task-notification-ownership") { db in
+            try db.execute(sql: """
+                CREATE TABLE notification_ownership (
+                  instance_id TEXT PRIMARY KEY NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+                  publisher_id TEXT NOT NULL, revision INTEGER NOT NULL, payload_hash BLOB NOT NULL
+                );
+                CREATE TABLE notification_task_decisions (
+                  instance_id TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+                  task_id TEXT NOT NULL, decision_key TEXT NOT NULL, recipients BLOB NOT NULL,
+                  PRIMARY KEY(instance_id,task_id,decision_key)
+                );
+                UPDATE relay_metadata SET value='4' WHERE key='schema_version';
+                """)
+        }
         return migrator
     }
 
     public func health() throws -> RelayHealth {
         try database.read { db in
             _ = try String.fetchOne(db, sql: "SELECT value FROM relay_metadata WHERE key='schema_version'")
-            return RelayHealth(schemaVersion: Self.schemaVersion)
+            return RelayHealth(schemaVersion: Self.schemaVersion, notificationPolicies: ["task.batch.v1"])
         }
     }
 
@@ -196,8 +253,12 @@ public actor RelayStore {
 
     public func publish(auth: RelayCredentialContext, request: RelayPublishRequest, now: Date = .init()) throws -> RelayEvent {
         guard auth.capabilities.contains(.publishState) else { throw RelayStoreError.forbidden }
-        guard request.payload.count <= 512 * 1024 else { throw RelayStoreError.payloadTooLarge }
-        return try database.write { db in
+        guard request.kind != "task.state.v1" else { RelayNotificationOwnershipPath.invalidBatch.log(); throw RelayStoreError.notificationOwnerRequired }
+        guard request.payload.count <= RelayWire.maximumEventPayloadBytes else {
+            FileHandle.standardError.write(Data("{\"event\":\"publish_rejected\",\"path\":\"PUB-05\",\"reason\":\"payloadTooLarge\",\"payload_bytes\":\(request.payload.count),\"limit_bytes\":\(RelayWire.maximumEventPayloadBytes)}\n".utf8))
+            throw RelayStoreError.payloadTooLarge
+        }
+        let result = try database.write { db in
             guard let seq = try Int64.fetchOne(db, sql: "SELECT next_sequence FROM instances WHERE id=? AND revoked_at IS NULL", arguments: [auth.instanceID.uuidString]) else { throw RelayStoreError.unauthorized }
             try db.execute(sql: "UPDATE instances SET next_sequence=next_sequence+1 WHERE id=?", arguments: [auth.instanceID.uuidString])
             try db.execute(sql: "INSERT INTO relay_events(instance_id,sequence,kind,payload,is_snapshot,created_at) VALUES (?,?,?,?,?,?)", arguments: [auth.instanceID.uuidString, seq, request.kind, request.payload, request.isSnapshot, now.timeIntervalSince1970])
@@ -206,8 +267,24 @@ public actor RelayStore {
             }
             let floor = max(0, seq - Int64(eventTailLimit))
             try db.execute(sql: "DELETE FROM relay_events WHERE instance_id=? AND sequence<=? AND is_snapshot=0", arguments: [auth.instanceID.uuidString, floor])
-            return RelayEvent(sequence: seq, kind: request.kind, payload: request.payload, createdAt: now)
+            // Full activity snapshots are ordinary events in existing desktop
+            // clients. A count-only tail of 2,000 could retain many gigabytes.
+            // Keep the newest bounded suffix without evicting spatial bootstrap.
+            try db.execute(sql: """
+                DELETE FROM relay_events WHERE instance_id=? AND is_snapshot=0 AND sequence IN (
+                  SELECT sequence FROM (
+                    SELECT sequence, SUM(length(payload)) OVER (ORDER BY sequence DESC) AS retained_bytes
+                    FROM relay_events WHERE instance_id=? AND is_snapshot=0
+                  ) WHERE retained_bytes>?
+                )
+                """, arguments: [auth.instanceID.uuidString, auth.instanceID.uuidString, RelayWire.maximumEventTailBytes])
+            let event = RelayEvent(sequence: seq, kind: request.kind, payload: request.payload, createdAt: now)
+            let traces = try Self.enqueuePublishedAlerts(db, event: event, instanceID: auth.instanceID, key: encryptionKey, now: now)
+            return (event, traces)
         }
+        result.1.forEach(outboxTrace)
+        if request.kind == "task.batch.v1" { RelayNotificationOwnershipPath.committed.log() }
+        return result.0
     }
 
     public func events(auth: RelayCredentialContext, after cursor: Int64) throws -> RelayEventPage {
@@ -277,11 +354,54 @@ public actor RelayStore {
 
     public func pushRegistrations(instanceID: UUID) throws -> [RelayStoredPushRegistration] {
         try database.read { db in
-            try Row.fetchAll(db, sql: "SELECT id,device_id,kind,sealed_token FROM push_registrations WHERE instance_id=? AND revoked_at IS NULL", arguments: [instanceID.uuidString]).compactMap { row in
+            try Row.fetchAll(db, sql: """
+                SELECT p.id,p.device_id,p.kind,p.sealed_token
+                FROM push_registrations p JOIN instances i ON i.id=p.instance_id
+                WHERE p.instance_id=? AND p.revoked_at IS NULL AND i.revoked_at IS NULL
+                  AND EXISTS (SELECT 1 FROM credentials c
+                    WHERE c.instance_id=p.instance_id AND c.device_id=p.device_id
+                      AND c.role='companion' AND c.revoked_at IS NULL)
+                """, arguments: [instanceID.uuidString]).compactMap { row in
                 guard let id = UUID(uuidString: row["id"]), let deviceID = UUID(uuidString: row["device_id"]), let kind = RelayPushRegistrationKind(rawValue: row["kind"]) else { return nil }
                 let sealed: Data = row["sealed_token"]
                 guard let box = try? AES.GCM.SealedBox(combined: sealed), let token = try? AES.GCM.open(box, using: encryptionKey) else { return nil }
                 return RelayStoredPushRegistration(id: id, deviceID: deviceID, kind: kind, token: token)
+            }
+        }
+    }
+
+    /// A transaction prevents actor reentrancy or two relay processes from
+    /// submitting the same alert concurrently. Accepted identities survive
+    /// restart; abandoned in-flight work can be reclaimed after its lease.
+    /// This is event deduplication, not a task completion policy or an outbox.
+    public func claimPushDecision(registrationID: UUID, decisionKey: String, now: Date = .init()) throws -> UUID? {
+        try database.write { db in
+            if let row = try Row.fetchOne(db, sql: "SELECT claimed_at,accepted_at,disposition FROM notification_claims WHERE registration_id=? AND decision_key=?",
+                                          arguments: [registrationID.uuidString, decisionKey]) {
+                let accepted: Double? = row["accepted_at"]
+                let claimed: Double = row["claimed_at"]
+                let disposition: String? = row["disposition"]
+                if accepted != nil || disposition != nil || now.timeIntervalSince1970 - claimed < 120 { return nil }
+            }
+            let claimID = UUID()
+            try db.execute(sql: """
+                INSERT INTO notification_claims(registration_id,decision_key,claim_id,claimed_at)
+                VALUES (?,?,?,?) ON CONFLICT(registration_id,decision_key)
+                DO UPDATE SET claim_id=excluded.claim_id,claimed_at=excluded.claimed_at
+                """, arguments: [registrationID.uuidString, decisionKey, claimID.uuidString, now.timeIntervalSince1970])
+            return claimID
+        }
+    }
+
+    public func finishPushDecision(registrationID: UUID, decisionKey: String, claimID: UUID,
+                                   accepted: Bool, now: Date = .init()) throws {
+        try database.write { db in
+            if accepted {
+                try db.execute(sql: "UPDATE notification_claims SET accepted_at=?,disposition='accepted' WHERE registration_id=? AND decision_key=? AND claim_id=? AND disposition IS NULL",
+                               arguments: [now.timeIntervalSince1970, registrationID.uuidString, decisionKey, claimID.uuidString])
+            } else {
+                try db.execute(sql: "DELETE FROM notification_claims WHERE registration_id=? AND decision_key=? AND claim_id=? AND accepted_at IS NULL AND disposition IS NULL",
+                               arguments: [registrationID.uuidString, decisionKey, claimID.uuidString])
             }
         }
     }

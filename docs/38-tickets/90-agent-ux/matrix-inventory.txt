@@ -89,7 +89,11 @@ check --cli-update-settings-check
 check --codex-appserver-parity-check
 check --codex-appserver-runner-check
 check --command-center-check
+check --companion-agent-destination-check
 check --companion-sync-health-check
+check --companion-task-host-check
+check --companion-task-ledger-check
+check --companion-task-publication-check
 check --completion-awareness-check
 check --component-lab-check
 check --composer-dictation-check
@@ -356,6 +360,10 @@ leg run scripts/check-sidebar-native-ux-program.sh
 leg run swift build
 leg run swift build --disable-sandbox --skip-update --product Array
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
+leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
+leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedSyncChecks
+leg run swift build --disable-sandbox --skip-update --product continuum-relay
 leg run swift build --product Array
 leg run swift build --product ContinuumRevivedCoreChecks
 leg run swift run ContinuumRevivedSyncIntegrationChecks
@@ -435,6 +443,7 @@ leg run_app_check .build/debug/Array --child-crash-isolation-check
 leg run_app_check .build/debug/Array --choice-geometry-check
 leg run_app_check .build/debug/Array --cli-update-settings-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
+leg run_app_check .build/debug/Array --companion-task-host-check
 leg run_app_check .build/debug/Array --completion-awareness-check
 leg run_app_check .build/debug/Array --component-lab-check
 leg run_app_check .build/debug/Array --composer-dictation-check
@@ -689,6 +698,8 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --cli-update-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-parity-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --command-center-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --companion-agent-destination-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --companion-task-ledger-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --context-meter-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --dictation-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
@@ -712,10 +723,13 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --transcript-rehydration-che
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --unreadable-canvas-store-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+leg run_leg .build/debug/ContinuumRevivedSyncChecks --companion-task-publication-check
+leg run_leg bash scripts/check-relay-linux.sh
 leg run_leg node Tools/IOSPreviewProof/check-bridge.cjs
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
 leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
+leg run_leg python3 scripts/check-notification-map.py --self-test
 leg run_leg scripts/capture-cli-fixtures.sh check
 leg run_leg scripts/check-app-bundle.sh --configuration debug
 leg run_leg scripts/check-color-hygiene.sh
@@ -725,6 +739,8 @@ leg run_leg scripts/check-ios-preview-live.sh
 leg run_leg scripts/check-ios-preview-proof.sh
 leg run_leg scripts/check-matrix-inventory.sh
 leg run_leg scripts/check-root-docs.sh
+leg run_leg swift run --skip-build ContinuumRevivedRelayCoreChecks
+leg run_leg swift run --skip-build ContinuumRevivedRelayIntegrationChecks
 leg run_leg swift run ContinuumRevivedAgentContentChecks
 leg run_leg swift run ContinuumRevivedAgentUIChecks
 leg run_leg swift run ContinuumRevivedCoreChecks

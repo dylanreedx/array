@@ -2,6 +2,11 @@ import ContinuumRevivedCore
 import ContinuumRevivedSync
 import Foundation
 
+if CommandLine.arguments.contains("--companion-task-publication-check") {
+    do { try await runCompanionTaskPublicationChecks(); exit(0) }
+    catch { fputs("FAIL: \(error)\n", stderr); exit(1) }
+}
+
 // Ticket: docs/38-tickets/05-delete-tombstone.md
 // Executable checks for the tombstone vocabulary + delete-wins policy.
 // All in-process: no daemon, no network, no wall clock. Prints measured

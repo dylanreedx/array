@@ -7,6 +7,12 @@ RUN swift package resolve
 COPY Sources ./Sources
 RUN swift build -c release --product continuum-relay
 
+FROM build AS checks
+RUN swift build -c release --product ContinuumRevivedRelayCoreChecks
+RUN swift build -c release --product ContinuumRevivedRelayIntegrationChecks
+RUN .build/release/ContinuumRevivedRelayCoreChecks
+RUN .build/release/ContinuumRevivedRelayIntegrationChecks
+
 FROM swift:6.1-jammy-slim
 RUN apt-get update && apt-get install -y --no-install-recommends libsqlite3-0 && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home relay && mkdir -p /data && chown relay:relay /data

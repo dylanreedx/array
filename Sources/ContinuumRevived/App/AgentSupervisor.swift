@@ -1030,6 +1030,15 @@ final class AgentSupervisor {
     static let replayCap = 500
 
     private let store: AgentStore
+    private var companionTaskLedger: CompanionTaskLedger?
+    private var companionTaskTrackingHealthy = true
+    private var companionRunBindings: [AgentID: CompanionTaskRunHandle] = [:]
+    private var companionBackgroundBindings: [UUID: (AgentID, CompanionTaskRunHandle)] = [:]
+    private var companionCompactionItems: [AgentID: UUID] = [:]
+    private var companionAcceptedStarts: Set<AgentID> = []
+    private var companionQueueHydrationPending: Set<AgentID> = []
+    private var companionHeldStarts: [AgentID: CompanionTaskRunHandle] = [:]
+    var onCompanionTasksChanged: (() -> Void)?
     private let makeRunner: (AgentRunnerLaunch) -> AgentRunning
     private let warn: (String) -> Void
     /// The production writer is `AgentStore.upsert`. The optional seam exists only
@@ -1419,6 +1428,9 @@ final class AgentSupervisor {
             returnDeliveringSteers(for: id)
         }
         let phase = terminal?.phase ?? .indeterminate
+        if let item = companionCompactionItems.removeValue(forKey: id) {
+            updateCompanionTasks { try $0.settleHostWork(item, state: phase == .succeeded ? .succeeded : (phase == .cancelled ? .cancelled : (phase == .failed ? .failed : .unknown))) }
+        }
         if var record = records[id] {
             if phase == .succeeded {
                 record.inFlightCompaction = nil
@@ -1505,6 +1517,7 @@ final class AgentSupervisor {
     private struct PreparedAgentPrompt {
         let prompt: AgentPrompt
         let expectedAgentID: AgentID
+        var companionQueuedItemID: UUID? = nil
     }
 
     private struct TurnFacts {
@@ -1590,6 +1603,8 @@ final class AgentSupervisor {
         self.store = store
         self.makeRunner = makeRunner
         self.warn = warn
+        do { self.companionTaskLedger = try CompanionTaskLedger(applicationSupportDirectory: store.layout.applicationSupportDirectory) }
+        catch { self.companionTaskTrackingHealthy = false; warn("Companion task tracking unavailable; no task completion can be inferred.") }
         self.upsertRecord = upsertRecord ?? { record in try store.upsert(record) }
         self.nameTitlerCommand = nameTitlerCommand
         self.nameGenerationTimeout = nameGenerationTimeout
@@ -2242,6 +2257,9 @@ final class AgentSupervisor {
             if let queueFile = submissionRecoveryStore?.layout.queuedMessagesFile(for: record.id),
                ((try? Data(contentsOf: queueFile))?.count ?? 0) > 2 {
                 pauseQueue(record.id, .afterRelaunch)
+                companionQueueHydrationPending.insert(record.id)
+                updateCompanionTasks { ledger in _ = try ledger.ensureUnknown(agentID: record.id.rawValue) }
+                hydrateQueueCache(for: record.id)
             }
             restoredIDs.insert(record.id)
             report.restored.append(record.id)
@@ -2582,7 +2600,10 @@ final class AgentSupervisor {
             persist(record)
         }
         if let prompt, !prompt.isEmpty {
-            send(prompt, to: id)
+            if let parentAgentID {
+                _ = sendPrepared(PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: id), to: id,
+                                 taskParent: companionParentRun(for: parentAgentID))
+            } else { send(prompt, to: id) }
         } else {
             applyDerivedNameIfNeeded(to: id, firstPrompt: nil)
         }
@@ -2869,7 +2890,8 @@ final class AgentSupervisor {
     }
 
     @discardableResult
-    private func sendPrepared(_ prepared: PreparedAgentPrompt, to id: AgentID) -> Bool {
+    private func sendPrepared(_ prepared: PreparedAgentPrompt, to id: AgentID,
+                              taskParent: CompanionTaskRunHandle? = nil, queuedItemID: UUID? = nil) -> Bool {
         guard !contextRecoveryInFlight.contains(id) else {
             warn("Context recovery is being prepared; keep this draft and send after recovery starts.")
             return false
@@ -2899,6 +2921,11 @@ final class AgentSupervisor {
         if let refusal = sendRefusal(for: id) {
             warn("AgentSupervisor.send: \(refusal)")
             return false
+        }
+        updateCompanionTasks { ledger in
+            companionRunBindings[id] = try ledger.begin(agentID: id.rawValue, parent: taskParent, queuedID: queuedItemID ?? prepared.companionQueuedItemID)
+            companionAcceptedStarts.insert(id)
+            if companionQueueHydrationPending.contains(id), let run = companionRunBindings[id] { try ledger.markIncomplete(run) }
         }
         let firstPromptText = Self.visibleNamingText(
             from: prompt,
@@ -3009,6 +3036,9 @@ final class AgentSupervisor {
     ) {
         guard let record = records[id] else { return }
         let runnerGeneration = RunnerGenerationToken()
+        if companionAcceptedStarts.remove(id) == nil {
+            updateCompanionTasks { ledger in companionRunBindings[id] = try ledger.beginUnknown(agentID: id.rawValue) }
+        }
         runnerGenerationTokens[id] = runnerGeneration
         runners[id] = runner
         notifyTurnCapabilitiesChanged(id)
@@ -3102,7 +3132,7 @@ final class AgentSupervisor {
                 DispatchQueue.main.async {
                     guard let self,
                           self.runnerGenerationTokens[id] == runnerGeneration,
-                          self.runners[id] === runner else { return }
+                          self.runners[id] === runner || self.idleSessionRunners[id] === runner else { return }
                     self.handleProviderSubagentActivity(activity, rootAgentID: id)
                 }
             }
@@ -3116,7 +3146,7 @@ final class AgentSupervisor {
                 DispatchQueue.main.async {
                     guard let self,
                           self.runnerGenerationTokens[id] == runnerGeneration,
-                          self.runners[id] === runner else { return }
+                          self.runners[id] === runner || self.idleSessionRunners[id] === runner else { return }
                     self.bindObservedRun(handle, parent: id)
                 }
             }
@@ -3458,7 +3488,15 @@ final class AgentSupervisor {
             pendingReturnStamps[id] = nil
             return .refused(.harnessNotReady)
         }
-        heldForReadiness[id] = prepared
+        var held = prepared
+        let itemID = prepared.companionQueuedItemID ?? UUID()
+        updateCompanionTasks { ledger in
+            let reservation = try ledger.reserveQueued(agentID: id.rawValue, itemID: itemID, newTask: true)
+            try ledger.resolveQueuedReservation(reservation, accepted: true)
+            companionHeldStarts[id] = reservation
+        }
+        held.companionQueuedItemID = itemID
+        heldForReadiness[id] = held
         let returnedAt = pendingReturnStamps.removeValue(forKey: id)
         turnFacts[id, default: TurnFacts()].presence.arm(at: returnedAt ?? Date())
         turnFacts[id]?.presence.noteStartupDetail(waitsForSessionDiscovery(record)
@@ -3486,13 +3524,16 @@ final class AgentSupervisor {
         for (id, prepared) in heldForReadiness {
             if isStillStarting(id) { continue }
             heldForReadiness[id] = nil
+            let heldRun = companionHeldStarts.removeValue(forKey: id)
             if let refusal = sendRefusal(for: id) {
                 turnFacts[id]?.presence.reduce(.runtimeError(threadId: nil, message: refusal), at: Date())
+                if let heldRun { updateCompanionTasks { try $0.cancelQueued(heldRun.runID) } }
                 appendLocalNotice(id: id, key: "send-not-sent", title: "Not sent", body: refusal)
                 notifyTurnCapabilitiesChanged(id)
                 continue
             }
             if !sendPrepared(prepared, to: id) {
+                if let heldRun { updateCompanionTasks { try $0.cancelQueued(heldRun.runID) } }
                 notifyTurnCapabilitiesChanged(id)
             }
         }
@@ -3501,6 +3542,9 @@ final class AgentSupervisor {
     /// Stop on a held prompt withdraws it. True when there was one.
     private func cancelHeldPrompt(for id: AgentID) -> Bool {
         guard heldForReadiness.removeValue(forKey: id) != nil else { return false }
+        if let held = companionHeldStarts.removeValue(forKey: id) {
+            updateCompanionTasks { try $0.cancelQueued(held.runID) }
+        }
         turnFacts[id]?.presence.noteStopRequested()
         turnFacts[id]?.presence.reduce(.sessionStateChanged(.stopped), at: Date())
         appendLocalNotice(id: id, key: "send-withdrawn", title: "Not sent",
@@ -3522,7 +3566,8 @@ final class AgentSupervisor {
     @discardableResult
     func sendAgentMessage(_ text: String, from senderID: AgentID, to id: AgentID) -> Bool {
         let prompt = AgentPrompt(agentMessageText(text, from: senderID))
-        guard send(prompt, to: id) else { return false }
+        let parent = companionParentRun(for: senderID)
+        guard sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id, taskParent: parent) else { return false }
         echoPrompt(prompt, for: id)
         return true
     }
@@ -4752,7 +4797,10 @@ final class AgentSupervisor {
 
         case let .childAnnounced(parentProviderThreadID, childProviderThreadID, sourceItemID, displayLabel):
             guard let parentAgentID = providerThreadAgentRoutes[rootAgentID]?[parentProviderThreadID]
-            else { return }
+            else {
+                if let run = companionRunBindings[rootAgentID] { updateCompanionTasks { try $0.markIncomplete(run) } }
+                return
+            }
             let request = SpawnRequest(
                 role: nil,
                 prompt: "Codex delegated work",
@@ -4761,18 +4809,26 @@ final class AgentSupervisor {
                 observedOnly: true,
                 displayLabel: displayLabel
             )
-            guard let childAgentID = handleSpawnRequest(request, from: parentAgentID) else { return }
+            guard let childAgentID = handleSpawnRequest(request, from: parentAgentID) else {
+                if let run = companionRunBindings[rootAgentID] { updateCompanionTasks { try $0.markIncomplete(run) } }
+                return
+            }
             providerThreadAgentRoutes[rootAgentID, default: [:]][childProviderThreadID] = childAgentID
             let pending = pendingProviderThreadEvents[rootAgentID]?
                 .removeValue(forKey: childProviderThreadID) ?? []
             for event in pending {
                 deliver(event.withThreadId(Self.threadId(for: childAgentID)), to: childAgentID)
             }
+            if let run = companionRunBindings[rootAgentID] {
+                let unknown = pendingProviderThreadEvents[rootAgentID]?.values.contains { !$0.isEmpty } ?? false
+                updateCompanionTasks { try $0.setProviderMembershipUnknown(run, unknown: unknown) }
+            }
 
         case let .threadEvent(providerThreadID, event):
             guard let target = providerThreadAgentRoutes[rootAgentID]?[providerThreadID] else {
                 pendingProviderThreadEvents[rootAgentID, default: [:]][providerThreadID, default: []]
                     .append(event)
+                if let run = companionRunBindings[rootAgentID] { updateCompanionTasks { try $0.setProviderMembershipUnknown(run, unknown: true) } }
                 return
             }
             // Primary events already travel through AgentRunning.onEvent. This
@@ -4814,6 +4870,7 @@ final class AgentSupervisor {
             // Without the announcing call's id there is no stable identity, and a
             // child Array cannot re-identify later is not worth minting.
             let toolName = parent.harness == .claudeCode ? "Agent" : "delegate_agent"
+            if let run = companionRunBindings[parentId] { updateCompanionTasks { try $0.markIncomplete(run) } }
             return refuseSpawn(.roleUnresolved, for: parentId, toolName: toolName)
         }
         let childID = AgentID(rawValue: AgentRecord.observedChildID(
@@ -4829,6 +4886,7 @@ final class AgentSupervisor {
                 records[childID] = existing
                 persist(existing)
             }
+            bindCompanionObservedChild(childID, parentID: parentId, sourceID: toolUseID)
             return childID
         }
 
@@ -4873,6 +4931,7 @@ final class AgentSupervisor {
         child.providerSessionId = boundRunID ?? child.providerSessionId
         records[childID] = child
         persist(child)
+        bindCompanionObservedChild(childID, parentID: parentId, sourceID: toolUseID)
         // Anything that arrived before the record existed replays now, in order.
         flushPendingSubagentEvents(for: childID)
         deliver(.childAgentSpawned(
@@ -5306,7 +5365,71 @@ final class AgentSupervisor {
     }
 
     private func notifyTurnCapabilitiesChanged(_ id: AgentID) {
+        updateCompanionTasks { ledger in
+            try ledger.reconcileQueued(agentID: id.rawValue, itemIDs: (queuedWorkItemsCache[id] ?? []).map(\.id))
+        }
         for observe in turnCapabilityObservers.values { observe(id) }
+    }
+
+    private func updateCompanionTasks(_ body: (CompanionTaskLedger) throws -> Void) {
+        guard companionTaskTrackingHealthy, let ledger = companionTaskLedger else { return }
+        let before = ledger.revision
+        do {
+            try body(ledger)
+            if before != ledger.revision { onCompanionTasksChanged?() }
+        } catch {
+            companionTaskTrackingHealthy = false
+            warn("Companion task tracking failed; task notifications remain withheld.")
+            onCompanionTasksChanged?()
+        }
+    }
+
+    private func companionParentRun(for id: AgentID) -> CompanionTaskRunHandle? {
+        var result: CompanionTaskRunHandle?
+        updateCompanionTasks { ledger in result = try ledger.currentRun(agentID: id.rawValue) ?? ledger.ensureUnknown(agentID: id.rawValue) }
+        return result
+    }
+
+    private func bindCompanionObservedChild(_ id: AgentID, parentID: AgentID, sourceID: String) {
+        guard let parent = companionParentRun(for: parentID) else { return }
+        updateCompanionTasks { ledger in
+            companionRunBindings[id] = try ledger.adoptObserved(agentID: id.rawValue, parent: parent,
+                sourceID: "\(parentID.rawValue.uuidString)|\(sourceID)")
+        }
+    }
+
+    private func recordCompanionTaskEvent(_ event: AgentRuntimeEvent, for id: AgentID) {
+        switch event {
+        case .turnStarted, .turnCompleted, .requestOpened, .requestResolved, .userInputRequested, .userInputResolved,
+             .runtimeError, .sessionStateChanged(.stopped), .sessionStateChanged(.error): break
+        default: return // never serialize a token/content stream
+        }
+        updateCompanionTasks { ledger in
+            let run = try companionRunBindings[id] ?? ledger.ensureUnknown(agentID: id.rawValue)
+            companionRunBindings[id] = run
+            let synthetic: Bool
+            if case .turnCompleted(_, let turn, let outcome, _) = event {
+                synthetic = outcome != .completed && ["no-result:", "stopped:", "failed:"].contains(where: turn.hasPrefix)
+            } else { synthetic = false }
+            try ledger.observe(event, run: run, allowSyntheticTerminal: synthetic)
+            if case .turnCompleted = event,
+               (runners[id] ?? idleSessionRunners[id]).flatMap({ $0 as? AgentSteeringRunning })?.hasBackgroundWork == true {
+                try ledger.setBackgroundUnknown(run, unknown: true)
+                companionBackgroundBindings[run.runID] = (id, run)
+            }
+        }
+    }
+
+    func companionTaskSnapshot(revisionFloor: UInt64 = 0) throws -> CompanionTaskSnapshotBatch {
+        guard companionTaskTrackingHealthy, let ledger = companionTaskLedger else { throw CompanionTaskLedgerError.invalidRun }
+        for (id, work) in queuedWorkItemsCache { try ledger.reconcileQueued(agentID: id.rawValue, itemIDs: work.map(\.id)) }
+        for (runID, binding) in companionBackgroundBindings {
+            if let runner = (runners[binding.0] ?? idleSessionRunners[binding.0]) as? AgentSteeringRunning, !runner.hasBackgroundWork {
+                try ledger.setBackgroundUnknown(binding.1, unknown: false)
+                companionBackgroundBindings.removeValue(forKey: runID)
+            }
+        }
+        return try ledger.snapshot(revisionFloor: revisionFloor)
     }
 
     /// Items whose agent has reported a completed turn, so a surface that rebuilds
@@ -6724,8 +6847,12 @@ final class AgentSupervisor {
                 return .refused(.unsupported)
             }
             if runners[agentID] != nil {
+                let itemID = UUID()
+                var reservation: CompanionTaskRunHandle?
+                updateCompanionTasks { reservation = try $0.reserveQueued(agentID: agentID.rawValue, itemID: itemID) }
                 _ = await store.enqueueCompaction(
-                    focus: request.focus, operationID: request.operationID, for: agentID)
+                    id: itemID, focus: request.focus, operationID: request.operationID, for: agentID)
+                if let reservation { updateCompanionTasks { try $0.resolveQueuedReservation(reservation, accepted: true) } }
                 queuedWorkItemsCache[agentID] = await store.queuedWorkItems(for: agentID)
                 notifyTurnCapabilitiesChanged(agentID)
                 return .accepted
@@ -6752,6 +6879,15 @@ final class AgentSupervisor {
             guard snapshot.capabilities.canQueue, let store = submissionRecoveryStore else {
                 return .refused(.unsupported)
             }
+            let companionItemID = UUID()
+            var companionReservation: CompanionTaskRunHandle?
+            var companionAccepted = false
+            updateCompanionTasks { companionReservation = try $0.reserveQueued(agentID: agentID.rawValue, itemID: companionItemID) }
+            defer {
+                if let reservation = companionReservation {
+                    updateCompanionTasks { try $0.resolveQueuedReservation(reservation, accepted: companionAccepted) }
+                }
+            }
             await qaAfterQueueAdmission?()
             let draftImageAttachments = prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
             do {
@@ -6767,12 +6903,14 @@ final class AgentSupervisor {
                 AgentComposerDraftFileReference(displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path)
             }
             _ = await store.enqueueMessage(
+                id: companionItemID,
                 text: prompt.text,
                 imageAttachments: draftImageAttachments,
                 fileReferences: fileReferences,
                 agentReferences: prompt.agentReferences,
                 for: agentID
             )
+            companionAccepted = true
             queuedWorkItemsCache[agentID] = await store.queuedWorkItems(for: agentID)
             notifyTurnCapabilitiesChanged(agentID)
             if runners[agentID] == nil && !pausedQueues.contains(agentID) { drainQueue(for: agentID) }
@@ -6787,6 +6925,15 @@ final class AgentSupervisor {
             guard snapshot.capabilities.canSteer, let store = submissionRecoveryStore else {
                 return .refused(.unsupported)
             }
+            let companionItemID = UUID()
+            var companionReservation: CompanionTaskRunHandle?
+            var companionAccepted = false
+            updateCompanionTasks { companionReservation = try $0.reserveQueued(agentID: agentID.rawValue, itemID: companionItemID) }
+            defer {
+                if let reservation = companionReservation {
+                    updateCompanionTasks { try $0.resolveQueuedReservation(reservation, accepted: companionAccepted) }
+                }
+            }
             await qaAfterQueueAdmission?()
             let draftImageAttachments = prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
             do {
@@ -6796,6 +6943,7 @@ final class AgentSupervisor {
                 return .refused(.invalidAttachment)
             }
             _ = await store.enqueueSteer(
+                id: companionItemID,
                 text: prompt.text,
                 imageAttachments: draftImageAttachments,
                 fileReferences: prompt.fileReferences.map {
@@ -6803,6 +6951,7 @@ final class AgentSupervisor {
                 },
                 agentReferences: prompt.agentReferences,
                 for: agentID)
+            companionAccepted = true
             queuedWorkItemsCache[agentID] = await store.queuedWorkItems(for: agentID)
             notifyTurnCapabilitiesChanged(agentID)
             handOverHeldSteers(for: agentID)
@@ -7845,6 +7994,7 @@ final class AgentSupervisor {
             let messages = await store.queuedWorkItems(for: id)
             guard let self else { return }
             self.queuedWorkItemsCache[id] = messages
+            self.companionQueueHydrationPending.remove(id)
             if !messages.isEmpty { self.notifyTurnCapabilitiesChanged(id) }
         }
     }
@@ -7854,6 +8004,7 @@ final class AgentSupervisor {
     /// primary control still means only "interrupt the current turn".
     func cancelQueuedMessage(_ messageID: UUID, for id: AgentID) {
         guard let store = submissionRecoveryStore else { return }
+        updateCompanionTasks { try $0.cancelQueued(messageID) }
         queuedWorkItemsCache[id]?.removeAll { $0.id == messageID }
         notifyTurnCapabilitiesChanged(id)
         runQueueOp(for: id) { await store.removeQueuedMessage(id: messageID, for: id) }
@@ -7867,6 +8018,7 @@ final class AgentSupervisor {
             if case .prompt(let message) = $0 { return !message.isSteer }
             return true
         }.map(\.id)
+        updateCompanionTasks { ledger in for itemID in followUps { try ledger.cancelQueued(itemID) } }
         queuedWorkItemsCache[id]?.removeAll { followUps.contains($0.id) }
         notifyTurnCapabilitiesChanged(id)
         runQueueOp(for: id) {
@@ -7956,6 +8108,8 @@ final class AgentSupervisor {
                     self.notifyTurnCapabilitiesChanged(id)
                     return
                 }
+                companionCompactionItems[id] = workItem.id
+                updateCompanionTasks { try $0.beginHostWork(workItem.id) }
                 return
             }
             guard case .prompt(let message) = workItem else { return }
@@ -7968,7 +8122,7 @@ final class AgentSupervisor {
                 await self.restoreDrainedWorkItem(workItem, for: id, store: store)
                 return
             }
-            guard self.sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id) else {
+            guard self.sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id, queuedItemID: message.id) else {
                 // The runner became busy again in the same beat (a fresh
                 // interactive send won the race) — put the message back rather
                 // than lose it.
@@ -8164,7 +8318,7 @@ final class AgentSupervisor {
             }
             return false
         }
-        guard forceSend(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id, echo: true) else {
+        guard forceSend(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id, companionQueuedItemID: itemID), to: id, echo: true) else {
             await store.requeueWorkItemAtFront(item, for: id)
             queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
             notifyTurnCapabilitiesChanged(id)
@@ -8185,7 +8339,16 @@ final class AgentSupervisor {
             return true
         }
         guard !activeCompactionOperations.contains(id) else { return false }
-        pendingForceSends[id, default: []].append((prepared, echo))
+        var admitted = prepared
+        if admitted.companionQueuedItemID == nil {
+            let itemID = UUID()
+            updateCompanionTasks { ledger in
+                let run = try ledger.reserveQueued(agentID: id.rawValue, itemID: itemID, newTask: true)
+                try ledger.resolveQueuedReservation(run, accepted: true)
+            }
+            admitted.companionQueuedItemID = itemID
+        }
+        pendingForceSends[id, default: []].append((admitted, echo))
         stopRequestedAgents.insert(id)
         turnFacts[id]?.presence.noteStopRequested()
         if interruptingAgents.contains(id) { return true }
@@ -8248,7 +8411,7 @@ final class AgentSupervisor {
         }
         guard !pending.isEmpty, let store = submissionRecoveryStore else { return }
         let messages = pending.map { entry in
-            AgentComposerQueuedMessage(text: entry.prompt.prompt.text,
+            AgentComposerQueuedMessage(id: entry.prompt.companionQueuedItemID ?? UUID(), text: entry.prompt.prompt.text,
                 imageAttachments: entry.prompt.prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) },
                 fileReferences: entry.prompt.prompt.fileReferences.map {
                     AgentComposerDraftFileReference(displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path)
@@ -8325,6 +8488,7 @@ final class AgentSupervisor {
               let entry = deliveringSteers[id]?.remove(at: index) else { return }
         switch disposition {
         case .consumed:
+            updateCompanionTasks { try $0.applyQueuedToParent(steerID) }
             recordTranscriptUserPrompt(entry.prompt, for: id)
             echoPrompt(entry.prompt, for: id)
         case .returned:
@@ -8679,6 +8843,7 @@ final class AgentSupervisor {
             break
         }
         updateTurnFacts(with: event, for: id, now: now)
+        recordCompanionTaskEvent(event, for: id)
         if case let .contextWindowUpdated(_, snapshot) = event {
             contextWindowSnapshots[id] = snapshot
         }
@@ -11923,9 +12088,14 @@ func checkClearCommandTransaction(
     let sessionID = AgentTranscriptStore.canonicalSessionID(for: parentID)
     var noticeDocument: AgentDocument?
     let deadline = Date().addingTimeInterval(3)
-    while noticeDocument == nil {
+    while true {
         noticeDocument = try await transcriptStore.load(agentID: parentID, sessionID: sessionID)
-        if noticeDocument != nil { break }
+        // An earlier telemetry write can create the document before the final
+        // command-notice write lands. Wait for the behavior asserted below,
+        // not merely for any document to exist.
+        if noticeDocument?.entries.contains(where: {
+            if case .localNotice = $0.provenance { return true }; return false
+        }) == true { break }
         if Date() >= deadline { break }
         try await Task.sleep(for: .milliseconds(50))
     }
@@ -16911,7 +17081,11 @@ private final class ProviderSubagentFixtureRunner:
         let parent = "codex-provider-parent"
         let child = "codex-provider-child"
         let grandchild = "codex-provider-grandchild"
+        onEvent(.turnStarted(threadId: parent, turnId: "codex-parent-turn"))
         activity(.primaryThread(providerThreadID: parent))
+        // Provider frames can precede the announcement that gives them a
+        // parent. The host must withhold completion until routing is known.
+        activity(.threadEvent(providerThreadID: child, event: .turnStarted(threadId: child, turnId: "codex-child-turn")))
         activity(.childAnnounced(
             parentProviderThreadID: parent, childProviderThreadID: child,
             sourceItemID: "codex-child-call", displayLabel: "Scout"))
@@ -17015,6 +17189,15 @@ private func checkCodexProviderSubagentRouting(
     }) else {
         throw fail("Codex routing: the parent did not complete before descendant release, so the late-child positive control is vacuous")
     }
+    let taskBeforeRelease = try supervisor.companionTaskSnapshot().tasks
+    guard taskBeforeRelease.count == 1, let task = taskBeforeRelease.first,
+          task.members.count == 3, task.membershipComplete,
+          let root = task.members.first(where: { $0.agentID == parentID.rawValue }), root.state == .succeeded,
+          let child = task.members.first(where: { $0.agentID == childID.rawValue }), child.state == .running,
+          let grandchild = task.members.first(where: { $0.agentID == grandchildID.rawValue }), grandchild.state == .running,
+          child.parentRunID == root.runID, grandchild.parentRunID == child.runID else {
+        throw fail("Codex task ownership: parent result lost running provider child/grandchild membership")
+    }
     runner.releaseDescendantEvents()
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
         childInbox.events.contains {
@@ -17034,6 +17217,9 @@ private func checkCodexProviderSubagentRouting(
         return false
     }) else { throw fail("Codex routing: descendant content leaked into the parent transcript") }
 
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        (try? supervisor.companionTaskSnapshot().tasks.first?.members.allSatisfy { $0.state == .succeeded }) == true
+    }) else { throw fail("Codex task ownership: actual descendant results did not settle their task members") }
     return "structured Codex provider activity adopted one read-only child plus a nested grandchild and routed each provider thread only to its own transcript"
 }
 

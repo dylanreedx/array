@@ -1,0 +1,29 @@
+{
+  "Sources/ContinuumRevived/App/AgentCLIUpdateCenter.swift": {
+    "local-banner": { "count": 1, "paths": ["MAC-02"] }
+  },
+  "Sources/ContinuumRevived/App/AgentSoundSystem.swift": {
+    "audio": { "count": 1, "paths": ["MAC-03", "MAC-04", "MAC-05", "MAC-06", "MAC-09"] }
+  },
+  "Sources/ContinuumRevived/App/ContinuumApp.swift": {
+    "dock-badge": { "count": 9, "paths": ["MAC-01", "QA-05"] }
+  },
+  "Sources/ContinuumRevived/App/NeedsAttentionNotification.swift": {
+    "local-banner": { "count": 1, "paths": ["MAC-01"] }
+  },
+  "Sources/ContinuumRevivedCore/APNSPushService.swift": {
+    "apns-endpoint": { "count": 2, "paths": ["QA-01"] },
+    "apns-type": { "count": 1, "paths": ["QA-01"] }
+  },
+  "Sources/ContinuumRevivedRelayCore/RelayAPNSService.swift": {
+    "apns-endpoint": { "count": 2, "paths": ["H-01", "H-02", "H-03", "H-04", "SUR-01", "SUR-02", "SUR-03", "T-04", "T-05", "T-06"] },
+    "apns-type": { "count": 3, "paths": ["H-01", "H-02", "H-03", "H-04", "SUR-01", "SUR-02", "SUR-03", "T-04", "T-05", "T-06"] }
+  },
+  "iOS/Continuum/Sources/SystemSurfaceCoordinator.swift": {
+    "badge": { "count": 2, "paths": ["SUR-04", "SUR-06"] },
+    "live-activity": { "count": 1, "paths": ["SUR-04"] }
+  },
+  "scripts/push-sim-test.sh": {
+    "simulator-push": { "count": 1, "paths": ["QA-02"] }
+  }
+}

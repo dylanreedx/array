@@ -90,7 +90,15 @@ private struct NotificationPrimerView: View {
 
 @MainActor
 private final class PushNotificationAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
-    weak var model: AgentsBoardModel?
+    private var deferredNotificationURL: URL?
+    weak var model: AgentsBoardModel? {
+        didSet {
+            if let model, let url = deferredNotificationURL {
+                model.pendingDeepLink = url
+                deferredNotificationURL = nil
+            }
+        }
+    }
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         let center = UNUserNotificationCenter.current()
@@ -152,7 +160,12 @@ private final class PushNotificationAppDelegate: NSObject, UIApplicationDelegate
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let userInfo = response.notification.request.content.userInfo
-        guard let model else { return }
+        guard let model else {
+            if let raw = userInfo[ArraySystemSurfaceConstants.deepLinkUserInfoKey] as? String {
+                deferredNotificationURL = URL(string: raw)
+            }
+            return
+        }
         let grantedScope = await MainActor.run { model.grantedScope }
         guard let intent = handlePushAction(actionId: response.actionIdentifier, userInfo: userInfo, grantedScope: grantedScope) else {
             await MainActor.run { model.openPushDeepLink(userInfo) }
@@ -244,9 +257,19 @@ private struct ContinuumRootView: View {
             switch url.host?.lowercased() {
             case "approval": selectedTab = .approvals
             case "devices", "status": selectedTab = .settings
-            case "agent", "agents": selectedTab = .agents
+            case "agent":
+                guard model.pairedInstanceID != nil else { return }
+                model.navigateToAgent(url)
+                selectedTab = .agents
+            case "agents": selectedTab = .agents
             default: break
             }
+            model.pendingDeepLink = nil
+        }
+        .onChange(of: model.pairedInstanceID) { _, instance in
+            guard instance != nil, let url = model.pendingDeepLink, url.host?.lowercased() == "agent" else { return }
+            model.navigateToAgent(url)
+            selectedTab = .agents
             model.pendingDeepLink = nil
         }
     }
@@ -281,6 +304,44 @@ private final class AgentsBoardModel: ObservableObject {
     @Published var pairingStatusMessage: String?
     @Published var pairingInProgress = false
     @Published var pendingDeepLink: URL?
+    @Published var agentNavigationPath: [UUID] = []
+    @Published var notificationDestination: CompanionAgentDestination?
+    @Published var taskObservation: CompanionTaskObservation?
+    @Published var agentNavigationError: String?
+    private var taskObservationTask: Task<Void, Never>?
+
+    func navigateToAgent(_ url: URL) {
+        guard let destination = CompanionAgentDestination(url: url, pairedInstanceID: pairedInstanceID) else {
+            agentNavigationError = "This notification does not belong to the paired Mac, or its agent link is invalid."
+            return
+        }
+        agentNavigationError = nil
+        notificationDestination = destination
+        agentNavigationPath = [destination.agentID]
+    }
+
+    #if DEBUG
+    private func installNotificationDetailFixture() {
+        let agent = UUID(uuidString: "10000000-0000-4000-8000-000000000001")!
+        let child = UUID(uuidString: "10000000-0000-4000-8000-000000000002")!
+        let taskID = UUID(uuidString: "20000000-0000-4000-8000-000000000001")!
+        let run = UUID(uuidString: "30000000-0000-4000-8000-000000000001")!
+        let childRun = UUID(uuidString: "30000000-0000-4000-8000-000000000002")!
+        let data = Data("""
+        {"publisherID":"\(UUID())","revision":1,"tasks":[{"taskID":"\(taskID)","rootRunID":"\(run)","membershipComplete":true,"members":[{"agentID":"\(agent)","runID":"\(run)","state":"succeeded"},{"agentID":"\(child)","runID":"\(childRun)","parentRunID":"\(run)","state":"running"}]}]}
+        """.utf8)
+        guard let batch = try? JSONDecoder().decode(CompanionTaskSnapshotBatch.self, from: data) else { return }
+        let now = Date()
+        snapshot = .init(snapshotSequence: 1, snapshotReplicaId: UUID(), byAgent: [
+            agent: .init(status: .working, lastSummary: "Newer work on this agent", recent: [], updatedAt: now),
+            child: .init(status: .working, lastSummary: "Checking the remaining work", recent: [], updatedAt: now)
+        ])
+        rows = AgentsBoardProjection.rows(from: snapshot)
+        taskObservation = .init(batch: batch, publishedAt: now.addingTimeInterval(-120), sequence: 1)
+        navigateToAgent(URL(string: "array://agent/\(agent)?task=\(taskID)&run=\(run)")!)
+        state = .live
+    }
+    #endif
 
     // Ticket: docs/38-tickets/61b-canvas-editor.md
     @Published var canvasScene: CanvasScene = CanvasScene(zones: [], tiles: [])
@@ -389,6 +450,13 @@ private final class AgentsBoardModel: ObservableObject {
 
     func start() async {
         guard task == nil else { return }
+        #if DEBUG
+        // Rendering-only fixture: no Keychain, network, phone token or command.
+        if ProcessInfo.processInfo.environment["CONTINUUM_COMPANION_DETAIL_QA"] == "1" {
+            installNotificationDetailFixture()
+            return
+        }
+        #endif
         state = .loading
         transportAvailability = .connecting
         startFreshnessTicker()
@@ -442,6 +510,15 @@ private final class AgentsBoardModel: ObservableObject {
                 credential: pairedSession.token
             )
             relayTransport = relay
+            taskObservationTask = Task { [weak self] in
+                for await observation in relay.taskObservations {
+                    guard !Task.isCancelled, let self else { return }
+                    if let previous = self.taskObservation {
+                        guard observation.supersedes(previous) else { continue }
+                    }
+                    self.taskObservation = observation
+                }
+            }
             relay.start()
             transportAvailability = .available
             lastFetchReport = "relay: connecting to \(relayConfig.baseURL.absoluteString)"
@@ -642,6 +719,11 @@ private final class AgentsBoardModel: ObservableObject {
     }
 
     private func tearDownSyncReceivers() async {
+        taskObservationTask?.cancel()
+        taskObservationTask = nil
+        taskObservation = nil
+        notificationDestination = nil
+        agentNavigationPath = []
         let activityReceiver = receiver
         let spatial = spatialReceiver
         task?.cancel()
@@ -1158,7 +1240,7 @@ private struct AgentsBoardView: View {
     @Binding var selectedTab: ContinuumTab
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $model.agentNavigationPath) {
             Group {
                 switch model.freshness.state {
                 case .unpaired:
@@ -1186,6 +1268,9 @@ private struct AgentsBoardView: View {
             }
             .tokenBackground(.canvas, ignoringSafeArea: true)
             .navigationTitle("Agents")
+            .alert("Agent link unavailable", isPresented: Binding(get: { model.agentNavigationError != nil }, set: { if !$0 { model.agentNavigationError = nil } })) {
+                Button("OK") { model.agentNavigationError = nil }
+            } message: { Text(model.agentNavigationError ?? "") }
             .navigationDestination(for: UUID.self) { agentId in
                 AgentDetailView(agentId: agentId, selectedTab: $selectedTab)
             }
@@ -1296,6 +1381,9 @@ private struct AgentDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                if let destination = model.notificationDestination, destination.agentID == agentId {
+                    notificationTaskContext(destination)
+                }
                 if let row, let activity {
                     DetailHeader(row: row)
                     if let parentID = model.parentByChild[agentId] {
@@ -1372,6 +1460,40 @@ private struct AgentDetailView: View {
         .tokenBackground(.canvas, ignoringSafeArea: true)
         .navigationTitle("Agent")
         .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .bottom) { FreshnessFooter(freshness: model.freshness) }
+    }
+
+    @ViewBuilder
+    private func notificationTaskContext(_ destination: CompanionAgentDestination) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("From your notification").font(.headline)
+            if let observation = model.taskObservation, let task = observation.task(for: destination) {
+                let detail = CompanionTaskDetail(task: task)
+                Text(detail.summary).font(.subheadline)
+                Text("\(detail.succeeded) finished · \(detail.running) running · \(detail.queued) queued · \(detail.blocked) need attention")
+                    .font(.caption).foregroundStyle(.secondary)
+                if detail.uncertain {
+                    Text("The Mac has not confirmed all participating work. This is not a completed-task claim.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(task.members.filter { !$0.state.terminal }, id: \.runID) { member in
+                    NavigationLink(value: member.agentID) {
+                        Label("Agent \(member.agentID.uuidString.prefix(8)) · \(member.state.rawValue)", systemImage: "person.crop.circle")
+                            .font(.caption)
+                    }
+                }
+                Text("Last task update: \(observation.publishedAt.formatted(date: .abbreviated, time: .standard))")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text(destination.taskID == nil
+                     ? "This older notification identifies the agent, but not its task. The conversation below may include newer work."
+                     : "Task context is unavailable. Reconnect to the Mac to check what remains; the agent may have moved to newer work.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tokenBackground(.panel)
     }
 }
 

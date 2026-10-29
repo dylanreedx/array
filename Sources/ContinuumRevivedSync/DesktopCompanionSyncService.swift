@@ -306,6 +306,10 @@ public actor DesktopCompanionSyncService {
     private var transcriptSenders: [UUID: TranscriptProjectionSender] = [:]
     private var activityStore: ActivityStore?
     private var spatialStore: MemorySpatialOpLogStore?
+    private let taskSnapshotProvider: (@Sendable (UInt64) async throws -> CompanionTaskSnapshotBatch)?
+    private var taskPublication: Task<String?, Never>?
+    private var taskPublicationAgain = false
+    private var taskPulse: Task<Void, Never>?
 
     public private(set) var diagnostics: DesktopCompanionSyncDiagnostics
 
@@ -315,6 +319,7 @@ public actor DesktopCompanionSyncService {
         pairingSnapshot: @escaping PairingSnapshotProvider,
         canvasSnapshot: @escaping CanvasSnapshotProvider,
         activitySnapshot: @escaping ActivitySnapshotProvider,
+        taskSnapshot: (@Sendable (UInt64) async throws -> CompanionTaskSnapshotBatch)? = nil,
         transcriptChannels: @escaping TranscriptChannelProvider = { [] },
         transcriptDocument: @escaping TranscriptDocumentProvider = { _ in nil },
         stopAgent: @escaping AgentStopHandler = { _ in .unsupported },
@@ -331,6 +336,7 @@ public actor DesktopCompanionSyncService {
         self.pairingSnapshotProvider = pairingSnapshot
         self.canvasSnapshotProvider = canvasSnapshot
         self.activitySnapshotProvider = activitySnapshot
+        self.taskSnapshotProvider = taskSnapshot
         self.transcriptChannelProvider = transcriptChannels
         self.transcriptDocumentProvider = transcriptDocument
         self.agentStopHandler = stopAgent
@@ -394,6 +400,15 @@ public actor DesktopCompanionSyncService {
             approvalResponder = responder
             agentStopResponder = stopResponder
             started = true
+            if taskSnapshotProvider != nil, transport is any CompanionTaskPublishingTransport {
+                taskPulse = Task { [weak self] in
+                    while !Task.isCancelled {
+                        do { try await Task.sleep(for: .seconds(10)) } catch { return }
+                        guard let self else { return }
+                        _ = await self.publishTaskNotifications()
+                    }
+                }
+            }
         }
 
         await refreshTranscriptSenders(scope: pairing.authorizedScope)
@@ -403,6 +418,10 @@ public actor DesktopCompanionSyncService {
     }
 
     public func stop() async {
+        taskPulse?.cancel(); taskPulse = nil
+        taskPublication?.cancel()
+        _ = await taskPublication?.value
+        taskPublication = nil
         inboundTask?.cancel()
         inboundTask = nil
         await activitySender?.stop()
@@ -450,6 +469,9 @@ public actor DesktopCompanionSyncService {
             return
         }
 
+        // Task metadata must publish even when no canvas is mounted or inventory
+        // reconciliation is still pending. Join ownership before legacy sends.
+        let taskError = await publishTaskNotifications()
         let now = clock.now()
         let (canvas, workspace) = try await canvasSnapshotProvider()
         let spatial = DesktopSpatialBootstrap.snapshot(canvasState: canvas, workspaceDocument: workspace, replicaId: replicaId)
@@ -458,12 +480,56 @@ public actor DesktopCompanionSyncService {
         try await demux.send(.activity(.snapshot(activity)))
         diagnostics.lastSpatialPublishAt = now
         diagnostics.lastActivityPublishAt = now
-        diagnostics.lastError = nil
+        diagnostics.lastError = taskError
         try await publishHeartbeat(
             pairing: pairing,
             spatialWatermark: "\(spatial.compactionOpId.lamport):\(spatial.compactionOpId.replica.uuidString)",
             activityWatermark: "\(activity.snapshotSequence):\(activity.snapshotReplicaId.uuidString)"
         )
+    }
+
+    private func publishTaskNotifications() async -> String? {
+        guard let provider = taskSnapshotProvider, let publisher = transport as? any CompanionTaskPublishingTransport else { return nil }
+        if let active = taskPublication {
+            taskPublicationAgain = true
+            return await active.value
+        }
+        let job = Task { [weak self] () -> String? in
+            guard let self else { return nil }
+            return await self.performTaskPublication(provider: provider, publisher: publisher)
+        }
+        taskPublication = job
+        let error = await job.value
+        taskPublication = nil
+        return error
+    }
+
+    private func performTaskPublication(
+        provider: @Sendable (UInt64) async throws -> CompanionTaskSnapshotBatch,
+        publisher: any CompanionTaskPublishingTransport
+    ) async -> String? {
+        repeat {
+            taskPublicationAgain = false
+            if Task.isCancelled { return "Task notifications cancelled" }
+            do {
+                let pairing = await pairingSnapshotProvider()
+                guard pairing.isPaired else { return nil }
+                let context = try await publisher.taskNotificationContext()
+                guard context.supported else { return nil }
+                let snapshot = try await provider(context.owner?.revision ?? 0)
+                if let owner = context.owner, owner.publisherID != snapshot.publisherID {
+                    diagnostics.lastError = "Task notification owner mismatch"
+                    return diagnostics.lastError
+                }
+                try await publisher.publishTaskNotifications(snapshot)
+            } catch {
+                // Do not export paths, request bodies, storage errors or auth.
+                diagnostics.lastError = "Task notifications unavailable"
+                return diagnostics.lastError
+            }
+        } while taskPublicationAgain
+        if diagnostics.lastError == "Task notifications unavailable" { diagnostics.lastError = nil }
+        return nil
     }
 
     public func fetchChanges(reason: DesktopCompanionFetchReason) async throws {

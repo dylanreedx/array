@@ -3,7 +3,11 @@ import PackageDescription
 
 let package = Package(
     name: "array-relay-linux",
-    products: [.executable(name: "continuum-relay", targets: ["continuum-relay"])],
+    products: [
+        .executable(name: "continuum-relay", targets: ["continuum-relay"]),
+        .executable(name: "ContinuumRevivedRelayCoreChecks", targets: ["ContinuumRevivedRelayCoreChecks"]),
+        .executable(name: "ContinuumRevivedRelayIntegrationChecks", targets: ["ContinuumRevivedRelayIntegrationChecks"]),
+    ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.11.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
@@ -36,6 +40,23 @@ let package = Package(
             name: "continuum-relay",
             dependencies: ["ContinuumRevivedRelayCore", "ContinuumRevivedRelayNIO"],
             path: "Sources/continuum-relay"
+        ),
+        .executableTarget(
+            name: "ContinuumRevivedRelayCoreChecks",
+            dependencies: [
+                "ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore",
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "Crypto", package: "swift-crypto"),
+            ],
+            path: "Sources/ContinuumRevivedRelayCoreChecks"
+        ),
+        .executableTarget(
+            name: "ContinuumRevivedRelayIntegrationChecks",
+            dependencies: [
+                "ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore", "ContinuumRevivedRelayNIO",
+                .product(name: "Crypto", package: "swift-crypto"),
+            ],
+            path: "Sources/ContinuumRevivedRelayIntegrationChecks"
         ),
     ]
 )

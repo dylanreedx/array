@@ -30,6 +30,8 @@ hard rules are the same file — `CLAUDE.md` symlinks to it.
 - [Architecture overview](./internals/architecture-overview.md)
 - [Agent providers (pi, claude, codex)](./internals/providers.md)
 - [QA: the matrix, self-checks, witnesses](./internals/qa.md)
+- [Notification paths](./internals/notification-paths.md) — maintained trigger,
+  policy, delivery and action map; all notification changes update this contract
 - [Tile selection and group transforms](./internals/tile-multiselect.md) — interaction
   contract, gesture ownership, performance and release verification
 - Workspace API v1 (CX-01) — the frozen contracts are the header of

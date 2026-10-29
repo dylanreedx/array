@@ -28,9 +28,12 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
     // AsyncStream continuations).
 
     public let inbound: AsyncStream<SyncMessage>
+    public let taskObservations: AsyncStream<CompanionTaskObservation>
+    private let taskObservationContinuation: AsyncStream<CompanionTaskObservation>.Continuation
     public let connectionState: AsyncStream<ConnectionState>
 
     private let inboundContinuation: AsyncStream<SyncMessage>.Continuation
+    private var cachedTaskContext: (at: Date, value: CompanionTaskNotificationContext)?
     private let stateContinuation: AsyncStream<ConnectionState>.Continuation
     private let baseURL: URL
     private let bearerToken: String
@@ -90,6 +93,9 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
         var inboundContinuation: AsyncStream<SyncMessage>.Continuation!
         self.inbound = AsyncStream { inboundContinuation = $0 }
         self.inboundContinuation = inboundContinuation
+        let observations = AsyncStream<CompanionTaskObservation>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        self.taskObservations = observations.stream
+        self.taskObservationContinuation = observations.continuation
         var stateContinuation: AsyncStream<ConnectionState>.Continuation!
         self.connectionState = AsyncStream { stateContinuation = $0 }
         self.stateContinuation = stateContinuation
@@ -126,6 +132,7 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
         stateContinuation.yield(.disconnected(reason: "stopped"))
         stateContinuation.finish()
         inboundContinuation.finish()
+        taskObservationContinuation.finish()
     }
 
     // MARK: SyncTransport
@@ -316,6 +323,11 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
                 .filter { $0.sequence > Int64(after) }
                 .sorted { $0.sequence < $1.sequence }
             let messages = events.compactMap { try? JSONDecoder().decode(SyncMessage.self, from: $0.payload) }
+            for event in events where event.kind == "task.batch.v1" {
+                if let observation = Self.taskObservation(event: event) {
+                    taskObservationContinuation.yield(observation)
+                }
+            }
             let delivered = events.last.map { UInt64(max(0, $0.sequence)) } ?? after
             return PollBatch(
                 messages: messages,
@@ -334,6 +346,14 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
             latestCursor: decoded.latestSeq,
             latestDeliveredCursor: decoded.envelopes.last?.seq ?? after
         )
+    }
+
+    public static func taskObservation(event: RelayEvent) -> CompanionTaskObservation? {
+        guard event.kind == "task.batch.v1",
+              let wire = try? JSONDecoder().decode(RelayTaskBatch.self, from: event.payload),
+              wire.tasks.count <= 512, wire.tasks.allSatisfy({ $0.version == 1 }),
+              let batch = try? JSONDecoder().decode(CompanionTaskSnapshotBatch.self, from: event.payload) else { return nil }
+        return .init(batch: batch, publishedAt: event.createdAt, sequence: event.sequence)
     }
 
     private static func isSnapshot(_ message: SyncMessage) -> Bool {
@@ -426,5 +446,53 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
         cursor = newValue
         lock.unlock()
         onCursorChange?(newValue)
+    }
+}
+
+extension RelaySyncTransport: CompanionTaskPublishingTransport {
+    private func taskContextCache() -> CompanionTaskNotificationContext? {
+        lock.lock(); defer { lock.unlock() }
+        guard let cached = cachedTaskContext, (0..<60).contains(Date().timeIntervalSince(cached.at)) else { return nil }
+        return cached.value
+    }
+    private func rememberTaskContext(_ context: CompanionTaskNotificationContext) {
+        lock.lock(); defer { lock.unlock() }
+        var next = context
+        if let prior = cachedTaskContext?.value.owner, let owner = next.owner,
+           prior.publisherID == owner.publisherID, prior.revision > owner.revision { next.owner = prior }
+        cachedTaskContext = (Date(), next)
+    }
+    public func taskNotificationContext() async throws -> CompanionTaskNotificationContext {
+        guard apiVersion == .hardenedV2 else { return .init(supported: false, owner: nil) }
+        if let cached = taskContextCache() { return cached }
+        let (data, response) = try await session.data(for: makeRequest("GET", path: "/health", body: nil))
+        try Self.checkStatus(data: data, response: response)
+        let health = try JSONDecoder().decode(RelayHealth.self, from: data)
+        guard health.notificationPolicies.contains("task.batch.v1") else {
+            let unsupported = CompanionTaskNotificationContext(supported: false, owner: nil)
+            rememberTaskContext(unsupported); return unsupported
+        }
+        let (ownerData, ownerResponse) = try await session.data(for: makeRequest("GET", path: "/v2/notification-owner", body: nil))
+        try Self.checkStatus(data: ownerData, response: ownerResponse)
+        let owner = try JSONDecoder().decode(RelayNotificationOwnershipResponse.self, from: ownerData)
+        let context = CompanionTaskNotificationContext(supported: true, owner: owner.owner)
+        rememberTaskContext(context); return context
+    }
+    public func publishTaskNotifications(_ snapshot: CompanionTaskSnapshotBatch) async throws {
+        let context = try await taskNotificationContext()
+        guard context.supported else { return }
+        if let owner = context.owner, owner.publisherID != snapshot.publisherID {
+            throw SyncTransportError.sendFailed(reason: "notificationOwnerMismatch")
+        }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let payload = try encoder.encode(snapshot.relayTaskBatch)
+        let request = RelayPublishRequest(kind: "task.batch.v1", payload: payload)
+        let (data, response) = try await session.data(for: makeRequest("POST", path: "/v2/events", body: encoder.encode(request)))
+        guard (response as? HTTPURLResponse)?.statusCode == 201 else {
+            throw SyncTransportError.sendFailed(reason: "taskNotificationPublishRejected")
+        }
+        _ = data // event receipt is not a delivery acknowledgement
+        rememberTaskContext(.init(supported: true, owner: .init(publisherID: snapshot.publisherID,
+            revision: max(snapshot.revision, context.owner?.revision ?? 0))))
     }
 }

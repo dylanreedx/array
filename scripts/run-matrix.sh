@@ -41,6 +41,9 @@ TRANSCRIPT_VIEWPORT_ONLY=0
 IOS_PREVIEW_PROOF_ONLY=0
 IOS_PREVIEW_LIVE_ONLY=0
 IOS_PREVIEW_TILE_ONLY=0
+COMPANION_TASKS_ONLY=0
+NOTIFICATIONS_ONLY=0
+NOTIFICATIONS_LINUX_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
     --sidebar-refinements)
@@ -87,9 +90,21 @@ if [[ $# -gt 0 ]]; then
       IOS_PREVIEW_TILE_ONLY=1
       shift
       ;;
+    --companion-tasks)
+      COMPANION_TASKS_ONLY=1
+      shift
+      ;;
+    --notifications)
+      NOTIFICATIONS_ONLY=1
+      shift
+      ;;
+    --notifications-linux)
+      NOTIFICATIONS_LINUX_ONLY=1
+      shift
+      ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile]
+Usage: scripts/run-matrix.sh [--fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux]
 
 Runs the project verification matrix. --fast skips the slower packaging bundle
 probe and keeps the build/check/app-flag/git hygiene gates used by the opt-in
@@ -119,6 +134,12 @@ rendering/input/teardown assertions. It does not verify a live simulator.
 and installed runtime configured via IOS_PREVIEW_LIVE_* environment variables.
 --ios-preview-tile rebuilds the app/CoreChecks and exercises production tile
 mount/spawn/restore with an offline transport, plus API exposure and palette checks.
+--companion-tasks rebuilds Mac/Core/Sync/relay checks and reports authoritative
+task membership, publication and exclusive notification ownership offline.
+--notifications rebuilds relay checks and reports notification classification,
+delivery traces, revocation and sender-map coverage offline. No APNs sends.
+--notifications-linux builds and runs both relay suites in Linux/amd64 Swift 6.1
+release mode using Docker. No Fly connection, credentials or real APNs sends.
 USAGE
       exit 0
       ;;
@@ -500,6 +521,44 @@ if [[ "$WORKSPACE_SELECTOR_ONLY" -eq 1 ]]; then
   exit $?
 fi
 
+if [[ "$COMPANION_TASKS_ONLY" -eq 1 ]]; then
+  # Explicitly start and verify this owned namespace before supervisor coverage.
+  tmux new-session -d -s companion-matrix-guard
+  MATRIX_TASK_SOCKET=$(tmux display-message -p '#{socket_path}')
+  python3 -c 'import pathlib,sys; assert pathlib.Path(sys.argv[1]).resolve().is_relative_to(pathlib.Path(sys.argv[2]).resolve())' "$MATRIX_TASK_SOCKET" "$TMUX_TMPDIR"
+  trap 'tmux kill-server >/dev/null 2>&1 || true; rm -rf "$MATRIX_TMUX_TMPDIR"' EXIT
+  run_leg python3 scripts/check-notification-map.py --self-test
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedSyncChecks
+  run swift build --disable-sandbox --skip-update --product Array
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
+  run_leg .build/debug/ContinuumRevivedCoreChecks --companion-task-ledger-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --companion-agent-destination-check
+  run_leg .build/debug/ContinuumRevivedSyncChecks --companion-task-publication-check
+  run_app_check .build/debug/Array --companion-task-host-check
+  run_app_check .build/debug/Array --agent-supervisor-check
+  run_leg swift run --skip-build ContinuumRevivedRelayIntegrationChecks
+  MATRIX_NOTES+=("Task ownership is source only; no deployment, prod state, phone push or exact-task phone navigation is exercised.")
+  matrix_report 'Companion tasks matrix (targeted)'
+  exit $?
+fi
+if [[ "$NOTIFICATIONS_LINUX_ONLY" -eq 1 ]]; then
+  run_leg bash scripts/check-relay-linux.sh
+  MATRIX_NOTES+=("Linux/amd64 release checks use fake APNs and isolated stores; no live device acceptance.")
+  matrix_report 'Linux notifications matrix (targeted)'
+  exit $?
+fi
+if [[ "$NOTIFICATIONS_ONLY" -eq 1 ]]; then
+  run_leg python3 scripts/check-notification-map.py --self-test
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
+  run swift build --disable-sandbox --skip-update --product continuum-relay
+  run_leg swift run --skip-build ContinuumRevivedRelayCoreChecks
+  run_leg swift run --skip-build ContinuumRevivedRelayIntegrationChecks
+  MATRIX_NOTES+=("Offline notification behavior only; real TestFlight/APNs presentation is not exercised.")
+  matrix_report 'Notifications matrix (targeted)'
+  exit $?
+fi
 if [[ "$IOS_PREVIEW_TILE_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
@@ -706,6 +765,7 @@ run_leg swift run ContinuumRevivedRelayChecks
 # real NIO public/admin listener startup plus graceful shutdown.
 run_leg swift run ContinuumRevivedRelayProtocolChecks
 run_leg swift run ContinuumRevivedRelayCoreChecks
+run_leg python3 scripts/check-notification-map.py --self-test
 run_leg swift run ContinuumRevivedRelayIntegrationChecks
 # Ticket 57: gated real-CloudKit backend leg. Skips gracefully (exit 0,
 # cloudkit_available=false in the manifest) unless CLOUDKIT_ENABLED=1 is set
@@ -824,6 +884,10 @@ run_app_check .build/debug/Array --ui-test-support-check
 # Also source-scans Sources/ContinuumRevived so no view can construct its own
 # PiAgentRunner and become a second owner.
 run_app_check .build/debug/Array --agent-supervisor-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --companion-task-ledger-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --companion-agent-destination-check
+run_leg .build/debug/ContinuumRevivedSyncChecks --companion-task-publication-check
+run_app_check .build/debug/Array --companion-task-host-check
 # TR-04: the completion/dispatch seam driven through the REAL composer, popover
 # and synthetic key events — a typed payload (command, file, directory) must
 # never degrade into literal text in the draft. This check has existed since it

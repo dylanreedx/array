@@ -74,6 +74,18 @@ No model list or default model is written into the source: a hand-kept claude
 list hid Opus 5.5 for a release. `AgentCatalogQAFixture` stands in for the CLIs
 in checks only; a live app whose probe found nothing offers nothing.
 
+### 6. Every notification path is explicit and maintained
+
+[Notification paths](docs/internals/notification-paths.md) is the maintained
+inventory for Array-owned phone pushes/actions, badges, widgets, Live Activities,
+Mac agent alerts/sounds and diagnostic senders. Any change to a notification
+trigger, policy, recipient, payload, delivery surface, suppression, retry or tap
+action must update its stable path ID in that map in the same change. Record
+quiet and failure outcomes too; keep proposed behavior distinct from implemented
+and witnessed behavior. No unclassified official notification path may ship.
+Substantive notification changes require behavioral witnesses reported by the
+matrix; documentation or source-string checks alone do not establish confidence.
+
 ## A small glossary
 
 - **Tile** — one surface on the canvas: terminal, browser, file tree, diff

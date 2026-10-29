@@ -4,6 +4,14 @@ import ContinuumRevivedSync
 import CoreGraphics
 import Darwin
 import Foundation
+if CommandLine.arguments.contains("--companion-agent-destination-check") {
+    do { try runCompanionAgentDestinationChecks(); exit(0) }
+    catch { print("FAIL companion agent destination: \(error)"); exit(1) }
+}
+if CommandLine.arguments.contains("--companion-task-ledger-check") {
+    do { try runCompanionTaskLedgerChecks(); exit(0) }
+    catch { print("FAIL companion task ledger: \(error)"); exit(1) }
+}
 
 if try runAuthSigningKeyRestartSubprocessIfRequested() {
     Foundation.exit(0)

@@ -2045,6 +2045,18 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--companion-task-host-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    print(try await runCompanionTaskHostChecks())
+                    print(try AppDelegate.checkCompanionPublishCoalescing())
+                    Foundation.exit(0)
+                } catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-supervisor-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -5916,7 +5928,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// connect — the relay's registry is in-memory, so a relay restart
     /// would otherwise 401 every phone until it re-paired.
     private var relayTokenSyncTask: Task<Void, Never>?
-    private var companionPublishDebounceWorkItem: DispatchWorkItem?
+    private var pendingCompanionPublish: (DesktopCompanionPublishReason, String) = (.statusChanged, "task-state")
+    private lazy var companionPublishPush = CoalescedPush { [weak self] in
+        guard let self else { return }
+        let pending = self.pendingCompanionPublish
+        Task { @MainActor [weak self] in await self?.publishCompanionSync(reason: pending.0, diagnosticsReason: pending.1) }
+    }
     private var navKeymap: NavKeymap = .default {
         didSet { leaderDwell = TimeInterval(navKeymap.effectiveLeaderDwellMs) / 1000 }
     }
@@ -11529,16 +11546,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         diagnosticsReason: String,
         debounce: TimeInterval
     ) {
-        companionPublishDebounceWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                self.companionPublishDebounceWorkItem = nil
-                await self.publishCompanionSync(reason: reason, diagnosticsReason: diagnosticsReason)
-            }
-        }
-        companionPublishDebounceWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + debounce, execute: workItem)
+        pendingCompanionPublish = (reason, diagnosticsReason)
+        companionPublishPush.request(within: debounce)
     }
 
     @MainActor
@@ -11642,6 +11651,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let authService = companionAuthService
         let transcriptStore = agentTranscriptStore
         let supervisor = agentSupervisor
+        supervisor.onCompanionTasksChanged = { [weak self] in
+            self?.scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "task-state", debounce: 0.5)
+        }
         return DesktopCompanionSyncService(
             configuration: configuration,
             transport: transport,
@@ -11683,6 +11695,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     guard let self else { return ActivityLogSnapshot.empty }
                     return try self.companionActivitySnapshot()
                 }
+            },
+            taskSnapshot: { floor in
+                try await MainActor.run { try supervisor.companionTaskSnapshot(revisionFloor: floor) }
             },
             transcriptChannels: {
                 guard let auth = authService,
@@ -40389,6 +40404,14 @@ static func checkRowStatusIsTurnState(
     }) else {
         throw fail("row-status: the second turn never started — isRunning \(supervisor.isRunning(agentId)), tile \(tile.currentAgentStatus)")
     }
+    // The tile presenter can say working before its asynchronous ingest hook
+    // records turn.started. Do not send Stop until the stale-ring fixture has
+    // actually earned that state; otherwise the delayed hook samples idle and
+    // the later nonvacuity guard fails before testing row authority.
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+        app.managedAgentActivityByAgent[agentId.rawValue]?.last?.kind == "turn.started"
+            && app.managedAgentActivityByAgent[agentId.rawValue]?.last?.status == .working
+    }) else { throw fail("row-status: turn.started never entered the activity ring before Stop") }
     let workingRow = try inboxRow("mid second turn")
     guard workingRow.state == .working else {
         throw fail("row-status: the row reads \(workingRow.state) mid-turn with a snapshot that says working")
@@ -40905,5 +40928,32 @@ extension AppDelegate {
             throw Failure(description: "SidebarLiveness RED:\n  " + failures.joined(separator: "\n  "))
         }
         return "SidebarLiveness: " + report.joined(separator: "; ")
+    }
+}
+
+// Drives the actual app scheduling seam with a deterministic scheduler. No
+// service is created and no paired account or real app state is consulted.
+extension AppDelegate {
+    @MainActor
+    static func checkCompanionPublishCoalescing() throws -> String {
+        struct Failure: Error { let message: String }
+        let app = AppDelegate()
+        var instant = DispatchTime(uptimeNanoseconds: 1_000_000_000)
+        var queued: [(DispatchTime, DispatchWorkItem)] = []
+        var sends: [(Double, String)] = []
+        app.companionPublishPush = CoalescedPush(now: { instant }, schedule: { queued.append(($0, $1)) }, action: {
+            sends.append((Double(instant.uptimeNanoseconds) / 1e9, app.pendingCompanionPublish.1))
+        })
+        for step in 0..<30 {
+            instant = DispatchTime(uptimeNanoseconds: UInt64(1_000_000_000 + step * 100_000_000))
+            for entry in queued.filter({ !$0.1.isCancelled && $0.0 <= instant }) {
+                queued.removeAll { $0.1 === entry.1 }; entry.1.perform()
+            }
+            app.scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "tick-\(step)", debounce: 0.5)
+        }
+        guard let first = sends.first, first.0 <= 1.5, sends.count >= 5, first.1 == "tick-4" else {
+            throw Failure(message: "continuous activity starved app companion publication or lost latest reason")
+        }
+        return "Companion app scheduling passed: continuous activity publishes within 0.5s and keeps latest reason"
     }
 }

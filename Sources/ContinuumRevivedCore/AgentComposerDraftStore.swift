@@ -766,6 +766,7 @@ public actor AgentComposerDraftStore {
     /// what it is given and never inspects turn state.
     @discardableResult
     public func enqueueMessage(
+        id: UUID = UUID(),
         text: String,
         imageAttachments: [AgentComposerDraftImageAttachment] = [],
         fileReferences: [AgentComposerDraftFileReference] = [],
@@ -774,6 +775,7 @@ public actor AgentComposerDraftStore {
         queuedAt: Date? = nil
     ) -> AgentComposerQueuedMessage {
         let message = AgentComposerQueuedMessage(
+            id: id,
             text: text,
             imageAttachments: imageAttachments,
             fileReferences: fileReferences,
@@ -824,12 +826,14 @@ public actor AgentComposerDraftStore {
 
     @discardableResult
     public func enqueueCompaction(
+        id: UUID = UUID(),
         focus: String?,
         operationID: UUID = UUID(),
         for agentID: AgentID,
         queuedAt: Date? = nil
     ) -> AgentComposerQueuedCompaction {
         let item = AgentComposerQueuedCompaction(
+            id: id,
             operationID: operationID,
             focus: focus,
             queuedAt: queuedAt ?? clock.now())
@@ -907,6 +911,7 @@ public actor AgentComposerDraftStore {
     /// follow-up, so held steers keep their own order and always drain first.
     @discardableResult
     public func enqueueSteer(
+        id: UUID = UUID(),
         text: String,
         imageAttachments: [AgentComposerDraftImageAttachment] = [],
         fileReferences: [AgentComposerDraftFileReference] = [],
@@ -915,6 +920,7 @@ public actor AgentComposerDraftStore {
         queuedAt: Date? = nil
     ) -> AgentComposerQueuedMessage {
         let message = AgentComposerQueuedMessage(
+            id: id,
             text: text,
             imageAttachments: imageAttachments,
             fileReferences: fileReferences,

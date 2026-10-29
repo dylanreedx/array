@@ -21,6 +21,10 @@ public final class RelayServer: @unchecked Sendable {
     private let liveHub = RelayLiveHub()
     private let pushDelivery: (any RelayEventPushDelivering)?
     private var channels: [Channel] = []
+    private var outboxWorker: Task<Void, Never>?
+
+    /// Read after start and before stop, including an ephemeral port-zero bind.
+    public var listeningPublicPort: Int? { channels.first?.localAddress?.port }
 
     public init(store: RelayStore, configuration: RelayServerConfiguration = .init(), pushDelivery: (any RelayEventPushDelivering)? = nil) {
         self.store = store; self.configuration = configuration
@@ -33,12 +37,23 @@ public final class RelayServer: @unchecked Sendable {
         do {
             let adminChannel = try await bootstrap(admin: true, port: configuration.adminPort).get()
             channels = [publicChannel, adminChannel]
+            if let pushDelivery {
+                outboxWorker = Task {
+                    while !Task.isCancelled {
+                        await pushDelivery.drainOutbox()
+                        do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                    }
+                }
+            }
         } catch {
             try? await publicChannel.close().get(); throw error
         }
     }
 
     public func stop() async throws {
+        outboxWorker?.cancel()
+        await outboxWorker?.value
+        outboxWorker = nil
         for channel in channels { try? await channel.close().get() }
         channels.removeAll()
         try await group.shutdownGracefully()
@@ -88,14 +103,24 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
     private let pushDelivery: (any RelayEventPushDelivering)?
     private let liveHub: RelayLiveHub
     private var head: HTTPRequestHead?; private var body = ByteBuffer()
+    private var rejectedBody = false
     init(store: RelayStore, liveHub: RelayLiveHub, pushDelivery: (any RelayEventPushDelivering)?, admin: Bool) { self.store = store; self.liveHub = liveHub; self.pushDelivery = pushDelivery; self.admin = admin }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         switch unwrapInboundIn(data) {
-        case .head(let value): head = value; body.clear()
-        case .body(var chunk): body.writeBuffer(&chunk)
+        case .head(let value):
+            head = value; body.clear(); rejectedBody = false
+            if let length = value.headers.first(name: "content-length").flatMap(Int.init), length > RelayWire.maximumRequestBodyBytes {
+                rejectOversizedBody(context)
+            }
+        case .body(var chunk):
+            guard !rejectedBody else { return }
+            guard chunk.readableBytes <= RelayWire.maximumRequestBodyBytes - body.readableBytes else {
+                rejectOversizedBody(context); return
+            }
+            body.writeBuffer(&chunk)
         case .end:
-            guard let head else { return }
+            guard let head, !rejectedBody else { return }
             let bytes = body.readData(length: body.readableBytes) ?? Data()
             let contextBox = SendableContext(context)
             Task { [store, liveHub, pushDelivery, admin] in
@@ -103,6 +128,12 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
                 contextBox.context.eventLoop.execute { self.write(response, context: contextBox.context) }
             }
         }
+    }
+
+    private func rejectOversizedBody(_ context: ChannelHandlerContext) {
+        rejectedBody = true; body.clear()
+        FileHandle.standardError.write(Data("{\"event\":\"publish_rejected\",\"path\":\"PUB-05\",\"reason\":\"requestBodyTooLarge\",\"limit_bytes\":\(RelayWire.maximumRequestBodyBytes)}\n".utf8))
+        write(.error(.payloadTooLarge, "payloadTooLarge"), context: context)
     }
 
     private static func route(head: HTTPRequestHead, body: Data, store: RelayStore, liveHub: RelayLiveHub, pushDelivery: (any RelayEventPushDelivering)?, admin: Bool) async -> Response {
@@ -125,11 +156,12 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
                 return .json(.ok, RelayPairingCancellationResponse(id: id, cancelled: true))
             }
             if head.method == .GET, head.uri == "/v2/devices" { return .json(.ok, try await store.devices(auth: auth)) }
+            if head.method == .GET, head.uri == "/v2/notification-owner" { return .json(.ok, try await store.notificationOwnership(auth: auth)) }
             if head.method == .DELETE, head.uri.hasPrefix("/v2/devices/"), let id = UUID(uuidString: String(head.uri.dropFirst("/v2/devices/".count))) {
                 try await store.revokeCredential(auth: auth, credentialID: id); await liveHub.disconnect(credentialID: id); return .json(.ok, RelayErrorResponse(code: "revoked"))
             }
             if head.method == .POST, head.uri == "/v2/events" {
-                let event = try await store.publish(auth: auth, request: JSONDecoder.relay.decode(RelayPublishRequest.self, from: body)); await liveHub.publish(event, instanceID: auth.instanceID); if let pushDelivery { Task { await pushDelivery.deliver(event: event, instanceID: auth.instanceID) } }; return .json(.created, event)
+                let event = try await store.publish(auth: auth, request: JSONDecoder.relay.decode(RelayPublishRequest.self, from: body)); await liveHub.publish(event, instanceID: auth.instanceID); if let pushDelivery { Task { await pushDelivery.deliverPublished(event: event, instanceID: auth.instanceID) } }; return .json(.created, event)
             }
             if head.method == .GET, head.uri.hasPrefix("/v2/events") {
                 let cursor = URLComponents(string: "http://relay\(head.uri)")?.queryItems?.first(where: { $0.name == "cursor" })?.value.flatMap(Int64.init) ?? 0
@@ -151,6 +183,10 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
         } catch RelayStoreError.forbidden { return .error(.forbidden, "forbidden") }
         catch RelayStoreError.invalidOrExpiredCode { return .error(.gone, "invalidOrExpiredCode") }
         catch RelayStoreError.payloadTooLarge { return .error(.payloadTooLarge, "payloadTooLarge") }
+        catch RelayStoreError.notificationOwnerRequired { return .error(.conflict, "notificationOwnerRequired") }
+        catch RelayStoreError.notificationOwnerMismatch { return .error(.conflict, "notificationOwnerMismatch") }
+        catch RelayStoreError.notificationRevisionConflict { return .error(.conflict, "notificationRevisionConflict") }
+        catch RelayStoreError.invalidNotificationBatch { return .error(.badRequest, "invalidNotificationBatch") }
         catch {
             // Error values may contain SQL or request data; log only their static type.
             let line = "{\"event\":\"request_failed\",\"error_type\":\"\(String(describing: type(of: error)))\"}\n"
@@ -234,7 +270,7 @@ private final class RelayWebSocketHandler: ChannelInboundHandler, @unchecked Sen
                     send(.welcome(instanceID: authenticated.instanceID, latestSequence: page.latestSequence, capabilities: authenticated.capabilities), contextBox.context)
                     if let snapshot = page.snapshot { send(.event(snapshot), contextBox.context) }; for event in page.events { send(.event(event), contextBox.context) }
                     Task { for await event in stream where event.sequence > page.latestSequence { self.send(.event(event), contextBox.context) } }
-                case .publish(let request): guard let auth else { throw RelayStoreError.unauthorized }; let event = try await store.publish(auth: auth, request: request); await liveHub.publish(event, instanceID: auth.instanceID); if let pushDelivery { Task { await pushDelivery.deliver(event: event, instanceID: auth.instanceID) } }
+                case .publish(let request): guard let auth else { throw RelayStoreError.unauthorized }; let event = try await store.publish(auth: auth, request: request); await liveHub.publish(event, instanceID: auth.instanceID); if let pushDelivery { Task { await pushDelivery.deliverPublished(event: event, instanceID: auth.instanceID) } }
                 case .command(let request): guard let auth else { throw RelayStoreError.unauthorized }; send(.receipt(try await store.acceptCommand(auth: auth, request: request)), contextBox.context)
                 case .ping: send(.pong, contextBox.context)
                 default: break
