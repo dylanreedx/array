@@ -521,14 +521,14 @@
       "name": "array_delegate",
       "label": "Array Delegate To Agent",
       "op": "agent.delegate",
-      "description": "Create a child agent in Array, inheriting your provider, model and checkout, and place its tile beside you on the canvas. Returns the real childAgentId, tileId, per-step statuses (creation, attachment, durability, presentation) and childRunning. Requires an idempotencyKey: the same key with the same payload never creates a second child. Under Agent permissions Ask first, the first delegation in a session asks the user (scope_approval_required if declined); under Free it does not. Errors are structured (unsupported, permission_denied, idempotency_conflict, outcome_unknown); it never creates a worktree or changes provider/model.",
+      "description": "Create a child agent in Array, inheriting your checkout and, by default, harness and model, and place its tile beside you on the canvas. Returns the real childAgentId, tileId, per-step statuses (creation, attachment, durability, presentation) and childRunning. Requires an idempotencyKey: the same key with the same payload never creates a second child. Under Agent permissions Ask first, the first delegation in a session asks the user (scope_approval_required if declined); under Free it does not. Errors are structured (unsupported, permission_denied, idempotency_conflict, outcome_unknown); it never creates a worktree or silently changes the selected CLI.",
       "promptSnippet": "Delegate a task to a new child agent that appears on the Array canvas",
       "promptGuidelines": [
         "Delegate only when the user asked for it; discussing delegation is not an instruction to spawn.",
         "Always pass a stable idempotencyKey and reuse the SAME key when retrying — never delegate twice for one task.",
         "If the result is partial with retryOp 'agent.reveal', the child EXISTS: call array_reveal_agent with its childAgentId; do not delegate again.",
         "On cancelled or outcome_unknown, call array_get_operation with the operationId (or your idempotencyKey) before doing anything else.",
-        "Do not pass provider or model: the child inherits yours, and a different one is refused as unsupported.",
+        "Optionally pass harness (Claude Code, Codex or Pi) and an exact fully qualified model from that harness's live catalogue. Omit both to inherit; a different harness without model uses its own catalogue default. Unready or exhausted harnesses and unknown models are refused; no silent CLI fallback.",
         "Collect the child's answer with wait_agents, passing the operationId array_delegate returned as its handle."
       ],
       "parameters": {
@@ -547,6 +547,15 @@
             "type": "string",
             "maxLength": 128,
             "description": "Stable key for this delegation. Reuse it verbatim on any retry."
+          },
+          "harness": {
+            "type": "string",
+            "enum": ["Claude Code", "Codex", "Pi"],
+            "description": "Child CLI; omit to inherit yours. Must be installed and signed in."
+          },
+          "model": {
+            "type": "string",
+            "description": "Exact fully qualified id from the selected CLI catalogue. Omit to inherit on the same harness, or use a different harness's own default."
           },
           "placement": {
             "type": "object",

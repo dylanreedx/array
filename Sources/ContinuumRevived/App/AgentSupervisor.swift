@@ -2031,6 +2031,20 @@ final class AgentSupervisor {
         return accountQuotas[harness]
     }
 
+    /// Refuse only a fresh, unexpired account-wide exhausted window. Unknown
+    /// windows may be model-specific, so they cannot block an arbitrary model.
+    func delegationQuotaRefusal(for harness: AgentHarness, now: Date = Date()) -> String? {
+        restoreAccountQuotasIfNeeded()
+        guard let quota = accountQuotas[harness], now.timeIntervalSince(quota.observedAt) < 300,
+              quota.windows.contains(where: { window in
+                  guard window.kind == .fiveHour || window.kind == .sevenDay || window.kind == .spendLimit,
+                        let used = window.utilization, used >= 1,
+                        let reset = window.resetsAt, reset > now else { return false }
+                  return true
+              }) else { return nil }
+        return "\(harness.rawValue) has exhausted its reported account usage window. Wait for its reset or explicitly choose another harness."
+    }
+
     /// Loads the persisted readings once per process, on first ask rather than
     /// at boot: an empty row is only a problem when something is looking at it,
     /// and this keeps a disk read off the launch path.
@@ -4966,7 +4980,7 @@ final class AgentSupervisor {
     ///
     /// Returns nil on a refusal, having said so in the parent's transcript.
     @discardableResult
-    func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID) -> AgentID? {
+    func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil) -> AgentID? {
         guard let parent = records[parentId] else {
             return refuseSpawn(.unknownParent, for: parentId)
         }
@@ -5040,9 +5054,9 @@ final class AgentSupervisor {
                 prompt: request.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     ? request.prompt : agentMessageText(request.prompt, from: parentId),
                 cwd: projectRoot,
-                harness: parentHarness,
-                model: resolvedRole.model,
-                thinking: resolvedRole.thinking,
+                harness: childSelection?.harness ?? parentHarness,
+                model: childSelection?.model ?? resolvedRole.model,
+                thinking: childSelection?.thinking ?? resolvedRole.thinking,
                 projectId: parent.projectId,
                 parentAgentID: parentId,
                 isolated: request.isolated
@@ -5075,7 +5089,7 @@ final class AgentSupervisor {
                 parentAgentID: parentId.rawValue,
                 displayName: childName,
                 sourceItemID: request.sourceItemID,
-                provider: parentHarness.rawValue,
+                provider: (childSelection?.harness ?? parentHarness).rawValue,
                 spawnedAt: Date()
             ), to: parentId)
             return childID

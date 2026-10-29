@@ -2252,6 +2252,21 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--workspace-api-cross-harness-delegation-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runWorkspaceAPIDelegationChecks(crossHarness: true)
+                    print("ContinuumRevivedWorkspaceAPIDelegationChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         // Agent permissions (Settings ▸ Agents): Free within a project delegates,
         // messages any agent in the project and inspects it without a prompt,
         // while cross-project reach still asks or is refused, the per-agent

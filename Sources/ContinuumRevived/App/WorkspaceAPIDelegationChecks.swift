@@ -16,7 +16,7 @@ import Foundation
 ///
 /// What each act would say when it goes red is written beside it.
 @MainActor
-func runWorkspaceAPIDelegationChecks() async throws {
+func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
     struct Failure: Error, CustomStringConvertible {
         let message: String
         var description: String { message }
@@ -187,9 +187,15 @@ func runWorkspaceAPIDelegationChecks() async throws {
     let delegate = AppDelegate()
     // BEFORE anything touches `workspaceAPI` (lazy, and it binds this supervisor
     // for the life of the service): a real supervisor over an isolated store.
+    var fixtureRunners: [AgentID: ScriptedAgentRunner] = [:]
     let supervisor = AgentSupervisor(store: AgentStore(
         applicationSupportDirectory: URL(fileURLWithPath: appSupportPath, isDirectory: true)
-            .appendingPathComponent("workspace-api-delegation-check", isDirectory: true)))
+            .appendingPathComponent("workspace-api-delegation-check", isDirectory: true)), makeRunner: { launch -> AgentRunning in
+            if !crossHarness { return AgentSupervisor.productionRunner(for: launch) }
+            let runner = ScriptedAgentRunner(script: [.turnCompleted(threadId: "fixture", turnId: "done", outcome: .completed, errorMessage: nil)])
+            fixtureRunners[launch.record.id] = runner
+            return runner
+        })
     delegate.agentSupervisor = supervisor
     // Agent permissions Off: new agents start without workspace tools and every
     // gated request asks — the world this leg was written against. The user's
@@ -261,6 +267,67 @@ func runWorkspaceAPIDelegationChecks() async throws {
         try expect(runtime.interactionGeneration == before.generation, "\(what): a programmatic operation is not a user interaction")
     }
 
+    if crossHarness {
+        supervisor.workspaceToolsPermission = { .free }
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.codex)
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
+        api.approvalHandler = { _ in .allowForSession }
+        for (source, target) in [(AgentHarness.claudeCode, AgentHarness.codex), (.claudeCode, .pi), (.codex, .claudeCode), (.claudeCode, .claudeCode)] {
+            let model = AgentModelCatalog.shared.snapshot(for: source).seedModel!
+            let parent = supervisor.spawn(role: nil, prompt: nil, cwd: pbRoot, harness: source, model: model, thinking: "low", projectId: projectPb, projectRoot: pbRoot)
+            _ = supervisor.setWorkspaceToolsEnabled(agentID: parent, true)
+            let handle = "cross-\(source.rawValue)-\(target.rawValue)".replacingOccurrences(of: " ", with: "-")
+            var payload: [String: Any] = ["task": "cross harness task", "idempotencyKey": handle, "presentation": ["camera": "preserve"]]
+            if target != source { payload["harness"] = target.rawValue }
+            let expectedModel = source == .codex ? AgentCatalogQAFixture.claude.models.last! : (target == source ? model : AgentModelCatalog.shared.snapshot(for: target).seedModel!)
+            if source == .codex { payload["model"] = expectedModel }
+            let created = try result(api.dispatch(agentId: parent, requestId: handle, op: "agent.delegate", payload: payload), "cross harness delegation")
+            let replay = try result(api.dispatch(agentId: parent, requestId: handle + "-retry", op: "agent.delegate", payload: payload), "cross retry")
+            try expect(replay["childAgentId"] == created["childAgentId"], "cross retry creates no duplicate")
+            let childId = AgentID(rawValue: UUID(uuidString: created["childAgentId"]!.string!)!)
+            let child = supervisor.records[childId]!
+            try expect(child.harness == target && child.model == expectedModel, "child owns selected harness and catalogue model")
+            try expect(child.parentAgentID == parent && child.workspaceToolsEnabled && child.tileId != nil, "cross child retains parent, tools and visible tile")
+            try expect(created["provider"]?.string == target.rawValue, "result reports actual child provider")
+            let stream = supervisor.events(for: parent)
+            var chipMatches: Bool?
+            let chip = Task { @MainActor in
+                for await event in stream {
+                    if case let .childAgentSpawned(_, id, parentID, _, sourceID, provider, _) = event, id == childId.rawValue {
+                        chipMatches = parentID == parent.rawValue && sourceID == handle && provider == target.rawValue
+                        return
+                    }
+                }
+            }
+            _ = await waitUntil(timeout: 5, pollInterval: 0.02) { chipMatches != nil }
+            chip.cancel()
+            try expect(chipMatches == true, "parent transcript chip names child's actual provider and source")
+            let settled = await waitUntil(timeout: 5, pollInterval: 0.02) { !supervisor.isRunning(childId) }
+            try expect(settled && fixtureRunners[childId] != nil, "selected child runs and settles")
+            guard let helper = AppDelegate.workspaceMCPExecutablePath(), let config = delegate.workspaceMCPHost.configuration(for: parent, serverExecutable: helper) else { throw Failure(message: "missing MCP helper") }
+            let client = try WorkspaceMCPCheckClient(executable: helper, environment: config.environment)
+            defer { client.close() }
+            let waited = try await client.request("tools/call", ["name": "wait_agents", "arguments": ["handles": [handle], "timeoutSeconds": 5]])
+            let content = (waited["result"] as? [String: Any])?["structuredContent"] as? [String: Any]
+            let agents = (content?["result"] as? [String: Any])?["agents"] as? [[String: Any]]
+            try expect(agents?.first?["status"] as? String == "completed", "wait_agents collects cross child: \(waited)")
+            _ = try result(api.dispatch(agentId: parent, requestId: handle + "-message", op: "agent.message", payload: ["agentId": childId.rawValue.uuidString, "text": "follow up", "idempotencyKey": handle + "-message"]), "cross child message")
+            let delivered = await waitUntil(timeout: 5, pollInterval: 0.02) { fixtureRunners[childId]?.prompts.contains(where: { $0.contains("follow up") }) == true }
+            try expect(delivered, "cross child's runner receives the message")
+            _ = try failure(api.dispatch(agentId: parent, requestId: handle + "-bad", op: "agent.delegate", payload: ["task": "bad", "idempotencyKey": handle + "-bad", "model": "unknown/model"]), .unsupported, "unknown model")
+        }
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .codex, readiness: .loggedOut, models: []))
+        _ = try failure(dispatch("agent.delegate", ["task": "unready", "idempotencyKey": "unready", "harness": "Codex"]), .unsupported, "signed out harness")
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .codex, readiness: .missing, models: []))
+        _ = try failure(dispatch("agent.delegate", ["task": "missing", "idempotencyKey": "missing", "harness": "Codex"]), .unsupported, "missing CLI")
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.codex)
+        supervisor.qaDeliverAccountQuota(.init(harness: .codex, windows: [.init(kind: .fiveHour, utilization: 1, resetsAt: Date().addingTimeInterval(600))], observedAt: Date(), source: .unknown("fixture")))
+        _ = try failure(dispatch("agent.delegate", ["task": "exhausted", "idempotencyKey": "exhausted", "harness": "Codex"]), .unsupported, "exhausted usage")
+        print("cross-harness delegation: Claude → Codex/Pi, Codex → Claude, inheritance, unknown model, signed out, MCP wait and message passed")
+        return
+    }
+
     // Fixture sanity — the whole leg is meaningless without these.
     try expect(runtime.qaHasCanvas, "the production mount must give the runtime its canvas")
     try expect(canvas.armedZoneId == zoneA, "zoneA must be armed at boot, got \(String(describing: canvas.armedZoneId))")
@@ -287,13 +354,14 @@ func runWorkspaceAPIDelegationChecks() async throws {
                "a denied delegation creates NOTHING: \(supervisor.records.count) records, \(supervisor.children(of: parentId).count) children, \(agentTileCount()) tiles")
     try expectPreserved(beforeDenied, "denied delegation")
 
-    // MARK: B — provider/model overrides are refused, never silently applied
+    // MARK: B — unready harnesses and unknown models are refused
 
     api.approvalHandler = { prompt in prompts.append(prompt); return .allowForSession }
+    AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .loggedOut, models: []))
     let wrongProvider = try failure(
         dispatch("agent.delegate", ["task": "audit the parser", "idempotencyKey": "k-prov", "provider": "Claude Code"]),
         .unsupported, "provider override")
-    try expect(wrongProvider.message.contains("Pi"), "the refusal says which provider the child would have inherited: \(wrongProvider.message)")
+    try expect(wrongProvider.message.contains("Claude Code"), "the refusal names the unavailable selected harness: \(wrongProvider.message)")
     _ = try failure(
         dispatch("agent.delegate", ["task": "audit the parser", "idempotencyKey": "k-model", "model": "some-other/model"]),
         .unsupported, "model override")

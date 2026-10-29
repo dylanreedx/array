@@ -9,8 +9,8 @@ import Foundation
 // same function the pi `spawn_agent` tool drives — and made visible by the
 // EXISTING inbox-reveal route (`TileSpawner.spawnManagedAgentForExistingAgent`
 // → `installProjectTile`, then `AppDelegate.wireManagedAgentTile`). Nothing here
-// launches a process, creates a worktree, or picks a provider or model of its
-// own (§10.1). The operation record is reserved BEFORE creation and every step
+// launches a process or creates a worktree. Harness/model selectors are resolved
+// against the selected CLI catalogue before creation. The operation record is reserved BEFORE creation and every step
 // is reported separately (§10.3): a child whose tile could not be presented is a
 // success with a repairable step, repaired by `agent.reveal`, never by a second
 // `agent.delegate`.
@@ -72,17 +72,36 @@ extension WorkspaceAPIService {
             return .error(WorkspaceAPIError(code: code, message: message, approvalRequestId: approvalRequestId))
         }
 
-        // 3. Inheritance only (§10.1): the child runs the parent's harness and
-        //    model. An override that differs is refused explicitly, never applied
-        //    silently and never downgraded.
+        // Resolve exclusively against the selected CLI's live catalogue.
         guard let parentHarness = record.harness else {
             return fail(.unsupported, "This agent's harness is unresolved, so a child cannot inherit it.")
         }
-        if let provider = request.provider, !Self.namesHarness(provider, parentHarness) {
-            return fail(.unsupported, "Array delegates with the parent's own provider (\(parentHarness.rawValue)); a different provider for the child is not supported.")
+        func resolveHarness(_ raw: String) -> AgentHarness? {
+            AgentHarness.allCases.first { Self.namesHarness(raw, $0) }
         }
-        if let model = request.model, model != record.model {
-            return fail(.unsupported, "Array delegates with the parent's own model (\(record.model)); a per-child model override is not supported.")
+        let childHarness: AgentHarness
+        if let selector = request.harness ?? request.provider {
+            guard let selected = resolveHarness(selector) else {
+                return fail(.invalidRequest, "Unknown child harness '\(selector)'. Choose Claude Code, Codex or Pi.")
+            }
+            childHarness = selected
+        } else {
+            childHarness = parentHarness
+        }
+        if let provider = request.provider, resolveHarness(provider) != childHarness {
+            return fail(.invalidRequest, "harness and provider must name the same CLI.")
+        }
+        if let reason = AgentSupervisor.readinessRefusal(for: childHarness, retry: "delegate again") {
+            return fail(.unsupported, reason)
+        }
+        if let reason = supervisor.delegationQuotaRefusal(for: childHarness) {
+            return fail(.unsupported, reason)
+        }
+        let catalog = AgentModelCatalog.shared.snapshot(for: childHarness)
+        guard let childModel = request.model ?? (childHarness == parentHarness ? record.model : catalog.seedModel),
+              catalog.models.contains(childModel),
+              (request.model == nil && childHarness == parentHarness || childModel.contains("/")) else {
+            return fail(.unsupported, "\(childHarness.rawValue) does not offer the requested child model. Use an exact fully qualified id from its live catalogue; no other CLI was tried.")
         }
 
         // 4. Grant (§14.1). Delegation is outside the Phase 1 preset: the first
@@ -151,13 +170,22 @@ extension WorkspaceAPIService {
         }
         _beforeCommitHook?()
 
+        // Approval can run a nested event loop; validate again at the effect seam.
+        if let reason = AgentSupervisor.readinessRefusal(for: childHarness, retry: "delegate again") {
+            return fail(.unsupported, reason)
+        }
+        if let reason = supervisor.delegationQuotaRefusal(for: childHarness) { return fail(.unsupported, reason) }
+        guard AgentModelCatalog.shared.models(for: childHarness).contains(childModel) else {
+            return fail(.unsupported, "The selected child model is no longer offered by \(childHarness.rawValue). Delegate again with an exact catalogue id.")
+        }
+
         // 6. Creation, through the supervisor's one child-creation path. The
         //    request id doubles as the spawn-result handle, so `wait_agents` can
         //    collect this child exactly like a `spawn_agent` one.
         let spawnRequest = SpawnRequest(
             role: nil, prompt: request.task, isolated: false, sourceItemID: requestId,
             displayLabel: request.title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
-        guard let childId = supervisor.handleSpawnRequest(spawnRequest, from: agentId) else {
+        guard let childId = supervisor.handleSpawnRequest(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking)) else {
             let reason = supervisor.spawnRefusal(for: agentId)?.reason ?? "the supervisor refused the spawn"
             return fail(.unsupported, "Array did not start a child: \(reason).", approvalRequestId: approvalRequestId, keep: true)
         }

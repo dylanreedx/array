@@ -43,6 +43,7 @@ if [[ -n "$MATRIX_TMUX_BIN" ]]; then
   esac
 fi
 
+CROSS_HARNESS_DELEGATION_ONLY=0
 SIDEBAR_REFINEMENTS_ONLY=0
 FAST=0
 CODEX_PERMISSIONS_ONLY=0
@@ -60,6 +61,10 @@ NOTIFICATIONS_LINUX_ONLY=0
 HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    --cross-harness-delegation)
+      CROSS_HARNESS_DELEGATION_ONLY=1
+      shift
+      ;;
     --sidebar-refinements)
       SIDEBAR_REFINEMENTS_ONLY=1
       shift
@@ -503,6 +508,16 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+if [[ "$CROSS_HARNESS_DELEGATION_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update
+  run_app_check .build/debug/Array --workspace-api-cross-harness-delegation-check
+  run_app_check .build/debug/Array --workspace-api-delegation-check
+  run_app_check .build/debug/Array --strict-agent-harness-check
+  run_app_check .build/debug/Array --inbox-parent-fold-check
+  run_app_check .build/debug/Array --agent-tile-reference-check
+  matrix_report 'Cross-harness delegation matrix (targeted)'
+  exit $?
+fi
 if [[ "$CODEX_PERMISSIONS_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
   run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
@@ -1392,6 +1407,7 @@ run_app_check .build/debug/Array --workspace-api-board-check
 # a presentation failure repaired by agent.reveal, operation.get per step, and
 # cancellation reporting the child truthfully.
 run_app_check .build/debug/Array --workspace-api-delegation-check
+run_app_check .build/debug/Array --workspace-api-cross-harness-delegation-check
 # .plans/79: a parent delegates and messages a child over the real API and pi
 # bridge. The child draws both as cards from the parent (name, colour, a reveal
 # that works), never as user prompts; the parent's row reads "Messaged …"; a

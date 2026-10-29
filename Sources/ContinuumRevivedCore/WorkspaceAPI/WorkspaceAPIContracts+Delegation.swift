@@ -58,16 +58,17 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     /// The child's task. Model-authored text: local only.
     public var task: String
     public var title: String?
-    /// Harness raw value. Phase 2b inherits the parent's; a different one is
-    /// `unsupported`, never a silent change of provider (§10.1).
+    /// Legacy alias for harness. Conflicting selectors are invalid.
     public var provider: String?
-    /// Fully qualified model id. Phase 2b inherits the parent's; a different one
-    /// is `unsupported`, never a silent change of cost.
+    /// Exact catalogue id. Omitted: inherit for the same harness, otherwise use its seed.
     public var model: String?
     public var placement: Placement?
     public var presentationPolicy: WorkspacePresentationPolicy
     /// REQUIRED for delegation: a spawn without a key cannot be retried safely.
     public var idempotencyKey: String?
+
+    /// Child CLI; omission inherits the parent.
+    public var harness: String?
 
     public init(
         task: String,
@@ -76,8 +77,10 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         model: String? = nil,
         placement: Placement? = nil,
         presentationPolicy: WorkspacePresentationPolicy = .defaultExplicitOpen,
-        idempotencyKey: String? = nil
+        idempotencyKey: String? = nil,
+        harness: String? = nil
     ) {
+        self.harness = harness
         self.task = task
         self.title = title
         self.provider = provider
@@ -88,13 +91,14 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case task, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey
+        case task, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey, harness
     }
 
     /// Tolerant of the model-facing shape (`presentation`, short names, any
     /// subset). Unknown keys are ignored, so a forged `authorized` is inert.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        harness = try c.decodeIfPresent(String.self, forKey: .harness)
         task = try c.decode(String.self, forKey: .task)
         title = try c.decodeIfPresent(String.self, forKey: .title)
         provider = try c.decodeIfPresent(String.self, forKey: .provider)
@@ -107,6 +111,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(harness, forKey: .harness)
         try c.encode(task, forKey: .task)
         try c.encodeIfPresent(title, forKey: .title)
         try c.encodeIfPresent(provider, forKey: .provider)

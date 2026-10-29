@@ -71,3 +71,28 @@ guidance), tmux, git CLT. `OnboardingPanel.liveProbes` is the single source.
 - **Approval flow** — both backends run without a tool-approval dock in the
   headless tile (claude `--permission-mode bypassPermissions`, codex full
   access, pi role tools).
+
+## Cross-harness delegation
+
+`array_delegate` accepts optional `harness` (`Claude Code`, `Codex`, `Pi`) and
+`model`. With neither, the child inherits the parent's harness and model. A
+new harness without a model uses that CLI catalogue's `seedModel` (its reported
+default, or its first listed model). Explicit models must be exact, fully
+qualified entries in the selected harness's live catalogue. `provider` remains
+a legacy alias; conflicting selectors are invalid requests.
+
+The API returns structured `unsupported` errors before creation for uninstalled,
+signed-out, checking or unavailable harnesses, unknown models, and fresh
+account-wide exhausted usage windows with future resets. Missing quota telemetry
+is unknown; model-specific windows do not establish account-wide exhaustion.
+No selection silently falls back to another CLI. Runner-reported failures after
+creation remain visible through the child's transcript and operation result.
+
+Children use the supervisor's existing spawn path, caps, parent link, tools,
+grants, transcript chip, result handle and tile attachment, regardless of their
+parent's harness. `array_message_agent` and MCP `wait_agents` resolve by agent
+identity and operation handle. The offline
+`--workspace-api-cross-harness-delegation-check` drives the production mount and
+workspace API with catalogue fixtures and scripted runners; it performs no real
+model turns. The shared pi/MCP tool catalogue describes these selectors to all
+three harnesses.
