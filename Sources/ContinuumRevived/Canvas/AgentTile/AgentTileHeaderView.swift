@@ -34,6 +34,8 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     private var row: NSStackView?
     private weak var statusBadge: NSView?
     private var elapsedWidth: NSLayoutConstraint?
+    private var rowLeading: NSLayoutConstraint?
+    private var rowTrailing: NSLayoutConstraint?
 
     /// Production uses the compact row's single elapsed clock. The standalone
     /// elapsed lane remains available to the formatter/geometry probes.
@@ -67,10 +69,14 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         elapsedLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
 
-        let row = NSStackView(views: [elapsedLabel, NSView(), branchChip])
+        let spacer = NSView()
+        let row = NSStackView(views: [elapsedLabel, spacer, branchChip])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = CGFloat(pageZoom.scaled(Space.m))
+        // The spacer only pushes the branch right; a second gap after it would
+        // cost a narrow header width it does not have.
+        row.setCustomSpacing(0, after: spacer)
         row.edgeInsets = contextInsets
         row.translatesAutoresizingMaskIntoConstraints = false
         addSubview(row)
@@ -80,9 +86,21 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
             equalToConstant: Self.elapsedColumnWidth(zoom: pageZoom))
         self.elapsedWidth = elapsedWidth
 
+        // The side insets give way only after the branch has truncated to its
+        // floor, so a full status badge never runs past the tile edge.
+        let insets = horizontalInsets
+        let rowLeading = row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: insets.left)
+        rowLeading.priority = NSLayoutConstraint.Priority(999)
+        let rowTrailing = row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -insets.right)
+        rowTrailing.priority = NSLayoutConstraint.Priority(998)
+        self.rowLeading = rowLeading
+        self.rowTrailing = rowTrailing
+
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: leadingAnchor),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            rowLeading,
+            rowTrailing,
+            row.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
+            row.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
             row.topAnchor.constraint(equalTo: topAnchor),
             row.bottomAnchor.constraint(equalTo: bottomAnchor),
             elapsedWidth,
@@ -114,10 +132,11 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     }
 
     private var contextInsets: NSEdgeInsets {
-        let row = NSEdgeInsets(Inset.row, zoom: pageZoom)
-        return NSEdgeInsets(top: CGFloat(pageZoom.scaled(4)), left: row.left,
-                            bottom: CGFloat(pageZoom.scaled(4)), right: row.right)
+        NSEdgeInsets(top: CGFloat(pageZoom.scaled(4)), left: 0,
+                     bottom: CGFloat(pageZoom.scaled(4)), right: 0)
     }
+
+    private var horizontalInsets: NSEdgeInsets { NSEdgeInsets(Inset.row, zoom: pageZoom) }
 
     /// Re-derives every metric this header owns from `zoom`. Same contract as
     /// `applyTokens()`: idempotent, and safe on a header already showing a
@@ -130,6 +149,8 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         elapsedLabel.font = .token(.captionMono, zoom: pageZoom)
         row?.spacing = CGFloat(pageZoom.scaled(Space.m))
         row?.edgeInsets = contextInsets
+        rowLeading?.constant = horizontalInsets.left
+        rowTrailing?.constant = -horizontalInsets.right
         elapsedWidth?.constant = Self.elapsedColumnWidth(zoom: pageZoom)
         invalidateIntrinsicContentSize()
         needsLayout = true
@@ -283,10 +304,14 @@ final class AgentTileOverflowButton: NSControl, TokenThemed, AgentPageZoomScalab
     override func layout() {
         super.layout()
         guard let image = imageView.image, image.size.width > 0 else { return }
-        let scale = min(chromeGlyphWidth, bounds.width) / Self.glyphInkBounds.width
+        // The image box is wider than the ink by the side bearings, so a
+        // button only as wide as the requested dots caps the scale to fit
+        // the whole box, and the box is kept inside the button.
+        let scale = min(chromeGlyphWidth / Self.glyphInkBounds.width, bounds.width / image.size.width)
         let width = image.size.width * scale
         let height = image.size.height * scale
-        let rect = NSRect(x: bounds.midX - Self.glyphInkBounds.midX * scale,
+        let x = bounds.midX - Self.glyphInkBounds.midX * scale
+        let rect = NSRect(x: min(max(x, bounds.minX), bounds.maxX - width),
                           y: bounds.midY - Self.glyphInkBounds.midY * scale,
                           width: width, height: height)
         if imageView.frame != rect { imageView.frame = rect }

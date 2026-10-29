@@ -89,14 +89,21 @@ enum AgentTileChromeConsolidationChecks {
                     tile.applyAwarenessSignal(nil)
                     try expect(context.isHidden, "\(label): an empty context strip must reclaim its space")
                     if let directory = ProcessInfo.processInfo.environment["AGENT_CHROME_CONSOLIDATION_PNG_DIR"] {
-                        tile.applyBranchContext(AgentRowContext(agentKind: .managed, checkedOutBranch: "array/integration"))
-                        tile.setPageZoom(.default)
-                        tile.layoutSubtreeIfNeeded()
-                        let image = try TranscriptViewportClippingChecks.render(tile).image
+                        // The crowded case: a long branch beside a live status badge.
+                        tile.applyBranchContext(AgentRowContext(agentKind: .managed,
+                            checkedOutBranch: "agent/investigate-notifications-and-header-layout"))
+                        tile.applyAwarenessSignal(AgentSignal(id: "consolidation-capture", kind: .actionRequired,
+                            agentID: nil, tileID: tile.tile.id, threadID: nil, occurredAt: Date(), source: .managedRuntime))
                         let url = URL(fileURLWithPath: directory, isDirectory: true)
                         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-                        try NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?
-                            .write(to: url.appendingPathComponent("chrome-\(cases).png"))
+                        for zoom in [AgentPageZoom(percent: 150), AgentPageZoom.default] {
+                            tile.setPageZoom(zoom)
+                            tile.layoutSubtreeIfNeeded()
+                            let image = try TranscriptViewportClippingChecks.render(tile).image
+                            let name = "chrome-\(renderer)-\(appearance == .aqua ? "light" : "dark")-\(Int(width))pt-\(zoom.percent).png"
+                            try NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?
+                                .write(to: url.appendingPathComponent(name))
+                        }
                     }
                     cases += 1
                 }
