@@ -14,10 +14,14 @@ public extension WorkspaceAPIOp {
     /// What the session preset grants without a prompt. `canvas.apply` is
     /// deliberately absent: the first apply for a checkout goes through the
     /// trusted approval UI, and "allow for session" covers the later ones.
+    /// `agent.notify` is present because its prompt would appear on the Mac the
+    /// user has walked away from, holding back the alert meant to reach them;
+    /// the task policy (one held request per run) is its limit instead.
     static let sessionPresetOperations: Set<WorkspaceAPIOp> = [
         .workspaceContext, .artifactOpen, .agentFind, .agentInspect,
         .canvasQuery, .agentReveal, .operationGet, .boardQuery, .boardApply, .agentUpdate,
         .browserSnapshot, .browserScreenshot, .browserConsole,
+        .agentNotify,
     ]
 
     /// Outside the preset, but not refused: the service asks the user through

@@ -107,5 +107,6 @@ func runCompanionTaskLedgerChecks() throws {
     catch is TaskLedgerCheckFailure { throw TaskLedgerCheckFailure(message: "unwritable ledger accepted work") }
     catch {}
     try taskExpect(failureLedger.revision == priorRevision, "failed durable write must not mutate in-memory task truth")
+    try runCompanionAttentionLedgerChecks()
     print("Companion task ledger checks passed: explicit root/child/queue provenance, old-child/new-task isolation, provider replay, admission barrier, stale terminal, steer settlement, restart unknown, revision floor and privacy")
 }

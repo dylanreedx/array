@@ -1721,6 +1721,44 @@
         ],
         "additionalProperties": false
       }
+    },
+    {
+      "name": "array_notify",
+      "label": "Array Notify",
+      "op": "agent.notify",
+      "description": "Tell the user you need them (reason needs_input) or that your work is done (reason completed). It goes through Array's task policy, never around it: needs_input marks your task as needing the user, and your run then waits until someone sends you your next turn, which continues the same task. completed sends nothing by itself, because Array announces a task once, automatically, when it and every agent in it has finished; a child agent can never announce its parent's task. Your message stays in your transcript and is never shown on the lock screen. Returns operationId, agentId, reason, outcome (recorded, coalesced or unavailable), phoneDelivery (taskAlerts, noPairedPhone, relayWithoutTaskAlerts or unknown) and an explanation you can repeat to the user. Preserves presentation.",
+      "promptSnippet": "Tell the user you need them, through Array's one-alert-per-task policy",
+      "promptGuidelines": [
+        "Use needs_input when you cannot continue without the user: a decision, an approval outside Array, or information only they have. Ask your question in your reply as usual; this only makes sure they hear about it.",
+        "Do not use it for progress updates or to say you are working. Array already shows that.",
+        "Calling completed is optional: the task's own completion alert covers it. Never call it to announce someone else's work.",
+        "One needs_input per turn is enough; a second is coalesced. Reuse the same idempotencyKey for a retry of the same request.",
+        "Report phoneDelivery honestly: noPairedPhone or relayWithoutTaskAlerts means no phone alert will arrive."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": [
+              "needs_input",
+              "completed"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "idempotencyKey": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "message"
+        ]
+      }
     }
   ]
 }

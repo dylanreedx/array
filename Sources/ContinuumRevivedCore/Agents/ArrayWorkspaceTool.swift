@@ -46,6 +46,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     case browserEvaluate = "array_browser_evaluate"
     case browserConsole = "array_browser_console"
 
+    case notify = "array_notify"
     public var isBrowser: Bool { rawValue.hasPrefix("array_browser_") }
 
     /// claude's prefix for a tool served by the `array_workspace` MCP server
@@ -68,6 +69,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .revealAgent, .messageAgent, .browserOpen, .browserNavigate, .browserSnapshot,
              .browserClick, .browserType, .browserPressKey, .browserScroll, .browserWaitFor,
              .browserScreenshot, .browserEvaluate, .browserConsole: return .unknown
+        case .revealAgent, .messageAgent, .notify: return .unknown
         }
     }
 
@@ -86,6 +88,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .getOperation: return "clock"
         case .browserOpen, .browserNavigate, .browserSnapshot, .browserClick, .browserType,
              .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole: return "globe"
+        case .notify: return "bell"
         }
     }
 
@@ -129,6 +132,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .browserScreenshot: return "Captured a browser screenshot"
         case .browserEvaluate: return "Ran JavaScript in a browser"
         case .browserConsole: return "Read a browser console"
+        case .notify: return "Notified you"
         }
     }
 

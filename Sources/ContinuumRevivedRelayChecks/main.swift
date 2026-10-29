@@ -9,6 +9,9 @@ import Foundation
 // sockets, no wall clock. Prints measured values; exits non-zero on the
 // first failure (run-matrix.sh gates on it).
 
+do { try runAgentNotifyPolicyChecks() }
+catch { fputs("FAIL: agent notify policy: \(error)\n", stderr); exit(1) }
+
 func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() {
         fputs("FAIL: \(message)\n", stderr)

@@ -205,6 +205,12 @@ final class WorkspaceAPIService {
         }
         return true
     }
+    struct CachedAgentNotify { let payloadHash: String; let result: AgentNotifyResult }
+    var agentNotifyIdempotency: [AgentID: [String: CachedAgentNotify]] = [:]
+    var agentNotifyIdempotencyOrder: [AgentID: [String]] = [:]
+    /// What `agent.notify` can promise about a phone. The app answers from its
+    /// companion diagnostics; nothing here is persisted.
+    var companionNotifyDelivery: () -> AgentNotifyResult.PhoneDelivery = { .unknown }
     static let idempotencyCapacity = 64
     private static let recentOperationsCapacity = 16
 
@@ -223,7 +229,8 @@ final class WorkspaceAPIService {
         browserRuntimeWiring: ((WKWebViewBrowserRuntime, UUID) -> Void)? = nil,
         browserIdleClose: ((UUID, AgentID) -> Bool)? = nil,
         browserControlPresentation: ((UUID, AgentID, Bool, Bool) -> Void)? = nil,
-        browserAuditPresentation: ((UUID, [BrowserAuditEntry]) -> Void)? = nil
+        browserAuditPresentation: ((UUID, [BrowserAuditEntry]) -> Void)? = nil,
+        companionNotifyDelivery: @escaping () -> AgentNotifyResult.PhoneDelivery = { .unknown }
     ) {
         self.runtimeProvider = runtime
         self.canvasProvider = canvas
@@ -240,6 +247,7 @@ final class WorkspaceAPIService {
         self.browserIdleClose = browserIdleClose
         self.browserControlPresentation = browserControlPresentation
         self.browserAuditPresentation = browserAuditPresentation
+        self.companionNotifyDelivery = companionNotifyDelivery
     }
 
     deinit {
@@ -424,6 +432,8 @@ final class WorkspaceAPIService {
         case .agentUpdate:
             return updateAgent(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
                                payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
+        case .agentNotify:
+            return notify(agentId: agentId, requestId: requestId, payload: payload, isCancelled: isCancelled)
         case .agentFind:
             return findAgents(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload, runtime: runtime, canvas: canvas)
         case .agentInspect:

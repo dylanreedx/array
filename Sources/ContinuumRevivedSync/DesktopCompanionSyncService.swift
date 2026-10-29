@@ -89,6 +89,9 @@ public struct DesktopCompanionSyncDiagnostics: Equatable, Sendable {
     public var lastInboundMessageKind: String?
     public var lastApprovalResponseOutcome: ApprovalResponseOutcome?
     public var lastError: String?
+    /// Whether the relay applies task alerts, as of the last task publication
+    /// attempt while paired. nil until one has run.
+    public var taskAlertsSupported: Bool?
 
     public init(
         containerIdentifier: String,
@@ -106,7 +109,8 @@ public struct DesktopCompanionSyncDiagnostics: Equatable, Sendable {
         lastFetchAt: Date? = nil,
         lastInboundMessageKind: String? = nil,
         lastApprovalResponseOutcome: ApprovalResponseOutcome? = nil,
-        lastError: String? = nil
+        lastError: String? = nil,
+        taskAlertsSupported: Bool? = nil
     ) {
         self.containerIdentifier = containerIdentifier
         self.desktopBundleIdentifier = desktopBundleIdentifier
@@ -124,6 +128,17 @@ public struct DesktopCompanionSyncDiagnostics: Equatable, Sendable {
         self.lastInboundMessageKind = lastInboundMessageKind
         self.lastApprovalResponseOutcome = lastApprovalResponseOutcome
         self.lastError = lastError
+        self.taskAlertsSupported = taskAlertsSupported
+    }
+
+    /// What `agent.notify` can promise, from what the last publication learned.
+    public var notifyDelivery: AgentNotifyResult.PhoneDelivery {
+        guard isPaired, pairedDeviceCount > 0 else { return .noPairedPhone }
+        switch taskAlertsSupported {
+        case true?: return .taskAlerts
+        case false?: return .relayWithoutTaskAlerts
+        case nil: return .unknown
+        }
     }
 }
 
@@ -515,6 +530,7 @@ public actor DesktopCompanionSyncService {
                 let pairing = await pairingSnapshotProvider()
                 guard pairing.isPaired else { return nil }
                 let context = try await publisher.taskNotificationContext()
+                diagnostics.taskAlertsSupported = context.supported
                 guard context.supported else { return nil }
                 let snapshot = try await provider(context.owner?.revision ?? 0)
                 if let owner = context.owner, owner.publisherID != snapshot.publisherID {

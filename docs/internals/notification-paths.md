@@ -201,8 +201,9 @@ successful work. This slice adds no automatic recovery inference.
 
 Attention targets the actual member's agent with existing N1/N2 actions.
 Task alerts in source now carry exact agent/task/run/instance destinations (IOS-03); deployed v15 retains agent-only links. Physical phone navigation,
-chat, foreground-view suppression, category budgets/preferences, recovery after
-a failed/cancelled child, and a host `array_notify` tool remain future slices.
+chat, foreground-view suppression, category budgets/preferences and recovery after
+a failed/cancelled child remain future slices. The agent `array_notify` tool is
+NOTIFY-01…07 below.
 No settle-window timer has been added. Hosted task mode is one source across
 alert/widget/Live Activity pushes; Mac-local awareness and phone-local surface
 projection retain their separately mapped behavior.
@@ -379,6 +380,36 @@ categoryDisabled/deduplicated/sent/tokenExpired/providerTokenExpired/failed,
 or throws. Only successful identities are remembered, in memory. Do not merge
 these claims with H-01–H-05.
 
+### Agent-requested notification: `array_notify` (source only)
+
+2026-10-29. Workspace op `agent.notify`, tool `array_notify` for pi and the
+`array_workspace` MCP server (Claude, Codex). It adds no sender, no relay decision
+path and no payload field: an agent's request becomes a task-ledger fact, and the
+existing task policy (T-01…T-07) decides. The caller is the only subject; the
+host derives its run. There is no target, recipient, device or alert text in the
+request. The agent's message stays in its transcript; the request id the relay
+sees is `notify-` plus a hash of agent and idempotency key. In the session preset
+(no prompt): an approval prompt would wait on the Mac the user has left.
+
+| ID | Trigger | Policy → recipient/surface → outcome |
+| --- | --- | --- |
+| NOTIFY-01 | `needs_input` from an agent mid-turn | Caller's bound run holds one request (pending needsInput, provider approvals still take precedence) → T-04: one attention alert naming that agent, through the outbox. Result `recorded` |
+| NOTIFY-02 | The turn ends while the request is held | Run stays needsInput (`awaitingAnswer`), never succeeded, so no T-06 completion replaces the attention banner; same decision identity, so no second alert. Later runner stop/runtime error is ignored. A relaunch keeps the wait: it is a settled fact, not lost work |
+| NOTIFY-03 | The agent's next accepted turn (user send, queued or readiness-held send, delegated message) | Answers it: the waiting run settles succeeded and the new turn joins the same task under it → T-03 quiet while it runs, then one T-06 for the whole task. Unsolicited/unknown provider work does not answer |
+| NOTIFY-04 | A second `needs_input` in the same run, or any while waiting | `coalesced`; no ledger write, no new decision. Same idempotency key returns the cached result; same key with a different request is `idempotency_conflict` |
+| NOTIFY-05 | `completed` | Never alerts: completion stays T-06 alone, so a child cannot announce its parent's task. Withdraws this turn's own held request if there is one. Result `coalesced` |
+| NOTIFY-06 | Agent idle, tracking unavailable, or turn failed/stopped | `unavailable`, nothing recorded; a failed turn keeps T-05, a stopped turn drops the request |
+| NOTIFY-07 | Result's `phoneDelivery` | From the last companion publication: `taskAlerts`, `noPairedPhone`, `relayWithoutTaskAlerts` (production v15 today: no phone alert), `unknown`. Apple acceptance and phone display are not claimed |
+
+Mac-local surfaces are unchanged: a request is not a Mac banner or sound.
+
+Witnesses: CoreChecks `--companion-task-ledger-check` (attention section),
+app `--agent-notify-check` (production `dispatch` → supervisor → ledger),
+`ContinuumRevivedRelayChecks` (ledger → wire → relay decision: one attention
+alert across turn end and relaunch, quiet while answered, one completion).
+Mutations reproduced RED: turn end treated as success (T-06 at turn end), the
+answer opening a new task, and the handler recording without the ledger.
+
 ## Remaining product policy and desired end state
 
 | ID | Trigger | Required decision |
@@ -392,7 +423,7 @@ these claims with H-01–H-05.
 | NEXT-07 | Cancellation/interruption | No success alert; visible cancelled/interrupted state |
 | NEXT-08 | Replay/reconnect/restart or repeated tool key | Durable dedupe; no second decision |
 | NEXT-09 | New task using same agent | New task eligibility, separate from old descendants |
-| NEXT-10 | Agent array_notify request | Host validates and maps to same policy; cannot bypass descendant barrier; milestones opt-in |
+| NEXT-10 | Agent array_notify request | Implemented in source as NOTIFY-01…07 (needs_input, completed). Still proposed: opt-in progress milestones and agent-written alert text, which needs an explicit lock-screen privacy policy |
 | NEXT-11 | User already viewing relevant agent | Update detail; suppress redundant foreground banner by default |
 | NEXT-12 | Muted category/quiet-hours/budget exhausted | Record inbox outcome; suppress/defer according to explicit preference; attention policy must be documented |
 | NEXT-13 | Revoked recipient / stale pairing | No future push or command authority |

@@ -2071,6 +2071,16 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--agent-notify-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    print(try await AgentNotifyChecks.run())
+                    Foundation.exit(0)
+                } catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--companion-task-host-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -5868,7 +5878,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         browserControlPresentation: { [weak self] tile, agent, engaged, userDriving in
             self?.presentBrowserControl(tileId: tile, agentId: agent, engaged: engaged, userDriving: userDriving)
         },
-        browserAuditPresentation: { [weak self] tile, entries in self?.presentBrowserActivity(tileId: tile, entries: entries) }
+        browserAuditPresentation: { [weak self] tile, entries in self?.presentBrowserActivity(tileId: tile, entries: entries) },
+        companionNotifyDelivery: { [weak self] in self?.companionNotifyDelivery ?? .unknown }
     )
     private func presentBrowserControl(tileId: UUID, agentId: AgentID, engaged: Bool, userDriving: Bool) {
         guard let view = canvasView?.tileView(for: tileId) as? BrowserTileNSView else { return }
@@ -6030,6 +6041,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     )
     private var localPairingListener: LocalPairingEndpointListener?
     private var companionSyncService: DesktopCompanionSyncService?
+    /// `agent.notify`'s phone promise, refreshed after each companion
+    /// publication. With no companion service there is no paired phone.
+    private var companionNotifyDelivery: AgentNotifyResult.PhoneDelivery = .noPairedPhone
     /// Set when the service runs in relay mode (D4-R1); used to register
     /// phone pairing tokens with the relay at exchange time.
     private var relaySyncTransport: RelaySyncTransport?
@@ -11556,6 +11570,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 )
                 await companionSyncService?.stop()
                 companionSyncService = nil
+                companionNotifyDelivery = .unknown
                 relaySyncTransport?.stop()
                 relaySyncTransport = nil
                 startDesktopCompanionSyncService()
@@ -11932,6 +11947,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return
         }
         let diagnostics = await companionSyncService.diagnostics
+        companionNotifyDelivery = diagnostics.notifyDelivery
         let registeredObservedAgents = ((try? projectStore?.listSessions()) ?? [])
             .filter { $0.agentDescriptor != nil }
             .count

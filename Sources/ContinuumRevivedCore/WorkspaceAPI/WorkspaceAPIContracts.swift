@@ -62,6 +62,8 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     case browserScreenshot = "browser.take_screenshot"
     case browserEvaluate = "browser.evaluate"
     case browserConsole = "browser.console"
+    // `WorkspaceAPIContracts+Notify.swift`: the caller's own task alert.
+    case agentNotify = "agent.notify"
 }
 
 // MARK: - Identity

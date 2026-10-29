@@ -5425,6 +5425,26 @@ final class AgentSupervisor {
         }
     }
 
+    /// `agent.notify` needs_input: the caller's own bound run asks for a person.
+    /// nil when there is nothing to hold — the agent is not mid-turn, or task
+    /// tracking is unavailable — so the API reports that instead of a promise.
+    func requestCompanionAttention(agentID: AgentID, requestID: String) -> CompanionAttentionOutcome? {
+        guard isRunning(agentID), let run = companionRunBindings[agentID] else { return nil }
+        var outcome: CompanionAttentionOutcome?
+        updateCompanionTasks { outcome = try $0.holdAttention(run, requestID: requestID) }
+        return outcome
+    }
+
+    /// `agent.notify` completed: the agent withdraws a request it made earlier in
+    /// this turn. Completion itself is announced by the task, never from here.
+    /// nil when task tracking has nothing for this agent.
+    func withdrawCompanionAttention(agentID: AgentID) -> Bool? {
+        guard let run = companionRunBindings[agentID] else { return nil }
+        var released: Bool?
+        updateCompanionTasks { released = try $0.releaseAttention(run) }
+        return released
+    }
+
     func companionTaskSnapshot(revisionFloor: UInt64 = 0) throws -> CompanionTaskSnapshotBatch {
         guard companionTaskTrackingHealthy, let ledger = companionTaskLedger else { throw CompanionTaskLedgerError.invalidRun }
         for (id, work) in queuedWorkItemsCache { try ledger.reconcileQueued(agentID: id.rawValue, itemIDs: work.map(\.id)) }
