@@ -212,6 +212,39 @@ private func runClaudeSessionRunnerChecks() {
         }
     }
 
+    // 1b. Every launch the runner spawns runs in bypass permissions mode: a
+    //     headless -p session has nobody to answer a prompt, so on the CLI's
+    //     default mode the agent's shell, Xcode, git and network calls are
+    //     denied. Read from the fake's recorded argv, not re-derived.
+    for (label, mayExist, fork, sessionFlags) in [
+        ("start", false, false, ["--session-id", sessionID]),
+        ("resume", true, false, ["--resume", sessionID]),
+        ("fork", true, true, ["--resume", sessionID, "--fork-session"]),
+    ] {
+        let root = steeringFakeRoot(.claude)
+        defer { try? FileManager.default.removeItem(at: root) }
+        withFakeOnPath(root) {
+            let runner = ClaudeAgentRunner(config: .init(
+                model: "fake-model", effort: "high", cwd: root, sessionId: sessionID,
+                conversationMayExist: mayExist, forkSession: fork))
+            do {
+                try runner.run(prompt: AgentPrompt("first")) { _ in }
+            } catch {
+                expect(false, "claude permissions (\(label)): a plain turn must not throw: \(error)")
+            }
+            runner.stop()
+            let argv = AgentSteeringQAFakes.argv(in: root)
+            func contains(_ run: [String]) -> Bool {
+                argv.indices.contains { argv[$0...].starts(with: run) }
+            }
+            expect(contains(sessionFlags),
+                   "claude permissions (\(label)): expected session flags \(sessionFlags), got \(argv)")
+            expect(contains(["--permission-mode", "bypassPermissions"]),
+                   "claude permissions (\(label)): spawned claude must run in bypassPermissions mode, got \(argv)")
+        }
+    }
+    print("Claude bypassPermissions launch witnessed: start, resume, fork")
+
     // 2. A steer written during a tool call is consumed at the boundary and
     //    confirmed by its replay.
     do {

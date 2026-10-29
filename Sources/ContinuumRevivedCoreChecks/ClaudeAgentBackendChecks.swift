@@ -445,6 +445,8 @@ private func runClaudeRunnerArgvChecks() {
         "--forward-subagent-text",
         "--model", "claude-haiku-4-5-20251001",
         "--effort", "high",
+        // A headless -p session has nobody to answer a permission prompt.
+        "--permission-mode", "bypassPermissions",
         "--resume", claudeSID,
     ], "ClaudeAgentRunner argv (resume) drifted: \(resume)")
 
@@ -466,9 +468,28 @@ private func runClaudeRunnerArgvChecks() {
         // a silently-dropped flag would show up.
         "--forward-subagent-text",
         "--model", "claude-haiku-4-5-20251001",
+        "--permission-mode", "bypassPermissions",
         "--session-id", claudeSID,
         "--extra",
     ], "ClaudeAgentRunner argv (start) drifted: \(start)")
+
+    let fork = ClaudeAgentRunner.processArguments(
+        model: "claude-haiku-4-5-20251001",
+        effort: nil,
+        sessionMode: .fork,
+        sessionId: claudeSID,
+        extraArgs: []
+    )
+    expect(fork == [
+        "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+        "--include-partial-messages",
+        "--replay-user-messages",
+        "--include-hook-events",
+        "--forward-subagent-text",
+        "--model", "claude-haiku-4-5-20251001",
+        "--permission-mode", "bypassPermissions",
+        "--resume", claudeSID, "--fork-session",
+    ], "ClaudeAgentRunner argv (fork) drifted: \(fork)")
 
     // Executable resolution mirrors pi's GUI-thin-PATH strategy.
     let absolute = ClaudeAgentRunner.resolvedCommand(
@@ -524,7 +545,7 @@ private func runClaudeRunnerArgvChecks() {
                "ClaudeCLIBackend: \(mode) must treat an auth failure as terminal, not retry it")
     }
 
-    print("ClaudeAgentRunner argv checks passed: both session modes pinned, resolution mirrors pi, failure predicates match the captured stderr, fresh agents create before resuming and each direction retries only its own failure")
+    print("ClaudeAgentRunner argv checks passed: all three session modes pinned with bypassPermissions, resolution mirrors pi, failure predicates match the captured stderr, fresh agents create before resuming and each direction retries only its own failure")
 }
 
 private func runClaudeBackendPolicyChecks() {

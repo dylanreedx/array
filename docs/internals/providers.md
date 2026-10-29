@@ -30,6 +30,13 @@ never API keys (owner rule).
 - **Model catalogue**: `AgentModelCatalog` publishes immutable per-harness snapshots. Pi membership comes only from its bounded `--list-models` probe; Claude and Codex use their authenticated native catalogues. Production never flattens them for selection. QA fixtures are deterministic presentation seeds, not authentication evidence.
 - **Readiness**: `pi auth check --provider X --json --no-refresh` and `claude
   auth status --json`, surfaced as onboarding rows.
+- **Permissions**: a headless run has nobody to answer a CLI permission
+  prompt, so every managed agent runs with full access. Claude gets
+  `--permission-mode bypassPermissions` on fresh, resumed and forked
+  sessions (`ClaudeAgentRunner.processArguments`); Codex gets
+  `sandbox_mode=danger-full-access` + `approval_policy=never` on its launch,
+  thread and turn requests. Array's workspace grants (Free / Ask first) are a
+  separate layer that still gates Array's own tools.
 
 ### Compliance — why local claude spawning is safe
 
@@ -62,4 +69,5 @@ guidance), tmux, git CLT. `OnboardingPanel.liveProbes` is the single source.
   `AgentRunning` seam today; a richer backend protocol (model listing, auth
   readiness) is the tidy-up once codex lands.
 - **Approval flow** — both backends run without a tool-approval dock in the
-  headless tile (claude `--dangerously-skip-permissions`, pi role tools).
+  headless tile (claude `--permission-mode bypassPermissions`, codex full
+  access, pi role tools).

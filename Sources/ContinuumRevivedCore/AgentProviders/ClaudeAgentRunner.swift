@@ -257,9 +257,13 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// `--verbose` is required by the CLI for stream-json in print mode. No
     /// positional prompt: every prompt is a stdin message, so there is nothing
     /// after the options for `--mcp-config`'s variadic list to swallow.
-    /// Permission mode is intentionally not overridden: the user's effective
-    /// Claude configuration remains authoritative, while hook events expose
-    /// native interaction seams.
+    /// Permission mode is always `bypassPermissions`, as managed Codex runs
+    /// with full access: a headless `-p` session has nobody to answer a
+    /// permission prompt, so on the CLI's default mode every shell, Xcode,
+    /// simulator, git or network call the agent needs is denied. The flag
+    /// applies to fresh, resumed and forked sessions alike (measured on
+    /// claude 2.1.312: a resume without it reports `default`). Array's own
+    /// workspace grants are a separate layer and still gate its tools.
     public static func processArguments(
         model: String,
         effort: String?,
@@ -287,6 +291,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
                 "--include-hook-events", "--forward-subagent-text"]
             + ["--model", model]
             + (effort.map { ["--effort", $0] } ?? [])
+            + ["--permission-mode", "bypassPermissions"]
             + sessionArgs
             + extraArgs
         if let workspaceMCP {
