@@ -96,3 +96,16 @@ identity and operation handle. The offline
 workspace API with catalogue fixtures and scripted runners; it performs no real
 model turns. The shared pi/MCP tool catalogue describes these selectors to all
 three harnesses.
+
+Live delegation acceptance is separately opt-in and spends real provider usage:
+`ARRAY_DELEGATION_LIVE=1 scripts/check-cross-harness-live.sh`. It is never part of
+the default matrix. It mounts an isolated workspace without opening a window and
+uses the production supervisor, runner factory and workspace MCP host with the
+user's signed-in CLIs. Catalogue membership is live-probed; named Haiku/mini
+models are preferred when offered. Exact catalogue ids can be selected using
+`ARRAY_DELEGATION_LIVE_CLAUDE_MODEL` / `ARRAY_DELEGATION_LIVE_CODEX_MODEL` /
+`ARRAY_DELEGATION_LIVE_PI_MODEL`. Add `ARRAY_DELEGATION_LIVE_PI=1` for Claude → Pi.
+`ARRAY_DELEGATION_LIVE_OUT` chooses the evidence directory. The witness requires
+actual child replies, parent tool calls and answers, selected record identities,
+and delegation chips; a cross-harness follow-up asks the child's own runner for
+a second answer. Missing auth, unavailable models and exhausted usage fail visibly.
