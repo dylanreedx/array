@@ -418,6 +418,7 @@ func runWorkspaceAPIBrowserCheck() throws {
     _ = try call("browser.evaluate", ["tileId": target, "script": "() => 4"])
     guard scopePrompts == 3 else { throw WorkspaceAPIChecks.Failure(message: "allow once must not grant later browser actions") }
     try runAgentBrowserPopupCheck()
+    try runBrowserControlHardeningChecks()
     print("Workspace browser API: MCP browser operations, ownership, permissions, residency, caps, restart and popup passed")
 }
 
