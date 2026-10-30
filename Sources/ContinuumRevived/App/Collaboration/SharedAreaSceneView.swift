@@ -646,6 +646,10 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         agreementPanel.show(agreement: selectedObject, in: knownDocument, draft: activeDraft)
         freshnessPanel.show(agent: selectedObject, in: knownDocument, model: agentFreshness)
         livePanel.show(object: selectedObject, in: knownDocument)
+        // Stale is not offline: it may still be running, so only offline turns the view into history.
+        livePanel.hostOnline = knownDocument?.items.first(where: { $0.id == selectedObject })
+            .flatMap { SharedAreaHostLivenessCopy.liveness(for: $0, in: knownHosts) }
+            .flatMap { $0.state == .online ? true : $0.state == .offline ? false : nil }
         let key = ControlsKey(status: controller.status, submitting: controller.isSubmitting, canSubmit: controller.canSubmit,
             epoch: controller.scope?.epoch, role: controller.scope?.role.rawValue,
             documentRevision: controller.document?.revision, selected: selectedObject,

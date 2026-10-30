@@ -166,10 +166,14 @@ enum SharedAgentLiveChecks {
         try expect(colours[0].brightnessComponent < colours[1].brightnessComponent,
             "the live panel re-resolves its token colours for light and dark offscreen renders")
 
-        panel.hostOnline = false
-        try expect(panel.statusText.contains("host offline, last confirmed") && panel.controlsText.hasPrefix("Its host is offline"),
-            "a host reported offline turns the view into last-confirmed history with nothing offered")
-        panel.hostOnline = nil
+        // Liveness arrives the production way: the area's host list on the
+        // controller's own connection, read by the scene (COL-06).
+        await authority.publish(host: log.head.host, state: .offline)
+        try await eventually("B's panel follows its host offline", seconds: 5) { panel.statusText.contains("host offline, last confirmed") }
+        try expect(panel.controlsText.hasPrefix("Its host is offline"),
+            "an offline host from the area's liveness turns the view into last-confirmed history with nothing offered")
+        await authority.publish(host: log.head.host, state: .online)
+        try await eventually("B's panel follows its host back online", seconds: 5) { !panel.statusText.contains("host offline") }
 
         // Unselect and unmount stop the read loop; nothing was ever executed.
         try scene.selectObject(nil)
@@ -229,6 +233,17 @@ enum SharedAgentLiveChecks {
             }
         }
         func appendLosingFirst(_ payloads: [P.Payload]) { append(payloads); skip = true }
+        func publish(host: SharedArea.ID<SharedArea.Host>, state: Collaboration.HostLivenessState) async {
+            let current = Collaboration.State(scope: .init(area: document.id, epoch: 1, role: .editor), document: document)
+            let now = Date()
+            let liveness = Collaboration.HostLiveness(host: host, generation: UUID(), state: state, lastSeen: now,
+                staleAt: now.addingTimeInterval(30), offlineAt: now.addingTimeInterval(90), reason: state == .offline ? .expired : nil)
+            guard var replica = try? CollaborationReplica(state: current),
+                  (try? replica.receive(.init(scope: current.scope, after: document.revision, through: document.revision, events: [],
+                      nextCursor: document.revision, presenceVersion: UUID(), presence: [], serverTime: now, hosts: [liveness]))) != nil
+            else { return }
+            for connection in connections { await connection.emit(.connected(replica)) }
+        }
     }
     private struct Transport: SharedAreaControllerTransport {
         let identityValue: Collaboration.Identity
