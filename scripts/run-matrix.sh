@@ -600,6 +600,8 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_leg python3 scripts/check-collaboration-pair.py
   run_leg swift run --skip-build ContinuumRevivedRelayCoreChecks
   run_leg swift run --skip-build ContinuumRevivedRelayIntegrationChecks
+  # The relay ships on Linux; the Mac legs above cannot see a Linux-only break.
+  run_leg bash scripts/check-relay-linux.sh
   matrix_report 'Collaboration matrix (targeted)'
   exit $?
 fi
