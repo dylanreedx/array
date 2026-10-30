@@ -29,16 +29,17 @@ extension Collaboration {
         public struct Source: Codable, Equatable, Sendable {
             public let incarnation: AgentIncarnation
             public let host: SharedArea.ID<SharedArea.Host>
-            /// Stable turn identity from the live projection.
+            /// Opaque turn identity from the live projection (`AgentProjection.Row.turn`).
             public let turn: String
-            /// Monotonic projection sequence of the quoted event, if known.
-            public let sequence: UInt64?
+            /// The quoted row's projection generation and sequence, if quoted
+            /// from the live tail (`AgentProjection.Snapshot.position(of:)`).
+            public let position: AgentProjection.Position?
             /// The dispatch this result answers, when the host associated one.
             public let command: UUID?
             public let artifact: ArtifactRevisionRef?
-            public init(incarnation: AgentIncarnation, host: SharedArea.ID<SharedArea.Host>, turn: String, sequence: UInt64? = nil,
-                        command: UUID? = nil, artifact: ArtifactRevisionRef? = nil) {
-                self.incarnation = incarnation; self.host = host; self.turn = turn; self.sequence = sequence
+            public init(incarnation: AgentIncarnation, host: SharedArea.ID<SharedArea.Host>, turn: String,
+                        position: AgentProjection.Position? = nil, command: UUID? = nil, artifact: ArtifactRevisionRef? = nil) {
+                self.incarnation = incarnation; self.host = host; self.turn = turn; self.position = position
                 self.command = command; self.artifact = artifact
             }
         }

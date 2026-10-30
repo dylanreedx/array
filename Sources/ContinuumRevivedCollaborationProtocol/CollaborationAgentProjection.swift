@@ -73,9 +73,23 @@ extension Collaboration {
             public var text: String
             public var status: ToolStatus?
             public var truncated: Bool
-            public init(id: String, turn: String?, kind: RowKind, text: String = "", status: ToolStatus? = nil, truncated: Bool = false) {
-                self.id = id; self.turn = turn; self.kind = kind; self.text = text; self.status = status; self.truncated = truncated
+            /// The sequence of the frame that last changed this row; 0 for a row
+            /// that came from included history. With the generation, this is the
+            /// row's `Position` for a result excerpt.
+            public var sequence: UInt64
+            public init(id: String, turn: String?, kind: RowKind, text: String = "", status: ToolStatus? = nil,
+                        truncated: Bool = false, sequence: UInt64 = 0) {
+                self.id = id; self.turn = turn; self.kind = kind; self.text = text; self.status = status
+                self.truncated = truncated; self.sequence = sequence
             }
+        }
+
+        /// Where an event stands in a projection: the source of truth for the
+        /// `turn`/position a result excerpt cites (`Collaboration.ResultExcerpt`).
+        public struct Position: Codable, Hashable, Sendable {
+            public let generation: UInt64
+            public let sequence: UInt64
+            public init(generation: UInt64, sequence: UInt64) { self.generation = generation; self.sequence = sequence }
         }
 
         public enum Payload: Codable, Equatable, Sendable {
@@ -129,10 +143,16 @@ extension Collaboration {
                 for row in rows { insert(row) }
             }
 
+            /// The position an excerpt of `row` cites, if the row came from the live tail.
+            public func position(of row: String) -> Position? {
+                guard let found = rows.first(where: { $0.id == row }), found.sequence > 0 else { return nil }
+                return Position(generation: generation, sequence: found.sequence)
+            }
+
             public var valid: Bool {
                 schema == AgentProjection.schema && generation > 0 && rows.count <= AgentProjection.maxRows && omittedRows >= 0
                     && Set(rows.map(\.id)).count == rows.count
-                    && rows.allSatisfy { $0.id.utf8.count <= 64 && ($0.turn?.utf8.count ?? 0) <= 64
+                    && rows.allSatisfy { $0.sequence <= through && $0.id.utf8.count <= 64 && ($0.turn?.utf8.count ?? 0) <= 64
                         && $0.text.utf8.count <= AgentProjection.maxRowTextBytes && AgentProjection.sanitize($0.text) == $0.text }
             }
 
@@ -154,8 +174,9 @@ extension Collaboration {
                     if let index = rows.firstIndex(where: { $0.id == id }) {
                         guard rows[index].kind == .assistant else { throw .invalid }
                         Self.append(delta, to: &rows[index])
+                        rows[index].sequence = frame.sequence
                     } else {
-                        var row = Row(id: id, turn: turn, kind: .assistant)
+                        var row = Row(id: id, turn: turn, kind: .assistant, sequence: frame.sequence)
                         Self.append(delta, to: &row)
                         insert(row)
                     }
@@ -163,8 +184,9 @@ extension Collaboration {
                     if let index = rows.firstIndex(where: { $0.id == id }) {
                         guard rows[index].kind == .tool(kind) else { throw .invalid }
                         rows[index].status = status
+                        rows[index].sequence = frame.sequence
                     } else {
-                        insert(Row(id: id, turn: turn, kind: .tool(kind), status: status))
+                        insert(Row(id: id, turn: turn, kind: .tool(kind), status: status, sequence: frame.sequence))
                     }
                 }
                 through = frame.sequence

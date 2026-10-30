@@ -166,7 +166,7 @@ func runSharedAgentFreshnessChecks() async throws {
         try await edit([.admit(artifact, .init(id: .init(), object: artifact.id, rect: rect(1050)))])
         let artifactR1 = UUID(), artifactR2 = UUID()
         let excerpt = Collaboration.ResultExcerpt(area: initial.document.id, capturedBy: a.identity.person,
-            source: .init(incarnation: secondAgent, host: host.id, turn: "turn-7", sequence: 42, command: toSecond.command.id,
+            source: .init(incarnation: secondAgent, host: host.id, turn: "turn-7", position: .init(generation: 1, sequence: 42), command: toSecond.command.id,
                           artifact: .init(object: artifact.id, revision: artifactR1, contentDigest: String(repeating: "a", count: 64))),
             text: "Error type added; parser tests pass.")
         try ledger.keep(excerpt)
