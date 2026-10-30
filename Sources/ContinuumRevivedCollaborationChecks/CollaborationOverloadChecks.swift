@@ -97,7 +97,16 @@ func runCollaborationOverloadChecks(api: CollaborationAPI, store: CollaborationS
 
         await controller.open()
         try await overloadEventually("controller reconnects after 429") { controller.status == .reconnecting }
-        try overloadExpect(controller.document == state.document && controller.scope == nil && !controller.canSubmit
+        // The last Scope may stay visible; the status gate is what refuses writes.
+        let probe = SharedArea.Command(area: area, expectedRevision: 1,
+            edits: [.post(.init(id: .init(), object: object.id, author: credential.identity.person, text: "Must not send during overload."))])
+        guard case .rejected(.notConnected) = await controller.submit(probe) else {
+            throw OverloadCheckFailure(message: "an overloaded controller admitted a write")
+        }
+        let untouched = try await api.state(area: area.rawValue)
+        try overloadExpect(untouched.document.revision == 1 && controller.pendingOperations.isEmpty,
+            "a write attempted during overload is refused locally and never reaches the service")
+        try overloadExpect(controller.document == state.document && !controller.canSubmit
             && controller.view == camera && controller.drafts.contains(draft) && (try local.load()?.accessDenied == false),
             "429 retains the cached canvas, camera and private draft without persisting access denial or enabling writes")
         await controller.close()
