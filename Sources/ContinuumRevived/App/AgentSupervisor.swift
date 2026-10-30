@@ -2635,6 +2635,7 @@ final class AgentSupervisor {
         // because it needs every restored record in `records` to resolve a child's
         // parent.
         reconcileObservedRunsAfterRestore()
+        reconcileManagedMode()
         return report
     }
 
@@ -2897,6 +2898,8 @@ final class AgentSupervisor {
         tileId: UUID?,
         displayName: String? = nil
     ) -> AgentID {
+        // Retain the old internal argument for callers; Settings owns the policy.
+        let mode = targetMode(harness: harness, parent: parentAgentID)
         let now = Date()
         if let parentAgentID {
             // The child and its parent's counter are committed as one
@@ -7085,7 +7088,50 @@ final class AgentSupervisor {
         onCompletion?(landed)
     }
 
-    // MARK: - Managed mode (backend only)
+    // MARK: - App-wide Managed mode
+
+    private var managedModeDefaults: UserDefaults = .standard
+    private var managedModeObserver: NSObjectProtocol?
+    static let managedModeDidChange = Notification.Name("array.agent.managedModeDidChange")
+
+    /// Wired by the real boot mount; uses the same suite as Settings.
+    func configureManagedMode(defaults: UserDefaults) {
+        managedModeDefaults = defaults
+        if let managedModeObserver { NotificationCenter.default.removeObserver(managedModeObserver) }
+        managedModeObserver = NotificationCenter.default.addObserver(
+            forName: SettingChangeEvent.name(for: SettingID(rawValue: AgentManagedModeConfig.enabledKey)),
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reconcileManagedMode() }
+        }
+        reconcileManagedMode()
+    }
+
+    isolated deinit {
+        if let managedModeObserver { NotificationCenter.default.removeObserver(managedModeObserver) }
+    }
+
+    private func targetMode(harness: AgentHarness?, parent: AgentID?) -> AgentMode {
+        AgentManagedModeConfig.mode(harness: harness, parent: parent,
+            enabled: AgentManagedModeConfig.enabled(defaults: managedModeDefaults))
+    }
+
+    func reconcileManagedMode() {
+        for record in Array(records.values) where record.capabilities.locallyManaged {
+            setMode(targetMode(harness: record.harness, parent: record.parentAgentID), for: record.id)
+        }
+    }
+
+    func effectiveMode(for id: AgentID) -> AgentMode {
+        guard let record = records[id], record.parentAgentID == nil,
+              record.harness == .claudeCode || record.harness == .codex else { return .free }
+        return isRunning(id) ? (runningModes[id] ?? record.mode) : record.mode
+    }
+
+    func showsManagedIndicator(for id: AgentID) -> Bool {
+        effectiveMode(for: id) == .managed && AgentManagedModeConfig.showIndicator(defaults: managedModeDefaults)
+    }
+
 
     private var pendingModeRestarts: Set<AgentID> = []
     private var runningModes: [AgentID: AgentMode] = [:]
@@ -7119,11 +7165,13 @@ final class AgentSupervisor {
         // every submitted turn. send snapshots the new policy in runningModes;
         // the existing trusted hooks consult that snapshot, not this live record.
         // Pi retains free execution behavior.
+        NotificationCenter.default.post(name: Self.managedModeDidChange, object: self, userInfo: ["agentID": id])
         return true
     }
 
     func managedHookReply(for record: AgentRecord, payload: [String: Any]) -> [String: Any]? {
-        guard let harness = record.harness, harness == .claudeCode || harness == .codex,
+        guard record.parentAgentID == nil,
+              let harness = record.harness, harness == .claudeCode || harness == .codex,
               (runningModes[record.id] ?? record.mode) == .managed else { return nil }
         return managedHookStates[record.id, default: ManagedLeadHookState()].reply(payload: payload, harness: harness)
     }

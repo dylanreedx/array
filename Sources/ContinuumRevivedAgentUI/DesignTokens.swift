@@ -682,3 +682,10 @@ func srgb(_ hex: UInt32) -> ChipColor {
         g: Double((hex >> 8) & 0xFF) / 255.0,
         b: Double(hex & 0xFF) / 255.0)
 }
+
+/// Managed mode identity, separate from warnings and agent identity colours.
+public enum ManagedModeToken {
+    public static let maroon = TokenColor(light: srgb(0x800020), dark: srgb(0xC8798D))
+    public static let fillOpacity: Double = 0.15
+    public static let borderOpacity: Double = 0.25
+}

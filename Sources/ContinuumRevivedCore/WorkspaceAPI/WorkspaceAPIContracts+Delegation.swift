@@ -58,6 +58,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     /// A failed/stopped child of this caller whose work should inform this attempt.
     public var retryOf: AgentID?
     /// Helpers default to free, even when their parent is managed.
+    /// Legacy input accepted for compatibility, ignored: helpers always run free.
     public var mode: AgentMode?
     /// The child's task. Model-authored text: local only.
     public var task: String

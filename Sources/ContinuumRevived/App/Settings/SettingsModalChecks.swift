@@ -507,6 +507,10 @@ enum SettingsSearchChecks {
         }
         func results() -> [SettingsEntry] { model.searchResults.map(\.entry) }
 
+        try type("managed")
+        try expect(results().contains { $0.field?.key == AgentManagedModeConfig.enabledKey }, "Managed mode must be searchable")
+        try type("indicator")
+        try expect(results().contains { $0.field?.key == AgentManagedModeConfig.showIndicatorKey }, "Managed indicator must be searchable")
         try type("dark")
         try expect(model.searchQuery == "dark", "typing must reach the model; query='\(model.searchQuery)'")
         try expect(results().contains { $0.paneID == "editor" && $0.label == "Appearance" }, "'dark' must find the Editor appearance")

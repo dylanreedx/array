@@ -52,6 +52,8 @@ func runSettingsSchemaChecks() {
 
     // Existing prefs represented: the schema must bind each of these exact keys.
     let expectedKeys: Set<String> = [
+        AgentManagedModeConfig.enabledKey,
+        AgentManagedModeConfig.showIndicatorKey,
         ZoneChromeFeature.userDefaultsKey,
         DeleteConfirmPolicy.userDefaultsKey,
         DefaultBrowserURL.userDefaultsKey,
@@ -298,10 +300,16 @@ private func runSettingsRegistrySearchChecks(sections: [SettingsSection]) {
     expect(!entries.contains { $0.anchor == "field.\(CommandCenterAppearanceConfig.customOpacityKey)" },
            "the custom opacity row must not be searchable while Frosted is chosen")
 
+    expect(AgentManagedModeConfig.enabled(defaults: defaults) && AgentManagedModeConfig.showIndicator(defaults: defaults),
+           "Managed mode and indicator must default on")
     func search(_ query: String) -> [SettingsSearch.Result] { SettingsSearch.search(query, in: entries) }
     func has(_ query: String, _ predicate: (SettingsEntry) -> Bool) -> Bool { search(query).contains { predicate($0.entry) } }
 
+    expect(has("managed") { $0.field?.key == AgentManagedModeConfig.enabledKey }, "Managed mode searchable")
+    expect(has("indicator") { $0.field?.key == AgentManagedModeConfig.showIndicatorKey }, "Managed indicator searchable")
     expect(has("dark") { $0.paneID == "editor" && $0.label == "Appearance" }, "'dark' must find the Editor appearance (an option title)")
+    expect(has("managed") { $0.field?.key == AgentManagedModeConfig.enabledKey }, "Managed mode searchable")
+    expect(has("indicator") { $0.field?.key == AgentManagedModeConfig.showIndicatorKey }, "Managed indicator searchable")
     expect(has("dark") { $0.id == "pane.appearance" }, "'dark' must find the Appearance pane")
     expect(has("theme") { $0.id == "pane.appearance" } && has("theme") { $0.paneID == "editor" && $0.label == "Appearance" },
            "'theme' must find Appearance and the Editor appearance")

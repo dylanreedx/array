@@ -557,11 +557,6 @@
             "type": "string",
             "description": "Failed/stopped child of yours to continue; carries its brief, changed files and report."
           },
-          "mode": {
-            "type": "string",
-            "enum": ["free", "managed"],
-            "description": "Child mode; default free. Managed leads delegate edits and bulk reads."
-          },
           "model": {
             "type": "string",
             "description": "Exact fully qualified id from the selected CLI catalogue. Omit to inherit on the same harness, or use a different harness's own default."

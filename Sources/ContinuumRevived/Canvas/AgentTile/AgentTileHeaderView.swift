@@ -26,6 +26,23 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
 
     private let elapsedLabel = NSTextField(labelWithString: "")
     private let branchChip = BranchChipNSView()
+    private let managedBadge = AgentManagedBadgeView(frame: .zero)
+    var showsManaged = false {
+        didSet {
+            guard showsManaged != oldValue else { return }
+            updateVisibility(); needsLayout = true
+        }
+    }
+    private func updateManagedVisibility() {
+        // Preserve branch and actionable status first. At 320pt the badge fits
+        // beside a branch; a status or 150% text zoom makes it yield as a unit.
+        let floor = pageZoom.scaled(statusBadge?.isHidden == false ? 440 : 300)
+        managedBadge.isHidden = !showsManaged || (bounds.width > 0 && bounds.width < floor
+            && (!branchChip.isHidden || statusBadge?.isHidden == false))
+    }
+    var qaManagedFrame: NSRect? {
+        managedBadge.isHidden ? nil : managedBadge.convert(managedBadge.bounds, to: self)
+    }
     private var presentation: AgentTileStatePresenter.Presentation?
     private var elapsedTimer: Timer?
 
@@ -55,7 +72,8 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     }
 
     func updateVisibility() {
-        isHidden = branchChip.isHidden && statusBadge?.isHidden != false && !showsElapsed
+        updateManagedVisibility()
+        isHidden = branchChip.isHidden && managedBadge.isHidden && statusBadge?.isHidden != false && !showsElapsed
     }
 
 
@@ -70,7 +88,8 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
 
 
         let spacer = NSView()
-        let row = NSStackView(views: [elapsedLabel, spacer, branchChip])
+        let row = NSStackView(views: [elapsedLabel, spacer, branchChip, managedBadge])
+        managedBadge.isHidden = true
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = CGFloat(pageZoom.scaled(Space.m))
@@ -129,6 +148,7 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     func applyTokens() {
         elapsedLabel.textColor = TextToken.textSecondary.color.nsColor(for: effectiveTokenTheme)
         branchChip.applyTokens()
+        managedBadge.applyTokens()
     }
 
     private var contextInsets: NSEdgeInsets {
@@ -170,6 +190,7 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         // The duration remains in the spoken status. At narrow widths a live
         // status badge takes this space so both branch and status stay legible.
         elapsedLabel.isHidden = !showsElapsed
+        updateVisibility()
         super.layout()
     }
 

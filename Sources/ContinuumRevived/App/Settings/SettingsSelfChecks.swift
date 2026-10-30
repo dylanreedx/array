@@ -223,6 +223,14 @@ enum SettingsSelfChecks {
         // CLI; a CLI switch keeps an incompatible saved model as an explicit invalid
         // item; a pick under the new CLI is stored.
         fixture.select("agents")
+        for key in [AgentManagedModeConfig.enabledKey, AgentManagedModeConfig.showIndicatorKey] {
+            let field = sections.flatMap(\.fields).first { $0.key == key }!
+            try expect(model.value(of: field) == .bool(true), "Managed settings must default on")
+            model.write(.bool(false), to: field)
+            try expect(defaults.bool(forKey: key) == false, "Managed settings row failed to persist")
+            model.reset(field)
+            try expect(model.value(of: field) == .bool(true), "Managed settings reset must restore on")
+        }
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .ready, models: ["anthropic/claude-y", "anthropic/claude-z"]))
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .codex, readiness: .loggedOut, models: ["openai-codex/gpt-x"]))
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .missing, models: ["google/gemini-z"]))

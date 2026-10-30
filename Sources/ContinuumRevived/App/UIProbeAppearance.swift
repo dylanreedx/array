@@ -509,6 +509,7 @@ enum UIProbeAppearance {
             // a stale token CGColor meanwhile.
             ("appearance.agentTileHeader", NSSize(width: 420, height: 56), {
                 let header = AgentTileHeaderView(frame: NSRect(x: 0, y: 0, width: 420, height: 56))
+                header.showsManaged = true
                 header.apply(AgentTileStatePresenter.present(
                     name: "sol-implementer",
                     status: .working,
@@ -1001,6 +1002,7 @@ enum UIProbeAppearance {
         // `LineToken.border` outline that becomes `AccentToken.accentApproval` when
         // the agent is off the branch it was given.
         "BranchChipNSView",
+        "AgentManagedBadgeView",
         // P1.11. `ManagedAgentTileNSView`'s own layer is `TileNSView`'s fill and
         // outline, inherited through `super.applyTokens()` — so listing it here is
         // what puts the tile's `tileBody` fill and its `borderStrong` edge under
@@ -1166,6 +1168,11 @@ enum UIProbeAppearance {
         theme: TokenTheme
     ) -> Set<String> {
         var values = legalValues(for: kind, theme: theme)
+        if owner == "AgentManagedBadgeView" {
+            let opacity = kind == .background || kind == .fill
+                ? ManagedModeToken.fillOpacity : ManagedModeToken.borderOpacity
+            return [hex(ManagedModeToken.maroon.nsColor(for: theme).withAlphaComponent(opacity).cgColor)]
+        }
         if owner == "IOSPreviewTileNSView" || owner == "IOSPreviewTileNSView.body" {
             return [hex((kind == .background || kind == .fill
                          ? SurfaceToken.tileBody.color : LineToken.borderStrong.color).cgColor(for: theme))]
@@ -1828,6 +1835,7 @@ enum UIProbeAppearance {
                     .init(id: UUID(), text: "Compact context", attachmentCount: 0, kind: .compaction),
                 ],
                 pause: .afterStop))
+            tile.qaPageZoomHeaderView.showsManaged = true
             tile.layoutSubtreeIfNeeded()
         }
         return [
@@ -2696,6 +2704,14 @@ enum UIProbeAppearance {
     }
 
     /// Called from `UIProbe.runUIProbeChecks` (`--ui-probe-check`).
+    /// Run the same complete token census even when an earlier unrelated
+    /// ui-probe residency witness prevents the full appearance leg reaching it.
+    static func runManagedModeTokenChecks() throws {
+        let sweep = try runProductionSweep()
+        let adoption = try runAdoptedTokenValueCheck()
+        print("Managed badge token census: \(sweep.views) themed views, \(adoption.owners) adopted owners, \(adoption.assertions) layer and \(adoption.foregrounds) foreground assertions passed")
+    }
+
     static func runAppearanceChecks() throws {
         guard CanvasSymbolImage.qaBitmapContractHolds() else {
             throw fail("canvas SF Symbol freeze lost its shared bitmap-only template contract")

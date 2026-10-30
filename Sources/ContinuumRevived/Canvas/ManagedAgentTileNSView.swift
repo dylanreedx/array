@@ -456,6 +456,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             self, selector: #selector(terminalToggleSettingChanged(_:)),
             name: SettingChangeEvent.name(for: SettingID(rawValue: AgentTerminalFaceConfig.showToggleKey)),
             object: nil)
+        for name in [AgentSupervisor.managedModeDidChange,
+                     SettingChangeEvent.name(for: SettingID(rawValue: AgentManagedModeConfig.showIndicatorKey))] {
+            NotificationCenter.default.addObserver(self, selector: #selector(managedModeChanged(_:)), name: name, object: nil)
+        }
         agentHeader.showsElapsedTime = false
         agentHeader.installStatusBadge(awarenessBadge)
         enableTitleBarActions()
@@ -4507,7 +4511,13 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         )
     }
 
+    @objc private func managedModeChanged(_ notification: Notification) {
+        if let id = notification.userInfo?["agentID"] as? AgentID, id != projectedAgentID { return }
+        applyAgentHeader(status: descriptor.status)
+    }
+
     private func applyAgentHeader(status: AgentStatus) {
+        agentHeader.showsManaged = projectedAgentID.map { agentSource?.showsManagedIndicator(for: $0) == true } ?? false
         defer { chromeDidChange() }
         let presentation: AgentTileStatePresenter.Presentation
         if let shown = agentStatusOverride {

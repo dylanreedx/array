@@ -3,7 +3,7 @@ import ContinuumRevivedCore
 import CryptoKit
 import Foundation
 
-/// Production delegation, runner, scoped-trust probe and authenticated hook endpoint.
+/// Production lead spawn, runner, scoped-trust probe and authenticated hook endpoint.
 /// The CLI double records actual argv/RPC and executes the configured hook command.
 @MainActor
 enum ManagedCodexChecks {
@@ -21,15 +21,15 @@ enum ManagedCodexChecks {
         return b
     }
     static func delegate(_ b: Bench, mode: String?, task: String = "fixture") async throws -> AgentID {
-        var payload: [String: Any] = ["task": task, "title": task, "harness": "Codex", "model": model,
-                                      "idempotencyKey": UUID().uuidString]
-        if let mode { payload["mode"] = mode }
-        let reply = try await WorkspaceAgentReportChecks.call(b.configuration(for: b.f.agentId), "array_delegate", payload)
-        guard !reply.isError, let result = reply.reply["result"] as? [String: Any],
-              let raw = result["childAgentId"] as? String, let uuid = UUID(uuidString: raw) else {
-            throw WorkspaceAgentReportChecks.Failure(description: "Codex delegation failed: \(reply.reply)")
-        }
-        return AgentID(rawValue: uuid)
+        // Low-level runner-policy fixture. Creation policy itself is exercised by
+        // ManagedSettingChecks through Settings and the mounted production host.
+        let cwd = b.binDir.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        let id = b.supervisor.spawn(role: nil, prompt: nil, cwd: cwd, harness: .codex,
+            model: model, thinking: AgentModelConfig.defaultThinking)
+        _ = b.supervisor.setMode(mode == "managed" ? .managed : .free, for: id)
+        try expect(b.supervisor.send(task, to: id), "fixture lead send refused")
+        return id
     }
     static func log(_ b: Bench) -> URL { b.binDir.appendingPathComponent("codex.jsonl") }
     static func rows(_ b: Bench, kind: String, session: String? = nil) -> [[String: Any]] {
@@ -122,7 +122,7 @@ enum ManagedCodexChecks {
             try expect(latest.contains { output($0)["permissionDecision"] as? String == "deny" } == (nextMode == .managed), "next turn retained old hook policy")
             lastPID = next["pid"] as? Int
         }
-        print("Managed Codex launch passed: production delegation, frozen free argv, scoped hooks enforce policy, deferred switches both directions, new app-server resumes same thread, cold-cache flag")
+        print("Managed Codex launch passed: production lead spawn, frozen free argv, scoped hooks enforce policy, deferred switches both directions, new app-server resumes same thread, cold-cache flag")
     }
     static func thread(_ b: Bench, _ id: AgentID) throws -> String {
         guard let sid = b.supervisor.records[id]?.codexThreadId else { throw WorkspaceAgentReportChecks.Failure(description: "runner failed to persist Codex thread") }

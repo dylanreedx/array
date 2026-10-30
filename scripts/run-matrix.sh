@@ -633,6 +633,10 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --claude-adopted-turn-check
   run_app_check .build/debug/Array --sidebar-agent-status-line-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
+  run_app_check .build/debug/Array --settings-panel-check
+  run_app_check .build/debug/Array --settings-search-check
+  run_app_check .build/debug/Array --managed-setting-check
   run_app_check .build/debug/Array --managed-mode-launch-check
   run_app_check .build/debug/Array --managed-mode-hooks-check
   run_app_check .build/debug/Array --managed-mode-persistence-check
@@ -957,6 +961,7 @@ run_app_check .build/debug/Array --helper-watchdog-check
 # one block for a helper's long hand-back, and silent for a continuation, a
 # short one, a top-level Stop, or an app that is down or silent.
 run_app_check .build/debug/Array --workspace-hook-pushback-check
+run_app_check .build/debug/Array --managed-setting-check
 run_app_check .build/debug/Array --managed-mode-launch-check
 run_app_check .build/debug/Array --managed-mode-hooks-check
 run_app_check .build/debug/Array --managed-mode-persistence-check

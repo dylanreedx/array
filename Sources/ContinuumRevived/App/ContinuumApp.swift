@@ -2555,6 +2555,20 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--managed-setting-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedSettingChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--managed-mode-launch-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -21410,6 +21424,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.workspaceToolsPermission = { [weak self] in
             WorkspaceToolsConfig.permission(defaults: self?.settingsDefaults ?? .standard)
         }
+        agentSupervisor.configureManagedMode(defaults: settingsDefaults)
         workspaceAPI.shortReportsEnabled = { [weak self] in
             AgentShortReportConfig.enabled(defaults: self?.settingsDefaults ?? .standard)
         }

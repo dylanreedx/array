@@ -2,7 +2,7 @@ import AppKit
 import ContinuumRevivedCore
 import Foundation
 
-/// Real agent.delegate -> supervisor -> production Claude runner -> disposable
+/// Real lead spawn -> supervisor -> production Claude runner -> disposable
 /// CLI, plus the real hook executable, listener and mounted workspace service.
 @MainActor
 enum ManagedModeChecks {
@@ -59,16 +59,15 @@ enum ManagedModeChecks {
     }
 
     static func delegate(_ b: WorkspaceAgentReportChecks.Bench, mode: String?, label: String) async throws -> AgentID {
-        var payload: [String: Any] = ["task": label, "title": label, "harness": "Claude Code",
-            "model": model, "idempotencyKey": UUID().uuidString]
-        if let mode { payload["mode"] = mode }
-        let config = try b.configuration(for: b.f.agentId)
-        let reply = try await WorkspaceAgentReportChecks.call(config, "array_delegate", payload)
-        guard !reply.isError, let result = reply.reply["result"] as? [String: Any],
-              let raw = result["childAgentId"] as? String, let uuid = UUID(uuidString: raw) else {
-            throw Failure(description: "managed delegation failed: \(reply.reply)")
-        }
-        return AgentID(rawValue: uuid)
+        // Low-level runner-policy fixture. Creation policy itself is exercised by
+        // ManagedSettingChecks through Settings and the mounted production host.
+        let cwd = b.binDir.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        let id = b.supervisor.spawn(role: nil, prompt: nil, cwd: cwd, harness: .claudeCode,
+            model: model, thinking: AgentModelConfig.defaultThinking)
+        _ = b.supervisor.setMode(mode == "managed" ? .managed : .free, for: id)
+        try expect(b.supervisor.send(label, to: id), "fixture lead send refused")
+        return id
     }
 
     static func settled(_ b: WorkspaceAgentReportChecks.Bench, _ id: AgentID) async throws {
@@ -143,7 +142,7 @@ enum ManagedModeChecks {
         try await settled(b, free)
         let again = try argv(b, free)
         try expect(launches(b, free).count == heldCount + 1 && again.contains("--resume") && !again.contains("Edit,Write,MultiEdit,NotebookEdit,ListAgents"), "switch back did not resume free")
-        print("Managed mode launch checks passed: real delegated argv, free byte equality, deferred switches both directions and resume, cold-cache flag")
+        print("Managed mode launch checks passed: real lead argv, free byte equality, deferred switches both directions and resume, cold-cache flag")
     }
 
     static func hook(_ b: WorkspaceAgentReportChecks.Bench, _ id: AgentID, _ payload: [String: Any]) async throws -> [String: Any] {
@@ -234,9 +233,9 @@ enum ManagedModeChecks {
             let record = try JSONDecoder().decode(AgentRecord.self, from: JSONSerialization.data(withJSONObject: obj))
             try store.upsert(record)
             let legacy = AgentSupervisor(store: store); legacy.restore()
-            try expect(legacy.records[id]?.mode == .free, "old/unknown/malformed mode did not load free")
+            try expect(record.mode == .free && legacy.records[id]?.mode == .managed, "legacy mode must decode free then reconcile to app default")
             legacy.stopAll()
         }
-        print("Managed mode persistence checks passed: delegated mode survives fresh supervisor restore, absent/unknown/malformed mode loads free")
+        print("Managed mode persistence checks passed: lead mode survives restore; absent/unknown/malformed mode decodes free then reconciles to the app default")
     }
 }

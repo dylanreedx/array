@@ -215,6 +215,14 @@ public enum SettingsSchema {
             SettingsGroup(id: "agents.status", title: "Status row",
                           footer: "Applies to every agent tile. Account usage is per provider account, shared by every agent signed into it.",
                           rows: statusRow),
+            SettingsGroup(id: "agents.managedMode", title: "Managed mode", rows: [
+                SettingsRow(.toggle(key: AgentManagedModeConfig.enabledKey, label: "Managed mode", default: true),
+                            help: "Changes apply at each agent’s next turn. That turn re-reads its conversation at full price.",
+                            keywords: ["managed", "free", "lead", "delegate", "helpers"]),
+                SettingsRow(.toggle(key: AgentManagedModeConfig.showIndicatorKey, label: "Show Managed indicator", default: true),
+                            help: "Shows Managed beside the branch in agent tiles.",
+                            keywords: ["managed", "badge", "indicator", "header"]),
+            ]),
             SettingsGroup(id: "agents.lifecycle", title: "Finished agents", rows: [
                 SettingsRow(.choice(key: AgentAutoSettleConfig.afterDaysKey, label: "Settle finished agents", options: AgentAutoSettleConfig.options, default: AgentAutoSettleConfig.defaultOption,
                                     titles: Dictionary(uniqueKeysWithValues: AgentAutoSettleConfig.options.map { option in
