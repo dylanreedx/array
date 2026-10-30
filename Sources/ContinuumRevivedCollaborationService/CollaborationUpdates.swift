@@ -32,7 +32,7 @@ extension CollaborationStore {
             return page
         }
         let identity = try identity(token: token)
-        guard updateWaiters.values.filter({ $0.device == identity.device && $0.area == area }).count < 2,
+        guard updateWaiters.values.filter({ $0.device == identity.device && $0.area == area }).count < 4,
               updateWaiters.count < 1024 else { throw CollaborationStoreError.tooManySubscriptions }
         // Wake at the earliest visible presence expiry, even without new traffic.
         let expiry = page.presence.map(\.expiresAt).min()?.timeIntervalSince(clock()) ?? 25
