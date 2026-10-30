@@ -447,6 +447,44 @@ ID returns that refusal. A relay receipt is never execution: `queued` says the
 host has not accepted the prompt. An attempt already past admission is the
 host's record and is never rewritten by expiry.
 
+## Live agent views
+
+A teammate can watch a published agent without anything running on their
+machine. The host session owns one `SharedAgentProjector` per published local
+agent. It attaches through the supervisor's atomic `transcriptAttachment`, so
+every event after the attach is in the tail and none is in both. An allowlist
+on the host decides what crosses: assistant text, tool kind and status, turn
+boundaries, phase and bound-runner capabilities. Prompts, reasoning, tool
+titles and output, requests and their questions, usage, error text, provider
+ids and terminal control characters never do. History from before publication
+is excluded unless the owner chooses assistant output, and only assistant
+cards qualify.
+
+Every frame carries host, object, a host generation persisted per object and a
+sequence. The host, the service and each viewer apply the same reducer
+(`Collaboration.AgentProjection`). A late join gets the head snapshot. A cursor
+gets every retained frame once. A gap, an older generation or a cursor beyond
+the retained 512 frames gets an explicit resnapshot, never a guess. The service
+refuses a stale generation's frames. Only the device that publishes the
+observation, as its owner, may write. Any current member may read.
+Unpublishing deletes the stored projection, and backups authenticate it.
+Bounds (32 rows, 3 KiB per row, 1 KiB deltas) keep a full snapshot under the
+256 KiB request limit.
+
+Controls are read from the bound runner (`turnSnapshot`), never from the
+harness. Interrupt is advertised only with a bound steering runner, and
+teardown is never published. Remotely, only the control holder can send or
+queue, and only through the handoff route. Steer, interrupt and provider
+approvals have no cross-host route, and a watched session offers nothing.
+
+Selecting a published agent replaces the inspector's reader with
+`SharedAgentLiveView`. It polls one agent at a time, stops on deselect and
+unmount, and turns into last-confirmed history when the area reports the host
+offline. Witnesses: the projection sections of the service checks (portable
+and HTTP A/B/C) and the "live agent projections" stage of
+`--collaboration-native-check`, which drives the real supervisor and the three
+fake CLIs and mounts the scene through the production entry.
+
 ## Hover usage accounting
 
 Only explicitly published local managed agents contribute. Codex session counters
