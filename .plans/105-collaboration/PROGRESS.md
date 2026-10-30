@@ -1121,3 +1121,35 @@ leaves the item without a revision, and nothing retries it after a
 relaunch.
 
 Remaining: w7 live views, then `array/col-native-budgets`.
+
+## Integrator gate — w7 live agent views on `8dbfa899`, 30 October 2026
+
+Merged: w7 `array/mp-w7-live` (twelve commits, `9e97f8e8`..`7e1c4401`). w7
+had rebased onto `fe041913`, so the cherry-pick was clean, and the merged
+tree differs from w7's own gated tree only in this file.
+
+Gate: `--collaboration` under the lock, isolated. Log:
+`qa-runs/coordinator/gate-8dbfa899.log`. **11 legs run, all passed.**
+
+Board (revision 162):
+- **COL-15 → Done.** Receipt `workers/w7-live.md` has a witness for every
+  criterion: late join or resnapshot, snapshot/tail race, gaps, no private
+  history or side channels, background turns, stale generation, no duplicate
+  executor, all three harnesses through the production runners, controls from
+  the bound runner, and no QA-only capability false positive.
+- **COL-14 → Done.** w7 replaced the provisional turn/sequence on excerpts
+  with projection positions (`a63f28fe`, `88ac5a62`). That was the last open
+  item against COL-14's criteria.
+
+Known limits, not acceptance gaps:
+- No control yet picks an agent result to quote; `shareResultExcerpt` is the
+  entry point.
+- The live view polls once a second while an agent is selected.
+- Handoff "Send now" does not yet read the projected `canSend`; the host
+  still refuses at dispatch.
+- The Claude fake sends whole messages, so a Claude turn through it shows a
+  tool step without text.
+
+Remaining: `array/col-native-budgets` (COL-21 native slice, which also closes
+COL-18's keyboard parity). COL-13 still owes its per-harness handoff seam
+witness.
