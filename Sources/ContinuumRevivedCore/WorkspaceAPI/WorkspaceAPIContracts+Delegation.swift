@@ -55,6 +55,8 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         public init(nearTileId: UUID? = nil) { self.nearTileId = nearTileId }
     }
 
+    /// Helpers default to free, even when their parent is managed.
+    public var mode: AgentMode?
     /// The child's task. Model-authored text: local only.
     public var task: String
     public var title: String?
@@ -72,6 +74,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
 
     public init(
         task: String,
+        mode: AgentMode? = nil,
         title: String? = nil,
         provider: String? = nil,
         model: String? = nil,
@@ -80,6 +83,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         idempotencyKey: String? = nil,
         harness: String? = nil
     ) {
+        self.mode = mode
         self.harness = harness
         self.task = task
         self.title = title
@@ -91,7 +95,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case task, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey, harness
+        case task, mode, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey, harness
     }
 
     /// Tolerant of the model-facing shape (`presentation`, short names, any
@@ -99,6 +103,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         harness = try c.decodeIfPresent(String.self, forKey: .harness)
+        mode = try c.decodeIfPresent(AgentMode.self, forKey: .mode)
         task = try c.decode(String.self, forKey: .task)
         title = try c.decodeIfPresent(String.self, forKey: .title)
         provider = try c.decodeIfPresent(String.self, forKey: .provider)
@@ -112,6 +117,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encodeIfPresent(harness, forKey: .harness)
+        try c.encodeIfPresent(mode, forKey: .mode)
         try c.encode(task, forKey: .task)
         try c.encodeIfPresent(title, forKey: .title)
         try c.encodeIfPresent(provider, forKey: .provider)

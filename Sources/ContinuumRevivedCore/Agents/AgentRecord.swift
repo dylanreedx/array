@@ -289,6 +289,11 @@ public struct AgentCapabilities: Codable, Equatable, Sendable {
         locallyManaged: false)
 }
 
+/// Execution discipline, independent of the CLI that owns the record.
+public enum AgentMode: String, Codable, CaseIterable, Sendable {
+    case free, managed
+}
+
 public struct AgentRecord: Codable, Equatable, Sendable {
     /// v2 separates registered project, concrete checkout/worktree, logical
     /// Home, and observed Where. Legacy `cwd` remains encoded as a compatibility
@@ -315,6 +320,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// Strict owner of runner, catalogue, transcript and provider side channels.
     /// Optional only for decoding legacy records; every new record supplies it.
     public var harness: AgentHarness?
+    /// Execution discipline; old or unrecognized values decode as free.
+    public var mode: AgentMode
     /// Fully-qualified model id — the exact catalogue entry, per P0.10's
     /// `AgentModelConfig` (a prefix lets Pi's fuzzy matcher choose silently).
     public var model: String
@@ -758,6 +765,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         namingRequest: NamingRequest? = nil,
         role: String? = nil,
         harness: AgentHarness? = nil,
+        mode: AgentMode = .free,
         model: String,
         thinking: String,
         cwd: String,
@@ -805,6 +813,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.namingRequest = namingRequest
         self.role = role
         self.harness = harness
+        self.mode = mode
         self.model = model
         self.thinking = thinking
         self.cwd = cwd
@@ -1003,7 +1012,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     // `timeIntervalSinceReferenceDate` IS Date's storage, so no arithmetic
     // conversion happens and the round-trip is exact.
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, model, thinking, cwd
+        case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, mode, model, thinking, cwd
         case projectRoot, checkoutRoot, homeRelativePath, lastObservedWhere, worktreeId
         case worktreeBranch, projectId, parentAgentID, capabilities, sourceItemId
         case spawnResultHandle, workspaceToolsEnabled, identityColor
@@ -1045,6 +1054,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         displayName = try container.decode(String.self, forKey: .displayName)
         role = try container.decodeIfPresent(String.self, forKey: .role)
         harness = try container.decodeIfPresent(AgentHarness.self, forKey: .harness)
+        mode = (try? container.decodeIfPresent(AgentMode.self, forKey: .mode)) ?? .free
         model = try container.decode(String.self, forKey: .model)
         // A pre-provenance record has no source field. Identifier-shaped and
         // blank legacy seeds were automatic, while every other old title is
@@ -1169,6 +1179,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(namingRequest, forKey: .namingRequest)
         try container.encodeIfPresent(role, forKey: .role)
         try container.encodeIfPresent(harness, forKey: .harness)
+        try container.encode(mode, forKey: .mode)
         try container.encode(model, forKey: .model)
         try container.encode(thinking, forKey: .thinking)
         try container.encode(cwd, forKey: .cwd)

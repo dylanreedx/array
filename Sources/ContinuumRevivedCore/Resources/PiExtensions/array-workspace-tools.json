@@ -553,6 +553,11 @@
             "enum": ["Claude Code", "Codex", "Pi"],
             "description": "Child CLI; omit to inherit yours. Must be installed and signed in."
           },
+          "mode": {
+            "type": "string",
+            "enum": ["free", "managed"],
+            "description": "Child mode; default free. Managed leads delegate edits and bulk reads."
+          },
           "model": {
             "type": "string",
             "description": "Exact fully qualified id from the selected CLI catalogue. Omit to inherit on the same harness, or use a different harness's own default."

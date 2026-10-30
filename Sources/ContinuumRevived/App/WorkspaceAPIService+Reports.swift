@@ -42,10 +42,12 @@ extension WorkspaceAPIService {
         }
     }
 
-    /// `.plans/102` P2a: the hook reply. Off ("Ask helpers for short reports"
-    /// unset, the default), every event gets the P1 reply, an empty result, and
-    /// the command prints nothing.
+    /// `.plans/102`: managed lead decisions, then the opt-in report policy.
+    /// Free agents with short reports off retain the empty P1 reply.
     func hookReply(for record: AgentRecord, payload: [String: Any]) -> [String: Any] {
+        if let output = supervisor.managedHookReply(for: record, payload: payload) {
+            return [WorkspaceAgentHook.hookOutputKey: output]
+        }
         guard shortReportsEnabled(),
               let output = WorkspaceAgentHook.reportPushBack(payload: payload, callerHasParent: record.parentAgentID != nil) else {
             return [:]

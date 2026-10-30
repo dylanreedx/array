@@ -194,6 +194,7 @@ public enum ClaudeCLIBackend {
 /// Measured live on claude 2.1.291 (captures in `.plans/69`'s probe directory).
 public final class ClaudeAgentRunner: @unchecked Sendable {
     public struct Config: Sendable {
+        public var mode: AgentMode
         /// Claude-native model argument (already stripped of the `anthropic/`
         /// catalogue prefix — `ClaudeCLIBackend.modelArgument`).
         public var model: String
@@ -229,6 +230,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
 
         public init(
             model: String,
+            mode: AgentMode = .free,
             effort: String? = nil,
             cwd: URL,
             sessionId: String,
@@ -240,6 +242,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             configDirectory: String? = nil
         ) {
             self.configDirectory = configDirectory
+            self.mode = mode
             self.model = model
             self.effort = effort
             self.cwd = cwd
@@ -275,7 +278,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         sessionMode: SessionMode,
         sessionId: String,
         extraArgs: [String],
-        workspaceMCP: WorkspaceMCPConfiguration? = nil
+        workspaceMCP: WorkspaceMCPConfiguration? = nil,
+        mode: AgentMode = .free
     ) -> [String] {
         let sessionArgs: [String]
         switch sessionMode {
@@ -299,6 +303,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             + ["--permission-mode", "bypassPermissions"]
             + sessionArgs
             + extraArgs
+        if mode == .managed {
+            args += ["--disallowed-tools", "Edit,Write,MultiEdit,NotebookEdit" + (workspaceMCP == nil ? "" : ",ListAgents")]
+        }
         if let workspaceMCP {
             // The guidance line rides in the system prompt because Claude
             // defers MCP tools behind tool search: without it the model never
@@ -314,9 +321,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             // theirs, so it is never passed here. It sits before the MCP pair
             // so the config path stays last.
             args += ["--append-system-prompt", WorkspaceMCPConfiguration.agentGuidance,
-                     "--allowedTools", "mcp__array_workspace",
-                     "--disallowedTools", "ListAgents",
-                     "--settings", workspaceMCP.claudeHookSettingsJSON,
+                     "--allowedTools", "mcp__array_workspace"]
+                + (mode == .free ? ["--disallowedTools", "ListAgents"] : [])
+                + ["--settings", workspaceMCP.claudeHookSettingsJSON,
                      "--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigPath]
         }
         return args
@@ -849,7 +856,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             sessionMode: mode,
             sessionId: config.sessionId,
             extraArgs: config.extraArgs,
-            workspaceMCP: config.workspaceMCP
+            workspaceMCP: config.workspaceMCP,
+            mode: config.mode
         )
         let spawned: ProcessGroupChild
         do {

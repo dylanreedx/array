@@ -1788,6 +1788,7 @@ final class AgentSupervisor {
         if let forkFrom = record.pendingSessionForkFrom {
             return ClaudeAgentRunner.Config(
                 model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
+                mode: record.mode,
                 effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
                 cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
                 sessionId: forkFrom,
@@ -1799,6 +1800,7 @@ final class AgentSupervisor {
         let location = claudeSessionLocation(for: record)
         return ClaudeAgentRunner.Config(
             model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
+            mode: record.mode,
             effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: location.cwd, isDirectory: true),
             sessionId: location.sessionId,
@@ -2757,6 +2759,7 @@ final class AgentSupervisor {
         prompt: String?,
         cwd: URL,
         harness: AgentHarness = AgentHarnessConfig.resolved(),
+        mode: AgentMode = .free,
         model: String,
         thinking: String,
         projectId: UUID? = nil,
@@ -2780,6 +2783,7 @@ final class AgentSupervisor {
             worktreeId: nil,
             worktreeBranch: nil,
             harness: harness,
+            mode: mode,
             model: model,
             thinking: thinking,
             projectId: projectId,
@@ -2807,6 +2811,7 @@ final class AgentSupervisor {
         prompt: String?,
         cwd: URL,
         harness: AgentHarness = AgentHarnessConfig.resolved(),
+        mode: AgentMode = .free,
         model: String,
         thinking: String,
         projectId: UUID? = nil,
@@ -2853,6 +2858,7 @@ final class AgentSupervisor {
             worktreeId: worktreeId,
             worktreeBranch: branch,
             harness: harness,
+            mode: mode,
             model: model,
             thinking: thinking,
             projectId: projectId,
@@ -2874,6 +2880,7 @@ final class AgentSupervisor {
         worktreeId: String?,
         worktreeBranch: String?,
         harness: AgentHarness,
+        mode: AgentMode,
         model: String,
         thinking: String,
         projectId: UUID?,
@@ -2898,6 +2905,7 @@ final class AgentSupervisor {
                 worktreeId: worktreeId,
                 worktreeBranch: worktreeBranch,
                 harness: harness,
+                mode: mode,
                 model: model,
                 thinking: thinking,
                 projectId: projectId,
@@ -2927,6 +2935,7 @@ final class AgentSupervisor {
                 displayNameSource: .sentinel,
                 role: role,
                 harness: harness,
+                mode: mode,
                 model: model,
                 thinking: thinking,
                 cwd: cwd.path,
@@ -2986,6 +2995,7 @@ final class AgentSupervisor {
         worktreeId: String?,
         worktreeBranch: String?,
         harness: AgentHarness,
+        mode: AgentMode,
         model: String,
         thinking: String,
         projectId: UUID?,
@@ -3025,6 +3035,7 @@ final class AgentSupervisor {
                     displayNameSource: .sentinel,
                     role: role,
                     harness: harness,
+                    mode: mode,
                     model: model,
                     thinking: thinking,
                     cwd: cwd.path,
@@ -3362,7 +3373,7 @@ final class AgentSupervisor {
         // once per turn — not on any per-delta path.
         let runner: AgentRunning
         if let idle = idleSessionRunners.removeValue(forKey: id) {
-            if idle.canAcceptAnotherTurn {
+            if idle.canAcceptAnotherTurn && !pendingModeRestarts.contains(id) {
                 runner = idle
             } else {
                 idle.stop()
@@ -3372,6 +3383,8 @@ final class AgentSupervisor {
         } else {
             runner = makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi))))
         }
+        pendingModeRestarts.remove(id)
+        runningModes[id] = record.mode
         // T5 — steers still marked delivering belong to an earlier turn of a
         // session that has gone idle since; a new turn means they were taken.
         settleStaleDeliveringSteers(for: id)
@@ -5270,6 +5283,7 @@ final class AgentSupervisor {
             worktreeId: nil,
             worktreeBranch: nil,
             harness: parent.harness ?? AgentHarnessConfig.resolved(),
+            mode: .free,
             model: parent.model,
             thinking: parent.thinking,
             projectId: parent.projectId,
@@ -5321,7 +5335,7 @@ final class AgentSupervisor {
     ///
     /// Returns nil on a refusal, having said so in the parent's transcript.
     @discardableResult
-    func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil) -> AgentID? {
+    func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil, mode: AgentMode = .free) -> AgentID? {
         guard let parent = records[parentId] else {
             return refuseSpawn(.unknownParent, for: parentId)
         }
@@ -5396,6 +5410,7 @@ final class AgentSupervisor {
                     ? request.prompt : agentMessageText(request.prompt, from: parentId),
                 cwd: projectRoot,
                 harness: childSelection?.harness ?? parentHarness,
+                mode: mode,
                 model: childSelection?.model ?? resolvedRole.model,
                 thinking: childSelection?.thinking ?? resolvedRole.thinking,
                 projectId: parent.projectId,
@@ -6058,6 +6073,9 @@ final class AgentSupervisor {
         }
 
         records.removeValue(forKey: id)
+        pendingModeRestarts.remove(id)
+        runningModes.removeValue(forKey: id)
+        managedHookStates.removeValue(forKey: id)
         hookReceipts.removeValue(forKey: id)
         lastSettledAt.removeValue(forKey: id)
         runnerGenerationTokens.removeValue(forKey: id)
@@ -6754,6 +6772,40 @@ final class AgentSupervisor {
             warn("AgentSupervisor.requestGeneratedName: agent \(id.rawValue.uuidString) lost the naming CAS; keeping its existing name")
         }
         onCompletion?(landed)
+    }
+
+    // MARK: - Managed mode (backend only)
+
+    private var pendingModeRestarts: Set<AgentID> = []
+    private var runningModes: [AgentID: AgentMode] = [:]
+    private var managedHookStates: [AgentID: ManagedLeadHookState] = [:]
+
+    /// Read before offering a switch. Changing Claude's tool set rewrites the
+    /// prompt cache on the next turn. No warning UI is built in this slice.
+    func modeSwitchStartsColdCache(for id: AgentID, to mode: AgentMode) -> Bool {
+        guard let record = records[id] else { return false }
+        return record.harness == .claudeCode && record.mode != mode
+            && (record.latestTurnAt != nil || record.providerSessionId != nil || record.pendingSessionForkFrom != nil)
+    }
+
+    /// Persist now, apply at the next submitted turn; never stop current work.
+    @discardableResult
+    func setMode(_ mode: AgentMode, for id: AgentID) -> Bool {
+        guard var record = records[id], record.capabilities.locallyManaged else { return false }
+        guard record.mode != mode else { return true }
+        record.mode = mode
+        guard persist(record) else { return false }
+        records[id] = record
+        if record.harness == .claudeCode { pendingModeRestarts.insert(id) }
+        // TODO(.plans/102 Codex slice): apply mode to Codex's native hook bridge.
+        // Codex and Pi intentionally retain free execution behavior for now.
+        return true
+    }
+
+    func managedHookReply(for record: AgentRecord, payload: [String: Any]) -> [String: Any]? {
+        guard record.harness == .claudeCode,
+              (runningModes[record.id] ?? record.mode) == .managed else { return nil }
+        return managedHookStates[record.id, default: ManagedLeadHookState()].reply(payload: payload)
     }
 
     // MARK: - Model and thinking level (P6.1)

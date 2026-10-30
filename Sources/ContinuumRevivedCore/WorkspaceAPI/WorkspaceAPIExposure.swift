@@ -26,6 +26,7 @@ public enum WorkspaceAPIExposure {
         "agent.namingRequest": .internal,
         "agent.role": .notExposed("Changing an existing agent's role is not an API update."),
         "agent.harness": .notExposed("Changing an existing harness requires the native settings flow."),
+        "agent.mode": .notExposed("Set at creation via agent.delegate; existing-agent switches use the internal mode API for cache warning."),
         "agent.model": .notExposed("Existing-agent provider settings are native UI only."),
         "agent.thinking": .notExposed("Existing-agent provider settings are native UI only."),
         "agent.cwd": .notExposed("Changing an existing agent's home is native UI only."),

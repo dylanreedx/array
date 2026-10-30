@@ -59,6 +59,7 @@ IOS_PREVIEW_TILE_ONLY=0
 COMPANION_TASKS_ONLY=0
 NOTIFICATIONS_ONLY=0
 NOTIFICATIONS_LINUX_ONLY=0
+MANAGED_MODE_ONLY=0
 HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
@@ -126,13 +127,17 @@ if [[ $# -gt 0 ]]; then
       NOTIFICATIONS_LINUX_ONLY=1
       shift
       ;;
+    --managed-mode)
+      MANAGED_MODE_ONLY=1
+      shift
+      ;;
     --hook-bridge)
       HOOK_BRIDGE_ONLY=1
       shift
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge]
+Usage: scripts/run-matrix.sh [--boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
 
 --boards rebuilds app/CoreChecks and reports the board library, lifecycle, API and reference witnesses.
 
@@ -156,6 +161,9 @@ remains required.
 --agent-tile-menu rebuilds the app and reports native agent menus, chrome
 scaling, page zoom, face switching, identity color, tile rename and location actions.
 It is a targeted development gate, not the full release matrix.
+--managed-mode runs the hook-bridge legs plus managed lead argv, hooks, persistence
+and exposure checks.
+
 --hook-bridge rebuilds the app, CoreChecks and array-workspace-mcp, then reports
 the Claude observation-hook argv and the hook command against the production
 listener (.plans/102 P1), plus array_report/array_status, wait_agents' report
@@ -609,6 +617,26 @@ if [[ "$NOTIFICATIONS_ONLY" -eq 1 ]]; then
   matrix_report 'Notifications matrix (targeted)'
   exit $?
 fi
+if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+  run swift build --disable-sandbox --skip-update --product array-workspace-mcp
+  run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
+  run_app_check .build/debug/Array --workspace-hook-bridge-check
+  run_app_check .build/debug/Array --workspace-mcp-host-check
+  run_app_check .build/debug/Array --workspace-agent-report-check
+  run_app_check .build/debug/Array --workspace-hook-pushback-check
+  run_app_check .build/debug/Array --claude-adopted-turn-check
+  run_app_check .build/debug/Array --sidebar-agent-status-line-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
+  run_app_check .build/debug/Array --managed-mode-launch-check
+  run_app_check .build/debug/Array --managed-mode-hooks-check
+  run_app_check .build/debug/Array --managed-mode-persistence-check
+  matrix_report 'Managed mode matrix (targeted)'
+  exit $?
+fi
 if [[ "$HOOK_BRIDGE_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
@@ -912,6 +940,9 @@ run_app_check .build/debug/Array --workspace-agent-report-check
 # one block for a helper's long hand-back, and silent for a continuation, a
 # short one, a top-level Stop, or an app that is down or silent.
 run_app_check .build/debug/Array --workspace-hook-pushback-check
+run_app_check .build/debug/Array --managed-mode-launch-check
+run_app_check .build/debug/Array --managed-mode-hooks-check
+run_app_check .build/debug/Array --managed-mode-persistence-check
 # .plans/102 P2b: the line under an agent's name in the shipped sidebar, from
 # real records: its declared now or "Needs you" (amber) while it works, its
 # report's check result once done, nothing from an earlier turn, one truncated
