@@ -356,7 +356,11 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
                 geometryLedger = try store.save(ledger)
                 pendingGeometry = mutation
             } catch {
-                geometryUnavailable = true; canvas.setPreview([:])
+                // Nothing was sent. If disk still holds the last accepted
+                // generation, the write never landed and later moves stay safe;
+                // anything else needs the explicit delivery check to recover.
+                geometryUnavailable = !geometryLedgerUnchanged()
+                canvas.setPreview([:])
                 messageLabel.stringValue = "Could not retain layout history. Nothing sent."
                 lastControlsKey = nil; refresh(); return
             }
@@ -436,6 +440,13 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         } catch {
             geometryUnavailable = true; messageLabel.stringValue = "Layout history is unavailable. Existing work is preserved."
         }
+    }
+    private func geometryLedgerUnchanged() -> Bool {
+        guard let store = geometryLedgerStore, let held = geometryLedger, held.pending == nil else { return false }
+        do {
+            guard let disk = try store.load() else { return held.generation == 0 }
+            return disk.generation == held.generation && disk.pending == nil
+        } catch { return false }
     }
     private func acknowledgeGeometry(_ mutation: SharedAreaGeometryHistory.Mutation, revision: UInt64) throws {
         if geometryHistory.acknowledgedRevision(for: mutation.command.id) == revision { return }
@@ -531,6 +542,10 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         let changed = current?.id != knownDocument?.id || current?.revision != knownDocument?.revision
         if let gesture = geometryGesture, current?.revision != gesture.document.revision {
             cancelGeometry(); messageLabel.stringValue = "Workspace changed. Move canceled."
+        } else if geometryGesture != nil, controller.status != .connected || controller.scope == nil || controller.scope?.role == .viewer {
+            // Permission is rechecked on every authority frame, not only at
+            // release: a downgraded editor must not keep previewing an edit.
+            cancelGeometry(); messageLabel.stringValue = "Editing access changed. Move canceled."
         }
         if changed {
             knownDocument = current

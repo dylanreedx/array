@@ -166,6 +166,11 @@ enum SharedAreaGeometrySceneChecks {
         try expect(await authority.commands.count == beforeCancel && !sceneA.isGeometryGestureActive
             && sceneA.renderedFrame(for: first.id) == cancelFrame, "Escape cancels preview without a shared operation")
         try expect(!viewerScene.beginGeometry(placements: [p1.id]), "read-only participant cannot begin a geometry mutation")
+        let pair = Pair(a: sceneA, b: sceneB, modelA: modelA, modelB: modelB, authority: authority, editor: b,
+            objects: [first.id, second.id], placements: [p1.id, p2.id])
+        try await runAccessLossDuringGroupDrag(pair)
+        try await runFailedLedgerSave(pair, root: root)
+        try await runRevocationDuringGroupResize(pair)
         try expect(try Data(contentsOf: source) == sourceBytes && executorCount() == originalExecutors,
             "all geometry input preserves supplied private source bytes and executor census")
         sceneA.unmount(); sceneB.unmount(); viewerScene.unmount()
@@ -174,7 +179,145 @@ enum SharedAreaGeometrySceneChecks {
             authority: authority, mount: mount)
         try expect(try Data(contentsOf: source) == sourceBytes && executorCount() == originalExecutors,
             "cold geometry recovery and compensation preserve supplied source bytes and execution")
-        print("Native shared geometry passed: production mounts, pointer group move/resize, responder Undo/keyboard Redo, private cameras, remote conflict, cancellation, cold inverse recovery and no source execution.")
+        print("Native shared geometry passed: production mounts, pointer group move/resize, responder Undo/keyboard Redo, private cameras, remote conflict, cancellation, permission loss and revocation mid-gesture, failed ledger save, cold inverse recovery and no source execution.")
+    }
+    /// Two production-mounted clients on one scripted authority. B is the
+    /// editor whose access changes; A is the peer whose replica must not move.
+    @MainActor private struct Pair {
+        let a: SharedAreaSceneView, b: SharedAreaSceneView
+        let modelA: SharedAreaController, modelB: SharedAreaController
+        let authority: Authority
+        let editor: Collaboration.Identity
+        let objects: [SharedArea.ID<SharedArea.Object>]
+        let placements: [SharedArea.ID<SharedArea.Placement>]
+        func frames(_ scene: SharedAreaSceneView) -> [NSRect?] { objects.map { scene.renderedFrame(for: $0) } }
+        func rects(_ model: SharedAreaController) -> [SharedArea.Rect?] {
+            placements.map { id in model.document?.positions.first(where: { $0.id == id })?.rect }
+        }
+    }
+    private static func ledger(_ scene: SharedAreaSceneView) throws -> SharedAreaGeometryLedger {
+        guard let file = scene.geometryLedgerFile else { throw Failure(description: "geometry ledger absent") }
+        return try JSONCodec.makeDecoder().decode(SharedAreaGeometryLedger.self, from: Data(contentsOf: file))
+    }
+    private static func selectGroup(_ pair: Pair, in scene: SharedAreaSceneView) throws {
+        // Shift-click toggles, so start from an empty selection.
+        let empty = NSPoint(x: 8, y: scene.areaCanvasView.frame.minY + 8)
+        guard scene.object(at: empty) == nil else { throw Failure(description: "no empty canvas point to clear selection") }
+        scene.areaCanvasView.mouseDown(with: try pointer(.leftMouseDown, point: empty, in: scene))
+        scene.areaCanvasView.mouseUp(with: try pointer(.leftMouseUp, point: empty, in: scene))
+        try click(pair.objects[0], in: scene)
+        try click(pair.objects[1], in: scene, modifiers: [.shift])
+    }
+
+    /// COL-11: losing edit permission while a group drag is live cancels it,
+    /// sends nothing, restores the pre-gesture frames and leaves no Undo entry.
+    private static func runAccessLossDuringGroupDrag(_ pair: Pair) async throws {
+        try selectGroup(pair, in: pair.b)
+        let framesA = pair.frames(pair.a), framesB = pair.frames(pair.b)
+        let acceptedA = pair.rects(pair.modelA), acceptedB = pair.rects(pair.modelB)
+        let ledgerBefore = try ledger(pair.b)
+        let commandsBefore = await pair.authority.commands.count
+        guard let start = framesB[0] else { throw Failure(description: "editor group card absent") }
+        let grab = NSPoint(x: start.minX + 30, y: start.minY + 24)
+        pair.b.areaCanvasView.mouseDown(with: try pointer(.leftMouseDown, point: grab, in: pair.b))
+        pair.b.areaCanvasView.mouseDragged(with: try pointer(.leftMouseDragged, point: .init(x: grab.x + 55, y: grab.y + 33), in: pair.b))
+        try expect(pair.b.isGeometryGestureActive && pair.frames(pair.b)[0]?.minX == start.minX + 55
+            && pair.frames(pair.b)[1]?.minX == framesB[1].map { $0.minX + 55 },
+            "editor holds a live group-drag preview before its access changes")
+        try await pair.authority.setRole(.viewer, for: pair.editor)
+        try await eventually("access downgrade reaches the editor mid-drag") { pair.modelB.scope?.role == .viewer }
+        try expect(!pair.b.isGeometryGestureActive, "losing edit permission cancels the live group drag at once")
+        try expect(pair.frames(pair.b) == framesB, "the editor's group returns to its exact pre-gesture frames")
+        pair.b.areaCanvasView.mouseDragged(with: try pointer(.leftMouseDragged, point: .init(x: grab.x + 90, y: grab.y + 60), in: pair.b))
+        pair.b.areaCanvasView.mouseUp(with: try pointer(.leftMouseUp, point: .init(x: grab.x + 90, y: grab.y + 60), in: pair.b))
+        try await Task.sleep(for: .milliseconds(150))
+        try expect(await pair.authority.commands.count == commandsBefore && pair.modelB.pendingOperations.isEmpty
+            && !pair.b.hasPendingGeometry,
+            "pointer movement and release after the permission loss commit no operation")
+        let ledgerAfter = try ledger(pair.b)
+        try expect(ledgerAfter.generation == ledgerBefore.generation && ledgerAfter.pending == nil
+            && ledgerAfter.history.undoCount == ledgerBefore.history.undoCount,
+            "the canceled drag leaves no local Undo entry or prepared intent")
+        try expect(pair.frames(pair.b) == framesB && pair.frames(pair.a) == framesA
+            && pair.rects(pair.modelA) == acceptedA && pair.rects(pair.modelB) == acceptedB,
+            "both mounted clients keep the exact accepted frames")
+        try await pair.authority.setRole(.editor, for: pair.editor)
+        try await eventually("edit access returns") { pair.modelB.canSubmit }
+    }
+
+    /// COL-11: a failed pre-effect ledger write sends nothing, returns frames to
+    /// the last accepted state on both clients, and does not disable later moves.
+    private static func runFailedLedgerSave(_ pair: Pair, root: URL) async throws {
+        try click(pair.objects[0], in: pair.a)
+        guard let start = pair.a.renderedFrame(for: pair.objects[0]), let ledgerFile = pair.a.geometryLedgerFile,
+              let accepted = pair.rects(pair.modelA)[0] else { throw Failure(description: "failed-save fixture absent") }
+        let framesA = pair.frames(pair.a), framesB = pair.frames(pair.b)
+        let acceptedB = pair.rects(pair.modelB)
+        let ledgerBefore = try ledger(pair.a)
+        let commandsBefore = await pair.authority.commands.count
+        let target = ledgerFile.standardizedFileURL.path
+        StoreFileWriter.install(.init(fault: .failWrite(1), scope: root, matching: { $0.standardizedFileURL.path == target }))
+        defer { StoreFileWriter.uninstall() }
+        let grab = NSPoint(x: start.minX + 30, y: start.minY + 24), drop = NSPoint(x: grab.x + 45, y: grab.y + 30)
+        pair.a.areaCanvasView.mouseDown(with: try pointer(.leftMouseDown, point: grab, in: pair.a))
+        pair.a.areaCanvasView.mouseDragged(with: try pointer(.leftMouseDragged, point: drop, in: pair.a))
+        pair.a.areaCanvasView.mouseUp(with: try pointer(.leftMouseUp, point: drop, in: pair.a))
+        try await eventually("injected ledger failure reached") { StoreFileWriter.trace.contains { $0.outcome == .failed } }
+        let trace = StoreFileWriter.uninstall()
+        try expect(trace.count == 1 && trace[0].outcome == .failed, "the commit's pre-effect ledger write was the one that failed")
+        try await Task.sleep(for: .milliseconds(100))
+        try expect(await pair.authority.commands.count == commandsBefore && pair.modelA.pendingOperations.isEmpty
+            && !pair.a.hasPendingGeometry, "a failed pre-effect ledger write sends nothing")
+        try expect(pair.frames(pair.a) == framesA && pair.frames(pair.b) == framesB
+            && pair.rects(pair.modelA)[0] == accepted && pair.rects(pair.modelB) == acceptedB,
+            "frames return to the last accepted state and the peer's replica is unchanged")
+        let ledgerAfter = try ledger(pair.a)
+        try expect(ledgerAfter.generation == ledgerBefore.generation && ledgerAfter.pending == nil,
+            "the failed save leaves the accepted ledger generation untouched")
+
+        // 45 x 30 screen points at zoom 0.75 is exactly 60 x 40 area points.
+        let moved = SharedArea.Rect(x: accepted.x + 60, y: accepted.y + 40, width: accepted.width, height: accepted.height)
+        pair.a.areaCanvasView.mouseDown(with: try pointer(.leftMouseDown, point: grab, in: pair.a))
+        pair.a.areaCanvasView.mouseDragged(with: try pointer(.leftMouseDragged, point: drop, in: pair.a))
+        pair.a.areaCanvasView.mouseUp(with: try pointer(.leftMouseUp, point: drop, in: pair.a))
+        try await eventually("a later gesture is accepted") {
+            pair.rects(pair.modelA)[0] == moved && pair.rects(pair.modelB)[0] == moved && pair.a.canUndoSharedGeometry
+        }
+        let expectedB = pair.b.screenPoint(forAreaPoint: .init(x: moved.x, y: moved.y))
+        try expect(await pair.authority.commands.count == commandsBefore + 1
+            && close(pair.b.renderedFrame(for: pair.objects[0])?.minX, expectedB.x)
+            && close(pair.b.renderedFrame(for: pair.objects[0])?.minY, expectedB.y)
+            && pair.a.renderedFrame(for: pair.objects[0])?.minX == start.minX + 45,
+            "after the failure a later gesture commits once and lands on exact frames on both clients")
+    }
+
+    /// COL-11: revocation during a group resize withdraws content and commits nothing.
+    private static func runRevocationDuringGroupResize(_ pair: Pair) async throws {
+        try selectGroup(pair, in: pair.b)
+        let framesA = pair.frames(pair.a), acceptedA = pair.rects(pair.modelA)
+        let ledgerBefore = try ledger(pair.b)
+        let commandsBefore = await pair.authority.commands.count
+        guard let one = pair.frames(pair.b)[0], let two = pair.frames(pair.b)[1] else { throw Failure(description: "resize group absent") }
+        let group = one.union(two)
+        let handle = NSPoint(x: group.maxX, y: group.maxY), pulled = NSPoint(x: handle.x + 60, y: handle.y + 40)
+        pair.b.areaCanvasView.mouseDown(with: try pointer(.leftMouseDown, point: handle, in: pair.b))
+        pair.b.areaCanvasView.mouseDragged(with: try pointer(.leftMouseDragged, point: pulled, in: pair.b))
+        try expect(pair.b.isGeometryGestureActive && (pair.frames(pair.b)[0]?.width ?? 0) > one.width,
+            "editor holds a live group-resize preview before revocation")
+        try await pair.authority.revoke(pair.editor)
+        try await eventually("revocation reaches the editor mid-resize") {
+            if case .unavailable = pair.modelB.status { return true } else { return false }
+        }
+        try expect(!pair.b.isGeometryGestureActive && pair.frames(pair.b).allSatisfy { $0 == nil },
+            "revocation cancels the resize and withdraws the shared frames")
+        pair.b.areaCanvasView.mouseUp(with: try pointer(.leftMouseUp, point: pulled, in: pair.b))
+        try await Task.sleep(for: .milliseconds(150))
+        let ledgerAfter = try ledger(pair.b)
+        try expect(await pair.authority.commands.count == commandsBefore && pair.modelB.pendingOperations.isEmpty
+            && ledgerAfter.generation == ledgerBefore.generation && ledgerAfter.pending == nil,
+            "a revoked editor's release commits nothing and records no Undo entry")
+        try expect(pair.frames(pair.a) == framesA && pair.rects(pair.modelA) == acceptedA,
+            "the remaining participant keeps exact frames through the revocation")
     }
     private static func runColdRecovery(root: URL, identity: Collaboration.Identity,
                                         placement: SharedArea.ID<SharedArea.Placement>, authority: Authority,
@@ -253,6 +396,7 @@ enum SharedAreaGeometrySceneChecks {
         func start() async -> AsyncStream<CollaborationSession.Status> { pair.stream }
         func stop() async { pair.continuation.finish() }
         func emit(_ state: Collaboration.State) throws { pair.continuation.yield(.connected(try CollaborationReplica(state: state))) }
+        func revoke() { pair.continuation.yield(.unavailable) }
     }
     private actor ReplyGate {
         var entered = false
@@ -272,12 +416,31 @@ enum SharedAreaGeometrySceneChecks {
         var connections: [(Collaboration.Identity, Connection)] = []
         var commands: [SharedArea.Command] = []
         var replyGate: ReplyGate?
+        var epoch: Int64 = 1
+        var roles: [UUID: Collaboration.Role] = [:]
+        var revoked = Set<UUID>()
         init(document: SharedArea.Document, owner: Collaboration.Identity, editor: Collaboration.Identity, viewer: Collaboration.Identity) {
             self.document = document; area = document.id; self.owner = owner; self.editor = editor; self.viewer = viewer
         }
         func state(_ identity: Collaboration.Identity) throws -> Collaboration.State {
-            guard [owner, editor, viewer].contains(identity) else { throw CollaborationClientError.server(status: 404, code: "notFound") }
-            return .init(scope: .init(area: document.id, epoch: 1, role: identity == owner ? .owner : identity == editor ? .editor : .viewer), document: document)
+            guard [owner, editor, viewer].contains(identity), !revoked.contains(identity.device) else {
+                throw CollaborationClientError.server(status: 404, code: "notFound")
+            }
+            let role = roles[identity.device] ?? (identity == owner ? .owner : identity == editor ? .editor : .viewer)
+            return .init(scope: .init(area: document.id, epoch: epoch, role: role), document: document)
+        }
+        /// A membership change bumps the epoch and reaches every live subscriber.
+        func setRole(_ role: Collaboration.Role, for identity: Collaboration.Identity) async throws {
+            roles[identity.device] = role; epoch += 1
+            try await broadcast()
+        }
+        func revoke(_ identity: Collaboration.Identity) async throws {
+            revoked.insert(identity.device); epoch += 1
+            for (person, connection) in connections where person == identity { await connection.revoke() }
+            try await broadcast()
+        }
+        private func broadcast() async throws {
+            for (person, connection) in connections where !revoked.contains(person.device) { try await connection.emit(state(person)) }
         }
         func connection(_ identity: Collaboration.Identity) throws -> Connection {
             _ = try state(identity); let value = Connection(); connections.append((identity, value)); return value
@@ -285,13 +448,13 @@ enum SharedAreaGeometrySceneChecks {
         func holdNextReply(_ gate: ReplyGate) { replyGate = gate }
         func apply(_ mutation: Collaboration.Mutation, identity: Collaboration.Identity) async throws -> Collaboration.Receipt {
             let current = try state(identity)
-            guard current.scope.canSubmit(mutation.command), mutation.epoch == 1 else { throw CollaborationClientError.server(status: 403, code: "forbidden") }
+            guard current.scope.canSubmit(mutation.command), mutation.epoch == epoch else { throw CollaborationClientError.server(status: 403, code: "forbidden") }
             commands.append(mutation.command)
             let result: SharedArea.Outcome
             do { result = try document.apply(mutation.command) }
             catch SharedArea.Failure.conflict { throw CollaborationClientError.server(status: 409, code: "conflict") }
             if let gate = replyGate { replyGate = nil; await gate.wait() }
-            for (person, connection) in connections { try await connection.emit(state(person)) }
+            try await broadcast()
             switch result {
             case .applied(let revision): return .init(revision: revision, duplicate: false)
             case .duplicate(let revision): return .init(revision: revision, duplicate: true)
