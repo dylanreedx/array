@@ -37,8 +37,10 @@ extension CollaborationStore {
         let identity = try identity(token: token)
         guard updateWaiters.values.filter({ $0.device == identity.device && $0.area == area }).count < Self.updateDeviceLimit,
               updateWaiters.count < Self.updateGlobalLimit else { throw CollaborationStoreError.tooManySubscriptions }
-        // Wake at the earliest visible presence expiry, even without new traffic.
-        let expiry = page.presence.map(\.expiresAt).min()?.timeIntervalSince(clock()) ?? 25
+        // Wake at the earliest visible presence expiry or host liveness
+        // transition, even without new traffic.
+        let wake = (page.presence.map(\.expiresAt) + [Self.nextHostTransition(page.hosts, after: clock())].compactMap { $0 }).min()
+        let expiry = wake?.timeIntervalSince(clock()) ?? 25
         let milliseconds = min(request.waitMilliseconds, max(1, Int(ceil(expiry * 1000))))
         let id = request.subscriptionID
         cancelledUpdateRequests = cancelledUpdateRequests.filter { $0.value.until > clock() }
@@ -109,10 +111,11 @@ extension CollaborationStore {
                         expiresAt: value.expiresAt, label: value.label,
                         usage: try usageForPresence(db, area: area, identity: value.identity))
                 }
+            let hosts = try hostLiveness(db, area: area)
             let version = presenceVersions[area] ?? UUID()
             presenceVersions[area] = version
             return .init(scope: scope, after: request.after, through: through, events: events, nextCursor: next,
-                presenceVersion: version, presence: presence, serverTime: clock())
+                presenceVersion: version, presence: presence, serverTime: clock(), hosts: hosts)
         }
     }
 

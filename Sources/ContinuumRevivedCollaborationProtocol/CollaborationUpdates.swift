@@ -60,10 +60,13 @@ extension Collaboration {
         public let presenceVersion: UUID
         public let presence: [Presence]
         public let serverTime: Date
+        /// Execution-host liveness, versioned with presence but expiring on its own
+        /// policy. Absent from a relay that predates host liveness.
+        public let hosts: [HostLiveness]?
         public init(scope: Scope, after: UInt64, through: UInt64, events: [Event], nextCursor: UInt64,
-                    presenceVersion: UUID, presence: [Presence], serverTime: Date) {
+                    presenceVersion: UUID, presence: [Presence], serverTime: Date, hosts: [HostLiveness]? = nil) {
             self.scope = scope; self.after = after; self.through = through; self.events = events; self.nextCursor = nextCursor
-            self.presenceVersion = presenceVersion; self.presence = presence; self.serverTime = serverTime
+            self.presenceVersion = presenceVersion; self.presence = presence; self.serverTime = serverTime; self.hosts = hosts
         }
     }
 }

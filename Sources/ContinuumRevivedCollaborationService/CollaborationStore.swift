@@ -26,6 +26,7 @@ public actor CollaborationStore {
     var presenceEntries: [CollaborationPresenceKey: CollaborationPresenceEntry] = [:]
     var presenceFlushes: [CollaborationPresenceKey: Task<Void, Never>] = [:]
     var presenceVersions: [UUID: UUID] = [:]
+    var hostLivenessStates: [UUID: [UUID: String]] = [:]
 
     public init(path: String, masterKey: Data, clock: @escaping @Sendable () -> Date = { Date() },
                 retention: CollaborationRetention = .init()) throws {
@@ -83,6 +84,7 @@ public actor CollaborationStore {
         Self.registerUsageMigration(&migrator)
         Self.registerRetentionMigration(&migrator)
         Self.registerArtifactMigration(&migrator)
+        Self.registerHostLivenessMigration(&migrator)
         try migrator.migrate(database)
         try Self.preflightDatabaseKey(database, keyData: normalizedKeyData)
     }
