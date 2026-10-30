@@ -42,6 +42,9 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
     private let heading = NSTextField(labelWithString: "Hand agent control to a teammate")
     private let explanation = NSTextField(wrappingLabelWithString: "The agent and checkout stay on their original host. An accepted handoff lets the invited teammate send the next reviewed prompt; it does not copy files or provider login.")
     private let controlLabel = NSTextField(wrappingLabelWithString: "Checking current control…")
+    private let recipientLabel = NSTextField(labelWithString: "Teammate")
+    private let contextLabel = NSTextField(labelWithString: "Shared agreement and timing")
+    private let promptLabel = NSTextField(labelWithString: "Prompt")
     private let recipient = NSTextField(string: "")
     private let offer = ComposerActionButton(presentation: CollaborationHubView.action("Offer handoff", symbol: "person.badge.plus"))
     private let accept = ComposerActionButton(presentation: CollaborationHubView.action("Accept handoff", symbol: "person.crop.circle.badge.checkmark"))
@@ -71,7 +74,9 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
         super.init(frame: .init(x: 0, y: 0, width: 780, height: 820))
         heading.font = .token(.title)
         for label in [explanation, controlLabel, status] { label.font = .token(.body); label.isSelectable = true }
-        recipient.font = .token(.body); recipient.isBezeled = false; recipient.drawsBackground = true
+        for label in [recipientLabel, contextLabel, promptLabel] { label.font = .token(.label) }
+        // Fields and editors are transparent; `draw` paints their wells.
+        recipient.font = .token(.body); recipient.isBezeled = false; recipient.drawsBackground = false; recipient.focusRingType = .none
         recipient.delegate = self
         recipient.placeholderString = "Teammate collaboration ID"; recipient.setAccessibilityLabel("Handoff recipient collaboration ID")
         configure(contextReader, scroll: contextScroll, editable: false, label: "Reviewed shared agreement")
@@ -87,7 +92,7 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
                                    (check, #selector(checkDelivery)), (send, #selector(sendPrompt))] {
             button.target = self; button.action = selector
         }
-        for child in [heading, explanation, controlLabel, recipient, offer, accept, reclaim, contextChoice, modeChoice,
+        for child in [heading, explanation, controlLabel, recipientLabel, contextLabel, promptLabel, recipient, offer, accept, reclaim, contextChoice, modeChoice,
                       contextScroll, promptScroll, status, refresh, check, send] { addSubview(child) }
         do {
             let draft = try model.draft(object: object)
@@ -131,7 +136,9 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
         view.textContainer?.containerSize = .init(width: 0, height: CGFloat.greatestFiniteMagnitude)
         view.textContainerInset = .init(width: Space.m, height: Space.m)
         view.font = .token(.body); view.setAccessibilityLabel(label)
-        scroll.documentView = view; scroll.hasVerticalScroller = true; scroll.drawsBackground = false; scroll.borderType = .noBorder
+        view.drawsBackground = false
+        scroll.documentView = view; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
+        scroll.drawsBackground = false; scroll.borderType = .noBorder
     }
     private func reload() {
         guard !stopped else { return }
@@ -205,30 +212,49 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
             }
         }
     }
-    override func draw(_ dirtyRect: NSRect) { SurfaceToken.panel.color.nsColor(in: self).setFill(); bounds.fill() }
+    override func draw(_ dirtyRect: NSRect) {
+        SurfaceToken.panel.color.nsColor(in: self).setFill(); bounds.fill()
+        // Editable wells use the same body surface as the hub's text fields.
+        SurfaceToken.tileBody.color.nsColor(in: self).setFill()
+        for well in [recipientWell, contextScroll.frame, promptScroll.frame] {
+            NSBezierPath(roundedRect: well, xRadius: Radius.card, yRadius: Radius.card).fill()
+        }
+    }
+    private var recipientWell = NSRect.zero
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyAppearance() }
     private func applyAppearance() {
-        for label in [heading, explanation, controlLabel, status, recipient] { label.textColor = TextToken.textPrimary.color.nsColor(in: self) }
-        recipient.backgroundColor = SurfaceToken.tileBody.color.nsColor(in: self)
-        for view in [contextReader, prompt] { view.textColor = TextToken.textPrimary.color.nsColor(in: self); view.backgroundColor = SurfaceToken.tileBody.color.nsColor(in: self) }
+        for label in [heading, recipientLabel, contextLabel, promptLabel, recipient] { label.textColor = TextToken.textPrimary.color.nsColor(in: self) }
+        for label in [explanation, controlLabel, status] { label.textColor = TextToken.textSecondary.color.nsColor(in: self) }
+        for view in [contextReader, prompt] { view.textColor = TextToken.textPrimary.color.nsColor(in: self) }
         needsDisplay = true
     }
     override func layout() {
         super.layout()
-        let margin = CGFloat(Space.xl), width = max(1, bounds.width - 2 * margin)
+        let margin = CGFloat(Space.xl), width = max(1, bounds.width - 2 * margin), row: CGFloat = 32
+        var moved = false
         func place(_ view: NSView, _ y: CGFloat, _ height: CGFloat, x: CGFloat = 0, w: CGFloat? = nil) {
             let next = NSRect(x: margin + x, y: y, width: w ?? width, height: height)
-            if view.frame != next { view.frame = next }
+            if view.frame != next { view.frame = next; moved = true }
         }
-        place(heading, 22, 28); place(explanation, 58, 60); place(controlLabel, 124, 54)
-        place(recipient, 190, 32, w: width - 180); place(offer, 190, 32, x: width - 170, w: 170)
-        place(accept, 234, 32, w: 180); place(reclaim, 234, 32, x: 194, w: 180)
-        place(contextChoice, 282, 32, w: width - 230); place(modeChoice, 282, 32, x: width - 215, w: 215)
-        place(contextScroll, 326, max(120, (bounds.height - 600) / 2))
-        let promptTop = max(462, (bounds.height - 600) / 2 + 338)
-        place(promptScroll, promptTop, max(110, bounds.height - promptTop - 160))
-        place(status, bounds.height - 146, 84)
-        place(refresh, bounds.height - 52, 32, w: 110); place(check, bounds.height - 52, 32, x: 122, w: 170)
-        place(send, bounds.height - 52, 32, x: width - 230, w: 230)
+        place(heading, 20, 28); place(explanation, 52, 40); place(controlLabel, 96, 36)
+        place(recipientLabel, 140, 18)
+        let well = NSRect(x: margin, y: 162, width: width - 182, height: row)
+        if recipientWell != well { recipientWell = well; moved = true }
+        place(recipient, well.midY - 11, 22, x: CGFloat(Space.m), w: well.width - 2 * CGFloat(Space.m))
+        place(offer, 162, row, x: width - 170, w: 170)
+        place(accept, 206, row, w: 200); place(reclaim, 206, row, x: 212, w: 200)
+        place(contextLabel, 254, 18)
+        place(contextChoice, 276, row, w: width - 227); place(modeChoice, 276, row, x: width - 215, w: 215)
+        // Below the fixed rows: agreement reader, prompt editor, status, actions.
+        let statusTop = bounds.height - 104, flexible = max(0, statusTop - 12 - 316 - 12 - 22)
+        let contextHeight = max(96, (flexible * 0.4).rounded())
+        place(contextScroll, 316, contextHeight)
+        place(promptLabel, 316 + contextHeight + 12, 18)
+        let promptTop = 316 + contextHeight + 34
+        place(promptScroll, promptTop, max(96, statusTop - 12 - promptTop))
+        place(status, statusTop, 40)
+        place(refresh, bounds.height - 52, row, w: 110); place(check, bounds.height - 52, row, x: 122, w: 170)
+        place(send, bounds.height - 52, row, x: width - 230, w: 230)
+        if moved { needsDisplay = true }
     }
 }
