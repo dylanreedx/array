@@ -11,6 +11,12 @@ func refuses(_ expected: SharedArea.Failure, _ action: () throws -> Void) throws
     catch let error as SharedArea.Failure { try require(error == expected, "refuses \(expected)") }
 }
 typealias S = SharedArea
+if let flag = CommandLine.arguments.firstIndex(of: "--kill-child"), CommandLine.arguments.count > flag + 1 {
+    await runKillChild(CommandLine.arguments[flag + 1])
+}
+if CommandLine.arguments.contains("--kill-relaunch-only") {
+    do { try await runCollaborationKillRelaunchChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
+}
 do {
 let owner = S.ID<S.Person>()
 let host = S.ID<S.Host>()
@@ -124,6 +130,7 @@ try runSharedAreaGeometryChecks()
 try runSharedAreaUsageChecks()
 try await runSharedAreaRecoveryChecks()
 try await runSharedAgentHostDispatchChecks()
+try await runCollaborationKillRelaunchChecks()
 try await runSharedAreaPublicationSubmissionChecks()
 try await runSharedAreaControllerChecks()
 try await runCollaborationAccountChecks()

@@ -1,0 +1,15 @@
+PASS kill/relaunch: outboxBeforeSend: child process was SIGKILLed at its kill point
+PASS kill/relaunch: outboxBeforeSend: service holds the change not yet at the moment of death
+PASS kill/relaunch: outboxBeforeSend: relaunch lands the exact intent exactly once
+PASS kill/relaunch: outboxBeforeSend: relaunch sends the unsent intent once
+PASS kill/relaunch: outboxBeforeSend: private drafts survive and the accepted draft retires
+PASS kill/relaunch: outboxAfterCommit: child process was SIGKILLed at its kill point
+PASS kill/relaunch: outboxAfterCommit: service holds the change once at the moment of death
+PASS kill/relaunch: outboxAfterCommit: relaunch lands the exact intent exactly once
+PASS kill/relaunch: outboxAfterCommit: relaunch reconciles the lost reply from the authoritative receipt without resending
+PASS kill/relaunch: outboxAfterCommit: private drafts survive and the accepted draft retires
+PASS kill/relaunch: teammate B controls the shared agent
+PASS kill/relaunch: hostAfterClaim: child process was SIGKILLed at its kill point
+PASS kill/relaunch: hostAfterClaim: a claim that never reached the provider runs exactly once after relaunch
+PASS kill/relaunch: hostDuringProvider: child process was SIGKILLed at its kill point
+FAIL: KillFailure(message: "hostDuringProvider: an attempt cut off inside the provider call is reported uncertain and never resent")

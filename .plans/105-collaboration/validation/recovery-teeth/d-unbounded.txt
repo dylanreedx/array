@@ -1,0 +1,11 @@
+PASS recovery/scale: a 1500-event tail is served in bounded 128-event pages against one high-water mark
+PASS recovery/scale: cold replay through bootstrap plus paged tail holds all 1500 events once
+PASS recovery/scale: live and cold replicas are byte-identical to the authoritative document
+PASS recovery/scale: a bounded tail reports catching up and never presents a partial prefix as connected shared state
+PASS recovery/scale: cold replay advances monotonically without a gap or rewind
+PASS recovery/scale: uncertain in-flight commit resolves to one revision whether or not it landed before the kill
+PASS recovery/scale: after SIGKILL and relaunch every issued change is present exactly once
+PASS recovery/scale: both clients resume from their cursors to the relaunched relay's exact document
+PASS recovery/scale: outage keeps the validated replica: no access loss, no re-bootstrap and no rewind
+PASS recovery/scale: outage keeps the validated replica: no access loss, no re-bootstrap and no rewind
+FAIL: ScaleFailure(message: "the read beyond the 1024-request global budget is refused immediately as subscriptionLimit")

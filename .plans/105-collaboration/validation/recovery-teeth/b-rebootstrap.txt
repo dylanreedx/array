@@ -1,0 +1,6 @@
+PASS recovery/scale: a 1500-event tail is served in bounded 128-event pages against one high-water mark
+PASS recovery/scale: cold replay through bootstrap plus paged tail holds all 1500 events once
+PASS recovery/scale: live and cold replicas are byte-identical to the authoritative document
+PASS recovery/scale: a bounded tail reports catching up and never presents a partial prefix as connected shared state
+PASS recovery/scale: cold replay advances monotonically without a gap or rewind
+FAIL: ScaleFailure(message: "timeout: both sessions observe the outage")

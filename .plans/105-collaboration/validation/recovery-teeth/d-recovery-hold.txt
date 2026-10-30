@@ -1,0 +1,13 @@
+PASS overload HTTP: actual HTTP overload leaves a fresh current membership and document readable
+PASS overload HTTP: a write attempted during overload is refused locally and never reaches the service
+PASS overload HTTP: 429 retains the cached canvas, camera and private draft without persisting access denial or enabling writes
+PASS overload HTTP: retry 1 retains the original validated replica and cursor
+PASS overload HTTP: retry 2 retains the original validated replica and cursor
+PASS overload HTTP: retry 3 retains the original validated replica and cursor
+PASS overload HTTP: retry 4 retains the original validated replica and cursor
+PASS overload HTTP: retry 5 retains the original validated replica and cursor
+PASS overload HTTP: retry 6 retains the original validated replica and cursor
+PASS overload HTTP: retry 7 retains the original validated replica and cursor
+PASS overload HTTP: retry 8 retains the original validated replica and cursor
+PASS overload HTTP: successive 429 responses increase reconnect backoff and stop at the 10000ms cap
+FAIL: OverloadCheckFailure(message: "timeout same session recovered")

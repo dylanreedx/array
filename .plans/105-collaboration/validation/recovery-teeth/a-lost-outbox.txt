@@ -1,0 +1,3 @@
+PASS kill/relaunch: outboxBeforeSend: child process was SIGKILLed at its kill point
+PASS kill/relaunch: outboxBeforeSend: service holds the change not yet at the moment of death
+FAIL: KillFailure(message: "outboxBeforeSend: relaunch lands the exact intent exactly once")
