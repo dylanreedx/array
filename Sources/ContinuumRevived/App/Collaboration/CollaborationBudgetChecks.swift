@@ -192,7 +192,20 @@ enum CollaborationBudgetChecks {
         try expect(sceneB.contentDrawCount == contentDraws && CollaborationWorkCensus.layoutTotal == 0 && CollaborationWorkCensus.insertionTotal == 0,
             "the burst repaints no shared content, runs no layout pass and creates no view (\(CollaborationWorkCensus.layouts), \(CollaborationWorkCensus.insertions))")
 
-        // 1b. Fifty updates, each followed by a display pass.
+        // 1b. The overlay itself coalesces: fifty teammate positions assigned
+        // within one main-thread turn paint once, at the last one. (Through the
+        // controller it never sees more than one per turn; see 1a.)
+        try await quiesce()
+        let coalesceDraws = overlay.drawCount
+        let positions = (1...50).map { frame(burst + 400 + $0) }
+        for value in positions { overlay.peers = [value] }
+        let coalescedPoint = overlay.convert(sceneB.screenPoint(forAreaPoint: .init(x: cAt(burst + 450).x, y: cAt(burst + 450).y)), from: sceneB)
+        try await Rig.eventually("overlay paints the coalesced position") { settle(); return overlay.drawnCursors[c.device] == coalescedPoint }
+        try await quiesce()
+        try expect(overlay.drawCount - coalesceDraws == 1,
+            "50 cursor updates in one turn paint the overlay once (\(overlay.drawCount - coalesceDraws)), at the last position")
+
+        // 1c. Fifty updates, each followed by a display pass.
         let paced = 50
         try await quiesce()
         overlayDraws = overlay.drawCount; contentDraws = sceneB.contentDrawCount; applied = 0
