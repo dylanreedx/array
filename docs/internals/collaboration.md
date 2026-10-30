@@ -55,6 +55,22 @@ the same person can recover a successful acceptance while it remains current.
 Forwarding the code cannot admit a different person. New members receive **all
 retained shared-area history**; there is no partial-history mode yet.
 
+**History on join, a decision for Dylan.** Removing a discussion or agreement
+takes it off the canvas, but its posts and revisions stay in the area document
+and its retained operations. Someone invited later therefore still reads that
+text. Unpublished artifacts behave differently: their bytes follow current
+publication, so nobody, the owner included, can fetch them after the unpublish.
+The recorded choice in [DECISIONS.md](../../.plans/105-collaboration/DECISIONS.md)
+keeps this. Shared discussion stays one continuous history, and nothing that
+was already readable to the area disappears behind a membership date.
+
+The cost: unpublish is not redaction. Text that went to an area is readable by
+every future member for the life of the area. A real redaction would need a
+per-object history floor in the reducer and in compaction. That is a schema
+change, not a setting. The boundary audit pins the current behaviour
+(`pinned policy: late joiner D receives a removed discussion's text, never an
+unpublished artifact's bytes`), so changing it is deliberate and visible.
+
 One owner is retained: self-removal is refused, and ownership transfer is not yet
 implemented. Editors may arrange admitted content, discuss, edit revisioned
 agreements and publish observations from their own registered execution device.
@@ -117,12 +133,21 @@ epoch/revision or changed retry intent 409. The collaboration route body limit i
 host are validated; client IDs are not authority. Source publication from another
 device, even the same person's second device, is refused.
 
+Two status details are deliberate, recorded so that nobody "fixes" them by
+accident. First, when a host claims or admits a request whose requester has
+since been removed, the answer is 404, not 403. The requester's membership is
+gone, so the authority lookup misses; both statuses refuse and change nothing.
+Second, a member probing an ID inside an area they belong to can get 403 for a
+real dispatch and 404 for a made-up one. Dispatch IDs are random client UUIDs
+that other members never see. A person outside the area gets the unknown-area
+404 on every nested route, whether the ID is real or not.
+
 Snapshots, operation append and reducer receipts commit in one SQLite transaction.
 Retries preserve the original revision; operation identity is bound to its actor
 as well as payload. Source privacy relies on typed projections before admission;
 this service does not inspect or upload the source filesystem. Operation paging
-and compaction are implemented as described below; blob storage remains future
-work.
+and compaction are implemented as described below; artifact bytes are under
+Shared artifacts.
 
 ## Retention
 
@@ -138,7 +163,8 @@ or whether a deletion holds is kept for the life of the area. Defaults live in
 | Deleted object and placement IDs (tombstones) | head and horizon snapshots | Life of the area. A stale create of a deleted ID is refused before and after compaction. |
 | Operation receipts (ID, digest, original revision) | snapshots, plus `operation_receipts` for the actor | Life of the area. A retry returns its original revision; another person reusing the ID gets `changedIntent`. |
 | Membership epochs, removals, device revocation | `areas`, `members`, `devices` | Life of the service. Compaction never touches them. |
-| Artifact references | document items/tombstones | As current state. The service stores references, never artifact bytes. |
+| Artifact references | document items/tombstones | As current state. |
+| Artifact revisions, reviews and blobs | `collaboration_artifact_*`, sealed | Life of the area, within the 64 MiB area quota. Unpublishing makes them unreachable (the unknown-ID 404) but does not delete them. They are not in the operation log, so compaction never touches them. |
 | Executable requests not yet admitted by their host | `agent_dispatches` (`queued`, `claimed`) | 15 minutes from enqueue, then refused. The requester reconfirms with a new request under current authority. |
 | Admitted attempts and unknown outcomes | `agent_dispatches` (`dispatching`, `uncertain`, `accepted`, `refused`) | Life of the area. Expiry never rewrites them; the host's journal decides between accepted and uncertain. |
 

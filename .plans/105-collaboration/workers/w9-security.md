@@ -136,3 +136,120 @@ on this base.
 - `continuum-relay` was rebuilt before every log run.
 - Not run: the full matrix, the Linux container, the Array app build, any
   default tmux socket or production relay.
+
+## Round 2: artifacts, retention and backups (30 October 2026)
+
+The bench was rebased onto `array/collaboration-finish` at `e17d0a52`, which now
+has artifacts (COL-16) and compaction/retention (COL-19). The first round's
+commit was already merged there.
+
+### New witness
+
+`CollaborationBoundaryAuditArtifactChecks.swift` runs inside the same default
+service-checks leg (and `--boundary-audit-only`). It uses real NIO routes, and
+its store compacts after every command (tail 2, batch 1, age 0). An injectable
+clock drives the 15-minute dispatch authority window.
+
+- **Counterexample.** A member receives the blob bytes, with
+  `cache-control: no-store`, plus the manifest path and the review note.
+- **Excluded C.** On 8 artifact and history routes, a real ID gives byte-identical
+  output to a random one, and nothing changes. The routes are state, revision,
+  blob, upload, publish, review, drift and updates.
+- **Member B forwarding pointers.** Each of these reads exactly like an unknown
+  blob:
+  - a blob path under area Y;
+  - another object's revision;
+  - an uploaded draft blob that no manifest lists;
+  - a cross-object revision;
+  - a discussion ID used as an artifact.
+
+  B cannot upload to or publish A's artifact, V cannot review, and nothing
+  changes.
+- **Unpublish.** Before and after: the member's cached blob URL and the
+  artifact state then read like an unknown object, even for the owner.
+- **Pinned policy.** Late joiner D receives a removed discussion's text, but
+  never an unpublished artifact's bytes.
+- **Retention.**
+  - After compaction, the store's integrity verification passes.
+  - Behind the horizon, excluded C gets the unknown-area 404, never a
+    "snapshot required" that would reveal the area.
+  - Member B gets a content-free 409.
+  - Removed B's horizon read and cached blob URL equal an unknown area's.
+  - A compacted operation ID cannot be reused or exactly replayed by another
+    person, nor changed by its re-admitted author.
+- **Stale queued work.** A prompt queued before compaction, removal and
+  re-admission cannot be claimed or admitted. Past the authority window, a
+  still-authorized prompt is refused at claim and nothing stays pending.
+- **Storage.** After compaction, the database, WAL and SHM keep blobs, the
+  unlisted draft, paths, reviews and the horizon snapshot sealed.
+
+The relay process log audit now also drives artifact traffic: upload, publish,
+member fetch, a hash mismatch, an oversized blob and a forbidden upload. It
+then runs the operator `--collaboration-backup`, `--collaboration-verify-backup`
+and a failing verify as subprocesses. Positive control: each one succeeds or
+fails as expected and logs its event. Their output carries no content, IDs,
+tokens, codes or keys, and the backup file keeps them sealed.
+
+### Teeth, round 2
+
+Each mutation was applied with both the service-checks and `continuum-relay`
+binaries rebuilt. Each went RED on the intended assertion, then the file was
+restored and the run was GREEN again.
+
+| Mutation | RED assertion |
+| --- | --- |
+| `artifactBlob` skips current membership | excluded C distinguishes the blob route |
+| `artifactBlob` serves any stored digest of the object | member B reads the unlisted draft |
+| horizon checked before membership | excluded C sees "snapshot required" |
+| authority window never expires | stale prompt still pending past the window |
+| operation-ID binding read from the compactable log | A's exact replay of B's retired command |
+| artifact route writes its URI to stderr | relay log carries a protected value |
+| unpublished artifact stays readable | cached blob after unpublish |
+
+The operation-ID mutation was GREEN at first. My changed-content probes are
+refused by the document's own receipt digest anyway, so they could not see the
+binding move. The binding only matters for an exact replay by another person,
+which would otherwise get that person's receipt back. That probe was added, and
+the mutation now goes RED. A first draft-blob mutation was too crude: it broke
+the legitimate read as well. The precise version, which skips only the manifest
+listing, goes RED on the forwarded-pointer step.
+
+Two fixture traps, fixed:
+- A path sentinel containing `/` can never match JSON output, because the
+  encoder writes `\/`. That would have hidden a real path leak, so the sentinel
+  now has no slash.
+- The publish probe's body named the real object while the URL named a random
+  one. The service checks body against URL before authenticating, so the 400
+  reflected the caller's own input, not server state. Each body now names its
+  own URL's object.
+
+### Review items
+
+- **Logs.** The relay and operator commands log only event names, ports,
+  counts and command names. A failure logs the error's description, and the
+  audit drives that path. No content or credentials appear (witnessed above).
+- **Storage, keys and retention.** These match the trusted-service contract.
+  AES-GCM seals snapshots, operations, horizon snapshots, artifact records,
+  reviews and blobs, with blob AAD binding area, object and digest. Tokens and
+  codes are SHA-256 hashes. Backups copy ciphertext and never the key.
+  Two docs statements were stale, and both are corrected:
+  - "the service stores references, never artifact bytes";
+  - "blob storage remains future work".
+
+  The retention table now also states that unpublished artifact bytes stay
+  sealed but unreachable for the life of the area.
+- **E2EE claims.** None in product copy. Searching the app's collaboration UI,
+  canvas, Core collaboration and the website finds only two unrelated code
+  comments. The internals doc says "This is not group E2EE." This is a source
+  search, not a witness.
+
+### Policy items (lead decisions)
+
+- **Item 2.** "All retained history on join" stays. The tradeoff is written into
+  `docs/internals/collaboration.md` ("History on join, a decision for Dylan")
+  and pinned by the witness above.
+- **Items 3 and 4.** The 404/403 behaviour stays. It is documented under the
+  HTTP contract.
+- **Finding 1.** Worker 4 is fixing it on `array/col-admission`. R3 still asserts
+  only "final, not accepted, no execution", and tightens to `.refused` with that
+  fix.
