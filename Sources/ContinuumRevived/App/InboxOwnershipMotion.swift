@@ -113,7 +113,8 @@ final class InboxSweepBorderView: NSView {
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
         let inset = next.card.insetBy(dx: Self.lineWidth / 2, dy: Self.lineWidth / 2)
-        let radius = max(0, CGFloat(Radius.card) - Self.lineWidth / 2)
+        // The inset ring's own Default radius, resolved in the corner style.
+        let radius = max(0, CGFloat(CornerRole.radius(base: CornerRole.card.base - Double(Self.lineWidth) / 2)))
         let path = CGPath(roundedRect: inset, cornerWidth: radius, cornerHeight: radius, transform: nil)
         let contrast: NSColor = next.dark ? .white : .black
         ring.frame = bounds
@@ -278,7 +279,8 @@ final class InboxPulseDotsView: NSView {
         wantsLayer = true
         for dot in dots {
             dot.bounds = CGRect(x: 0, y: 0, width: 2.6, height: 2.6)
-            dot.cornerRadius = 1.3
+            // Through the corner style: round dots at Default, squares at Sharp.
+            dot.applyCorner(base: 1.3)
             dot.opacity = 0.35
             layer?.addSublayer(dot)
         }
@@ -502,5 +504,14 @@ struct InboxOwnershipChrome {
                   reach: (gutter + slice.titleLeading - 1 - leadX) * 0.25),
             .init(kind: slice.helperLane, x: helperX, top: rowMid + 6 - top, turn: rowMid - top, reach: 0),
         ]
+    }
+}
+
+/// The sweep caches its ring path and skips identical updates, so a corner-style
+/// change alone would leave the old radius on screen. The style walk re-applies it.
+extension InboxSweepBorderView: CornerStyled {
+    func applyCornerStyle() {
+        guard let shown, !isHidden else { return }
+        apply(shown, force: false)
     }
 }
