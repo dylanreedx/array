@@ -5,6 +5,10 @@ import ContinuumRevivedCollaborationProtocol
 
 public enum CollaborationStoreError: Error, Equatable {
     case unauthorized, forbidden, unavailable, invalidInvitation, invalidRequest, staleEpoch, invalidCursor, tooManySubscriptions, invalidDatabaseKey
+    /// The cursor predates the compacted horizon: fetch the area snapshot.
+    case compacted
+    /// Stored snapshot, horizon and operation tail do not reconstruct each other.
+    case integrityFailure
 }
 
 /// Separate database, credentials and namespace from companion v2. Every request
@@ -13,6 +17,9 @@ public actor CollaborationStore {
     let database: DatabaseQueue
     let key: SymmetricKey
     let clock: @Sendable () -> Date
+    let retention: CollaborationRetention
+    /// Post-commit compaction that failed and left the full log in place.
+    public internal(set) var compactionFailures = 0
 
     var cancelledUpdateRequests: [UUID: CollaborationCancelledUpdate] = [:]
     var updateWaiters: [UUID: CollaborationUpdateWaiter] = [:]
@@ -20,13 +27,14 @@ public actor CollaborationStore {
     var presenceFlushes: [CollaborationPresenceKey: Task<Void, Never>] = [:]
     var presenceVersions: [UUID: UUID] = [:]
 
-    public init(path: String, masterKey: Data, clock: @escaping @Sendable () -> Date = { Date() }) throws {
+    public init(path: String, masterKey: Data, clock: @escaping @Sendable () -> Date = { Date() },
+                retention: CollaborationRetention = .init()) throws {
         guard masterKey.count >= 32 else { throw CollaborationStoreError.invalidRequest }
         var config = Configuration(); config.busyMode = .timeout(2)
         database = try DatabaseQueue(path: path, configuration: config)
         let normalizedKeyData = Data(SHA256.hash(data: masterKey))
         key = SymmetricKey(data: normalizedKeyData)
-        self.clock = clock
+        self.clock = clock; self.retention = retention
         // Authenticate an already adopted database before any migration can
         // write with a deployment key that merely has the right length.
         try Self.preflightDatabaseKey(database, keyData: normalizedKeyData)
@@ -73,6 +81,7 @@ public actor CollaborationStore {
         }
         Self.registerHandoffMigration(&migrator)
         Self.registerUsageMigration(&migrator)
+        Self.registerRetentionMigration(&migrator)
         try migrator.migrate(database)
         try Self.preflightDatabaseKey(database, keyData: normalizedKeyData)
     }
@@ -249,7 +258,9 @@ public actor CollaborationStore {
             guard current.epoch == request.epoch else { throw CollaborationStoreError.staleEpoch }
             guard current.allows(.layout) || current.allows(.discuss) || current.allows(.publish) else { throw CollaborationStoreError.forbidden }
             guard request.command.area.rawValue == area else { throw CollaborationStoreError.unavailable }
-            if let actorPerson = try String.fetchOne(db, sql: "SELECT d.person FROM operations o JOIN devices d ON d.id=o.actor WHERE o.area=? AND o.operation_id=?", arguments: [area.uuidString, request.command.id.rawValue.uuidString]), actorPerson != caller.person.rawValue.uuidString {
+            // Receipts outlive compaction, so an operation ID stays bound to
+            // its original person after the operation row itself is retired.
+            if let actorPerson = try String.fetchOne(db, sql: "SELECT d.person FROM operation_receipts r JOIN devices d ON d.id=r.actor WHERE r.area=? AND r.operation_id=?", arguments: [area.uuidString, request.command.id.rawValue.uuidString]), actorPerson != caller.person.rawValue.uuidString {
                 throw SharedArea.Failure.changedIntent
             }
             let bytes = try Data.fetchOne(db, sql: "SELECT snapshot FROM areas WHERE id=?", arguments: [area.uuidString])!
@@ -262,12 +273,18 @@ public actor CollaborationStore {
                 try refreshUsageAccess(db, area: area, document: document)
                 try refreshHandoffAccess(db, area: area, document: document)
                 try db.execute(sql: "UPDATE areas SET snapshot=?,revision=? WHERE id=?", arguments: [try seal(document), Int64(revision), area.uuidString])
-                try db.execute(sql: "INSERT INTO operations(area,revision,actor,operation_id,command) VALUES (?,?,?,?,?)", arguments: [area.uuidString, Int64(revision), caller.device.uuidString, request.command.id.rawValue.uuidString, try seal(request.command)])
+                try db.execute(sql: "INSERT INTO operations(area,revision,actor,operation_id,command,committed) VALUES (?,?,?,?,?,?)", arguments: [area.uuidString, Int64(revision), caller.device.uuidString, request.command.id.rawValue.uuidString, try seal(request.command), clock().timeIntervalSince1970])
+                try db.execute(sql: "INSERT INTO operation_receipts(area,operation_id,revision,actor) VALUES (?,?,?,?)", arguments: [area.uuidString, request.command.id.rawValue.uuidString, Int64(revision), caller.device.uuidString])
                 return .init(revision: revision, duplicate: false)
             }
         }
         // Notify only after the durable transaction has committed.
-        if !receipt.duplicate { wakeArea(area) }
+        if !receipt.duplicate {
+            // Maintenance is its own transaction. A failed compaction keeps the
+            // full log and never fails or undoes the committed command.
+            do { try database.write { db in _ = try compactIfDue(db, area: area) } } catch { compactionFailures += 1 }
+            wakeArea(area)
+        }
         return receipt
     }
     private func authorize(_ db: Database, _ caller: Collaboration.Identity, _ current: Collaboration.Scope,

@@ -78,7 +78,11 @@ extension CollaborationStore {
         sweepPresence()
         return try database.read { db in
             let identity = try authenticate(db, token), scope = try scope(db, identity, area)
-            let head = UInt64(try Int64.fetchOne(db, sql: "SELECT revision FROM areas WHERE id=?", arguments: [area.uuidString])!)
+            let row = try Row.fetchOne(db, sql: "SELECT revision,horizon FROM areas WHERE id=?", arguments: [area.uuidString])!
+            let head = UInt64(row["revision"] as Int64)
+            // Retired operations are never reported as an empty page. A cursor
+            // behind the horizon is told to take the snapshot explicitly.
+            guard request.after >= UInt64(row["horizon"] as Int64) else { throw CollaborationStoreError.compacted }
             let through = request.through ?? head
             guard request.after <= through, through <= head, request.after <= UInt64(Int64.max) else { throw CollaborationStoreError.invalidCursor }
             var events: [Collaboration.Event] = []

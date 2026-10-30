@@ -75,6 +75,7 @@ enum CollaborationRoutes {
         catch CollaborationStoreError.forbidden { return .error(.forbidden, "forbidden") }
         catch CollaborationStoreError.invalidInvitation { return .error(.gone, "invalidInvitation") }
         catch CollaborationStoreError.invalidCursor { return .error(.conflict, "resyncRequired") }
+        catch CollaborationStoreError.compacted { return .error(.conflict, "snapshotRequired") }
         catch CollaborationStoreError.tooManySubscriptions { return .error(.tooManyRequests, "subscriptionLimit") }
         catch is CancellationError { return .error(.requestTimeout, "cancelled") }
         catch CollaborationStoreError.staleEpoch { return .error(.conflict, "staleEpoch") }
