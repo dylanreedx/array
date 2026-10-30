@@ -76,6 +76,13 @@ private func runProjectionContractChecks() throws {
         && early.state?.rows.first(where: { $0.id == "x13" })?.status == .completed
         && early.state?.rows.count == P.maxRows && early.state?.omittedRows == 8 && early.state?.rows.first?.id == "r4",
         "text deltas fold into one row, tool rows update in place, and the oldest 8 of 40 rows are counted as omitted")
+    // Turn 13 is payloads 79...84: its text row last changed at 82, its tool at 83.
+    let quoted = early.state!.rows.first { $0.id == "r13" }!
+    let source = Collaboration.ResultExcerpt.Source(incarnation: .init(object: object, hostGeneration: UUID()), host: host,
+        turn: quoted.turn!, position: early.state!.position(of: "r13"))
+    try projectionCheck(source.position == P.Position(generation: 1, sequence: 82)
+        && early.state!.position(of: "x13") == P.Position(generation: 1, sequence: 83) && source.turn == "t13",
+        "each row records the frame that last changed it, so a result excerpt cites the projection's own turn and position")
 
     // A gap never advances: the replica asks for a resnapshot instead.
     var gapped = P.Replica()

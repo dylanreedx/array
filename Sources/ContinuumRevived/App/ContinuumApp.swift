@@ -1649,6 +1649,9 @@ enum ContinuumApp {
                     })
                     print("STAGE collaboration native: live agent projections")
                     try await SharedAgentProjectorChecks.run()
+                    try await SharedAgentLiveChecks.run(mount: { controller, person, host in
+                        delegate.mountWorkspaceSceneAtBoot(sharedAreaController: controller, person: person, in: host)
+                    })
                     guard executorConstructions == 0, supervisor.records.isEmpty else {
                         throw SelfCheckError("shared scene constructed a local executor or agent record")
                     }

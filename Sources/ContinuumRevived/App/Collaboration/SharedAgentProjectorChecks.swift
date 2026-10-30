@@ -9,7 +9,7 @@ import ContinuumRevivedCollaborationProtocol
 @MainActor
 enum SharedAgentProjectorChecks {
     private struct Failure: Error, CustomStringConvertible { let description: String }
-    private typealias P = Collaboration.AgentProjection
+    typealias P = Collaboration.AgentProjection
 
     private static func expect(_ value: Bool, _ label: String) throws {
         guard value else { throw Failure(description: label) }
@@ -125,7 +125,7 @@ enum SharedAgentProjectorChecks {
         await withHistory.flush()
         let historyText = String(decoding: historySink.batches.reduce(Data(), +), as: UTF8.self)
         try expect(historyText.contains("HISTORY-MARKER answer") && !historyText.contains("PRIVATE-"),
-            "included history carries assistant output only")
+            "included history carries assistant output only (delivered: \(historyText.prefix(1200)))")
         withHistory.stop()
 
         // 3. A background turn Array did not send still projects, with no executor.
