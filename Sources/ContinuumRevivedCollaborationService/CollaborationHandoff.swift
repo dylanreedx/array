@@ -144,6 +144,7 @@ extension CollaborationStore {
         return try database.write { db in
             let caller = try authenticate(db, token), current = try scope(db, caller, area)
             let digest = try handoffDigest(request, object: object)
+            try expireDispatches(db, area: area)
             if let row = try dispatchRow(db, area: area, id: request.id) {
                 guard row["actor"] as String == caller.device.uuidString, row["digest"] as Data == digest else { throw SharedArea.Failure.changedIntent }
                 return try dispatchReceipt(row)
@@ -161,16 +162,17 @@ extension CollaborationStore {
             let command = Collaboration.AgentDispatchCommand(id: request.id, area: .init(area), object: object, source: source,
                 requester: caller, epoch: current.epoch, controlRevision: state.revision, hostGeneration: state.hostGeneration,
                 context: context, text: request.text, mode: request.mode)
-            try db.execute(sql: "INSERT INTO agent_dispatches(area,id,object,host,actor,digest,command,phase) VALUES (?,?,?,?,?,?,?,'queued')",
+            try db.execute(sql: "INSERT INTO agent_dispatches(area,id,object,host,actor,digest,command,phase,created) VALUES (?,?,?,?,?,?,?,'queued',?)",
                 arguments: [area.uuidString, request.id.uuidString, object.rawValue.uuidString, source.host.rawValue.uuidString,
-                            caller.device.uuidString, digest, try seal(command)])
+                            caller.device.uuidString, digest, try seal(command), clock().timeIntervalSince1970])
             return .init(command: command, phase: .queued)
         }
     }
 
     public func agentDispatchReceipt(token: String, area: UUID, id: UUID) throws -> Collaboration.AgentDispatchReceipt {
-        try database.read { db in
+        try database.write { db in
             let caller = try authenticate(db, token); _ = try scope(db, caller, area)
+            try expireDispatches(db, area: area)
             guard let row = try dispatchRow(db, area: area, id: id) else { throw CollaborationStoreError.unavailable }
             let receipt = try dispatchReceipt(row)
             guard receipt.command.requester.person == caller.person || receipt.command.source.owner == caller.person else { throw CollaborationStoreError.forbidden }
@@ -182,6 +184,7 @@ extension CollaborationStore {
         try database.write { db in
             let caller = try authenticate(db, token); _ = try scope(db, caller, area)
             guard try String.fetchOne(db, sql: "SELECT device FROM hosts WHERE id=?", arguments: [host.rawValue.uuidString]) == caller.device.uuidString else { throw CollaborationStoreError.forbidden }
+            try expireDispatches(db, area: area)
             let rows = try Row.fetchAll(db, sql: "SELECT * FROM agent_dispatches WHERE area=? AND host=? AND phase IN ('queued','claimed','dispatching') ORDER BY rowid LIMIT 64",
                 arguments: [area.uuidString, host.rawValue.uuidString])
             var result: [Collaboration.AgentDispatchReceipt] = []
@@ -212,6 +215,7 @@ extension CollaborationStore {
                                    admit: Bool = false) throws -> Collaboration.AgentDispatchReceipt {
         try database.write { db in
             let caller = try authenticate(db, token); _ = try scope(db, caller, area)
+            try expireDispatches(db, area: area)
             guard let row = try dispatchRow(db, area: area, id: id) else { throw CollaborationStoreError.unavailable }
             let receipt = try dispatchReceipt(row)
             try requireSourceHost(db, caller: caller, source: receipt.command.source)
