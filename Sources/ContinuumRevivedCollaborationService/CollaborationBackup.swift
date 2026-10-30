@@ -13,15 +13,16 @@ public struct CollaborationBackupReport: Codable, Equatable, Sendable {
     public var people = 0, devices = 0, revokedDevices = 0, hosts = 0
     public var areas = 0, activeMembers = 0, removedMembers = 0, operations = 0
     public var invitations = 0, agentControls = 0, agentDispatches = 0, usageReports = 0
+    public var receipts = 0, compactedAreas = 0, artifactBlobs = 0, artifactRevisions = 0, artifactReviews = 0
 }
 
-/// Operator backup, verification and restore for the collaboration database.
-/// The companion database is a separate file and is never touched here.
+/// The one backup path: operator backup, verification and restore for the
+/// collaboration database. The companion database is never touched here.
 extension CollaborationStore {
     /// SQLite's online backup API copies one consistent read snapshot while the
     /// live relay keeps serving. The copy is verified before it is published at
     /// `destination`, so a file at that path is always a complete backup.
-    public static func backup(databaseAt source: String, to destination: String, masterKey: Data) throws -> CollaborationBackupReport {
+    public static func backup(databaseAt source: String, to destination: String, masterKey: Data) async throws -> CollaborationBackupReport {
         let fileManager = FileManager.default
         guard !fileManager.fileExists(atPath: destination) else { throw CollaborationBackupError.destinationExists }
         let target = URL(fileURLWithPath: destination)
@@ -33,15 +34,17 @@ extension CollaborationStore {
         let copy = try DatabaseQueue(path: partial.path)
         try live.backup(to: copy)
         try copy.close(); try live.close()
-        let report = try verifyBackup(at: partial.path, masterKey: masterKey)
+        let report = try await verifyBackup(at: partial.path, masterKey: masterKey)
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: partial.path)
         try fileManager.moveItem(at: partial, to: target)
         return report
     }
 
-    /// Authenticates the key marker and every sealed record of a backup, on a
-    /// scratch copy so neither verification nor migration writes the backup.
-    public static func verifyBackup(at path: String, masterKey: Data) throws -> CollaborationBackupReport {
+    /// Authenticates the key marker and every sealed record of a backup, and
+    /// rebuilds every area head from its horizon snapshot plus retained tail
+    /// (`verifyIntegrity`). Runs on a scratch copy so neither verification nor
+    /// migration writes the backup.
+    public static func verifyBackup(at path: String, masterKey: Data) async throws -> CollaborationBackupReport {
         let fileManager = FileManager.default
         let scratch = fileManager.temporaryDirectory.appendingPathComponent("array-collaboration-verify-\(UUID())")
         try fileManager.createDirectory(at: scratch, withIntermediateDirectories: true)
@@ -57,19 +60,20 @@ extension CollaborationStore {
         do { store = try CollaborationStore(path: copy.path, masterKey: masterKey) }
         catch CollaborationStoreError.invalidDatabaseKey { throw CollaborationStoreError.invalidDatabaseKey }
         catch { throw CollaborationBackupError.damaged }
-        var report = try store.database.read { db in try audit(db, keyData: Data(SHA256.hash(data: masterKey))) }
+        var report = try await store.auditBackupRecords(keyData: Data(SHA256.hash(data: masterKey)))
+        do { _ = try await store.verifyIntegrity() } catch { throw CollaborationBackupError.damaged }
         report.migrations = recorded
         return report
     }
 
     /// Installs a verified backup at `livePath`. An existing database is moved
     /// aside, never deleted; the relay must be stopped first and restarted after.
-    public static func restore(backup: String, to livePath: String, masterKey: Data) throws -> (report: CollaborationBackupReport, movedAside: String?) {
+    public static func restore(backup: String, to livePath: String, masterKey: Data) async throws -> (report: CollaborationBackupReport, movedAside: String?) {
         let fileManager = FileManager.default
         guard !fileManager.fileExists(atPath: livePath + "-journal"), !fileManager.fileExists(atPath: livePath + "-wal") else {
             throw CollaborationBackupError.hotJournal
         }
-        let report = try verifyBackup(at: backup, masterKey: masterKey)
+        let report = try await verifyBackup(at: backup, masterKey: masterKey)
         let live = URL(fileURLWithPath: livePath)
         try fileManager.createDirectory(at: live.deletingLastPathComponent(), withIntermediateDirectories: true)
         let partial = live.deletingLastPathComponent().appendingPathComponent(".\(live.lastPathComponent).restore-\(UUID())")
@@ -94,50 +98,63 @@ extension CollaborationStore {
         }
     }
 
-    private static func audit(_ db: Database, keyData: Data) throws -> CollaborationBackupReport {
-        let key = SymmetricKey(data: keyData)
-        func open<T: Decodable>(_ type: T.Type, _ bytes: Data) throws -> T {
-            try JSONDecoder().decode(type, from: AES.GCM.open(AES.GCM.SealedBox(combined: bytes), using: key))
-        }
-        func count(_ sql: String) throws -> Int { try Int.fetchOne(db, sql: sql) ?? 0 }
-        do {
-            guard try String.fetchAll(db, sql: "PRAGMA integrity_check") == ["ok"],
-                  try Row.fetchAll(db, sql: "PRAGMA foreign_key_check").isEmpty else { throw CollaborationBackupError.damaged }
-            for row in try Row.fetchAll(db, sql: "SELECT id,revision,snapshot FROM areas") {
-                let document = try open(SharedArea.Document.self, row["snapshot"])
-                let head: Int64 = row["revision"]
-                let newest = try Int64.fetchOne(db, sql: "SELECT MAX(revision) FROM operations WHERE area=?", arguments: [row["id"] as String])
-                guard UUID(uuidString: row["id"]) == document.id.rawValue, UInt64(head) == document.revision,
-                      (newest ?? 0) <= head else { throw CollaborationBackupError.damaged }
-            }
-            for row in try Row.fetchAll(db, sql: "SELECT area,revision,operation_id,command FROM operations") {
-                let command = try open(SharedArea.Command.self, row["command"])
-                let revision: Int64 = row["revision"]
-                guard UUID(uuidString: row["area"]) == command.area.rawValue, UUID(uuidString: row["operation_id"]) == command.id.rawValue,
-                      revision > 0, command.expectedRevision == UInt64(revision - 1) else { throw CollaborationBackupError.damaged }
-            }
-            if try db.tableExists("collaboration_usage") {
-                for row in try Row.fetchAll(db, sql: "SELECT host,payload FROM collaboration_usage") {
-                    let snapshot = try open(Collaboration.UsageSnapshot.self, row["payload"])
-                    guard snapshot.host.rawValue == UUID(uuidString: row["host"]) else { throw CollaborationBackupError.damaged }
+    /// Opens every sealed record through this store's own key and AAD rules.
+    func auditBackupRecords(keyData: Data) throws -> CollaborationBackupReport {
+        try database.read { db in
+            func count(_ sql: String) throws -> Int { try Int.fetchOne(db, sql: sql) ?? 0 }
+            func table(_ name: String, _ sql: String) throws -> Int { try db.tableExists(name) ? count(sql) : 0 }
+            do {
+                guard try String.fetchAll(db, sql: "PRAGMA integrity_check") == ["ok"],
+                      try Row.fetchAll(db, sql: "PRAGMA foreign_key_check").isEmpty else { throw CollaborationBackupError.damaged }
+                for row in try Row.fetchAll(db, sql: "SELECT id,revision,snapshot FROM areas") {
+                    let document = try unseal(SharedArea.Document.self, row["snapshot"])
+                    let head: Int64 = row["revision"]
+                    guard UUID(uuidString: row["id"]) == document.id.rawValue, UInt64(head) == document.revision else { throw CollaborationBackupError.damaged }
                 }
-            }
-            try validateHandoffCiphertext(db, keyData: keyData)
-        } catch let error as CollaborationBackupError { throw error }
-        catch { throw CollaborationBackupError.damaged }
-        var report = CollaborationBackupReport(migrations: [])
-        report.people = try count("SELECT COUNT(*) FROM people")
-        report.devices = try count("SELECT COUNT(*) FROM devices")
-        report.revokedDevices = try count("SELECT COUNT(*) FROM devices WHERE revoked<>0")
-        report.hosts = try count("SELECT COUNT(*) FROM hosts")
-        report.areas = try count("SELECT COUNT(*) FROM areas")
-        report.activeMembers = try count("SELECT COUNT(*) FROM members WHERE active<>0")
-        report.removedMembers = try count("SELECT COUNT(*) FROM members WHERE active=0")
-        report.operations = try count("SELECT COUNT(*) FROM operations")
-        report.invitations = try count("SELECT COUNT(*) FROM invitations")
-        if try db.tableExists("agent_control") { report.agentControls = try count("SELECT COUNT(*) FROM agent_control") }
-        if try db.tableExists("agent_dispatches") { report.agentDispatches = try count("SELECT COUNT(*) FROM agent_dispatches") }
-        if try db.tableExists("collaboration_usage") { report.usageReports = try count("SELECT COUNT(*) FROM collaboration_usage") }
-        return report
+                for row in try Row.fetchAll(db, sql: "SELECT area,revision,operation_id,command FROM operations") {
+                    let command = try unseal(SharedArea.Command.self, row["command"])
+                    let revision: Int64 = row["revision"]
+                    guard UUID(uuidString: row["area"]) == command.area.rawValue, UUID(uuidString: row["operation_id"]) == command.id.rawValue,
+                          revision > 0, command.expectedRevision == UInt64(revision - 1) else { throw CollaborationBackupError.damaged }
+                }
+                if try db.tableExists("collaboration_usage") {
+                    for row in try Row.fetchAll(db, sql: "SELECT host,payload FROM collaboration_usage") {
+                        let snapshot = try unseal(Collaboration.UsageSnapshot.self, row["payload"])
+                        guard snapshot.host.rawValue == UUID(uuidString: row["host"]) else { throw CollaborationBackupError.damaged }
+                    }
+                }
+                if try db.tableExists("collaboration_artifact_blobs") {
+                    for row in try Row.fetchAll(db, sql: "SELECT area,object,digest,length,sealed FROM collaboration_artifact_blobs") {
+                        guard let area = UUID(uuidString: row["area"]), let object = UUID(uuidString: row["object"]) else { throw CollaborationBackupError.damaged }
+                        let digest: String = row["digest"], length: Int = row["length"]
+                        let bytes = try AES.GCM.open(AES.GCM.SealedBox(combined: row["sealed"] as Data), using: key, authenticating: Self.blobAAD(area, object, digest))
+                        guard bytes.count == length, Artifact.digest(bytes) == digest else { throw CollaborationBackupError.damaged }
+                    }
+                    for row in try Row.fetchAll(db, sql: "SELECT record FROM collaboration_artifact_revisions") { _ = try unseal(Artifact.Record.self, row["record"]) }
+                    for row in try Row.fetchAll(db, sql: "SELECT review FROM collaboration_artifact_reviews") { _ = try unseal(Artifact.Review.self, row["review"]) }
+                }
+                try Self.validateHandoffCiphertext(db, keyData: keyData)
+            } catch let error as CollaborationBackupError { throw error }
+            catch { throw CollaborationBackupError.damaged }
+            var report = CollaborationBackupReport(migrations: [])
+            report.people = try count("SELECT COUNT(*) FROM people")
+            report.devices = try count("SELECT COUNT(*) FROM devices")
+            report.revokedDevices = try count("SELECT COUNT(*) FROM devices WHERE revoked<>0")
+            report.hosts = try count("SELECT COUNT(*) FROM hosts")
+            report.areas = try count("SELECT COUNT(*) FROM areas")
+            report.activeMembers = try count("SELECT COUNT(*) FROM members WHERE active<>0")
+            report.removedMembers = try count("SELECT COUNT(*) FROM members WHERE active=0")
+            report.operations = try count("SELECT COUNT(*) FROM operations")
+            report.invitations = try count("SELECT COUNT(*) FROM invitations")
+            report.agentControls = try table("agent_control", "SELECT COUNT(*) FROM agent_control")
+            report.agentDispatches = try table("agent_dispatches", "SELECT COUNT(*) FROM agent_dispatches")
+            report.usageReports = try table("collaboration_usage", "SELECT COUNT(*) FROM collaboration_usage")
+            report.receipts = try table("operation_receipts", "SELECT COUNT(*) FROM operation_receipts")
+            report.compactedAreas = try db.columns(in: "areas").contains { $0.name == "horizon" } ? count("SELECT COUNT(*) FROM areas WHERE horizon>0") : 0
+            report.artifactBlobs = try table("collaboration_artifact_blobs", "SELECT COUNT(*) FROM collaboration_artifact_blobs")
+            report.artifactRevisions = try table("collaboration_artifact_revisions", "SELECT COUNT(*) FROM collaboration_artifact_revisions")
+            report.artifactReviews = try table("collaboration_artifact_reviews", "SELECT COUNT(*) FROM collaboration_artifact_reviews")
+            return report
+        }
     }
 }

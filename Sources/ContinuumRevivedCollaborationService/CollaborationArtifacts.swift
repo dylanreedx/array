@@ -199,7 +199,7 @@ extension CollaborationStore {
         else { throw CollaborationStoreError.forbidden }
         return (scope, source)
     }
-    private static func blobAAD(_ area: UUID, _ object: UUID, _ digest: String) -> Data {
+    static func blobAAD(_ area: UUID, _ object: UUID, _ digest: String) -> Data {
         Data("array.collaboration.artifact-blob.v1|\(area.uuidString)|\(object.uuidString)|\(digest)".utf8)
     }
 }

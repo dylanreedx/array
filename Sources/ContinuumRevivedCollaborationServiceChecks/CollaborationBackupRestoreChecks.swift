@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedCollaborationClient
 import ContinuumRevivedCollaborationService
@@ -59,10 +60,14 @@ func runCollaborationBackupRestoreChecks() async throws {
     let companionNever = root.appendingPathComponent("companion-never/relay.sqlite").path
     let backupPath = root.appendingPathComponent("backups/collaboration-backup.sqlite").path
     try fileManager.createDirectory(atPath: (live as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-    let store = try CollaborationStore(path: live, masterKey: key, clock: { clock.now() })
+    // A tight retention window so the area written during the backup compacts:
+    // the backup then carries a horizon snapshot, a short tail and receipts.
+    let retention = CollaborationRetention(operationTail: 8, operationAge: 0, compactionBatch: 16)
+    let store = try CollaborationStore(path: live, masterKey: key, clock: { clock.now() }, retention: retention)
     let companion = try RelayStore(path: root.appendingPathComponent("companion.sqlite").path, masterKey: key)
     let server = RelayServer(store: companion, configuration: .init(host: "127.0.0.1", publicPort: 0, adminPort: 0), collaboration: store)
     try await server.start()
+    let liveEndpoint = URL(string: "http://127.0.0.1:\(server.listeningPublicPort!)")!
 
     func enroll(_ label: String) async throws -> Collaboration.Credential {
         let code = try await store.provisionPerson(label: label)
@@ -113,6 +118,24 @@ func runCollaborationBackupRestoreChecks() async throws {
         inputTokens: 200, outputTokens: 40, todayInputTokens: 200, todayOutputTokens: 40, dayUTC: "2026-10-30",
         observedSince: now, measuredAt: now, coveredAgents: 1, runningAgents: 0, partial: false)))
 
+    // An artifact revision with its sealed blob and a teammate's review.
+    typealias A = Collaboration.Artifact
+    let artifact = SharedArea.Item(id: .init(), kind: .artifact, source: .init(owner: a.identity.person, host: hostA.id, binding: .init()))
+    _ = try await store.apply(token: a.token, area: area1, request: .init(epoch: 1, command: .init(area: one.document.id, expectedRevision: 2, edits: [
+        .admit(artifact, .init(id: .init(), object: artifact.id, rect: .init(x: 0, y: 400, width: 320, height: 240)))])))
+    let artifactText = Data("@@ -1 +1 @@\n-old\n+backup-artifact-sentinel\n".utf8), artifactDigest = A.digest(artifactText)
+    let manifest = A.Manifest(object: artifact.id, parent: nil, kind: .diff, base: .init(head: String(repeating: "a", count: 40)),
+        declaration: .init(range: .workingTree, includesCommitted: false, includesStaged: true, includesUnstaged: true,
+                           includesUntracked: false, omittedChangedPaths: 0, omittedUntrackedPaths: 0),
+        entries: [.init(path: "src/main.swift", change: .modified, coverage: .included, blob: artifactDigest, length: artifactText.count,
+                        mediaType: "text/x-diff", sourceDigest: String(repeating: "b", count: 64))],
+        capturedAt: 1_800_000_000_000)
+    let liveA = try CollaborationAPI(baseURL: liveEndpoint, credential: a.token, allowsInsecureLoopback: true)
+    let liveB = try CollaborationAPI(baseURL: liveEndpoint, credential: b.token, allowsInsecureLoopback: true)
+    _ = try await liveA.publishArtifact(area: area1, epoch: 1, capture: .init(manifest: manifest, blobs: [artifactDigest: artifactText]))
+    let review = try await liveB.reviewArtifact(area: area1, object: artifact.id.rawValue,
+        request: .init(epoch: 1, revision: manifest.id, verdict: .approve, note: "Reviewed before the backup"))
+
     // Area 2: a viewer, and a teammate who joined and was then removed.
     let two = try await store.createArea(token: a.token), area2 = two.document.id.rawValue
     let viewer = try await store.invite(token: a.token, area: area2, request: .init(person: c.identity.person, role: .viewer))
@@ -133,8 +156,15 @@ func runCollaborationBackupRestoreChecks() async throws {
     let expired = try await store.invite(token: b.token, area: area3, request: .init(person: c.identity.person, lifetime: 1))
     clock.advance(2)
     let board = SharedArea.Item(id: .init(), kind: .discussion)
-    _ = try await store.apply(token: b.token, area: area3, request: .init(epoch: 1, command: .init(area: three.document.id, expectedRevision: 0, edits: [
-        .admit(board, .init(id: .init(), object: board.id, rect: .init(x: 0, y: -300, width: 300, height: 200)))])))
+    let boardCommand = SharedArea.Command(area: three.document.id, expectedRevision: 0, edits: [
+        .admit(board, .init(id: .init(), object: board.id, rect: .init(x: 0, y: -300, width: 300, height: 200)))])
+    _ = try await store.apply(token: b.token, area: area3, request: .init(epoch: 1, command: boardCommand))
+    // Enough history that area 3 compacts before the backup, whatever the
+    // concurrent writer below manages to add.
+    for index in 0..<40 {
+        _ = try await store.apply(token: a.token, area: area3, request: .init(epoch: 1, command: .init(area: three.document.id,
+            expectedRevision: UInt64(index + 1), edits: [.post(.init(id: .init(), object: board.id, author: a.identity.person, text: "history \(index)"))])))
+    }
     try await store.revokeDevice(token: a.token, device: aRevokedBefore.identity.device)
 
     var expected: [UUID: (data: Data, epoch: Int64)] = [:]
@@ -163,12 +193,16 @@ func runCollaborationBackupRestoreChecks() async throws {
     try backupCheck(made.status == 0 && fileManager.fileExists(atPath: backupPath), "operator backup command copies the live database while it serves writes (\(concurrentWrites) concurrent commits)")
     guard let report = made.report else { throw BackupCheckFailure(message: "backup printed no report: \(made.output)") }
     try backupCheck(report.areas == 3 && report.people == 4 && report.revokedDevices == 1 && report.removedMembers == 1
-        && report.agentDispatches == 1 && report.agentControls == 1 && report.usageReports == 1 && report.invitations == 6,
-        "backup report counts every area, person, revocation, removal, dispatch and usage row")
+        && report.agentDispatches == 1 && report.agentControls == 1 && report.usageReports == 1 && report.invitations == 6
+        && report.artifactBlobs == 1 && report.artifactRevisions == 1 && report.artifactReviews == 1,
+        "backup report counts every area, person, revocation, removal, dispatch, usage and artifact row")
+    try backupCheck(report.compactedAreas == 1 && report.receipts > report.operations,
+        "the backup carries a compacted area: horizon snapshot, short tail and every operation receipt (\(report.receipts) receipts, \(report.operations) retained operations)")
     let attributes = try fileManager.attributesOfItem(atPath: backupPath)
     try backupCheck((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600, "backup file is private to the operator account")
     let backupBytes = try Data(contentsOf: URL(fileURLWithPath: backupPath))
     try backupCheck(backupBytes.range(of: Data(sentinel.utf8)) == nil && backupBytes.range(of: Data(a.token.utf8)) == nil
+        && backupBytes.range(of: Data("backup-artifact-sentinel".utf8)) == nil
         && backupBytes.range(of: Data(pending.code.utf8)) == nil, "backup bytes exclude plaintext content, bearer tokens and invitation codes")
     try backupCheck(!fileManager.fileExists(atPath: (companionNever as NSString).deletingLastPathComponent), "operator commands never open the companion database")
     let leftovers = try fileManager.contentsOfDirectory(atPath: (backupPath as NSString).deletingLastPathComponent)
@@ -178,6 +212,21 @@ func runCollaborationBackupRestoreChecks() async throws {
     try backupCheck(again.status != 0 && (try Data(contentsOf: URL(fileURLWithPath: backupPath))) == backupBytes, "backup refuses to overwrite an existing backup")
     let wrongVerify = try await operatorCommand("--collaboration-verify-backup", backupPath, live: live, key: wrongKey, companion: companionNever)
     try backupCheck(wrongVerify.status != 0, "verification with a different master key refuses")
+    // Tampering that every ciphertext still authenticates through: only the
+    // horizon+tail replay and the artifact AAD/digest audit can see these.
+    func tampered(_ name: String, _ sql: String) async throws -> Int32 {
+        let path = root.appendingPathComponent("backups-damaged/\(name).sqlite").path
+        try fileManager.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try fileManager.copyItem(atPath: backupPath, toPath: path)
+        let database = try DatabaseQueue(path: path)
+        try await database.write { try $0.execute(sql: sql) }
+        try database.close()
+        return try await operatorCommand("--collaboration-verify-backup", path, live: live, key: key, companion: companionNever).status
+    }
+    let gap = try await tampered("tail-gap", "DELETE FROM operations WHERE area='\(area3.uuidString)' AND revision=(SELECT MAX(revision) FROM operations WHERE area='\(area3.uuidString)')-1")
+    try backupCheck(gap != 0, "verification refuses a backup missing one retained operation of a compacted area")
+    let relabelled = try await tampered("blob-relabel", "UPDATE collaboration_artifact_blobs SET digest='\(String(repeating: "f", count: 64))'")
+    try backupCheck(relabelled != 0, "verification refuses an artifact blob relabelled to another digest")
     var damaged = backupBytes
     let middle = damaged.count / 2
     for offset in middle..<(middle + 512) { damaged[offset] ^= 0x5A }
@@ -190,7 +239,7 @@ func runCollaborationBackupRestoreChecks() async throws {
     try backupCheck(verified.status == 0 && verified.report == report, "verification of the published backup reproduces its report")
 
     // Work after the backup point: lost by restore, by design.
-    _ = try await store.apply(token: a.token, area: area1, request: .init(epoch: 1, command: .init(area: one.document.id, expectedRevision: 2, edits: [
+    _ = try await store.apply(token: a.token, area: area1, request: .init(epoch: 1, command: .init(area: one.document.id, expectedRevision: 3, edits: [
         .post(.init(id: .init(), object: thread.id, author: a.identity.person, text: "written after the backup"))])))
     try await store.revokeDevice(token: a.token, device: aRevokedAfter.identity.device)
     try await server.stop()
@@ -202,7 +251,7 @@ func runCollaborationBackupRestoreChecks() async throws {
     try backupCheck(wrongRestore.status != 0 && !fileManager.fileExists(atPath: replacement), "restore with the wrong key installs nothing")
     let restored = try await operatorCommand("--collaboration-restore", backupPath, live: replacement, key: key, companion: companionNever)
     try backupCheck(restored.status == 0 && !restored.output.contains("moved_aside"), "operator restore installs the backup in a replacement directory")
-    let restoredStore = try CollaborationStore(path: replacement, masterKey: key, clock: { clock.now() })
+    let restoredStore = try CollaborationStore(path: replacement, masterKey: key, clock: { clock.now() }, retention: retention)
     do { _ = try CollaborationStore(path: replacement, masterKey: wrongKey); throw BackupCheckFailure(message: "restored database opened with the wrong key") }
     catch CollaborationStoreError.invalidDatabaseKey { print("PASS backup/restore: restored database refuses a different master key") }
     let restoredServer = RelayServer(store: companion, configuration: .init(host: "127.0.0.1", publicPort: 0, adminPort: 0), collaboration: restoredStore)
@@ -233,6 +282,16 @@ func runCollaborationBackupRestoreChecks() async throws {
         try backupCheck(receipt == accepted && receipt.command.requester.person == b.identity.person, "accepted handoff receipt and its human attribution survive restore")
         let retry = try await aa.apply(area: area1, mutation: .init(epoch: 1, command: firstCommand))
         try backupCheck(retry.duplicate && retry.revision == 1, "an original command retried after restore returns its first receipt")
+        let compactedRetry = try await bb.apply(area: area3, mutation: .init(epoch: 1, command: boardCommand))
+        try backupCheck(compactedRetry.duplicate && compactedRetry.revision == 1, "a command compacted out of the log before the backup still dedupes by its receipt")
+        let integrity = try await restoredStore.verifyIntegrity()
+        try backupCheck((integrity.horizons[area3] ?? 0) > 0, "the restored compacted area rebuilds its head from horizon plus tail")
+        let artifactRead = try await bb.readArtifact(area: area1, object: artifact.id.rawValue, revision: manifest.id.rawValue)
+        let artifactState = try await bb.artifactState(area: area1, object: artifact.id.rawValue)
+        try backupCheck(artifactRead.bytes["src/main.swift"] == artifactText && artifactRead.record.contentDigest == manifest.contentDigest
+            && artifactState.reviews.contains { $0.review == review && $0.review.revision == manifest.id },
+            "the artifact's exact bytes, digest and revision-pinned review survive restore")
+        try await refuses(404, "excluded C cannot read the restored artifact") { _ = try await cc.readArtifact(area: area1, object: artifact.id.rawValue) }
         try await refuses(401, "a device revoked before the backup stays revoked after restore") { _ = try await client(aRevokedBefore.token).state(area: area1) }
         try await refuses(404, "a member removed before the backup stays removed after restore") { _ = try await bb.state(area: area2) }
         try await refuses(404, "excluded C still cannot read area 1") { _ = try await cc.state(area: area1) }

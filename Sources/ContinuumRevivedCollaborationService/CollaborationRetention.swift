@@ -73,14 +73,6 @@ extension CollaborationStore {
         return UInt64(through)
     }
 
-    /// Restore rehearsal: a consistent online copy into a new file. Key
-    /// material is never written; the operator carries it separately.
-    public func backup(to path: String) throws {
-        guard !FileManager.default.fileExists(atPath: path) else { throw CollaborationStoreError.invalidRequest }
-        let destination = try DatabaseQueue(path: path)
-        try database.backup(to: destination)
-    }
-
     /// Every area's horizon snapshot plus its retained tail must reproduce the
     /// stored head exactly, with one receipt per revision and no gap.
     public func verifyIntegrity() throws -> CollaborationIntegrityReport {

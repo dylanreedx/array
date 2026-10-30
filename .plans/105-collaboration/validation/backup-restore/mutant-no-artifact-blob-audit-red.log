@@ -1,0 +1,11 @@
+PASS backup/restore: operator backup command copies the live database while it serves writes (57 concurrent commits)
+PASS backup/restore: backup report counts every area, person, revocation, removal, dispatch, usage and artifact row
+PASS backup/restore: the backup carries a compacted area: horizon snapshot, short tail and every operation receipt (95 receipts, 15 retained operations)
+PASS backup/restore: backup file is private to the operator account
+PASS backup/restore: backup bytes exclude plaintext content, bearer tokens and invitation codes
+PASS backup/restore: operator commands never open the companion database
+PASS backup/restore: backup leaves no partial file beside the published copy
+PASS backup/restore: backup refuses to overwrite an existing backup
+PASS backup/restore: verification with a different master key refuses
+PASS backup/restore: verification refuses a backup missing one retained operation of a compacted area
+FAIL: BackupCheckFailure(message: "verification refuses an artifact blob relabelled to another digest")

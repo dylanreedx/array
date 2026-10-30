@@ -193,7 +193,8 @@ func runCollaborationRetentionChecks() async throws {
         let replacement = root.appendingPathComponent("replacement-online", isDirectory: true)
         try FileManager.default.createDirectory(at: replacement, withIntermediateDirectories: true)
         let restoredPath = replacement.appendingPathComponent("collaboration.sqlite").path
-        try await store.backup(to: restoredPath)
+        // The one backup path: the verified operator backup (CollaborationBackup.swift).
+        _ = try await CollaborationStore.backup(databaseAt: path, to: restoredPath, masterKey: key)
         let keyFile = replacement.appendingPathComponent("collaboration.key")
         try key.base64EncodedString().write(to: keyFile, atomically: true, encoding: .utf8)
         try await server.stop(); serverRunning = false

@@ -46,11 +46,11 @@ func runCollaborationOperatorCommand(_ arguments: [String]) async -> Int32? {
         let report: CollaborationBackupReport
         switch arguments[1] {
         case "--collaboration-backup":
-            report = try CollaborationStore.backup(databaseAt: livePath, to: path, masterKey: key)
+            report = try await CollaborationStore.backup(databaseAt: livePath, to: path, masterKey: key)
         case "--collaboration-verify-backup":
-            report = try CollaborationStore.verifyBackup(at: path, masterKey: key)
+            report = try await CollaborationStore.verifyBackup(at: path, masterKey: key)
         default:
-            let restored = try CollaborationStore.restore(backup: path, to: livePath, masterKey: key)
+            let restored = try await CollaborationStore.restore(backup: path, to: livePath, masterKey: key)
             report = restored.report
             if let aside = restored.movedAside { fields["moved_aside"] = aside }
         }
