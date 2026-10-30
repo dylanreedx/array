@@ -193,6 +193,10 @@ enum SharedAreaPeerRuntime {
             host.contentView?.layoutSubtreeIfNeeded(); sharedWindow = host; scene = view
             observer = model.addChangeObserver { [weak self] in self?.changed() }
             await model.open()
+            // A killed peer's held reads keep its subscription slots until the
+            // service's 25 s wait expires; the client retries 429 meanwhile.
+            let deadline = Date().addingTimeInterval(40)
+            while model.status != .connected, Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
             guard model.status == .connected else { throw Failure(description: "area did not connect: \(model.status), persistence: \(String(describing: model.lastPersistenceError))") }
             if !hasCachedDocument { try view.fitContent() }
             let hostSession = try SharedAreaHostSession(account: account, area: area, supervisor: source.delegate.qaAgentSupervisor)
