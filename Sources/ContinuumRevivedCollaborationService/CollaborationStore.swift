@@ -85,6 +85,7 @@ public actor CollaborationStore {
         Self.registerRetentionMigration(&migrator)
         Self.registerArtifactMigration(&migrator)
         Self.registerHostLivenessMigration(&migrator)
+        Self.registerAgentProjectionMigration(&migrator)
         try migrator.migrate(database)
         try Self.preflightDatabaseKey(database, keyData: normalizedKeyData)
     }
@@ -276,6 +277,7 @@ public actor CollaborationStore {
                 try refreshUsageAccess(db, area: area, document: document)
                 try refreshHandoffAccess(db, area: area, document: document)
                 try refreshArtifactAccess(db, area: area, document: document)
+                try refreshAgentProjectionAccess(db, area: area, document: document)
                 try db.execute(sql: "UPDATE areas SET snapshot=?,revision=? WHERE id=?", arguments: [try seal(document), Int64(revision), area.uuidString])
                 try db.execute(sql: "INSERT INTO operations(area,revision,actor,operation_id,command,committed) VALUES (?,?,?,?,?,?)", arguments: [area.uuidString, Int64(revision), caller.device.uuidString, request.command.id.rawValue.uuidString, try seal(request.command), clock().timeIntervalSince1970])
                 try db.execute(sql: "INSERT INTO operation_receipts(area,operation_id,revision,actor) VALUES (?,?,?,?)", arguments: [area.uuidString, request.command.id.rawValue.uuidString, Int64(revision), caller.device.uuidString])

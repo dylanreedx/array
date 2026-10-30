@@ -18,6 +18,7 @@ enum CollaborationRoutes {
             let token = String(header.dropFirst(7))
             if let handoff = try await CollaborationHandoffRoutes.route(head: head, body: body, token: token, store: store) { return handoff }
             if let liveness = try await CollaborationHostLivenessRoutes.route(head: head, body: body, token: token, store: store) { return liveness }
+            if let projection = try await CollaborationAgentProjectionRoutes.route(head: head, body: body, token: token, store: store) { return projection }
             // Every store method authenticates again within its read/write transaction.
             if head.method == .GET, head.uri == "/collaboration/v1/self" { return .json(.ok, try await store.identity(token: token)) }
             if head.method == .POST, head.uri == "/collaboration/v1/devices/enrollments" {

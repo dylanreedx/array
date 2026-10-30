@@ -209,7 +209,7 @@ do {
         }
         try await runCollaborationDatabaseKeyChecks()
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationCapabilityChecks() }
-        if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationHandoffChecks(); try await runCollaborationUsageChecks(); try await runCollaborationEndorsementChecks() }
+        if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationHandoffChecks(); try await runCollaborationUsageChecks(); try await runCollaborationEndorsementChecks(); try await runCollaborationAgentProjectionChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationRecoveryScaleChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationRetentionChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationArtifactChecks() }
