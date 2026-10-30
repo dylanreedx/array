@@ -872,3 +872,28 @@ paths and report deterministic behavior/RED witnesses, with batched verification
 No production relay, push, live app, default tmux, real Keychain or deployment
 step was authorized by this expansion. The existing Dylan-only operational
 checks remain explicit.
+
+## Resume on the 0.7.35 release — 30 October 2026
+
+- `array/collaboration-finish` merges the shipped 0.7.35 release (`0c28fc06`)
+  in `c825629c`, then carries the finished worker branches: w6 artifacts, w8
+  freshness, w9 security and w10 acceptance (19 commits, tip `e17d0a52`). The
+  conflicts were only check and migration registrations; each was resolved by
+  keeping both sides.
+- Build environment: once the manifest recompiles, plain `xcrun` resolves the
+  Command Line Tools 27 SDK, which Xcode's Swift 6.3.3 cannot read ("SDK is not
+  supported by the compiler"). Builds pin
+  `SDKROOT=$(xcrun --sdk macosx --show-sdk-path)`. The shared wrapper
+  `.worktrees/.locks/app-build.sh` takes an exclusive lock (one app build or
+  gate at a time across helpers) and pins SDKROOT.
+- Board: COL-11, COL-12, COL-17 and COL-19 are Done, on the 10/10 gate at
+  `eb5b5c7b`, which included the pair run.
+- Eight helpers are running: w5 liveness (finish), w7 live views (finish),
+  D4915E0C refused-admission fix plus the freshness production hook,
+  w10 Linux relay gate plus the pair feature stages, w6 native artifact capture
+  and renderer plus live wake, w8 excerpts in discussion plus the freshness UI,
+  w9 COL-20 close-out over artifacts and retention, and 0B75131B COL-21 native
+  keyboard, Reduce Motion, budgets and census.
+- Decision recorded for Dylan: per-agent freshness receipts stay visible only
+  to the requester and the agent's owner. A teammate-wide projection would need
+  a privacy call.
