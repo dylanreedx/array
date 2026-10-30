@@ -132,10 +132,13 @@ public final class SharedAgentHandoffController {
     public private(set) var isBusy = false
     public private(set) var message = "Refresh to check the source host and current control."
     public var onChange: (@MainActor () -> Void)?
+    /// What this device's prompts gave each agent incarnation, by host acceptance.
+    public let freshness: SharedAgentFreshnessLedger
     private let intents: SharedAgentHandoffIntentStore
     public init(identity: Collaboration.Identity, transport: any SharedAgentHandoffTransport, directory: URL) throws {
         self.identity = identity; self.transport = transport; areaDirectory = directory
         intents = try .init(directory: directory, device: identity.device)
+        freshness = try .init(directory: directory.appendingPathComponent("freshness", isDirectory: true))
         pending = try intents.load()
         receipt = try intents.recentReceipt()
         if pending != nil { message = "A saved handoff request needs a delivery check. Its original identity is retained." }
@@ -157,6 +160,12 @@ public final class SharedAgentHandoffController {
             if let receipt {
                 let fresh = try await transport.receipt(id: receipt.command.id)
                 try intents.saveReceipt(fresh); self.receipt = fresh
+                try freshness.record(fresh)
+            }
+            // Settles older prompts too. One unreadable receipt (its requester
+            // was removed) stays unsettled rather than failing the refresh.
+            for id in try freshness.unsettledCommands() where id != receipt?.command.id {
+                if let settled = try? await transport.receipt(id: id) { try freshness.record(settled) }
             }
             pending = try intents.load()
             message = pending == nil ? "Execution stays on the original host. Handoff changes who may send its next prompt." : "A saved request needs a delivery check before another action."
@@ -211,6 +220,7 @@ public final class SharedAgentHandoffController {
             acknowledged = true
             let delivered: Collaboration.AgentDispatchReceipt? = switch intent.action { case .prompt: receipt; case .control: nil }
             try intents.acknowledge(intent, receipt: delivered); pending = nil
+            if let delivered { try freshness.record(delivered) }
             areaState = try await transport.state()
             control = try await transport.control(object: intent.object.rawValue)
         } catch {

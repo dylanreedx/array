@@ -89,6 +89,9 @@ func runSharedAgentHostDispatchChecks() async throws {
         try hostDispatchCheck(clientB.control?.controller == b.identity.person, "native-facing controller completes explicit targeted handoff through real HTTP")
         await clientB.send(text: "Implement the reviewed change.", context: context.id)
         guard let queued = clientB.receipt else { throw HostDispatchCheckFailure(message: "prompt not queued") }
+        try hostDispatchCheck(try clientB.freshness.frozenCommand(queued.command.id) == queued.command
+            && clientB.freshness.unsettledCommands() == [queued.command.id],
+            "the production controller freezes the delivered prompt in its freshness ledger, awaiting the host")
         let faultDB = try DatabaseQueue(path: hostDirectory.appendingPathComponent("agent-host-journal.sqlite").path)
         try await faultDB.write { db in
             try db.execute(sql: "CREATE TRIGGER reject_attempt BEFORE UPDATE OF phase ON handoff_attempts WHEN NEW.phase='attempting' BEGIN SELECT RAISE(ABORT,'injected host marker fault'); END")
@@ -113,6 +116,12 @@ func runSharedAgentHostDispatchChecks() async throws {
         await bAfterRelaunch.refresh(object: object.id)
         try hostDispatchCheck(sourceAcceptances == 1 && bAfterRelaunch.receipt?.command.id == queued.command.id && bAfterRelaunch.receipt?.phase == .accepted,
             "both client relaunch and lost host report recover the original accepted receipt without another prompt")
+        let incarnation = Collaboration.AgentIncarnation(object: object.id, hostGeneration: queued.command.hostGeneration)
+        let given = try bAfterRelaunch.freshness.freshness(of: incarnation, agreement: agreement.id,
+            in: bAfterRelaunch.areaState?.document ?? SharedArea.Document())
+        try hostDispatchCheck(try bAfterRelaunch.freshness.unsettledCommands().isEmpty && given.state == .current(context.id)
+            && given.lastAccepted == queued.command,
+            "a relaunched controller's refresh settles the host's acceptance: the agent was given the current agreement revision")
         await bAfterRelaunch.send(text: "Second deliberate prompt.", context: context.id)
         guard let second = bAfterRelaunch.receipt else { throw HostDispatchCheckFailure(message: "second prompt absent") }
         let interrupted = try reopenedJournal.prepare(second.command)
@@ -145,6 +154,9 @@ func runSharedAgentHostDispatchChecks() async throws {
         await afterCrash.pollOnce(bindings: [reattached])
         try hostDispatchCheck(sourceAcceptances == 2 && recipientAcceptances == 0,
             "only the new deliberate command adds one source acceptance; recovery adds none")
+        await resumedB.refresh(object: object.id)
+        try hostDispatchCheck(try resumedB.freshness.unsettledCommands().isEmpty,
+            "refresh settles older prompts too: the interrupted one is no longer awaiting the host")
         try await server.stop()
         print("Shared agent host dispatch checks passed: actual HTTP, source-only dispatch callback, pre-effect journal failure, lost report, client/host reconstruction, view-independent identity and honest interrupted-attempt uncertainty.")
     } catch { try? await server.stop(); throw error }
