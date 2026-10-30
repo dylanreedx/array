@@ -234,26 +234,33 @@ extension WorkspaceAPIService {
 
         // 7. Attachment: a tile in the PARENT's zone, framed against that zone
         //    (hazard 9), through the existing managed-agent tile route.
-        let attachment = attachTile(
-            for: childId, parent: record, placement: request.placement, runtime: runtime, canvas: canvas)
-        switch attachment {
-        case let .attached(tileId, zoneId):
-            result.tileId = tileId
-            result.actualZoneId = zoneId
-            if let snapshot = canvas.navigationTileSnapshot(for: tileId) {
-                result.actualWorldRect = CanvasWorldRect(snapshot.worldFrame)
-            }
-            result.steps.attachment = .succeeded
-            // `spawnManagedAgent` persisted the canvas and the managed-session
-            // record before returning `.spawned`; `attach` persisted the child's
-            // record. Durable state crossed its barrier inside those owners.
+        if record.mode == .managed {
+            // A full Array runner and courier, with presentation deliberately absent.
+            result.steps.attachment = .skipped
             result.steps.durability = .succeeded
-        case let .failed(message):
-            result.steps.attachment = .failed
-            result.steps.durability = .skipped
             result.steps.presentation = .skipped
-            result.partial = true
-            result.failureMessage = message
+        } else {
+            let attachment = attachTile(
+                for: childId, parent: record, placement: request.placement, runtime: runtime, canvas: canvas)
+            switch attachment {
+            case let .attached(tileId, zoneId):
+                result.tileId = tileId
+                result.actualZoneId = zoneId
+                if let snapshot = canvas.navigationTileSnapshot(for: tileId) {
+                    result.actualWorldRect = CanvasWorldRect(snapshot.worldFrame)
+                }
+                result.steps.attachment = .succeeded
+                // `spawnManagedAgent` persisted the canvas and the managed-session
+                // record before returning `.spawned`; `attach` persisted the child's
+                // record. Durable state crossed its barrier inside those owners.
+                result.steps.durability = .succeeded
+            case let .failed(message):
+                result.steps.attachment = .failed
+                result.steps.durability = .skipped
+                result.steps.presentation = .skipped
+                result.partial = true
+                result.failureMessage = message
+            }
         }
         operations.update(operationId: requestId) { op in
             op.steps = result.steps

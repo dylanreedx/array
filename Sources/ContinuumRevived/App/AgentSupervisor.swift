@@ -1639,6 +1639,7 @@ final class AgentSupervisor {
             return CodexRolloutTelemetry.latestSnapshot(threadId: threadId, freshness: .stale)
         }
         startHelperWatchdog()
+        startHelperTileSweep()
     }
 
     /// Whether the explicit Generate Name action is offered at all. Resolving
@@ -5698,6 +5699,7 @@ final class AgentSupervisor {
         if record.parentAgentID != nil {
             report.commandEvidence = HelperCommandGuard.evidence(for: report, receipts: hookReceipts[id] ?? [])
         }
+        helperFoldEligibleSince[id] = nil
         record.lastReport = AgentFiledReport(report: report, filedAt: date)
         guard persist(record) else { return false }
         onSelfReportChanged?(id)
@@ -5712,6 +5714,7 @@ final class AgentSupervisor {
             noteHelperProgress(id, last: status.needsYou == nil ? "status changed" : "needs you")
             record.helperWatchdogNeedsYou = nil
         }
+        helperFoldEligibleSince[id] = nil
         record.declaredStatus = status
         guard persist(record) else { return false }
         onSelfReportChanged?(id)
@@ -6178,6 +6181,7 @@ final class AgentSupervisor {
             warn("AgentSupervisor.archive: no agent \(id.rawValue.uuidString)")
             return report
         }
+        foldHelpers(of: id)
         // Stopped BEFORE the record is deleted, and that order is load-bearing: `stop`
         // delivers `.sessionStateChanged(.stopped)`, which is persist-worthy, so a stop
         // after the delete would write the record straight back.
@@ -6225,6 +6229,8 @@ final class AgentSupervisor {
         codexHookPushBacks.removeValue(forKey: id)
         helperProgress[id] = nil
         pendingHelperAlerts[id] = nil
+        helperFoldEligibleSince[id] = nil
+        pendingHelperFolds.remove(id)
         lastSettledAt.removeValue(forKey: id)
         runnerGenerationTokens.removeValue(forKey: id)
         history.removeValue(forKey: id)
@@ -6431,6 +6437,8 @@ final class AgentSupervisor {
         for (otherId, other) in records where otherId != id && other.tileId == tileId {
             var displaced = other
             displaced.tileId = nil
+            displaced.pinned = false
+            displaced.helperTileOpenedAt = nil
             records[otherId] = displaced
             persist(displaced)
         }
@@ -6452,8 +6460,158 @@ final class AgentSupervisor {
         }
         guard record.tileId != nil else { return }
         record.tileId = nil
+        record.pinned = false
+        record.helperTileOpenedAt = nil
         records[id] = record
         persist(record)
+    }
+
+    // MARK: - Helper tile lifecycle (.plans/102 D2)
+
+    struct HelperTileError: Error, LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+    static let helperTileCap = 3
+    static let helperFoldBackDelay: TimeInterval = 5
+    var helperTileNow: () -> Date = { Date() }
+    /// Installed at the production scene mount. Neither callback owns a runner.
+    var popOutHelperTile: ((AgentID, AgentID) throws -> UUID)?
+    var removeHelperTile: ((AgentID, UUID) throws -> Void)?
+    private var helperTileTimer: Timer?
+    private var helperFoldEligibleSince: [AgentID: Date] = [:]
+    private var pendingHelperFolds: Set<AgentID> = []
+
+    /// Nearest owning managed lead, or the direct parent for a free-mode family.
+    /// Tile-less intermediate helpers do not change the cap or placement owner.
+    func helperLead(for id: AgentID) -> AgentID? {
+        guard let parent = records[id]?.parentAgentID else { return nil }
+        var cursor: AgentID? = parent
+        var seen: Set<AgentID> = [id]
+        while let current = cursor, seen.insert(current).inserted {
+            if records[current]?.mode == .managed { return current }
+            cursor = records[current]?.parentAgentID
+        }
+        return records[parent] == nil ? nil : parent
+    }
+
+    @discardableResult
+    func popOut(_ id: AgentID) throws -> UUID {
+        guard let record = records[id], record.capabilities.locallyManaged,
+              let lead = helperLead(for: id), let popOutHelperTile else {
+            throw HelperTileError(message: "This helper has no available lead or canvas.")
+        }
+        if let tile = record.tileId { return tile }
+        let open = records.values.filter { $0.tileId != nil && helperLead(for: $0.id) == lead }
+        let needed = max(0, open.count - Self.helperTileCap + 1)
+        let candidates = open.filter { helperCanFold($0.id, requiresCurrentReport: false) }.sorted {
+            let lhs = $0.helperTileOpenedAt ?? $0.createdAt
+            let rhs = $1.helperTileOpenedAt ?? $1.createdAt
+            return lhs == rhs ? $0.id.rawValue.uuidString < $1.id.rawValue.uuidString : lhs < rhs
+        }
+        guard candidates.count >= needed else {
+            throw HelperTileError(message: "Three helper tiles are already open. Fold one back or unpin a finished helper first.")
+        }
+        for candidate in candidates.prefix(needed) { try foldBack(candidate.id) }
+        let tile = try popOutHelperTile(id, lead)
+        guard var attached = records[id], attached.tileId == tile else {
+            throw HelperTileError(message: "The helper tile could not be attached.")
+        }
+        attached.helperTileOpenedAt = helperTileNow()
+        attached.pinned = false
+        guard persist(attached) else { throw HelperTileError(message: "Could not save the helper tile binding.") }
+        helperFoldEligibleSince[id] = nil
+        onSelfReportChanged?(id)
+        return tile
+    }
+
+    /// A presentation operation only. Explicit fold also permits running/pinned
+    /// helpers; the cap and timer apply their stricter eligibility before calling.
+    func foldBack(_ id: AgentID) throws {
+        guard var record = records[id], record.parentAgentID != nil else {
+            throw HelperTileError(message: "That agent is not a helper.")
+        }
+        guard let tile = record.tileId else { return }
+        guard let removeHelperTile else { throw HelperTileError(message: "The canvas is unavailable.") }
+        try removeHelperTile(id, tile)
+        record.tileId = nil
+        record.pinned = false
+        record.helperTileOpenedAt = nil
+        guard persist(record) else { throw HelperTileError(message: "Could not save the folded helper binding.") }
+        helperFoldEligibleSince[id] = nil
+        pendingHelperFolds.remove(id)
+        onSelfReportChanged?(id)
+    }
+
+    @discardableResult
+    func setPinned(_ id: AgentID, _ pinned: Bool) -> Bool {
+        guard var record = records[id], record.parentAgentID != nil, record.tileId != nil else { return false }
+        record.pinned = pinned
+        guard persist(record) else { return false }
+        helperFoldEligibleSince[id] = nil
+        onSelfReportChanged?(id)
+        return true
+    }
+
+    private func helperCanFold(_ id: AgentID, requiresCurrentReport: Bool) -> Bool {
+        guard let record = records[id], record.parentAgentID != nil, record.tileId != nil,
+              !record.pinned, !isRunning(id),
+              let terminal = record.latestTerminalEvent, terminal.outcome == .succeeded,
+              terminal.endedAt >= (record.latestPromptAt ?? record.createdAt),
+              !currentLifecycleFacts(for: id, now: helperTileNow()).attentionIsYours,
+              record.declaredStatus?.needsYou == nil, record.helperWatchdogNeedsYou == nil else { return false }
+        // The cap can reclaim a successful helper without a report. Automatic
+        // folding waits for its current report so an unreported result stays out.
+        guard let report = record.lastReport else { return !requiresCurrentReport }
+        if requiresCurrentReport && report.filedAt < (record.latestPromptAt ?? record.createdAt) { return false }
+        return !report.report.checks.contains(where: { $0.result == .fail })
+            && !report.report.findings.contains(where: { $0.level == .blocker || $0.level == .issue })
+            && !(report.report.commandEvidence ?? []).contains(where: { $0.outcome != .observed })
+    }
+
+    private func startHelperTileSweep() {
+        helperTileTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            Task { @MainActor in self.sweepHelperTiles() }
+        }
+    }
+
+    /// Clock injection makes the exact five-second boundary deterministic offline.
+    func sweepHelperTiles() {
+        let now = helperTileNow()
+        for id in pendingHelperFolds {
+            do { try foldBack(id); pendingHelperFolds.remove(id) }
+            catch { warn("Helper fold-back deferred: \(error.localizedDescription)") }
+        }
+        for record in Array(records.values) {
+            let id = record.id
+            // Only tiles deliberately popped out participate, never free-mode
+            // delegation's ordinary tile or a restored native observed child.
+            guard record.helperTileOpenedAt != nil, helperCanFold(id, requiresCurrentReport: true) else {
+                helperFoldEligibleSince[id] = nil
+                continue
+            }
+            let since = helperFoldEligibleSince[id] ?? now
+            helperFoldEligibleSince[id] = since
+            guard now.timeIntervalSince(since) >= Self.helperFoldBackDelay else { continue }
+            do { try foldBack(id) }
+            catch { warn("Helper auto fold-back deferred: \(error.localizedDescription)") }
+        }
+    }
+
+    private func foldHelpers(of lead: AgentID) {
+        var pending = children(of: lead)
+        var seen: Set<AgentID> = [lead]
+        while let id = pending.popLast() {
+            guard seen.insert(id).inserted else { continue }
+            pending.append(contentsOf: children(of: id))
+            guard records[id]?.capabilities.locallyManaged == true else { continue }
+            do { try foldBack(id) }
+            catch {
+                pendingHelperFolds.insert(id)
+                warn("Lead closed; helper fold-back deferred: \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - Rename (P3.13)
@@ -8095,6 +8253,7 @@ final class AgentSupervisor {
         guard !currentLifecycleFacts(for: id, now: now).blocksSettlement(now: now) else {
             return false
         }
+        foldHelpers(of: id)
         record.archivedAt = now
         records[id] = record
         persist(record)
@@ -8121,6 +8280,7 @@ final class AgentSupervisor {
             return false
         }
         guard record.archivedAt == nil else { return false }
+        foldHelpers(of: id)
         if record.closeRequestedAt == nil { record.closeRequestedAt = now }
         if !currentLifecycleFacts(for: id, now: now).blocksSettlement(now: now) {
             record.archivedAt = now
@@ -9421,6 +9581,7 @@ final class AgentSupervisor {
         _ incomingEvent: AgentRuntimeEvent, to id: AgentID, now: Date = Date(), meterPublished: Bool = false
     ) {
         var event = incomingEvent
+        if Self.isRealActivity(event) { helperFoldEligibleSince[id] = nil }
         switch event {
         case .tokenUsageUpdated, .contextWindowUpdated: break
         default: noteActivity(id, now: now)

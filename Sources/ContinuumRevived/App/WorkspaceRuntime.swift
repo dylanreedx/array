@@ -2622,6 +2622,15 @@ final class WorkspaceRuntime {
         }
     }
 
+    /// Fold-back also removes a warm scene's presentation, without retiring its agent.
+    func removeParkedHelperTile(_ tileId: UUID, projectId: UUID) {
+        for layer in warmScenes.flatMap(\.layers) where layer.placement.projectId == projectId {
+            (layer.tileViews[tileId] as? ManagedAgentTileNSView)?.detach()
+            layer.tileViews.removeValue(forKey: tileId)?.retireFromScene()
+            layer.tiles.removeAll { $0.id == tileId }
+        }
+    }
+
     func parkedTileView(for tileId: UUID, projectId: UUID) -> TileNSView? {
         warmScenes.flatMap(\.layers).first(where: {
             $0.placement.projectId == projectId && $0.tiles.contains { $0.id == tileId }

@@ -56,6 +56,8 @@ public enum WorkspaceAPIExposure {
         "agent.acknowledgedTerminalSequence": .internal,
         "agent.lastVisitedAtReferenceInterval": .internal,
         "agent.tileId": .internal,
+        "agent.pinned": .notExposed("Helper tile pin is controlled by the internal sidebar lifecycle API."),
+        "agent.helperTileOpenedAtReferenceInterval": .internal,
         "agent.lastContextWindow": .internal,
         "agent.contextEpoch": .internal,
         "agent.inFlightCompaction": .internal,

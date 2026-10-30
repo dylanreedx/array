@@ -415,6 +415,10 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// agent. Anything that treats this as the agent's key reintroduces the
     /// three failures documented at the head of this file.
     public var tileId: UUID?
+    /// A helper pin lasts only as long as its popped-out tile.
+    public var pinned: Bool = false
+    /// Orders cap eviction by when the helper was popped out, not last activity.
+    public var helperTileOpenedAt: Date?
     /// The last provider-reported context-window telemetry, persisted so a
     /// resumed session seeds its meter with the real prior occupancy (rendered
     /// stale) instead of "unknown". Host-bound like everything else here; the
@@ -1027,7 +1031,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case failedAtReferenceInterval, runCompletedAtReferenceInterval
         case latestTerminalEvent, acknowledgedTerminalSequence
         case lastVisitedAtReferenceInterval
-        case tileId
+        case tileId, pinned, helperTileOpenedAtReferenceInterval
         case lastContextWindow
         case contextEpoch
         case inFlightCompaction
@@ -1130,6 +1134,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // terminal event arrives.
         lastVisitedAt = visitedInterval.map(Date.init(timeIntervalSinceReferenceDate:))
         tileId = try container.decodeIfPresent(UUID.self, forKey: .tileId)
+        pinned = tileId != nil && ((try? container.decodeIfPresent(Bool.self, forKey: .pinned)) ?? false)
+        helperTileOpenedAt = (try? container.decodeIfPresent(Double.self, forKey: .helperTileOpenedAtReferenceInterval))
+            .map(Date.init(timeIntervalSinceReferenceDate:))
         // Tolerant like the lifecycle dates above: malformed telemetry reads as
         // absent rather than dropping the whole record.
         lastContextWindow = (try? container.decodeIfPresent(
@@ -1226,6 +1233,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(lastVisitedAt?.timeIntervalSinceReferenceDate,
                                       forKey: .lastVisitedAtReferenceInterval)
         try container.encodeIfPresent(tileId, forKey: .tileId)
+        if pinned { try container.encode(true, forKey: .pinned) }
+        try container.encodeIfPresent(helperTileOpenedAt?.timeIntervalSinceReferenceDate, forKey: .helperTileOpenedAtReferenceInterval)
         try container.encodeIfPresent(lastContextWindow, forKey: .lastContextWindow)
         if contextEpoch != 0 { try container.encode(contextEpoch, forKey: .contextEpoch) }
         try container.encodeIfPresent(inFlightCompaction, forKey: .inFlightCompaction)

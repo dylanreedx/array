@@ -2513,6 +2513,48 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--helper-tile-lifecycle-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperTileChecks.lifecycle()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--helper-tile-cap-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperTileChecks.cap()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--helper-tile-auto-fold-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperTileChecks.automatic()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--managed-mode-launch-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -14130,7 +14172,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// which is an architectural change no packet has asked for. So it is SAID on
     /// stderr rather than left silent, and the agent's own record — its cwd, its
     /// project, the project chip on its row — is untouched: only the view moved.
+    /// Internal sidebar operations are AgentSupervisor.popOut/foldBack/setPinned.
+    /// This adapter owns only project canvas/session presentation state.
+    private func popOutHelper(_ id: AgentID, beside lead: AgentID) throws -> UUID {
+        guard let (spawner, scope, point) = spawnPlacementBesideParent(of: id, parentID: lead) else {
+            throw AgentSupervisor.HelperTileError(message: "Open the lead's workspace and tile before popping out this helper.")
+        }
+        switch spawner.spawnManagedAgentForExistingAgent(id, supervisor: agentSupervisor, at: point, creationScope: scope) {
+        case let .spawned(tileId):
+            wireManagedAgentTile(tileId, agentID: id)
+            workspaceRuntime?.noteStructuralCommit()
+            return tileId
+        case let .failure(error): throw error
+        }
+    }
+
+    private func foldHelperTile(_ id: AgentID, tileId: UUID) throws {
+        guard let record = agentSupervisor.records[id], let projectId = record.projectId,
+              let root = record.projectRoot else {
+            throw AgentSupervisor.HelperTileError(message: "The helper's project is unavailable.")
+        }
+        let owner = workspaceRuntime?.controller(for: projectId)
+        let lock = owner == nil ? ProjectLock(root: URL(fileURLWithPath: root, isDirectory: true)) : nil
+        defer { lock?.release() }
+        try lock?.acquire()
+        // Drain queued state before editing the durable WORLD-frame canvas.
+        try owner?.flushCanvasSave()
+        let store: any ProjectStoring = owner?.projectStore ?? ProjectStore(projectRoot: URL(fileURLWithPath: root))
+        var saved = try store.loadCanvas()
+        saved.tiles.removeAll { $0.id == tileId }
+        if saved.lastActiveTileId == tileId { saved.lastActiveTileId = nil }
+        try store.saveCanvas(saved)
+        // No close intent, stop, archive, undo entry, layout retidy or dialog.
+        // Parked layers must forget the tile too, or remount resurrects it.
+        workspaceRuntime?.removeParkedHelperTile(tileId, projectId: projectId)
+        if canvasView?.tileRecord(for: tileId) != nil, let canvasView {
+            (canvasView.tileView(for: tileId) as? ManagedAgentTileNSView)?.detach()
+            canvasView.removeTile(id: tileId)
+            recoverFocusAfterTileRemoval(deletedTileId: tileId, in: canvasView)
+        }
+        let sessions = owner?.managedSessionStore ?? ManagedAgentSessionStore(projectRoot: URL(fileURLWithPath: root))
+        try sessions.delete(tileId: tileId)
+        reconciledManagedSessionSource.invalidateCache()
+        workspaceRuntime?.noteStructuralCommit()
+    }
+
     private func attachTileToAgentFromInbox(_ agentId: AgentID) -> UUID? {
+        if let lead = agentSupervisor.helperLead(for: agentId), agentSupervisor.records[lead]?.mode == .managed {
+            do { return try agentSupervisor.popOut(agentId) }
+            catch {
+                fputs("Helper pop-out refused: \(error.localizedDescription)\n", stderr)
+                return nil
+            }
+        }
         // M1.6: put the tile in the AGENT'S project when that project has a live
         // zone. M1.3b gave every live controller a spawner, which is what makes
         // this possible at all; before it, only the active project had one and the
@@ -14201,9 +14295,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// placement takes over. The whole answer is nil when the
     /// parent has no tile on this canvas or its zone belongs to a project other
     /// than the child's.
-    private func spawnPlacementBesideParent(of agentId: AgentID) -> (TileSpawner, CreationScope, CGPoint?)? {
+    private func spawnPlacementBesideParent(of agentId: AgentID, parentID: AgentID? = nil) -> (TileSpawner, CreationScope, CGPoint?)? {
         guard let record = agentSupervisor.records[agentId],
-              let parentId = record.parentAgentID,
+              let parentId = parentID ?? record.parentAgentID,
               let parentTileId = agentSupervisor.records[parentId]?.tileId,
               let (spawner, scope) = spawnerAndScope(forTile: parentTileId),
               record.projectId == nil || record.projectId == scope.projectId,
@@ -21283,6 +21377,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // the host service; a policy flip revokes the agent's grants.
         canvasView.onUserCameraChange = { [weak self] in
             self?.workspaceRuntime?.noteUserInteraction()
+        }
+        agentSupervisor.popOutHelperTile = { [weak self] id, lead in
+            guard let self else { throw AgentSupervisor.HelperTileError(message: "The canvas is unavailable.") }
+            return try self.popOutHelper(id, beside: lead)
+        }
+        agentSupervisor.removeHelperTile = { [weak self] id, tile in
+            guard let self else { throw AgentSupervisor.HelperTileError(message: "The canvas is unavailable.") }
+            try self.foldHelperTile(id, tileId: tile)
         }
         agentSupervisor.hostToolHandler = { [weak self] agentId, call in
             guard let self else { call.respond(.unsupportedUnbound); return }
