@@ -1,0 +1,85 @@
+diff --git a/Sources/ContinuumRevivedCollaborationChecks/main.swift b/Sources/ContinuumRevivedCollaborationChecks/main.swift
+index b8e40104..c451d144 100644
+--- a/Sources/ContinuumRevivedCollaborationChecks/main.swift
++++ b/Sources/ContinuumRevivedCollaborationChecks/main.swift
+@@ -14,6 +14,9 @@ typealias S = SharedArea
+ if let flag = CommandLine.arguments.firstIndex(of: "--kill-child"), CommandLine.arguments.count > flag + 1 {
+     await runKillChild(CommandLine.arguments[flag + 1])
+ }
++if CommandLine.arguments.contains("--artifacts-only") {
++    do { try await runSharedArtifactProducerChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
++}
+ if CommandLine.arguments.contains("--kill-relaunch-only") {
+     do { try await runCollaborationKillRelaunchChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
+ }
+@@ -135,6 +138,7 @@ try await runSharedAreaPublicationSubmissionChecks()
+ try await runSharedAreaControllerChecks()
+ try await runCollaborationAccountChecks()
+ try await runSharedAreaControllerHTTPChecks()
++try await runSharedArtifactProducerChecks()
+ print("Collaboration contracts passed (reducer, reviewed publications, native controller and localhost HTTP; no mounted-scene or runner claims).")
+ 
+ } catch {
+diff --git a/Sources/ContinuumRevivedCollaborationClient/CollaborationAPI.swift b/Sources/ContinuumRevivedCollaborationClient/CollaborationAPI.swift
+index c18d21ef..6c82d4e2 100644
+--- a/Sources/ContinuumRevivedCollaborationClient/CollaborationAPI.swift
++++ b/Sources/ContinuumRevivedCollaborationClient/CollaborationAPI.swift
+@@ -10,9 +10,9 @@ public enum CollaborationClientError: Error, Equatable {
+ 
+ /// No implicit production endpoint, provider auth, cookies or global URL cache.
+ public struct CollaborationAPI: Sendable {
+-    private let baseURL: URL
+-    private let credential: String?
+-    private let session: URLSession
++    let baseURL: URL
++    let credential: String?
++    let session: URLSession
+     public init(baseURL: URL, credential: String? = nil, allowsInsecureLoopback: Bool = false) throws {
+         let loopback = ["localhost", "127.0.0.1", "[::1]", "::1"].contains(baseURL.host?.lowercased() ?? "")
+         guard baseURL.host != nil, baseURL.user == nil, baseURL.password == nil, baseURL.query == nil, baseURL.fragment == nil,
+diff --git a/Sources/ContinuumRevivedCollaborationService/CollaborationStore.swift b/Sources/ContinuumRevivedCollaborationService/CollaborationStore.swift
+index 0d4b02bb..d20f9f85 100644
+--- a/Sources/ContinuumRevivedCollaborationService/CollaborationStore.swift
++++ b/Sources/ContinuumRevivedCollaborationService/CollaborationStore.swift
+@@ -73,6 +73,7 @@ public actor CollaborationStore {
+         }
+         Self.registerHandoffMigration(&migrator)
+         Self.registerUsageMigration(&migrator)
++        Self.registerArtifactMigration(&migrator)
+         try migrator.migrate(database)
+         try Self.preflightDatabaseKey(database, keyData: normalizedKeyData)
+     }
+diff --git a/Sources/ContinuumRevivedCollaborationServiceChecks/main.swift b/Sources/ContinuumRevivedCollaborationServiceChecks/main.swift
+index 48d61bf5..c479f5ad 100644
+--- a/Sources/ContinuumRevivedCollaborationServiceChecks/main.swift
++++ b/Sources/ContinuumRevivedCollaborationServiceChecks/main.swift
+@@ -184,7 +184,9 @@ private func run() async throws {
+     print("Collaboration service checks passed: real localhost HTTP, isolated SQLite and A/B/C; no native scene/host-execution claims.")
+ }
+ do {
+-    if CommandLine.arguments.contains("--recovery-scale-only") {
++    if CommandLine.arguments.contains("--artifacts-only") {
++        try await runCollaborationArtifactChecks()
++    } else if CommandLine.arguments.contains("--recovery-scale-only") {
+         try await runCollaborationRecoveryScaleChecks()
+     } else if CommandLine.arguments.contains("--capabilities-only") {
+         try await runCollaborationCapabilityChecks()
+@@ -200,5 +202,6 @@ do {
+         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationCapabilityChecks() }
+         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationHandoffChecks(); try await runCollaborationUsageChecks() }
+         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationRecoveryScaleChecks() }
++        if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationArtifactChecks() }
+     }
+ } catch { print("FAIL: \(error)"); exit(1) }
+diff --git a/Sources/ContinuumRevivedRelayNIO/CollaborationRoutes.swift b/Sources/ContinuumRevivedRelayNIO/CollaborationRoutes.swift
+index 0ac7a6f5..d995b633 100644
+--- a/Sources/ContinuumRevivedRelayNIO/CollaborationRoutes.swift
++++ b/Sources/ContinuumRevivedRelayNIO/CollaborationRoutes.swift
+@@ -5,6 +5,7 @@ import ContinuumRevivedCollaborationService
+ 
+ enum CollaborationRoutes {
+     static func route(head: HTTPRequestHead, body: Data, store: CollaborationStore) async -> Response {
++        if let artifact = await CollaborationArtifactRoutes.route(head: head, body: body, store: store) { return artifact }
+         guard body.count <= 262_144 else { return .error(.payloadTooLarge, "payloadTooLarge") }
+         do {
+             let parts = head.uri.split(separator: "/").map(String.init)
