@@ -67,7 +67,7 @@ enum HelperWatchdogChecks {
         now.addTimeInterval(1200)
         await supervisor.sweepHelperWatchdog()
         try HelperGuardChecks.expect(alerts().count == 1, "same episode escalated twice")
-        try HelperGuardChecks.hook(bench, child, tool: "Read")
+        try await HelperGuardChecks.hook(bench, child, tool: "Read")
         let cleared = await waitUntil(timeout: 5, pollInterval: 0.02) { line() == nil }
         try HelperGuardChecks.expect(cleared, "hook progress did not clear sidebar")
         now.addTimeInterval(601)

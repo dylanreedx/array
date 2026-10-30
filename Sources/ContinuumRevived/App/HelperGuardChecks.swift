@@ -8,18 +8,15 @@ enum HelperGuardChecks {
     }
 
     static func hook(_ bench: WorkspaceAgentReportChecks.Bench, _ id: AgentID,
-                     tool: String, command: String? = nil, exit: Int? = nil, interrupted: Bool = false) throws {
-        let config = try bench.configuration(for: id)
+                     tool: String, command: String? = nil, exit: Int? = nil, interrupted: Bool = false) async throws {
         var payload: [String: Any] = ["hook_event_name": "PostToolUse", "tool_name": tool]
         if let command { payload["tool_input"] = ["command": command] }
         var response: [String: Any] = ["stdout": "", "stderr": "", "interrupted": interrupted]
         if let exit { response["exit_code"] = exit }
         payload["tool_response"] = response
-        let body = String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self)
-        let result = try WorkspaceHookBridgeChecks.runHook(bench.helper, endpoint: config.endpoint, agentID: config.agentID,
-                                                         tokenFile: config.tokenFilePath, body: body, marker: true)
-        try expect(result.status == 0, "hook command failed")
-        WorkspaceHookBridgeChecks.drainMain()
+        // This caller is an async main-actor check. Yield while the real hook
+        // runs so the host endpoint can service its main-actor request.
+        _ = try await ManagedModeChecks.hook(bench, id, payload)
     }
 
     static func runCommandEvidence() async throws {
@@ -35,14 +32,14 @@ enum HelperGuardChecks {
             let child = try bench.delegate("HOLD-\(name)")
             let ready = await waitUntil(timeout: 10, pollInterval: 0.02) { supervisor.isRunning(child) }
             try expect(ready, "child did not start")
-            try hook(bench, child, tool: "Edit")
+            try await hook(bench, child, tool: "Edit")
             if name != "absent" {
-                try hook(bench, child, tool: name == "codex" ? "functions.exec_command" : "Bash",
+                try await hook(bench, child, tool: name == "codex" ? "functions.exec_command" : "Bash",
                          command: name == "masked" ? "swift test || true" : "swift test",
                          exit: name == "unknown" ? nil : (name == "failed" ? 1 : 0), interrupted: name == "interrupted")
             }
-            if name == "stale" { try hook(bench, child, tool: "Write") }
-            if name == "shell-edit" { try hook(bench, child, tool: "Bash", command: "echo fix > source.swift", exit: 0) }
+            if name == "stale" { try await hook(bench, child, tool: "Write") }
+            if name == "shell-edit" { try await hook(bench, child, tool: "Bash", command: "echo fix > source.swift", exit: 0) }
             let config = try bench.configuration(for: child)
             let filed = try await WorkspaceAgentReportChecks.call(config, "array_report", [
                 "summary": "Finished", "checks": [["what": "swift test", "result": "pass"]]])
