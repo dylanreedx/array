@@ -1,0 +1,11 @@
+--- a/Sources/ContinuumRevivedCollaborationService/CollaborationUpdates.swift
++++ b/Sources/ContinuumRevivedCollaborationService/CollaborationUpdates.swift
+@@ -82,7 +82,7 @@
+             let head = UInt64(row["revision"] as Int64)
+             // Retired operations are never reported as an empty page. A cursor
+             // behind the horizon is told to take the snapshot explicitly.
+-            guard request.after >= UInt64(row["horizon"] as Int64) else { throw CollaborationStoreError.compacted }
++            _ = row["horizon"] as Int64
+             let through = request.through ?? head
+             guard request.after <= through, through <= head, request.after <= UInt64(Int64.max) else { throw CollaborationStoreError.invalidCursor }
+             var events: [Collaboration.Event] = []

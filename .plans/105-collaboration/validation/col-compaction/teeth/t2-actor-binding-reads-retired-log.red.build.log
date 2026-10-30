@@ -1,0 +1,13 @@
+warning: '--skip-update' option is deprecated and will be removed in a future release
+Building for debugging...
+warning: 'mp-recovery': Invalid Exclude '/Users/dylan/Documents/personal/Array/.worktrees/mp-recovery/Sources/ContinuumRevived/Canvas/UserInputCardView.swift': File not found.
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+[1/4] Write sources
+[3/7] Compiling ContinuumRevivedCollaborationService CollaborationStore.swift
+[4/7] Emitting module ContinuumRevivedCollaborationService
+[5/7] Compiling ContinuumRevivedCollaborationService CollaborationRetention.swift
+[5/8] Write Objects.LinkFileList
+[6/8] Linking ContinuumRevivedCollaborationServiceChecks
+[7/8] Applying ContinuumRevivedCollaborationServiceChecks
+Build of product 'ContinuumRevivedCollaborationServiceChecks' complete! (2.43s)
+build exit=0

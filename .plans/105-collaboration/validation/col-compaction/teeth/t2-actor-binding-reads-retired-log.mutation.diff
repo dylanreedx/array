@@ -1,0 +1,11 @@
+--- a/Sources/ContinuumRevivedCollaborationService/CollaborationStore.swift
++++ b/Sources/ContinuumRevivedCollaborationService/CollaborationStore.swift
+@@ -260,7 +260,7 @@
+             guard request.command.area.rawValue == area else { throw CollaborationStoreError.unavailable }
+             // Receipts outlive compaction, so an operation ID stays bound to
+             // its original person after the operation row itself is retired.
+-            if let actorPerson = try String.fetchOne(db, sql: "SELECT d.person FROM operation_receipts r JOIN devices d ON d.id=r.actor WHERE r.area=? AND r.operation_id=?", arguments: [area.uuidString, request.command.id.rawValue.uuidString]), actorPerson != caller.person.rawValue.uuidString {
++            if let actorPerson = try String.fetchOne(db, sql: "SELECT d.person FROM operations r JOIN devices d ON d.id=r.actor WHERE r.area=? AND r.operation_id=?", arguments: [area.uuidString, request.command.id.rawValue.uuidString]), actorPerson != caller.person.rawValue.uuidString {
+                 throw SharedArea.Failure.changedIntent
+             }
+             let bytes = try Data.fetchOne(db, sql: "SELECT snapshot FROM areas WHERE id=?", arguments: [area.uuidString])!

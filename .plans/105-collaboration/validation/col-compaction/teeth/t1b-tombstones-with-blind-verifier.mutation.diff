@@ -1,0 +1,24 @@
+--- a/Sources/ContinuumRevivedCollaborationService/CollaborationRetention.swift
++++ b/Sources/ContinuumRevivedCollaborationService/CollaborationRetention.swift
+@@ -70,6 +70,12 @@
+         try db.execute(sql: "UPDATE areas SET horizon=?,horizon_snapshot=? WHERE id=?",
+             arguments: [through, try seal(folded), area.uuidString])
+         try db.execute(sql: "DELETE FROM operations WHERE area=? AND revision<=?", arguments: [area.uuidString, through])
++        // TEETH: a "slimming" compaction that drops tombstones from the head.
++        let headSealed = try Data.fetchOne(db, sql: "SELECT snapshot FROM areas WHERE id=?", arguments: [area.uuidString])!
++        var slim = try JSONSerialization.jsonObject(with: try unseal(SharedArea.Document.self, headSealed).canonicalData()) as! [String: Any]
++        slim["deletedObjects"] = [Any](); slim["deletedPlacements"] = [Any]()
++        let slimmed = try JSONDecoder().decode(SharedArea.Document.self, from: JSONSerialization.data(withJSONObject: slim))
++        try db.execute(sql: "UPDATE areas SET snapshot=? WHERE id=?", arguments: [try seal(slimmed), area.uuidString])
+         return UInt64(through)
+     }
+ 
+@@ -94,7 +100,7 @@
+                 guard stored.id.rawValue == area, stored.revision == UInt64(head), horizon <= head else { throw CollaborationStoreError.integrityFailure }
+                 var rebuilt = try horizonDocument(db, area: area, horizon: horizon, sealed: row["horizon_snapshot"] as Data?)
+                 try replay(db, area: area, after: horizon, through: head, into: &rebuilt)
+-                guard try rebuilt.canonicalData() == stored.canonicalData() else { throw CollaborationStoreError.integrityFailure }
++                guard try rebuilt.canonicalData() == stored.canonicalData() || true else { throw CollaborationStoreError.integrityFailure }
+                 let below = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM operations WHERE area=? AND revision<=?", arguments: [area.uuidString, horizon])!
+                 let tail = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM operations WHERE area=?", arguments: [area.uuidString])!
+                 let bound = try Row.fetchOne(db, sql: "SELECT COUNT(*) AS n,MIN(revision) AS low,MAX(revision) AS high FROM operation_receipts WHERE area=?", arguments: [area.uuidString])!

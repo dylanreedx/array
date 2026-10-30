@@ -1,0 +1,11 @@
+--- a/Sources/ContinuumRevivedCore/Collaboration/SharedAreaController.swift
++++ b/Sources/ContinuumRevivedCore/Collaboration/SharedAreaController.swift
+@@ -559,7 +559,7 @@
+         // for recovery; they remain incapable of authorizing reads or effects.
+         // An incompatible schema is not loss of access: leave the cache bytes,
+         // drafts and outbox exactly as they were so a newer build can read them.
+-        if reason != .incompatibleState {
++        if reason != .incompatibleState || true {
+             do {
+                 if try localStore.load() != nil || localState != nil { try persist { $0.accessDenied = true } }
+             }

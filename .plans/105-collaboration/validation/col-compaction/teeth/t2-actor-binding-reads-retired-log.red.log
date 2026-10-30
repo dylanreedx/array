@@ -1,0 +1,13 @@
+PASS retention: operations younger than the retention age are never compacted, however many accumulate
+PASS retention: full-replay client pages through 523 operations before compaction
+PASS retention: compaction folds 516 operations into a horizon snapshot, keeps an 8-operation tail and one receipt per revision
+PASS retention: compaction ran without a maintenance failure
+PASS retention: a cursor behind the horizon is told to take the snapshot (409 snapshotRequired)
+PASS retention: a cursor at the horizon still replays the retained tail
+PASS retention: post-compaction snapshot client ends byte-equal to the client that replayed every operation
+PASS retention: the ancient client never presents its stale revision as connected shared state
+PASS retention: the deleted artifact stays deleted and every retained discussion post is present
+PASS retention: a stale client cannot resurrect an object deleted before the horizon (400 invalidCommand)
+PASS retention: a retry of a compacted operation returns its original receipt (revision 2), not a second effect
+FAIL: RetentionFailure(message: "another person cannot claim a compacted operation ID with identical bytes: expected 409 changedIntent, request succeeded")
+run exit=1

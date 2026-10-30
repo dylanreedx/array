@@ -1,0 +1,10 @@
+--- a/Sources/ContinuumRevivedCollaborationService/CollaborationRetention.swift
++++ b/Sources/ContinuumRevivedCollaborationService/CollaborationRetention.swift
+@@ -70,6 +70,7 @@
+         try db.execute(sql: "UPDATE areas SET horizon=?,horizon_snapshot=? WHERE id=?",
+             arguments: [through, try seal(folded), area.uuidString])
+         try db.execute(sql: "DELETE FROM operations WHERE area=? AND revision<=?", arguments: [area.uuidString, through])
++        try db.execute(sql: "DELETE FROM operation_receipts WHERE area=? AND revision<=?", arguments: [area.uuidString, through])
+         return UInt64(through)
+     }
+ 

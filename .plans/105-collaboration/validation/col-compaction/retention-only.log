@@ -1,0 +1,43 @@
+PASS retention: operations younger than the retention age are never compacted, however many accumulate
+PASS retention: full-replay client pages through 523 operations before compaction
+PASS retention: compaction folds 516 operations into a horizon snapshot, keeps an 8-operation tail and one receipt per revision
+PASS retention: compaction ran without a maintenance failure
+PASS retention: a cursor behind the horizon is told to take the snapshot (409 snapshotRequired)
+PASS retention: a cursor at the horizon still replays the retained tail
+PASS retention: post-compaction snapshot client ends byte-equal to the client that replayed every operation
+PASS retention: the ancient client never presents its stale revision as connected shared state
+PASS retention: the deleted artifact stays deleted and every retained discussion post is present
+PASS retention: a stale client cannot resurrect an object deleted before the horizon (400 invalidCommand)
+PASS retention: a retry of a compacted operation returns its original receipt (revision 2), not a second effect
+PASS retention: another person cannot claim a compacted operation ID with identical bytes (409 changedIntent)
+PASS retention: a member removed before compaction stays removed (404 notFound)
+PASS retention: a device revoked before compaction stays revoked (401 unauthorized)
+PASS retention: the pre-removal membership epoch stays stale after compaction (409 staleEpoch)
+PASS retention: an unsupported command schema is refused (400 invalidCommand)
+PASS retention: refused stale, foreign, old-epoch and unsupported requests leave the document unchanged
+PASS retention: a fault inside compaction keeps the committed command and rolls back the snapshot and horizon together
+PASS retention: the next commit compacts the deferred range and the log still reconstructs the head
+PASS retention: the live full-replay client stays byte-equal across compaction
+PASS retention: online backup: integrity verifies horizon 534 plus tail against the stored head
+PASS retention: online backup: restored service serves the exact document at epoch 2
+PASS retention: online backup: removed member stays removed (404 notFound)
+PASS retention: online backup: revoked device stays revoked (401 unauthorized)
+PASS retention: online backup: the old epoch stays stale (409 staleEpoch)
+PASS retention: online backup: compacted receipt returns the original revision
+PASS retention: online backup: operation ID stays bound to its original person (409 changedIntent)
+PASS retention: online backup: tombstone still refuses resurrection (400 invalidCommand)
+PASS retention: online backup: a pre-horizon cursor is still told to take the snapshot (409 snapshotRequired)
+PASS retention: online backup: refused requests change nothing
+PASS retention: SIGKILL lands inside a burst after 20 acknowledged commits
+PASS retention: a cold copy after SIGKILL keeps every acknowledged commit and reconstructs its head from horizon plus tail
+PASS retention: cold copy after SIGKILL: integrity verifies horizon 534 plus tail against the stored head
+PASS retention: cold copy after SIGKILL: restored service serves the exact document at epoch 2
+PASS retention: cold copy after SIGKILL: removed member stays removed (404 notFound)
+PASS retention: cold copy after SIGKILL: revoked device stays revoked (401 unauthorized)
+PASS retention: cold copy after SIGKILL: the old epoch stays stale (409 staleEpoch)
+PASS retention: cold copy after SIGKILL: compacted receipt returns the original revision
+PASS retention: cold copy after SIGKILL: operation ID stays bound to its original person (409 changedIntent)
+PASS retention: cold copy after SIGKILL: tombstone still refuses resurrection (400 invalidCommand)
+PASS retention: cold copy after SIGKILL: a pre-horizon cursor is still told to take the snapshot (409 snapshotRequired)
+PASS retention: cold copy after SIGKILL: refused requests change nothing
+Collaboration retention checks passed: compaction, explicit snapshot recovery, tombstones, receipts, membership and two replacement-directory restores.

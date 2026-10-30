@@ -1,0 +1,6 @@
+PASS retention: operations younger than the retention age are never compacted, however many accumulate
+PASS retention: full-replay client pages through 523 operations before compaction
+PASS retention: compaction folds 516 operations into a horizon snapshot, keeps an 8-operation tail and one receipt per revision
+PASS retention: compaction ran without a maintenance failure
+FAIL: RetentionFailure(message: "a cursor behind the horizon is told to take the snapshot (409 resyncRequired)")
+run exit=1

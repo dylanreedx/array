@@ -1,0 +1,11 @@
+--- a/Sources/ContinuumRevivedCollaborationService/CollaborationRetention.swift
++++ b/Sources/ContinuumRevivedCollaborationService/CollaborationRetention.swift
+@@ -110,7 +110,7 @@
+     /// authority window is refused. `dispatching` and later phases belong to
+     /// the host's recorded attempt and are never rewritten here.
+     func expireDispatches(_ db: Database, area: UUID) throws {
+-        try db.execute(sql: "UPDATE agent_dispatches SET phase='refused' WHERE area=? AND phase IN ('queued','claimed') AND created<=?",
++        try db.execute(sql: "UPDATE agent_dispatches SET phase='refused' WHERE area=? AND phase IN ('queued','claimed') AND created<=? AND 0",
+             arguments: [area.uuidString, clock().timeIntervalSince1970 - retention.dispatchAuthorityWindow])
+     }
+ 
