@@ -47,13 +47,21 @@ private struct RacingHostTransport: SharedAgentHandoffTransport {
     func finish(id: UUID, outcome: Collaboration.AgentHostOutcome) async throws -> Collaboration.AgentDispatchReceipt { try await base.finish(id: id, outcome: outcome) }
 }
 
+/// The service clock, advanced by a race hook to lapse a claim's authority window.
+private final class RaceClock: @unchecked Sendable {
+    private let lock = NSLock(); private var offset: TimeInterval = 0
+    func now() -> Date { lock.withLock { Date().addingTimeInterval(offset) } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { offset += seconds } }
+}
+
 @MainActor
 func runSharedAgentRevocationRaceChecks() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-revocation-race-\(UUID())")
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
     let key = Data(repeating: 97, count: 32)
-    let service = try CollaborationStore(path: root.appendingPathComponent("service.sqlite").path, masterKey: key)
+    let clock = RaceClock()
+    let service = try CollaborationStore(path: root.appendingPathComponent("service.sqlite").path, masterKey: key, clock: { clock.now() })
     let companion = try RelayStore(path: root.appendingPathComponent("companion.sqlite").path, masterKey: key)
     let server = RelayServer(store: companion, configuration: .init(host: "127.0.0.1", publicPort: 0, adminPort: 0), collaboration: service)
     try await server.start()
@@ -139,14 +147,26 @@ func runSharedAgentRevocationRaceChecks() async throws {
         try raceCheck(executions == [allowed] && racedPhase == .refused,
             "after re-admission the raced prompt resolves refused, never executed")
 
+        // R4. The claim's authority window lapses between claim and admission.
+        //     The service refuses the admission; the host journal must agree
+        //     (refused, not uncertain): the provider call never started.
+        let lapsed = try await promptFromB(try await handToB())
+        await hooks.set(admit: { clock.advance(CollaborationRetention().dispatchAuthorityWindow + 60) })
+        await dispatcher.pollOnce(bindings: [binding])
+        let lapsedPhase = try await aa.agentDispatchReceipt(area: area, id: lapsed).phase
+        let lapsedJournal = try journal.attempts().first { $0.id == lapsed }?.phase
+        try raceCheck(executions == [allowed] && lapsedPhase == .refused && lapsedJournal == .refused,
+            "claim lapses before admission: service receipt and host journal both say refused, no execution")
+
         // R3. Device revocation lands after the claim, before admission.
         let claimed = try await promptFromB(try await handToB())
         let bDevice = b.identity.device, bToken = b.token
         await hooks.set(admit: { try await service.revokeDevice(token: bToken, device: bDevice) })
         await dispatcher.pollOnce(bindings: [binding])
         let afterAdmitRace = try await aa.agentDispatchReceipt(area: area, id: claimed)
-        try raceCheck(executions == [allowed] && afterAdmitRace.phase != .accepted && afterAdmitRace.phase != .dispatching && afterAdmitRace.phase.isFinal,
-            "device revoked between claim and admission: admission refused, no execution, outcome final")
+        let revokedJournal = try journal.attempts().first { $0.id == claimed }?.phase
+        try raceCheck(executions == [allowed] && afterAdmitRace.phase == .refused && revokedJournal == .refused,
+            "device revoked between claim and admission: a definitive refusal before execute is refused, not uncertain, in receipt and journal")
         await dispatcher.pollOnce(bindings: [binding])
         try raceCheck(executions == [allowed] && (try journal.attempts()).filter { $0.phase == .accepted }.map(\.id) == [allowed],
             "a further poll executes nothing; the host journal holds exactly one accepted attempt")
