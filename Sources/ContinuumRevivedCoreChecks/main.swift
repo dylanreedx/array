@@ -9037,10 +9037,13 @@ do {
         .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
         .joined(separator: "\n")
     let compactDeclaration = declarationWithoutComments.filter { !$0.isWhitespace }
-    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")],resources:[.copy("Resources/PiExtensions")]),"#
+    // ContextWindows.json (3954fa393) and TestedCLIVersions.json (abc6fb0bb)
+    // are data tables Core reads at runtime; pinning them keeps a dropped or
+    // renamed resource red alongside the dependency list.
+    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")],resources:[.copy("Resources/PiExtensions"),.copy("Resources/ContextWindows.json"),.copy("Resources/TestedCLIVersions.json")]),"#
     expect(compactDeclaration == expectedDeclaration,
-           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, GRDB, and the PiExtensions resource, found: \(declaration)")
-    print("dependencies guard: ContinuumRevivedCore target has only AgentContent + AgentUI + GRDB dependencies, plus the pinned PiExtensions resource")
+           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, GRDB, and the pinned PiExtensions, ContextWindows and TestedCLIVersions resources, found: \(declaration)")
+    print("dependencies guard: ContinuumRevivedCore target has only AgentContent + AgentUI + GRDB dependencies, plus the pinned resources")
 }
 
 // MARK: - Ticket 08: Sync/observation type split (ActivityStore)
