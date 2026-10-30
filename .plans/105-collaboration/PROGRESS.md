@@ -1036,3 +1036,22 @@ Next merges, as each branch reaches done: w5, w6, w7, w8, w9, then
 `array/col-native-budgets`. At this gate, w5 and w7 had commits but still had
 uncommitted work and no committed receipt. w6, w8, w9 and native budgets had
 nothing committed past `e17d0a52`.
+
+## Integrator gate — w8 freshness on `a040bd80`, 30 October 2026
+
+Merged: w8 `array/mp-w8-freshness` (`c7d7f919`, `bfdc6951`), cherry-picked
+clean. It went in ahead of w5–w7 because its receipt and own gate were done
+and its dependencies (artifacts, the freshness hook) were already on the tip.
+
+Gate: `--collaboration` under the lock, isolated. Log:
+`qa-runs/coordinator/gate-a040bd80.log`. **11 legs run, all passed**,
+including all 17 `PASS shared freshness scene` lines.
+
+Board: COL-14 stays Doing. Every acceptance row has a witness (receipt
+`workers/w8-freshness.md`), but turn/sequence on excerpts are still
+provisional until w7 lands, and no control yet composes an excerpt from an
+agent result.
+
+Then merged w5 `array/mp-w5-liveness` (all but `040704a7`). That commit
+patched the backup "damaged pages" check to damage one page header; the tip
+already has w10's `cdc244a4`, which damages every page, so it was left out.
