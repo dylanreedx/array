@@ -20,6 +20,8 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     var geometryLedgerFile: URL? { geometryLedgerStore?.file }
     var hasPendingGeometry: Bool { pendingGeometry != nil }
     private(set) var mountCount = 0
+    /// Writes of this person's private camera/focus. Follow traffic must not add any.
+    private(set) var privateViewWrites = 0
     private(set) var isMounted = false
     private(set) var selectedObject: SharedArea.ID<SharedArea.Object>?
     var draftText: String { editor.string }
@@ -217,16 +219,34 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         guard [value.x, value.y, value.zoom].allSatisfy(\.isFinite), value.zoom > 0 else { throw SharedArea.Failure.invalidGeometry }
         if value.x != localCamera.x || value.y != localCamera.y || value.zoom != localCamera.zoom { cancelGeometry() }
         localCamera = value; cameraDirty = true
+        privateViewWrites += 1
         try controller.setView(value)
         cameraDirty = false
         canvas.setCamera(value)
         onCanvasTransformChange?()
     }
+    /// Follow drives the private camera from a teammate's published viewport.
+    /// It is presentation only: not local navigation, and not saved per frame.
+    @discardableResult
+    func applyFollowedCamera(_ value: SharedAreaLocalView) -> Bool {
+        guard isMounted, [value.x, value.y, value.zoom].allSatisfy(\.isFinite), value.zoom > 0 else { return false }
+        var next = value; next.focusedObject = selectedObject
+        guard next != localCamera else { return false }
+        if geometryGesture != nil { cancelGeometry() }
+        cameraTimer?.invalidate(); cameraTimer = nil
+        localCamera = next; cameraDirty = true
+        canvas.setCamera(localCamera)
+        onCanvasTransformChange?()
+        return true
+    }
+    /// Saves a followed camera once, when following ends.
+    func persistFollowedCamera() throws { if cameraDirty { try setCamera(localCamera) } }
     func selectObject(_ object: SharedArea.ID<SharedArea.Object>?) throws {
         try prepareToClose()
         var candidate = localCamera
         candidate.focusedObject = object
         // A failed focus write leaves the previous target and its draft intact.
+        privateViewWrites += 1
         try controller.setView(candidate)
         selectedObject = object
         localCamera = candidate
@@ -282,6 +302,9 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
               let document = controller.document else { return false }
         let selected = document.positions.filter { placements.contains($0.id) }
         guard selected.count == placements.count else { return false }
+        // Taking hold of shared content ends follow; a followed camera frame
+        // would otherwise cancel this gesture.
+        onLocalCameraNavigation?()
         geometryGesture = .init(document: document, placements: placements, kind: kind,
             frames: Dictionary(uniqueKeysWithValues: selected.map { ($0.id, $0.rect) }))
         canvas.geometryEnabled = true
@@ -475,6 +498,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     }
     func fitContent() throws {
         guard let positions = controller.document?.positions, let first = positions.first else { return }
+        onLocalCameraNavigation?()
         var rect = NSRect(x: first.rect.x, y: first.rect.y, width: first.rect.width, height: first.rect.height)
         for position in positions.dropFirst() { rect = rect.union(.init(x: position.rect.x, y: position.rect.y, width: position.rect.width, height: position.rect.height)) }
         let width = max(1, canvas.bounds.width - 64), height = max(1, canvas.bounds.height - 64)
@@ -786,7 +810,7 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
         super.init(frame: frameRect)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Shared objects")
-        setAccessibilityHelp("Drag to move shared objects. Shift-click selects a group. Drag its lower-right handle to resize. Command-Z undoes your layout change. Tab navigates objects; Escape cancels a gesture.")
+        setAccessibilityHelp("Drag to move shared objects. Shift-click selects a group. Drag its lower-right handle to resize. Command-Z undoes your layout change. Tab navigates objects; arrow keys pan; Escape cancels a gesture.")
     }
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -925,6 +949,17 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
         } else if event.keyCode == 53 {
             if geometryDrag != nil { cancelGeometryGesture(); onCancelGeometry?() }
             else { window?.selectNextKeyView(self) }
+        } else if (123...126).contains(event.keyCode) && event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+            // Keyboard camera pan, in screen points so every zoom moves alike.
+            let step = (event.modifierFlags.contains(.shift) ? 240 : 60) / camera.zoom
+            var moved = camera
+            switch event.keyCode {
+            case 123: moved.x -= step
+            case 124: moved.x += step
+            case 125: moved.y += step
+            default: moved.y -= step
+            }
+            onCamera?(moved, true)
         } else { super.keyDown(with: event) }
     }
     @objc func undo(_ sender: Any?) { onUndoGeometry?() }
