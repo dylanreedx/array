@@ -70,4 +70,4 @@ removed → RED.
   for `.artifact` in `CollaborationStore.authorize`.
 - Quota (64 MiB/area) is enforced but not witnessed. No retention/GC of staged
   or unpublished blobs (COL-19). Linux relay container not run.
-- Messages to workers 7/8/9 were refused (all mid-turn, three tries).
+- API note delivered to worker 8. Workers 7 and 9 refused it three times (mid-turn); the lead was asked to relay.
