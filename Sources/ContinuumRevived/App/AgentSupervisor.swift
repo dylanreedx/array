@@ -6533,17 +6533,21 @@ final class AgentSupervisor {
             throw HelperTileError(message: "This helper has no available lead or canvas.")
         }
         if let tile = record.tileId { return tile }
-        let open = records.values.filter { $0.tileId != nil && helperLead(for: $0.id) == lead }
+        // Only tiles opened by pop-out count: a child that got its tile from
+        // delegation before its lead went managed never had `helperTileOpenedAt`.
+        let open = records.values.filter { $0.helperTileOpenedAt != nil && $0.tileId != nil && helperLead(for: $0.id) == lead }
         let needed = max(0, open.count - Self.helperTileCap + 1)
         let candidates = open.filter { helperCanFold($0.id, requiresCurrentReport: false) }.sorted {
             let lhs = $0.helperTileOpenedAt ?? $0.createdAt
             let rhs = $1.helperTileOpenedAt ?? $1.createdAt
             return lhs == rhs ? $0.id.rawValue.uuidString < $1.id.rawValue.uuidString : lhs < rhs
         }
-        guard candidates.count >= needed else {
-            throw HelperTileError(message: "Three helper tiles are already open. Fold one back or unpin a finished helper first.")
+        // The cap makes room where it can and never refuses: with every open
+        // helper pinned, running or unfinished, the new tile opens over the cap.
+        for candidate in candidates.prefix(needed) {
+            do { try foldBack(candidate.id) }
+            catch { warn("Helper cap fold-back skipped: \(error.localizedDescription)") }
         }
-        for candidate in candidates.prefix(needed) { try foldBack(candidate.id) }
         let tile = try popOutHelperTile(id, lead)
         guard var attached = records[id], attached.tileId == tile else {
             throw HelperTileError(message: "The helper tile could not be attached.")
