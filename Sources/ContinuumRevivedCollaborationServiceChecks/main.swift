@@ -184,7 +184,9 @@ private func run() async throws {
     print("Collaboration service checks passed: real localhost HTTP, isolated SQLite and A/B/C; no native scene/host-execution claims.")
 }
 do {
-    if CommandLine.arguments.contains("--recovery-scale-only") {
+    if CommandLine.arguments.contains("--retention-only") {
+        try await runCollaborationRetentionChecks()
+    } else if CommandLine.arguments.contains("--recovery-scale-only") {
         try await runCollaborationRecoveryScaleChecks()
     } else if CommandLine.arguments.contains("--capabilities-only") {
         try await runCollaborationCapabilityChecks()
@@ -200,5 +202,6 @@ do {
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationCapabilityChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationHandoffChecks(); try await runCollaborationUsageChecks(); try await runCollaborationEndorsementChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationRecoveryScaleChecks() }
+        if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationRetentionChecks() }
     }
 } catch { print("FAIL: \(error)"); exit(1) }

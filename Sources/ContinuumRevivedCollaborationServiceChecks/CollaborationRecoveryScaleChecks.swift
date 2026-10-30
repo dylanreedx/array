@@ -11,7 +11,7 @@ private func scaleExpect(_ value: Bool, _ message: String) throws {
     guard value else { throw ScaleFailure(message: message) }
     print("PASS recovery/scale: \(message)")
 }
-private func eventually(_ label: String, seconds: Double = 30, _ condition: () async throws -> Bool) async throws {
+func eventually(_ label: String, seconds: Double = 30, _ condition: () async throws -> Bool) async throws {
     let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int(seconds * 1000)))
     while try await !condition() {
         guard ContinuousClock.now < deadline else { throw ScaleFailure(message: "timeout: \(label)") }
@@ -21,7 +21,7 @@ private func eventually(_ label: String, seconds: Double = 30, _ condition: () a
 
 /// Every status a session reports, in order. The stream buffers only the newest
 /// value, so the session status itself is also sampled after each emission.
-private actor StatusLog {
+actor StatusLog {
     enum Kind: Equatable { case connected, reconnecting, unavailable, stopped }
     struct Entry { let kind: Kind; let revision: UInt64? }
     private(set) var entries: [Entry] = []
@@ -29,7 +29,7 @@ private actor StatusLog {
         switch status {
         case .connected(let replica): entries.append(.init(kind: .connected, revision: replica.document.revision))
         case .reconnecting(let replica): entries.append(.init(kind: .reconnecting, revision: replica?.document.revision))
-        case .unavailable: entries.append(.init(kind: .unavailable, revision: nil))
+        case .unavailable, .incompatible: entries.append(.init(kind: .unavailable, revision: nil))
         case .stopped: entries.append(.init(kind: .stopped, revision: nil))
         }
     }
@@ -37,7 +37,7 @@ private actor StatusLog {
 }
 
 /// The real operator binary, killed with SIGKILL and relaunched on its port.
-private final class RelayProcess {
+final class RelayProcess {
     let port: Int
     let environment: [String: String]
     let log: URL
