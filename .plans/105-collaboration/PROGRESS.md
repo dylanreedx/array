@@ -1005,3 +1005,34 @@ failed. The failure is `ContinuumRevivedCollaborationServiceChecks`, at the
 backup "damaged pages" check above. The pair passed (15 behaviours, 552
 replayed events), and so did both companion relay suites. Log:
 `qa-runs/lead/gate-merge-0735.log`.
+
+## Integrator gate — admission + w10 on `5fa07c36`, 30 October 2026
+
+The coordinator cherry-picked `array/col-admission` (refused-admission pins,
+freshness ledger in the production controller, codex `forkedFromId`) and
+`array/mp-w10-acceptance` (one verified operator backup path, every backup
+page damaged in the check, relay retention overrides from the environment, and
+`check-relay-linux.sh` as a `--collaboration` leg) onto `collaboration-finish`.
+
+Gate: `CONTINUUM_SKIP_UI_BASELINES=1 .worktrees/.locks/app-build.sh
+scripts/run-matrix.sh --collaboration`, with its own TMUX_TMPDIR and
+CONTINUUM_APP_SUPPORT. Log: `qa-runs/coordinator/gate-5fa07c36.log`.
+**11 legs run, all passed.**
+
+- ServiceChecks passed, including "verification refuses a backup with damaged
+  pages". It failed before because the check damaged 512 bytes at the file's
+  midpoint, which could land on a free page that SQLite never reads. `cdc244a4`
+  now damages every page, and `a330d7de` makes the verified operator backup
+  the only backup path.
+- The new Linux relay leg (`check-relay-linux.sh`, in Docker) passed.
+- Pair, both relay suites, native, UI probe, menu contract and usage telemetry
+  passed. The inventory reports "grew" records, and they stay uncommitted.
+
+Board: nothing moved to Done. COL-13 still owes the handoff transport-seam
+witness for each managed harness (Claude, Codex, Pi). COL-21 still waits on
+the remaining helpers.
+
+Next merges, as each branch reaches done: w5, w6, w7, w8, w9, then
+`array/col-native-budgets`. At this gate, w5 and w7 had commits but still had
+uncommitted work and no committed receipt. w6, w8, w9 and native budgets had
+nothing committed past `e17d0a52`.
