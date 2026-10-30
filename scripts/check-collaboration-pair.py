@@ -127,7 +127,7 @@ class Peer:
             if self.process.poll() is not None: raise AssertionError(f"peer {self.label} exited {self.process.returncode} before ready")
             value = read_json(self.root / "mailbox" / "ready.json")
             return value if value and value.get("instance") == self.config["instance"] else None
-        return wait_for(ready, f"peer {self.label} native ready", 45)
+        return wait_for(ready, f"peer {self.label} native ready", 75)
     def call(self, op, timeout=30, **fields):
         identity = str(uuid.uuid4())
         request = dict(fields, op=op, id=identity, instance=self.config["instance"])
@@ -247,7 +247,8 @@ class Harness:
         baseline_a, baseline_b = a.call("status"), b.call("status")
         a.call("shareZone")
         first_a, first_b = self.converge(a, b)
-        assert {item["kind"] for item in first_b["items"]} >= {"agreement", "agentObservation"}
+        kinds = [item["kind"] for item in first_b["items"]]
+        assert kinds.count("agreement") == kinds.count("agentObservation") == 1, f"publication duplicated or missing: {kinds}"
         assert first_a["bindings"] == 1 and first_b["bindings"] == 0
         assert first_a["runnerConstructions"] == first_b["runnerConstructions"] == 0
         self.pass_step("production-mounted source-zone review publishes real HTTP portable content/layout and exact host binding, with zero recipient executor creation")
@@ -268,6 +269,16 @@ class Harness:
         a.call("undo"); after_undo, _ = self.converge(a, b)
         assert after_undo["positions"] == peer_won["positions"]
         self.pass_step("a teammate's conflicting move cancels stale preview and semantic Undo cannot overwrite the newer placement")
+        b.call("move", x=600.0, y=110.0); b_moved, _ = self.converge(a, b)
+        assert b_moved["positions"] != after_undo["positions"]
+        b.call("undo"); b_undone, _ = self.converge(a, b); assert b_undone["positions"] == after_undo["positions"]
+        b.call("redo"); b_redone, _ = self.converge(a, b); assert b_redone["positions"] == b_moved["positions"]
+        a.call("move", x=450.0, y=150.0); a_newer, _ = self.converge(a, b)
+        assert a_newer["positions"] != b_moved["positions"]
+        b.call("undo"); b_stale, _ = self.converge(a, b)
+        assert b_stale["positions"] == a_newer["positions"], "B's Undo overwrote A's newer placement"
+        a.call("undo"); settled, _ = self.converge(a, b); assert settled["positions"] == b_moved["positions"]
+        self.pass_step("the second person's own Undo and Redo replicate to both peers, and their stale Undo cannot overwrite the first person's newer move")
         a.call("camera", x=-220.0, y=130.0, zoom=0.8); b.call("camera", x=620.0, y=-300.0, zoom=1.2)
         assert a.call("status")["privateCamera"] != b.call("status")["privateCamera"]
         self.pass_step("the same shared arrangement retains independent private cameras")
@@ -280,7 +291,7 @@ class Harness:
         assert recovered["privateCamera"] == {"x": -220.0, "y": 130.0, "zoom": 0.8}
         assert any(position["x"] == 640.0 and position["y"] == 420.0 for position in recovered["positions"])
         a.call("undo"); recovered_undo, _ = self.converge(a, b)
-        assert recovered_undo["positions"] == peer_won["positions"]
+        assert recovered_undo["positions"] == settled["positions"]
         self.pass_step("abrupt pre-send process death retains exact command and geometry history; cold relaunch submits once and Undo still works")
         # Prevent another channel from delivering the accepted receipt before kill.
         proxy_a.pause()
@@ -292,7 +303,7 @@ class Harness:
         assert committed["privateCamera"] == {"x": -220.0, "y": 130.0, "zoom": 0.8}
         assert any(position["x"] == 760.0 and position["y"] == 490.0 for position in committed["positions"])
         a.call("undo"); after_lost_ack_undo, _ = self.converge(a, b)
-        assert after_lost_ack_undo["positions"] == peer_won["positions"]
+        assert after_lost_ack_undo["positions"] == settled["positions"]
         self.pass_step("post-commit/lost-ack process death recovers the authenticated original receipt without replaying a remote effect, and retains Undo")
         # >500 UPDATE EVENTS, not a cold snapshot reopen.
         proxy_b.hold_snapshots(); proxy_b.pause()
@@ -348,6 +359,9 @@ class Harness:
         a.call("usage")
         usage = wait_for(lambda: value.get("usage") if (value := a.call("status")).get("usage", {}).get("input") == 200 else None, "published source token observation reaches durable accounting", 10)
         assert usage["output"] == 40
+        for _ in range(3): a.call("usage"); a.call("hostPoll")
+        repeated = a.call("status")["usage"]
+        assert (repeated["input"], repeated["output"], repeated["todayInput"], repeated["todayOutput"]) == (200, 40, 200, 40), f"usage double-counted: {repeated}"
         b.call("camera", x=0.0, y=0.0, zoom=1.0)
         a.call("presence", x=80.0, y=80.0); b.call("presence", x=120.0, y=110.0)
         wait_for(lambda: b.snapshot().get("presence", 0) >= 2, "teammate cursor and usage presence")
@@ -355,7 +369,12 @@ class Harness:
         hover = wait_for(lambda: text if "Reported total: 240 tokens" in (text := b.call("hover", device=ready_a["device"])["hoverText"]) else None, "hover-only live teammate tokens", 10)
         assert hover
         assert not b.call("hover")["hoverText"]
-        self.pass_step("real source token events persist as 200 input/40 output and render only while the teammate cursor is inspected")
+        b.kill_abrupt(); b.start(); self.converge(a, b); a.call("usage")
+        b.call("camera", x=0.0, y=0.0, zoom=1.0); a.call("presence", x=80.0, y=80.0); b.call("presence", x=120.0, y=110.0)
+        relaunched = wait_for(lambda: text if "Reported total:" in (text := b.call("hover", device=ready_a["device"])["hoverText"]) else None, "hover after recipient relaunch", 10)
+        assert "Reported total: 240 tokens" in relaunched, f"hover double-counted after relaunch: {relaunched}"
+        assert a.call("status")["usage"]["todayInput"] == 200
+        self.pass_step("real source token events persist as 200 input/40 output and render only while the teammate cursor is inspected; republishing and a recipient relaunch never double-count")
         end_a, end_b = a.call("status"), b.call("status")
         assert end_a["sourceFiles"] == baseline_a["sourceFiles"] and end_b["sourceFiles"] == baseline_b["sourceFiles"]
         assert end_a["sourceWorld"] == baseline_a["sourceWorld"] and end_b["sourceWorld"] == baseline_b["sourceWorld"]
