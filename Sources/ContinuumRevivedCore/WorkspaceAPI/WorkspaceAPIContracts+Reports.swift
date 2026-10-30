@@ -50,6 +50,8 @@ public struct AgentReport: Codable, Equatable, Sendable {
         }
     }
 
+    /// Host-owned command observations; request validation never accepts these.
+    public var commandEvidence: [AgentCommandEvidence]?
     public var summary: String
     public var checks: [Check]
     public var findings: [Finding]

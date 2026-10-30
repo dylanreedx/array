@@ -142,8 +142,8 @@ extension WorkspaceMCPConfiguration {
     }
 }
 
-/// What the app keeps of one hook event. Small on purpose: no prompt, tool
-/// input or output, and no transcript path.
+/// Bounded hook observations. Keep only shell command/exit evidence, never prompts
+/// or full output. Missing exit evidence stays unknown (PostToolUse is not exit 0).
 public struct AgentHookReceipt: Equatable, Sendable {
     /// Assigned from the authenticated host record, never from hook input.
     public var harness: AgentHarness?
@@ -155,9 +155,12 @@ public struct AgentHookReceipt: Equatable, Sendable {
     /// On subagent events this is the PARENT's session (P0, stdin fields).
     public var sessionID: String?
     public var receivedAt: Date
+    public var command: String?
+    public var exitCode: Int?
 
     public init(event: String, toolName: String? = nil, subagentID: String? = nil,
-                subagentType: String? = nil, sessionID: String? = nil, receivedAt: Date, harness: AgentHarness? = nil) {
+                subagentType: String? = nil, sessionID: String? = nil, receivedAt: Date, harness: AgentHarness? = nil,
+                command: String? = nil, exitCode: Int? = nil) {
         self.harness = harness
         self.event = event
         self.toolName = toolName
@@ -165,6 +168,8 @@ public struct AgentHookReceipt: Equatable, Sendable {
         self.subagentType = subagentType
         self.sessionID = sessionID
         self.receivedAt = receivedAt
+        self.command = command
+        self.exitCode = exitCode
     }
 
     /// nil when the body names no event.
@@ -173,8 +178,21 @@ public struct AgentHookReceipt: Equatable, Sendable {
         func text(_ key: String) -> String? {
             (payload[key] as? String).flatMap { $0.isEmpty ? nil : String($0.prefix(256)) }
         }
+        let input = payload["tool_input"] as? [String: Any] ?? [:]
+        let response = payload["tool_response"] as? [String: Any] ?? [:]
+        let command = (input["command"] as? String ?? input["cmd"] as? String)
+        // Claude's recorded payload has stdout/stderr/interrupted but usually no
+        // numeric exit. Never confuse the hook process's exit with the command's.
+        var exitCode = response["exit_code"] as? Int ?? response["exitCode"] as? Int
+        let output = (response["stdout"] as? String ?? "") + "\n" + (response["stderr"] as? String ?? "")
+        if exitCode == nil, let match = output.range(of: #"(?m)^Exit code: [0-9]+$"#, options: .regularExpression) {
+            exitCode = Int(output[match].split(separator: " ").last ?? "")
+        }
+        // An interruption is not a numeric command exit; do not invent one.
+        if response["interrupted"] as? Bool == true { exitCode = nil }
         self.init(event: String(event.prefix(64)), toolName: text("tool_name"), subagentID: text("agent_id"),
-                  subagentType: text("agent_type"), sessionID: text("session_id"), receivedAt: receivedAt, harness: harness)
+                  subagentType: text("agent_type"), sessionID: text("session_id"), receivedAt: receivedAt, harness: harness,
+                  command: command.flatMap { $0.count <= 4096 ? $0 : nil }, exitCode: exitCode)
     }
 
     /// How many receipts the app keeps per agent; the oldest go first.

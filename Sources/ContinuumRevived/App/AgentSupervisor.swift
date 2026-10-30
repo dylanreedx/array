@@ -5520,8 +5520,8 @@ final class AgentSupervisor {
 
     /// `.plans/102` P1: what each agent's hooks reported, newest last,
     /// at most `AgentHookReceipt.ringCapacity` per agent. Observation only:
-    /// nothing reads a receipt to change behaviour, and recording one touches
-    /// no record, transcript or child. In memory; gone with the record.
+    /// reports compare command evidence against this bounded history.
+    /// In memory; gone with the record.
     private(set) var hookReceipts: [AgentID: [AgentHookReceipt]] = [:]
     private var codexHookPushBacks: [AgentID: Set<[String]>] = [:]
 
@@ -5568,6 +5568,10 @@ final class AgentSupervisor {
     @discardableResult
     func fileReport(_ report: AgentReport, for id: AgentID, at date: Date = Date()) -> Bool {
         guard var record = records[id] else { return false }
+        var report = report
+        if record.parentAgentID != nil {
+            report.commandEvidence = HelperCommandGuard.evidence(for: report, receipts: hookReceipts[id] ?? [])
+        }
         record.lastReport = AgentFiledReport(report: report, filedAt: date)
         guard persist(record) else { return false }
         onSelfReportChanged?(id)
@@ -9599,6 +9603,11 @@ final class AgentSupervisor {
         let settledAt = Date()
         var report: AgentReport?
         if let filed = child.lastReport, filed.filedAt > (lastSettledAt[id] ?? reportTurnBaseline) { report = filed.report }
+        if var carried = report {
+            let flags = carried.commandEvidence?.filter { $0.outcome != .observed } ?? []
+            carried.commandEvidence = flags.isEmpty ? nil : flags
+            report = carried
+        }
         lastSettledAt[id] = settledAt
         SpawnResultFile.write(
             SpawnResultFile(

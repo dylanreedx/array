@@ -1672,6 +1672,20 @@ enum ContinuumApp {
         }
         // `.plans/102` P2a: array_report / array_status through the real binary
         // and host, and wait_agents returning the report (setting off and on).
+        if CommandLine.arguments.contains("--helper-command-evidence-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperGuardChecks.runCommandEvidence()
+                    print("HelperCommandEvidenceChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--workspace-agent-report-check") {
             _ = NSApplication.shared
             Task { @MainActor in
