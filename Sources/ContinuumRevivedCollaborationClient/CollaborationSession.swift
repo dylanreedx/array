@@ -15,8 +15,9 @@ public actor CollaborationSession {
     private let sleep: @Sendable (Int) async throws -> Void
     private var replica: CollaborationReplica?
     private var through: UInt64?
-    // After a failure the next held read is short, so admission is observed
-    // within a second instead of when the next event or 25s timeout arrives.
+    /// After a failure, probe with a 1ms held read before holding for 25s. It
+    /// still passes subscription admission (429 while overloaded), but an idle
+    /// healthy service answers at once instead of staying "reconnecting".
     private var recovering = false
     private var task: Task<Void, Never>?
     private var continuation: AsyncStream<Status>.Continuation?
@@ -92,7 +93,7 @@ public actor CollaborationSession {
     private func request(_ current: UUID) -> Collaboration.UpdateRequest? {
         guard current == generation, let replica else { return nil }
         return .init(after: replica.document.revision, through: through,
-            presenceVersion: replica.presenceVersion, waitMilliseconds: through != nil ? 0 : recovering ? 1_000 : 25_000)
+            presenceVersion: replica.presenceVersion, waitMilliseconds: through != nil ? 0 : recovering ? 1 : 25_000)
     }
     private func receive(_ page: Collaboration.Updates, generation current: UUID) throws -> Bool {
         guard current == generation, var replica else { return false }
@@ -100,11 +101,14 @@ public actor CollaborationSession {
         self.replica = replica
         through = page.hasMore ? page.through : nil
         recovering = false
-        emit(.connected(replica))
+        // A bounded page short of its high-water mark is a stale prefix, not
+        // the shared state. Report it as catching up until the tail completes.
+        emit(page.hasMore ? .reconnecting(replica) : .connected(replica))
         return true
     }
     private func failed(_ error: any Error, generation current: UUID) -> Bool {
         guard current == generation else { return false }
+        recovering = true
         if error is DecodingError || error is SharedArea.Failure {
             replica = nil; through = nil
             finishUnavailable()
@@ -123,7 +127,6 @@ public actor CollaborationSession {
                 return false
             }
         }
-        recovering = true
         emit(.reconnecting(replica))
         return true
     }
