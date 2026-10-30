@@ -2822,21 +2822,27 @@ final class AgentSupervisor {
         sourceItemId: String? = nil,
         tileId: UUID? = nil,
         isolated: Bool,
-        displayName: String? = nil
+        displayName: String? = nil,
+        checkoutOverride: URL? = nil,
+        managedIsolation: Bool = false,
+        isolationTitle: String? = nil,
+        baseHead: String? = nil
     ) throws -> AgentID {
         // The id is minted HERE, before anything is created, because the slug is
         // derived from it — `WorktreeManager.slug` id-suffixes so two agents given the
         // same role and prompt do not land on one directory and one branch.
         let id = AgentID(rawValue: UUID())
         let logicalProjectRoot = projectRoot ?? cwd
-        var checkoutRoot = projectRoot ?? cwd
+        var checkoutRoot = checkoutOverride ?? projectRoot ?? cwd
         var workingDirectory = cwd
         var branch: String?
         var worktreeId: String?
         if isolated {
             let worktree = try worktrees.add(
-                repo: logicalProjectRoot,
-                slug: WorktreeManager.slug(role: role, prompt: prompt, id: id)
+                repo: checkoutOverride ?? logicalProjectRoot,
+                slug: WorktreeManager.slug(role: role, prompt: managedIsolation ? (isolationTitle ?? prompt) : prompt, id: id),
+                containerRepo: managedIsolation ? try worktrees.list(repo: checkoutOverride ?? logicalProjectRoot).first?.path : nil,
+                baseRef: baseHead
             )
             checkoutRoot = worktree.path
             workingDirectory = homeRelativePath.map {
@@ -2845,8 +2851,8 @@ final class AgentSupervisor {
             branch = worktree.branch
             worktreeId = worktree.path.lastPathComponent
         } else if let homeRelativePath {
-            checkoutRoot = logicalProjectRoot
-            workingDirectory = logicalProjectRoot.appendingPathComponent(homeRelativePath, isDirectory: true)
+            checkoutRoot = checkoutOverride ?? logicalProjectRoot
+            workingDirectory = checkoutRoot.appendingPathComponent(homeRelativePath, isDirectory: true)
         }
         return makeAgent(
             id: id,
@@ -5336,7 +5342,7 @@ final class AgentSupervisor {
     ///
     /// Returns nil on a refusal, having said so in the parent's transcript.
     @discardableResult
-    func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil, mode: AgentMode = .free) -> AgentID? {
+    func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil, mode: AgentMode = .free, retryOf: AgentID? = nil, originalBrief: String? = nil) -> AgentID? {
         guard let parent = records[parentId] else {
             return refuseSpawn(.unknownParent, for: parentId)
         }
@@ -5403,21 +5409,53 @@ final class AgentSupervisor {
                 handle: request.sourceItemID, requestedRole: request.role)
         }
         do {
+            let managed = parent.mode == .managed
+            let checkout = URL(fileURLWithPath: parent.checkoutRoot, isDirectory: true)
+            let overlapping = managed && records.values.contains {
+                $0.parentAgentID == parentId && $0.capabilities != .observedReadOnly
+                    && (isRunning($0.id) || turnPresence(for: $0.id)?.phase.isLive == true)
+                    && WorktreeManager.resolved(URL(fileURLWithPath: $0.checkoutRoot)) == WorktreeManager.resolved(checkout)
+            }
+            var isolate = request.isolated || overlapping
+            var notice: String?
+            var baseHead: String?
+            do { baseHead = try worktrees.head(repo: managed ? checkout : projectRoot) }
+            catch WorktreeManager.WorktreeError.invalidRepository {
+                if overlapping && !request.isolated {
+                    isolate = false
+                    notice = "Shared checkout: not a git repository; concurrent helper isolation unavailable."
+                }
+            }
+            catch { if isolate { throw error } }
+            // A git repository with no HEAD or another git failure is not a
+            // non-git fallback. Creation must fail rather than silently share it.
             let childID = try spawn(
                 role: request.role,
                 // The child's task is the parent's words, so it reaches the
                 // child as a message from the parent, never as the user's prompt.
                 prompt: request.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     ? request.prompt : agentMessageText(request.prompt, from: parentId),
-                cwd: projectRoot,
+                cwd: managed ? URL(fileURLWithPath: parent.cwd, isDirectory: true) : projectRoot,
                 harness: childSelection?.harness ?? parentHarness,
                 mode: mode,
                 model: childSelection?.model ?? resolvedRole.model,
                 thinking: childSelection?.thinking ?? resolvedRole.thinking,
                 projectId: parent.projectId,
+                projectRoot: projectRoot,
+                homeRelativePath: managed ? parent.homeRelativePath : nil,
                 parentAgentID: parentId,
-                isolated: request.isolated
+                isolated: isolate,
+                checkoutOverride: managed ? checkout : nil,
+                managedIsolation: overlapping,
+                isolationTitle: request.displayLabel ?? originalBrief ?? request.prompt,
+                baseHead: isolate ? baseHead : nil
             )
+            guard var spawned = records[childID] else { return nil }
+            spawned.delegationContext = AgentDelegationContext(
+                brief: originalBrief ?? request.prompt, baseHead: baseHead, retryOf: retryOf,
+                createdWorktree: overlapping && isolate, checkoutNotice: notice)
+            records[childID] = spawned
+            persist(spawned)
             // The child record remembers the tool call that asked for it, so its
             // terminal `.turnCompleted` in `deliver` can rewrite the result file
             // even across a relaunch. Distinct from `sourceItemId` (fan-out and
@@ -6268,6 +6306,11 @@ final class AgentSupervisor {
     /// on somebody's project root.
     private func cleanUpWorktree(of record: AgentRecord, into report: inout ArchiveReport) {
         guard let branch = record.worktreeBranch else { return }
+        if record.delegationContext?.createdWorktree == true {
+            report.worktreeRetained = (URL(fileURLWithPath: record.checkoutRoot), "helper worktree: explicit cleanup required")
+            report.branchRetained = (branch, "helper worktree retained")
+            return
+        }
         let worktree = URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)
         let container = worktree.deletingLastPathComponent()
         guard container.lastPathComponent == WorktreeManager.containerDirectoryName else {

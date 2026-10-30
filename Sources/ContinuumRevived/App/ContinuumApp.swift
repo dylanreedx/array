@@ -2485,6 +2485,34 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--helper-retry-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperRetryWorktreeChecks.retry()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--helper-worktree-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperRetryWorktreeChecks.worktrees()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--managed-mode-launch-check") {
             _ = NSApplication.shared
             Task { @MainActor in

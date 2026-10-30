@@ -8,9 +8,10 @@ import Foundation
 // by the supervisor's EXISTING path — `AgentSupervisor.handleSpawnRequest`, the
 // same function the pi `spawn_agent` tool drives — and made visible by the
 // EXISTING inbox-reveal route (`TileSpawner.spawnManagedAgentForExistingAgent`
-// → `installProjectTile`, then `AppDelegate.wireManagedAgentTile`). Nothing here
-// launches a process or creates a worktree. Harness/model selectors are resolved
-// against the selected CLI catalogue before creation. The operation record is reserved BEFORE creation and every step
+// → `installProjectTile`, then `AppDelegate.wireManagedAgentTile`). The supervisor
+// owns process launch and Managed helper isolation. Harness/model selectors are
+// resolved against the selected CLI catalogue before creation. The operation
+// record is reserved BEFORE creation and every step
 // is reported separately (§10.3): a child whose tile could not be presented is a
 // success with a repairable step, repaired by `agent.reveal`, never by a second
 // `agent.delegate`.
@@ -70,6 +71,10 @@ extension WorkspaceAPIService {
                 operations.release(operationId: requestId)
             }
             return .error(WorkspaceAPIError(code: code, message: message, approvalRequestId: approvalRequestId))
+        }
+
+        if let retryOf = request.retryOf, !supervisor.mayRetry(retryOf, from: agentId) {
+            return fail(.invalidRequest, "retryOf must name your failed, stopped or errored child, with no active turn.")
         }
 
         // Resolve exclusively against the selected CLI's live catalogue.
@@ -179,13 +184,24 @@ extension WorkspaceAPIService {
             return fail(.unsupported, "The selected child model is no longer offered by \(childHarness.rawValue). Delegate again with an exact catalogue id.")
         }
 
+        // Approval may have let the old helper resume or disappear.
+        var prompt = request.task
+        if let retryOf = request.retryOf {
+            guard supervisor.mayRetry(retryOf, from: agentId), let old = supervisor.records[retryOf] else {
+                return fail(.invalidRequest, "retryOf must name your failed, stopped or errored child, with no active turn.")
+            }
+            let files = try? WorktreeManager().changedFiles(
+                repo: URL(fileURLWithPath: old.checkoutRoot), since: old.delegationContext?.baseHead)
+            prompt += "\n\n" + AgentDelegationContext.handoff(from: old, changedFiles: files)
+        }
+
         // 6. Creation, through the supervisor's one child-creation path. The
         //    request id doubles as the spawn-result handle, so `wait_agents` can
         //    collect this child exactly like a `spawn_agent` one.
         let spawnRequest = SpawnRequest(
-            role: nil, prompt: request.task, isolated: false, sourceItemID: requestId,
+            role: nil, prompt: prompt, isolated: false, sourceItemID: requestId,
             displayLabel: request.title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
-        guard let childId = supervisor.handleSpawnRequest(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking), mode: request.mode ?? .free) else {
+        guard let childId = supervisor.handleSpawnRequest(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking), mode: request.mode ?? .free, retryOf: request.retryOf, originalBrief: request.task) else {
             let reason = supervisor.spawnRefusal(for: agentId)?.reason ?? "the supervisor refused the spawn"
             return fail(.unsupported, "Array did not start a child: \(reason).", approvalRequestId: approvalRequestId, keep: true)
         }
@@ -211,6 +227,10 @@ extension WorkspaceAPIService {
             actualZoneId: nil,
             childRunning: supervisor.isRunning(childId),
             partial: false)
+
+        result.checkoutRoot = child?.checkoutRoot
+        result.worktreeBranch = child?.worktreeBranch
+        result.checkoutNotice = child?.delegationContext?.checkoutNotice
 
         // 7. Attachment: a tile in the PARENT's zone, framed against that zone
         //    (hazard 9), through the existing managed-agent tile route.

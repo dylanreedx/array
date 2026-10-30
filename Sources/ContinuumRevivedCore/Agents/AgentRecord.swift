@@ -371,6 +371,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// decode-tolerant — the `snoozedAt`/`sourceItemId` convention, no schema
     /// bump.
     public var spawnResultHandle: String? = nil
+    /// Host-owned original brief and git baseline for retry handoffs.
+    public var delegationContext: AgentDelegationContext? = nil
     /// CX-01 (§14.1): whether this agent may use Array's workspace tools
     /// (bounded self context, open/reveal within its own checkout). Persisted
     /// POLICY, read by the host grant table; the model can neither read nor
@@ -1018,7 +1020,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, mode, model, thinking, cwd
         case projectRoot, checkoutRoot, homeRelativePath, lastObservedWhere, worktreeId
         case worktreeBranch, projectId, parentAgentID, capabilities, sourceItemId
-        case spawnResultHandle, workspaceToolsEnabled, identityColor
+        case delegationContext, spawnResultHandle, workspaceToolsEnabled, identityColor
         case parentRelativeOrdinal, nextChildOrdinal
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
         case latestPromptAtReferenceInterval, latestTurnAtReferenceInterval
@@ -1092,6 +1094,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         capabilities = (try? container.decodeIfPresent(
             AgentCapabilities.self, forKey: .capabilities)) ?? .managed
         sourceItemId = try container.decodeIfPresent(String.self, forKey: .sourceItemId)
+        delegationContext = try? container.decodeIfPresent(AgentDelegationContext.self, forKey: .delegationContext)
         spawnResultHandle = (try? container.decodeIfPresent(String.self, forKey: .spawnResultHandle)) ?? nil
         workspaceToolsEnabled = (try? container.decodeIfPresent(Bool.self, forKey: .workspaceToolsEnabled)) ?? false
         identityColor = (try? container.decodeIfPresent(String.self, forKey: .identityColor)) ?? nil
@@ -1198,6 +1201,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
             try container.encode(capabilities, forKey: .capabilities)
         }
         try container.encodeIfPresent(sourceItemId, forKey: .sourceItemId)
+        try container.encodeIfPresent(delegationContext, forKey: .delegationContext)
         try container.encodeIfPresent(spawnResultHandle, forKey: .spawnResultHandle)
         if workspaceToolsEnabled { try container.encode(true, forKey: .workspaceToolsEnabled) }
         try container.encodeIfPresent(identityColor, forKey: .identityColor)

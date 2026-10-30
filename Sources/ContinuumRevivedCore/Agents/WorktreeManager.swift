@@ -158,9 +158,9 @@ public struct WorktreeManager: Sendable {
     /// put two agents on one branch, which is exactly the clobbering this
     /// ticket exists to prevent.
     @discardableResult
-    public func add(repo: URL, slug: String) throws -> Worktree {
+    public func add(repo: URL, slug: String, containerRepo: URL? = nil, baseRef: String? = nil) throws -> Worktree {
         try requireRepository(repo)
-        let path = Self.worktreeURL(repo: repo, slug: slug)
+        let path = Self.worktreeURL(repo: containerRepo ?? repo, slug: slug)
         let branch = Self.branchName(slug: slug)
 
         if FileManager.default.fileExists(atPath: path.path) {
@@ -174,8 +174,34 @@ public struct WorktreeManager: Sendable {
             at: path.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        _ = try runGit(["worktree", "add", "-b", branch, path.path], repo: repo)
+        _ = try runGit(["worktree", "add", "-b", branch, path.path] + (baseRef.map { [$0] } ?? []), repo: repo)
         return Worktree(path: path, branch: branch, isMain: false)
+    }
+
+    /// Snapshot the source checkout, not the primary checkout's branch.
+    public func head(repo: URL) throws -> String {
+        do {
+            return try runGit(["rev-parse", "--verify", "HEAD"], repo: repo)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch let error as WorktreeError {
+            // Only this failure permits Managed delegation's shared fallback.
+            // Missing HEAD, permission errors and timeouts must fail isolation.
+            if case let .gitFailed(_, _, stderr) = error,
+               stderr.contains("not a git repository") {
+                throw WorktreeError.invalidRepository(repo.path)
+            }
+            throw error
+        }
+    }
+
+    /// Names only: committed changes since delegation, staged/unstaged changes,
+    /// and untracked files. Shared checkouts cannot attribute edits to one agent.
+    public func changedFiles(repo: URL, since head: String?) throws -> [String] {
+        try requireRepository(repo)
+        let paths = ["--", ".", ":(exclude).array", ":(exclude).worktrees"]
+        var names = try runGit(["diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv", head ?? "HEAD"] + paths, repo: repo)
+        names += try runGit(["ls-files", "--others", "--exclude-standard", "-z"] + paths, repo: repo)
+        return Array(Set(names.split(separator: "\0").map(String.init))).sorted()
     }
 
     /// Every worktree git knows about, main checkout included.

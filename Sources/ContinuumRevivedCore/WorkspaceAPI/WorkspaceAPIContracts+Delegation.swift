@@ -4,8 +4,8 @@ import Foundation
 //
 // Visible delegation with safe retry: the value contracts for `agent.delegate`,
 // `agent.reveal` and `operation.get`, plus the pure operation store the host
-// keeps behind them (§10.3). Codable, Sendable, no AppKit, no host paths on the
-// wire. The App target's `WorkspaceAPIService+Delegation.swift` fulfils them
+// keeps behind them (§10.3). Codable, Sendable, no AppKit. Checkout paths in
+// delegation results are host-local tool context, never companion payloads. The App target's `WorkspaceAPIService+Delegation.swift` fulfils them
 // over the supervisor's EXISTING child-creation path (`handleSpawnRequest`) and
 // the existing managed-agent tile route; nothing here spawns anything.
 
@@ -55,6 +55,8 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         public init(nearTileId: UUID? = nil) { self.nearTileId = nearTileId }
     }
 
+    /// A failed/stopped child of this caller whose work should inform this attempt.
+    public var retryOf: AgentID?
     /// Helpers default to free, even when their parent is managed.
     public var mode: AgentMode?
     /// The child's task. Model-authored text: local only.
@@ -75,6 +77,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     public init(
         task: String,
         mode: AgentMode? = nil,
+        retryOf: AgentID? = nil,
         title: String? = nil,
         provider: String? = nil,
         model: String? = nil,
@@ -83,6 +86,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         idempotencyKey: String? = nil,
         harness: String? = nil
     ) {
+        self.retryOf = retryOf
         self.mode = mode
         self.harness = harness
         self.task = task
@@ -95,7 +99,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case task, mode, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey, harness
+        case task, mode, retryOf, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey, harness
     }
 
     /// Tolerant of the model-facing shape (`presentation`, short names, any
@@ -103,6 +107,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         harness = try c.decodeIfPresent(String.self, forKey: .harness)
+        retryOf = try c.decodeIfPresent(AgentID.self, forKey: .retryOf)
         mode = try c.decodeIfPresent(AgentMode.self, forKey: .mode)
         task = try c.decode(String.self, forKey: .task)
         title = try c.decodeIfPresent(String.self, forKey: .title)
@@ -117,6 +122,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encodeIfPresent(harness, forKey: .harness)
+        try c.encodeIfPresent(retryOf, forKey: .retryOf)
         try c.encodeIfPresent(mode, forKey: .mode)
         try c.encode(task, forKey: .task)
         try c.encodeIfPresent(title, forKey: .title)
@@ -151,6 +157,10 @@ public struct AgentDelegateResult: Codable, Equatable, Sendable {
     /// `agent.delegate`: the child exists.
     public var retryOp: WorkspaceAPIOp?
     public var failureMessage: String?
+    /// Actual checkout and any explicit isolation fallback. Local tool result only.
+    public var checkoutRoot: String?
+    public var worktreeBranch: String?
+    public var checkoutNotice: String?
 
     public init(
         operationId: String,
