@@ -17,6 +17,7 @@ final class SharedAreaHandoffWindowController: NSObject, NSWindowDelegate {
         super.init()
         window.title = "Agent handoff"; window.minSize = .init(width: 700, height: 780)
         window.isReleasedWhenClosed = false; window.contentView = content; window.delegate = self
+        window.initialFirstResponder = content.initialKeyView
         window.center()
     }
     func show() { CollaborationWindow.present(window); content.refreshFromAuthority() }
@@ -107,6 +108,8 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
         } catch { draftLoadFailed = true }
         model.onChange = { [weak self] in self?.reload() }
         setAccessibilityRole(.group); setAccessibilityLabel("Agent handoff")
+        contextReader.delegate = self
+        CollaborationKeyLoop.link([recipient, offer, accept, reclaim, contextChoice, modeChoice, contextReader, prompt, refresh, check, send])
         reload(); applyAppearance()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) unavailable") }
@@ -115,6 +118,14 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
     func refreshHostLiveness() { refreshActions() }
     func refreshFromAuthority() { run { [weak self] in guard let self else { return }; await model.refresh(object: object) } }
     func textDidChange(_ notification: Notification) { scheduleDraftSave(); refreshActions() }
+    override func keyDown(with event: NSEvent) {
+        if !CollaborationKeyLoop.handleTab(event, in: window) { super.keyDown(with: event) }
+    }
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        CollaborationKeyLoop.moveFocus(from: textView, command: commandSelector)
+    }
+    /// The first stop when the handoff window opens.
+    var initialKeyView: NSView { recipient }
     func controlTextDidChange(_ notification: Notification) { scheduleDraftSave() }
     private func scheduleDraftSave() {
         guard !stopped, !draftLoadFailed else { return }
@@ -147,6 +158,8 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
         scroll.drawsBackground = false; scroll.borderType = .noBorder
     }
     private func reload() {
+        let heldFocus = CollaborationKeyLoop.holdFocus(in: window)
+        defer { CollaborationKeyLoop.restoreFocus(heldFocus, in: window) }
         guard !stopped else { return }
         if let control = model.control, control.object == object {
             let owner = control.source.owner == model.identity.person ? "you" : String(control.source.owner.rawValue.uuidString.prefix(8))
@@ -175,6 +188,8 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
         refreshActions()
     }
     private func refreshActions() {
+        let heldFocus = CollaborationKeyLoop.holdFocus(in: window)
+        defer { CollaborationKeyLoop.restoreFocus(heldFocus, in: window) }
         let control = model.control, idle = !model.isBusy && model.pending == nil && !draftLoadFailed
         let owner = control?.source.owner == model.identity.person
         let usable = control?.object == object && control?.epoch == model.areaState?.scope.epoch && model.areaState?.scope.role != .viewer

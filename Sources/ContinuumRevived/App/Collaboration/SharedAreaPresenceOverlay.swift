@@ -21,10 +21,18 @@ final class SharedAreaPresenceOverlay: NSView {
             guard oldValue != followBanner else { return }
             // Measured once per banner change, never in draw or hit testing.
             bannerTextWidth = followBanner.map { ($0 as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width } ?? 0
+            if followBanner != nil { bannerMeasurements += 1 }
             refreshGeometry()
         }
     }
     private var bannerTextWidth: CGFloat = 0
+    /// Work counters for the budget witnesses: overlay paints, usage-card paints
+    /// and banner text measurements.
+    private(set) var drawCount = 0
+    private(set) var cardDraws = 0
+    private(set) var bannerMeasurements = 0
+    /// Where the last paint put each teammate's cursor.
+    private(set) var drawnCursors: [UUID: NSPoint] = [:]
     private(set) var inspectedDevice: UUID?
     private var pointer: NSPoint?
     private var pointerInspection = false
@@ -116,9 +124,11 @@ final class SharedAreaPresenceOverlay: NSView {
     }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) {
-        renderedUsageText = nil
+        drawCount += 1
+        renderedUsageText = nil; drawnCursors = [:]
         for peer in visiblePeers {
             guard let point = cursorPoint(peer), bounds.insetBy(dx: -20, dy: -20).contains(point) else { continue }
+            drawnCursors[peer.identity.device] = point
             let cursor = NSBezierPath()
             cursor.move(to: point); cursor.line(to: .init(x: point.x + 5, y: point.y + 17))
             cursor.line(to: .init(x: point.x + 10, y: point.y + 11)); cursor.line(to: .init(x: point.x + 17, y: point.y + 10)); cursor.close()
@@ -135,6 +145,7 @@ final class SharedAreaPresenceOverlay: NSView {
             cardRect = .zero; return
         }
         let lines = Self.usageLines(peer)
+        cardDraws += 1
         cardRect = frame
         let path = NSBezierPath(roundedRect: cardRect, xRadius: CGFloat(CornerRole.card.radius), yRadius: CGFloat(CornerRole.card.radius))
         SurfaceToken.overlay.color.nsColor(in: self).setFill(); path.fill()

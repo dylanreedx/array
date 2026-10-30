@@ -44,6 +44,10 @@ final class SharedAreaPresencePublisher {
         overlay.onFollow = { [weak self] device in _ = self?.follow(device: device) }
         overlay.onStopFollowing = { [weak self] in self?.stopFollowing(notice: nil) }
         scene.onLocalCameraNavigation = { [weak self] in self?.localNavigation() }
+        scene.onFollowTeammate = { [weak self] device in
+            guard let self else { return }
+            if let device { _ = follow(device: device) } else { stopFollowing(notice: nil) }
+        }
         scene.window?.acceptsMouseMovedEvents = true
         observer = controller.addChangeObserver { [weak self] in self?.refresh() }
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .mouseExited]) { [weak self] event in
@@ -71,6 +75,7 @@ final class SharedAreaPresencePublisher {
         timer?.invalidate(); timer = nil; task?.cancel(); task = nil
         scene.onCanvasTransformChange = nil; overlay.onPointerExit = nil
         scene.onLocalCameraNavigation = nil; overlay.onFollow = nil; overlay.onStopFollowing = nil
+        scene.onFollowTeammate = nil; scene.setFollowTargets([], followed: nil)
         followedDevice = nil; overlay.followedDevice = nil; overlay.followBanner = nil
         cursor = nil; screenCursor = nil; lastStatus = nil
         overlay.peers = []; overlay.inspect(device: nil); overlay.removeFromSuperview()
@@ -87,6 +92,7 @@ final class SharedAreaPresencePublisher {
             task?.cancel(); task = nil; session = nil; generation = UUID()
         }
         updateFollow()
+        publishFollowTargets()
         guard controller.status == .connected else { return }
         if changed { send(force: true) }
     }
@@ -105,6 +111,7 @@ final class SharedAreaPresencePublisher {
         overlay.followedDevice = device
         overlay.followBanner = "Following \(name) · pan, scroll or zoom to stop"
         applyFollow(viewport)
+        publishFollowTargets()
         // Publish at once that this view is now borrowed, so nobody follows it back.
         send(force: true)
         return true
@@ -115,7 +122,22 @@ final class SharedAreaPresencePublisher {
         overlay.followedDevice = nil; overlay.followBanner = notice
         // One private camera write when following ends, never one per frame.
         try? scene.persistFollowedCamera()
+        publishFollowTargets()
         send(force: true)
+    }
+    /// Teammates currently sharing a view, for the keyboard path in the
+    /// Workspace menu. The scene ignores an unchanged list.
+    private func publishFollowTargets() {
+        guard !stopped else { return }
+        let now = Date(), own = controller.identity.device
+        var targets: [SharedAreaSceneView.FollowTarget] = []
+        if controller.status == .connected {
+            for peer in controller.presence where peer.identity.device != own && peer.expiresAt > now && peer.viewport?.valid == true {
+                targets.append(.init(device: peer.identity.device, label: overlay.label(peer)))
+            }
+        }
+        targets.sort { $0.label == $1.label ? $0.device.uuidString < $1.device.uuidString : $0.label < $1.label }
+        scene.setFollowTargets(Array(targets.prefix(16)), followed: followedDevice)
     }
     private func localNavigation() {
         if followedDevice != nil { stopFollowing(notice: nil) } else { overlay.followBanner = nil }

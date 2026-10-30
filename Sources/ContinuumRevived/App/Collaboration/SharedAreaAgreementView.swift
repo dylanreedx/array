@@ -20,6 +20,8 @@ final class SharedAreaAgreementView: NSView {
     var summaryColor: NSColor? { summary.textColor }
     var canEndorse: Bool { endorseButton.presentation.isEnabled }
     var canRebase: Bool { !rebaseButton.isHidden && rebaseButton.presentation.isEnabled }
+    /// The panel's stops in the scene's keyboard order.
+    var keyViews: [NSView] { [endorseButton, rebaseButton] }
 
     private let summary = NSTextField(labelWithString: "")
     private let notice = NSTextField(labelWithString: "")
@@ -60,20 +62,29 @@ final class SharedAreaAgreementView: NSView {
         let endorsers = currentRevision.map { document.endorsements(of: $0.id).map(\.person) } ?? []
         let mine = endorsers.contains(controller.identity.person)
         if currentRevision == nil {
-            summary.stringValue = "No revision yet · nothing to endorse"
+            setText(summary, "No revision yet · nothing to endorse")
         } else {
-            summary.stringValue = "Revision \(revisionNumber) · " + Self.endorsementText(endorsers.count, includesYou: mine)
+            setText(summary, "Revision \(revisionNumber) · " + Self.endorsementText(endorsers.count, includesYou: mine))
         }
         draftIsStale = currentRevision != nil && draft?.object == agreement && draft?.basedOn != currentRevision?.id
-        endorseButton.presentation = CollaborationHubView.action(mine ? "Endorsed" : "Endorse revision \(revisionNumber)",
+        // Endorsing disables the button a keyboard user just pressed.
+        let heldFocus = CollaborationKeyLoop.holdFocus(in: window)
+        defer { CollaborationKeyLoop.restoreFocus(heldFocus, in: window) }
+        // Assign only on change: a reassigned presentation lays the button out
+        // again, and this runs on every scene refresh, presence frames included.
+        let endorse = CollaborationHubView.action(mine ? "Endorsed" : "Endorse revision \(revisionNumber)",
             symbol: mine ? "checkmark.seal.fill" : "checkmark.seal",
             enabled: currentRevision != nil && !mine && !endorsing && controller.canSubmit, loading: endorsing)
-        rebaseButton.isHidden = !draftIsStale
-        rebaseButton.presentation = CollaborationHubView.action("Rebase draft", symbol: "arrow.triangle.branch", enabled: draftIsStale)
-        notice.stringValue = draftIsStale
+        if endorseButton.presentation != endorse { endorseButton.presentation = endorse }
+        if rebaseButton.isHidden == draftIsStale { rebaseButton.isHidden = !draftIsStale }
+        let rebase = CollaborationHubView.action("Rebase draft", symbol: "arrow.triangle.branch", enabled: draftIsStale)
+        if rebaseButton.presentation != rebase { rebaseButton.presentation = rebase }
+        setText(notice, draftIsStale
             ? "Your draft is based on an earlier revision. Read revision \(revisionNumber), then rebase."
-            : outcome
+            : outcome)
     }
+    /// Unchanged text is not reassigned; a reassigned label lays out again.
+    private func setText(_ field: NSTextField, _ value: String) { if field.stringValue != value { field.stringValue = value } }
 
     /// Endorses the revision this view is showing, never a newer one.
     func endorseCurrentRevision() async {

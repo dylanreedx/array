@@ -23,6 +23,7 @@ final class SharedAreaWindowController: NSObject, NSWindowDelegate {
         scene = delegate.mountWorkspaceSceneAtBoot(sharedAreaController: controller, person: person, in: window)
         presencePublisher = SharedAreaPresencePublisher(scene: scene)
         super.init()
+        window.initialFirstResponder = scene.areaCanvasView
         window.delegate = self
         window.center()
     }

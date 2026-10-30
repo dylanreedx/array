@@ -19,6 +19,7 @@ final class CollaborationHubWindowController: NSObject, NSWindowDelegate {
         window.title = "Collaboration"
         window.isReleasedWhenClosed = false
         window.contentView = content
+        window.initialFirstResponder = content.initialKeyView
         window.delegate = self
         window.center()
     }
@@ -90,10 +91,17 @@ final class CollaborationHubView: NSView, TokenThemed {
         open.target = self; open.action = #selector(openWorkspace)
         invite.target = self; invite.action = #selector(createInvitation)
         model.onChange = { [weak self] in self?.refreshAccounts(); self?.refresh() }
+        CollaborationKeyLoop.link([accountChoice, endpoint, enrollment, device, connect, workspaceAction, workspaceValue,
+                                   workspaceName, open, knownAreas, invitePerson, inviteRole, invite])
         refreshAccounts(); refresh(); applyTokens()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
     override var isFlipped: Bool { true }
+    override func keyDown(with event: NSEvent) {
+        if !CollaborationKeyLoop.handleTab(event, in: window) { super.keyDown(with: event) }
+    }
+    /// The first stop when the hub opens.
+    var initialKeyView: NSView { accountChoice }
 
     private func configure(_ field: NSTextField, placeholder: String, accessibility: String) {
         field.placeholderString = placeholder; field.font = .token(.body)
@@ -127,6 +135,8 @@ final class CollaborationHubView: NSView, TokenThemed {
         } else { identity.stringValue = ""; knownAreas.items = [] }
     }
     private func refresh() {
+        let heldFocus = CollaborationKeyLoop.holdFocus(in: window)
+        defer { CollaborationKeyLoop.restoreFocus(heldFocus, in: window) }
         let isNew = accountChoice.selectedID == "new"
         endpoint.isHidden = !isNew; enrollment.isHidden = !isNew; device.isHidden = !isNew
         let connected = model.activeAccount != nil

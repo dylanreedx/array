@@ -16,6 +16,7 @@ final class SharedAreaCaptureWindowController: NSObject, NSWindowDelegate {
         window.title = "Review sharing"
         window.minSize = .init(width: 680, height: 780)
         window.isReleasedWhenClosed = false; window.contentView = content; window.delegate = self
+        window.initialFirstResponder = content.initialKeyView
         content.onRequestClose = { [weak self] in self?.window.performClose(nil) }
         window.center()
     }
@@ -36,7 +37,7 @@ final class SharedAreaCaptureWindowController: NSObject, NSWindowDelegate {
 /// review. The source picker pages its choices rather than retaining a row view
 /// or constructing a popover entry for every tile in a large workspace.
 @MainActor
-final class SharedAreaCaptureView: NSView, TokenThemed {
+final class SharedAreaCaptureView: NSView, TokenThemed, NSTextViewDelegate {
     let coordinator: SharedAreaCaptureCoordinator
     var onRequestClose: (() -> Void)?
     private let title = NSTextField(labelWithString: "Review what you share")
@@ -67,6 +68,14 @@ final class SharedAreaCaptureView: NSView, TokenThemed {
         let submitting: Bool
     }
 
+    /// The first stop when the review window opens.
+    var initialKeyView: NSView { sourceChoice }
+    override func keyDown(with event: NSEvent) {
+        if !CollaborationKeyLoop.handleTab(event, in: window) { super.keyDown(with: event) }
+    }
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        CollaborationKeyLoop.moveFocus(from: textView, command: commandSelector)
+    }
     init(coordinator: SharedAreaCaptureCoordinator) {
         self.coordinator = coordinator
         super.init(frame: .init(x: 0, y: 0, width: 780, height: 800))
@@ -86,6 +95,8 @@ final class SharedAreaCaptureView: NSView, TokenThemed {
         reader.textContainer?.containerSize = .init(width: 0, height: CGFloat.greatestFiniteMagnitude)
         reader.textContainerInset = .init(width: Space.m, height: Space.m)
         reader.setAccessibilityLabel("Captured content to share")
+        reader.delegate = self
+        CollaborationKeyLoop.link([sourceChoice, pageBack, pageNext, modeChoice, reader, refreshButton, closeButton, shareButton])
         readerScroll.documentView = reader; readerScroll.hasVerticalScroller = true
         readerScroll.drawsBackground = false; readerScroll.borderType = .noBorder
         sourceChoice.onSelection = { [weak self] item in
@@ -148,6 +159,8 @@ final class SharedAreaCaptureView: NSView, TokenThemed {
         modeChoice.isEnabled = coordinator.canEditReview
     }
     private func refreshActions() {
+        let heldFocus = CollaborationKeyLoop.holdFocus(in: window)
+        defer { CollaborationKeyLoop.restoreFocus(heldFocus, in: window) }
         let pages = max(1, (coordinator.review.rows.count + pageSize - 1) / pageSize)
         let reviewing = coordinator.state == .reviewing
         sourceChoice.isEnabled = reviewing
@@ -159,6 +172,8 @@ final class SharedAreaCaptureView: NSView, TokenThemed {
             enabled: coordinator.state == .uncertain || coordinator.canConfirm, loading: coordinator.state == .submitting)
     }
     private func refreshSelected() {
+        let heldFocus = CollaborationKeyLoop.holdFocus(in: window)
+        defer { CollaborationKeyLoop.restoreFocus(heldFocus, in: window) }
         guard let row = coordinator.review.rows.first(where: { $0.source == selectedSource }) else {
             modeChoice.items = []; reader.string = ""; detail.stringValue = "No tile is selected."; return
         }

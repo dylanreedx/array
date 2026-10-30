@@ -16,6 +16,8 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     var onLocalCameraNavigation: (() -> Void)?
     var onCanvasTransformChange: (() -> Void)?
     var areaCanvasView: NSView { canvas }
+    /// Paints of the shared content canvas, for the budget witnesses.
+    var contentDrawCount: Int { canvas.drawCount }
     var localViewCamera: SharedAreaLocalView { localCamera }
     var geometryLedgerFile: URL? { geometryLedgerStore?.file }
     var hasPendingGeometry: Bool { pendingGeometry != nil }
@@ -97,7 +99,21 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         let uncertain: Bool
         let camera: SharedAreaLocalView
         let pendingCount: Int
+        let followTargets: [FollowTarget]
+        let followed: UUID?
     }
+    /// A teammate whose published view can be followed from the Workspace menu,
+    /// the keyboard path to the same follow the cursor card offers.
+    struct FollowTarget: Equatable { let device: UUID; let label: String }
+    private(set) var followTargets: [FollowTarget] = []
+    private(set) var followedTeammate: UUID?
+    /// Nil stops following.
+    var onFollowTeammate: ((UUID?) -> Void)?
+    /// Automatic camera motion (follow) jumps instead of gliding when this is on.
+    var reduceMotion: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    /// Camera frames drawn by follow, including each glide step.
+    private(set) var followCameraFrames = 0
+    private var followGlide: Timer?
 
     override var isFlipped: Bool { true }
 
@@ -154,6 +170,9 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         addSubview(artifactPanel)
         addSubview(livePanel)
         agreementPanel.onRebaseDraft = { [weak self] in self?.rebaseAgreementDraft() }
+        reader.delegate = self
+        // Reading order: canvas, header menus, the selected entry, then compose.
+        CollaborationKeyLoop.link([canvas, objectNavigator, actions, history] + agreementPanel.keyViews + [reader, editor, postButton])
         setAccessibilityRole(.group)
         setAccessibilityLabel("Shared workspace")
         applyTokens()
@@ -174,6 +193,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     }
     func unmount() {
         guard isMounted else { return }
+        followGlide?.invalidate(); followGlide = nil
         mountGeneration = UUID()
         do { try prepareToClose() } catch { showPrivateSaveFailure() }
         isMounted = false
@@ -250,6 +270,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     func setCamera(_ value: SharedAreaLocalView) throws {
         guard [value.x, value.y, value.zoom].allSatisfy(\.isFinite), value.zoom > 0 else { throw SharedArea.Failure.invalidGeometry }
         if value.x != localCamera.x || value.y != localCamera.y || value.zoom != localCamera.zoom { cancelGeometry() }
+        followGlide?.invalidate(); followGlide = nil
         localCamera = value; cameraDirty = true
         privateViewWrites += 1
         try controller.setView(value)
@@ -259,20 +280,62 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     }
     /// Follow drives the private camera from a teammate's published viewport.
     /// It is presentation only: not local navigation, and not saved per frame.
+    /// It glides to the target, or jumps when Reduce Motion is on; a new target
+    /// mid-glide continues from wherever the camera is.
     @discardableResult
     func applyFollowedCamera(_ value: SharedAreaLocalView) -> Bool {
         guard isMounted, [value.x, value.y, value.zoom].allSatisfy(\.isFinite), value.zoom > 0 else { return false }
-        var next = value; next.focusedObject = selectedObject
-        guard next != localCamera else { return false }
+        var target = value; target.focusedObject = selectedObject
+        guard target != followTarget else { return false }
         if geometryGesture != nil { cancelGeometry() }
         cameraTimer?.invalidate(); cameraTimer = nil
-        localCamera = next; cameraDirty = true
-        canvas.setCamera(localCamera)
-        onCanvasTransformChange?()
+        followGlide?.invalidate(); followGlide = nil
+        followTarget = target
+        guard !reduceMotion(), target != localCamera else { showFollowedCamera(target); return true }
+        glide = (start: localCamera, target: target, step: 0)
+        followGlide = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            let finished = MainActor.assumeIsolated { self?.advanceFollowGlide() ?? true }
+            if finished { timer.invalidate() }
+        }
         return true
     }
+    private var glide: (start: SharedAreaLocalView, target: SharedAreaLocalView, step: Int)?
+    private static let glideSteps = 12
+    /// One eased step of the follow glide; true once it has landed.
+    private func advanceFollowGlide() -> Bool {
+        guard isMounted, var current = glide, followGlide != nil else { return true }
+        current.step += 1; glide = current
+        let t = Double(current.step) / Double(Self.glideSteps), eased = 1 - pow(1 - t, 3)
+        var frame = current.target
+        frame.x = current.start.x + (current.target.x - current.start.x) * eased
+        frame.y = current.start.y + (current.target.y - current.start.y) * eased
+        frame.zoom = current.start.zoom * pow(current.target.zoom / current.start.zoom, eased)
+        let landed = current.step >= Self.glideSteps
+        if landed { frame = current.target; followGlide = nil; glide = nil }
+        showFollowedCamera(frame)
+        return landed
+    }
+    /// True while a follow glide is still moving toward its target.
+    var isFollowGliding: Bool { followGlide != nil }
+    private var followTarget: SharedAreaLocalView?
+    private func showFollowedCamera(_ frame: SharedAreaLocalView) {
+        localCamera = frame; cameraDirty = true
+        followCameraFrames += 1
+        canvas.setCamera(localCamera)
+        onCanvasTransformChange?()
+    }
+    /// The publisher reports who can be followed; the Workspace menu offers them.
+    func setFollowTargets(_ targets: [FollowTarget], followed: UUID?) {
+        guard targets != followTargets || followed != followedTeammate else { return }
+        followTargets = targets; followedTeammate = followed
+        if followed == nil { followTarget = nil }
+        refreshControls()
+    }
     /// Saves a followed camera once, when following ends.
-    func persistFollowedCamera() throws { if cameraDirty { try setCamera(localCamera) } }
+    func persistFollowedCamera() throws {
+        followGlide?.invalidate(); followGlide = nil; followTarget = nil
+        if cameraDirty { try setCamera(localCamera) }
+    }
     func selectObject(_ object: SharedArea.ID<SharedArea.Object>?) throws {
         try prepareToClose()
         var candidate = localCamera
@@ -573,6 +636,12 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
     }
 
+    override func keyDown(with event: NSEvent) {
+        if !CollaborationKeyLoop.handleTab(event, in: window) { super.keyDown(with: event) }
+    }
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        CollaborationKeyLoop.moveFocus(from: textView, command: commandSelector)
+    }
     func textDidChange(_ notification: Notification) {
         guard isMounted else { return }
         draftDirty = true
@@ -617,7 +686,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             canvas.install(document: current, hosts: knownHosts, camera: localCamera, selected: selectedObject)
             refreshReader()
         } else { canvas.setCamera(localCamera) }
-        statusLabel.stringValue = statusText
+        setText(statusLabel, statusText)
         artifactPanel.headsChanged(controller.artifactHeads)
         canvas.geometryEnabled = !geometryUnavailable && geometryLedger != nil && controller.canSubmit && !controller.isSubmitting && pendingGeometry == nil && uncertainCommand == nil
         if controller.status != .connected { attemptedGeometryRecovery = false }
@@ -643,6 +712,8 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         }
     }
     private func refreshControls() {
+        let heldFocus = CollaborationKeyLoop.holdFocus(in: window)
+        defer { CollaborationKeyLoop.restoreFocus(heldFocus, in: window) }
         agreementPanel.show(agreement: selectedObject, in: knownDocument, draft: activeDraft)
         freshnessPanel.show(agent: selectedObject, in: knownDocument, model: agentFreshness)
         livePanel.show(object: selectedObject, in: knownDocument)
@@ -654,17 +725,23 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             epoch: controller.scope?.epoch, role: controller.scope?.role.rawValue,
             documentRevision: controller.document?.revision, selected: selectedObject,
             hasText: !editor.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-            uncertain: uncertainCommand != nil, camera: controller.view, pendingCount: pendingDeliveryCount)
+            uncertain: uncertainCommand != nil, camera: controller.view, pendingCount: pendingDeliveryCount,
+            followTargets: followTargets, followed: followedTeammate)
         guard key != lastControlsKey else { return }
         lastControlsKey = key
         let writable = controller.canSubmit && !controller.isSubmitting
-        objectNavigator.items = canvas.visibleObjects.map { object in
+        // Every assignment below is skipped when unchanged: a reassigned menu,
+        // label or button lays itself out again, and this runs on every
+        // authority frame (COL-21 layout budget).
+        let objects: [ChoiceItem] = canvas.visibleObjects.map { object in
             .init(id: object.id.rawValue.uuidString, title: object.title + " · " + String(object.id.rawValue.uuidString.prefix(4)))
         }
-        objectNavigator.selectedID = selectedObject?.rawValue.uuidString
-        objectNavigator.selectedTitleOverride = "Objects"
-        objectNavigator.isEnabled = !objectNavigator.items.isEmpty
-        actions.items = [
+        if objectNavigator.items != objects { objectNavigator.items = objects }
+        let selectedID = selectedObject?.rawValue.uuidString
+        if objectNavigator.selectedID != selectedID { objectNavigator.selectedID = selectedID }
+        if objectNavigator.selectedTitleOverride != "Objects" { objectNavigator.selectedTitleOverride = "Objects" }
+        if objectNavigator.isEnabled == objects.isEmpty { objectNavigator.isEnabled = !objects.isEmpty }
+        let workspaceItems: [ChoiceItem] = [
             .init(id: "discussion", title: "New discussion", icon: .system("bubble.left"), enabled: writable && uncertainCommand == nil),
             .init(id: "agreement", title: "New agreement", icon: .system("doc.text"), enabled: writable && uncertainCommand == nil),
             .init(id: "undo-layout", title: "Undo layout change", icon: .system("arrow.uturn.backward"), enabled: canUndoSharedGeometry),
@@ -673,19 +750,31 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             .init(id: "handoff", title: "Hand agent off…", icon: .system("person.2"), enabled: writable && selectedObject.flatMap { selected in controller.document?.items.first(where: { $0.id == selected && $0.kind == .agentObservation }) } != nil && onRequestHandoff != nil),
             .init(id: "fit", title: "Fit shared content", icon: .system("arrow.up.left.and.arrow.down.right"), enabled: controller.document?.positions.isEmpty == false),
             .init(id: "invite", title: "Invite collaborator…", icon: .system("person.badge.plus"), enabled: controller.status == .connected && controller.scope?.allows(.manageSharing) == true)
-        ]
-        actions.setPresentationTitle("Workspace")
+        ] + followTargets.map { target in
+            target.device == followedTeammate
+                ? .init(id: "unfollow", title: "Stop following \(target.label)", icon: .system("eye.slash"))
+                : .init(id: "follow:" + target.device.uuidString, title: "Follow \(target.label)'s view", icon: .system("eye"))
+        }
+        if actions.items != workspaceItems { actions.items = workspaceItems; actions.setPresentationTitle("Workspace") }
         let kind = selectedObject.flatMap { object in knownDocument?.items.first(where: { $0.id == object })?.kind }
         let canCompose = kind == .discussion || kind == .agreement
-        editor.isEditable = canCompose && uncertainCommand == nil
-        postButton.presentation = .init(primaryAction: .send,
+        if editor.isEditable != (canCompose && uncertainCommand == nil) { editor.isEditable = canCompose && uncertainCommand == nil }
+        let post = AgentComposerPresentation(primaryAction: .send,
             title: uncertainCommand != nil ? "Check delivery" : kind == .agreement ? "Save revision" : "Post",
             symbolName: uncertainCommand != nil ? "arrow.clockwise" : "arrow.up",
             accessibilityLabel: uncertainCommand != nil ? "Check the previous delivery outcome" : kind == .agreement ? "Save an agreement revision" : "Post to discussion",
             isEnabled: writable && (uncertainCommand != nil || (canCompose && !editor.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)),
             isLoading: controller.isSubmitting, secondaryActions: [])
+        if postButton.presentation != post { postButton.presentation = post }
+    }
+    private func setText(_ field: NSTextField, _ value: String) { if field.stringValue != value { field.stringValue = value } }
+    private func setHistory(_ items: [ChoiceItem]) {
+        guard history.items != items else { return }
+        history.items = items; history.setPresentationTitle("History")
     }
     private func refreshReader() {
+        let heldFocus = CollaborationKeyLoop.holdFocus(in: window)
+        defer { CollaborationKeyLoop.restoreFocus(heldFocus, in: window) }
         // An artifact replaces the text reader and composer with its own
         // read-only revision view; everything else keeps the reader.
         artifactPanel.show(object: selectedObject, in: knownDocument)
@@ -696,11 +785,11 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         entryLabel.isHidden = !livePanel.isHidden; history.isHidden = !livePanel.isHidden
         guard let document = knownDocument, let object = selectedObject,
               let item = document.items.first(where: { $0.id == object }) else {
-            detailLabel.stringValue = activeDraft == nil ? "Select an object" : "Private draft"
-            entryLabel.stringValue = ""; reader.string = ""; history.items = []; displayedContextRevision = nil
+            setText(detailLabel, activeDraft == nil ? "Select an object" : "Private draft")
+            setText(entryLabel, ""); if !reader.string.isEmpty { reader.string = "" }; setHistory([]); displayedContextRevision = nil
             return
         }
-        detailLabel.stringValue = Self.title(for: item.kind)
+        setText(detailLabel, Self.title(for: item.kind))
         let entries: [String]
         switch item.kind {
         case .discussion:
@@ -719,13 +808,12 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         displayedContextRevision = revisions.indices.contains(readerIndex) ? revisions[readerIndex] : nil
         let text = entries.isEmpty ? (item.kind == .agreement ? "No agreement revision yet." : "No discussion messages yet.") : entries[readerIndex]
         if reader.string != text { reader.string = text; reader.scrollRangeToVisible(.init(location: 0, length: 0)) }
-        entryLabel.stringValue = entries.isEmpty ? "" : "Entry \(readerIndex + 1) of \(entries.count) · full entry"
-        history.items = [
+        setText(entryLabel, entries.isEmpty ? "" : "Entry \(readerIndex + 1) of \(entries.count) · full entry")
+        setHistory([
             .init(id: "earlier", title: "Earlier entry", enabled: readerIndex > 0),
             .init(id: "later", title: "Later entry", enabled: readerIndex + 1 < entries.count),
             .init(id: "latest", title: "Latest entry", enabled: !entries.isEmpty)
-        ]
-        history.setPresentationTitle("History")
+        ])
     }
     private func refreshFreshness() {
         guard isMounted else { return }
@@ -748,6 +836,9 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             actionTask = Task { [weak self] in await self?.createObject(kind: action == "discussion" ? .discussion : .agreement) }
         case "fit": do { try fitContent() } catch { showPrivateSaveFailure() }
         case "invite": onRequestInvite?()
+        case "unfollow": onFollowTeammate?(nil)
+        case let id where id.hasPrefix("follow:"):
+            if let device = UUID(uuidString: String(id.dropFirst("follow:".count))) { onFollowTeammate?(device) }
         default: break
         }
     }
@@ -875,7 +966,7 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
         super.init(frame: frameRect)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Shared objects")
-        setAccessibilityHelp("Drag to move shared objects. Shift-click selects a group. Drag its lower-right handle to resize. Command-Z undoes your layout change. Tab navigates objects; arrow keys pan; Escape cancels a gesture.")
+        setAccessibilityHelp("Drag to move shared objects. Shift-click selects a group. Drag its lower-right handle to resize. Command-Z undoes your layout change. Tab navigates objects; arrow keys pan; Escape cancels a gesture, then leaves the canvas, as does Control-Tab.")
     }
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -951,7 +1042,9 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
     func object(at point: NSPoint) -> SharedArea.ID<SharedArea.Object>? {
         visibleCards().cards.reversed().first(where: { $0.frame.contains(point) })?.card.position.object
     }
+    private(set) var drawCount = 0
     override func draw(_ dirtyRect: NSRect) {
+        drawCount += 1
         SurfaceToken.canvas.color.nsColor(in: self).setFill(); bounds.fill()
         if cards.isEmpty {
             draw(hasDocument ? "A shared place for your work" : "Shared content unavailable", rect: bounds.insetBy(dx: 28, dy: 28), role: .title, color: .textPrimary)
@@ -1015,11 +1108,15 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if event.keyCode == 6 && modifiers == .command { onUndoGeometry?() }
         else if event.keyCode == 6 && modifiers == [.command, .shift] { onRedoGeometry?() }
+        else if event.keyCode == 48 && modifiers.contains(.control) {
+            // Tab cycles shared objects inside the canvas; Control-Tab leaves it.
+            CollaborationKeyLoop.move(from: self, forward: !modifiers.contains(.shift), in: window)
+        }
         else if event.keyCode == 48 && event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
             onCycleSelection?(event.modifierFlags.contains(.shift))
         } else if event.keyCode == 53 {
             if geometryDrag != nil { cancelGeometryGesture(); onCancelGeometry?() }
-            else { window?.selectNextKeyView(self) }
+            else { CollaborationKeyLoop.move(from: self, forward: true, in: window) }
         } else if (123...126).contains(event.keyCode) && event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
             // Keyboard camera pan, in screen points so every zoom moves alike.
             let step = (event.modifierFlags.contains(.shift) ? 240 : 60) / camera.zoom
