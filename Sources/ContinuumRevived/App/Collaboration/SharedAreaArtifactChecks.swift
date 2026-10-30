@@ -140,10 +140,18 @@ enum SharedAreaArtifactChecks {
         try expect(panel.applicabilityText == "Source changed on the owner's Mac · not applicable",
                    "a source change shows not applicable instead of current")
 
-        // 5. Light and dark render through the same token renderer.
+        // 5. Light and dark render through the same token renderer, in a real
+        // window kept off every display, read back from the window server.
+        let window = NSWindow(contentRect: hostView.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hostView
+        window.orderFrontOffscreenForChecks()
+        defer { window.orderOut(nil) }
         for (name, theme) in [(NSAppearance.Name.aqua, TokenTheme.light), (.darkAqua, .dark)] {
-            panel.appearance = NSAppearance(named: name)
-            panel.viewDidChangeEffectiveAppearance()
+            window.appearance = NSAppearance(named: name)
+            hostView.layoutSubtreeIfNeeded(); hostView.display()
+            CATransaction.flush()
+            try await Task.sleep(for: .milliseconds(200))
             let storage = panel.renderedStorage ?? NSAttributedString()
             var additionColor: NSColor?
             storage.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: storage.length)) { value, range, stop in
@@ -151,23 +159,22 @@ enum SharedAreaArtifactChecks {
             }
             try expect(same(additionColor, AccentToken.accentDone.color.nsColor(for: theme)) && same(panel.textBackground, SurfaceToken.tileBody.color.nsColor(for: theme)),
                        "\(theme) appearance renders added lines and the body in that theme's tokens")
+            guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber), [.boundsIgnoreFraming, .bestResolution]) else {
+                throw Failure(message: "the window server returned no image of the check's own window")
+            }
+            let scale = CGFloat(image.width) / window.frame.width
+            let rect = panel.convert(panel.bounds, to: nil)
+            let crop = CGRect(x: rect.minX * scale, y: (window.frame.height - rect.maxY) * scale, width: rect.width * scale, height: rect.height * scale)
+            guard let cropped = image.cropping(to: crop.integral) else { throw Failure(message: "the panel lies outside its window") }
+            let pixels = NSBitmapImageRep(cgImage: cropped)
+            // Below the two-line coverage text, right of its words: the header
+            // shows whatever the panel sits on, the scene's panel surface.
+            let header = pixels.colorAt(x: Int((panel.bounds.width - 6) * scale), y: Int(80 * scale))
+            try expect(near(header, SurfaceToken.panel.color.nsColor(for: theme)),
+                       "\(theme) window shows the artifact header on that theme's panel surface")
             if let evidence = ProcessInfo.processInfo.environment["CONTINUUM_ARTIFACT_EVIDENCE_DIR"],
-               let rep = panel.bitmapImageRepForCachingDisplay(in: panel.bounds) {
-                // The panel draws on the scene's panel surface; paint it first
-                // so the evidence shows what a person sees in that theme.
-                NSGraphicsContext.saveGraphicsState()
-                NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-                NSColor.clear.set(); NSRect(origin: .zero, size: rep.size).fill(using: .copy)
-                NSGraphicsContext.restoreGraphicsState()
-                panel.cacheDisplay(in: panel.bounds, to: rep)
-                let image = NSImage(size: panel.bounds.size)
-                image.lockFocus()
-                SurfaceToken.panel.color.nsColor(for: theme).setFill(); NSRect(origin: .zero, size: panel.bounds.size).fill()
-                rep.draw(in: NSRect(origin: .zero, size: panel.bounds.size))
-                image.unlockFocus()
-                if let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
-                    try png.write(to: URL(fileURLWithPath: evidence).appendingPathComponent("artifact-\(theme).png"))
-                }
+               let png = pixels.representation(using: .png, properties: [:]) {
+                try png.write(to: URL(fileURLWithPath: evidence).appendingPathComponent("artifact-\(theme).png"))
             }
         }
         try expect(try tree(recipient) == recipientBefore, "the recipient's checkout is byte-identical after reading every revision")
@@ -176,13 +183,6 @@ enum SharedAreaArtifactChecks {
         await modelA.close(); await modelB.close()
     }
 
-    // MARK: - Fixture
-
-    private static func same(_ a: NSColor?, _ b: NSColor) -> Bool {
-        guard let a = a?.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return false }
-        return abs(a.redComponent - b.redComponent) < 0.002 && abs(a.greenComponent - b.greenComponent) < 0.002
-            && abs(a.blueComponent - b.blueComponent) < 0.002 && abs(a.alphaComponent - b.alphaComponent) < 0.002
-    }
     /// An accepted share whose uploads failed must still publish exactly the
     /// confirmed bytes, under the reserved revision IDs, after a relaunch and on
     /// reconnect — and never send a revision that already landed.
@@ -271,7 +271,21 @@ enum SharedAreaArtifactChecks {
         await model.close()
     }
 
+    // MARK: - Fixture
 
+    private static func same(_ a: NSColor?, _ b: NSColor) -> Bool {
+        guard let a = a?.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return false }
+        return abs(a.redComponent - b.redComponent) < 0.002 && abs(a.greenComponent - b.greenComponent) < 0.002
+            && abs(a.blueComponent - b.blueComponent) < 0.002 && abs(a.alphaComponent - b.alphaComponent) < 0.002
+    }
+
+    /// Window-server pixels pass through display colour matching, so allow a
+    /// little more than the exact-token tolerance.
+    private static func near(_ a: NSColor?, _ b: NSColor) -> Bool {
+        guard let a = a?.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return false }
+        return abs(a.redComponent - b.redComponent) < 0.04 && abs(a.greenComponent - b.greenComponent) < 0.04
+            && abs(a.blueComponent - b.blueComponent) < 0.04 && a.alphaComponent > 0.99
+    }
     private static func git(_ repo: URL, _ args: String...) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
@@ -332,6 +346,17 @@ enum SharedAreaArtifactChecks {
         var blobs: [String: Data] = [:]
         var reviews: [Artifact.Review] = []
         var connections: [UUID: (Collaboration.Identity, Connection)] = [:]
+        enum PublishOutcome { case refuse, loseReply }
+        /// Outcomes for the next publish calls; an empty script commits.
+        private var publishScript: [PublishOutcome] = []
+        /// Every publish call, including refused ones.
+        var attempts: [Artifact.Capture] = []
+        var revisionCount: Int { records.values.reduce(0) { $0 + $1.count } }
+        func script(_ outcomes: [PublishOutcome]) { publishScript = outcomes }
+        func reconnect(_ identity: Collaboration.Identity) async {
+            await connections[identity.device]?.1.emit(.reconnecting(nil))
+            await broadcast()
+        }
         init(owner: Collaboration.Identity, member: Collaboration.Identity) {
             self.owner = owner; self.member = member; document = .init(id: area)
         }
@@ -346,20 +371,16 @@ enum SharedAreaArtifactChecks {
             let result = try document.apply(mutation.command)
             await broadcast()
             switch result { case .applied(let r): return .init(revision: r, duplicate: false); case .duplicate(let r): return .init(revision: r, duplicate: true) }
-        enum PublishOutcome { case refuse, loseReply }
-        /// Outcomes for the next publish calls; an empty script commits.
-        private var publishScript: [PublishOutcome] = []
-        /// Every publish call, including refused ones.
-        var attempts: [Artifact.Capture] = []
-        var revisionCount: Int { records.values.reduce(0) { $0 + $1.count } }
-        func script(_ outcomes: [PublishOutcome]) { publishScript = outcomes }
-        func reconnect(_ identity: Collaboration.Identity) async {
-            await connections[identity.device]?.1.emit(.reconnecting(nil))
-            await broadcast()
-        }
         }
         func publish(_ capture: Artifact.Capture, by identity: Collaboration.Identity) async throws -> Artifact.PublishReceipt {
             let m = capture.manifest
+            attempts.append(capture)
+            let outcome = publishScript.isEmpty ? nil : publishScript.removeFirst()
+            if outcome == .refuse { throw CollaborationClientError.server(status: 503, code: "unavailable") }
+            // The service's idempotency: a known revision ID is a duplicate.
+            if let record = records[m.object]?.first(where: { $0.manifest.id == m.id }), record.contentDigest == m.contentDigest {
+                return .init(revision: m.id, sequence: record.sequence, duplicate: true)
+            }
             guard let item = document.items.first(where: { $0.id == m.object && $0.kind == .artifact }), item.source?.owner == identity.person else {
                 throw CollaborationClientError.server(status: 403, code: "forbidden")
             }
@@ -371,16 +392,10 @@ enum SharedAreaArtifactChecks {
                                                         publishedAt: Date(), contentDigest: m.contentDigest))
             published.append(capture)
             await broadcast()
+            if outcome == .loseReply { throw URLError(.networkConnectionLost) }
             return .init(revision: m.id, sequence: sequence, duplicate: false)
         }
         func review(_ identity: Collaboration.Identity, object: SharedArea.ID<SharedArea.Object>, revision: SharedArea.ID<Artifact.RevisionTag>) async throws -> Artifact.Review {
-            attempts.append(capture)
-            let outcome = publishScript.isEmpty ? nil : publishScript.removeFirst()
-            if outcome == .refuse { throw CollaborationClientError.server(status: 503, code: "unavailable") }
-            // The service's idempotency: a known revision ID is a duplicate.
-            if let record = records[m.object]?.first(where: { $0.manifest.id == m.id }), record.contentDigest == m.contentDigest {
-                return .init(revision: m.id, sequence: record.sequence, duplicate: true)
-            }
             guard let record = records[object]?.first(where: { $0.manifest.id == revision }) else { throw CollaborationClientError.server(status: 404, code: "notFound") }
             let value = Artifact.Review(id: .init(), object: object, revision: revision, contentDigest: record.contentDigest,
                                         author: identity.person, verdict: .approve, note: "", createdAt: Date())
@@ -392,7 +407,6 @@ enum SharedAreaArtifactChecks {
             await broadcast()
         }
         func artifactState(_ object: SharedArea.ID<SharedArea.Object>) throws -> Artifact.State {
-            if outcome == .loseReply { throw URLError(.networkConnectionLost) }
             guard document.items.contains(where: { $0.id == object && $0.kind == .artifact }) else { throw CollaborationClientError.server(status: 404, code: "notFound") }
             let list = records[object] ?? []
             func applicability(_ id: SharedArea.ID<Artifact.RevisionTag>) -> Artifact.Applicability {
