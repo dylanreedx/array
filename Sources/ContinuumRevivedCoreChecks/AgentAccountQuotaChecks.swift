@@ -363,7 +363,7 @@ func runAgentAccountQuotaChecks() {
         kind: .sevenDay, utilization: 0.67, resetsAt: observedAt.addingTimeInterval(-60))
     let undatedWindow = AgentQuotaWindow(kind: .spendLimit, utilization: 0.5, resetsAt: nil)
     store.save([
-        .claudeCode: AgentAccountQuotaSnapshot(
+        AgentAccount.defaultAccountId(for: .claudeCode): AgentAccountQuotaSnapshot(
             harness: .claudeCode,
             windows: [liveWindow, elapsedWindow, undatedWindow],
             observedAt: observedAt,
@@ -371,17 +371,17 @@ func runAgentAccountQuotaChecks() {
     ])
 
     let restored = store.restore(now: observedAt.addingTimeInterval(60))
-    expect(restored[.claudeCode]?.window(.fiveHour)?.utilization == 0.18,
+    expect(restored[AgentAccount.defaultAccountId(for: .claudeCode)]?.window(.fiveHour)?.utilization == 0.18,
            "a window still inside its own reset must come back with its real number")
     // The two that must NOT come back, each for its own reason.
-    expect(restored[.claudeCode]?.window(.sevenDay) == nil,
+    expect(restored[AgentAccount.defaultAccountId(for: .claudeCode)]?.window(.sevenDay) == nil,
            "a window past its reset must be dropped, not restored as a stale percentage")
-    expect(restored[.claudeCode]?.window(.spendLimit) == nil,
+    expect(restored[AgentAccount.defaultAccountId(for: .claudeCode)]?.window(.spendLimit) == nil,
            "a window with no reset instant cannot be validated and must be dropped")
     // Past every reset: the harness disappears rather than restoring an empty
     // shell that would render a row of dashes.
     let allElapsed = store.restore(now: observedAt.addingTimeInterval(86_400 * 30))
-    expect(allElapsed[.claudeCode] == nil,
+    expect(allElapsed[AgentAccount.defaultAccountId(for: .claudeCode)] == nil,
            "a snapshot with nothing valid left must not be restored at all")
     expect(AgentAccountQuotaStore(applicationSupportDirectory: storeDir
             .appendingPathComponent("absent", isDirectory: true))

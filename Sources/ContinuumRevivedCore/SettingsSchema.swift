@@ -147,6 +147,11 @@ public enum SettingsSchema {
         }
         return SettingsSection(id: "agents", title: "Agents", iconSystemName: "sparkles", sidebarHeading: tilesHeading,
                                keywords: ["ai", "assistant"], groups: [
+            // .plans/101: one login per CLI for the whole app, chosen here.
+            SettingsGroup(id: "agents.accounts", title: "Accounts",
+                          footer: "Every agent of a CLI uses the account in use. A switch lets running turns finish, then their next turn signs in as the new account. Each account signs in with the CLI's own login; Array never sees a password or token.", rows: [
+                SettingsRow(.custom(id: "agentAccounts", label: "Accounts")),
+            ]),
             SettingsGroup(id: "agents.new", title: "New agents",
                           footer: "Applies to new agents. Existing agents keep their own CLI, model, and effort.", rows: [
                 SettingsRow(.choice(key: AgentBackendConfig.key, label: "Agent CLI", options: AgentBackendConfig.options, default: AgentBackendConfig.defaultBackend.rawValue),
@@ -432,6 +437,12 @@ public enum SettingsSchema {
                             keywords: ["agent cli", "sign in", "login", "installed", "ready", "harness",
                                        "version", "update", "upgrade", "npm"])
             }
+        case .custom("agentAccounts", _):
+            return [
+                CustomEntry(anchor: "agentAccounts.list", label: "Accounts",
+                            keywords: ["account", "accounts", "personal", "work", "team", "max", "plan", "switch",
+                                       "login", "sign in", "subscription", "claude", "codex", "usage", "limit"]),
+            ]
         case .custom("canvasBackground", _):
             // Rows that only appear in some states (a custom colour, grid spacing,
             // an image's opacity) are found through the row that is always there.

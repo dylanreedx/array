@@ -20,9 +20,13 @@ public enum AgentAccountUsageProbe {
     public struct Reading: Sendable, Equatable {
         public var identity: AgentAccountIdentity?
         public var quota: AgentAccountQuotaSnapshot?
-        public init(identity: AgentAccountIdentity?, quota: AgentAccountQuotaSnapshot?) {
+        /// The CLI ANSWERED that this account has no login — distinct from a
+        /// read that failed or timed out, which says nothing either way.
+        public var signedOut: Bool
+        public init(identity: AgentAccountIdentity?, quota: AgentAccountQuotaSnapshot?, signedOut: Bool = false) {
             self.identity = identity
             self.quota = quota
+            self.signedOut = signedOut
         }
     }
 
@@ -78,14 +82,18 @@ public enum AgentAccountUsageProbe {
     ) -> Reading {
         let environment = claudeEnvironment(
             base: ProcessInfo.processInfo.environment, configDirectory: configDirectory)
-        let identity = run(
+        let status = run(
             command: command, arguments: ["auth", "status", "--json"],
             environment: environment, input: nil, timeout: timeout
-        ) { _, whole in
-            whole.flatMap { AgentAccountIdentity.claude(authStatusJSON: $0, observedAt: now()) }
+        ) { _, whole in whole.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] } }
+        let identity = status.flatMap { object in
+            (try? JSONSerialization.data(withJSONObject: object))
+                .flatMap { AgentAccountIdentity.claude(authStatusJSON: $0, observedAt: now()) }
         }
         // A signed-out dir has no windows to ask for.
-        guard identity != nil else { return Reading(identity: nil, quota: nil) }
+        guard identity != nil else {
+            return Reading(identity: nil, quota: nil, signedOut: (status?["loggedIn"] as? Bool) == false)
+        }
         let quota = run(
             command: command, arguments: claudeUsageArguments,
             environment: environment, input: claudeUsageRequestLine + "\n", timeout: timeout
@@ -97,12 +105,14 @@ public enum AgentAccountUsageProbe {
 
     public static func readCodex(
         command: PiAgentRunner.ResolvedCommand,
+        codexHome: String? = nil,
         timeout: TimeInterval,
         now: @escaping () -> Date = Date.init
     ) -> Reading {
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = PiAgentRunner.augmentedPath(
             basePath: environment["PATH"] ?? "", extraDirs: PiAgentRunner.liveExtraDirs())
+        if let codexHome, !codexHome.isEmpty { environment["CODEX_HOME"] = codexHome }
         guard let child = try? ProcessGroupChild.spawn(
             executable: command.executable,
             arguments: command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: []),
@@ -127,7 +137,10 @@ public enum AgentAccountUsageProbe {
             let account = try transport.sendRequest(method: "account/read", params: [:], timeout: timeout)
             let identity = (account as? [String: Any])
                 .flatMap { AgentAccountIdentity.codex(accountReadResult: $0, observedAt: now()) }
-            guard identity != nil else { return Reading(identity: nil, quota: nil) }
+            guard identity != nil else {
+                let signedOut = (account as? [String: Any]).map { $0["account"] is NSNull || $0["account"] == nil } ?? false
+                return Reading(identity: nil, quota: nil, signedOut: signedOut)
+            }
             let limits = try? transport.sendRequest(method: "account/rateLimits/read", params: [:], timeout: timeout)
             let quota = (limits as? [String: Any])
                 .flatMap { AgentAccountQuota.codexReadSnapshot(rateLimitsReadResult: $0, observedAt: now()) }

@@ -223,6 +223,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         public var workspaceMCP: WorkspaceMCPConfiguration?
         /// The agent id every descendant carries — `PiAgentRunner.childEnvironment`.
         public var processOwner: String?
+        /// .plans/101 — the account's config folder, passed as
+        /// `CLAUDE_CONFIG_DIR`. nil is the CLI's default login.
+        public var configDirectory: String?
 
         public init(
             model: String,
@@ -233,8 +236,10 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             conversationMayExist: Bool = true,
             forkSession: Bool = false,
             workspaceMCP: WorkspaceMCPConfiguration? = nil,
-            processOwner: String? = nil
+            processOwner: String? = nil,
+            configDirectory: String? = nil
         ) {
+            self.configDirectory = configDirectory
             self.model = model
             self.effort = effort
             self.cwd = cwd
@@ -853,10 +858,15 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
                 arguments: arguments,
                 // Same GUI-thin-PATH augmentation as pi's: an npm-installed claude is
                 // a node script whose shebang needs node on PATH. (The native binary
-                // doesn't, but augmenting is harmless there.) HOME and
-                // CLAUDE_CONFIG_DIR stay untouched — overriding HOME relocates the
-                // keychain lookup and the CLI stops finding its own login.
-                environment: Self.childEnvironment(workspaceMCP: config.workspaceMCP, processOwner: config.processOwner),
+                // doesn't, but augmenting is harmless there.) HOME stays
+                // untouched — overriding it relocates the keychain lookup and the
+                // CLI stops finding its own login. CLAUDE_CONFIG_DIR is the one
+                // thing an account changes (.plans/101): set for an account Array
+                // added, removed for the default, so the process signs in as the
+                // account the agent is pinned to and nothing inherited overrides it.
+                environment: Self.childEnvironment(
+                    workspaceMCP: config.workspaceMCP, processOwner: config.processOwner,
+                    configDirectory: config.configDirectory),
                 currentDirectory: config.cwd,
                 standardInput: .pipe
             )
@@ -969,9 +979,15 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// claude's environment: every Bash call claude makes inherits that, and
     /// `env` printed the capability token into a transcript.
     public static func childEnvironment(
-        workspaceMCP: WorkspaceMCPConfiguration?, processOwner: String? = nil
+        workspaceMCP: WorkspaceMCPConfiguration?, processOwner: String? = nil, configDirectory: String? = nil
     ) -> [String: String] {
-        PiAgentRunner.childEnvironment(processOwner: processOwner)
+        var environment = PiAgentRunner.childEnvironment(processOwner: processOwner)
+        if let configDirectory, !configDirectory.isEmpty {
+            environment["CLAUDE_CONFIG_DIR"] = configDirectory
+        } else {
+            environment.removeValue(forKey: "CLAUDE_CONFIG_DIR")
+        }
+        return environment
     }
 
     // MARK: - queue-confined line handling

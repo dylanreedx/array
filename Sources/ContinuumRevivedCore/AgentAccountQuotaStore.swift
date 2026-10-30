@@ -1,6 +1,6 @@
 import Foundation
 
-/// Remembers the last account quota reading per harness across launches, so a
+/// Remembers the last account quota reading per account across launches, so a
 /// relaunched app shows real percentages instead of a row of em dashes.
 ///
 /// This reverses an earlier call, and the reasoning is worth keeping. The first
@@ -42,16 +42,23 @@ public struct AgentAccountQuotaStore {
         var snapshots: [AgentAccountQuotaSnapshot]
     }
 
-    public func save(_ snapshots: [AgentHarness: AgentAccountQuotaSnapshot]) {
-        // Sorted by harness so the file does not churn on dictionary order.
-        let ordered = snapshots.keys.sorted { $0.rawValue < $1.rawValue }
-            .compactMap { snapshots[$0] }
+    /// Keyed by ACCOUNT id (.plans/101): two Claude logins are two readings.
+    public func save(_ snapshots: [String: AgentAccountQuotaSnapshot]) {
+        // Sorted by key so the file does not churn on dictionary order.
+        let ordered = snapshots.keys.sorted().compactMap { key -> AgentAccountQuotaSnapshot? in
+            guard var snapshot = snapshots[key] else { return nil }
+            snapshot.accountId = key
+            return snapshot
+        }
         try? writer.write(Payload(snapshots: ordered), to: fileURL)
     }
 
     /// Loads and VALIDATES. The `now` parameter is explicit so a check can pin
     /// the expiry arithmetic instead of racing a real clock.
-    public func restore(now: Date) -> [AgentHarness: AgentAccountQuotaSnapshot] {
+    ///
+    /// A reading saved before accounts existed has no `accountId`; it was the
+    /// harness's one login, so it restores to that harness's default account.
+    public func restore(now: Date) -> [String: AgentAccountQuotaSnapshot] {
         // `JSONCodec.makeDecoder()`, not a bare `JSONDecoder`: the writer
         // encodes dates as ISO-8601 and a default decoder expects a numeric
         // interval, so the asymmetry silently restored nothing at all.
@@ -59,7 +66,7 @@ public struct AgentAccountQuotaStore {
               let payload = try? JSONCodec.makeDecoder().decode(Payload.self, from: data)
         else { return [:] }
 
-        var result: [AgentHarness: AgentAccountQuotaSnapshot] = [:]
+        var result: [String: AgentAccountQuotaSnapshot] = [:]
         for var snapshot in payload.snapshots {
             snapshot.windows = snapshot.windows.filter { window in
                 // A reading with no reset instant cannot be validated, and one
@@ -70,7 +77,9 @@ public struct AgentAccountQuotaStore {
                 return resetsAt > now
             }
             guard !snapshot.windows.isEmpty || !(snapshot.credits?.isEmpty ?? true) else { continue }
-            result[snapshot.harness] = snapshot
+            let key = snapshot.accountId ?? AgentAccount.defaultAccountId(for: snapshot.harness)
+            snapshot.accountId = key
+            result[key] = snapshot
         }
         return result
     }

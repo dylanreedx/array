@@ -2341,6 +2341,7 @@ enum ContinuumApp {
             Task { @MainActor in
                 do {
                     try await runAgentAccountUsageAppChecks()
+                    try await runAgentAccountSwitchChecks()
                     if let capture = ProcessInfo.processInfo.environment["CONTINUUM_ACCOUNT_USAGE_CAPTURE_DIR"],
                        !capture.isEmpty {
                         try captureAccountUsageForReview(to: URL(fileURLWithPath: capture, isDirectory: true))
@@ -12203,6 +12204,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return CanvasBackgroundEditor(environment: environment)
     }
 
+    /// QA: the production Settings builder, so a check witnesses the real wiring.
+    func qaMakeSettingsModal(paneID: String?) -> SettingsModal { makeSettingsModal(paneID: paneID) }
+
     private func makeSettingsModal(paneID: String?) -> SettingsModal {
         let defaults = settingsDefaults
         let model = SettingsModel(
@@ -12228,6 +12232,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         model.onSignIn = { [weak self] harness in
             self?.signInToAgentCLI(harness)
         }
+        // .plans/101: one login per CLI for the whole app.
+        model.accountRows = { [weak self] in self?.agentSupervisor.settingsAccountRows() ?? [] }
+        model.onSwitchAccount = { [weak self] accountId in
+            guard let self, case let .refused(reason) = self.agentSupervisor.switchAccount(to: accountId) else { return }
+            self.setWorkspaceManagementMessage(reason, kind: .error)
+        }
+        model.onAddAccount = { [weak self] harness in self?.addAccountAndSignIn(harness) }
+        model.onSignInAccount = { [weak self] accountId in self?.signInToAccount(accountId) }
+        // Opening Settings reads who each saved login is.
+        agentSupervisor.refreshAccountUsage(harness: .claudeCode, minimumInterval: 30)
+        agentSupervisor.refreshAccountUsage(harness: .codex, minimumInterval: 30)
         model.cliUpdates = cliUpdateCenter
         // Opening Settings re-reads what the rows show: readiness (throttled, as
         // the row text promises "reopen Settings") and each CLI's version.
@@ -12269,6 +12284,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             wireAgentCLISignInCompletion(runtime, harness: harness)
         case let .missingCommand(executable):
             presentMissingCommand(executable: executable, profileId: command.executable)
+        default:
+            break
+        }
+    }
+
+    /// .plans/101 — "Add Claude account…" / "Add Codex account…": a saved login
+    /// with a folder of its own, then the CLI's own login in it.
+    private func addAccountAndSignIn(_ harness: AgentHarness) {
+        do {
+            let account = try agentSupervisor.addAccount(
+                harness: harness, label: agentSupervisor.nextAccountLabel(for: harness))
+            signInToAccount(account.id)
+        } catch {
+            NSSound.beep()
+        }
+    }
+
+    /// The CLI's OWN login, in the account's folder, in a terminal tile. Array
+    /// passes the folder (CLAUDE_CONFIG_DIR / CODEX_HOME) and nothing else.
+    private func signInToAccount(_ accountId: String) {
+        guard let account = agentSupervisor.accounts.first(where: { $0.id == accountId }),
+              account.harness != .pi else { return }
+        guard account.configDirectory != nil else {
+            signInToAgentCLI(account.harness)
+            return
+        }
+        settingsModal?.close()
+        guard resolvedCreationScope() != nil else {
+            requestCreationScope { [weak self] in self?.signInToAccount(accountId) }
+            return
+        }
+        guard let spawner = spawnerForFilesystemCreation() else { return }
+        let command = account.harness == .codex
+            ? CodexAgentRunner.liveResolvedCommand() : ClaudeAgentRunner.liveResolvedCommand()
+        let name = account.harness == .codex ? "codex" : "claude"
+        guard command.prefixArgs.isEmpty else {
+            presentMissingCommand(executable: name, profileId: name)
+            return
+        }
+        let arguments = account.harness == .codex
+            ? AgentAccountSetup.codexSignInArguments(for: account, codexExecutable: command.executable)
+            : AgentAccountSetup.claudeSignInArguments(for: account, claudeExecutable: command.executable)
+        switch spawner.spawnSignInTerminal(
+            executableName: "env", arguments: arguments,
+            title: "\(account.harness == .codex ? "Codex" : "Claude") sign-in · \(account.label)") {
+        case let .spawned(runtime):
+            installSpawnedTerminal(runtime, from: spawner)
+            let previous = runtime.onRuntimeExited
+            runtime.onRuntimeExited = { [weak self] runtimeId, exitCode in
+                previous?(runtimeId, exitCode)
+                // Who signed in, read straight away rather than on the next poll.
+                self?.agentSupervisor.refreshAccountUsage(account: account, minimumInterval: 0)
+            }
+        case let .missingCommand(executable):
+            presentMissingCommand(executable: executable, profileId: "env")
         default:
             break
         }

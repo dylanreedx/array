@@ -10,6 +10,8 @@ import Foundation
 //
 // Every fake records what production sent it, next to itself:
 //   argv.json        the argument vector of the latest spawn
+//   config-dirs.txt  each spawn's CLAUDE_CONFIG_DIR, one per line
+//   codex-homes.txt  each spawn's CODEX_HOME, one per line
 //   spawn.count      how many processes were started
 //   stdin.jsonl      every stdin line, verbatim, in arrival order
 //   pid.txt          the pid of the latest spawn
@@ -100,6 +102,18 @@ public enum AgentSteeringQAFakes {
         return argv
     }
 
+    /// Each spawn's `CODEX_HOME`, in order; `<default>` when unset.
+    public static func codexHomes(in directory: URL) -> [String] {
+        let text = try? String(contentsOf: directory.appendingPathComponent("codex-homes.txt"), encoding: .utf8)
+        return text?.split(separator: "\n").map(String.init) ?? []
+    }
+
+    /// Each spawn's `CLAUDE_CONFIG_DIR`, in order; `<default>` when unset.
+    public static func configDirectories(in directory: URL) -> [String] {
+        let text = try? String(contentsOf: directory.appendingPathComponent("config-dirs.txt"), encoding: .utf8)
+        return text?.split(separator: "\n").map(String.init) ?? []
+    }
+
     /// The pid of the most recently spawned fake process.
     public static func latestPid(in directory: URL) -> pid_t? {
         let text = try? String(contentsOf: directory.appendingPathComponent("pid.txt"), encoding: .utf8)
@@ -128,6 +142,10 @@ with open(_count_path, "w") as f:
     f.write(str(_n + 1))
 with open(os.path.join(HERE, "pid.txt"), "w") as f:
     f.write(str(os.getpid()))
+with open(os.path.join(HERE, "config-dirs.txt"), "a") as f:
+    f.write(os.environ.get("CLAUDE_CONFIG_DIR", "<default>") + "\n")
+with open(os.path.join(HERE, "codex-homes.txt"), "a") as f:
+    f.write(os.environ.get("CODEX_HOME", "<default>") + "\n")
 
 _out_lock = threading.Lock()
 def out(obj):

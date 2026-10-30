@@ -159,6 +159,176 @@ func runAgentAccountUsageChecks() {
            "account-usage: the usage read must leave no session and run no hooks, got \(calls)")
     expect(!calls.last!.contains("stream-json"),
            "account-usage: a signed-out dir must not be asked for usage, got \(calls.last!)")
+    expect(freshReading.signedOut && !defaultReading.signedOut,
+           "account-usage: only the CLI answering loggedIn:false marks an account signed out")
+    let silent = root.appendingPathComponent("claude-silent")
+    try? "#!/bin/sh\nsleep 30\n".write(to: silent, atomically: true, encoding: .utf8)
+    _ = chmod(silent.path, 0o755)
+    let timedOut = AgentAccountUsageProbe.readClaude(
+        command: PiAgentRunner.ResolvedCommand(executable: silent.path, prefixArgs: []),
+        configDirectory: nil, timeout: 1, now: { observedAt })
+    expect(timedOut.identity == nil && !timedOut.signedOut,
+           "account-usage: a CLI that never answers says nothing about sign-in, got \(timedOut)")
 
-    print("AgentAccountUsage checks passed: get_usage reads percent windows with ISO resets, ignores extra_usage, and a signed-out answer is no reading; auth status and codex account/read name the login and plan; codex rateLimits/read is weekly-only; the real spawn reads the default and a named dir with CLAUDE_CONFIG_DIR set or removed, HOME untouched, no session left and no usage asked of a signed-out dir")
+    // (E) Slice 2 — the account store. An id, a label, a harness, a folder:
+    // nothing that could be a credential, and the defaults never written.
+    let support = root.appendingPathComponent("support", isDirectory: true)
+    let accountStore = AgentAccountStore(applicationSupportDirectory: support)
+    let work = accountStore.makeClaudeAccount(label: "Work", existing: [])
+    let work2 = accountStore.makeClaudeAccount(label: "Work", existing: [work])
+    expect(work.id == "claude.work" && work2.id == "claude.work-2",
+           "account-usage: account ids are the label's slug, numbered past a taken one, got \(work.id), \(work2.id)")
+    expect(work.configDirectory == support.appendingPathComponent("accounts/claude.work/claude").path,
+           "account-usage: an added account's folder lives under Array's Application Support, got \(String(describing: work.configDirectory))")
+    let codexWork = accountStore.makeAccount(harness: .codex, label: "Work", existing: [work])
+    expect(codexWork.id == "codex.work"
+            && codexWork.configDirectory == support.appendingPathComponent("accounts/codex.work/codex").path,
+           "account-usage: a Codex account is its own CODEX_HOME under Application Support, got \(codexWork)")
+    do {
+        try accountStore.save(.init(
+            accounts: [AgentAccount.defaultAccount(for: .claudeCode), work, codexWork],
+            active: [AgentHarness.claudeCode.rawValue: work.id]))
+    } catch {
+        expect(false, "account-usage: saving accounts failed: \(error)")
+    }
+    expect(accountStore.load() == .init(accounts: [work, codexWork], active: [AgentHarness.claudeCode.rawValue: work.id]),
+           "account-usage: only added accounts and the account in use per CLI are stored, got \(accountStore.load())")
+    let stored = (try? Data(contentsOf: support.appendingPathComponent("accounts.json")))
+        .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+    let keys = Set(((stored?["accounts"] as? [[String: Any]])?.first ?? [:]).keys)
+    expect(keys == ["id", "label", "harness", "configDirectory"],
+           "account-usage: an account record holds an id, label, harness and folder only, got \(keys.sorted())")
+
+    // (F) The Work folder shares settings with Personal, and NOTHING that
+    // belongs to a login or a session.
+    let personalDir = root.appendingPathComponent("personal-claude", isDirectory: true)
+    try? fm.createDirectory(at: personalDir.appendingPathComponent("agents"), withIntermediateDirectories: true)
+    try? fm.createDirectory(at: personalDir.appendingPathComponent("skills"), withIntermediateDirectories: true)
+    try? fm.createDirectory(at: personalDir.appendingPathComponent("projects"), withIntermediateDirectories: true)
+    for name in ["settings.json", "CLAUDE.md", ".claude.json", ".credentials.json", "history.jsonl"] {
+        try? "{}".write(to: personalDir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+    let workDirURL = URL(fileURLWithPath: work.configDirectory!, isDirectory: true)
+    let linked = (try? AgentAccountSetup.prepareClaudeConfigDirectory(workDirURL, sharingFrom: personalDir)) ?? []
+    expect(Set(linked) == ["settings.json", "CLAUDE.md", "agents", "skills", "projects"],
+           "account-usage: the shared items that exist are linked (commands is absent here), got \(linked)")
+    for name in linked {
+        let destination = try? fm.destinationOfSymbolicLink(atPath: workDirURL.appendingPathComponent(name).path)
+        expect(destination == personalDir.appendingPathComponent(name).path,
+               "account-usage: \(name) must link back to the personal folder, got \(String(describing: destination))")
+    }
+    let present = Set((try? fm.contentsOfDirectory(atPath: workDirURL.path)) ?? [])
+    expect(present.isDisjoint(with: [".claude.json", ".credentials.json", "history.jsonl"]),
+           "account-usage: login state and history must never be shared, found \(present.sorted())")
+    try? "{\"theme\":\"dark\"}".write(to: workDirURL.appendingPathComponent("settings.json"), atomically: false, encoding: .utf8)
+    expect((try? String(contentsOf: personalDir.appendingPathComponent("settings.json"), encoding: .utf8)) == "{\"theme\":\"dark\"}",
+           "account-usage: a settings edit through Work is the one shared settings file")
+    let ownDir = root.appendingPathComponent("own-settings", isDirectory: true)
+    try? fm.createDirectory(at: ownDir, withIntermediateDirectories: true)
+    try? "own".write(to: ownDir.appendingPathComponent("settings.json"), atomically: true, encoding: .utf8)
+    let ownLinked = (try? AgentAccountSetup.prepareClaudeConfigDirectory(ownDir, sharingFrom: personalDir)) ?? []
+    expect(!ownLinked.contains("settings.json")
+            && (try? String(contentsOf: ownDir.appendingPathComponent("settings.json"), encoding: .utf8)) == "own",
+           "account-usage: a file the account already has is never replaced")
+    expect(((try? AgentAccountSetup.prepareClaudeConfigDirectory(workDirURL, sharingFrom: personalDir)) ?? ["x"]).isEmpty,
+           "account-usage: preparing twice links nothing new")
+
+    // (I) Slice 3 — moving a conversation between accounts. Shared
+    // `projects/` (the normal case) needs nothing; a folder with its own
+    // `projects/` gets the session file and its sidecar folder copied in.
+    let sessionId = "11111111-2222-4333-8444-555555555555"
+    let sessionCwd = "/Users/example/Projects/array"
+    let slug = ClaudeAgentStateReader.encodeCwd(sessionCwd)
+    let personalSessions = personalDir.appendingPathComponent("projects/\(slug)", isDirectory: true)
+    try? fm.createDirectory(at: personalSessions.appendingPathComponent("\(sessionId)/subagents"), withIntermediateDirectories: true)
+    try? "turn 1\n".write(to: personalSessions.appendingPathComponent("\(sessionId).jsonl"), atomically: true, encoding: .utf8)
+    try? "child\n".write(to: personalSessions.appendingPathComponent("\(sessionId)/subagents/agent-1.jsonl"), atomically: true, encoding: .utf8)
+    expect((try? AgentAccountSetup.ensureSessionVisible(
+            sessionId: sessionId, cwd: sessionCwd, from: personalDir, to: workDirURL)) == .shared
+            && fm.fileExists(atPath: workDirURL.appendingPathComponent("projects/\(slug)/\(sessionId).jsonl").path),
+           "account-usage: through the shared projects/, Work already sees Personal's conversation")
+    let ownProjects = root.appendingPathComponent("own-projects", isDirectory: true)
+    try? fm.createDirectory(at: ownProjects.appendingPathComponent("projects/\(slug)"), withIntermediateDirectories: true)
+    try? "stale\n".write(to: ownProjects.appendingPathComponent("projects/\(slug)/\(sessionId).jsonl"), atomically: true, encoding: .utf8)
+    let moved = try? AgentAccountSetup.ensureSessionVisible(
+        sessionId: sessionId, cwd: sessionCwd, from: personalDir, to: ownProjects)
+    expect(moved == .copied
+            && (try? String(contentsOf: ownProjects.appendingPathComponent("projects/\(slug)/\(sessionId).jsonl"), encoding: .utf8)) == "turn 1\n"
+            && fm.fileExists(atPath: ownProjects.appendingPathComponent("projects/\(slug)/\(sessionId)/subagents/agent-1.jsonl").path),
+           "account-usage: a folder with its own projects/ gets the current session and its sidecars, replacing a stale copy (got \(String(describing: moved)))")
+    expect((try? AgentAccountSetup.ensureSessionVisible(
+            sessionId: "no-such-session", cwd: sessionCwd, from: personalDir, to: ownProjects)) == .missing,
+           "account-usage: a session that does not exist yet is reported missing, not invented")
+
+    // (J) The runner's environment: CLAUDE_CONFIG_DIR only for an added
+    // account, an inherited one removed for the default, HOME never touched.
+    setenv("CLAUDE_CONFIG_DIR", "/tmp/inherited", 1)
+    let workEnv = ClaudeAgentRunner.childEnvironment(workspaceMCP: nil, configDirectory: work.configDirectory)
+    let personalEnv = ClaudeAgentRunner.childEnvironment(workspaceMCP: nil, configDirectory: nil)
+    unsetenv("CLAUDE_CONFIG_DIR")
+    expect(workEnv["CLAUDE_CONFIG_DIR"] == work.configDirectory && personalEnv["CLAUDE_CONFIG_DIR"] == nil
+            && workEnv["HOME"] == ProcessInfo.processInfo.environment["HOME"]
+            && personalEnv["HOME"] == ProcessInfo.processInfo.environment["HOME"],
+           "account-usage: the runner sets CLAUDE_CONFIG_DIR for Work only and never HOME")
+
+    // (K) Codex: a Codex account's home shares config and sessions, never
+    // auth.json; the runner and the probe pass CODEX_HOME for it.
+    let personalCodex = root.appendingPathComponent("personal-codex", isDirectory: true)
+    try? fm.createDirectory(at: personalCodex.appendingPathComponent("sessions"), withIntermediateDirectories: true)
+    for name in ["config.toml", "AGENTS.md", "auth.json", "history.jsonl"] {
+        try? "x".write(to: personalCodex.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+    let codexHomeURL = URL(fileURLWithPath: codexWork.configDirectory!, isDirectory: true)
+    let codexLinked = (try? AgentAccountSetup.prepareDirectory(
+        codexHomeURL, sharing: AgentAccountSetup.sharedItems(for: .codex), from: personalCodex)) ?? []
+    expect(Set(codexLinked) == ["config.toml", "AGENTS.md", "sessions"]
+            && !fm.fileExists(atPath: codexHomeURL.appendingPathComponent("auth.json").path),
+           "account-usage: a Codex home shares config, instructions and sessions, never auth.json, got \(codexLinked)")
+    let codexEnv = CodexAgentRunner.childEnvironment(workspaceMCP: nil, codexHome: codexWork.configDirectory)
+    expect(codexEnv["CODEX_HOME"] == codexWork.configDirectory
+            && codexEnv["HOME"] == ProcessInfo.processInfo.environment["HOME"],
+           "account-usage: the Codex runner passes the account's CODEX_HOME and never HOME")
+    expect(AgentAccountSetup.codexSignInArguments(for: codexWork, codexExecutable: "/opt/bin/codex")
+            == ["CODEX_HOME=\(codexWork.configDirectory!)", "/opt/bin/codex", "login"],
+           "account-usage: Codex Work signs in with codex login in its own home")
+
+    // (G) Readings filed by ACCOUNT: two logins on one CLI never overwrite
+    // each other, and a file from before accounts restores to the default.
+    let quotaDir = root.appendingPathComponent("quota", isDirectory: true)
+    try? fm.createDirectory(at: quotaDir, withIntermediateDirectories: true)
+    let future = Date().addingTimeInterval(3_600)
+    func reading(_ used: Double, accountId: String? = nil) -> AgentAccountQuotaSnapshot {
+        AgentAccountQuotaSnapshot(
+            harness: .claudeCode,
+            windows: [AgentQuotaWindow(kind: .fiveHour, utilization: used, resetsAt: future)],
+            observedAt: Date(), source: .claudeUsageRequest, accountId: accountId)
+    }
+    let quotaStore = AgentAccountQuotaStore(applicationSupportDirectory: quotaDir)
+    quotaStore.save([AgentAccount.defaultAccountId(for: .claudeCode): reading(0.16), work.id: reading(0.40)])
+    let both = quotaStore.restore(now: Date())
+    expect(both[AgentAccount.defaultAccountId(for: .claudeCode)]?.window(.fiveHour)?.utilization == 0.16
+            && both[work.id]?.window(.fiveHour)?.utilization == 0.40,
+           "account-usage: Personal and Work readings must both survive, got \(both.mapValues { $0.window(.fiveHour)?.utilization })")
+    let legacyDir = root.appendingPathComponent("legacy", isDirectory: true)
+    try? fm.createDirectory(at: legacyDir, withIntermediateDirectories: true)
+    struct LegacyPayload: Encodable { var snapshots: [AgentAccountQuotaSnapshot] }
+    let legacyData = try? JSONCodec.makeEncoder().encode(LegacyPayload(snapshots: [reading(0.33)]))
+    expect(legacyData.map { !String(decoding: $0, as: UTF8.self).contains("accountId") } == true,
+           "account-usage: the legacy fixture must carry no accountId")
+    try? legacyData?.write(to: legacyDir.appendingPathComponent("account-quotas.json"))
+    let migrated = AgentAccountQuotaStore(applicationSupportDirectory: legacyDir).restore(now: Date())
+    expect(migrated.keys.sorted() == [AgentAccount.defaultAccountId(for: .claudeCode)]
+            && migrated.values.first?.window(.fiveHour)?.utilization == 0.33,
+           "account-usage: a reading saved before accounts belongs to the default account, got \(migrated.keys.sorted())")
+
+    // (H) Sign-in is Claude's own login, in the account's folder.
+    expect(AgentAccountSetup.claudeSignInArguments(for: work, claudeExecutable: "/opt/bin/claude")
+            == ["CLAUDE_CONFIG_DIR=\(work.configDirectory!)", "/opt/bin/claude", "auth", "login", "--claudeai"],
+           "account-usage: Work signs in with claude auth login in its own folder")
+    expect(AgentAccountSetup.claudeSignInArguments(
+            for: AgentAccount.defaultAccount(for: .claudeCode), claudeExecutable: "/opt/bin/claude")
+            == ["/opt/bin/claude", "auth", "login", "--claudeai"],
+           "account-usage: Personal signs in with no folder override")
+
+    print("AgentAccountUsage checks passed: get_usage reads percent windows with ISO resets, ignores extra_usage, and a signed-out answer is no reading; auth status and codex account/read name the login and plan; codex rateLimits/read is weekly-only; the real spawn reads the default and a named dir with CLAUDE_CONFIG_DIR set or removed, HOME untouched, no session left and no usage asked of a signed-out dir; only an answered loggedIn:false reads as signed out; added accounts store an id, label, harness and folder only; the Work folder links settings, CLAUDE.md, agents, skills, commands and projects back to Personal and never login state or history; a switch finds the conversation through the shared projects/ or copies it and its sidecars into a folder with its own; the runner sets CLAUDE_CONFIG_DIR for an added account only and never HOME; readings are filed by account and an old file migrates to the default; sign-in is claude auth login in the account's folder")
 }

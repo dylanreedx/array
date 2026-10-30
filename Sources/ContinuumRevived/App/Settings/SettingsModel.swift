@@ -27,6 +27,12 @@ final class SettingsModel {
     @ObservationIgnored var actionHandlers: [String: () -> Void] = [:]
     /// Runs the CLI's OWN login flow (a terminal tile). Never a key field.
     @ObservationIgnored var onSignIn: ((AgentHarness) -> Void)?
+    /// .plans/101 — the saved logins per CLI, and the two things the list can
+    /// do: switch the whole CLI to one, and add one through the CLI's own login.
+    @ObservationIgnored var accountRows: (() -> [SettingsAccountRow])?
+    @ObservationIgnored var onSwitchAccount: ((String) -> Void)?
+    @ObservationIgnored var onAddAccount: ((AgentHarness) -> Void)?
+    @ObservationIgnored var onSignInAccount: ((String) -> Void)?
     /// Versions and in-app updates for the agent CLIs; nil draws readiness only.
     @ObservationIgnored var cliUpdates: AgentCLIUpdateCenter?
     /// `.custom` rows that embed an AppKit view, by id.
@@ -87,6 +93,7 @@ final class SettingsModel {
     @ObservationIgnored var pendingEdits: [String: () -> Void] = [:]
     @ObservationIgnored private var catalogObserver: NSObjectProtocol?
     @ObservationIgnored private var libraryObserver: NSObjectProtocol?
+    @ObservationIgnored private var accountObserver: NSObjectProtocol?
 
     init(
         sections: [SettingsSection] = SettingsSchema.sections(),
@@ -113,11 +120,18 @@ final class SettingsModel {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.revision += 1 }
         }
+        // An account read, a switch or an added account redraws the Accounts rows.
+        accountObserver = NotificationCenter.default.addObserver(
+            forName: AgentSupervisor.accountUsageDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.revision += 1 }
+        }
     }
 
     isolated deinit {
         if let catalogObserver { NotificationCenter.default.removeObserver(catalogObserver) }
         if let libraryObserver { NotificationCenter.default.removeObserver(libraryObserver) }
+        if let accountObserver { NotificationCenter.default.removeObserver(accountObserver) }
     }
 
     // MARK: Panes

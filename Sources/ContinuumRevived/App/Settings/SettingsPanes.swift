@@ -329,6 +329,8 @@ struct SettingsFieldRow: View {
                 SettingsSoundRows(model: model)
             case .custom("harnessStatus", _):
                 SettingsHarnessRows(model: model)
+            case .custom("agentAccounts", _):
+                SettingsAccountRows(model: model)
             case .shortcuts:
                 EmptyView()
             default:
@@ -449,6 +451,85 @@ private struct SettingsFontFamilyRow: View {
             SettingsRowLabel(title: row.field.label, help: row.help)
         }
         .pickerStyle(.menu)
+    }
+}
+
+// MARK: - Accounts (.plans/101)
+
+/// One saved login as Settings lists it.
+struct SettingsAccountRow: Equatable {
+    let id: String
+    let harness: AgentHarness
+    /// `Personal`, `Work`.
+    let title: String
+    /// `personal@example.com · Max`, or why there is none.
+    let detail: String
+    /// The account every agent of this CLI uses now.
+    let isActive: Bool
+    /// The CLI is switching TO this account: running turns are finishing.
+    let switchingDetail: String?
+    /// The CLI answered that this account has no login.
+    let signedOut: Bool
+}
+
+/// Settings ▸ Agents ▸ Accounts: per CLI, the account in use first, then the
+/// other saved logins with Switch, then Add. One login per CLI for the app.
+private struct SettingsAccountRows: View {
+    let model: SettingsModel
+
+    var body: some View {
+        let _ = model.revision
+        let rows = model.accountRows?() ?? []
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach([AgentHarness.claudeCode, .codex], id: \.self) { harness in
+                let mine = rows.filter { $0.harness == harness }
+                if !mine.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(harness == .claudeCode ? "Claude" : "Codex")
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        ForEach(mine, id: \.id) { row in
+                            StatusRow(
+                                title: row.title,
+                                status: status(row),
+                                symbol: symbol(row),
+                                tone: row.isActive ? .good : (row.signedOut ? .warning : .neutral),
+                                detail: row.switchingDetail ?? row.detail,
+                                actionTitle: actionTitle(row),
+                                action: { action(row) })
+                            .settingsRenderedText("account.\(row.id)", "\(row.title): \(status(row)) · \(row.switchingDetail ?? row.detail)", model: model)
+                        }
+                        if let add = model.onAddAccount {
+                            Button(harness == .claudeCode ? "Add Claude account…" : "Add Codex account…") { add(harness) }
+                                .settingsRenderedText("account.add.\(harness.rawValue)", "add", model: model)
+                        }
+                    }
+                }
+            }
+        }
+        .settingsAnchor("agentAccounts.list", model: model)
+    }
+
+    private func status(_ row: SettingsAccountRow) -> String {
+        if row.switchingDetail != nil { return "Switching…" }
+        if row.isActive { return "In use" }
+        return row.signedOut ? "Not signed in" : "Saved"
+    }
+
+    private func symbol(_ row: SettingsAccountRow) -> String {
+        if row.switchingDetail != nil { return "arrow.triangle.2.circlepath" }
+        if row.isActive { return "checkmark.circle.fill" }
+        return row.signedOut ? "person.crop.circle.badge.exclamationmark" : "person.crop.circle"
+    }
+
+    private func actionTitle(_ row: SettingsAccountRow) -> String? {
+        if row.signedOut { return model.onSignInAccount != nil ? "Sign In…" : nil }
+        guard !row.isActive, row.switchingDetail == nil, model.onSwitchAccount != nil else { return nil }
+        return "Switch to \(row.title)"
+    }
+
+    private func action(_ row: SettingsAccountRow) {
+        if row.signedOut { model.onSignInAccount?(row.id) } else { model.onSwitchAccount?(row.id) }
     }
 }
 

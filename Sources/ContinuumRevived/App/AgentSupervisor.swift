@@ -1088,7 +1088,7 @@ final class AgentSupervisor {
     /// `resets_at`, so a relaunch shows the last real percentages instead of a
     /// row of em dashes. See `AgentAccountQuotaStore` for why checking the reset
     /// is the right answer rather than discarding the reading.
-    private var accountQuotas: [AgentHarness: AgentAccountQuotaSnapshot] = [:]
+    private var accountQuotas: [String: AgentAccountQuotaSnapshot] = [:]
     private lazy var accountQuotaStore: AgentAccountQuotaStore? = {
         guard let directory = AgentStore.resolveApplicationSupportDirectory(smokeTest: false)
         else { return nil }
@@ -1238,7 +1238,7 @@ final class AgentSupervisor {
                          parentAgentID: id, displayName: "Continue \(record.displayName)")
         case .compactAndRetry:
             guard let store = submissionRecoveryStore, let prompt = latestRecoverablePrompts[id],
-                  let candidate = (idleSessionRunners[id] ?? makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))) as? AgentCompactionRunning,
+                  let candidate = (idleSessionRunners[id] ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id))))) as? AgentCompactionRunning,
                   candidate.compactionCapabilities.supportsManual else { return nil }
             recoveredContextFailureTurns[id] = failedTurnID
             let draftImages = prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
@@ -1289,7 +1289,7 @@ final class AgentSupervisor {
         guard var record = records[id], runners[id] == nil else { return false }
         let runner = preferredRunner
             ?? idleSessionRunners[id]
-            ?? makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))
+            ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id))))
         guard let compacting = runner as? AgentCompactionRunning,
               compacting.compactionCapabilities.supportsManual else { return false }
         if idleSessionRunners[id] === runner { idleSessionRunners[id] = nil }
@@ -1696,8 +1696,12 @@ final class AgentSupervisor {
     nonisolated static func productionRunner(for launch: AgentRunnerLaunch) -> AgentRunning {
         let record = launch.record
         switch record.harness {
-        case .claudeCode: return claudeRunner(for: record, workspaceMCP: launch.workspaceMCP)
-        case .codex: return codexRunner(for: record, workspaceMCP: launch.workspaceMCP)
+        case .claudeCode:
+            return claudeRunner(for: record, workspaceMCP: launch.workspaceMCP,
+                                configDirectory: launch.accountConfigDirectory)
+        case .codex:
+            return codexRunner(for: record, workspaceMCP: launch.workspaceMCP,
+                               codexHome: launch.accountConfigDirectory)
         case .pi: return piRunner(for: launch)
         case nil: return RefusingAgentRunner(reason: "This agent has unresolved harness ownership. Choose Claude Code, Codex, or Pi in the agent composer. Help → Environment Setup…")
         }
@@ -1734,8 +1738,12 @@ final class AgentSupervisor {
 
     /// The only `ClaudeAgentRunner(` construction in the app, mirroring
     /// `piRunner(for:)` so the same ownership scan can hold for both.
-    nonisolated static func claudeRunner(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> AgentRunning {
-        ClaudeAgentRunner(config: claudeRunnerConfig(for: record, workspaceMCP: workspaceMCP))
+    nonisolated static func claudeRunner(
+        for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, configDirectory: String? = nil
+    ) -> AgentRunning {
+        var config = claudeRunnerConfig(for: record, workspaceMCP: workspaceMCP)
+        config.configDirectory = configDirectory
+        return ClaudeAgentRunner(config: config)
     }
 
     /// What a claude-backed runner is built with. The catalogue's provider
@@ -1803,8 +1811,12 @@ final class AgentSupervisor {
 
     /// The only `CodexAgentRunner(` construction in the app, mirroring
     /// `claudeRunner(for:)` so the same ownership scan holds for all three.
-    nonisolated static func codexRunner(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> AgentRunning {
-        CodexAgentRunner(config: codexRunnerConfig(for: record, workspaceMCP: workspaceMCP))
+    nonisolated static func codexRunner(
+        for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, codexHome: String? = nil
+    ) -> AgentRunning {
+        var config = codexRunnerConfig(for: record, workspaceMCP: workspaceMCP)
+        config.codexHome = codexHome
+        return CodexAgentRunner(config: config)
     }
 
     /// What a codex-backed runner is built with. The catalogue prefix is
@@ -2010,7 +2022,9 @@ final class AgentSupervisor {
         // file it by harness so every agent on the same login reads one value,
         // then still fan the observation out so their tiles repaint.
         if case let .accountQuota(snapshot) = observation {
-            accountQuotas[snapshot.harness] = snapshot
+            // The login this agent's live runner signed in as owns the reading.
+            let accountId = account(forAgent: id)?.id ?? AgentAccount.defaultAccountId(for: snapshot.harness)
+            accountQuotas[accountId] = snapshot
             accountQuotaStore?.save(accountQuotas)
             runtimeObservationObservers.values.forEach { observers in
                 observers.values.forEach { $0(observation) }
@@ -2036,104 +2050,307 @@ final class AgentSupervisor {
         runtimeObservationObservers[id]?.values.forEach { $0(observation) }
     }
 
-    /// The account quota for THIS agent's harness, or nil when the provider has
-    /// reported none. Pi reports no account windows at all, so nil there is
-    /// "unsupported" rather than "not yet observed" — the presenter says so
-    /// either way, because both are unknown and neither is zero.
+    /// The account quota for the account this agent is spending, or nil when
+    /// the provider has reported none. Pi reports no account windows at all, so
+    /// nil there is "unsupported" rather than "not yet observed".
     func accountQuota(for id: AgentID) -> AgentAccountQuotaSnapshot? {
-        guard let harness = records[id]?.harness else { return nil }
+        guard let account = account(forAgent: id) else { return nil }
         restoreAccountQuotasIfNeeded()
-        return accountQuotas[harness]
+        return accountQuotas[account.id]
     }
 
-    // MARK: - .plans/101 live account usage
+    // MARK: - .plans/101 accounts: one login per CLI for the whole app
 
-    /// Which login each harness is spending. In memory only: it is re-read on
-    /// demand, and a stale identity carried across a relaunch would name an
-    /// account the CLI may no longer be signed into.
-    private var accountIdentities: [AgentHarness: AgentAccountIdentity] = [:]
-    private var accountUsageInFlight: Set<AgentHarness> = []
-    private var accountUsageLastStarted: [AgentHarness: Date] = [:]
+    /// Each account's login, by account id. In memory only: re-read on demand.
+    private var accountIdentities: [String: AgentAccountIdentity] = [:]
+    /// Accounts whose CLI answered "not signed in" on the last read.
+    private var signedOutAccounts: Set<String> = []
+    private var accountUsageInFlight: Set<String> = []
+    private var accountUsageLastStarted: [String: Date] = [:]
     private var accountUsagePollTimer: Timer?
     static let accountUsageDidChangeNotification = Notification.Name("AgentSupervisor.accountUsageDidChange")
-    /// Reads one harness's account off the main thread. Production's reads
-    /// nothing until `enableLiveAccountUsage()`; a check injects a fixture.
-    var accountUsageReader: @Sendable (AgentHarness) -> AgentAccountUsageProbe.Reading? = { harness in
+
+    /// Saved logins and the account each CLI uses, beside the agent store (so
+    /// channel-split, and a check's temp store gets its own).
+    private lazy var accountStore = AgentAccountStore(
+        applicationSupportDirectory: store.layout.applicationSupportDirectory)
+    private lazy var accountState: AgentAccountStore.State = accountStore.load()
+
+    /// Where Personal's settings live, for a new account to share. A check
+    /// points these at temp folders so nothing links to the real ones.
+    var personalClaudeDirectory = AgentAccountSetup.personalClaudeDirectory()
+    var personalCodexDirectory = AgentAccountSetup.personalCodexDirectory()
+
+    /// The account the agent's LIVE runner signed in as — a running turn or a
+    /// pooled idle session. A switch never touches it; the next runner is built
+    /// for the account in use instead.
+    private var runnerAccounts: [AgentID: AgentAccount] = [:]
+
+    /// Every account: each CLI's own login, then the ones Array added.
+    var accounts: [AgentAccount] {
+        [AgentAccount.defaultAccount(for: .claudeCode), AgentAccount.defaultAccount(for: .codex)]
+            + accountState.accounts
+    }
+
+    /// THE account a CLI uses, for every one of its agents. Falls back to the
+    /// CLI's own login only when the saved choice names an account that no
+    /// longer exists — which is the CLI's own default, not another account.
+    func activeAccount(for harness: AgentHarness) -> AgentAccount {
+        let chosen = accountState.active[harness.rawValue]
+        return accounts.first { $0.id == chosen && $0.harness == harness }
+            ?? AgentAccount.defaultAccount(for: harness)
+    }
+
+    /// Reads one account off the main thread. Production's reads nothing
+    /// until `enableLiveAccountUsage()`; a check injects a fixture.
+    var accountUsageReader: @Sendable (AgentAccount) -> AgentAccountUsageProbe.Reading? = { account in
         guard AgentAccountUsageLiveGate.shared.isEnabled else { return nil }
-        switch harness {
+        switch account.harness {
         case .claudeCode:
             let command = ClaudeAgentRunner.liveResolvedCommand()
             // A bare-name fallback proves the CLI is not installed.
             guard command.prefixArgs.isEmpty else { return nil }
-            return AgentAccountUsageProbe.readClaude(command: command, configDirectory: nil, timeout: 8)
+            return AgentAccountUsageProbe.readClaude(
+                command: command, configDirectory: account.configDirectory, timeout: 8)
         case .codex:
             let command = CodexAgentRunner.liveResolvedCommand()
             guard command.prefixArgs.isEmpty else { return nil }
-            return AgentAccountUsageProbe.readCodex(command: command, timeout: 8)
+            return AgentAccountUsageProbe.readCodex(
+                command: command, codexHome: account.configDirectory, timeout: 8)
         case .pi:
             // Pi reports no identity and no limits; there is nothing to ask.
             return nil
         }
     }
 
+    private func hasLiveRunner(_ id: AgentID) -> Bool {
+        runners[id] != nil || idleSessionRunners[id] != nil
+    }
+
+    /// The account this agent is spending NOW: its live runner's, else the
+    /// CLI's account in use. Mid-switch a running turn shows the old account,
+    /// because that is the login the turn is using.
+    func account(forAgent id: AgentID) -> AgentAccount? {
+        guard let harness = records[id]?.harness, harness != .pi else { return nil }
+        if hasLiveRunner(id), let live = runnerAccounts[id] { return live }
+        return activeAccount(for: harness)
+    }
+
     func accountIdentity(for id: AgentID) -> AgentAccountIdentity? {
-        guard let harness = records[id]?.harness else { return nil }
-        return accountIdentities[harness]
+        guard let account = account(forAgent: id) else { return nil }
+        return accountIdentities[account.id]
+    }
+
+    /// Agents of `harness` still on another account than the one in use: their
+    /// running turn finishes there, then their next turn moves.
+    func agentsFinishingOnPreviousAccount(_ harness: AgentHarness) -> [AgentID] {
+        let active = activeAccount(for: harness)
+        return records.keys.filter { id in
+            records[id]?.harness == harness && hasLiveRunner(id) && runnerAccounts[id].map { $0.id != active.id } == true
+        }
+    }
+
+    enum AccountSwitchOutcome: Equatable {
+        case unchanged
+        /// The CLI's agents move now; this many finish a running turn first.
+        case switched(finishingTurns: Int)
+        case refused(String)
+    }
+
+    /// Switch a whole CLI to another saved login. ONE account per CLI: every
+    /// agent of it moves together, and NEVER mid-turn — a running turn keeps
+    /// the login it started with and its process retires when the turn ends;
+    /// an idle pooled session stops now. Every agent's next turn starts on the
+    /// new account, resuming its own conversation.
+    @discardableResult
+    func switchAccount(to accountId: String) -> AccountSwitchOutcome {
+        guard let account = accounts.first(where: { $0.id == accountId }) else {
+            return .refused("No such account.")
+        }
+        guard !signedOutAccounts.contains(account.id) else {
+            return .refused("\(account.label) is not signed in. Sign in first.")
+        }
+        let harness = account.harness
+        guard activeAccount(for: harness).id != account.id else { return .unchanged }
+        var state = accountState
+        state.active[harness.rawValue] = account.isDefault ? nil : account.id
+        do { try accountStore.save(state) } catch { return .refused("Couldn't save the account choice.") }
+        accountState = state
+        var finishing = 0
+        for (id, record) in records where record.harness == harness {
+            if runners[id] != nil {
+                retireSessionAfterTurn.insert(id)
+                finishing += 1
+            } else if let idle = idleSessionRunners.removeValue(forKey: id) {
+                idleReapTokens[id] = nil
+                idle.stop()
+            }
+        }
+        NotificationCenter.default.post(name: Self.accountUsageDidChangeNotification, object: self)
+        refreshAccountUsage(account: account, minimumInterval: 30)
+        return .switched(finishingTurns: finishing)
+    }
+
+    /// Every runner launch passes through here: it signs the launch in as the
+    /// CLI's account in use and, for Claude, makes the agent's conversation
+    /// resumable there first when it last ran under another account.
+    private func accountLaunch(_ launch: AgentRunnerLaunch) -> AgentRunnerLaunch {
+        let id = launch.record.id
+        guard let harness = launch.record.harness, harness != .pi else { return launch }
+        let active = activeAccount(for: harness)
+        if harness == .claudeCode, let previous = runnerAccounts[id], previous.id != active.id {
+            let location = Self.claudeSessionLocation(for: launch.record)
+            _ = try? AgentAccountSetup.ensureSessionVisible(
+                sessionId: launch.record.pendingSessionForkFrom ?? location.sessionId,
+                cwd: location.cwd,
+                from: folder(of: previous),
+                to: folder(of: active))
+        }
+        runnerAccounts[id] = active
+        var signed = launch
+        signed.accountConfigDirectory = active.configDirectory
+        return signed
+    }
+
+    private func folder(of account: AgentAccount) -> URL {
+        if let directory = account.configDirectory { return URL(fileURLWithPath: directory, isDirectory: true) }
+        return account.harness == .codex ? personalCodexDirectory : personalClaudeDirectory
+    }
+
+    /// Adds a saved login with a folder of its own, sharing Personal's
+    /// settings and sessions. Signed out until the CLI's own login runs there.
+    func addAccount(harness: AgentHarness, label: String) throws -> AgentAccount {
+        let account = accountStore.makeAccount(harness: harness, label: label, existing: accounts)
+        if let directory = account.configDirectory {
+            try AgentAccountSetup.prepareDirectory(
+                URL(fileURLWithPath: directory, isDirectory: true),
+                sharing: AgentAccountSetup.sharedItems(for: harness),
+                from: harness == .codex ? personalCodexDirectory : personalClaudeDirectory)
+        }
+        var state = accountState
+        state.accounts.append(account)
+        try accountStore.save(state)
+        accountState = state
+        NotificationCenter.default.post(name: Self.accountUsageDidChangeNotification, object: self)
+        return account
+    }
+
+    /// "Work", then "Work 2": the label a new account of a CLI gets.
+    func nextAccountLabel(for harness: AgentHarness) -> String {
+        let labels = Set(accounts.filter { $0.harness == harness }.map(\.label))
+        if !labels.contains("Work") { return "Work" }
+        var n = 2
+        while labels.contains("Work \(n)") { n += 1 }
+        return "Work \(n)"
+    }
+
+    /// Settings ▸ Agents ▸ Accounts: per CLI, the account in use first, then
+    /// the other saved logins.
+    func settingsAccountRows() -> [SettingsAccountRow] {
+        [AgentHarness.claudeCode, .codex].flatMap { harness -> [SettingsAccountRow] in
+            let active = activeAccount(for: harness)
+            let finishing = agentsFinishingOnPreviousAccount(harness)
+            let previousLabel = finishing.first.flatMap { runnerAccounts[$0]?.label }
+            // Still in use by the turns finishing on it, as the approved sheet shows.
+            let finishingOn = Set(finishing.compactMap { runnerAccounts[$0]?.id })
+            let mine = accounts.filter { $0.harness == harness }
+                .sorted { ($0.id == active.id ? 0 : 1) < ($1.id == active.id ? 0 : 1) }
+            return mine.map { account in
+                let identity = accountIdentities[account.id]
+                let signedOut = signedOutAccounts.contains(account.id)
+                let detail = identity.map { [$0.email ?? $0.organizationName, $0.planDisplayName].compactMap { $0 }
+                    .joined(separator: " · ") }
+                    ?? (signedOut ? "Not signed in" : "Checking…")
+                let from = previousLabel ?? "the previous account"
+                let switching: String? = account.id == active.id && !finishing.isEmpty
+                    ? (finishing.count == 1
+                        ? "1 agent finishes its turn on \(from), then moves here"
+                        : "\(finishing.count) agents finish their turn on \(from), then move here")
+                    : nil
+                return SettingsAccountRow(
+                    id: account.id, harness: harness, title: account.label, detail: detail,
+                    isActive: account.id == active.id || finishingOn.contains(account.id),
+                    switchingDetail: switching, signedOut: signedOut)
+            }
+        }
+    }
+
+    func accountIdentity(accountId: String) -> AgentAccountIdentity? { accountIdentities[accountId] }
+
+    func accountQuota(accountId: String) -> AgentAccountQuotaSnapshot? {
+        restoreAccountQuotasIfNeeded()
+        return accountQuotas[accountId]
     }
 
     /// Ask the CLI for this agent's account limits now, unless a read started
-    /// within `minimumInterval` or one is still out. Opening the hover card asks
-    /// with a short interval; an idle row asks with a long one.
+    /// within `minimumInterval` or one is still out.
     @discardableResult
     func refreshAccountUsage(for id: AgentID, minimumInterval: TimeInterval) -> Bool {
-        guard let harness = records[id]?.harness else { return false }
-        return refreshAccountUsage(harness: harness, minimumInterval: minimumInterval)
+        guard let account = account(forAgent: id) else { return false }
+        return refreshAccountUsage(account: account, minimumInterval: minimumInterval)
+    }
+
+    /// Every saved login of one CLI: Settings lists them whether or not an
+    /// agent uses them.
+    func refreshAccountUsage(harness: AgentHarness, minimumInterval: TimeInterval) {
+        for account in accounts where account.harness == harness {
+            refreshAccountUsage(account: account, minimumInterval: minimumInterval)
+        }
     }
 
     @discardableResult
-    func refreshAccountUsage(harness: AgentHarness, minimumInterval: TimeInterval, now: Date = Date()) -> Bool {
-        guard harness != .pi, !accountUsageInFlight.contains(harness),
+    func refreshAccountUsage(account: AgentAccount, minimumInterval: TimeInterval, now: Date = Date()) -> Bool {
+        guard account.harness != .pi, !accountUsageInFlight.contains(account.id),
               AgentModelCatalog.refreshDue(
-                lastStartedAt: accountUsageLastStarted[harness], minimumInterval: minimumInterval, now: now)
+                lastStartedAt: accountUsageLastStarted[account.id], minimumInterval: minimumInterval, now: now)
         else { return false }
-        accountUsageInFlight.insert(harness)
-        accountUsageLastStarted[harness] = now
+        accountUsageInFlight.insert(account.id)
+        accountUsageLastStarted[account.id] = now
         let reader = accountUsageReader
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let reading = reader(harness)
+            let reading = reader(account)
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.accountUsageInFlight.remove(harness)
-                if let reading { self.applyAccountUsageReading(reading, harness: harness) }
+                self.accountUsageInFlight.remove(account.id)
+                if let reading { self.applyAccountUsageReading(reading, accountId: account.id) }
             }
         }
         startAccountUsagePollingIfLive()
         return true
     }
 
-    /// Every harness an agent here runs on, at most once per `minimumInterval`.
-    /// App activation and the slow poll call this.
+    /// The account in use of every CLI an agent here runs on, at most once per
+    /// `minimumInterval`. App activation and the slow poll call this.
     func refreshAccountUsageForAgents(minimumInterval: TimeInterval) {
-        for harness in Set(records.values.compactMap(\.harness)) {
-            refreshAccountUsage(harness: harness, minimumInterval: minimumInterval)
+        for harness in Set(records.values.compactMap(\.harness)) where harness != .pi {
+            refreshAccountUsage(account: activeAccount(for: harness), minimumInterval: minimumInterval)
         }
     }
 
-    /// A reading that names no login is not applied: a timeout and a sign-out
-    /// look the same from here, and blanking the row on a slow CLI would hide
-    /// a real reading. A reading for a DIFFERENT login than before drops the old
-    /// login's windows, which are no longer this harness's.
-    func applyAccountUsageReading(_ reading: AgentAccountUsageProbe.Reading, harness: AgentHarness) {
-        guard let identity = reading.identity else { return }
+    /// A reading that names no login is applied only when the CLI SAID so
+    /// (signed out): a timeout says nothing, and blanking the row on a slow CLI
+    /// would hide a real reading. A different login than before drops the old
+    /// login's windows, which are no longer this account's.
+    func applyAccountUsageReading(_ reading: AgentAccountUsageProbe.Reading, accountId: String) {
         restoreAccountQuotasIfNeeded()
-        let previous = accountIdentities[harness]
-        accountIdentities[harness] = identity
+        guard let identity = reading.identity else {
+            if reading.signedOut, !signedOutAccounts.contains(accountId) || accountIdentities[accountId] != nil {
+                signedOutAccounts.insert(accountId)
+                accountIdentities[accountId] = nil
+                if accountQuotas.removeValue(forKey: accountId) != nil { accountQuotaStore?.save(accountQuotas) }
+                NotificationCenter.default.post(name: Self.accountUsageDidChangeNotification, object: self)
+            }
+            return
+        }
+        signedOutAccounts.remove(accountId)
+        let previous = accountIdentities[accountId]
+        accountIdentities[accountId] = identity
         if let quota = reading.quota {
-            accountQuotas[harness] = quota
+            accountQuotas[accountId] = quota
             accountQuotaStore?.save(accountQuotas)
         } else if let previous,
                   previous.organizationId != identity.organizationId || previous.email != identity.email {
-            accountQuotas[harness] = nil
+            accountQuotas[accountId] = nil
             accountQuotaStore?.save(accountQuotas)
         }
         NotificationCenter.default.post(name: Self.accountUsageDidChangeNotification, object: self)
@@ -2151,11 +2368,12 @@ final class AgentSupervisor {
         }
     }
 
-    /// Refuse only a fresh, unexpired account-wide exhausted window. Unknown
-    /// windows may be model-specific, so they cannot block an arbitrary model.
+    /// Refuse only a fresh, unexpired account-wide exhausted window of the
+    /// account a new agent of `harness` would start on.
     func delegationQuotaRefusal(for harness: AgentHarness, now: Date = Date()) -> String? {
         restoreAccountQuotasIfNeeded()
-        guard let quota = accountQuotas[harness], now.timeIntervalSince(quota.observedAt) < 300,
+        guard let quota = accountQuotas[activeAccount(for: harness).id],
+              now.timeIntervalSince(quota.observedAt) < 300,
               quota.windows.contains(where: { window in
                   guard window.kind == .fiveHour || window.kind == .sevenDay || window.kind == .spendLimit,
                         let used = window.utilization, used >= 1,
@@ -2165,26 +2383,24 @@ final class AgentSupervisor {
         return "\(harness.rawValue) has exhausted its reported account usage window. Wait for its reset or explicitly choose another harness."
     }
 
-    /// Loads the persisted readings once per process, on first ask rather than
-    /// at boot: an empty row is only a problem when something is looking at it,
-    /// and this keeps a disk read off the launch path.
+    /// Loads the persisted readings once per process, on first ask.
     private var didRestoreAccountQuotas = false
     private func restoreAccountQuotasIfNeeded() {
         guard !didRestoreAccountQuotas else { return }
         didRestoreAccountQuotas = true
         guard let restored = accountQuotaStore?.restore(now: Date()), !restored.isEmpty else { return }
         // A live reading observed this session always wins over a restored one.
-        for (harness, snapshot) in restored where accountQuotas[harness] == nil {
-            accountQuotas[harness] = snapshot
+        for (accountId, snapshot) in restored where accountQuotas[accountId] == nil {
+            accountQuotas[accountId] = snapshot
         }
     }
 
     /// QA seam: deliver a quota observation without a live provider.
     func qaDeliverAccountQuota(_ snapshot: AgentAccountQuotaSnapshot) {
-        accountQuotas[snapshot.harness] = snapshot
+        accountQuotas[snapshot.accountId ?? activeAccount(for: snapshot.harness).id] = snapshot
     }
 
-    var qaAccountUsageInFlight: Set<AgentHarness> { accountUsageInFlight }
+    var qaAccountUsageInFlight: Set<String> { accountUsageInFlight }
 
     /// True once there is user/session work that makes Home retargeting unsafe.
     /// Used by the native Home action surface: zero-turn agents may be reassigned;
@@ -3148,10 +3364,10 @@ final class AgentSupervisor {
             } else {
                 idle.stop()
                 interruptWorkingClaudeMirroredChildren(of: id)
-                runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi)))
+                runner = makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi))))
             }
         } else {
-            runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi)))
+            runner = makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi))))
         }
         // T5 — steers still marked delivering belong to an earlier turn of a
         // session that has gone idle since; a new turn means they were taken.
@@ -7079,7 +7295,7 @@ final class AgentSupervisor {
             else { return .refused(.turnNotReady) }
 
             let candidate = (runners[agentID] ?? idleSessionRunners[agentID]
-                ?? makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: agentID))))
+                ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: agentID)))))
             guard let compacting = candidate as? AgentCompactionRunning,
                   compacting.compactionCapabilities.supportsManual else {
                 return .refused(.unsupported)
@@ -7945,7 +8161,7 @@ final class AgentSupervisor {
     private func sessionCommandCapabilities(for id: AgentID) -> AgentSessionCommandCapabilities {
         guard let record = records[id] else { return .oneShotProse }
         let runner = runners[id] ?? idleSessionRunners[id]
-            ?? makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))
+            ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id))))
         var capabilities = runner.commandCapabilities
         // The runner answers for the transport; the supervisor answers for what
         // the harness has ADVERTISED, because a one-shot claude process is

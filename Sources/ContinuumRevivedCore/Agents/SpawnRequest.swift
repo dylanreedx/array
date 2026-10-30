@@ -258,11 +258,19 @@ public struct AgentRunnerLaunch: Sendable {
     /// Links from this agent up to a root. 0 for a user-created agent.
     public let spawnDepth: Int
     public let workspaceMCP: WorkspaceMCPConfiguration?
+    /// .plans/101 — the config folder of the account this launch signs in as.
+    /// nil is the CLI's default login. Resolved by the supervisor, which owns
+    /// the accounts; the record carries only the account's id.
+    public var accountConfigDirectory: String?
 
-    public init(record: AgentRecord, spawnDepth: Int, workspaceMCP: WorkspaceMCPConfiguration? = nil) {
+    public init(
+        record: AgentRecord, spawnDepth: Int, workspaceMCP: WorkspaceMCPConfiguration? = nil,
+        accountConfigDirectory: String? = nil
+    ) {
         self.record = record
         self.spawnDepth = spawnDepth
         self.workspaceMCP = workspaceMCP
+        self.accountConfigDirectory = accountConfigDirectory
     }
 }
 

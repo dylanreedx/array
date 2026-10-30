@@ -206,6 +206,9 @@ public final class CodexAgentRunner: @unchecked Sendable {
         public var workspaceMCP: WorkspaceMCPConfiguration?
         /// The agent id every descendant carries — `PiAgentRunner.childEnvironment`.
         public var processOwner: String?
+        /// .plans/101 — the account's home, passed as `CODEX_HOME`. nil keeps
+        /// the CLI's own (inherited) home.
+        public var codexHome: String?
         public init(
             model: String,
             effort: String? = nil,
@@ -213,8 +216,10 @@ public final class CodexAgentRunner: @unchecked Sendable {
             threadId: String? = nil,
             extraArgs: [String] = [],
             workspaceMCP: WorkspaceMCPConfiguration? = nil,
-            processOwner: String? = nil
+            processOwner: String? = nil,
+            codexHome: String? = nil
         ) {
+            self.codexHome = codexHome
             self.model = model
             self.effort = effort
             self.cwd = cwd
@@ -1165,16 +1170,21 @@ public final class CodexAgentRunner: @unchecked Sendable {
     }
 
     private func childEnvironment() -> [String: String] {
-        Self.childEnvironment(workspaceMCP: config.workspaceMCP, processOwner: config.processOwner)
+        Self.childEnvironment(
+            workspaceMCP: config.workspaceMCP, processOwner: config.processOwner, codexHome: config.codexHome)
     }
 
     /// The MCP server's endpoint and token reach it through its own config
     /// (`mcp_servers.array_workspace.env`), never through codex's environment,
     /// which every shell command codex runs inherits.
     public static func childEnvironment(
-        workspaceMCP: WorkspaceMCPConfiguration?, processOwner: String? = nil
+        workspaceMCP: WorkspaceMCPConfiguration?, processOwner: String? = nil, codexHome: String? = nil
     ) -> [String: String] {
-        PiAgentRunner.childEnvironment(processOwner: processOwner)
+        var environment = PiAgentRunner.childEnvironment(processOwner: processOwner)
+        // .plans/101: an account Array added is its own CODEX_HOME, which is
+        // where codex keeps that login's auth.json. HOME is never touched.
+        if let codexHome, !codexHome.isEmpty { environment["CODEX_HOME"] = codexHome }
+        return environment
     }
 }
 

@@ -242,11 +242,15 @@ public enum AgentQuotaTelemetrySource: Equatable, Sendable, Codable {
     }
 }
 
-/// One account's quota reading. Keyed by harness by every consumer: this is not
+/// One account's quota reading. Keyed by ACCOUNT by every consumer: this is not
 /// per-agent state and must never be persisted onto an `AgentRecord`, which
 /// would mint one racing copy per agent and resurrect a stale one per relaunch.
 public struct AgentAccountQuotaSnapshot: Equatable, Sendable, Codable {
     public var harness: AgentHarness
+    /// .plans/101 — which account this reading belongs to. Nil in readings
+    /// persisted before accounts existed; those are the harness's default
+    /// account, which was the only one.
+    public var accountId: String?
     public var windows: [AgentQuotaWindow]
     public var credits: AgentQuotaCredits?
     public var observedAt: Date
@@ -257,9 +261,11 @@ public struct AgentAccountQuotaSnapshot: Equatable, Sendable, Codable {
         windows: [AgentQuotaWindow],
         credits: AgentQuotaCredits? = nil,
         observedAt: Date,
-        source: AgentQuotaTelemetrySource
+        source: AgentQuotaTelemetrySource,
+        accountId: String? = nil
     ) {
         self.harness = harness
+        self.accountId = accountId
         self.windows = windows
         self.credits = credits
         self.observedAt = observedAt
