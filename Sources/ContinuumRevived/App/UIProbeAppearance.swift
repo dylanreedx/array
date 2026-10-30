@@ -337,13 +337,11 @@ enum UIProbeAppearance {
         // The managed-agent tile carries the Canvas conformers; the two chrome views
         // are constructed directly (both are `init(frame:)`, no store needed) so the
         // App-layer half of the ticket is covered by the same sweep.
-        let collaborationScene = try SharedAreaSceneChecks.makeAppearanceFixture()
-        let collaborationHub = try CollaborationHubChecks.makeAppearanceFixture()
-        let collaborationCapture = try SharedAreaCaptureChecks.makeAppearanceFixture()
-        let surfaces: [(id: String, size: NSSize, make: () -> NSView)] = [
-            ("appearance.sharedAreaScene", NSSize(width: 960, height: 680), { collaborationScene }),
-            ("appearance.collaborationHub", NSSize(width: 680, height: 720), { collaborationHub }),
-            ("appearance.collaborationCapture", NSSize(width: 780, height: 800), { collaborationCapture }),
+        // Every collaboration surface comes from one list, which the
+        // collaboration class census also checks for coverage.
+        let collaboration: [(id: String, size: NSSize, make: () -> NSView)] = try CollaborationAppearanceSurfaces.all()
+            .map { surface in ("appearance.\(surface.id)", surface.size, { surface.view }) }
+        let surfaces: [(id: String, size: NSSize, make: () -> NSView)] = collaboration + [
             ("appearance.managedAgentTile", NSSize(width: 640, height: 560), makeTile),
             // The same tile on the row-list renderer (`ARRAY_TRANSCRIPT_RENDERER=list`,
             // still selectable): its request row is an `AgentRequestView`, which
@@ -1786,9 +1784,8 @@ enum UIProbeAppearance {
     }
 
     static func adoptedSurfaces() throws -> [AdoptedSurface] {
-        let collaborationScene = try SharedAreaSceneChecks.makeAppearanceFixture()
-        let collaborationHub = try CollaborationHubChecks.makeAppearanceFixture()
-        let collaborationCapture = try SharedAreaCaptureChecks.makeAppearanceFixture()
+        let collaboration = try CollaborationAppearanceSurfaces.all()
+            .map { surface in AdoptedSurface(id: surface.id, size: surface.size, make: { surface.view }) }
         let entries = LabCatalog.entries(env: LabEnvironment(ghostty: nil, browserEngine: nil))
         guard let entry = entries.first(where: { $0.id == "tiles.managedAgent" }),
               case let .staticCard(_, makeTile) = entry.content else {
@@ -1867,10 +1864,7 @@ enum UIProbeAppearance {
             tile.qaPageZoomHeaderView.showsManaged = true
             tile.layoutSubtreeIfNeeded()
         }
-        return [
-            AdoptedSurface(id: "sharedAreaScene", size: NSSize(width: 960, height: 680), make: { collaborationScene }),
-            AdoptedSurface(id: "collaborationHub", size: NSSize(width: 680, height: 720), make: { collaborationHub }),
-            AdoptedSurface(id: "collaborationCapture", size: NSSize(width: 780, height: 800), make: { collaborationCapture }),
+        return collaboration + [
             AdoptedSurface(id: "editorNavigator", size: NSSize(width: 260, height: 400), make: {
                 FileTreeBrowserView(rootURL: URL(fileURLWithPath: "/nonexistent-editor-navigator-probe-root"))
             }),
