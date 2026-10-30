@@ -621,6 +621,7 @@ if [[ "$HOOK_BRIDGE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --workspace-mcp-disconnect-check
   run_app_check .build/debug/Array --workspace-agent-report-check
   run_app_check .build/debug/Array --workspace-hook-pushback-check
+  run_app_check .build/debug/Array --claude-adopted-turn-check
   matrix_report 'Hook bridge matrix (targeted)'
   exit $?
 fi
@@ -1204,6 +1205,12 @@ run_app_check .build/debug/Array --agent-first-paint-check
 # header, which used to paint Idle with Send disabled.
 run_app_check .build/debug/Array --agent-steering-recovery-check
 run_app_check .build/debug/Array --agent-presence-check
+# .plans/102: the PARENT's side of a background subagent's hand-back. The
+# production claude runner and supervisor against the fake replaying a real
+# claude 2.1.312 stream: claude's own second turn (fresh init, second result)
+# is adopted as the parent's second turn, working -> done twice, the second
+# completion carrying the child's answer, nothing doubled.
+run_app_check .build/debug/Array --claude-adopted-turn-check
 # TR-06: responding to a request the provider is HOLDING. Drives the real
 # `wireManagedAgentTile` and asserts the response transport is bound by
 # production — the seam sat declared-and-unbound through every release of the

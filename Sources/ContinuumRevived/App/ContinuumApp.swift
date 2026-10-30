@@ -2419,6 +2419,21 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--claude-adopted-turn-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let summary = try await runAgentAdoptedTurnChecks()
+                    print("AgentAdoptedTurnChecks passed: \(summary)")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-spawn-limit-check") {
             _ = NSApplication.shared
             Task { @MainActor in

@@ -6850,6 +6850,9 @@ final class AgentSupervisor {
     /// persisted or woken. Absence here is not evidence the agent did nothing.
     /// QA: how many times the supervisor's copy re-parsed an open stream.
     func qaTranscriptParseCount(for id: AgentID) -> Int { transcriptProjections[id]?.streamingMarkupParseCount ?? 0 }
+    /// QA: the final assistant text the supervisor's copy holds now — what a
+    /// spawned child's result carries back and the sidebar hover card reads.
+    func qaFinalAssistantText(for id: AgentID) -> String? { transcriptProjections[id]?.finalAssistantText }
 
     func transcriptDocumentProjection(for id: AgentID) -> AgentDocument? {
         transcriptProjections[id]?.document
