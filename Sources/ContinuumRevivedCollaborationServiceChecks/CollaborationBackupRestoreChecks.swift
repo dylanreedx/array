@@ -228,8 +228,11 @@ func runCollaborationBackupRestoreChecks() async throws {
     let relabelled = try await tampered("blob-relabel", "UPDATE collaboration_artifact_blobs SET digest='\(String(repeating: "f", count: 64))'")
     try backupCheck(relabelled != 0, "verification refuses an artifact blob relabelled to another digest")
     var damaged = backupBytes
-    let middle = damaged.count / 2
-    for offset in middle..<(middle + 512) { damaged[offset] ^= 0x5A }
+    // A slice of every page after the header, so the damage cannot fall in
+    // free space by luck of page layout (it did, once, on Linux).
+    for page in stride(from: 4096, to: damaged.count, by: 4096) {
+        for offset in (page + 128)..<min(page + 640, damaged.count) { damaged[offset] ^= 0x5A }
+    }
     let damagedPath = root.appendingPathComponent("backups-damaged/damaged.sqlite").path
     try fileManager.createDirectory(atPath: (damagedPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
     try damaged.write(to: URL(fileURLWithPath: damagedPath))

@@ -1,6 +1,6 @@
-PASS backup/restore: operator backup command copies the live database while it serves writes (39 concurrent commits)
+PASS backup/restore: operator backup command copies the live database while it serves writes (71 concurrent commits)
 PASS backup/restore: backup report counts every area, person, revocation, removal, dispatch, usage and artifact row
-PASS backup/restore: the backup carries a compacted area: horizon snapshot, short tail and every operation receipt (76 receipts, 12 retained operations)
+PASS backup/restore: the backup carries a compacted area: horizon snapshot, short tail and every operation receipt (108 receipts, 12 retained operations)
 PASS backup/restore: backup file is private to the operator account
 PASS backup/restore: backup bytes exclude plaintext content, bearer tokens and invitation codes
 PASS backup/restore: operator commands never open the companion database
@@ -14,10 +14,10 @@ PASS backup/restore: verification of the published backup reproduces its report
 PASS backup/restore: restore with the wrong key installs nothing
 PASS backup/restore: operator restore installs the backup in a replacement directory
 PASS backup/restore: restored database refuses a different master key
-PASS backup/restore: restored HTTP service returns area 789BCEE3 byte-identical with its membership epoch
-PASS backup/restore: restored HTTP service returns area 481EB48B byte-identical with its membership epoch
+PASS backup/restore: restored HTTP service returns area 8A6BAC29 byte-identical with its membership epoch
+PASS backup/restore: restored HTTP service returns area 3902BB49 byte-identical with its membership epoch
 PASS backup/restore: a write after the backup point is absent: restore is point-in-time
-PASS backup/restore: the area written during the backup restores one consistent revision (72 of 41...80)
+PASS backup/restore: the area written during the backup restores one consistent revision (104 of 41...112)
 PASS backup/restore: accepted handoff receipt and its human attribution survive restore
 PASS backup/restore: an original command retried after restore returns its first receipt
 PASS backup/restore: a command compacted out of the log before the backup still dedupes by its receipt
