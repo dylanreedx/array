@@ -1,0 +1,8 @@
+== reduce-motion mutation (diff)
+267c267
+<         guard !reduceMotion(), target != localCamera else { showFollowedCamera(target); return true }
+---
+>         guard true, target != localCamera else { showFollowedCamera(target); return true }
+mutant build exit=0
+mutant run exit=1
+FAIL: Failure(message: "Follow from the cursor card centres the leader\'s area-local viewport at the follower\'s own size and zoom")

@@ -1,0 +1,8 @@
+== unchanged-reassign mutation (diff)
+78c78
+<         if endorseButton.presentation != endorse { endorseButton.presentation = endorse }
+---
+>         endorseButton.presentation = endorse
+mutant build exit=0
+mutant run exit=1
+FAIL: the burst repaints no shared content, runs no layout pass and creates no view (["ComposerActionButton": 1], [:])

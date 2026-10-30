@@ -1,0 +1,8 @@
+== census-surface mutation (diff)
+22c22
+<             .init(id: "sharedAreaFollow", size: .init(width: 960, height: 680), view: try agreementScene(following: true)),
+---
+> 
+mutant build exit=0
+mutant run exit=1
+FAIL: collaboration view classes on no appearance surface: ["SharedAreaPresenceOverlay"] (of ["CollaborationHubView", "SharedAreaAgreementView", "SharedAreaCaptureLayoutView", "SharedAreaCaptureSelectionView", "SharedAreaCaptureView", "SharedAreaHandoffView", "SharedAreaPresenceOverlay", "SharedAreaSceneCanvas", "SharedAreaSceneView"]) — add the view, visible, to CollaborationAppearanceSurfaces.all() so the ui-probe census covers its colours

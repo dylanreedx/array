@@ -1,0 +1,8 @@
+== keyboard-tab mutation (diff)
+73c73
+<         guard event.keyCode == 48, event.modifierFlags.intersection([.command, .option]).isEmpty, let window else { return false }
+---
+>         guard false, event.keyCode == 48, event.modifierFlags.intersection([.command, .option]).isEmpty, let window else { return false }
+mutant build exit=0
+mutant run exit=1
+FAIL: Tab never reached Shared objects; went Objects → Objects → Objects → Objects → Objects → Objects → Objects → Objects → Objects → Objects → Objects → Objects; key window shared

@@ -1,0 +1,8 @@
+== focus-restore mutation (diff)
+57c57
+<         guard let held, let window, held.isHiddenOrHasHiddenAncestor || !held.canBecomeKeyView || current(in: window) !== held else { return }
+---
+>         guard false, let held, let window, held.isHiddenOrHasHiddenAncestor || !held.canBecomeKeyView || current(in: window) !== held else { return }
+mutant build exit=0
+mutant run exit=1
+FAIL: when Endorse turns into a disabled Endorsed, keyboard focus moves on to the next stop instead of dropping to the window

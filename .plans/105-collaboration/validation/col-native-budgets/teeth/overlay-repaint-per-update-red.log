@@ -1,0 +1,8 @@
+== overlay-repaint-per-update mutation (diff)
+106c106
+<         refreshAccessibility(); needsDisplay = true
+---
+>         refreshAccessibility(); needsDisplay = true; display()
+mutant build exit=0
+mutant run exit=1
+FAIL: 50 cursor updates in one turn paint the overlay once (50), at the last position

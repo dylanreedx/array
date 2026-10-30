@@ -1,0 +1,47 @@
+PASS collaboration accessibility: the shared window opens with keyboard focus on the shared canvas
+PASS collaboration accessibility: Tab inside the canvas selects a shared object and keeps focus there
+PASS collaboration accessibility: an arrow key pans the shared canvas
+PASS collaboration accessibility: Control-Tab leaves the canvas for the Objects menu
+PASS collaboration accessibility: shared scene with an agreement: Tab visits Shared objects → Objects → Workspace → History → Endorse revision 1 → Selected shared entry → Private discussion or agreement draft in reading order
+PASS collaboration accessibility: shared scene with an agreement: every visible enabled control is in the Tab loop
+PASS collaboration accessibility: shared scene: Shift-Tab walks the same stops in reverse (Selected shared entry → Endorse revision 1 → History → Workspace → Objects → Shared objects)
+PASS collaboration accessibility: Return on the focused Endorse control records this person's endorsement
+PASS collaboration accessibility: when Endorse turns into a disabled Endorsed, keyboard focus moves on to the next stop instead of dropping to the window
+PASS collaboration accessibility: Workspace › New discussion by keyboard creates and selects a shared discussion
+PASS collaboration accessibility: typed keys reach the draft, and Tab leaves it for Post instead of inserting a tab
+PASS collaboration accessibility: Return on Post shares the typed message
+PASS collaboration accessibility: Workspace › Follow by keyboard follows the teammate's view and says so
+PASS collaboration accessibility: Workspace › Stop following by keyboard ends follow
+PASS collaboration accessibility: the hub opens with keyboard focus on the account menu
+PASS collaboration accessibility: choosing by keyboard returns focus to the account menu
+PASS collaboration accessibility: hub: Tab visits Choose an account → Collaboration service URL → One-time Array enrollment code → Device name → Connect in reading order
+PASS collaboration accessibility: hub: every visible enabled control is in the Tab loop
+PASS collaboration accessibility: typed keys reach the hub's service URL field
+PASS collaboration accessibility: capture review opens with keyboard focus on the tile list
+PASS collaboration accessibility: capture review (Share selection disabled until something is opted in): Tab visits Tile to review → Sharing mode → Captured content to share → Refresh review → Cancel in reading order
+PASS collaboration accessibility: capture review (Share selection disabled until something is opted in): every visible enabled control is in the Tab loop
+PASS collaboration accessibility: a sharing mode is chosen by keyboard
+PASS collaboration accessibility: the handoff window opens on the recipient field
+PASS collaboration accessibility: handoff: every visible enabled control is in the Tab loop, agreement before prompt (Handoff recipient collaboration ID → Offer handoff → Reclaim control → Shared agreement revision → Prompt timing → Reviewed shared agreement → Prompt for handed-off agent → Refresh)
+PASS collaboration accessibility: Tab leaves the handoff prompt without inserting a tab
+PASS collaboration accessibility: prompt timing is chosen by keyboard
+PASS collaboration accessibility: with Reduce Motion on, following jumps to the teammate's view in one frame
+PASS collaboration accessibility: with Reduce Motion on, tracked moves also jump
+PASS collaboration accessibility: with Reduce Motion off, following starts a glide instead of jumping
+PASS collaboration accessibility: the glide lands exactly on the teammate's view over 12 frames with no private camera writes
+PASS collaboration budget: the measured client shows a shared scene with its agreement panel
+PASS collaboration budget: 200 updates in one display interval apply as 2 frame(s) and 2 overlay paint(s), showing the last position
+PASS collaboration budget: the burst repaints no shared content, runs no layout pass and creates no view ([:], [:])
+PASS collaboration budget: 50 cursor updates in one turn paint the overlay once (1), at the last position
+PASS collaboration budget: 50 paced updates: ≤ 1 overlay paint each (35), no content paint, no layout pass, no view
+PASS collaboration budget: usage advances to the latest report while closed hover paints no card and measures no text
+PASS collaboration budget: presence flood: zero transcript measurements, zero canvas saves, zero executor/model work, 0 shared-cache writes (≤ 0)
+PASS collaboration budget: the measured client follows its teammate
+PASS collaboration budget: 20 followed moves: ≤ 1 content paint each (20), no layout pass, no view, no private camera write
+PASS collaboration budget: follow: zero transcript measurements, zero canvas saves, zero executor/model work, 0 shared-cache writes (≤ 0)
+PASS collaboration budget: 20 agreement revisions and endorsements: no Array view created (AppKit text fragments 9 ≤ 1 each), 90 layout passes (45 then 45, ≤ 6 each, flat), 17 content paints (≤ 1 each) ["ChoiceButton": 1, "_NSTextViewportElementView": 9, "ComposerActionButton": 10, "NSTextView": 29, "NSTextField": 41] inserted ["_NSTextViewportElementView": 9]
+PASS collaboration budget: agreement revisions and endorsements: zero transcript measurements, zero canvas saves, zero executor/model work, 20 shared-cache writes (≤ 20)
+PASS collaboration budget: 20 remote moves and posts: no Array view created (AppKit text fragments 0 ≤ 1 each), 20 layout passes (10 then 10, ≤ 6 each, flat), 18 content paints (≤ 1 each) ["NSTextView": 20] inserted [:]
+PASS collaboration budget: remote moves and posts: zero transcript measurements, zero canvas saves, zero executor/model work, 20 shared-cache writes (≤ 20)
+PASS collaboration budget: no budgeted traffic sent a shared operation or created an agent record
+PASS collaboration census: 9 collaboration view classes (CollaborationHubView, SharedAreaAgreementView, SharedAreaCaptureLayoutView, SharedAreaCaptureSelectionView, SharedAreaCaptureView, SharedAreaHandoffView, SharedAreaPresenceOverlay, SharedAreaSceneCanvas, SharedAreaSceneView) each render visibly in light and dark across 7 surfaces
