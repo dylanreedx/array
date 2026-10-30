@@ -6,21 +6,42 @@ import ContinuumRevivedCollaborationService
 ///     continuum-relay --collaboration-backup <new backup path>
 ///     continuum-relay --collaboration-verify-backup <backup path>
 ///     continuum-relay --collaboration-restore <backup path>
+///     continuum-relay --collaboration-list-people
+///     continuum-relay --collaboration-recover-person <person id>
 ///
 /// They read RELAY_COLLABORATION_DATABASE_PATH and RELAY_COLLABORATION_MASTER_KEY
-/// and never open the companion database. Output is a counts-only JSON report.
+/// and never open the companion database. Backup commands print a counts-only
+/// report; recovery prints a one-time enrollment, which is admission material.
 /// Returns nil when the arguments are not one of these commands.
-func runCollaborationOperatorCommand(_ arguments: [String]) -> Int32? {
-    let commands = ["--collaboration-backup", "--collaboration-verify-backup", "--collaboration-restore"]
+func runCollaborationOperatorCommand(_ arguments: [String]) async -> Int32? {
+    let commands = ["--collaboration-backup", "--collaboration-verify-backup", "--collaboration-restore",
+                    "--collaboration-list-people", "--collaboration-recover-person"]
     guard arguments.count > 1, commands.contains(arguments[1]) else { return nil }
     let environment = ProcessInfo.processInfo.environment
-    guard arguments.count == 3, let livePath = environment["RELAY_COLLABORATION_DATABASE_PATH"],
+    let expectedCount = arguments[1] == "--collaboration-list-people" ? 2 : 3
+    guard arguments.count == expectedCount, let livePath = environment["RELAY_COLLABORATION_DATABASE_PATH"],
           let secret = environment["RELAY_COLLABORATION_MASTER_KEY"],
           let key = Data(base64Encoded: secret), key.count >= 32 else {
         log("error", "invalid_operator_command", fields: ["command": arguments[1]]); return 2
     }
-    let path = arguments[2]
+    let path = arguments.count > 2 ? arguments[2] : ""
     do {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]; encoder.dateEncodingStrategy = .iso8601
+        if arguments[1] == "--collaboration-list-people" || arguments[1] == "--collaboration-recover-person" {
+            let store = try CollaborationStore(path: livePath, masterKey: key)
+            if arguments[1] == "--collaboration-list-people" {
+                FileHandle.standardOutput.write(try encoder.encode(try await store.operatorPeople()))
+            } else {
+                guard let person = UUID(uuidString: path) else { throw CollaborationStoreError.invalidRequest }
+                let recovery = try await store.operatorRecoverPerson(person)
+                FileHandle.standardOutput.write(try encoder.encode(recovery.enrollment))
+                FileHandle.standardOutput.write(Data("\n".utf8))
+                log("info", "operator_recovered_person", fields: ["revoked_devices": "\(recovery.revokedDevices.count)"])
+                return 0
+            }
+            FileHandle.standardOutput.write(Data("\n".utf8))
+            return 0
+        }
         var fields = ["command": arguments[1]]
         let report: CollaborationBackupReport
         switch arguments[1] {
@@ -33,7 +54,6 @@ func runCollaborationOperatorCommand(_ arguments: [String]) -> Int32? {
             report = restored.report
             if let aside = restored.movedAside { fields["moved_aside"] = aside }
         }
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         FileHandle.standardOutput.write(try encoder.encode(report))
         FileHandle.standardOutput.write(Data("\n".utf8))
         log("info", "operator_command_completed", fields: fields)
