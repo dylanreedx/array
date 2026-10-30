@@ -48,6 +48,19 @@ enum SharedAreaProviderDispatchChecks {
             else { unsetenv("CONTINUUM_CODEX_TRANSPORT") }
             for snapshot in savedCatalog { AgentModelCatalog.shared.resetForQA(snapshot: snapshot) }
         }
+        // Handing the agent over, per harness, through both production controllers.
+        for (kind, harness, model) in [(AgentSteeringQAFakes.Harness.claude, AgentHarness.claudeCode, AgentCatalogQAFixture.claude.seedModel ?? ""),
+                                       (.codex, .codex, "openai-codex/gpt-5.6-sol"), (.pi, .pi, AgentCatalogQAFixture.pi[0])] {
+            switch kind {
+            case .claude: AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
+            case .codex: AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.codex)
+            case .pi: AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
+            }
+            let root = URL(fileURLWithPath: support).appendingPathComponent("handoff-seam-\(kind.rawValue)-\(UUID())")
+            defer { try? FileManager.default.removeItem(at: root) }
+            setenv("PATH", "\(root.appendingPathComponent("bin").path):\(originalPath)", 1)
+            try await SharedAreaHandoffSeamChecks.run(kind, harness: harness, model: model, root: root)
+        }
         for kind in [AgentSteeringQAFakes.Harness.claude, .codex, .pi] {
             let root = URL(fileURLWithPath: support).appendingPathComponent("provider-dispatch-\(kind.rawValue)-\(UUID())")
             defer { try? FileManager.default.removeItem(at: root) }
@@ -216,7 +229,7 @@ enum SharedAreaProviderDispatchChecks {
     }
 
     /// The user prompt a fake recorded, and how many non-text parts rode with it.
-    private static func promptFrame(_ frame: [String: Any]) -> (text: String, attachments: Int)? {
+    static func promptFrame(_ frame: [String: Any]) -> (text: String, attachments: Int)? {
         if frame["type"] as? String == "prompt", let text = frame["message"] as? String {
             return (text, (frame["images"] as? [Any])?.count ?? 0)
         }
