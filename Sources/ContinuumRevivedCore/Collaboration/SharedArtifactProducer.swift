@@ -8,7 +8,8 @@ import CryptoKit
 /// Reads the checkout and runs git read-only (`GIT_OPTIONAL_LOCKS=0`, no index
 /// refresh). Only explicitly selected paths are read; unselected changes are
 /// declared by count, never by name or content.
-public struct SharedArtifactProducer {
+/// `@unchecked`: its only non-Sendable member is the checks-only seam.
+public struct SharedArtifactProducer: @unchecked Sendable {
     public typealias Artifact = Collaboration.Artifact
     public enum DiffRange: Equatable, Sendable { case workingTree, staged, branch(base: String) }
     public enum Selection: Equatable, Sendable {
@@ -18,7 +19,7 @@ public struct SharedArtifactProducer {
         case diff(DiffRange, paths: [String]?, untracked: [String])
     }
     public enum Failure: Error, Equatable {
-        case notRepository, invalidPath(String), changedDuringCapture, gitFailed(String), tooManyEntries, tooLarge
+        case notRepository, invalidPath(String), changedDuringCapture, gitFailed(String), tooManyEntries, tooLarge, unsupportedSource
     }
     public struct Applicability: Equatable, Sendable {
         public let changedPaths: Int
@@ -37,26 +38,65 @@ public struct SharedArtifactProducer {
         git = gitExecutableURL; self.timeout = timeout; self.attempts = attempts; betweenReads = betweenReadsForChecks
     }
 
+    /// A coherent capture not yet bound to a shared object. Its digest covers
+    /// every published byte and claim except identity and capture time, so a
+    /// fresh re-read at confirmation compares equal only if nothing changed.
+    public struct Draft: Sendable, Equatable {
+        public let kind: Artifact.Kind
+        public let base: Artifact.Base
+        public let declaration: Artifact.Declaration
+        public let entries: [Artifact.Entry]
+        public let blobs: [String: Data]
+        public let capturedAt: Int64
+        public var contentDigest: String {
+            Artifact.Manifest(id: .init(UUID(uuidString: "00000000-0000-0000-0000-000000000000")!), object: .init(UUID(uuidString: "00000000-0000-0000-0000-000000000000")!), parent: nil, kind: kind,
+                              base: base, declaration: declaration, entries: entries, capturedAt: 0).contentDigest
+        }
+        public var includedCount: Int { entries.filter { $0.coverage == .included }.count }
+        public func capture(object: SharedArea.ID<SharedArea.Object>, id: SharedArea.ID<Artifact.RevisionTag> = .init(),
+                            parent: SharedArea.ID<Artifact.RevisionTag>?) throws -> Artifact.Capture {
+            let manifest = Artifact.Manifest(id: id, object: object, parent: parent, kind: kind, base: base,
+                                             declaration: declaration, entries: entries, capturedAt: capturedAt)
+            try Artifact.validate(manifest)
+            return .init(manifest: manifest, blobs: blobs)
+        }
+    }
+
     /// Two consecutive reads must produce the same claim, or the capture is
     /// retried; after `attempts` it refuses rather than publish a revision
     /// that never existed at any instant.
-    public func capture(root: URL, object: SharedArea.ID<SharedArea.Object>, parent: SharedArea.ID<Artifact.RevisionTag>?,
-                        selection: Selection, now: Date = Date()) throws -> Artifact.Capture {
+    public func draft(root: URL, selection: Selection, now: Date = Date()) throws -> Draft {
         var previous = try read(root: root, selection: selection)
         for _ in 0..<attempts {
             betweenReads?()
             let next = try read(root: root, selection: selection)
             if next == previous {
                 guard next.entries.count <= Artifact.Limits.entries else { throw Failure.tooManyEntries }
-                let manifest = Artifact.Manifest(object: object, parent: parent, kind: next.kind, base: next.base,
-                    declaration: next.declaration, entries: next.entries, capturedAt: Int64((now.timeIntervalSince1970 * 1000).rounded()))
-                guard manifest.includedBytes <= Artifact.Limits.revisionBytes else { throw Failure.tooLarge }
-                try Artifact.validate(manifest)
-                return .init(manifest: manifest, blobs: next.blobs)
+                let draft = Draft(kind: next.kind, base: next.base, declaration: next.declaration, entries: next.entries,
+                                  blobs: next.blobs, capturedAt: Int64((now.timeIntervalSince1970 * 1000).rounded()))
+                guard draft.entries.reduce(0, { $0 + ($1.length ?? 0) }) <= Artifact.Limits.revisionBytes else { throw Failure.tooLarge }
+                return draft
             }
             previous = next
         }
         throw Failure.changedDuringCapture
+    }
+
+    public func capture(root: URL, object: SharedArea.ID<SharedArea.Object>, parent: SharedArea.ID<Artifact.RevisionTag>?,
+                        selection: Selection, now: Date = Date()) throws -> Artifact.Capture {
+        try draft(root: root, selection: selection, now: now).capture(object: object, parent: parent)
+    }
+
+    /// Untracked, unignored paths the owner may explicitly choose to include.
+    public func untrackedPaths(root: URL) throws -> [String] {
+        let checkout = try isolate(root)
+        defer { checkout.discard() }
+        return try git(["ls-files", "--others", "--exclude-standard", "-z"], checkout, limit: 4 << 20).data
+            .split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+            .filter { Artifact.isPortablePath($0) }.prefix(Artifact.Limits.entries / 2).map { $0 }
+    }
+    public func currentBranch(root: URL) throws -> String {
+        text(try git(["rev-parse", "--abbrev-ref", "HEAD"], Checkout(root: root, index: nil)))
     }
 
     /// Does `manifest` still describe this checkout? Compares HEAD/merge base

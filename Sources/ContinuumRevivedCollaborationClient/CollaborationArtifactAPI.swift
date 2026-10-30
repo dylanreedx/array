@@ -10,6 +10,7 @@ public struct CollaborationArtifactContents: Sendable {
     public let record: Collaboration.Artifact.Record
     /// Keyed by repository-relative path, `included` entries only.
     public let bytes: [String: Data]
+    public init(record: Collaboration.Artifact.Record, bytes: [String: Data]) { self.record = record; self.bytes = bytes }
 }
 
 extension CollaborationAPI {

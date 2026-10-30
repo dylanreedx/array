@@ -128,10 +128,33 @@ func runSharedAreaPublicationChecks() throws {
     try publicationRefuses(.reviewIncomplete) {
         _ = try P.confirm(incomplete, expectedDigest: incomplete.digest, inventory: full, choices: [choices[0]])
     }
-    let artifact = try P.prepare(inventory: full, selection: .tiles([note.key]), choices: [.init(source: note.key, content: .artifact)],
+    let digestOne = String(repeating: "1", count: 64), digestTwo = String(repeating: "2", count: 64)
+    let artifact = try P.prepare(inventory: full, selection: .tiles([note.key]), choices: [.init(source: note.key, content: .artifact(digest: digestOne))],
         area: area, author: author, host: host, expectedRevision: 0)
-    try publicationExpect(artifact.rows[0].disposition == .unsupported(.artifactStorageUnavailable) && artifact.manifest.edits.isEmpty,
-        "artifact intent is visibly unsupported rather than publishing a misleading empty payload")
+    try publicationExpect(artifact.rows[0].disposition == .unsupported(.requiresDiffOrFile) && artifact.manifest.edits.isEmpty,
+        "artifact intent on a note is visibly unsupported rather than publishing a misleading payload")
+    // COL-16: a diff tile publishes an artifact item bound to this host, and
+    // confirmation refuses when the re-captured bytes differ from the review.
+    let diff = P.SourceTile(projectID: firstProject, tile: tile(.diffReview, x: 1200, title: "private-diff-title", project: firstProject))
+    let diffInventory = P.Inventory(workspaceID: workspace, coverage: .partial, sources: [diff])
+    let undecided = try P.prepare(inventory: diffInventory, selection: .tiles([diff.key]), choices: [], area: area, author: author, host: host, expectedRevision: 0)
+    try publicationExpect(undecided.rows[0].disposition == .needsReview, "a diff tile asks for an explicit choice instead of being dropped")
+    let diffChoice: [P.Choice] = [.init(source: diff.key, content: .artifact(digest: digestOne))]
+    let diffReview = try P.prepare(inventory: diffInventory, selection: .tiles([diff.key]), choices: diffChoice, area: area, author: author, host: host, expectedRevision: 0)
+    let diffConfirmed = try P.confirm(diffReview, expectedDigest: diffReview.digest, inventory: diffInventory, choices: diffChoice)
+    var diffDocument = SharedArea.Document(id: area)
+    try diffDocument.apply(diffConfirmed.command)
+    try publicationExpect(diffDocument.items.count == 1 && diffDocument.items[0].kind == .artifact && diffDocument.items[0].source?.host == host
+        && diffConfirmed.artifacts.count == 1 && diffConfirmed.artifacts[0].object == diffDocument.items[0].id
+        && diffConfirmed.artifacts[0].contentDigest == digestOne && diffConfirmed.sourceBindings.map(\.object) == [diffDocument.items[0].id],
+        "a confirmed diff becomes a host-sourced artifact item with a reserved revision and a private binding")
+    try publicationRefuses(.reviewChanged) {
+        _ = try P.confirm(diffReview, expectedDigest: diffReview.digest, inventory: diffInventory,
+                          choices: [.init(source: diff.key, content: .artifact(digest: digestTwo))])
+    }
+    let malformed = try P.prepare(inventory: diffInventory, selection: .tiles([diff.key]), choices: [.init(source: diff.key, content: .artifact(digest: ""))],
+        area: area, author: author, host: host, expectedRevision: 0)
+    try publicationExpect(malformed.rows[0].disposition == .unsupported(.unavailableArtifact), "a diff whose capture is missing cannot be confirmed")
     let unbound = P.SourceTile(projectID: firstProject, tile: agent.tile)
     let unboundReview = try P.prepare(inventory: .init(workspaceID: workspace, coverage: .partial, sources: [unbound]), selection: .tiles([unbound.key]),
         choices: [.init(source: unbound.key, content: .agentObservation)], area: area, author: author, host: host, expectedRevision: 0)

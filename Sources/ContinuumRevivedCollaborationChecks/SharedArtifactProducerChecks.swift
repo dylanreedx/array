@@ -185,6 +185,38 @@ func runSharedArtifactProducerChecks() async throws {
         try git(ownerRoot, "commit", "-q", "-am", "move head")
         try require(try producer.applicability(of: r2.manifest, root: ownerRoot).baseMoved, "a new commit marks the base moved")
         try require(try tree(recipientRoot) == recipientBefore, "recipient checkout still byte-identical at the end")
+
+        // Capture review path: persisted tiles resolve to a source with no git,
+        // untracked files enter only through the explicit opt-in, and a
+        // re-capture of unchanged bytes has the reviewed digest.
+        func tile(_ kind: TileKind, _ metadata: TileMetadata) -> Tile {
+            Tile(id: UUID(), kind: kind, title: "fixture", frame: .init(x: 0, y: 0, width: 400, height: 300),
+                 zPosition: FracIndex(value: 0.5), runtimeRef: nil, metadata: metadata)
+        }
+        try write(ownerRoot, "src/feature.swift", "let value = 5 // review-source-sentinel\n")
+        let diffSource = SharedArtifactSource.resolve(tile: tile(.diffReview, TileMetadata(diffSource: "workingTreeVsHEAD")), projectRoot: ownerRoot)
+        let fileSource = SharedArtifactSource.resolve(tile: tile(.file, TileMetadata(filePath: ownerRoot.appendingPathComponent("src/feature.swift").path)), projectRoot: ownerRoot)
+        let outside = SharedArtifactSource.resolve(tile: tile(.file, TileMetadata(filePath: "/etc/hosts")), projectRoot: ownerRoot)
+        try require(fileSource == .file(root: ownerRoot, path: "src/feature.swift") && outside == nil
+            && diffSource == .diff(root: ownerRoot, source: DiffReviewSource(kind: .workingTreeVsHEAD), includeUntracked: false),
+            "diff and file tiles resolve to repository-relative sources; a file outside the project resolves to none")
+        guard case let .diff(diffRoot, diffKind, _) = diffSource else { throw CheckFailure(label: "diff source") }
+        let drafts = await SharedArtifactSource.drafts(["plain": diffSource!, "untracked": .diff(root: diffRoot, source: diffKind, includeUntracked: true)])
+        let plain = try drafts["plain"]!.get(), withUntracked = try drafts["untracked"]!.get()
+        let plainBytes = plain.blobs.values.map { String(decoding: $0, as: UTF8.self) }.joined()
+        let untrackedBytes = withUntracked.blobs.values.map { String(decoding: $0, as: UTF8.self) }.joined()
+        try require(plainBytes.contains("review-source-sentinel") && !plainBytes.contains("untracked-selected-sentinel")
+            && plain.declaration.omittedUntrackedPaths == 3 && !plain.declaration.includesUntracked,
+            "a plain diff snapshot never carries untracked content, only their count")
+        try require(untrackedBytes.contains("untracked-selected-sentinel") && untrackedBytes.contains("untracked-unselected-sentinel")
+            && withUntracked.declaration.includesUntracked && withUntracked.declaration.omittedUntrackedPaths == 0,
+            "the explicit untracked opt-in includes them and declares it")
+        let again = try diffSource!.draft()
+        try write(ownerRoot, "src/feature.swift", "let value = 6\n")
+        let moved = try diffSource!.draft()
+        try require(again.contentDigest == plain.contentDigest && moved.contentDigest != plain.contentDigest,
+            "re-capturing unchanged bytes keeps the reviewed digest; an edit changes it")
+        try require(try tree(recipientRoot) == recipientBefore, "recipient checkout byte-identical after review captures")
         try await server.stop()
     } catch { try? await server.stop(); throw error }
     print("Shared artifact producer checks passed: fixture repositories, real routes, recipient checkout untouched.")

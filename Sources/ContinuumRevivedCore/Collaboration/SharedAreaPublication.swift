@@ -53,8 +53,10 @@ public enum SharedAreaPublication {
         /// Explicit captured text; never an implicit live note subscription.
         case agreement(text: String)
         case discussion(text: String)
-        /// Review reports unsupported until immutable artifact storage exists.
-        case artifact
+        /// A diff/file snapshot captured off main by the owner host. `digest`
+        /// is `SharedArtifactProducer.Draft.contentDigest`; confirmation
+        /// re-captures, so changed bytes refuse instead of publishing.
+        case artifact(digest: String)
         case omit
     }
     public struct Choice: Equatable, Sendable {
@@ -63,7 +65,7 @@ public enum SharedAreaPublication {
         public init(source: SourceKey, content: Content) { self.source = source; self.content = content }
     }
     public enum Unsupported: String, Sendable {
-        case tileKind, requiresManagedAgent, unavailableAgent, requiresNote, unavailableContentRevision, artifactStorageUnavailable
+        case tileKind, requiresManagedAgent, unavailableAgent, requiresNote, unavailableContentRevision, requiresDiffOrFile, unavailableArtifact
     }
     public enum Disposition: Equatable, Sendable {
         case ready(SharedArea.Kind)
@@ -113,11 +115,20 @@ public enum SharedAreaPublication {
         public let reviewDigest: String
         public let author: SharedArea.ID<SharedArea.Person>
         public let host: SharedArea.ID<SharedArea.Host>
+        /// Each admitted artifact and the revision ID its first capture takes.
+        /// The bytes stay with the caller that captured them.
+        public let artifacts: [ArtifactPublication]
         fileprivate init(command: SharedArea.Command, sourceBindings: [SharedAreaLocalSourceBinding], reviewDigest: String,
-                         author: SharedArea.ID<SharedArea.Person>, host: SharedArea.ID<SharedArea.Host>) {
+                         author: SharedArea.ID<SharedArea.Person>, host: SharedArea.ID<SharedArea.Host>, artifacts: [ArtifactPublication]) {
             self.command = command; self.sourceBindings = sourceBindings; self.reviewDigest = reviewDigest
-            self.author = author; self.host = host
+            self.author = author; self.host = host; self.artifacts = artifacts
         }
+    }
+    public struct ArtifactPublication: Equatable, Sendable {
+        public let source: SourceKey
+        public let object: SharedArea.ID<SharedArea.Object>
+        public let revision: SharedArea.ID<Collaboration.Artifact.RevisionTag>
+        public let contentDigest: String
     }
     public enum Failure: Error, Equatable {
         case incompleteCoverage, duplicateSource, missingSource, invalidSelection
@@ -139,6 +150,7 @@ public enum SharedAreaPublication {
         let binding = SharedArea.ID<SharedArea.Binding>()
         let context = SharedArea.ID<SharedArea.Revision>()
         let post = SharedArea.ID<SharedArea.Message>()
+        let revision = SharedArea.ID<Collaboration.Artifact.RevisionTag>()
     }
     private struct PrivateFingerprint: Encodable {
         let key: String
@@ -176,10 +188,16 @@ public enum SharedAreaPublication {
         let fresh = try build(inventory: inventory, choices: choices,
             configuration: review.configuration, allocations: review.allocations)
         guard fresh.review.digest == review.digest else { throw Failure.reviewChanged }
+        let artifacts: [ArtifactPublication] = choices.compactMap { choice in
+            guard case .artifact(let digest) = choice.content, let allocation = review.allocations[choice.source],
+                  review.manifest.edits.contains(where: { if case .admit(let item, _) = $0 { return item.id == allocation.object }; return false })
+            else { return nil }
+            return .init(source: choice.source, object: allocation.object, revision: allocation.revision, contentDigest: digest)
+        }
         return Confirmed(command: .init(area: review.manifest.area, id: review.configuration.operation,
             expectedRevision: review.manifest.expectedRevision, edits: review.manifest.edits),
             sourceBindings: fresh.bindings, reviewDigest: review.digest,
-            author: review.manifest.author, host: review.manifest.host)
+            author: review.manifest.author, host: review.manifest.host, artifacts: artifacts)
     }
 
     private static func build(inventory: Inventory, choices: [Choice], configuration: Configuration,
@@ -215,7 +233,7 @@ public enum SharedAreaPublication {
             rows.append(Row(source: source.key, localTitle: tile.title, tileKind: tile.kind, disposition: disposition, previewText: preview))
             guard case .ready(let kind) = disposition else { continue }
             let allocation = allocations[source.key] ?? Allocation(); allocations[source.key] = allocation
-            let publishedSource: SharedArea.Source? = kind == .agentObservation
+            let publishedSource: SharedArea.Source? = kind == .agentObservation || kind == .artifact
                 ? .init(owner: configuration.author, host: configuration.host, binding: allocation.binding) : nil
             let item = SharedArea.Item(id: allocation.object, kind: kind, source: publishedSource)
             entries.append(.init(tile: tile, publication: item, placement: allocation.placement))
@@ -224,7 +242,7 @@ public enum SharedAreaPublication {
                 contentEdits.append(.context(.init(id: allocation.context, object: item.id, parent: nil, author: configuration.author, text: text)))
             case .discussion(let text):
                 contentEdits.append(.post(.init(id: allocation.post, object: item.id, author: configuration.author, text: text)))
-            case .agentObservation:
+            case .agentObservation, .artifact:
                 bindings.append(.init(object: item.id, binding: allocation.binding, host: configuration.host,
                     projectID: source.projectID, tileID: tile.id, agentID: source.agentID))
             default: break
@@ -250,13 +268,16 @@ public enum SharedAreaPublication {
     private static func disposition(for source: SourceTile, content: Content?) -> Disposition {
         guard let content else {
             switch source.tile.kind {
-            case .managedAgent, .note: return .needsReview
+            case .managedAgent, .note, .diffReview, .file: return .needsReview
             default: return .unsupported(.tileKind)
             }
         }
         switch content {
         case .omit: return .omitted
-        case .artifact: return .unsupported(.artifactStorageUnavailable)
+        case .artifact(let digest):
+            guard source.tile.kind == .diffReview || source.tile.kind == .file else { return .unsupported(.requiresDiffOrFile) }
+            guard Collaboration.Artifact.isDigest(digest) else { return .unsupported(.unavailableArtifact) }
+            return .ready(.artifact)
         case .agentObservation:
             guard source.tile.kind == .managedAgent else { return .unsupported(.requiresManagedAgent) }
             guard source.agentID != nil else { return .unsupported(.unavailableAgent) }

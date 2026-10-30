@@ -40,8 +40,8 @@ private actor SharedAreaAPIConnection: SharedAreaControllerConnection {
 
 /// Actual API/session adapter used by native views and by the localhost harness.
 public struct SharedAreaAPITransport: SharedAreaControllerTransport {
-    private let api: CollaborationAPI
-    private let area: UUID
+    let api: CollaborationAPI
+    let area: UUID
     public init(endpoint: CollaborationServiceEndpoint, credential: Collaboration.Credential, area: UUID) throws {
         // The endpoint type already rejected non-loopback plaintext URLs.
         api = try CollaborationAPI(baseURL: endpoint.canonicalURL, credential: credential.token,
@@ -91,6 +91,11 @@ public final class SharedAreaController {
     public private(set) var presence: [Collaboration.Presence] = []
     /// Execution-host liveness from the relay; empty means no host has proved it is alive.
     public private(set) var hostLiveness: [Collaboration.HostLiveness] = []
+    /// Latest revision per artifact from the last authority frame (COL-16).
+    public private(set) var artifactHeads: [Collaboration.Artifact.Head] = []
+    /// Artifact routes ride the admitted transport; nil until identity and
+    /// membership are confirmed online, like every other request.
+    public var artifactTransport: (any SharedAreaArtifactTransport)? { transport as? any SharedAreaArtifactTransport }
     public private(set) var isSubmitting = false
     public private(set) var lastPersistenceError: (any Error)?
     public var onChange: (@MainActor () -> Void)?
@@ -197,7 +202,7 @@ public final class SharedAreaController {
         let retirements = Array(retiringConnections.values)
         updateTask?.cancel(); updateTask = nil; transport = nil
         admittedRevision = nil; admittedEpoch = nil
-        scope = nil; presence = []; hostLiveness = []; isSubmitting = false
+        scope = nil; presence = []; hostLiveness = []; artifactHeads = []; isSubmitting = false
         document = localState?.accessDenied == true ? nil : localState?.document
         status = .connecting; changed()
         await previous?.stop()
@@ -264,7 +269,7 @@ public final class SharedAreaController {
         let retirements = Array(retiringConnections.values)
         updateTask?.cancel(); updateTask = nil; transport = nil
         admittedRevision = nil; admittedEpoch = nil
-        scope = nil; presence = []; hostLiveness = []; document = nil; isSubmitting = false
+        scope = nil; presence = []; hostLiveness = []; artifactHeads = []; document = nil; isSubmitting = false
         status = .closed; changed()
         await previous?.stop()
         await awaitRetirements(retirements)
@@ -559,7 +564,7 @@ public final class SharedAreaController {
         admittedEpoch = max(admittedEpoch ?? 0, replica.scope.epoch)
         document = localState?.accessDenied == true ? nil : localState?.document
         if scope == nil || replica.scope.epoch >= scope!.epoch { scope = replica.scope }
-        if !preservingPresence { presence = replica.presence; hostLiveness = replica.hosts ?? [] }
+        if !preservingPresence { presence = replica.presence; hostLiveness = replica.hosts ?? []; artifactHeads = replica.artifactHeads }
         return document != nil && (admittedRevision ?? 0) >= (localState?.appliedRevision ?? 0)
             && (admittedEpoch ?? 0) >= (localState?.observedMembershipEpoch ?? 0)
     }
@@ -592,7 +597,7 @@ public final class SharedAreaController {
         let previous = connection; connection = nil
         updateTask?.cancel(); updateTask = nil; transport = nil
         admittedRevision = nil; admittedEpoch = nil
-        document = nil; scope = nil; presence = []; hostLiveness = []; isSubmitting = false
+        document = nil; scope = nil; presence = []; hostLiveness = []; artifactHeads = []; isSubmitting = false
         status = .unavailable(reason); changed()
         if let previous {
             let retirement = UUID()
