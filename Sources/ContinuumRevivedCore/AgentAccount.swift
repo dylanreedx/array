@@ -247,8 +247,10 @@ public enum AgentAccountSetup {
     }
 
     public static func claudeSignInArguments(for account: AgentAccount, claudeExecutable: String) -> [String] {
-        var arguments: [String] = []
-        if let directory = account.configDirectory { arguments.append("CLAUDE_CONFIG_DIR=\(directory)") }
-        return arguments + [claudeExecutable, "auth", "login", "--claudeai"]
+        // Personal signs in to Claude's default folder: `env -u` drops any
+        // inherited CLAUDE_CONFIG_DIR, exactly as the runner and the probe do,
+        // so the login lands where Personal's agents read it.
+        let folder = account.configDirectory.map { ["CLAUDE_CONFIG_DIR=\($0)"] } ?? ["-u", "CLAUDE_CONFIG_DIR"]
+        return folder + [claudeExecutable, "auth", "login", "--claudeai"]
     }
 }

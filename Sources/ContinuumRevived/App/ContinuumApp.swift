@@ -2424,6 +2424,7 @@ enum ContinuumApp {
                 do {
                     try await runAgentAccountUsageAppChecks()
                     try await runAgentAccountSwitchChecks()
+                    try await runAgentAccountSameLoginChecks()
                     if let capture = ProcessInfo.processInfo.environment["CONTINUUM_ACCOUNT_USAGE_CAPTURE_DIR"],
                        !capture.isEmpty {
                         try captureAccountUsageForReview(to: URL(fileURLWithPath: capture, isDirectory: true))
@@ -12737,10 +12738,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func signInToAccount(_ accountId: String) {
         guard let account = agentSupervisor.accounts.first(where: { $0.id == accountId }),
               account.harness != .pi else { return }
-        guard account.configDirectory != nil else {
-            signInToAgentCLI(account.harness)
-            return
-        }
+        // Personal too: its own `auth login` in its own folder, not a bare
+        // `claude` the user has to drive to /login.
         settingsModal?.close()
         guard resolvedCreationScope() != nil else {
             requestCreationScope { [weak self] in self?.signInToAccount(accountId) }

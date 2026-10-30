@@ -2174,6 +2174,17 @@ final class AgentSupervisor {
         guard let account = accounts.first(where: { $0.id == accountId }) else {
             return .refused("No such account.")
         }
+        // A switch is to a LOGIN, not a folder label. Claude's default folder
+        // ("Personal") can hold the same login as an added account — one email
+        // can sign in to a personal and a team organisation — and switching
+        // between two folders holding one login changes nothing while looking
+        // like it worked (0.7.35: agents kept hitting the Team limit).
+        let current = activeAccount(for: account.harness)
+        if current.id != account.id, let duplicate = sameLogin(as: account), duplicate.id == current.id {
+            let org = accountIdentities[account.id]?.organizationName.map { " (\($0))" } ?? ""
+            let provider = account.harness == .codex ? "Codex" : "Claude"
+            return .refused("\(account.label) is signed in to the same \(provider) login as \(current.label)\(org). Sign in to \(account.label) with your other account first.")
+        }
         guard !signedOutAccounts.contains(account.id) else {
             return .refused("\(account.label) is not signed in. Sign in first.")
         }
@@ -2253,6 +2264,17 @@ final class AgentSupervisor {
 
     /// Settings ▸ Agents ▸ Accounts: per CLI, the account in use first, then
     /// the other saved logins.
+    /// Another saved account of the same CLI signed in to the same
+    /// organisation as `account`, when both logins have been read. The email
+    /// alone cannot tell them apart: personal and team plans share one.
+    func sameLogin(as account: AgentAccount) -> AgentAccount? {
+        guard let org = accountIdentities[account.id]?.organizationId else { return nil }
+        return accounts.first {
+            $0.harness == account.harness && $0.id != account.id
+                && accountIdentities[$0.id]?.organizationId == org
+        }
+    }
+
     func settingsAccountRows() -> [SettingsAccountRow] {
         [AgentHarness.claudeCode, .codex].flatMap { harness -> [SettingsAccountRow] in
             let active = activeAccount(for: harness)
@@ -2277,7 +2299,8 @@ final class AgentSupervisor {
                 return SettingsAccountRow(
                     id: account.id, harness: harness, title: account.label, detail: detail,
                     isActive: account.id == active.id || finishingOn.contains(account.id),
-                    switchingDetail: switching, signedOut: signedOut)
+                    switchingDetail: switching, signedOut: signedOut,
+                    sameLoginAs: sameLogin(as: account)?.label)
             }
         }
     }
