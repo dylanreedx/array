@@ -52,6 +52,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             agentFreshness?.startWatchingLedger()
         }
     }
+    private(set) lazy var artifactPanel = SharedAreaArtifactView(controller: controller, person: person)
     private var localCamera = SharedAreaLocalView()
     private var cameraDirty = false
     private var cameraTimer: Timer?
@@ -149,6 +150,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         }
         addSubview(agreementPanel)
         addSubview(freshnessPanel)
+        addSubview(artifactPanel)
         agreementPanel.onRebaseDraft = { [weak self] in self?.rebaseAgreementDraft() }
         setAccessibilityRole(.group)
         setAccessibilityLabel("Shared workspace")
@@ -181,6 +183,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         cancelGeometry()
         if uncertainCommand == nil { pendingCreatedObject = nil }
         knownDocument = nil
+        artifactPanel.show(object: nil, in: nil)
         canvas.install(document: nil, camera: localCamera, selected: nil)
         reader.string = ""; entryLabel.stringValue = ""; detailLabel.stringValue = "Closed shared workspace"
         editor.isEditable = false; postButton.isEnabled = false
@@ -208,6 +211,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         setFrame(readerScroll, .init(x: x, y: header + 106 + agreement, width: width, height: max(48, editorTop - header - 118 - agreement)))
         setFrame(editorScroll, .init(x: x, y: editorTop, width: width, height: 112))
         setFrame(postButton, .init(x: x, y: editorTop + 122, width: min(width, 160), height: ComposerActionButton.controlHeight))
+        setFrame(artifactPanel, .init(x: x, y: header + 106, width: width, height: max(160, editorTop + 112 - header - 106)))
         setFrame(messageLabel, .init(x: x, y: editorTop + 161, width: width, height: 17))
         onCanvasTransformChange?()
     }
@@ -609,6 +613,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             refreshReader()
         } else { canvas.setCamera(localCamera) }
         statusLabel.stringValue = statusText
+        artifactPanel.headsChanged(controller.artifactHeads)
         canvas.geometryEnabled = !geometryUnavailable && geometryLedger != nil && controller.canSubmit && !controller.isSubmitting && pendingGeometry == nil && uncertainCommand == nil
         if controller.status != .connected { attemptedGeometryRecovery = false }
         if let mutation = pendingGeometry, !geometryUnavailable, !attemptedGeometryRecovery,
@@ -671,6 +676,10 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             isLoading: controller.isSubmitting, secondaryActions: [])
     }
     private func refreshReader() {
+        // An artifact replaces the text reader and composer with its own
+        // read-only revision view; everything else keeps the reader.
+        artifactPanel.show(object: selectedObject, in: knownDocument)
+        for view in [readerScroll, editorScroll, postButton] as [NSView] { view.isHidden = !artifactPanel.isHidden }
         guard let document = knownDocument, let object = selectedObject,
               let item = document.items.first(where: { $0.id == object }) else {
             detailLabel.stringValue = activeDraft == nil ? "Select an object" : "Private draft"

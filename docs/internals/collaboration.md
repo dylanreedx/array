@@ -146,7 +146,7 @@ Snapshots, operation append and reducer receipts commit in one SQLite transactio
 Retries preserve the original revision; operation identity is bound to its actor
 as well as payload. Source privacy relies on typed projections before admission;
 this service does not inspect or upload the source filesystem. Operation paging
-and compaction are implemented as described below; artifact bytes are under
+and compaction are implemented as described below; artifact blobs are under
 Shared artifacts.
 
 ## Retention
@@ -163,8 +163,9 @@ or whether a deletion holds is kept for the life of the area. Defaults live in
 | Deleted object and placement IDs (tombstones) | head and horizon snapshots | Life of the area. A stale create of a deleted ID is refused before and after compaction. |
 | Operation receipts (ID, digest, original revision) | snapshots, plus `operation_receipts` for the actor | Life of the area. A retry returns its original revision; another person reusing the ID gets `changedIntent`. |
 | Membership epochs, removals, device revocation | `areas`, `members`, `devices` | Life of the service. Compaction never touches them. |
-| Artifact references | document items/tombstones | As current state. |
-| Artifact revisions, reviews and blobs | `collaboration_artifact_*`, sealed | Life of the area, within the 64 MiB area quota. Unpublishing makes them unreachable (the unknown-ID 404) but does not delete them. They are not in the operation log, so compaction never touches them. |
+| Artifact items | document items/tombstones | As current state. An artifact item must name its publishing source. |
+| Artifact revisions, reviews and published blobs | `collaboration_artifact_*`, sealed | While the artifact stays published. Unpublishing deletes all three: a removed object ID can never return, so its bytes are unreachable. |
+| Staged artifact blobs no revision names | `collaboration_artifact_blobs` (`published=0`) | `artifactStagingLifetime` (1 hour), collected on the next upload in the area. They count against the 64 MiB area quota until then. |
 | Executable requests not yet admitted by their host | `agent_dispatches` (`queued`, `claimed`) | 15 minutes from enqueue, then refused. The requester reconfirms with a new request under current authority. |
 | Admitted attempts and unknown outcomes | `agent_dispatches` (`dispatching`, `uncertain`, `accepted`, `refused`) | Life of the area. Expiry never rewrites them; the host's journal decides between accepted and uncertain. |
 
@@ -494,8 +495,28 @@ new revision is the remedy, so approval never carries forward. The owner-host
 because `git diff` rewrites a stale index even with optional locks off; it
 re-reads until two reads agree or refuses with `changedDuringCapture`. The
 recipient's `readArtifact` verifies digests and returns bytes in memory; it
-takes no path. Native capture review still lists diff/file tiles as
-unsupported, and recipients learn of a new revision by fetching state.
+takes no path.
+
+Every updates page carries `artifactHeads`: latest revision, sequence, drift
+flag and review count for each admitted artifact. Publishing, reviewing and
+drift wake held subscriptions after commit, so a view refetches only the
+artifact whose head changed. Storage follows the Retention table.
+
+Capture review offers diff tiles as "Diff snapshot" (tracked changes only) or
+"Diff snapshot with untracked files" (the explicit opt-in), and file tiles as
+"File snapshot" of the saved bytes. Capture runs off main. The draft's
+content digest joins the review digest, and confirmation re-captures, so an
+edit after review refuses. The confirmed command admits a host-sourced
+artifact item with a reserved first revision ID, which the coordinator
+publishes after acceptance. If that upload fails the item honestly has no
+revision. A branch diff of a branch other than the checkout's HEAD is refused.
+
+In the shared scene, selecting an artifact replaces the text reader with
+`SharedAreaArtifactView`: one text view rendered by the diff tile's token
+renderer, a revision choice (follow latest, or pin one), the file list with
+coverage, and Approve/Request changes on the shown revision. A pinned revision
+says which revision is latest; reviews on other revisions are reported as not
+applying, and drift shows "not applicable".
 
 ## Opt-in process configuration
 

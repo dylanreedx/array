@@ -18,9 +18,11 @@ extension SharedAreaPublication.Confirmed {
                 if case .admit(let item, _) = edit, item.id == binding.object { return item }
                 return nil
             }.first
-            guard binding.host == host, binding.agentID != nil, binding.tileID != nil,
+            // An agent binding names its local agent; an artifact binding
+            // (COL-16) names only its source tile and never an agent.
+            guard binding.host == host, binding.tileID != nil,
                   let item = admittedItem,
-                  item.kind == .agentObservation,
+                  (item.kind == .agentObservation && binding.agentID != nil) || (item.kind == .artifact && binding.agentID == nil),
                   item.source == .init(owner: person, host: host, binding: binding.binding) else {
                 throw SharedAreaLocalStoreError.invalidState
             }

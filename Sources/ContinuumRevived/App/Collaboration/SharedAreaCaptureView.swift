@@ -169,6 +169,11 @@ final class SharedAreaCaptureView: NSView, TokenThemed {
                       ChoiceItem(id: "discussion", title: "Discussion snapshot", detail: "Captured note text as the first shared message")]
         case .managedAgent:
             items.append(ChoiceItem(id: "agent", title: "Agent observation", detail: "Host-owned reference; history excluded, control needs a separate handoff"))
+        case .diffReview:
+            items += [ChoiceItem(id: "artifact", title: "Diff snapshot", detail: "These changes as they are now; untracked files are not included"),
+                      ChoiceItem(id: "artifact-untracked", title: "Diff snapshot with untracked files", detail: "Also includes every untracked, unignored file")]
+        case .file:
+            items.append(ChoiceItem(id: "artifact", title: "File snapshot", detail: "The saved file as it is now; teammates cannot edit your copy"))
         default: break
         }
         items.append(ChoiceItem(id: "omit", title: "Keep private", detail: "Exclude this tile from the shared arrangement"))
@@ -181,6 +186,8 @@ final class SharedAreaCaptureView: NSView, TokenThemed {
         detail.stringValue = Self.disposition(row)
         switch row.disposition {
         case .ready(.agreement), .ready(.discussion): reader.string = row.previewText ?? ""
+        case .ready(.artifact), .unsupported(.unavailableArtifact):
+            reader.string = coordinator.artifactSummary(row.source) ?? "Choose a snapshot mode to capture it."
         case .ready(.agentObservation): reader.string = "This shares an opaque reference to the host's agent. Agent history, prompts, terminal contents, files and checkout changes are not included. Execution stays on the original host; control needs a separate accepted handoff."
         case .omitted: reader.string = "This tile stays private and will not appear in the shared arrangement."
         case .unsupported: reader.string = "This tile cannot be published in this version. It is excluded from the shared arrangement."
@@ -208,10 +215,13 @@ final class SharedAreaCaptureView: NSView, TokenThemed {
     private func show(_ error: any Error) { message.stringValue = SharedAreaCaptureCoordinator.message(for: error) }
     private static func key(_ value: SharedAreaPublication.SourceKey) -> String { "\(value.projectID.uuidString)/\(value.tileID.uuidString)" }
     private static func mode(_ value: String) -> SharedAreaInventory.Mode? {
-        switch value { case "agent": .agentObservation; case "agreement": .agreement; case "discussion": .discussion; case "omit": .omit; default: nil }
+        switch value {
+        case "agent": .agentObservation; case "agreement": .agreement; case "discussion": .discussion; case "omit": .omit
+        case "artifact": .artifact; case "artifact-untracked": .artifactWithUntracked; default: nil
+        }
     }
     private static func modeID(_ value: SharedAreaInventory.Mode) -> String {
-        switch value { case .agentObservation: "agent"; case .agreement: "agreement"; case .discussion: "discussion"; case .artifact: "artifact"; case .omit: "omit" }
+        switch value { case .agentObservation: "agent"; case .agreement: "agreement"; case .discussion: "discussion"; case .artifact: "artifact"; case .artifactWithUntracked: "artifact-untracked"; case .omit: "omit" }
     }
     private static func disposition(_ row: SharedAreaPublication.Row) -> String {
         switch row.disposition {
@@ -219,6 +229,8 @@ final class SharedAreaCaptureView: NSView, TokenThemed {
         case .omitted: return "\(row.tileKind.displayName) · kept private"
         case .unsupported(.unavailableAgent): return "Managed agent unavailable · excluded"
         case .unsupported(.unavailableContentRevision): return "Note content unavailable · excluded"
+        case .unsupported(.unavailableArtifact): return "\(row.tileKind.displayName) · snapshot not captured yet"
+        case .ready(.artifact): return "Snapshot · exact bytes as captured now; your checkout is not shared"
         case .unsupported: return "\(row.tileKind.displayName) · sharing unsupported; excluded"
         case .ready(.agentObservation): return "Agent observation · history excluded; separate handoff for control"
         case .ready(.agreement): return "Agreement · captured text, independent of the source note"

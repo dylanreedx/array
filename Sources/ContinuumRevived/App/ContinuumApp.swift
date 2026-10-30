@@ -1656,6 +1656,12 @@ enum ContinuumApp {
                     try await CollaborationWindowCommandChecks.run()
                     print("STAGE collaboration native: capture workflow")
                     try await SharedAreaCaptureChecks.run()
+                    print("STAGE collaboration native: shared artifacts")
+                    try await SharedAreaArtifactChecks.run(mount: { controller, person, host in
+                        delegate.mountWorkspaceSceneAtBoot(sharedAreaController: controller, person: person, in: host)
+                    }, executorCount: {
+                        supervisor.records.keys.filter { supervisor.isRunning($0) }.count + executorConstructions
+                    })
                     print("STAGE collaboration native: hover-only teammate usage")
                     try await SharedAreaPresenceChecks.run()
                     try await SharedAreaUsageCollectorChecks.run()

@@ -50,8 +50,8 @@ public struct SharedAreaPendingOperation: Codable, Equatable, Sendable {
                     if case .admit(let item, _) = edit, item.id == binding.object { return item }
                     return nil
                 }.first
-                guard binding.agentID != nil, binding.tileID != nil, binding.host == publication.host,
-                      admitted?.kind == .agentObservation,
+                guard binding.tileID != nil, binding.host == publication.host,
+                      (admitted?.kind == .agentObservation && binding.agentID != nil) || (admitted?.kind == .artifact && binding.agentID == nil),
                       admitted?.source == .init(owner: actor.person, host: publication.host, binding: binding.binding) else {
                     throw SharedAreaLocalStoreError.invalidState
                 }

@@ -31,22 +31,27 @@ enum SharedAreaInventory {
             }
         }
     }
-    enum Mode: Sendable { case agentObservation, agreement, discussion, artifact, omit }
+    /// `artifactWithUntracked` is the explicit opt-in that adds untracked
+    /// files to a working-tree diff snapshot; plain `artifact` never does.
+    enum Mode: Sendable { case agentObservation, agreement, discussion, artifact, artifactWithUntracked, omit }
 
     struct Snapshot {
         let inventory: Publication.Inventory
         /// Local review content only. Neither Snapshot nor these keys encode.
         let noteTexts: [Key: String]
         let issues: [Issue]
+        /// Diff/file tiles resolved to what they would capture. Resolving runs
+        /// no git; capture happens off main in the review coordinator.
+        var artifactSources: [Key: SharedArtifactSource] = [:]
 
         /// Rebuild the selected content from this freshly read owner snapshot,
         /// rather than reusing text captured before the confirmation gesture.
-        func choices(for modes: [Key: Mode]) throws -> [Publication.Choice] {
+        func choices(for modes: [Key: Mode], drafts: [Key: SharedArtifactProducer.Draft] = [:]) throws -> [Publication.Choice] {
             try modes.map { key, mode in
                 let content: Publication.Content
                 switch mode {
                 case .agentObservation: content = .agentObservation
-                case .artifact: content = .artifact
+                case .artifact, .artifactWithUntracked: content = .artifact(digest: drafts[key]?.contentDigest ?? "")
                 case .omit: content = .omit
                 case .agreement, .discussion:
                     guard let text = noteTexts[key] else { throw Failure.unavailableContent(key) }
@@ -94,6 +99,7 @@ enum SharedAreaInventory {
             }
         }
         var sources: [Publication.SourceTile] = [], noteTexts: [Key: String] = [:], issues: [Issue] = []
+        var artifactSources: [Key: SharedArtifactSource] = [:]
         for projectID in requiredProjects.sorted(by: { $0.uuidString < $1.uuidString }) {
             guard allProjectIDs.contains(projectID), (try? runtime.collaborationOwnsProject(projectID)) == true else {
                 failures.append(.init(projectID: projectID, tileID: nil, label: "Selected project", reason: .projectNotInWorkspace))
@@ -153,11 +159,14 @@ enum SharedAreaInventory {
                         generation = SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
                     } else { issues.append(.init(projectID: projectID, tileID: tile.id, label: tile.title, reason: .noteUnavailable)) }
                 }
+                if let source = SharedArtifactSource.resolve(tile: tile, projectRoot: URL(fileURLWithPath: controller.project.rootPath, isDirectory: true)) {
+                    artifactSources[key] = source
+                }
                 sources.append(.init(projectID: projectID, tile: tile, agentID: agentID, contentRevision: generation))
             }
         }
         guard failures.isEmpty else { throw Failure.incompleteCoverage(failures) }
         return Snapshot(inventory: .init(workspaceID: runtime.workspaceId, coverage: coverage, sources: sources),
-            noteTexts: noteTexts, issues: issues)
+            noteTexts: noteTexts, issues: issues, artifactSources: artifactSources)
     }
 }
