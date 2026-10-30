@@ -156,7 +156,7 @@ public enum AgentAccountSetup {
         if let configured = environment["CODEX_HOME"], !configured.isEmpty {
             return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath, isDirectory: true)
         }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+        return URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).appendingPathComponent(".codex", isDirectory: true)
     }
 
     /// Creates `directory` and links each shared item that exists in `personal`
@@ -188,7 +188,7 @@ public enum AgentAccountSetup {
     /// inherited `CLAUDE_CONFIG_DIR` — the default account's probe and runner
     /// remove that variable, so this is the directory they actually use.
     public static func personalClaudeDirectory() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude", isDirectory: true)
+        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).appendingPathComponent(".claude", isDirectory: true)
     }
 
     public enum SessionMove: Equatable, Sendable {
