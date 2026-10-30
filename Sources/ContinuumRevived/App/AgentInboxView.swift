@@ -2554,10 +2554,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             let heights = (start...end).map { tableView(tableView, heightOfRow: $0) }
             let groupHeight = heights.reduce(0, +) + spacing * CGFloat(end - start)
             let rollup = rollupsByParent[lead.id]
-            let leadDisclosure = disclosure(for: lead)
-            let titleLeading = InboxOwnershipChrome.titleLeading(
-                foldWidth: AgentInbox96CellView.disclosureTrailing(for: leadDisclosure, childCount: rollup?.children ?? 0),
-                hasDot: lead.identityColor != nil)
             let ask = ownershipAskByLead[lead.id]
             let working = lead.state == .working || (rollup?.working ?? 0) > 0
             let sweepPhase = working && ask == nil ? InboxOwnershipClock.phase(for: lead.id) : nil
@@ -2586,7 +2582,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 slices[index] = InboxOwnershipSlice(
                     offset: offset, groupHeight: groupHeight,
                     continuesAbove: index > start, continuesBelow: index < end,
-                    titleLeading: titleLeading,
                     leadLane: lanes[index - start].0, helperLane: lanes[index - start].1,
                     sweepPhase: sweepPhase, sweepColour: lead.identityColor,
                     raisedAsk: index == start ? ask : nil)
@@ -7834,7 +7829,7 @@ final class AgentInboxRemainderView: NSTableCellView {
         guard slice != ownership else { return }
         if ownership == nil { ownershipChrome.install(in: self) }
         ownership = slice
-        labelLeading?.constant = AgentInbox96CellView.outerGutter + Double(slice.titleLeading) + 14
+        labelLeading?.constant = AgentInbox96CellView.outerGutter + Double(InboxOwnershipChrome.subagentLeading) + 14
         labelCentre?.constant = -AgentInbox96CellView.ownershipTrailingGap(for: nesting) / 2
         needsLayout = true
     }
