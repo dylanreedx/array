@@ -56,18 +56,79 @@ removed → RED; admitted-object check removed → RED; second-read agreement
 removed → RED; untracked included without selection → RED; private index
 removed → RED.
 
+## Round 2 (30 October 2026, on e17d0a52; tip in the coordinator message)
+
+Lead's items, each with its witness:
+
+1. **Source required for `.artifact`.** `CollaborationStore.authorize`
+   refuses an artifact without a source. Witness: service
+   "artifact admitted without a publishing source refuses (400)". Three
+   existing checks that admitted source-less artifacts now give one.
+2. **Native capture.** Diff tiles offer "Diff snapshot" and "Diff snapshot
+   with untracked files"; file tiles offer "File snapshot". Capture runs off
+   main (`SharedArtifactSource.drafts`); the draft digest joins the review
+   digest; confirmation re-captures; the accepted command admits a
+   host-sourced item with a reserved revision ID, then the coordinator
+   publishes it. Witnesses: Core publication (needsReview, host source,
+   reviewChanged on new bytes, missing capture refused); producer (tile →
+   source, untracked only by opt-in, stable digest); native journey
+   `SharedAreaArtifactChecks` in `--collaboration-native-check`.
+3. **Renderer.** `SharedAreaArtifactView` replaces the scene's reader for
+   artifacts: one text view through `DiffReviewTileNSView.render`, follow
+   latest or pin a revision, file list with coverage, Approve / Request
+   changes. Native journey asserts revision 1 current → approval → revision 2
+   live with the approval reported as not applying → pinned revision 1
+   "superseded" → drift "not applicable"; light and dark token colours;
+   recipient checkout byte-identical; no executor.
+4. **Live wake.** `Updates.artifactHeads`; publish/review/drift wake held
+   subscriptions; controller exposes `artifactHeads`. Witnesses: service
+   "held subscription wakes on publication" and heads content; native journey
+   follows the new head without polling.
+5. **Quota + GC.** Staged blobs no revision names expire after
+   `CollaborationRetention.artifactStagingLifetime` (1 h); unpublishing deletes
+   blobs, revisions and reviews. Witnesses: 64 MiB quota refuses after 63 MiB;
+   expiry frees it; published bytes survive; unpublish leaves 0 rows.
+6. **COL-07 nested lookups.** Unchanged boundary from round 1 (41 → 49
+   service PASS); worker 9 extends the adversarial audit.
+
+Native journey (`SharedAreaArtifactChecks`, 18 PASS inside
+`--collaboration-native-check`): review opts nothing in; both tiles captured
+off main; untracked file counted, never named or uploaded; edit after review
+refuses with no command or bytes sent; refreshed review publishes both;
+recipient scene shows revision 1 current; approval; live wake to revision 2
+with the approval not applying; pinned revision 1 "superseded"; drift "not
+applicable"; light and dark token colours; recipient checkout byte-identical;
+no executor. It first went RED for a real reason: the submission path only
+accepted agent bindings, so artifact bindings were refused. Fixed in
+`SharedAreaPublicationSubmission` and `SharedAreaPendingOperation`.
+
+Renders: `.plans/105-collaboration/validation/artifacts/artifact-{light,dark}.png`.
+In the dark image the header strip is white because the offscreen bitmap does
+not include the scene surface the panel sits on (the panel paints no background,
+like the agreement panel). Text view, controls and colours show the theme; the
+colours are asserted against tokens, not read off the image.
+
+Gate: `scripts/run-matrix.sh --collaboration` under the app-build lock,
+isolated TMUX_TMPDIR / CONTINUUM_APP_SUPPORT, CONTINUUM_SKIP_UI_BASELINES=1:
+"Collaboration matrix (targeted): 10 leg(s) run ... passed", gate exit 0. One
+note: the ui-probe theme surface-cache witness is skipped with display-
+dependent checks.
+
+Teeth (each restored): scene not forwarding heads → native RED ("approval
+appears" timeout); confirmation reusing reviewed drafts → native RED ("an edit
+after review refuses"); no wake on publish → RED; no staging GC → RED;
+source-less artifact allowed → RED; no unpublish cleanup → RED; missing
+capture accepted → RED; artifact item without host source → RED. Heads
+filtered to admitted objects is defence in depth: unpublish cleanup already
+removes the rows, so no witness can tell it apart (stays green when removed).
+
 ## Not done / not verified
 
-- Native: capture review still lists diff/file tiles as unsupported, and the
-  shared scene has no read-only artifact renderer. Wiring is in lead-owned
-  files (`SharedAreaPublication`, Scene). Entry points: producer
-  `SharedArtifactProducer.capture`, client `publishArtifact` / `readArtifact`.
-- No live wake for new revisions: recipients see them by fetching
-  `GET /artifacts/{o}`. An `artifactHeads` field on the updates page would fix
-  that (lead's Updates file).
-- The service still admits an `.artifact` item without a source (pre-existing
-  rule). Such an item can never get revisions. Optional hunk: require a source
-  for `.artifact` in `CollaborationStore.authorize`.
-- Quota (64 MiB/area) is enforced but not witnessed. No retention/GC of staged
-  or unpublished blobs (COL-19). Linux relay container not run.
+- An upload that fails after the arrangement is accepted leaves the item with
+  no revision; after a relaunch nothing retries it (drafts are in memory).
+- The native journey uses a scripted authority (the app links no service);
+  the real routes, client and controller transport are witnessed in the
+  service and Core legs.
+- The capture inventory's tile → source mapping is witnessed through
+  `SharedArtifactSource.resolve`, not through a mounted workspace inventory.
 - API note delivered to worker 8. Workers 7 and 9 refused it three times (mid-turn); the lead was asked to relay.
