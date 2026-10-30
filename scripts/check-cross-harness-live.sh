@@ -27,5 +27,8 @@ if command -v tmux >/dev/null; then
 fi
 swift build --product Array
 swift build --product array-workspace-mcp
+# The Swift witness pins agents.managedMode.enabled=false in a private Settings
+# suite: this fixed delegate/message/wait scenario needs Free. A CLI "NO" is a
+# string, not the Bool this setting reads; never write the user's preferences.
 .build/debug/Array --workspace-api-live-delegation-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path '' 2>&1 | tee "$LIVE_OUT/run.log"
 printf 'Live delegation evidence: %s\n' "$ARRAY_DELEGATION_LIVE_EVIDENCE"

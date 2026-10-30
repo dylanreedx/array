@@ -19,6 +19,13 @@ func runWorkspaceAPIDeviceBrowserLiveChecks() async throws {
           Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else {
         throw Failure(description: "Use ARRAY_DEVICE_BROWSER_LIVE=1 scripts/check-device-browser-live.sh with isolated dev state.")
     }
+    // The caller must perform the exact tool sequence itself. Managed's lead
+    // brief can delegate it instead; pin the real Settings key in a private suite.
+    let modeSuite = "array.qa.device-browser-live-free"
+    let modePolicy = QAIsolatedDefaults(isolatedSuiteName: modeSuite)!
+    modePolicy.removePersistentDomain(forName: modeSuite)
+    modePolicy.set(false, forKey: AgentManagedModeConfig.enabledKey)
+    defer { modePolicy.removePersistentDomain(forName: modeSuite) }
     let out = URL(fileURLWithPath: output)
     var evidence: [[String: Any]] = []
     var journalFailed = false
@@ -52,6 +59,7 @@ func runWorkspaceAPIDeviceBrowserLiveChecks() async throws {
         var supervisor: AgentSupervisor!
         defer { supervisor?.stopAll(); f.dispose() }
         f.configureMount = { delegate, _ in
+            delegate.qaSettingsDefaults = modePolicy
             supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: f.appSupport),
                 nameTitlerCommand: { _ in nil }, claudeSessionTitle: { _, _ in nil },
                 submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: f.appSupport),
@@ -68,6 +76,9 @@ func runWorkspaceAPIDeviceBrowserLiveChecks() async throws {
         supervisor.workspaceToolsPermission = { permission }
         let agent = supervisor.spawn(role: nil, prompt: nil, cwd: root, harness: harness, model: model,
             thinking: thinking, projectId: WorkspaceInvariantsFixture.projectA1, projectRoot: root, displayName: "Live \(key) tool acceptance")
+        guard supervisor.effectiveMode(for: agent) == .free else {
+            throw Failure(description: "Live device/browser's private Free setting did not reach the supervisor. No model turn was sent.")
+        }
         _ = supervisor.setWorkspaceToolsEnabled(agentID: agent, true)
         let spawner = try mounted.runtime.ensureSpawner(forProjectId: WorkspaceInvariantsFixture.projectA1)
         let scope = CreationScope(projectId: WorkspaceInvariantsFixture.projectA1, projectRoot: root.path,

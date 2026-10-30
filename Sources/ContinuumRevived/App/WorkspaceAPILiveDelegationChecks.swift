@@ -13,6 +13,13 @@ func runWorkspaceAPILiveDelegationChecks() async throws {
           Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else {
         throw Failure(description: "Live delegation requires ARRAY_DELEGATION_LIVE=1, isolated app support and an evidence path (dev only).")
     }
+    // This fixed delegate/message/wait scenario predates Managed leads. Use the
+    // real Settings key, typed as Bool in a private suite, never user defaults.
+    let modeSuite = "array.qa.live-delegation-free"
+    let modePolicy = QAIsolatedDefaults(isolatedSuiteName: modeSuite)!
+    modePolicy.removePersistentDomain(forName: modeSuite)
+    modePolicy.set(false, forKey: AgentManagedModeConfig.enabledKey)
+    defer { modePolicy.removePersistentDomain(forName: modeSuite) }
     var evidence: [[String: Any]] = []
     func save() throws {
         let data = try JSONSerialization.data(withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys])
@@ -46,6 +53,7 @@ func runWorkspaceAPILiveDelegationChecks() async throws {
         let root = fixture.projectRoots[WorkspaceInvariantsFixture.projectA1]!
         var supervisor: AgentSupervisor!
         fixture.configureMount = { delegate, _ in
+            delegate.qaSettingsDefaults = modePolicy
             supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: fixture.appSupport),
                 nameTitlerCommand: { _ in nil }, claudeSessionTitle: { _, _ in nil },
                 submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: fixture.appSupport),
@@ -57,6 +65,9 @@ func runWorkspaceAPILiveDelegationChecks() async throws {
         defer { supervisor.stopAll() }
         let parent = supervisor.spawn(role: nil, prompt: nil, cwd: root, harness: source, model: sourceModel,
             thinking: "low", projectId: WorkspaceInvariantsFixture.projectA1, projectRoot: root, displayName: "Live delegation parent")
+        guard supervisor.effectiveMode(for: parent) == .free else {
+            throw Failure(description: "Live delegation's private Free setting did not reach the supervisor. No model turn was sent.")
+        }
         _ = supervisor.setWorkspaceToolsEnabled(agentID: parent, true)
         var text: [AgentID: String] = [:]
         var answers: [AgentID: [String]] = [:]

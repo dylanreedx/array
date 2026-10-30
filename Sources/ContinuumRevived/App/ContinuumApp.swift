@@ -7142,6 +7142,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let report: @MainActor @Sendable (String) -> Void = { line in
             FileHandle.standardError.write(Data("[agent-location-live] \(line)\n".utf8))
         }
+        // This live witness requires the caller itself to read/edit files and
+        // emit location changes. Pin Free even when Claude/Codex is selected;
+        // a Managed lead delegates those edits to a different agent.
+        let modeSuite = "array.qa.location-live-free"
+        let modePolicy = QAIsolatedDefaults(isolatedSuiteName: modeSuite)!
+        modePolicy.removePersistentDomain(forName: modeSuite)
+        modePolicy.set(false, forKey: AgentManagedModeConfig.enabledKey)
+        agentSupervisor.configureManagedMode(defaults: modePolicy)
         guard let externalPath = ProcessInfo.processInfo.environment["CONTINUUM_LOCATION_LIVE_EXTERNAL"],
               (externalPath as NSString).isAbsolutePath,
               FileManager.default.fileExists(atPath: externalPath),

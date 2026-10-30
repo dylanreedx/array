@@ -28,5 +28,8 @@ if command -v tmux >/dev/null; then
 fi
 swift build --product Array
 swift build --product array-workspace-mcp
+# run.py's Swift witness pins agents.managedMode.enabled=false in a private
+# Settings suite: the caller must drive the tools itself, not delegate as a lead.
+# A CLI "NO" is a string, not the Bool this setting reads; no user prefs change.
 python3 Tools/DeviceBrowserLive/run.py 2>&1 | tee "$LIVE_OUT/run.log"
 printf 'Device/browser live evidence: %s\n' "$ARRAY_DEVICE_BROWSER_LIVE_EVIDENCE"
