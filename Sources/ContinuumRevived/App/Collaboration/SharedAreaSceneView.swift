@@ -53,6 +53,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         }
     }
     private(set) lazy var artifactPanel = SharedAreaArtifactView(controller: controller, person: person)
+    private(set) lazy var livePanel = SharedAgentLiveView(controller: controller)
     private var localCamera = SharedAreaLocalView()
     private var cameraDirty = false
     private var cameraTimer: Timer?
@@ -151,6 +152,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         addSubview(agreementPanel)
         addSubview(freshnessPanel)
         addSubview(artifactPanel)
+        addSubview(livePanel)
         agreementPanel.onRebaseDraft = { [weak self] in self?.rebaseAgreementDraft() }
         setAccessibilityRole(.group)
         setAccessibilityLabel("Shared workspace")
@@ -176,6 +178,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         do { try prepareToClose() } catch { showPrivateSaveFailure() }
         isMounted = false
         controller.onChange = nil
+        livePanel.stop()
         cameraTimer?.invalidate(); cameraTimer = nil
         draftTimer?.invalidate(); draftTimer = nil
         actionTask?.cancel(); actionTask = nil
@@ -209,6 +212,8 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         setFrame(agreementPanel, .init(x: x, y: header + 106, width: width, height: SharedAreaAgreementView.height))
         setFrame(freshnessPanel, .init(x: x, y: header + 106, width: width, height: SharedAreaAgentFreshnessView.height))
         setFrame(readerScroll, .init(x: x, y: header + 106 + agreement, width: width, height: max(48, editorTop - header - 118 - agreement)))
+        // A selected agent's live view takes the reader's place.
+        setFrame(livePanel, readerScroll.frame)
         setFrame(editorScroll, .init(x: x, y: editorTop, width: width, height: 112))
         setFrame(postButton, .init(x: x, y: editorTop + 122, width: min(width, 160), height: ComposerActionButton.controlHeight))
         setFrame(artifactPanel, .init(x: x, y: header + 106, width: width, height: max(160, editorTop + 112 - header - 106)))
@@ -640,6 +645,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     private func refreshControls() {
         agreementPanel.show(agreement: selectedObject, in: knownDocument, draft: activeDraft)
         freshnessPanel.show(agent: selectedObject, in: knownDocument, model: agentFreshness)
+        livePanel.show(object: selectedObject, in: knownDocument)
         let key = ControlsKey(status: controller.status, submitting: controller.isSubmitting, canSubmit: controller.canSubmit,
             epoch: controller.scope?.epoch, role: controller.scope?.role.rawValue,
             documentRevision: controller.document?.revision, selected: selectedObject,
@@ -680,6 +686,10 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         // read-only revision view; everything else keeps the reader.
         artifactPanel.show(object: selectedObject, in: knownDocument)
         for view in [readerScroll, editorScroll, postButton] as [NSView] { view.isHidden = !artifactPanel.isHidden }
+        // A selected agent's live view takes the reader's place, entry navigation included.
+        livePanel.show(object: selectedObject, in: knownDocument)
+        if !livePanel.isHidden { readerScroll.isHidden = true }
+        entryLabel.isHidden = !livePanel.isHidden; history.isHidden = !livePanel.isHidden
         guard let document = knownDocument, let object = selectedObject,
               let item = document.items.first(where: { $0.id == object }) else {
             detailLabel.stringValue = activeDraft == nil ? "Select an object" : "Private draft"
@@ -877,7 +887,7 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
             switch item.kind {
             case .agentObservation:
                 body = SharedAreaHostLivenessCopy.cardLine(SharedAreaHostLivenessCopy.liveness(for: item, in: hosts))
-                    + "\nAgent stays on its publishing host.\nTranscript history is not shared yet."
+                    + "\nAgent stays on its publishing host.\nSelect it to follow its work live."
             case .artifact: body = "Artifact content unavailable."
             case .discussion: body = posts[item.id]?.last?.text ?? "No messages yet."
             case .agreement: body = contexts[item.id]?.last?.text ?? "No agreement revision yet."
