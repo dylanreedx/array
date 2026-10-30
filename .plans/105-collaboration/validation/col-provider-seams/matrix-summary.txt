@@ -1,0 +1,20 @@
+==> scripts/check-matrix-inventory.sh
+==> swift build --disable-sandbox --skip-update --product Array
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationServiceChecks
+==> swift build --disable-sandbox --skip-update --product continuum-relay
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+==> .build/debug/ContinuumRevivedCollaborationChecks
+==> .build/debug/ContinuumRevivedCollaborationServiceChecks
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.ccQK1T CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.GvYckA .build/debug/Array --collaboration-native-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.vOeBl4 CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.8hAf9G .build/debug/Array --ui-probe-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.a2vfM8 CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.jNK30R .build/debug/Array --menu-contract-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+==> .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
+==> python3 scripts/check-collaboration-pair.py
+==> swift run --skip-build ContinuumRevivedRelayCoreChecks
+==> swift run --skip-build ContinuumRevivedRelayIntegrationChecks
+---- Collaboration matrix (targeted): 10 leg(s) run ----
+Collaboration matrix (targeted) passed.
+EXIT 0

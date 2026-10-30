@@ -1,0 +1,21 @@
+== t1-crash-resend
+RED:   FAIL: provider dispatch: claude: a relaunched host must report outcome unknown with zero second write, got Optional(ContinuumRevivedCollaborationProtocol.Collaboration.AgentDispatchPhase.uncertain) / 2 writes
+GREEN: ContinuumRevivedCollaborationNativeChecks passed
+== t2-unsent-reported-unknown
+RED:   FAIL: provider dispatch: claude: removed membership must refuse before any transport write, got Optional(ContinuumRevivedCollaborationProtocol.Collaboration.AgentDispatchPhase.uncertain) / 0 writes
+GREEN: ContinuumRevivedCollaborationNativeChecks passed
+== t3-refused-claim-blocks-queue
+RED:   FAIL: provider dispatch: timeout: claude: the command after a stale one never reached the runner
+GREEN: ContinuumRevivedCollaborationNativeChecks passed
+== t4-fork-counted-in-full
+RED:   FAIL: provider usage: a forked codex thread must count only its post-fork delta (97,300 / 400); got 162296 / 713
+GREEN: Collaboration provider usage telemetry checks passed
+== t5-reset-double-count
+RED:   FAIL: provider usage: a codex counter reset must re-baseline without negative or double count (68,996 / 333, partial); got (input: 70196, output: 343, partial: true)
+GREEN: Collaboration provider usage telemetry checks passed
+== t6-claude-subagent-dropped
+RED:   FAIL: provider usage: claude subagent run must count the inclusive result once (79,036 / 500) beside 7 request observations; got 51671 / 330
+GREEN: Collaboration provider usage telemetry checks passed
+== t7-late-report-counted
+RED:   FAIL: provider usage: late codex totals must add nothing after a reset; got (input: 128792, output: 616, partial: true)
+GREEN: Collaboration provider usage telemetry checks passed
