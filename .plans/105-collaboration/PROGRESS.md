@@ -897,3 +897,105 @@ checks remain explicit.
 - Decision recorded for Dylan: per-agent freshness receipts stay visible only
   to the requester and the agent's owner. A teammate-wide projection would need
   a privacy call.
+
+## Gate on the merged release tip — state at handoff
+
+Gate: `CONTINUUM_SKIP_UI_BASELINES=1 .worktrees/.locks/app-build.sh
+scripts/run-matrix.sh --collaboration`, started on the sources of `e17d0a52`.
+`8e4a01f2` only adds docs, so the sources are the same. Log:
+`qa-runs/lead/gate-merge-0735.log`. **It had not finished at handoff**:
+`run-matrix.sh` was still running (pid 5333) inside
+`check-collaboration-pair.py`, and the two companion relay suites come after it.
+
+Results so far:
+- Matrix inventory: passed. It reports 16 "grew" records, deliberately not
+  committed.
+- `ContinuumRevivedCollaborationChecks`: passed.
+- **`ContinuumRevivedCollaborationServiceChecks`: FAILED** at w10's backup
+  check: `BackupCheckFailure("verification refuses a backup with damaged
+  pages")`. The suite stops at the first failure, so every service section
+  after it never ran in this pass. Likely cause, not yet confirmed: w10's
+  `CollaborationBackup` against COL-19's new horizon/`operation_receipts`
+  tables or its own `verifyIntegrity()`; the two backup paths were written
+  separately. w10 was told to unify them (item 3 of its brief).
+- `--collaboration-native-check`, `--ui-probe-check`, `--menu-contract-check`:
+  no failure printed (UIProbe: 525 TokenThemed views).
+- CoreChecks `--collaboration-usage-telemetry-check`: passed.
+- Pair check and relay suites: still running or not yet run.
+
+The first attempt at this gate died before compiling anything (the SDK
+mismatch below). The wrapper now pins SDKROOT.
+
+## Handoff to coordinator (E284CDC7) — 30 October 2026
+
+Every helper's brief says the same things:
+- Wrap every app build and gate in `.worktrees/.locks/app-build.sh`
+  (exclusive lock, pins SDKROOT).
+- Background only, never take focus. Use `CONTINUUM_SKIP_UI_BASELINES=1`, an
+  isolated TMUX_TMPDIR and CONTINUUM_APP_SUPPORT (`mktemp -d` + `pwd -P`), and
+  unset TMUX/TMUX_PANE.
+- Witnesses are behavioural, run inside existing legs, and are teeth-tested
+  RED then GREEN.
+- Commits under Dylan's identity with no trailer. No push, stash, inventory
+  commit or deploy, and never `mcp__plan__*`.
+- Finish with one gate run under the lock, write a receipt, and deliver the
+  **final answer to the lead (411E45C2) as the turn's final message**. Each was
+  started with `array_message_agent`, so their answers are collected with
+  `wait_agents` on these message operation ids.
+
+Those messages were delivered. A follow-up note about the SDK was refused by
+D4915E0C, 6B5C446C and B7624240 because they were mid-turn. The lock wrapper
+covers their app builds, but their non-app builds may hit "SDK is not supported
+by the compiler"; the fix is
+`SDKROOT=$(xcrun --sdk macosx --show-sdk-path)`.
+
+| # | Agent | Bench / branch | Task | Wait handle |
+| --- | --- | --- | --- | --- |
+| 1 | `6B5C446C-34A1-4629-A2A1-EAC3F7B40B2C` (w5) | `.worktrees/mp-w5-liveness` / `array/mp-w5-liveness` | COL-06: commit the uncommitted native wiring, rebase onto `collaboration-finish`, rendered liveness card witness (light/dark), handoff dialog warns before "send now" to a host that isn't online, expose `controller.hostLiveness` for w7. Receipt `workers/w5-liveness.md` | `toolu_01B8JcfjxAPU9AXtSPER5SyN` |
+| 2 | `B7624240-9165-4103-A51A-093A146AEBF7` (w7) | `.worktrees/mp-w7-live` / `array/mp-w7-live` | COL-15: commit the uncommitted projector, rebase; late join snapshot+tail or resnapshot, no private side channels, no duplicate executor, runner-capability controls, all three harnesses, read-only live view; gate controls on w5's `hostLiveness`; owns turn/sequence shapes and adjusts w8's provisional types. Receipt `workers/w7-live.md` | `toolu_01EMikzgxoisecBrGMGfXACS` |
+| 3 | `D4915E0C-1350-4F98-A710-EEE117688858` | `.worktrees/col-provider-seams` / `array/col-admission` (from `e17d0a52`) | w9 finding 1: definitive refusal (403/404/409) before `execute` → `refused`, not `uncertain`, in `SharedAgentHandoffTransport.dispatch`; tighten w9's R3; align a lapsed-claim host label with the service. Wire w8's freshness ledger into `SharedAgentHandoffController` (production witness). Read codex `forkedFromId`. Receipt `validation/col-admission/README.md` | `toolu_01B9sDv4zWNM9jKqpK7s56YM` |
+| 4 | `896A0BA8-F412-4D37-BDE1-572700179E60` (w10) | `.worktrees/mp-w10-acceptance` / `array/mp-w10-acceptance` (reset to `collaboration-finish`) | Linux relay gate (`check-relay-linux.sh`) passing on the merged tree and recorded in ACCEPTANCE.md; add it as a `--collaboration` leg (no inventory commit); unify w10 backup with COL-19 `backup(to:)`/`verifyIntegrity()` and cover artifact + horizon/receipt tables (**this is the area of the current service FAIL**); pair `features` stages for endorsements/follow/compaction/artifacts/freshness, with w5/w7 stages left pending. Receipt `workers/w10-acceptance.md`, `ACCEPTANCE.md` | `toolu_01HbHhzH2uprLbhATvWpFhin` |
+| 5 | `E06E8F11-DA07-4C4B-B015-F21CB4363EC2` (w6) | `.worktrees/mp-w6-artifacts` / `array/mp-w6-artifacts` (reset to `collaboration-finish`) | COL-16+07: diff/file publishable in capture review; read-only artifact renderer in scene (perf checklist); `artifactHeads` live wake on the updates page; require a source for `.artifact`; quota witness; blob GC per retention; own narrow artifact-boundary witness. Receipt `workers/w6-artifacts.md` | `toolu_01FxxvaHUnu27skAmhXPf3ve` |
+| 6 | `DE92D619-0EB0-467D-866C-14B6077C9E02` (w8) | `.worktrees/mp-w8-freshness` / `array/mp-w8-freshness` (reset to `collaboration-finish`) | COL-14: additive `Post` excerpt reference in `SharedAreaDocument` (turn, host, artifact manifest+digest), native freshness and excerpt UI, witness through the production controller and a mounted scene. Told not to wire the controller hook (D4915E0C does it) and not to change turn/sequence types (w7 does). Visibility decision: requester and owner only | `toolu_01SMCKZHNa6azLAo5xU43xzE` |
+| 7 | `50B885E3-10DE-41BC-8910-25DF8CCFBB7F` (w9) | `.worktrees/mp-w9-security` / `array/mp-w9-security` (reset to `collaboration-finish`) | COL-20 close: extend the A/B/C audit to artifact routes and compaction/retention; pin "all retained history on join" plus a documented decision for Dylan; log/storage review; no E2EE claim. Told not to touch the handoff transport. Receipt `workers/w9-security.md` | `toolu_019uvtdwtPKgYNciYcuMszHY` |
+| 8 | `0B75131B-87E2-44E5-90AD-C7298F21796A` | `.worktrees/mp-gate` / `array/col-native-budgets` (from `e17d0a52`) | COL-21 native slice: keyboard parity via the real event path, Reduce Motion, count-based budgets on the production mount, token-owner census, light/dark renders (ACCEPTANCE.md "Native budgets and accessibility still owed"). Its keyboard parity also closes COL-18. Receipt `validation/col-native-budgets/README.md` | `toolu_01KnvgWdWNg2RPvwYWry3r6r` |
+
+Planned merge order, each cherry-picked onto `array/collaboration-finish` with
+a `--collaboration` gate after each batch:
+1. D4915E0C `array/col-admission`, then w10. Both are small and fix
+   correctness; w10 includes the backup fix for the current service FAIL.
+2. w5 liveness, before w7, which reads `hostLiveness`.
+3. w6 artifacts, before w8, which pins artifact manifests, and w9, which
+   audits artifact routes.
+4. w7 live views, then w8 freshness. Recheck the turn/sequence types after both
+   land.
+5. w9 security.
+6. 0B75131B native budgets last, so its generic census and budget witnesses
+   see every new view.
+
+Expected conflicts are registrations in the checks `main.swift` files, the
+migration list in `CollaborationStore`, and small `SharedAreaSceneView`,
+`SharedAreaController` and service `CollaborationUpdates` hunks: keep both
+sides. After w10 adds the Linux leg, the inventory "grew" records stay
+uncommitted.
+
+Board at handoff (revision 156): COL-11/12/17/19 moved to Done. COL-13 waits
+for the refused-admission fix, COL-18 for keyboard parity. COL-06/07/14/15/16/
+20/21 wait for their helpers. COL-22 operations stay with Dylan, and COL-23–26
+stay To Do.
+
+Working tree at handoff:
+- Everything above is committed through `8e4a01f2` (this section is the next
+  commit).
+- `.plans/105-collaboration/workers/INBOX.md` has an uncommitted change from
+  the coordinator, not the lead.
+- `port-release-0735.patch` and `scripts/__pycache__/` are untracked leftovers.
+- Nothing unmerged or half-applied.
+- The scratch `col-merge` worktree and its branch are removed.
+- Stale benches `mp-pair` (`array/col-agreements`) and `mp-recovery`
+  (`array/col-compaction`) are fully merged and can be returned with
+  `git worktree remove`.
+- Branches `array/col-scene-gestures`, `array/col-provider-seams`,
+  `array/mp-gate`, `array/mp-pair` and `array/mp-recovery` are fully landed.
+- `.worktrees/.locks/app-build.sh` is the shared lock wrapper; it is
+  uncommitted and outside git.
