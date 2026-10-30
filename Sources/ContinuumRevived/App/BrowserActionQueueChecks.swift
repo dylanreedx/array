@@ -140,7 +140,7 @@ func runBrowserActionQueueCheck() throws {
     try require(effects.filter { $0.hasPrefix("reentrant-") } == ["reentrant-first", "reentrant-second"],
                 "reentrant completion must preserve per-tile order")
     // Cached results must not retain the action's captured browser/runtime.
-    final class LifetimeToken {}
+    final class LifetimeToken: @unchecked Sendable {}
     weak var weakToken: LifetimeToken?
     func submitLifetimeProbe() {
         let token = LifetimeToken()
