@@ -10,9 +10,9 @@ public enum CollaborationClientError: Error, Equatable {
 
 /// No implicit production endpoint, provider auth, cookies or global URL cache.
 public struct CollaborationAPI: Sendable {
-    private let baseURL: URL
-    private let credential: String?
-    private let session: URLSession
+    let baseURL: URL
+    let credential: String?
+    let session: URLSession
     public init(baseURL: URL, credential: String? = nil, allowsInsecureLoopback: Bool = false) throws {
         let loopback = ["localhost", "127.0.0.1", "[::1]", "::1"].contains(baseURL.host?.lowercased() ?? "")
         guard baseURL.host != nil, baseURL.user == nil, baseURL.password == nil, baseURL.query == nil, baseURL.fragment == nil,

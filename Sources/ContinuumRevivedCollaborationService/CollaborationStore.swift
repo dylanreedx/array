@@ -82,6 +82,7 @@ public actor CollaborationStore {
         Self.registerHandoffMigration(&migrator)
         Self.registerUsageMigration(&migrator)
         Self.registerRetentionMigration(&migrator)
+        Self.registerArtifactMigration(&migrator)
         try migrator.migrate(database)
         try Self.preflightDatabaseKey(database, keyData: normalizedKeyData)
     }

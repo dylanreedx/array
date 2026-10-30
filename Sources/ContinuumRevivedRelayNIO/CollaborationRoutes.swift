@@ -5,6 +5,7 @@ import ContinuumRevivedCollaborationService
 
 enum CollaborationRoutes {
     static func route(head: HTTPRequestHead, body: Data, store: CollaborationStore) async -> Response {
+        if let artifact = await CollaborationArtifactRoutes.route(head: head, body: body, store: store) { return artifact }
         guard body.count <= 262_144 else { return .error(.payloadTooLarge, "payloadTooLarge") }
         do {
             let parts = head.uri.split(separator: "/").map(String.init)

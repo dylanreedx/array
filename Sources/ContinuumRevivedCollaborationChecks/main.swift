@@ -14,6 +14,9 @@ typealias S = SharedArea
 if let flag = CommandLine.arguments.firstIndex(of: "--kill-child"), CommandLine.arguments.count > flag + 1 {
     await runKillChild(CommandLine.arguments[flag + 1])
 }
+if CommandLine.arguments.contains("--artifacts-only") {
+    do { try await runSharedArtifactProducerChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
+}
 if CommandLine.arguments.contains("--kill-relaunch-only") {
     do { try await runCollaborationKillRelaunchChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
 }
@@ -138,6 +141,7 @@ try await runSharedAreaControllerHTTPChecks()
 try runSharedAreaAgreementReducerChecks()
 try await runSharedAreaAgreementHTTPChecks()
 try await runCollaborationRetentionRecoveryChecks()
+try await runSharedArtifactProducerChecks()
 print("Collaboration contracts passed (reducer, reviewed publications, native controller and localhost HTTP; no mounted-scene or runner claims).")
 
 } catch {

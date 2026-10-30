@@ -186,6 +186,8 @@ private func run() async throws {
 do {
     if CommandLine.arguments.contains("--retention-only") {
         try await runCollaborationRetentionChecks()
+    } else if CommandLine.arguments.contains("--artifacts-only") {
+        try await runCollaborationArtifactChecks()
     } else if CommandLine.arguments.contains("--recovery-scale-only") {
         try await runCollaborationRecoveryScaleChecks()
     } else if CommandLine.arguments.contains("--capabilities-only") {
@@ -203,5 +205,6 @@ do {
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationHandoffChecks(); try await runCollaborationUsageChecks(); try await runCollaborationEndorsementChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationRecoveryScaleChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationRetentionChecks() }
+        if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationArtifactChecks() }
     }
 } catch { print("FAIL: \(error)"); exit(1) }
