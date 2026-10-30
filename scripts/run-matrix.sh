@@ -636,6 +636,10 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --managed-mode-launch-check
   run_app_check .build/debug/Array --managed-mode-hooks-check
   run_app_check .build/debug/Array --managed-mode-persistence-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
+  run_app_check .build/debug/Array --workspace-codex-hook-check
+  run_app_check .build/debug/Array --managed-codex-launch-check
+  run_app_check .build/debug/Array --managed-codex-hooks-check
   matrix_report 'Managed mode matrix (targeted)'
   exit $?
 fi
@@ -951,6 +955,8 @@ run_app_check .build/debug/Array --workspace-hook-pushback-check
 run_app_check .build/debug/Array --managed-mode-launch-check
 run_app_check .build/debug/Array --managed-mode-hooks-check
 run_app_check .build/debug/Array --managed-mode-persistence-check
+run_app_check .build/debug/Array --managed-codex-launch-check
+run_app_check .build/debug/Array --managed-codex-hooks-check
 # .plans/102 P2b: the line under an agent's name in the shipped sidebar, from
 # real records: its declared now or "Needs you" (amber) while it works, its
 # report's check result once done, nothing from an earlier turn, one truncated

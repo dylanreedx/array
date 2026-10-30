@@ -2457,6 +2457,34 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--managed-codex-launch-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedCodexChecks.launch()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--managed-codex-hooks-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedCodexChecks.hooks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--managed-mode-launch-check") {
             _ = NSApplication.shared
             Task { @MainActor in

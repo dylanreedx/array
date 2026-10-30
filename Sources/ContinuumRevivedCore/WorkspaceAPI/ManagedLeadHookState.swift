@@ -1,6 +1,6 @@
 import Foundation
 
-/// Per-Claude-session policy, owned and serialized by the supervisor on main.
+/// Per-lead policy, owned and serialized by the supervisor on main.
 /// Hook transport failures remain fail-open; malformed events never spend a look.
 public struct ManagedLeadHookState {
     // Permanent context: paid again on every later message. Keep this brief tight.
@@ -14,12 +14,23 @@ public struct ManagedLeadHookState {
         "Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch",
         "LS", "NotebookRead", "LSP", "TaskOutput", "ReadMcpResourceTool", "ListMcpResourcesTool",
     ]
+    public static let editDenial = "Managed leads cannot edit files. Delegate this to a helper with array_delegate."
+    // Codex rust-v0.165.0: apply_patch is canonical (Edit/Write are matcher
+    // aliases only). Notes extension names are flattened namespace + tool.
+    public static let codexEditTools: Set<String> = ["apply_patch", "noteswrite_file", "notesappend_to_file"]
+    public static let codexShellTools: Set<String> = ["Bash", "exec_command", "shell", "shell_command"]
+    public static let codexQuickLookTools: Set<String> = codexShellTools.union([
+        "write_stdin", "read_file", "grep_files", "list_dir", "view_image",
+        "read_mcp_resource", "list_mcp_resources", "list_mcp_resource_templates",
+        "web_search", "webrun", "notesread_file", "noteslist_files_by_prefix", "notessearch_contents",
+        "historylist_windows", "historylist_items", "historyread_item", "historysearch_contents",
+    ])
     private var briefedSessions: Set<String> = []
     private var quickLooks = 0
 
     public init() {}
 
-    public mutating func reply(payload: [String: Any]) -> [String: Any]? {
+    public mutating func reply(payload: [String: Any], harness: AgentHarness = .claudeCode) -> [String: Any]? {
         // Native children share the lead's token/session id. Their reads must
         // neither consume the lead's budget nor inherit its lead instructions.
         guard payload["agent_id"] == nil,
@@ -34,22 +45,38 @@ public struct ManagedLeadHookState {
             quickLooks = 0
             return nil
         case "PreToolUse":
-            guard let tool = payload["tool_name"] as? String, !tool.isEmpty,
-                  let input = payload["tool_input"] as? [String: Any],
+            guard let tool = payload["tool_name"] as? String, !tool.isEmpty else { return nil }
+            // Deny by identity even when an oversized patch's input was trimmed
+            // by the hook transport. Freeform patches use {command: patch}.
+            if harness == .codex && Self.codexEditTools.contains(tool) {
+                return Self.deny(Self.editDenial)
+            }
+            guard let input = payload["tool_input"] as? [String: Any],
                   !tool.hasPrefix("mcp__array_workspace__"),
-                  Self.quickLookTools.contains(tool) || tool.hasPrefix("mcp__") else { return nil }
-            if tool == "Bash" {
-                guard let command = input["command"] as? String else { return nil }
-                if Self.isFreeGitInspection(command) { return nil }
+                  (harness == .codex ? Self.codexQuickLookTools : Self.quickLookTools).contains(tool)
+                    || tool.hasPrefix("mcp__") else { return nil }
+            if harness == .codex ? Self.codexShellTools.contains(tool) : tool == "Bash" {
+                // Native shell/exec hooks normalize to Bash + command. Accept
+                // raw exec's cmd too; shell arrays spend a look conservatively.
+                let command = input["command"] as? String ?? (harness == .codex ? input["cmd"] as? String : nil)
+                if let command {
+                    if Self.isFreeGitInspection(command) { return nil }
+                } else if !(harness == .codex && input["command"] is [String]) {
+                    return nil
+                }
             }
             // Saturating counter: the fourth and every later look is refused.
             quickLooks = min(quickLooks + 1, 4)
             guard quickLooks > 3 else { return nil }
-            return ["hookSpecificOutput": ["hookEventName": event,
-                    "permissionDecision": "deny", "permissionDecisionReason": Self.denial]]
+            return Self.deny(Self.denial)
         default:
             return nil
         }
+    }
+
+    private static func deny(_ reason: String) -> [String: Any] {
+        ["hookSpecificOutput": ["hookEventName": "PreToolUse",
+            "permissionDecision": "deny", "permissionDecisionReason": reason]]
     }
 
     /// Deliberately conservative: a single literal git status/log/diff command.

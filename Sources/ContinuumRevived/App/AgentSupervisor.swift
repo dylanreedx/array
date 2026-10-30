@@ -6890,12 +6890,19 @@ final class AgentSupervisor {
     private var runningModes: [AgentID: AgentMode] = [:]
     private var managedHookStates: [AgentID: ManagedLeadHookState] = [:]
 
-    /// Read before offering a switch. Changing Claude's tool set rewrites the
+    /// Read before offering a switch. A changed lead policy starts a cold
     /// prompt cache on the next turn. No warning UI is built in this slice.
     func modeSwitchStartsColdCache(for id: AgentID, to mode: AgentMode) -> Bool {
         guard let record = records[id] else { return false }
-        return record.harness == .claudeCode && record.mode != mode
-            && (record.latestTurnAt != nil || record.providerSessionId != nil || record.pendingSessionForkFrom != nil)
+        guard record.mode != mode else { return false }
+        switch record.harness {
+        case .claudeCode:
+            return record.latestTurnAt != nil || record.providerSessionId != nil || record.pendingSessionForkFrom != nil
+        case .codex:
+            return record.codexThreadId != nil
+        default:
+            return false
+        }
     }
 
     /// Persist now, apply at the next submitted turn; never stop current work.
@@ -6906,16 +6913,18 @@ final class AgentSupervisor {
         record.mode = mode
         guard persist(record) else { return false }
         records[id] = record
-        if record.harness == .claudeCode { pendingModeRestarts.insert(id) }
-        // TODO(.plans/102 Codex slice): apply mode to Codex's native hook bridge.
-        // Codex and Pi intentionally retain free execution behavior for now.
+        if record.harness == .claudeCode || record.harness == .codex { pendingModeRestarts.insert(id) }
+        // Codex already starts a fresh app-server and resumes codexThreadId on
+        // every submitted turn. send snapshots the new policy in runningModes;
+        // the existing trusted hooks consult that snapshot, not this live record.
+        // Pi retains free execution behavior.
         return true
     }
 
     func managedHookReply(for record: AgentRecord, payload: [String: Any]) -> [String: Any]? {
-        guard record.harness == .claudeCode,
+        guard let harness = record.harness, harness == .claudeCode || harness == .codex,
               (runningModes[record.id] ?? record.mode) == .managed else { return nil }
-        return managedHookStates[record.id, default: ManagedLeadHookState()].reply(payload: payload)
+        return managedHookStates[record.id, default: ManagedLeadHookState()].reply(payload: payload, harness: harness)
     }
 
     // MARK: - Model and thinking level (P6.1)
