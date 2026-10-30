@@ -168,6 +168,7 @@ enum BoardInteractionChecks {
             }
             let board = Board(id: UUID(), title: "Tasks", columns: [todo, doing], cards: cards)
             try store.saveBoard(board)
+            try store.saveBoardState(BoardState(boards: [BoardIndexEntry(id: board.id, tileId: nil, title: board.title, createdAt: Date(timeIntervalSince1970: 1_900_000_000), updatedAt: Date(timeIntervalSince1970: 1_900_000_000))]))
             let tile = Tile(id: UUID(), kind: .kanban, title: "Tasks",
                             frame: TileFrame(x: 0, y: 0, width: 640, height: 480),
                             zPosition: .fromLegacyRank(0), runtimeRef: nil, metadata: TileMetadata())

@@ -80,6 +80,20 @@ enum UIProbeAppearance {
         return view
     }
 
+    /// The board library must be visible in both the appearance sweep and the
+    /// adopted-surface census, including its three distinct row states.
+    private static func makeKanbanBoardLibrary() -> NSView {
+        let view = makeKanbanTile() as! KanbanTileNSView
+        let current = BoardLibraryEntry(id: view.board.id, title: view.board.title, isOpen: true)
+        let entries = [current,
+                       BoardLibraryEntry(id: UUID(), title: "Release preparation", isOpen: true),
+                       BoardLibraryEntry(id: UUID(), title: "Ideas for later", isOpen: false)]
+        view.boardLibraryProvider = { entries }
+        view.refreshBoardLibrary()
+        view.toggleBoardSidebar()
+        return view
+    }
+
     // MARK: - Layer colour slots
 
     /// One assignable colour on one layer.
@@ -336,6 +350,7 @@ enum UIProbeAppearance {
                 return makeTile()
             }),
             ("appearance.kanbanTile", NSSize(width: 480, height: 320), makeKanbanTile),
+            ("appearance.kanbanBoardLibrary", NSSize(width: 720, height: 360), makeKanbanBoardLibrary),
             ("appearance.iosPreviewTile", NSSize(width: 440, height: 700), makeIOSPreviewTile),
             ("appearance.editorNavigator", NSSize(width: 260, height: 400), {
                 FileTreeBrowserView(rootURL: URL(fileURLWithPath: "/nonexistent-editor-navigator-probe-root"))
@@ -1888,6 +1903,7 @@ enum UIProbeAppearance {
                 return card
             }),
             AdoptedSurface(id: "kanbanTile", size: NSSize(width: 480, height: 320), make: makeKanbanTile),
+            AdoptedSurface(id: "kanbanBoardLibrary", size: NSSize(width: 720, height: 360), make: makeKanbanBoardLibrary),
             AdoptedSurface(id: "iosPreviewTile", size: NSSize(width: 440, height: 700), make: makeIOSPreviewTile),
             AdoptedSurface(id: "noteTile", size: NSSize(width: 480, height: 320), make: {
                 NoteTileNSView(

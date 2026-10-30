@@ -108,6 +108,7 @@ enum BoardTaskWorkflowChecks {
         let card = BoardCard(id: UUID(), columnId: column.id, position: .fromLegacyRank(0), title: "Modal fixture", createdAt: Date(), updatedAt: Date())
         let board = Board(id: UUID(), title: "Tasks", columns: [column], cards: [card])
         try store.saveBoard(board)
+        try store.saveBoardState(BoardState(boards: [BoardIndexEntry(id: board.id, tileId: nil, title: board.title, createdAt: Date(timeIntervalSince1970: 1_900_000_000), updatedAt: Date(timeIntervalSince1970: 1_900_000_000))]))
         let tile = Tile(id: UUID(), kind: .kanban, title: "Tasks", frame: TileFrame(x: 0, y: 0, width: 400, height: 400), zPosition: .fromLegacyRank(0), runtimeRef: nil, metadata: TileMetadata())
         let view = KanbanTileNSView(tile: tile, board: board)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 800), styleMask: [.borderless], backing: .buffered, defer: false)

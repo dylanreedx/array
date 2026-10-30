@@ -1889,6 +1889,70 @@ final class WorkspaceRuntime {
         return mapped
     }
 
+    /// User navigation for durable project boards. A persisted tile in another
+    /// zone/workspace is revealed there; only a board with no tile may replace
+    /// the caller's current board or acquire a fresh tile.
+    @discardableResult
+    func openBoard(projectId: UUID, boardId: UUID, replacingTileId: UUID? = nil) -> TileSpawner.SavedBoardOutcome {
+        guard let canvasView else { return .failure(BoardLibraryError.locationUnavailable) }
+        do {
+            let appRegistry = try registryStore.loadOrEmpty()
+            if !document.zones.contains(where: { $0.projectId == projectId }),
+               let workspace = appRegistry.projects.first(where: { $0.id == projectId && !$0.missing })?.workspaceId,
+               workspace != workspaceId {
+                try switchWorkspace(to: workspace)
+            }
+            guard let sourceZone = replacingTileId.flatMap({ canvasView.zoneId(containing: $0) })
+                    .flatMap({ id in document.zones.first(where: { $0.zoneId == id && $0.projectId == projectId }) })
+                    ?? document.zones.first(where: { $0.zoneId == document.lastActiveZoneId && $0.projectId == projectId })
+                    ?? document.zones.first(where: { $0.projectId == projectId }) else {
+                throw BoardLibraryError.locationUnavailable
+            }
+            _ = setActiveZone(sourceZone.zoneId, reason: .explicit)
+            ensureZoneLayer(forZone: sourceZone.zoneId)
+            if registry.controller(for: projectId)?.tileSpawner == nil {
+                attachActiveControllerUI(canvasView: canvasView)
+            }
+            guard let spawner = registry.controller(for: projectId)?.tileSpawner else {
+                throw BoardLibraryError.locationUnavailable
+            }
+            let outcome = spawner.openSavedBoard(boardId, replacingTileId: replacingTileId)
+            switch outcome {
+            case let .existing(tile):
+                if let zoneId = tile.zoneId,
+                   !document.zones.contains(where: { $0.zoneId == zoneId && $0.projectId == projectId }) {
+                    var owner: UUID?
+                    for workspace in appRegistry.workspaces where workspace.id != workspaceId {
+                        if try loadWorkspaceDocument(workspaceId: workspace.id)?.zones.contains(where: {
+                            $0.zoneId == zoneId && $0.projectId == projectId
+                        }) == true {
+                            owner = workspace.id
+                            break
+                        }
+                    }
+                    guard let owner else { throw BoardLibraryError.locationUnavailable }
+                    try switchWorkspace(to: owner)
+                }
+                if let zoneId = tile.zoneId {
+                    _ = setActiveZone(zoneId, reason: .explicit)
+                    ensureZoneLayer(forZone: zoneId)
+                }
+                guard canvasView.tileRecord(for: tile.id) != nil,
+                      canvasView.tileView(for: tile.id) as? KanbanTileNSView != nil else {
+                    throw BoardLibraryError.locationUnavailable
+                }
+                canvasView.centerOnTile(tile.id)
+                _ = focusBroker.enterScope(.tile(tile.id), reason: .userClick)
+            case let .opened(tileId), let .switched(tileId):
+                noteStructuralCommit()
+                canvasView.centerOnTile(tileId)
+                _ = focusBroker.enterScope(.tile(tileId), reason: .userClick)
+            case .failure: break
+            }
+            return outcome
+        } catch { return .failure(error) }
+    }
+
     // MARK: - CX-01 explicit-destination open (`.plans/59`, §9 / §16)
 
     /// A destination the workspace API resolved BEFORE any effect. Pure output of

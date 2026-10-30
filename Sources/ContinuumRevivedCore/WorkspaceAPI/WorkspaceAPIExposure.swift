@@ -104,6 +104,7 @@ public enum WorkspaceAPIExposure {
         "tile.metadata.agentSoundOverrides": .notExposed("Per-agent sound preferences are native UI only."),
         "tile.metadata.agentTerminalFace": .notExposed("Switching an agent tile's face is native UI only."),
         "tile.metadata.markdownDocumentMode": .notExposed("Editor-mode selection is native UI only."),
+        "tile.metadata.boardViewState": .notExposed("Board library presentation stays user-owned."),
         "tile.metadata.fileEditorViewState": .notExposed("Editor presentation and cursor state stay user-owned."),
         "tile.metadata.boardId": .internal,
 

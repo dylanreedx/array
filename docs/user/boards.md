@@ -7,6 +7,16 @@ order: 12
 
 A Board is a project-local kanban document. Use it to turn a loose idea into work that a person or agent can pick up with its context intact.
 
+## Find, rename, and reopen boards
+
+Use **Boards** in a board tile to show or hide its sidebar. The list includes the project's saved boards, with **Current**, **On canvas**, or **Closed** showing where each one is.
+
+Select an **On canvas** board to navigate to its existing tile. Select a **Closed** board to display it in the current tile; the previous board remains saved. Each board can have one tile on the canvas, and each tile shows one board at a time. Use **New board** to create another board.
+
+Double-click the board title, or choose **Rename** from the sidebar’s actions, to change its name. Press Enter to save or Escape to cancel. Closing a board tile preserves its columns and tasks; use the board list to reopen it. When no board tile is open, use the workspace's **Open board** command to choose a saved board.
+
+**Delete…** removes the board itself and is separate from closing its tile. Only delete a board when you no longer need its saved tasks.
+
 ## Make a useful task
 
 Create a Board through the available workspace commands. Add a task to a column, give it a clear title, and open its detail view to write the description. A task can include Markdown, typed links to documents, agents or tiles, external URLs, images, and one assignee.
@@ -22,6 +32,12 @@ Column names and order belong to the board; agents should discover their IDs ins
 Drag a task between columns or reorder it within a column. Board changes have their own undo history, separate from moving the board tile around the canvas. A card’s place in a column is document data; the board tile’s position is canvas geometry.
 
 An assignee records responsibility. Assigning an agent is distinct from sending it a prompt. Use the task handoff/send flow when you want work to start.
+
+## Reference a board in an agent prompt
+
+Drag a board's header into an agent composer, just as you would reference another agent. The composer adds a board reference; write what you want the agent to do, then send your prompt. Hold Option when dragging the header to move the tile instead.
+
+The reference identifies the saved board, so renaming it or closing its tile does not change which board you shared. Referencing a board does not assign its tasks or move cards between columns.
 
 ## Hand a task to an agent
 

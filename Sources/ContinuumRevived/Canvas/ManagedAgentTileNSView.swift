@@ -982,6 +982,34 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         return true
     }
 
+    func acceptsBoardReference(from source: KanbanTileNSView) -> Bool {
+        guard let target = attachedAgentID, let recipient = agentSource?.records[target],
+              let canvas, source.canvas === canvas, !source.hasRetiredFromScene,
+              let projectID = recipient.projectId,
+              canvas.tiles(forProjectId: projectID).contains(where: { $0.id == source.tile.id }),
+              source.boardRuntime?.board(id: source.board.id) != nil else { return false }
+        return terminalFaceSession == nil && !composeBackdrop.isHidden && v2Composer != nil && !isHiddenOrHasHiddenAncestor
+    }
+
+    @discardableResult
+    func handleBoardReference(from source: KanbanTileNSView, commit: Bool) -> Bool {
+        guard acceptsBoardReference(from: source), let target = attachedAgentID,
+              let projectID = agentSource?.records[target]?.projectId,
+              let board = source.boardRuntime?.board(id: source.board.id), let composer = v2Composer else { return false }
+        promoteForIncomingFocus()
+        guard commit else { composer.setReferenceDropHighlight(true); return true }
+        composer.setReferenceDropHighlight(false)
+        let trusted = BoardPromptReference(projectID: projectID, boardID: board.id, displayName: board.title)
+        let previous = referenceDropTask
+        referenceDropTask = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self, self.attachedAgentID == target, !Task.isCancelled else { return }
+            let accepted = await composer.addBoardReferenceAfterRestore(trusted, expectedAgentID: target)
+            if accepted, self.attachedAgentID == target { self.window?.makeFirstResponder(composer.textView) }
+        }
+        return true
+    }
+
     func qaAwaitReferenceDrop() async { await referenceDropTask?.value }
 
     override func layout() {
@@ -4389,11 +4417,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 canSteer: capabilities.canSteer,
                 canQueue: capabilities.canQueue
             ),
-            hasDraft: !(v2Composer?.draft.agentReferences.isEmpty ?? true) || v2Composer?.draft.taskContext != nil || !(v2Composer?.draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            hasDraft: !(v2Composer?.draft.agentReferences.isEmpty ?? true) || !(v2Composer?.draft.boardReferences.isEmpty ?? true) || v2Composer?.draft.taskContext != nil || !(v2Composer?.draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         )
         // 2026-10-13 — a draft typed while the turn works is offered its ways
         // in beside the Stop; an empty busy composer offers Stop alone.
-        let hasDraft = !(v2Composer?.draft.agentReferences.isEmpty ?? true) || v2Composer?.draft.taskContext != nil
+        let hasDraft = !(v2Composer?.draft.agentReferences.isEmpty ?? true) || !(v2Composer?.draft.boardReferences.isEmpty ?? true) || v2Composer?.draft.taskContext != nil
             || !(v2Composer?.draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         let workingNow = snapshot?.executionState == .working
         applyWorkingSendChoices(

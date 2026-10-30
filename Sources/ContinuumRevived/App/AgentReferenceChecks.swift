@@ -28,6 +28,18 @@ enum AgentReferenceChecks {
             state.tiles[index].metadata = TileMetadata(launchProfileId: "managed-agent", projectRelativeCwd: ".")
             state.tiles[index].frame = TileFrame(x: 440 + Double(offset) * 660, y: 380, width: 640, height: 520)
         }
+        let boardID = UUID()
+        let boardTileID = UUID()
+        let board = Board.makeDefault(id: boardID, title: "Planning board", now: Date())
+        try projectStore.saveBoard(board)
+        try projectStore.saveBoardState(BoardState(boards: [BoardIndexEntry(id: boardID, tileId: boardTileID,
+            title: board.title, createdAt: Date(), updatedAt: Date())]))
+        var boardTile = state.tiles.first(where: { $0.id == tileIDs[0] })!
+        boardTile = Tile(id: boardTileID, kind: .kanban, title: board.title,
+            frame: TileFrame(x: 1800, y: 380, width: 900, height: 600), zPosition: boardTile.zPosition, runtimeRef: nil,
+            metadata: TileMetadata(boardId: boardID))
+        boardTile.zoneId = state.tiles.first(where: { $0.id == tileIDs[0] })!.zoneId
+        state.tiles.append(boardTile)
         try projectStore.saveCanvas(state)
         var agents: [AgentID] = []
         let appSupport = fixture.appSupport
@@ -76,6 +88,33 @@ enum AgentReferenceChecks {
         let before = canvas.allTilesInWorldFrames()
         let documentBefore = mounted.runtime.document
         let diskBefore = try Data(contentsOf: projectStore.layout.canvasFile)
+        guard let boardSource = canvas.tileView(for: boardTileID) as? KanbanTileNSView else {
+            throw TileInsertSlideChecks.Failure(message: "production mount did not hydrate board source")
+        }
+        guard let boardDrag = AgentReferenceDrag(board: boardSource),
+              let event = NSEvent.mouseEvent(with: .leftMouseDragged, location: .zero, modifierFlags: [],
+                  timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1),
+              let optionEvent = NSEvent.mouseEvent(with: .leftMouseDragged, location: .zero, modifierFlags: [.option],
+                  timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else {
+            throw TileInsertSlideChecks.Failure(message: "board header drag has no reference route")
+        }
+        let targetWorld = canvas.worldFrame(forTileFrame: target.tile.frame, tileId: target.tile.id)
+        let bodyPoint = CGPoint(x: targetWorld.x + targetWorld.width / 2, y: targetWorld.y + targetWorld.height * 0.6)
+        try TileInsertSlideChecks.expect(boardDrag.recipient(atWorld: bodyPoint, event: event) === target,
+            "board header drag must resolve the recipient's resting body at every zoom")
+        try TileInsertSlideChecks.expect(boardDrag.recipient(atWorld: bodyPoint, event: optionEvent) == nil,
+            "Option-board-header drag must remain a tile move")
+        boardDrag.setRecipient(target)
+        try TileInsertSlideChecks.expect(composer.referenceDropHighlighted, "board reference hover must highlight composer")
+        try TileInsertSlideChecks.expect(boardDrag.commit(to: target), "board header drag commit must add reference")
+        boardDrag.end()
+        try TileInsertSlideChecks.expect(!composer.referenceDropHighlighted, "board drag end must clear hover highlight")
+        try TileInsertSlideChecks.expect(target.handleBoardReference(from: boardSource, commit: false), "board header reference hover must be accepted")
+        try TileInsertSlideChecks.expect(target.handleBoardReference(from: boardSource, commit: true), "board reference must reach draft")
+        try TileInsertSlideChecks.expect(target.handleBoardReference(from: boardSource, commit: true), "repeated board drop must deduplicate")
+        await target.qaAwaitReferenceDrop()
+        let boardRef = BoardPromptReference(projectID: WorkspaceInvariantsFixture.projectA1, boardID: boardID, displayName: board.title)
+        try TileInsertSlideChecks.expect(composer.draft.boardReferences == [boardRef], "board reference must resolve trusted board identity and title")
         let dropped = AgentPromptReference(agentID: agents[0], displayName: "spoofed label")
         try TileInsertSlideChecks.expect(target.handleAgentReference(dropped, commit: false), "recipient must accept reference hover")
         try TileInsertSlideChecks.expect(target.handleAgentReference(dropped, commit: true), "recipient must forward a reference to the draft")
@@ -102,11 +141,11 @@ enum AgentReferenceChecks {
         for _ in 0..<10 { await Task.yield() }
         try await drafts.flushReportingFailure(agentID: agents[1])
         let reloaded = await AgentComposerDraftStore(applicationSupportDirectory: fixture.appSupport).load(for: agents[1])
-        try TileInsertSlideChecks.expect(reloaded?.agentReferences == [ref], "agent reference must survive a fresh draft store")
-        let queued = await drafts.enqueueMessage(text: "later", agentReferences: [ref], for: agents[1])
-        let steered = await drafts.enqueueSteer(text: "now", agentReferences: [ref], for: agents[1])
+        try TileInsertSlideChecks.expect(reloaded?.agentReferences == [ref] && reloaded?.boardReferences == [boardRef], "agent reference must survive a fresh draft store")
+        let queued = await drafts.enqueueMessage(text: "later", agentReferences: [ref], boardReferences: [boardRef], for: agents[1])
+        let steered = await drafts.enqueueSteer(text: "now", agentReferences: [ref], boardReferences: [boardRef], for: agents[1])
         let queue = await AgentComposerDraftStore(applicationSupportDirectory: fixture.appSupport).queuedMessages(for: agents[1])
-        try TileInsertSlideChecks.expect(queue.map(\.id) == [steered.id, queued.id] && queue.allSatisfy { $0.agentReferences == [ref] }, "durable queue and steer must preserve references")
+        try TileInsertSlideChecks.expect(queue.map(\.id) == [steered.id, queued.id] && queue.allSatisfy { $0.agentReferences == [ref] && $0.boardReferences == [boardRef] }, "durable queue and steer must preserve references")
         if zoom == 1, !autoLayout {
             let directory = URL(fileURLWithPath: "qa-runs/agent-reference-check", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -123,15 +162,19 @@ enum AgentReferenceChecks {
         }
         composer.composerRequestedSend(composer.textView)
         for _ in 0..<100 where sink.prompts.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
-        try TileInsertSlideChecks.expect(sink.prompts.count == 1 && sink.prompts[0].agentReferences == [ref], "real composer send must deliver reference to the sink exactly once")
+        try TileInsertSlideChecks.expect(sink.prompts.count == 1 && sink.prompts[0].agentReferences == [ref] && sink.prompts[0].boardReferences == [boardRef], "real composer send must deliver reference to the sink exactly once")
+        try TileInsertSlideChecks.expect(!AgentPrompt(boardReferences: [boardRef]).isEmpty,
+            "a board reference alone must be sendable")
         let sent = sink.prompts[0]
         let wire = sent.providerText
         try TileInsertSlideChecks.expect(ClaudeAgentRunner.promptArgument(sent) == wire
             && CodexCLIBackend.promptArgument(sent) == wire
             && PiAgentRunner.promptArgumentSegments(sent) == [wire], "all harnesses must receive the same reference envelope")
-        let parsed = AgentReferencePromptEnvelope.parse(wire)
+        let boardParsed = BoardReferencePromptEnvelope.parse(wire)
+        try TileInsertSlideChecks.expect(boardParsed?.references == [boardRef], "board provider envelope must preserve stable board identity")
+        let parsed = AgentReferencePromptEnvelope.parse(boardParsed?.text ?? wire)
         try TileInsertSlideChecks.expect(parsed?.references == [ref] && parsed?.text == sent.text, "provider reference must roundtrip without sharing a conversation")
-        let mixed = AgentReferencePromptEnvelope.parse(wire + "\n@/tmp/design doc.md")
+        let mixed = AgentReferencePromptEnvelope.parse((boardParsed?.text ?? wire) + "\n@/tmp/design doc.md")
         try TileInsertSlideChecks.expect(mixed?.references == [ref] && mixed?.text == sent.text + "\n\n@/tmp/design doc.md",
             "reference decoding must preserve provider-appended file paths")
         var live = AgentTranscriptProjection(threadId: "reference-live")
@@ -140,10 +183,12 @@ enum AgentReferenceChecks {
         try live.appendUserPrompt(id: entryID, prompt: sent)
         try restored.appendUserPrompt(id: entryID, prompt: AgentPrompt(wire))
         try TileInsertSlideChecks.expect(live.document.entries.first?.blocks == restored.document.entries.first?.blocks, "live and restored transcripts must show the same user mention")
-        composer.apply(.init(text: "", selection: NSRange(location: 0, length: 0), revision: 3, agentReferences: [ref]))
+        composer.apply(.init(text: "", selection: NSRange(location: 0, length: 0), revision: 3, agentReferences: [ref], boardReferences: [boardRef]))
+        composer.qaRemoveBoardReference(at: 0)
+        try TileInsertSlideChecks.expect(composer.draft.boardReferences.isEmpty, "remove board chip must remove its reference")
         composer.qaRemoveAgentReference(at: 0)
         try TileInsertSlideChecks.expect(composer.draft.agentReferences.isEmpty, "remove chip must remove its reference")
-        print("AgentReferenceChecks PASS zoom=\(zoom) autoLayout=\(autoLayout): drop, draft, queue, steer, send, harnesses, transcript")
+        print("AgentReferenceChecks PASS zoom=\(zoom) autoLayout=\(autoLayout): drop, draft, queue, steer, send, harnesses, transcript, board references")
     }
 }
 

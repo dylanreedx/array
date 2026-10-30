@@ -11,7 +11,7 @@ import ContinuumRevivedCore
 // pointer move indistinguishable by the time they reach the model.
 
 @MainActor
-final class KanbanTileNSView: TileNSView {
+final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
     /// Selection and editing are DISTINCT states, and the distinction decides
     /// which undo stack Cmd-Z reaches: while a card's text field is first
     /// responder, `CanvasNSView.undo(_:)` routes to the field's own manager.
@@ -34,6 +34,21 @@ final class KanbanTileNSView: TileNSView {
 
     /// The only way anything leaves this view.
     var onCommand: ((BoardCommand) -> Void)?
+
+    var boardLibraryProvider: (() -> [BoardLibraryEntry])?
+    var onSelectBoard: ((UUID) -> Void)?
+    var onCreateBoard: (() -> Void)?
+    var onRenameBoard: ((UUID, String) -> String?)?
+    var onDeleteBoard: ((UUID) -> Void)?
+    var onBoardViewStateChange: ((BoardViewState) -> Void)?
+    private var boardViewState: BoardViewState
+    private let library = BoardLibraryView(frame: .zero)
+    private weak var boardSidebarToggle: NSButton?
+    private let librarySplit = NSSplitView()
+    private var rebuildingLibrary = false
+    var qaBoardLibraryEntries: [BoardLibraryEntry] { library.entries }
+    var qaVisibleBoardLibraryRows: [String] { library.visibleRowTitles }
+    var qaBoardSidebarExpanded: Bool { boardViewState.sidebarExpanded }
 
     private let body = FlippedContainerView()
     private let contentContainer = FlippedContainerView()
@@ -138,6 +153,7 @@ final class KanbanTileNSView: TileNSView {
 
     init(tile: Tile, board: Board) {
         self.board = board
+        self.boardViewState = tile.metadata.boardViewState ?? BoardViewState()
         super.init(tile: tile)
 
         horizontalScroll.hasHorizontalScroller = true
@@ -157,7 +173,21 @@ final class KanbanTileNSView: TileNSView {
         gestureHint.lineBreakMode = .byTruncatingTail
         contentContainer.addSubview(horizontalScroll)
         contentContainer.addSubview(gestureHint)
-        setContentView(contentContainer)
+        librarySplit.isVertical = true
+        librarySplit.dividerStyle = .thin
+        librarySplit.delegate = self
+        library.onSelect = { [weak self] id in self?.activateLibraryBoard(id) }
+        library.onCreate = { [weak self] in
+            guard let self, self.prepareForBoardNavigation() else { return }
+            self.onCreateBoard?()
+        }
+        library.onRename = { [weak self] id, title in self?.renameLibraryBoard(id, title: title) }
+        library.onDelete = { [weak self] id in
+            guard let self, self.prepareForBoardNavigation() else { return }
+            self.onDeleteBoard?(id)
+        }
+        library.onError = { [weak self] error in self?.onTaskActionError?(error) }
+        rebuildLibraryShell()
         installAddAccessory()
         rebuildColumns()
         applyTokens()
@@ -179,8 +209,104 @@ final class KanbanTileNSView: TileNSView {
         button.setAccessibilityLabel("Add a task")
         button.toolTip = "Add a task (⌘N)"
         button.frame = NSRect(x: 0, y: 0, width: 18, height: 16)
-        setTitleBarAccessory(button)
+        let toggle = NSButton(image: NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle boards")!, target: self, action: #selector(toggleBoardSidebar))
+        boardSidebarToggle = toggle
+        toggle.title = "Boards"
+        toggle.font = NSFont.token(.caption)
+        toggle.imagePosition = .imageLeading
+        toggle.isBordered = false
+        toggle.controlSize = .small
+        toggle.toolTip = "Show or hide project boards"
+        let actions = NSStackView(views: [toggle, button])
+        actions.orientation = .horizontal
+        actions.spacing = 8
+        setTitleBarAccessory(actions)
     }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if event.clickCount == 2,
+           !event.modifierFlags.contains(.command),
+           canvas?.pointerPanRequested(for: event) != true,
+           titleHitRect?.contains(point) == true {
+            beginCurrentBoardRename()
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    func beginCurrentBoardRename() {
+        guard prepareForBoardNavigation() else { return }
+        if !boardViewState.sidebarExpanded { toggleBoardSidebar() }
+        refreshBoardLibrary()
+        layoutSubtreeIfNeeded()
+        library.beginRenameCurrentBoard()
+    }
+
+    func refreshBoardLibrary() {
+        library.render(boardLibraryProvider?() ?? [BoardLibraryEntry(id: board.id, title: board.title, isOpen: true)], current: board.id)
+    }
+
+    @objc func toggleBoardSidebar() {
+        boardViewState.sidebarExpanded.toggle()
+        onBoardViewStateChange?(boardViewState)
+        rebuildLibraryShell()
+    }
+
+    func prepareForBoardNavigation() -> Bool {
+        guard library.finishPendingRename() else { return false }
+        guard taskDetail?.finishBeforeOpeningAnother() ?? true else { return false }
+        taskDetail = nil
+        cancelCardDrag()
+        setFocusState(.none)
+        return true
+    }
+
+    func activateLibraryBoard(_ id: UUID) {
+        guard id != board.id, prepareForBoardNavigation() else { return }
+        onSelectBoard?(id)
+    }
+
+    @discardableResult
+    func renameLibraryBoard(_ id: UUID, title: String) -> String? {
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return "A board needs a name." }
+        let error = onRenameBoard?(id, name)
+        if error == nil { refreshBoardLibrary() }
+        return error
+    }
+
+    private func rebuildLibraryShell() {
+        rebuildingLibrary = true
+        defer { rebuildingLibrary = false }
+        librarySplit.subviews.forEach { $0.removeFromSuperview() }
+        if boardViewState.sidebarExpanded { librarySplit.addSubview(library) }
+        librarySplit.addSubview(contentContainer)
+        setContentView(librarySplit)
+        refreshBoardLibrary()
+        needsLayout = true
+    }
+
+    func splitView(_ splitView: NSSplitView, resizeSubviewsWithOldSize oldSize: NSSize) {
+        let size = splitView.bounds.size
+        guard boardViewState.sidebarExpanded else { contentContainer.frame = splitView.bounds; return }
+        let requested = boardViewState.sidebarWidth.isFinite ? boardViewState.sidebarWidth : 220
+        let width = min(max(CGFloat(requested), 160), max(160, min(320, size.width * 0.45)))
+        library.frame = NSRect(x: 0, y: 0, width: width, height: size.height)
+        contentContainer.frame = NSRect(x: width + splitView.dividerThickness, y: 0,
+            width: max(0, size.width - width - splitView.dividerThickness), height: size.height)
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard !rebuildingLibrary, boardViewState.sidebarExpanded, library.frame.width > 0 else { return }
+        let width = Double(library.frame.width)
+        guard boardViewState.sidebarWidth != width else { return }
+        boardViewState.sidebarWidth = width
+        onBoardViewStateChange?(boardViewState)
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat { 160 }
+    func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat { min(320, splitView.bounds.width * 0.45) }
 
     @objc private func addTaskFromTitleBar() {
         guard let columnId = focusedColumnId ?? board.orderedColumns.first?.id else { return }
@@ -193,6 +319,7 @@ final class KanbanTileNSView: TileNSView {
     /// which is exactly what an agent-originated move produces — reuses the view
     /// under the pointer instead of destroying it.
     func render(_ board: Board) {
+        if board.id != self.board.id { horizontalScroll.contentView.scroll(to: .zero) }
         let structureChanged = board.orderedColumns.map(\.id) != self.board.orderedColumns.map(\.id)
         // A change from outside a local drag animates (FLIP): capture where every
         // card is on screen now, apply, lay out once, animate from the delta.
@@ -206,6 +333,7 @@ final class KanbanTileNSView: TileNSView {
         var departed: [KanbanCardView] = []
         self.board = board
         taskDetail?.refresh()
+        refreshBoardLibrary()
         if structureChanged {
             rebuildColumns()
         } else {
@@ -578,6 +706,8 @@ final class KanbanTileNSView: TileNSView {
 
     override func applyTokens() {
         super.applyTokens()
+        library.applyTokens(in: self)
+        boardSidebarToggle?.contentTintColor = TextToken.textPrimary.color.nsColor(in: self)
         contentBackgroundLayer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(in: self)
         emptyBoardLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         gestureHint.textColor = TextToken.textSecondary.color.nsColor(in: self)

@@ -12,6 +12,7 @@ struct AgentComposerDraft: Equatable {
     var imageAttachments: [AgentPromptImageAttachment] = []
     var fileReferences: [AgentPromptFileReference] = []
     var agentReferences: [AgentPromptReference] = []
+    var boardReferences: [BoardPromptReference] = []
     var taskContext: BoardTaskContext? = nil
 
     static let empty = AgentComposerDraft(text: "", selection: NSRange(location: 0, length: 0), revision: 0, imageAttachments: [], fileReferences: [])
@@ -124,6 +125,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     private var importedAttachments: [AgentPromptImageAttachment] = []
     private var importedFileReferences: [AgentPromptFileReference] = []
     private var importedAgentReferences: [AgentPromptReference] = []
+    private var importedBoardReferences: [BoardPromptReference] = []
     private var imageImportFailureCount = 0
     private var imageImportFailureCategories: [String] = []
 
@@ -278,6 +280,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         agentReferenceRail.onRemoveAgent = { [weak self] reference in
             guard let self else { return }
             self.importedAgentReferences.removeAll { $0.agentID == reference.agentID }
+            self.draft.revision &+= 1
+            self.updateAgentReferenceRail()
+            self.publishDraftChange()
+        }
+        agentReferenceRail.onRemoveBoard = { [weak self] reference in
+            guard let self else { return }
+            self.importedBoardReferences.removeAll { $0.boardID == reference.boardID && $0.projectID == reference.projectID }
             self.draft.revision &+= 1
             self.updateAgentReferenceRail()
             self.publishDraftChange()
@@ -518,6 +527,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 self.importedAttachments = []
                 self.importedFileReferences = []
                 self.importedAgentReferences = []
+                self.importedBoardReferences = []
                 self.updateAttachmentRail()
                 self.updateFileReferenceRail()
                 self.apply(.empty)
@@ -551,7 +561,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 revision: 0,
                 imageAttachments: resolved,
                 fileReferences: resolvedFileReferences,
-                agentReferences: stored.agentReferences,
+                agentReferences: stored.agentReferences, boardReferences: stored.boardReferences,
                 taskContext: stored.taskContext
             ))
         }
@@ -680,6 +690,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 imageAttachments: self.importedAttachments + images,
                 fileReferences: self.importedFileReferences + self.resolvedFileReferences(from: message.fileReferences),
                 agentReferences: AgentPromptReference.unique(self.importedAgentReferences + message.agentReferences),
+                boardReferences: BoardPromptReference.unique(self.importedBoardReferences + message.boardReferences),
                 taskContext: self.draft.taskContext))
             self.publishDraftChange()
             self.window?.makeFirstResponder(self.textView)
@@ -695,7 +706,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
 
     private var hasDraftContent: Bool {
         !textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || !importedAgentReferences.isEmpty || draft.taskContext != nil
+            || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || !importedAgentReferences.isEmpty || !importedBoardReferences.isEmpty || draft.taskContext != nil
     }
 
     func unbindActionSink() {
@@ -742,6 +753,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         importedAttachments = newDraft.imageAttachments
         importedFileReferences = newDraft.fileReferences
         importedAgentReferences = AgentPromptReference.unique(newDraft.agentReferences)
+        importedBoardReferences = BoardPromptReference.unique(newDraft.boardReferences)
         updateAttachmentRail()
         updateFileReferenceRail()
         updateAgentReferenceRail()
@@ -751,7 +763,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             revision: newDraft.revision,
             imageAttachments: importedAttachments,
             fileReferences: importedFileReferences,
-            agentReferences: importedAgentReferences,
+            agentReferences: importedAgentReferences, boardReferences: importedBoardReferences,
             taskContext: newDraft.taskContext
         )
         updateTaskContextRail()
@@ -963,7 +975,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     func composerHasSendableAttachments(_ textView: ComposerTextView) -> Bool {
-        !importedAttachments.isEmpty || !importedFileReferences.isEmpty || !importedAgentReferences.isEmpty || draft.taskContext != nil
+        !importedAttachments.isEmpty || !importedFileReferences.isEmpty || !importedAgentReferences.isEmpty || !importedBoardReferences.isEmpty || draft.taskContext != nil
     }
 
     func composerRequestedSend(_ textView: ComposerTextView) {
@@ -979,14 +991,14 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         }
         qaSendRequestCount += 1
         let prompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || !importedAgentReferences.isEmpty || draft.taskContext != nil else { return }
+        guard !prompt.isEmpty || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || !importedAgentReferences.isEmpty || !importedBoardReferences.isEmpty || draft.taskContext != nil else { return }
         if let snapshot = turnSnapshot, actionSink != nil, draftAgentID != nil {
             let resolver = AgentComposerIntentState(
                 executionState: snapshot.executionState,
                 capabilities: snapshot.capabilities
             )
             let intent: AgentComposerIntent?
-            if draft.taskContext == nil, importedAttachments.isEmpty, importedFileReferences.isEmpty, importedAgentReferences.isEmpty,
+            if draft.taskContext == nil, importedAttachments.isEmpty, importedFileReferences.isEmpty, importedAgentReferences.isEmpty, importedBoardReferences.isEmpty,
                let invocation = resolvedSelectedCommand(in: prompt)
                 ?? typedArrayCompactInvocation(in: prompt) {
                 // By descriptor ID, not by name. `/compact` is Array's own typed
@@ -1007,12 +1019,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                     // user had no way to tell whether the command had run.
                     intent = .providerCommand(invocation)
                 }
-            } else if !importedAttachments.isEmpty || !importedFileReferences.isEmpty || !importedAgentReferences.isEmpty || draft.taskContext != nil {
+            } else if !importedAttachments.isEmpty || !importedFileReferences.isEmpty || !importedAgentReferences.isEmpty || !importedBoardReferences.isEmpty || draft.taskContext != nil {
                 let attachedPrompt = AgentPrompt(
                     text: draft.taskContext?.promptText(additionalInstructions: prompt) ?? prompt,
                     imageAttachments: importedAttachments,
                     fileReferences: importedFileReferences,
-                    agentReferences: importedAgentReferences
+                    agentReferences: importedAgentReferences, boardReferences: importedBoardReferences
                 )
                 switch snapshot.executionState {
                 case .ready:
@@ -1038,11 +1050,11 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             )
         } else if let onSubmitIntent {
             pendingSubmittedPrompt = nil
-            guard onSubmitIntent(AgentReferencePromptEnvelope.text(prompt, references: importedAgentReferences)) else { return }
+            guard onSubmitIntent(BoardReferencePromptEnvelope.text(AgentReferencePromptEnvelope.text(prompt, references: importedAgentReferences), references: importedBoardReferences)) else { return }
             completeAcceptedSend(prompt)
         } else if let onSubmitPrompt {
             pendingSubmittedPrompt = prompt
-            onSubmitPrompt(AgentReferencePromptEnvelope.text(prompt, references: importedAgentReferences))
+            onSubmitPrompt(BoardReferencePromptEnvelope.text(AgentReferencePromptEnvelope.text(prompt, references: importedAgentReferences), references: importedBoardReferences))
         }
     }
 
@@ -1325,7 +1337,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             revision: textChanged ? draft.revision &+ 1 : draft.revision,
             imageAttachments: importedAttachments,
             fileReferences: importedFileReferences,
-            agentReferences: importedAgentReferences,
+            agentReferences: importedAgentReferences, boardReferences: importedBoardReferences,
             taskContext: draft.taskContext
         )
         onDraftChange?(draft)
@@ -1336,7 +1348,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 updatedAt: Date(),
                 imageAttachments: importedAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) },
                 fileReferences: persistedFileReferences(),
-                agentReferences: importedAgentReferences,
+                agentReferences: importedAgentReferences, boardReferences: importedBoardReferences,
                 taskContext: draft.taskContext
             )
             Task { await draftStore.save(persisted, for: draftAgentID) }
@@ -1541,7 +1553,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             updatedAt: Date(),
             imageAttachments: importedAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) },
             fileReferences: persistedFileReferences(),
-            agentReferences: importedAgentReferences,
+            agentReferences: importedAgentReferences, boardReferences: importedBoardReferences,
             taskContext: draft.taskContext
         )
     }
@@ -1588,7 +1600,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             revision: draft.revision &+ 1,
             imageAttachments: resolved,
             fileReferences: resolvedFileReferences,
-            agentReferences: persisted.agentReferences,
+            agentReferences: persisted.agentReferences, boardReferences: persisted.boardReferences,
             taskContext: persisted.taskContext
         ))
     }
@@ -1811,6 +1823,25 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         return addAgentReference(reference)
     }
 
+    func addBoardReferenceAfterRestore(_ reference: BoardPromptReference, expectedAgentID: AgentID) async -> Bool {
+        let generation = bindingGeneration
+        await restoreTask?.value
+        guard !Task.isCancelled, isCurrentBinding(agentID: expectedAgentID, generation: generation) else { return false }
+        if importedBoardReferences.contains(where: { $0.boardID == reference.boardID && $0.projectID == reference.projectID }) { return true }
+        guard importedBoardReferences.count < 16 else {
+            showTransientHint("A draft can reference up to 16 boards.")
+            return false
+        }
+        importedBoardReferences.append(reference)
+        draft.revision &+= 1
+        updateAgentReferenceRail()
+        publishDraftChange()
+        editorContentsChanged()
+        return true
+    }
+
+    func qaRemoveBoardReference(at index: Int) { agentReferenceRail.qaRemoveBoard(at: index) }
+
     func qaAwaitDraftRestore() async { await restoreTask?.value }
 
     /// Called by the tile's private reference-drop route. This only edits a
@@ -1833,7 +1864,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
 
     private func updateAgentReferenceRail() {
         agentReferenceRail.setAgentReferences(importedAgentReferences)
-        agentReferenceRailHeightConstraint.constant = importedAgentReferences.isEmpty ? 0 : ComposerFileReferenceRailView.railHeight(zoom: pageZoom)
+        agentReferenceRail.setBoardReferences(importedBoardReferences)
+        agentReferenceRailHeightConstraint.constant = importedAgentReferences.isEmpty && importedBoardReferences.isEmpty ? 0 : ComposerFileReferenceRailView.railHeight(zoom: pageZoom)
         invalidateIntrinsicContentSize()
         needsLayout = true
     }

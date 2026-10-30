@@ -2433,15 +2433,126 @@ final class TileSpawner {
             metadata: TileMetadata(boardId: boardId)
         )
         let view = KanbanTileNSView(tile: tile, board: board)
-        runtime.attach(view, to: boardId)
-        runtime.bindTile(tileId, to: boardId)
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
         do {
-            try persistThenArrange(tileId, after: target, in: canvasView)
+            try persistProjectCanvas(after: target, in: canvasView)
+            try runtime.setTileBinding(tileId, for: boardId)
         } catch {
-            return .failure(error)
+            let cause = error
+            withdrawFailedSpawn(tileId, target: target, in: canvasView)
+            if target != .unplaced {
+                do { try persistProjectCanvas(after: target, in: canvasView) }
+                catch { return .failure(BoardLibraryError.rollbackFailed(error.localizedDescription)) }
+            }
+            // The document remains indexed and closed, ready for Open board.
+            return .failure(cause)
+        }
+        runtime.attach(view, to: boardId)
+        if case let .zoneLayer(zoneId) = target {
+            canvasView.arrangeAutoLayoutAfterSpawn(zoneId: zoneId, spawnedTileId: tileId)
         }
         return .spawned(boardId: boardId, tileId: tileId)
+    }
+
+    enum SavedBoardOutcome {
+        case opened(tileId: UUID)
+        case switched(tileId: UUID)
+        case existing(tile: Tile)
+        case failure(Error)
+    }
+
+    /// The canvas is the authority for open/closed state. The index's pointer
+    /// is a discovery hint: a tile in an evicted zone or another workspace is
+    /// still open, and an index left behind by an interrupted save is not one.
+    func savedBoardTiles() throws -> [Tile] {
+        guard let canvasView else { throw SpawnError.canvasUnavailable }
+        let base = try projectStore.tryLoadCanvas() ?? CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil)
+        return canvasView.canvasStateForPersistence(
+            projectId: project.id, base: base, persistedTiles: base.tiles).tiles
+            .filter { $0.kind == .kanban }
+    }
+
+    /// Open a durable board, optionally replacing the board in a caller's tile.
+    /// Existing ownership wins over replacement. No view-only lookup can prove
+    /// uniqueness because an unhydrated board has no NSView.
+    func openSavedBoard(_ boardId: UUID, replacingTileId: UUID? = nil) -> SavedBoardOutcome {
+        guard let canvasView, let runtime = boardRuntimeProvider?(),
+              runtime.boardIndexEntries().contains(where: { $0.id == boardId }),
+              let board = runtime.board(id: boardId) else {
+            return .failure(BoardLibraryError.unavailable)
+        }
+        do {
+            let openTiles = try savedBoardTiles()
+            let matches = openTiles.filter { $0.metadata.boardId == boardId }
+            guard matches.count <= 1 else { throw BoardLibraryError.multipleTiles }
+            if let existing = matches.first {
+                if runtime.boardIndexEntries().first(where: { $0.id == boardId })?.tileId != existing.id {
+                    try runtime.setTileBinding(nil, for: boardId)
+                    try runtime.setTileBinding(existing.id, for: boardId)
+                }
+                return .existing(tile: existing)
+            }
+            // Clear a stale index pointer only after checking the full canvas.
+            if runtime.boardIndexEntries().first(where: { $0.id == boardId })?.tileId != nil {
+                try runtime.setTileBinding(nil, for: boardId)
+            }
+            if let replacingTileId {
+                guard openTiles.contains(where: { $0.id == replacingTileId }),
+                      let previous = canvasView.tileRecord(for: replacingTileId),
+                      previous.kind == .kanban, let sourceId = previous.metadata.boardId,
+                      let view = canvasView.tileView(for: replacingTileId) as? KanbanTileNSView,
+                      view.prepareForBoardNavigation() else { throw BoardLibraryError.navigationBlocked }
+                guard canvasView.isFlatCompatibilitySceneActive || previous.zoneId.map({
+                    canvasView.installedZoneLayerIds.contains($0)
+                }) == true else { throw SpawnError.canvasUnavailable }
+                let sources = openTiles.filter { $0.metadata.boardId == sourceId }
+                guard sources.count == 1 else { throw BoardLibraryError.multipleTiles }
+                if runtime.boardIndexEntries().first(where: { $0.id == sourceId })?.tileId != replacingTileId {
+                    try runtime.setTileBinding(nil, for: sourceId)
+                    try runtime.setTileBinding(replacingTileId, for: sourceId)
+                }
+                var next = previous
+                next.title = board.title
+                next.metadata.boardId = boardId
+                let target = canvasView.materializeProjectTile(tileView: view, for: next)
+                do {
+                    try persistProjectCanvas(after: target, in: canvasView)
+                    try runtime.switchTileBinding(replacingTileId, from: sourceId, to: boardId)
+                } catch {
+                    canvasView.materializeProjectTile(tileView: view, for: previous)
+                    do { try persistProjectCanvas(after: target, in: canvasView) }
+                    catch { return .failure(BoardLibraryError.rollbackFailed(error.localizedDescription)) }
+                    throw error
+                }
+                runtime.attach(view, to: boardId)
+                return .switched(tileId: replacingTileId)
+            }
+            let tileId = UUID()
+            let targetZoneId = creationScopeProvider?()?.zoneId
+            let frame = makeProjectTilePlacement(
+                worldPoint: nil, size: CanvasEngine.defaultFrame(for: .kanban),
+                in: canvasView, targetZoneId: targetZoneId)
+            let tile = Tile(id: tileId, kind: .kanban, title: board.title, frame: frame,
+                            zPosition: CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId)),
+                            runtimeRef: nil, metadata: TileMetadata(boardId: boardId))
+            let view = KanbanTileNSView(tile: tile, board: board)
+            let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+            do {
+                try persistProjectCanvas(after: target, in: canvasView)
+                try runtime.setTileBinding(tileId, for: boardId)
+            } catch {
+                withdrawFailedSpawn(tileId, target: target, in: canvasView)
+                do { try persistProjectCanvas(after: target, in: canvasView) }
+                catch { return .failure(BoardLibraryError.rollbackFailed(error.localizedDescription)) }
+                throw error
+            }
+            runtime.attach(view, to: boardId)
+            if case let .zoneLayer(zoneId) = target {
+                canvasView.arrangeAutoLayoutAfterSpawn(zoneId: zoneId, spawnedTileId: tileId)
+            }
+            return .opened(tileId: tileId)
+        } catch { return .failure(error) }
     }
 
     enum DiffReviewOutcome {

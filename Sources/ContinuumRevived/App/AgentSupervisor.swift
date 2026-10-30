@@ -1245,7 +1245,7 @@ final class AgentSupervisor {
             let references = prompt.fileReferences.map { AgentComposerDraftFileReference(
                 displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path) }
             await store.enqueueContextRecovery(text: prompt.text, imageAttachments: draftImages,
-                                              fileReferences: references, agentReferences: prompt.agentReferences, for: id)
+                                              fileReferences: references, agentReferences: prompt.agentReferences, boardReferences: prompt.boardReferences, for: id)
             queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
             pausedQueues.remove(id)
             queuePauseReasons[id] = nil
@@ -7177,7 +7177,7 @@ final class AgentSupervisor {
                         text: prompt.text,
                         imageAttachments: preparedAttachments,
                         fileReferences: prompt.fileReferences,
-                        agentReferences: prompt.agentReferences
+                        agentReferences: prompt.agentReferences, boardReferences: prompt.boardReferences
                     ),
                     expectedAgentID: agentID
                 )
@@ -7365,7 +7365,7 @@ final class AgentSupervisor {
                 text: prompt.text,
                 imageAttachments: draftImageAttachments,
                 fileReferences: fileReferences,
-                agentReferences: prompt.agentReferences,
+                agentReferences: prompt.agentReferences, boardReferences: prompt.boardReferences,
                 for: agentID
             )
             companionAccepted = true
@@ -7407,7 +7407,7 @@ final class AgentSupervisor {
                 fileReferences: prompt.fileReferences.map {
                     AgentComposerDraftFileReference(displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path)
                 },
-                agentReferences: prompt.agentReferences,
+                agentReferences: prompt.agentReferences, boardReferences: prompt.boardReferences,
                 for: agentID)
             companionAccepted = true
             queuedWorkItemsCache[agentID] = await store.queuedWorkItems(for: agentID)
@@ -7431,7 +7431,7 @@ final class AgentSupervisor {
                 return .refused(.invalidAttachment)
             }
             let forced = PreparedAgentPrompt(
-                prompt: AgentPrompt(text: prompt.text, imageAttachments: prepared, fileReferences: prompt.fileReferences, agentReferences: prompt.agentReferences),
+                prompt: AgentPrompt(text: prompt.text, imageAttachments: prepared, fileReferences: prompt.fileReferences, agentReferences: prompt.agentReferences, boardReferences: prompt.boardReferences),
                 expectedAgentID: agentID)
             return forceSend(forced, to: agentID) ? .accepted : .refused(.turnNotReady)
         case .command:
@@ -8678,7 +8678,7 @@ final class AgentSupervisor {
             case .prompt(let message):
                 let entry = ComposerQueueRailState.Item(
                     id: message.id, text: message.text,
-                    attachmentCount: message.imageAttachments.count + message.fileReferences.count + message.agentReferences.count,
+                    attachmentCount: message.imageAttachments.count + message.fileReferences.count + message.agentReferences.count + message.boardReferences.count,
                     kind: message.isSteer ? .heldSteer : .queued)
                 if message.isSteer { state.steers.append(entry) } else { state.queued.append(entry) }
             case .compaction(let compaction):
@@ -8691,7 +8691,7 @@ final class AgentSupervisor {
         state.steers += (deliveringSteers[id] ?? []).map {
             ComposerQueueRailState.Item(
                 id: $0.id, text: $0.message.text,
-                attachmentCount: $0.message.imageAttachments.count + $0.message.fileReferences.count + $0.message.agentReferences.count,
+                attachmentCount: $0.message.imageAttachments.count + $0.message.fileReferences.count + $0.message.agentReferences.count + $0.message.boardReferences.count,
                 kind: .deliveringSteer)
         }
         if pausedQueues.contains(id) { state.pause = queuePauseReasons[id] ?? .held }
@@ -8873,7 +8873,7 @@ final class AgentSupervisor {
                 imageAttachments: entry.prompt.prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) },
                 fileReferences: entry.prompt.prompt.fileReferences.map {
                     AgentComposerDraftFileReference(displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path)
-                }, agentReferences: entry.prompt.prompt.agentReferences, queuedAt: Date())
+                }, agentReferences: entry.prompt.prompt.agentReferences, boardReferences: entry.prompt.prompt.boardReferences, queuedAt: Date())
         }
         pauseQueue(id, .afterStop)
         appendLocalNotice(id: id, key: "forced-not-sent-\(UUID().uuidString)", title: "Not sent",
@@ -9092,7 +9092,7 @@ final class AgentSupervisor {
                     displayName: $0.displayName, contentType: $0.contentType,
                     fileURL: URL(fileURLWithPath: $0.path))
             }
-            return AgentPrompt(text: message.text, imageAttachments: prepared, fileReferences: fileReferences, agentReferences: message.agentReferences)
+            return AgentPrompt(text: message.text, imageAttachments: prepared, fileReferences: fileReferences, agentReferences: message.agentReferences, boardReferences: message.boardReferences)
         } catch {
             warn("AgentSupervisor: not sending queued message for agent \(id.rawValue.uuidString): attachment no longer valid")
             let threadId = Self.threadId(for: id)

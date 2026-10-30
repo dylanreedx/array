@@ -61,17 +61,20 @@ public struct AgentPrompt: Equatable, Sendable {
     public var imageAttachments: [AgentPromptImageAttachment]
     public var fileReferences: [AgentPromptFileReference]
     public var agentReferences: [AgentPromptReference]
+    public var boardReferences: [BoardPromptReference]
 
     public init(
         text: String = "",
         imageAttachments: [AgentPromptImageAttachment] = [],
         fileReferences: [AgentPromptFileReference] = [],
-        agentReferences: [AgentPromptReference] = []
+        agentReferences: [AgentPromptReference] = [],
+        boardReferences: [BoardPromptReference] = []
     ) {
         self.text = text
         self.imageAttachments = imageAttachments
         self.fileReferences = fileReferences
         self.agentReferences = AgentPromptReference.unique(agentReferences)
+        self.boardReferences = BoardPromptReference.unique(boardReferences)
     }
 
     public init(_ text: String) {
@@ -82,7 +85,7 @@ public struct AgentPrompt: Equatable, Sendable {
     /// file reference is. Keep this provider-neutral predicate in one place so
     /// keyboard, composer, and supervisor routes agree on attachment-only sends.
     public var providerText: String {
-        AgentReferencePromptEnvelope.text(text, references: agentReferences)
+        BoardReferencePromptEnvelope.text(AgentReferencePromptEnvelope.text(text, references: agentReferences), references: boardReferences)
     }
 
     public var isEmpty: Bool {
@@ -90,5 +93,6 @@ public struct AgentPrompt: Equatable, Sendable {
             && imageAttachments.isEmpty
             && fileReferences.isEmpty
             && agentReferences.isEmpty
+            && boardReferences.isEmpty
     }
 }

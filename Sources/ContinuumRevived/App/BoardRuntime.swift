@@ -25,6 +25,22 @@ enum BoardCommandOutcome: Equatable {
     case persistenceFailed(String)
 }
 
+enum BoardLifecycleError: LocalizedError {
+    case boardUnavailable
+    case boardAlreadyOpen
+    case bindingChanged
+    case rollbackFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .boardUnavailable: return "This board is unavailable."
+        case .boardAlreadyOpen: return "This board already has an open tile."
+        case .bindingChanged: return "The board's open tile changed. Try again."
+        case .rollbackFailed(let message): return "The board could not be restored: \(message)"
+        }
+    }
+}
+
 @MainActor
 final class BoardRuntime {
     private let projectStore: any ProjectStoring
@@ -37,6 +53,9 @@ final class BoardRuntime {
     /// the user's finger; anything else applies immediately and the live drag
     /// absorbs it on its next pointer event.
     private(set) var cardHeldByPointer: UUID?
+
+    /// Refresh document lists after a committed metadata or binding change.
+    var onBoardIndexChanged: (() -> Void)?
 
     /// Applied to every tile this runtime adopts. The app installs it once; the
     /// runtime knows nothing about agents or supervisors itself.
@@ -56,6 +75,9 @@ final class BoardRuntime {
     /// The board for `id`, loaded from disk on first use and cached after.
     func board(id: UUID) -> Board? {
         if let cached = boards[id] { return cached }
+        // Recovery backups may outlive deliberate deletion. Only indexed
+        // documents are live; never resurrect one by loading an old backup.
+        guard boardIndexEntries().contains(where: { $0.id == id }) else { return nil }
         guard let loaded = try? projectStore.tryLoadBoard(id: id) ?? nil else { return nil }
         boards[id] = loaded
         return loaded
@@ -74,21 +96,30 @@ final class BoardRuntime {
     func createBoard(id: UUID, title: String, now: Date = Date()) -> Board? {
         let board = Board.makeDefault(id: id, title: title, now: now)
         do {
+            var state = try projectStore.tryLoadBoardState() ?? BoardState(boards: [])
+            guard !state.boards.contains(where: { $0.id == id }) else { return nil }
             try projectStore.saveBoard(board)
-            var state = (try? projectStore.tryLoadBoardState() ?? nil) ?? BoardState(boards: [])
             state.boards.append(BoardIndexEntry(
                 id: id, tileId: nil, title: title, createdAt: now, updatedAt: now))
-            try projectStore.saveBoardState(state)
+            do { try projectStore.saveBoardState(state) }
+            catch {
+                // Creation never leaves an undiscoverable document on an index failure.
+                try? projectStore.deleteBoard(id: id)
+                return nil
+            }
         } catch {
             return nil
         }
         boards[id] = board
+        onBoardIndexChanged?()
         return board
     }
 
     // MARK: - View attachment
 
     func attach(_ view: KanbanTileNSView, to boardId: UUID) {
+        // A tile can switch documents; remove its previous command/undo owner first.
+        detach(view)
         var existing = (views[boardId] ?? []).filter { $0.view != nil }
         guard !existing.contains(where: { $0.view === view }) else { return }
         existing.append(WeakBoardView(view: view))
@@ -97,16 +128,28 @@ final class BoardRuntime {
         view.boardIdForUndo = boardId
         view.onCommand = { [weak self, weak view] command in
             guard let self, let view else { return }
-            _ = self.apply(command, to: boardId, originatingView: view)
+            switch self.apply(command, to: boardId, originatingView: view) {
+            case .applied, .rebased: break
+            case .persistenceFailed(let message): view.onTaskActionError?(message)
+            case .rejected(let error): view.onTaskActionError?(error.description)
+            case .rejectedCardHeldByPointer:
+                view.onTaskActionError?("Finish dragging this task before changing it.")
+            }
         }
         tileConfigurator?(view)
-        if let board = board(id: boardId) { view.render(board) }
+        if let board = board(id: boardId) {
+            view.setTitleBarIdentity(title: board.title)
+            view.render(board)
+        }
     }
 
     func detach(_ view: KanbanTileNSView) {
         for (boardId, entries) in views {
             views[boardId] = entries.filter { $0.view !== view && $0.view != nil }
         }
+        view.onCommand = nil
+        view.boardRuntime = nil
+        view.boardIdForUndo = nil
     }
 
     /// The undo stack for a board, created on first use. Deliberately NOT the
@@ -153,7 +196,26 @@ final class BoardRuntime {
         // Persist BEFORE publishing. A view that renders a state the disk does
         // not hold is a lie that survives relaunch.
         do {
+            // Read before writing so a damaged index cannot be silently replaced.
+            let storedState = try projectStore.tryLoadBoardState()
             try projectStore.saveBoard(transaction.after)
+            if var state = storedState,
+               let index = state.boards.firstIndex(where: { $0.id == boardId }) {
+                state.boards[index].title = transaction.after.title
+                state.boards[index].updatedAt = now
+                do {
+                    try projectStore.saveBoardState(state)
+                } catch {
+                    do { try projectStore.saveBoard(transaction.before) }
+                    catch {
+                        // The durable board remains authoritative even if rollback fails.
+                        boards.removeValue(forKey: boardId)
+                        if let durable = board(id: boardId) { broadcast(durable, for: boardId) }
+                        return .persistenceFailed(BoardLifecycleError.rollbackFailed(error.localizedDescription).localizedDescription)
+                    }
+                    throw error
+                }
+            }
         } catch {
             boards[boardId] = transaction.before
             broadcast(transaction.before, for: boardId)
@@ -163,6 +225,7 @@ final class BoardRuntime {
         boards[boardId] = transaction.after
         if recordUndo { history(for: boardId).record(transaction) }
         broadcast(transaction.after, for: boardId, skipping: nil)
+        onBoardIndexChanged?()
         onCommittedTransaction?(transaction, actingAgent)
         return transaction.rebasedAnchors
             ? .rebased(revision: transaction.after.revision)
@@ -207,6 +270,7 @@ final class BoardRuntime {
         views[boardId] = live
         for entry in live {
             guard let view = entry.view, view !== skipping else { continue }
+            view.setTitleBarIdentity(title: board.title)
             view.render(board)
         }
     }
@@ -216,27 +280,83 @@ final class BoardRuntime {
     /// Closing a board TILE is closing a window, not deleting the board — the
     /// same rule `case .managedAgent` states for agents. The index entry loses
     /// its tile pointer and the file stays.
-    func detachTile(_ tileId: UUID, boardId: UUID) {
-        Self.detachTile(tileId, boardId: boardId, in: projectStore)
+    @discardableResult
+    func detachTile(_ tileId: UUID, boardId: UUID) -> Error? {
+        let error = Self.detachTile(tileId, boardId: boardId, in: projectStore)
+        if error == nil { onBoardIndexChanged?() }
+        return error
     }
 
-    /// The same index edit for callers that hold a store but no runtime — the
-    /// tile-delete path resolves a `ProjectStoring`, not a controller. One
-    /// implementation, so the two cannot drift.
-    static func detachTile(_ tileId: UUID, boardId: UUID, in store: any ProjectStoring) {
-        guard var state = try? store.tryLoadBoardState() ?? nil else { return }
-        guard let index = state.boards.firstIndex(where: { $0.id == boardId }) else { return }
-        guard state.boards[index].tileId == tileId else { return }
-        state.boards[index].tileId = nil
-        try? store.saveBoardState(state)
+    @discardableResult
+    static func detachTile(_ tileId: UUID, boardId: UUID, in store: any ProjectStoring) -> Error? {
+        do {
+            guard var state = try store.tryLoadBoardState(),
+                  let index = state.boards.firstIndex(where: { $0.id == boardId }),
+                  state.boards[index].tileId == tileId else { return nil }
+            state.boards[index].tileId = nil
+            try store.saveBoardState(state)
+            return nil
+        } catch { return error }
     }
 
-    func bindTile(_ tileId: UUID, to boardId: UUID) {
-        guard var state = try? projectStore.tryLoadBoardState() ?? nil else { return }
-        guard let index = state.boards.firstIndex(where: { $0.id == boardId }) else { return }
+    @discardableResult
+    func bindTile(_ tileId: UUID, to boardId: UUID) -> Error? {
+        do { try setTileBinding(tileId, for: boardId); return nil }
+        catch { return error }
+    }
+
+    /// The index is a discovery aid. Callers first resolve actual canvas ownership;
+    /// this guards against overwriting another tile's durable binding.
+    func setTileBinding(_ tileId: UUID?, for boardId: UUID) throws {
+        guard var state = try projectStore.tryLoadBoardState(),
+              let index = state.boards.firstIndex(where: { $0.id == boardId }),
+              board(id: boardId) != nil else { throw BoardLifecycleError.boardUnavailable }
+        if let existing = state.boards[index].tileId, let tileId, existing != tileId {
+            throw BoardLifecycleError.boardAlreadyOpen
+        }
         state.boards[index].tileId = tileId
-        try? projectStore.saveBoardState(state)
+        try projectStore.saveBoardState(state)
+        onBoardIndexChanged?()
     }
+
+    /// One index write changes both bindings; failure leaves both unchanged.
+    func switchTileBinding(_ tileId: UUID, from sourceId: UUID, to destinationId: UUID) throws {
+        guard sourceId != destinationId else { return }
+        guard var state = try projectStore.tryLoadBoardState(),
+              let source = state.boards.firstIndex(where: { $0.id == sourceId }),
+              let destination = state.boards.firstIndex(where: { $0.id == destinationId }),
+              board(id: destinationId) != nil else { throw BoardLifecycleError.boardUnavailable }
+        guard state.boards[source].tileId == tileId else { throw BoardLifecycleError.bindingChanged }
+        guard state.boards[destination].tileId == nil else { throw BoardLifecycleError.boardAlreadyOpen }
+        state.boards[source].tileId = nil
+        state.boards[destination].tileId = tileId
+        try projectStore.saveBoardState(state)
+        onBoardIndexChanged?()
+    }
+
+    /// Permanent deletion is separate from closing and requires a closed board.
+    /// Remove the document first, then its index; restore the document if the
+    /// index write fails. Attachments are retained because other cards may share them.
+    func deleteClosedBoard(id: UUID) throws {
+        guard var state = try projectStore.tryLoadBoardState(),
+              let index = state.boards.firstIndex(where: { $0.id == id }),
+              let current = board(id: id) else { throw BoardLifecycleError.boardUnavailable }
+        guard state.boards[index].tileId == nil else { throw BoardLifecycleError.boardAlreadyOpen }
+        try projectStore.deleteBoard(id: id)
+        state.boards.remove(at: index)
+        do { try projectStore.saveBoardState(state) }
+        catch {
+            let original = error
+            do { try projectStore.saveBoard(current) }
+            catch { throw BoardLifecycleError.rollbackFailed(error.localizedDescription) }
+            throw original
+        }
+        boards.removeValue(forKey: id)
+        histories.removeValue(forKey: id)
+        views.removeValue(forKey: id)
+        onBoardIndexChanged?()
+    }
+
 }
 
 private struct WeakBoardView {

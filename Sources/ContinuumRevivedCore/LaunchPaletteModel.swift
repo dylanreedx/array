@@ -10,6 +10,7 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case fanOutQueueSelection
     case newNote
     case newBoard
+    case openBoard
     case newBrowser
     case newIOSPreview
     case openFile
@@ -67,6 +68,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Fan Out Selected Tickets…"
         case .newNote:
             return "New Note"
+        case .openBoard:
+            return "Open Board…"
         case .newBoard:
             return "New Board"
         case .newBrowser:
@@ -144,6 +147,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["fan", "out", "fanout", "agents", "tickets", "queue", "selected", "batch"]
         case .newNote:
             return ["new", "note"]
+        case .openBoard:
+            return ["open", "board", "saved", "closed", "reopen", "kanban"]
         case .newBoard:
             return ["new", "board", "kanban", "tasks", "cards"]
         case .newBrowser:
@@ -850,6 +855,7 @@ public enum LaunchPaletteModel {
         case .newHeadlessAgent: return item(row, .developer, "Background agent", "Run without a canvas tile", "bolt.horizontal", ["headless", "tileless"], false, false, "action:headless-agent")
         case .fanOutQueueSelection: return item(row, .developer, "Fan out selected tickets", "Start one agent per selected ticket", "arrow.triangle.branch", ["queue", "batch"], false, false, "action:fan-out")
         case .newNote: return item(row, .create, "Note", "Add a canvas note", "note.text", ["new"], true, true, "action:new-note")
+        case .openBoard: return item(row, .actions, "Open board…", "Open a saved project board", "rectangle.split.3x1", ["saved", "reopen", "closed"], false, true, "action:open-board")
         case .newBoard: return item(row, .create, "Board", "Add a kanban board", "rectangle.split.3x1", ["new", "kanban"], true, true, "action:new-board")
         case .newBrowser: return item(row, .create, "Browser", "Open a web tile", "globe", ["new", "web"], true, true, "action:new-browser")
         case .newIOSPreview: return item(row, .create, "iOS Preview", "Run an iPhone or iPad simulator on the canvas", "iphone", ["simulator", "device", "ipad"], true, true, "action:ios-preview")

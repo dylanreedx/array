@@ -20,14 +20,16 @@ final class AgentReferenceDrag {
     }
 
     private struct Source {
-        weak var view: ManagedAgentTileNSView?
+        weak var view: TileNSView?
     }
     let references: [AgentPromptReference]
     var reference: AgentPromptReference { references[0] }
+    private weak var boardSource: KanbanTileNSView?
+    private let sourceBoardID: UUID?
     private let sources: [Source]
     /// The dragged tile's world frame at rest, where it waits while referencing.
     let restFrame: TileFrame
-    private weak var source: ManagedAgentTileNSView?
+    private weak var source: TileNSView?
     /// Topmost first.
     private let candidates: [Candidate]
     private(set) weak var recipient: ManagedAgentTileNSView?
@@ -36,6 +38,24 @@ final class AgentReferenceDrag {
     convenience init?(source: ManagedAgentTileNSView) {
         guard let canvas = source.canvas else { return nil }
         self.init(sources: [source], canvas: canvas)
+    }
+
+    init?(board source: KanbanTileNSView) {
+        guard let canvas = source.canvas else { return nil }
+        let available: [Candidate] = canvas.tileViewsInVisualOrder.reversed().compactMap { view in
+            guard let target = view as? ManagedAgentTileNSView, target.acceptsBoardReference(from: source) else { return nil }
+            let rest = canvas.worldFrame(forTileFrame: target.tile.frame, tileId: target.tile.id)
+            let regions = target.agentReferenceDropRegions.map { $0.offsetBy(dx: rest.x, dy: rest.y) }
+            return regions.isEmpty ? nil : Candidate(view: target, regions: regions)
+        }
+        guard !available.isEmpty else { return nil }
+        references = []
+        sources = [Source(view: source)]
+        self.source = source
+        boardSource = source
+        sourceBoardID = source.board.id
+        candidates = available
+        restFrame = canvas.worldFrame(forTileFrame: source.tile.frame, tileId: source.tile.id)
     }
 
     /// A batch is all-or-nothing: every selected tile must resolve to an agent,
@@ -57,6 +77,7 @@ final class AgentReferenceDrag {
         }
         guard !candidates.isEmpty else { return nil }
         self.references = references
+        sourceBoardID = nil
         self.sources = sources.map { Source(view: $0) }
         self.source = source
         restFrame = canvas.worldFrame(forTileFrame: source.tile.frame, tileId: source.tile.id)
@@ -68,7 +89,8 @@ final class AgentReferenceDrag {
         guard let view = candidates.first(where: { $0.regions.contains { $0.contains(worldPoint) } })?.view,
               view.window === source.window, !view.hasRetiredFromScene,
               sources.allSatisfy({ $0.view.map { !$0.hasRetiredFromScene && $0.window === view.window } ?? false }),
-              references.allSatisfy({ view.acceptsAgentReference($0) }) else { return nil }
+              references.allSatisfy({ view.acceptsAgentReference($0) }),
+              boardSource.map({ $0.board.id == sourceBoardID && view.acceptsBoardReference(from: $0) }) ?? true else { return nil }
         return view
     }
 
@@ -82,8 +104,8 @@ final class AgentReferenceDrag {
 
     /// The card beside the pointer, topmost on the canvas.
     func showCard(atWindowPoint windowPoint: NSPoint, in canvas: NSView) {
-        let name = references.count == 1 ? reference.displayName : "\(references.count) agents"
-        let card = self.card ?? AgentReferenceDragCard(name: name, tint: references.count == 1 ? source?.identityColor : nil)
+        let name = boardSource?.board.title ?? (references.count == 1 ? reference.displayName : "\(references.count) agents")
+        let card = self.card ?? AgentReferenceDragCard(name: name, tint: references.count == 1 ? (source as? ManagedAgentTileNSView)?.identityColor : nil)
         self.card = card
         if card.superview !== canvas || canvas.subviews.last !== card {
             canvas.addSubview(card, positioned: .above, relativeTo: nil)
@@ -95,6 +117,10 @@ final class AgentReferenceDrag {
 
     @discardableResult
     func commit(to recipient: ManagedAgentTileNSView) -> Bool {
+        if let sourceBoardID {
+            guard let boardSource, boardSource.board.id == sourceBoardID else { return false }
+            return recipient.handleBoardReference(from: boardSource, commit: true)
+        }
         guard references.allSatisfy({ recipient.acceptsAgentReference($0) }) else { return false }
         // The existing recipient queue waits for draft restore and serializes
         // additions. Every identity therefore survives one batch without one

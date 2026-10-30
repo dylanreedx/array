@@ -4371,6 +4371,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--board-library-check") {
+            do {
+                _ = NSApplication.shared
+                try BoardLibraryChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--board-tile-lifecycle-check") {
             do {
                 _ = NSApplication.shared
@@ -8284,7 +8295,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // the same rule `case .managedAgent` states below. The document and
             // its index row survive; only the tile pointer is cleared.
             if let boardId = tile.metadata.boardId, let projectStore = ownerStore {
-                BoardRuntime.detachTile(id, boardId: boardId, in: projectStore)
+                if let view = canvasView.tileView(for: id) as? KanbanTileNSView,
+                   !view.prepareForBoardNavigation() { return }
+                if let error = BoardRuntime.detachTile(id, boardId: boardId, in: projectStore) {
+                    presentSpawnRefusal(error.localizedDescription)
+                    return
+                }
+                if let view = canvasView.tileView(for: id) as? KanbanTileNSView {
+                    owner?.boardRuntime.detach(view)
+                }
             }
         case .diffReview:
             if let reviewId = tile.metadata.reviewId,
@@ -8339,6 +8358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         } else {
             flushCanvasSave()
         }
+        if tile.kind == .kanban, let owner { refreshBoardLibraries(controller: owner) }
         // A closed watch or Move here tile never owned anything to keep.
         dropDetachedExternalSessionAgents()
         refreshAgentSurfaces()
@@ -9166,8 +9186,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 transaction, actingAgent: actingAgent, runtime: runtime, projectID: projectID,
                 attachmentStore: attachmentStore)
         }
-        runtime.tileConfigurator = { [weak self, weak runtime] view in
-            guard let self else { return }
+        runtime.onBoardIndexChanged = { [weak self, weak controller] in
+            guard let self, let controller else { return }
+            self.refreshBoardLibraries(controller: controller)
+        }
+        runtime.tileConfigurator = { [weak self, weak runtime, weak controller] view in
+            guard let self, let runtime, let controller else { return }
+            self.configureBoardLibrary(view, runtime: runtime, controller: controller)
             view.taskAttachmentStore = attachmentStore
             view.onTaskActionError = { [weak self] error in self?.presentSpawnRefusal(error) }
             view.agentDisplayName = { [weak self] id in self?.agentSupervisor.displayName(forAgent: id) }
@@ -9215,6 +9240,127 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         }
         return runtime
+    }
+
+    private func refreshBoardLibraries(controller: ZoneRuntimeController) {
+        guard let canvasView else { return }
+        for tile in canvasView.navigationTileSnapshots() where tile.kind == .kanban {
+            guard self.controller(owningTile: tile.tileId)?.project.id == controller.project.id,
+                  let view = canvasView.tileView(for: tile.tileId) as? KanbanTileNSView else { continue }
+            if var updated = canvasView.tileRecord(for: tile.tileId),
+               let boardId = updated.metadata.boardId, let board = controller.boardRuntime.board(id: boardId),
+               updated.title != board.title {
+                updated.title = board.title
+                _ = canvasView.materializeProjectTile(tileView: view, for: updated)
+                controller.scheduleCanvasSave()
+            }
+            view.refreshBoardLibrary()
+        }
+    }
+
+    private func configureBoardLibrary(_ view: KanbanTileNSView, runtime: BoardRuntime, controller: ZoneRuntimeController) {
+        let projectId = controller.project.id
+        view.boardLibraryProvider = { [weak runtime, weak controller, weak view] in
+            guard let runtime, let controller else { return [] }
+            do {
+                let openIds = Set(try controller.tileSpawner?.savedBoardTiles().compactMap { $0.metadata.boardId } ?? [])
+                return runtime.boardIndexEntries().map { BoardLibraryEntry(id: $0.id, title: $0.title, isOpen: openIds.contains($0.id)) }
+            } catch {
+                view?.onTaskActionError?(error.localizedDescription)
+                return []
+            }
+        }
+        view.onSelectBoard = { [weak self, weak view, weak controller] boardId in
+            guard let self, let view, let controller else { return }
+            let outcome = self.workspaceRuntime?.openBoard(projectId: projectId, boardId: boardId, replacingTileId: view.tile.id)
+                ?? controller.tileSpawner?.openSavedBoard(boardId, replacingTileId: view.tile.id)
+            if let outcome { self.finishBoardOpen(outcome) }
+            self.refreshBoardLibraries(controller: controller)
+        }
+        view.onCreateBoard = { [weak self, weak view] in
+            guard let self, let view, self.revealTileFromInbox(view.tile.id) else { return }
+            _ = self.spawnBoardFromPalette()
+        }
+        view.onRenameBoard = { [weak runtime] id, title in
+            guard let runtime else { return "The board is no longer available." }
+            switch runtime.apply(.renameBoard(title: title), to: id) {
+            case .applied, .rebased: return nil
+            case .persistenceFailed(let error): return error
+            case .rejected(let error): return error.description
+            case .rejectedCardHeldByPointer: return "Finish dragging the task before renaming this board."
+            }
+        }
+        view.onDeleteBoard = { [weak self, weak runtime, weak controller] id in
+            guard let self, let runtime, let controller, let board = runtime.board(id: id) else { return }
+            let alert = NSAlert()
+            alert.messageText = "Delete “\(board.title)”?"
+            alert.informativeText = "This deletes the board and its tasks. Closing its tile keeps them saved."
+            alert.addButton(withTitle: "Delete Board")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            do {
+                let tiles = try controller.tileSpawner?.savedBoardTiles().filter { $0.metadata.boardId == id } ?? []
+                for tile in tiles {
+                    let outcome = self.workspaceRuntime?.openBoard(projectId: projectId, boardId: id) ?? .existing(tile: tile)
+                    if case .failure = outcome { self.finishBoardOpen(outcome); return }
+                    guard self.canvasView?.tileView(for: tile.id) is KanbanTileNSView else {
+                        throw BoardLibraryError.locationUnavailable
+                    }
+                    self.deleteTile(id: tile.id)
+                    guard self.canvasView?.tileRecord(for: tile.id) == nil else { return }
+                }
+                try controller.flushCanvasSave()
+                try runtime.deleteClosedBoard(id: id)
+                self.refreshBoardLibraries(controller: controller)
+            } catch { self.presentSpawnRefusal(error.localizedDescription) }
+        }
+        view.onBoardViewStateChange = { [weak self, weak view, weak controller] state in
+            guard let self, let view, let controller, var tile = self.canvasView?.tileRecord(for: view.tile.id) else { return }
+            let toggled = (tile.metadata.boardViewState?.sidebarExpanded ?? false) != state.sidebarExpanded
+            tile.metadata.boardViewState = state
+            _ = self.canvasView?.materializeProjectTile(tileView: view, for: tile)
+            controller.scheduleCanvasSave()
+            // Divider drags use the controller's debounce rather than fsync on every pointer event.
+            if toggled {
+                do { try controller.flushCanvasSave() }
+                catch { self.presentSpawnRefusal(error.localizedDescription) }
+            }
+        }
+        view.refreshBoardLibrary()
+    }
+
+    private func finishBoardOpen(_ outcome: TileSpawner.SavedBoardOutcome) {
+        switch outcome {
+        case let .opened(tileId), let .switched(tileId): focusSpawnedTile(tileId)
+        case let .existing(tile): _ = revealTileFromInbox(tile.id)
+        case let .failure(error): presentSpawnRefusal(error.localizedDescription)
+        }
+    }
+
+    private let savedBoardPicker = ChoicePopoverController()
+
+    private func openBoardFromPalette() {
+        guard let spawner = spawnerForFilesystemCreation(), let owner = controller(owning: spawner),
+              let canvasView else {
+            presentSpawnRefusal("Choose a project before opening a saved board.")
+            return
+        }
+        let entries = configuredBoardRuntime(owner).boardIndexEntries()
+        guard !entries.isEmpty else {
+            presentSpawnRefusal("This project has no saved boards. Create a New Board to get started.")
+            return
+        }
+        savedBoardPicker.present(
+            items: entries.map { ChoiceItem(id: $0.id.uuidString, title: $0.title, icon: .system("rectangle.split.3x1")) },
+            selectedID: nil, presentation: .completions,
+            layout: .completion(.init(breadcrumb: "Open board", footer: "Enter Open · Esc Cancel", headerSymbol: "rectangle.split.3x1")),
+            anchor: NSRect(x: canvasView.bounds.midX, y: canvasView.bounds.midY, width: 1, height: 1),
+            relativeTo: canvasView, accessibilityLabel: "Saved boards",
+            onSelection: { [weak self, weak owner] item in
+                guard let self, let owner, let id = UUID(uuidString: item.id) else { return }
+                if let result = self.workspaceRuntime?.openBoard(projectId: owner.project.id, boardId: id)
+                    ?? owner.tileSpawner?.openSavedBoard(id) { self.finishBoardOpen(result) }
+            }, focusReturnView: canvasView)
     }
 
     /// One post-commit path for UI, API, lifecycle automation and undo. The
@@ -18381,6 +18527,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let before = tileCount()
             spawnNoteFromPalette()
             return tileCount() > before
+        case .openBoard:
+            openBoardFromPalette()
+            return false
         case .newBoard:
             let before = tileCount()
             spawnBoardFromPalette()

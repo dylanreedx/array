@@ -772,6 +772,11 @@ class TileNSView: NSView, TokenThemed {
     /// The rect the tile title is really drawn into. `agentStatus` has to be set on
     /// the bar first — the title's available width depends on the pill.
     var qaTitleRect: NSRect? { titleBar?.qaTitleRect() }
+    /// Exact rendered title bounds in tile coordinates, for title gestures.
+    var titleHitRect: NSRect? {
+        guard let titleBar else { return nil }
+        return titleBar.convert(titleBar.renderedTitleRect, to: self)
+    }
     func applyDocumentTokens(to textView: NSTextView) {
         textView.backgroundColor = SurfaceToken.tileBody.color.nsColor(in: self)
         textView.textColor = TextToken.textPrimary.color.nsColor(in: self)
@@ -1152,6 +1157,7 @@ class TileNSView: NSView, TokenThemed {
             canvas?.beginGeometryEdit(.moveTile, tileIds: [tile.id], includeAllZones: true)
             canvas?.beginAutoLayoutGesture()
             if let agent = self as? ManagedAgentTileNSView { agentReferenceDrag = AgentReferenceDrag(source: agent) }
+            else if let board = self as? KanbanTileNSView { agentReferenceDrag = AgentReferenceDrag(board: board) }
             return
         }
         // Below the grab strip: defer to subclass / content view.
@@ -1255,7 +1261,7 @@ class TileNSView: NSView, TokenThemed {
                 canvas?.cancelGeometryEdit()
                 _ = canvas?.finishAutoLayoutGesture()
                 cancelActiveGeometryGesture()
-                recipient.handleAgentReference(referenceDrag.reference, commit: true)
+                referenceDrag.commit(to: recipient)
                 return
             }
         }
@@ -2919,7 +2925,8 @@ private final class TitleBarView: NSView, TokenThemed {
 
     /// QA: the rect the title is really drawn into, for the assertion that it never
     /// runs under the pill.
-    func qaTitleRect() -> NSRect { titleRect(theme: effectiveTokenTheme) }
+    var renderedTitleRect: NSRect { titleRect(theme: effectiveTokenTheme) }
+    func qaTitleRect() -> NSRect { renderedTitleRect }
 
     /// QA: the world x of the leftmost drag dot's outer edge — the thing the pill
     /// must not cross.

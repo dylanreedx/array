@@ -28,9 +28,11 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed, AgentPageZoomSca
     private let stack = NSStackView(frame: .zero)
     private var references: [AgentPromptFileReference] = []
     private var agentReferences: [AgentPromptReference] = []
+    private var boardReferences: [BoardPromptReference] = []
 
     var onRemove: ((AgentPromptFileReference) -> Void)?
     var onRemoveAgent: ((AgentPromptReference) -> Void)?
+    var onRemoveBoard: ((BoardPromptReference) -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -42,7 +44,7 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed, AgentPageZoomSca
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: references.isEmpty && agentReferences.isEmpty ? 0 : railHeight)
+        NSSize(width: NSView.noIntrinsicMetric, height: references.isEmpty && agentReferences.isEmpty && boardReferences.isEmpty ? 0 : railHeight)
     }
 
     func setReferences(_ newReferences: [AgentPromptFileReference]) {
@@ -55,6 +57,18 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed, AgentPageZoomSca
         setAccessibilityLabel("Referenced agents")
         setAccessibilityHelp("Agents referenced in this draft. References do not send messages or share conversations.")
         rebuildChips()
+    }
+
+    func setBoardReferences(_ references: [BoardPromptReference]) {
+        boardReferences = references
+        setAccessibilityLabel("References")
+        setAccessibilityHelp("Agents and boards referenced in this draft. References grant no additional access.")
+        rebuildChips()
+    }
+
+    func qaRemoveBoard(at index: Int) {
+        guard boardReferences.indices.contains(index) else { return }
+        onRemoveBoard?(boardReferences[index])
     }
 
     private func rebuildChips() {
@@ -83,7 +97,15 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed, AgentPageZoomSca
             chip.applyTokens(theme: theme)
             stack.addArrangedSubview(chip)
         }
-        isHidden = references.isEmpty && agentReferences.isEmpty
+        for reference in boardReferences {
+            let chip = ComposerFileReferenceChipView(name: reference.displayName, glyph: "▤", label: "Referenced board, \(reference.displayName)", zoom: pageZoom) { [weak self] in
+                self?.onRemoveBoard?(reference)
+            }
+            chip.toolTip = "\(reference.displayName) · \(reference.boardID.uuidString)"
+            chip.applyTokens(theme: theme)
+            stack.addArrangedSubview(chip)
+        }
+        isHidden = references.isEmpty && agentReferences.isEmpty && boardReferences.isEmpty
         invalidateIntrinsicContentSize()
         needsLayout = true
     }

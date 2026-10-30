@@ -61,6 +61,7 @@ public enum CommandRegistry {
                 globalShortcut("global.newNote", command: "tile.newNote", keyCode: 45, modifiers: [.command, .shift], priority: .canvasRail)
             ]),
             definition("tile.newBoard", .newBoard, aliases: ["kanban", "board", "tasks"]),
+            definition("board.open", .openBoard, aliases: ["saved boards", "reopen board"]),
             definition("tile.newBrowser", .newBrowser, aliases: ["web"]),
             definition("tile.newIOSPreview", .newIOSPreview, aliases: ["ios", "simulator", "iphone", "ipad"]),
             definition("tile.openFile", .openFile, aliases: ["document"]),

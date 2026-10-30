@@ -273,6 +273,16 @@ public struct FileEditorViewState: Codable, Equatable, Sendable {
     }
 }
 
+/// User-owned presentation of a board tile's project library.
+public struct BoardViewState: Codable, Equatable, Sendable {
+    public var sidebarExpanded: Bool
+    public var sidebarWidth: Double
+    public init(sidebarExpanded: Bool = false, sidebarWidth: Double = 220) {
+        self.sidebarExpanded = sidebarExpanded
+        self.sidebarWidth = sidebarWidth
+    }
+}
+
 public struct TileMetadata: Codable, Equatable, Sendable {
     public var launchProfileId: String?
     public var projectRelativeCwd: String?
@@ -312,6 +322,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     /// `<project root>/.array/boards/<boardId>.json`, deliberately outside the
     /// canvas: a card move must not race the canvas persistence merge nor land
     /// on the geometry undo stack.
+    public var boardViewState: BoardViewState?
     public var boardId: UUID?
 
     public init(
@@ -341,6 +352,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         agentTerminalFace: AgentTerminalFaceState? = nil,
         markdownDocumentMode: MarkdownDocumentMode? = nil,
         fileEditorViewState: FileEditorViewState? = nil,
+        boardViewState: BoardViewState? = nil,
         boardId: UUID? = nil
     ) {
         self.launchProfileId = launchProfileId
@@ -369,6 +381,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.agentTerminalFace = agentTerminalFace
         self.markdownDocumentMode = markdownDocumentMode
         self.fileEditorViewState = fileEditorViewState
+        self.boardViewState = boardViewState
         self.boardId = boardId
     }
 
@@ -399,6 +412,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case agentTerminalFace
         case markdownDocumentMode
         case fileEditorViewState
+        case boardViewState
         case boardId
     }
 
@@ -430,6 +444,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(agentTerminalFace, forKey: .agentTerminalFace)
         try container.encodeIfPresent(markdownDocumentMode, forKey: .markdownDocumentMode)
         try container.encodeIfPresent(fileEditorViewState, forKey: .fileEditorViewState)
+        try container.encodeIfPresent(boardViewState, forKey: .boardViewState)
         try container.encodeIfPresent(boardId, forKey: .boardId)
     }
 

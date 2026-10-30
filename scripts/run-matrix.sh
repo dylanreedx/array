@@ -49,6 +49,7 @@ FAST=0
 CODEX_PERMISSIONS_ONLY=0
 TILE_SELECTION_ONLY=0
 AGENT_REFERENCE_ONLY=0
+BOARDS_ONLY=0
 WORKSPACE_SELECTOR_ONLY=0
 AGENT_TILE_MENU_ONLY=0
 TRANSCRIPT_VIEWPORT_ONLY=0
@@ -83,6 +84,10 @@ if [[ $# -gt 0 ]]; then
       ;;
     --tile-selection)
       TILE_SELECTION_ONLY=1
+      shift
+      ;;
+    --boards)
+      BOARDS_ONLY=1
       shift
       ;;
     --agent-reference)
@@ -127,7 +132,9 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge]
+Usage: scripts/run-matrix.sh [--boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge]
+
+--boards rebuilds app/CoreChecks and reports the board library, lifecycle, API and reference witnesses.
 
 Runs the project verification matrix. --fast skips the slower packaging bundle
 probe and keeps the build/check/app-flag/git hygiene gates used by the opt-in
@@ -679,6 +686,25 @@ if [[ "$TRANSCRIPT_VIEWPORT_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --transcript-canvas-check
   run_app_check .build/debug/Array --tile-chrome-canvas-check
   matrix_report 'Transcript viewport matrix (targeted)'
+  exit $?
+fi
+if [[ "$BOARDS_ONLY" -eq 1 ]]; then
+  run_leg scripts/check-color-hygiene.sh
+  run swift build --product Array
+  run swift build --product ContinuumRevivedCoreChecks
+  run_app_check .build/debug/Array --board-library-check
+  run_app_check .build/debug/Array --board-tile-lifecycle-check
+  run_app_check .build/debug/Array --board-interaction-check
+  run_app_check .build/debug/Array --workspace-api-board-check
+  run_app_check .build/debug/Array --agent-tile-reference-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --agent-composer-draft-store-check
+  run_app_check .build/debug/Array --board-task-workflow-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --agent-transcript-projection-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --agent-prompt-image-contract-check
+  run_leg swift run ContinuumRevivedPaletteChecks
+  matrix_report 'Board matrix (targeted)'
   exit $?
 fi
 if [[ "$AGENT_REFERENCE_ONLY" -eq 1 ]]; then
@@ -1284,6 +1310,7 @@ run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 run_leg npm test --prefix Tools/TaskEditor
 run_app_check .build/debug/Array --board-interaction-check
 run_app_check .build/debug/Array --board-tile-lifecycle-check
+run_app_check .build/debug/Array --board-library-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check
 run_app_check .build/debug/Array --zone-registry-refcount-check
 run_app_check .build/debug/Array --agent-message-bus-check
