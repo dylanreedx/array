@@ -2,6 +2,9 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+#if canImport(Glibc)
+import Glibc
+#endif
 import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedCollaborationClient
 import ContinuumRevivedCollaborationService
@@ -76,12 +79,20 @@ final class RelayProcess {
     /// No graceful shutdown: in-flight requests and held reads are cut.
     func kill() {
         guard let process, process.isRunning else { return }
+        #if canImport(Glibc)
+        Glibc.kill(process.processIdentifier, SIGKILL)
+        #else
         Darwin.kill(process.processIdentifier, SIGKILL)
+        #endif
         process.waitUntilExit()
         self.process = nil
     }
     private static func freePort() throws -> Int {
+        #if canImport(Glibc)
+        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #else
         let fd = socket(AF_INET, SOCK_STREAM, 0)
+        #endif
         guard fd >= 0 else { throw ScaleFailure(message: "socket") }
         defer { close(fd) }
         var address = sockaddr_in()
