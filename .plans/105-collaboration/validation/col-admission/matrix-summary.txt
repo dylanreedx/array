@@ -1,0 +1,28 @@
+app-build lock acquired after 481s
+==> scripts/check-matrix-inventory.sh
+==> swift build --disable-sandbox --skip-update --product Array
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationServiceChecks
+==> swift build --disable-sandbox --skip-update --product continuum-relay
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+==> .build/debug/ContinuumRevivedCollaborationChecks
+==> .build/debug/ContinuumRevivedCollaborationServiceChecks
+FAILED: .build/debug/ContinuumRevivedCollaborationServiceChecks exited 1 — recorded; the matrix continues so one regression cannot hide the rest.
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.SrcKUs CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.qaVdrE .build/debug/Array --collaboration-native-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.ccEpb6 CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.EQ3rCV .build/debug/Array --ui-probe-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.52skOJ CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.tttFBC .build/debug/Array --menu-contract-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+==> .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
+==> python3 scripts/check-collaboration-pair.py
+==> swift run --skip-build ContinuumRevivedRelayCoreChecks
+==> swift run --skip-build ContinuumRevivedRelayIntegrationChecks
+---- Collaboration matrix (targeted): 10 leg(s) run ----
+FAILED (1):
+Collaboration matrix (targeted) FAILED: 1 leg(s) regressed. Their output is above, in order.
+EXIT 1
+
+Service suite reruns, same binary:
+run 1: FAIL: BackupCheckFailure(message: "verification refuses a backup with damaged pages")
+run 2: passed
+run 3: FAIL: BackupCheckFailure(message: "verification refuses a backup with damaged pages")

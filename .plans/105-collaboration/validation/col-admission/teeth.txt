@@ -1,0 +1,15 @@
+== a1-preexecute-refusal-uncertain
+RED:   FAIL: RevocationRaceFailure(message: "claim lapses before admission: service receipt and host journal both say refused, no execution")
+GREEN: Collaboration contracts passed (reducer, reviewed publications, native controller and localhost HTTP; no mounted-scene or runner claims).
+== f1-deliver-hook-dropped
+RED:   FAIL: HostDispatchCheckFailure(message: "the production controller freezes the delivered prompt in its freshness ledger, awaiting the host")
+GREEN: Collaboration contracts passed (reducer, reviewed publications, native controller and localhost HTTP; no mounted-scene or runner claims).
+== f2-refresh-record-dropped
+RED:   FAIL: HostDispatchCheckFailure(message: "a relaunched controller\'s refresh settles the host\'s acceptance: the agent was given the current agreement revision")
+GREEN: Collaboration contracts passed (reducer, reviewed publications, native controller and localhost HTTP; no mounted-scene or runner claims).
+== f3-settle-loop-dropped
+RED:   FAIL: HostDispatchCheckFailure(message: "refresh settles older prompts too: the interrupted one is no longer awaiting the host")
+GREEN: Collaboration contracts passed (reducer, reviewed publications, native controller and localhost HTTP; no mounted-scene or runner claims).
+== k1-forked-from-ignored
+RED:   FAIL: provider usage: a forked copy must count only what its thread adds (129,992 / 626) from codex's forkedFromId; lineage ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000001"], got 194988 / 939
+GREEN: Collaboration provider usage telemetry checks passed
