@@ -418,8 +418,8 @@ private func runRelayProcessLogAudit() async throws {
     let key = Data((0..<32).map { UInt8($0 &* 7 &+ 3) }), port = try await freeLoopbackPort(), adminPort = try await freeLoopbackPort()
     let collaborationPath = root.appendingPathComponent("collaboration.sqlite").path
     let stdoutURL = root.appendingPathComponent("stdout.log"), stderrURL = root.appendingPathComponent("stderr.log")
-    FileManager.default.createFile(atPath: stdoutURL.path, contents: nil)
-    FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
+    _ = FileManager.default.createFile(atPath: stdoutURL.path, contents: nil)
+    _ = FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
     // Provision people before the server owns the file; the operator seam is
     // not an HTTP route and its one-time output is not a diagnostic log.
     let operatorStore = try CollaborationStore(path: collaborationPath, masterKey: key)
@@ -505,7 +505,7 @@ private func runRelayProcessLogAudit() async throws {
         tool.arguments = arguments
         tool.environment = ["RELAY_COLLABORATION_DATABASE_PATH": collaborationPath, "RELAY_COLLABORATION_MASTER_KEY": key.base64EncodedString()]
         let out = root.appendingPathComponent("operator-\(UUID()).log")
-        FileManager.default.createFile(atPath: out.path, contents: nil)
+        _ = FileManager.default.createFile(atPath: out.path, contents: nil)
         let handle = try FileHandle(forWritingTo: out)
         tool.standardOutput = handle; tool.standardError = handle
         try tool.run(); tool.waitUntilExit(); try handle.close()
