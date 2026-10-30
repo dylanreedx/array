@@ -122,7 +122,7 @@ enum SharedAreaFreshnessSceneChecks {
         let artifactRevision = UUID()
         let quoted = Collaboration.ResultExcerpt(area: document.id, capturedBy: a.person,
             source: .init(incarnation: .init(object: second.id, hostGeneration: await script.generation(second.id)!), host: host, turn: "turn-7",
-                          sequence: 42, command: nil, artifact: .init(object: artifact.id, revision: artifactRevision, contentDigest: String(repeating: "c", count: 64))),
+                          position: .init(generation: 1, sequence: 42), command: nil, artifact: .init(object: artifact.id, revision: artifactRevision, contentDigest: String(repeating: "c", count: 64))),
             text: "Error type added; tests pass.")
         guard case .accepted = await sceneA.shareResultExcerpt(quoted, into: discussion.id, note: "My agent's result.") else {
             throw Failure(message: "owner's excerpt post was not accepted")

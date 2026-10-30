@@ -239,7 +239,7 @@ func runSharedAgentFreshnessChecks() async throws {
         let discussion = SharedArea.Item(id: .init(), kind: .discussion)
         try await edit([.admit(discussion, .init(id: .init(), object: discussion.id, rect: rect(1400)))])
         let shared = Collaboration.ResultExcerpt(area: initial.document.id, capturedBy: a.identity.person,
-            source: .init(incarnation: firstAgent, host: host.id, turn: "turn-3", sequence: 9, command: toFirst.command.id), text: "Parser change done.")
+            source: .init(incarnation: firstAgent, host: host.id, turn: "turn-3", position: .init(generation: 1, sequence: 9), command: toFirst.command.id), text: "Parser change done.")
         try await edit([.post(.init(id: .init(), object: discussion.id, author: a.identity.person, text: "Result from my agent.", excerpt: shared))])
         let teammateView = try await bb.state(area: area).document
         try freshnessCheck(teammateView.posts.last?.excerpt == shared && teammateView.posts.last?.excerpt?.source.turn == "turn-3",

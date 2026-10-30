@@ -111,7 +111,7 @@ enum SharedAreaExcerptPresentation {
     static func sourceLine(_ excerpt: Collaboration.ResultExcerpt) -> String {
         let source = excerpt.source
         var parts = ["Turn \(source.turn)"]
-        if let sequence = source.sequence { parts.append("event \(sequence)") }
+        if let position = source.position { parts.append("event \(position.sequence)") }
         parts.append("host \(short(source.host.rawValue))")
         parts.append("session \(short(source.incarnation.hostGeneration))")
         if let artifact = source.artifact {
