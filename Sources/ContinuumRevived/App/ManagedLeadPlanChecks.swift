@@ -20,9 +20,11 @@ enum ManagedLeadPlanChecks {
         let supervisor = b.supervisor, lead = b.f.agentId
         try b.f.delegate.reconciledManagedSessionSource.reconcile(
             registry: b.f.delegate.registryStore!.loadOrEmpty(), reason: .continuumRestarted, now: Date())
-        try expect(supervisor.setMode(.managed, for: lead), "could not enable managed lead")
         try expect(supervisor.setProviderSettings(agentID: lead, harness: .claudeCode, model: ManagedModeChecks.model),
                    "could not select lead harness")
+        ManagedSettingChecks.write(AgentManagedModeConfig.enabledKey, true, b)
+        try expect(supervisor.records[lead]?.mode == .managed && supervisor.records[lead]?.parentAgentID == nil,
+                   "Settings did not enable the top-level lead")
         // The API fixture uses a note as the lead's placement anchor. Replace
         // that fixture-only stand-in through the production spawn/wiring route.
         for entry in b.f.canvas.allWorkspaceTiles() where entry.zoneId == b.f.zoneB {
@@ -41,8 +43,8 @@ enum ManagedLeadPlanChecks {
             throw WorkspaceAgentReportChecks.Failure(description: "production spawn did not mount lead tile")
         }
         try expect(tile.qaLeadPlanView.isHidden, "unposted plan visible")
-        let helper = try await ManagedModeChecks.delegate(b, mode: nil, label: "HOLD-login")
-        let failed = try await ManagedModeChecks.delegate(b, mode: nil, label: "Compare error screen")
+        let helper = try await delegateHelper(b, label: "HOLD-login")
+        let failed = try await delegateHelper(b, label: "Compare error screen")
         try await ManagedModeChecks.settled(b, failed)
         try await AgentPresenceChecks.eventually("helper did not start") { supervisor.derivedStreamStatus(for: helper) == .working }
         _ = try ManagedModeChecks.argv(b, helper)
@@ -90,9 +92,9 @@ enum ManagedLeadPlanChecks {
             try expect(reply.isError && String(describing: reply.reply).contains("invalid_request"), "out-of-bounds plan accepted: \(bad)")
             try expect(supervisor.records[lead]?.declaredStatus == before, "refusal changed declaration")
         }
-        // A helper token can write only its own declaration; even a managed
-        // helper with a plan must never display the lead surface.
-        try expect(supervisor.setMode(.managed, for: failed), "helper mode setup failed")
+        // A helper token can write only its own declaration. Settings keeps
+        // helpers Free, and their own plans never display the lead surface.
+        try expect(supervisor.records[failed]?.mode == .free, "helper must remain Free")
         try await call(failedConfig, "array_status", ["now": "Helper plan", "agentId": lead.rawValue.uuidString,
             "plan": [["title": "Own work", "owner": "lead"]]])
         try expect(supervisor.records[lead]?.declaredStatus == before, "helper rewrote lead plan")
@@ -101,8 +103,10 @@ enum ManagedLeadPlanChecks {
            let helperTile = b.f.canvas.tileView(for: id) as? ManagedAgentTileNSView {
             try expect(helperTile.qaLeadPlanView.isHidden, "helper displays plan")
         } else { throw WorkspaceAgentReportChecks.Failure(description: "missing production helper tile") }
-        try expect(supervisor.setMode(.free, for: lead) && view.isHidden, "free lead displays plan")
-        try expect(supervisor.setMode(.managed, for: lead) && !view.isHidden, "managed plan did not return")
+        ManagedSettingChecks.write(AgentManagedModeConfig.enabledKey, false, b)
+        try expect(supervisor.records[lead]?.mode == .free && view.isHidden, "free lead displays plan")
+        ManagedSettingChecks.write(AgentManagedModeConfig.enabledKey, true, b)
+        try expect(supervisor.records[lead]?.mode == .managed && !view.isHidden, "managed plan did not return")
 
         // Render the actual mounted tile in each appearance, both disclosure states.
         tile.removeFromSuperview()
@@ -172,13 +176,15 @@ enum ManagedLeadPlanChecks {
         // Real disk restore and a newly attached tile, not a Codable round trip.
         try expect(view.presentation?.collapsed == true, "render did not leave collapsed state")
         supervisor.stopAll()
-        let restored = AgentSupervisor(store: AgentStore(smokeTest: false)); restored.restore()
+        let restored = AgentSupervisor(store: AgentStore(smokeTest: false))
+        restored.configureManagedMode(defaults: b.settings); restored.restore()
         defer { restored.stopAll() }
         tile.detach(); tile.attach(agentID: lead, supervisor: restored)
         try expect(tile.qaLeadPlanView.presentation?.collapsed == true && restored.records[lead]?.declaredStatus?.plan == supervisor.records[lead]?.declaredStatus?.plan,
                    "plan/disclosure lost on relaunch")
         try expect(tile.qaLeadPlanView.accessibilityPerformPress() && tile.qaLeadPlanView.presentation?.collapsed == false, "restored header did not expand")
-        let again = AgentSupervisor(store: AgentStore(smokeTest: false)); again.restore()
+        let again = AgentSupervisor(store: AgentStore(smokeTest: false))
+        again.configureManagedMode(defaults: b.settings); again.restore()
         defer { again.stopAll() }
         try expect(again.records[lead]?.leadPlanCollapsed == false, "expanded preference did not persist")
         var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(again.records[lead]!)) as! [String: Any]
@@ -187,6 +193,22 @@ enum ManagedLeadPlanChecks {
         try expect(!old.leadPlanCollapsed, "old record default is not expanded")
         try expect(AgentReport.wordCount(ManagedLeadHookState.brief) <= 140 && ManagedLeadHookState.brief.contains("array_status"), "brief lacks plan or exceeds 140 words")
         print("Managed lead plan passed: production MCP/store/tile, bounds, self-only, live helper states/watchdog, urgency, image disclosure, relaunch, free/helper suppression, light/dark renders")
+    }
+
+    private static func delegateHelper(_ b: WorkspaceAgentReportChecks.Bench, label: String) async throws -> AgentID {
+        // ManagedModeChecks.delegate deliberately spawns top-level runner-policy
+        // fixtures. Plan owners need real children of the token-bound lead.
+        let reply = try await WorkspaceAgentReportChecks.call(b.configuration(for: b.f.agentId), "array_delegate", [
+            "task": label, "title": label, "harness": "Claude Code",
+            "model": ManagedModeChecks.model, "idempotencyKey": UUID().uuidString])
+        guard !reply.isError, let result = reply.reply["result"] as? [String: Any],
+              let raw = result["childAgentId"] as? String, let uuid = UUID(uuidString: raw) else {
+            throw WorkspaceAgentReportChecks.Failure(description: "plan helper delegation failed: \(reply.reply)")
+        }
+        let id = AgentID(rawValue: uuid)
+        try expect(b.supervisor.records[id]?.parentAgentID == b.f.agentId && b.supervisor.records[id]?.mode == .free,
+                   "delegation must create a Free helper of the lead")
+        return id
     }
 
     static func render(_ tile: ManagedAgentTileNSView, window: NSWindow) throws {
