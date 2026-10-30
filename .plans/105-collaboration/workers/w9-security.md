@@ -253,3 +253,50 @@ Two fixture traps, fixed:
 - **Finding 1.** Worker 4 is fixing it on `array/col-admission`. R3 still asserts
   only "final, not accepted, no execution", and tightens to `.refused` with that
   fix.
+
+### Linux relay leg: memory, found and fixed (`ci(relay)` commit)
+
+The first round-2 gate was GREEN on every Mac leg; the audit printed all 57 of
+its PASS lines. Only the new Linux relay leg failed. Swift 6.1 compiles the
+checks module in a whole-module release build, which runs one LLVM codegen
+thread per CPU. The Docker VM has 15 CPUs under amd64 emulation, and the
+compiler was killed (signal 9, "cannot allocate memory").
+
+Measured in a container built from the same image, by sampling the compiler's
+`VmHWM` (its peak resident memory):
+
+| Variant | Codegen threads | Compiler peak | Result |
+| --- | --- | --- | --- |
+| Base, before this round (`5fa07c36`) | 15 | 7.1 GB | passes, with about 8% headroom in a 7.75 GB VM |
+| My artifact audit emptied | 15 | 7.3 GB | passes |
+| This round, complete | 15 | killed | out of memory |
+| My functions marked `@_optimize(none)` | 15 | killed | not the optimizer |
+| `swift build -j 2` | 15 | killed | `-j` does not reach codegen threads |
+| `-Xswiftc -num-threads -Xswiftc 4` | 4 | 5.9 GB | passes, little margin |
+| `-Xswiftc -num-threads -Xswiftc 2` | 2 | 3.7 GB | passes |
+
+So the module was one addition away from this failure before my round; any
+worker's next file would have tipped it. The fix caps the checks-stage build of
+`ContinuumRevivedCollaborationServiceChecks` at two codegen threads. The shipped
+relay build stage is unchanged. With the cap, `scripts/check-relay-linux.sh`
+passed: the audit's 57 PASS lines ran twice, once in the image build and once
+in the separate `docker run`. The Dockerfile is not mine. The change is its own
+commit, so the integrator can take or replace it.
+
+### Commits on `array/mp-w9-security`
+
+- `test(collaboration): audit artifact, retention and backup boundaries`
+- `docs(collaboration): record history-on-join and refusal status decisions`
+- `ci(relay): cap codegen threads for the Linux collaboration checks build`
+- `test(collaboration): discard createFile results in the relay log audit`
+
+### Final gate (rebased on `4969619a`)
+
+`scripts/run-matrix.sh --collaboration`, run under the build lock: 11 legs ran.
+Every Mac leg passed, including the boundary audit (57 PASS lines) and the
+revocation race (8 PASS lines). The Linux relay leg failed before it reached
+any checks. `continuum-relay` itself no longer compiles on Swift 6.1:
+`CollaborationUpdates.swift:112: error: sending 'db' risks causing data races`.
+This comes from `d41d3fab` (host heartbeats), which also fails the
+coordinator's own gate at `cfab6252`. It is not caused by this branch.
+With the memory cap, the Linux leg passed on the pre-heartbeat base.
