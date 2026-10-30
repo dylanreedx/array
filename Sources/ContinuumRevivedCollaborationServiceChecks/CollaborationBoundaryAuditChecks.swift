@@ -392,6 +392,7 @@ func runCollaborationBoundaryAuditChecks() async throws {
         try audit(true, "database, WAL and SHM exclude posts, agreements, prompts, tokens, invitation and enrollment codes")
         try await server.stop()
     } catch { try? await server.stop(); throw error }
+    try await runCollaborationArtifactRetentionAuditChecks()
     try await runRelayProcessLogAudit()
     print("Collaboration boundary audit passed: excluded/guessed/forwarded IDs, viewer, removal and device revocation with stale queued work, partial failures, storage and relay logs.")
 }
@@ -464,6 +465,23 @@ private func runRelayProcessLogAudit() async throws {
     _ = try await wire.send("POST", "areas/\(area)/commands", token: a.token, json: Data("{\"broken\": \"\(promptSentinel)\"".utf8))
     _ = try await wire.send("POST", "areas/\(area)/commands", token: a.token, json: Data(repeating: 65, count: 300_000) + Data(partialSentinel.utf8))
     _ = try await wire.send("POST", "enrollments/redeem", token: nil, body: Collaboration.RedeemEnrollment(code: enrollA.code, deviceLabel: "replay"))
+    // Artifact traffic: upload, publish, fetch, then a hash mismatch, an
+    // oversized blob and a forbidden upload, each carrying sentinel bytes.
+    let host = try await wire.value(Collaboration.Host.self, "POST", "hosts", token: a.token, body: NoBody(), status: 201)
+    let artifact = SharedArea.Item(id: .init(), kind: .artifact, source: .init(owner: a.identity.person, host: host.id, binding: .init()))
+    _ = try await wire.value(Collaboration.Receipt.self, "POST", "areas/\(area)/commands", token: a.token, body: Collaboration.Mutation(epoch: 1,
+        command: .init(area: .init(area), expectedRevision: 1, edits: [.admit(artifact, .init(id: .init(), object: artifact.id, rect: .init(x: 0, y: 0, width: 300, height: 200)))])))
+    let blob = Data("\(auditBlobSentinel) logged?".utf8), digest = Collaboration.Artifact.digest(blob)
+    let blobRoute = "areas/\(area)/artifacts/\(artifact.id.rawValue)"
+    try audit(try await wire.send("PUT", "\(blobRoute)/blobs/\(digest)", token: a.token, json: blob).0 == 201, "relay process accepts an artifact blob")
+    let manifest = auditManifest(object: artifact.id, path: "\(auditPathSentinel)/logged.diff", bytes: blob)
+    _ = try await wire.value(Collaboration.Artifact.PublishReceipt.self, "POST", "\(blobRoute)/revisions", token: a.token,
+        body: Collaboration.Artifact.PublishRequest(epoch: 1, manifest: manifest), status: 201)
+    let fetched = try await wire.send("GET", "\(blobRoute)/revisions/\(manifest.id.rawValue)/blobs/\(digest)", token: b.token, json: nil)
+    try audit(fetched.0 == 200 && fetched.1 == blob, "relay process serves the published blob to a member")
+    _ = try await wire.send("PUT", "\(blobRoute)/blobs/\(String(repeating: "0", count: 64))", token: a.token, json: blob)
+    _ = try await wire.send("PUT", "\(blobRoute)/blobs/\(digest)", token: a.token, json: Data(count: 1_100_000) + Data(auditDraftSentinel.utf8))
+    _ = try await wire.send("PUT", "\(blobRoute)/blobs/\(digest)", token: b.token, json: blob)
     process.interrupt()
     let stopDeadline = Date().addingTimeInterval(10)
     while process.isRunning, Date() < stopDeadline { try await Task.sleep(for: .milliseconds(50)) }
@@ -477,5 +495,37 @@ private func runRelayProcessLogAudit() async throws {
     for secret in secrets where text.contains(secret) {
         throw AuditFailure(message: "relay log carries a protected value (\(secret.prefix(6))…)")
     }
-    try audit(true, "relay stdout/stderr carry no content, labels, IDs, tokens, codes or keys across success, refusal and malformed traffic")
+    try audit(true, "relay stdout/stderr carry no content, labels, IDs, tokens, codes or keys across success, refusal, malformed and artifact traffic")
+
+    // Operator backup paths: the report is counts-only, a failure logs no
+    // secret, and the backup file keeps everything sealed.
+    func operatorRun(_ arguments: [String]) throws -> (Int32, String) {
+        let tool = Process()
+        tool.executableURL = process.executableURL
+        tool.arguments = arguments
+        tool.environment = ["RELAY_COLLABORATION_DATABASE_PATH": collaborationPath, "RELAY_COLLABORATION_MASTER_KEY": key.base64EncodedString()]
+        let out = root.appendingPathComponent("operator-\(UUID()).log")
+        FileManager.default.createFile(atPath: out.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: out)
+        tool.standardOutput = handle; tool.standardError = handle
+        try tool.run(); tool.waitUntilExit(); try handle.close()
+        return (tool.terminationStatus, String(decoding: try Data(contentsOf: out), as: UTF8.self))
+    }
+    let backupPath = root.appendingPathComponent("backups/collaboration-backup.sqlite").path
+    let backup = try operatorRun(["--collaboration-backup", backupPath])
+    let verify = try operatorRun(["--collaboration-verify-backup", backupPath])
+    let failed = try operatorRun(["--collaboration-verify-backup", root.appendingPathComponent("missing.sqlite").path])
+    try audit(backup.0 == 0 && verify.0 == 0 && failed.0 != 0 && backup.1.contains("\"areas\"") && failed.1.contains("operator_command_failed"),
+        "positive control: operator backup and verify succeed, a missing backup fails with a logged event")
+    let operatorText = backup.1 + verify.1 + failed.1
+    let protected = secrets + [auditBlobSentinel, auditDraftSentinel, auditPathSentinel]
+    for secret in protected where operatorText.contains(secret) {
+        throw AuditFailure(message: "operator output carries a protected value (\(secret.prefix(6))…)")
+    }
+    let backupBytes = try Data(contentsOf: URL(fileURLWithPath: backupPath))
+    for secret in [postSentinel, contextSentinel, auditBlobSentinel, auditPathSentinel, a.token, b.token, invitation.code, enrollA.code]
+        where backupBytes.range(of: Data(secret.utf8)) != nil {
+        throw AuditFailure(message: "backup file stores a protected value in plaintext (\(secret.prefix(6))…)")
+    }
+    try audit(true, "operator backup, verify and failure output carry no content, IDs or credentials; the backup file keeps them sealed")
 }
