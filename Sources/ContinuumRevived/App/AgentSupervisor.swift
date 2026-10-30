@@ -12290,11 +12290,8 @@ func runAgentSupervisorChecks() async throws {
     guard claudeConstructionSites == ["App/AgentSupervisor.swift"] else {
         throw fail("ClaudeAgentRunner is constructed outside AgentSupervisor.swift: \(claudeConstructionSites.sorted()) (same single-owner rule as PiAgentRunner)")
     }
-    // The Codex hook witness drives a scripted `codex` through its own runner to
-    // prove the hook commands reach the host; it never attaches a tile either.
-    let codexHookCheck = "App/WorkspaceCodexHookChecks.swift"
     let codexConstructionSites = try runnerConstructionSites(typeName: "CodexAgentRunner").sites
-        .subtracting([liveAcceptanceCheck, codexHookCheck])
+        .subtracting([liveAcceptanceCheck])
     guard codexConstructionSites == ["App/AgentSupervisor.swift"] else {
         throw fail("CodexAgentRunner is constructed outside AgentSupervisor.swift: \(codexConstructionSites.sorted()) (same single-owner rule as PiAgentRunner)")
     }
