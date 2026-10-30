@@ -1091,3 +1091,33 @@ history-on-join and 404/403 policies are recorded as decisions for Dylan in
 `docs/internals/collaboration.md`.
 
 Still to merge: w6 artifacts, w7 live views, then `array/col-native-budgets`.
+
+## Integrator gate — w6 artifacts on `fe041913`, 30 October 2026
+
+Merged: w6 `array/mp-w6-artifacts` (`3311b913`, `6cb18aa6`, `1aee3de1`,
+`6d2c9d18`). Conflicts, each resolved by keeping both sides:
+- `Updates`, `CollaborationReplica` and `SharedAreaController`: w5's `hosts`
+  and w6's `artifactHeads` both stay. The service reads `artifactHeads(db)`
+  before the presence map, like `hostLiveness`, so the Linux "sending 'db'"
+  error cannot come back through it.
+- `SharedAreaSceneView`: the freshness panel (w8) and the artifact panel (w6)
+  both stay. They share a frame but show only for an agent and an artifact
+  respectively.
+- `docs/internals/collaboration.md` retention table: w6's rows. Unpublishing
+  now deletes an artifact's revisions, reviews and blobs
+  (`refreshArtifactAccess`), so w9's "unreachable but not deleted" row was
+  stale.
+
+Gate: `--collaboration`, under the lock and isolated. Log:
+`qa-runs/coordinator/gate-fe041913.log`. **11 legs run, all passed.**
+
+Board (revision 160): COL-16 → Done. Its receipt
+(`workers/w6-artifacts.md`, round 2) has a witness for every acceptance
+item: coverage, live versus pinned review, drift, recipient byte-identity
+and the bounded quota with GC. COL-07 → Done: the nested artifact lookup
+boundary is covered by w6's routes and w9's artifact audit. Known limits
+that w6 recorded: an upload that fails after the arrangement is accepted
+leaves the item without a revision, and nothing retries it after a
+relaunch.
+
+Remaining: w7 live views, then `array/col-native-budgets`.
