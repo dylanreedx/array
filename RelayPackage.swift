@@ -4,6 +4,7 @@ import PackageDescription
 let package = Package(
     name: "array-relay-linux",
     products: [
+        .executable(name: "ContinuumRevivedCollaborationServiceChecks", targets: ["ContinuumRevivedCollaborationServiceChecks"]),
         .executable(name: "continuum-relay", targets: ["continuum-relay"]),
         .executable(name: "ContinuumRevivedRelayCoreChecks", targets: ["ContinuumRevivedRelayCoreChecks"]),
         .executable(name: "ContinuumRevivedRelayIntegrationChecks", targets: ["ContinuumRevivedRelayIntegrationChecks"]),
@@ -14,6 +15,10 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.12.0"),
     ],
     targets: [
+        .target(name: "ContinuumRevivedCollaborationProtocol", dependencies: [.product(name: "Crypto", package: "swift-crypto")], path: "Sources/ContinuumRevivedCollaborationProtocol"),
+        .target(name: "ContinuumRevivedCollaborationClient", dependencies: ["ContinuumRevivedCollaborationProtocol"], path: "Sources/ContinuumRevivedCollaborationClient"),
+        .target(name: "ContinuumRevivedCollaborationService", dependencies: ["ContinuumRevivedCollaborationProtocol", .product(name: "GRDB", package: "GRDB.swift"), .product(name: "Crypto", package: "swift-crypto")], path: "Sources/ContinuumRevivedCollaborationService"),
+        .executableTarget(name: "ContinuumRevivedCollaborationServiceChecks", dependencies: ["ContinuumRevivedCollaborationProtocol", "ContinuumRevivedCollaborationClient", "ContinuumRevivedCollaborationService", "ContinuumRevivedRelayNIO", "ContinuumRevivedRelayCore", .product(name: "GRDB", package: "GRDB.swift"), .product(name: "NIOCore", package: "swift-nio"), .product(name: "NIOPosix", package: "swift-nio"), .product(name: "NIOHTTP1", package: "swift-nio")], path: "Sources/ContinuumRevivedCollaborationServiceChecks"),
         .target(name: "ContinuumRevivedRelayProtocol", path: "Sources/ContinuumRevivedRelayProtocol"),
         .target(
             name: "ContinuumRevivedRelayCore",
@@ -27,7 +32,7 @@ let package = Package(
         .target(
             name: "ContinuumRevivedRelayNIO",
             dependencies: [
-                "ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore",
+                "ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore", "ContinuumRevivedCollaborationService",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -38,7 +43,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "continuum-relay",
-            dependencies: ["ContinuumRevivedRelayCore", "ContinuumRevivedRelayNIO"],
+            dependencies: ["ContinuumRevivedRelayCore", "ContinuumRevivedRelayNIO", "ContinuumRevivedCollaborationService"],
             path: "Sources/continuum-relay"
         ),
         .executableTarget(

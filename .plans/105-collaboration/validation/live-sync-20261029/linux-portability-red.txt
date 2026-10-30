@@ -1,0 +1,5 @@
+#13 135.0 /src/Sources/ContinuumRevivedCollaborationService/CollaborationStore.swift:54:89: error: capture of 'migrationKey' with non-sendable type 'SymmetricKey' in a '@Sendable' closure
+#13 135.0  54 |                 let data = try AES.GCM.open(AES.GCM.SealedBox(combined: sealed), using: migrationKey)
+#13 135.0     |                                                                                         `- error: capture of 'migrationKey' with non-sendable type 'SymmetricKey' in a '@Sendable' closure
+#13 ERROR: process "/bin/sh -c swift build -c release --product continuum-relay" did not complete successfully: exit code: 1
+ERROR: failed to build: failed to solve: process "/bin/sh -c swift build -c release --product continuum-relay" did not complete successfully: exit code: 1

@@ -1,0 +1,52 @@
+PASS capability: owner can view
+PASS capability: owner does not grant promptAgent
+PASS capability: owner does not grant stopAgent
+PASS capability: owner does not grant approveProviderRequest
+PASS capability: owner does not grant writeTerminal
+PASS capability: editor can view
+PASS capability: editor does not grant promptAgent
+PASS capability: editor does not grant stopAgent
+PASS capability: editor does not grant approveProviderRequest
+PASS capability: editor does not grant writeTerminal
+PASS capability: viewer can view
+PASS capability: viewer does not grant promptAgent
+PASS capability: viewer does not grant stopAgent
+PASS capability: viewer does not grant approveProviderRequest
+PASS capability: viewer does not grant writeTerminal
+PASS capability: editor collaboration capabilities exclude membership management
+PASS capability: agent observation without an explicit source refuses
+PASS capability: agent observation without an explicit source refuses has no content bytes
+PASS capability: source binding cannot masquerade as shared discussion
+PASS capability: source binding cannot masquerade as shared discussion has no content bytes
+PASS capability: fixture injects unsupported fields into the selected source
+PASS capability: explicit source publication is admitted
+PASS capability: invited editor receives selected snapshot
+PASS capability: snapshot excludes unsupported host metadata and caller-supplied grants
+PASS capability: invited editor receives selected replay
+PASS capability: replay excludes unsupported host metadata and caller-supplied grants
+PASS capability: excluded C cannot fetch a known area
+PASS capability: excluded C cannot fetch a known area has no content bytes
+PASS capability: excluded C cannot replay publication
+PASS capability: excluded C cannot replay publication has no content bytes
+PASS capability: presentation classifier permits editor layout
+PASS capability: editor arranges another owner's observation without owning its source
+PASS capability: forged grant cannot remove a teammate's source
+PASS capability: forged grant cannot remove a teammate's source has no content bytes
+PASS capability: mixed authorized and forbidden edits leave the entire document unchanged
+PASS capability: editor cannot expand sharing
+PASS capability: editor cannot expand sharing has no content bytes
+PASS capability: area editor does not create a promptAgent endpoint
+PASS capability: area editor does not create a promptAgent endpoint has no content bytes
+PASS capability: area editor does not create a stopAgent endpoint
+PASS capability: area editor does not create a stopAgent endpoint has no content bytes
+PASS capability: area editor does not create a approveProviderRequest endpoint
+PASS capability: area editor does not create a approveProviderRequest endpoint has no content bytes
+PASS capability: area editor does not create a writeTerminal endpoint
+PASS capability: area editor does not create a writeTerminal endpoint has no content bytes
+PASS capability: publication owner removal retries without resurrecting a source
+PASS capability: area ownership does not override another person's source ownership
+PASS capability: area ownership does not override another person's source ownership has no content bytes
+PASS capability: current owner can revoke membership
+PASS capability: queued mutation loses admission when collaborator is removed
+PASS capability: queued mutation loses admission when collaborator is removed has no content bytes
+PASS capability: removed collaborator creates no later durable effect

@@ -1,0 +1,11 @@
+PASS client boundary: service redirects deliver zero requests/credentials to the target
+PASS client boundary: future-schema snapshot terminates without a retry loop
+PASS client boundary: incompatible accepted command terminates without retaining stale authority
+PASS database key: invalid key or marker refuses before writes
+PASS database key: wrong-key reopen preserves snapshots, operations and heads
+PASS database key: correct-key reopen preserves exact document
+PASS database key: correct-key reopen preserves exact document
+PASS database key: invalid key or marker refuses before writes
+PASS database key: wrong-key v2 adoption leaves no marker or migration record
+PASS database key: failed v2 adoption rolls back without ciphertext changes
+FAIL: DatabaseKeyCheckFailure(message: "partial key adoption persisted")

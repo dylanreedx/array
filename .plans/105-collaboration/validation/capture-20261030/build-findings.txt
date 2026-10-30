@@ -1,0 +1,13 @@
+==> /tmp/array-collab105-capture-build.log
+/Users/dylan/Documents/personal/Array/qa-runs/collaboration-capture-1793337124970993000/context/Sources/ContinuumRevived/App/ContinuumApp.swift:11150:58: error: expression is 'async' but is not marked with 'await'
+      |                                                          |- error: expression is 'async' but is not marked with 'await'
+/Users/dylan/Documents/personal/Array/qa-runs/collaboration-capture-1793337124970993000/context/Sources/ContinuumRevived/App/Collaboration/SharedAreaCaptureView.swift:84:64: error: ambiguous use of 'greatestFiniteMagnitude'
+    |                                                                `- error: ambiguous use of 'greatestFiniteMagnitude'
+/Users/dylan/Documents/personal/Array/qa-runs/collaboration-capture-1793337124970993000/context/Sources/ContinuumRevived/App/Collaboration/SharedAreaCaptureView.swift:86:72: error: ambiguous use of 'greatestFiniteMagnitude'
+    |                                                                        `- error: ambiguous use of 'greatestFiniteMagnitude'
+/Users/dylan/Documents/personal/Array/qa-runs/collaboration-capture-1793337124970993000/context/Sources/ContinuumRevived/App/Collaboration/SharedAreaCaptureView.swift:154:127: error: cannot find 'pages' in scope
+    |                                                                                                                               `- error: cannot find 'pages' in scope
+==> /tmp/array-collab105-capture-red-build.log
+==> /tmp/array-collab105-capture-native-final-build.log
+/Users/dylan/Documents/personal/Array/qa-runs/collaboration-capture-1793337124970993000/context/Sources/ContinuumRevived/App/ContinuumApp.swift:17981:9: error: switch must be exhaustive
+      |         |- error: switch must be exhaustive

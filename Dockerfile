@@ -10,6 +10,8 @@ RUN swift build -c release --product continuum-relay
 FROM build AS checks
 RUN swift build -c release --product ContinuumRevivedRelayCoreChecks
 RUN swift build -c release --product ContinuumRevivedRelayIntegrationChecks
+RUN swift build -c release --product ContinuumRevivedCollaborationServiceChecks
+RUN .build/release/ContinuumRevivedCollaborationServiceChecks
 RUN .build/release/ContinuumRevivedRelayCoreChecks
 RUN .build/release/ContinuumRevivedRelayIntegrationChecks
 

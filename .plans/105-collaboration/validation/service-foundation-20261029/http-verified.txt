@@ -1,0 +1,57 @@
+==> .build/debug/ContinuumRevivedCollaborationServiceChecks
+PASS: operator enrollment process uses isolated configuration
+PASS: operator entry point issues redeemable person enrollment
+PASS: independent person identities
+PASS: one person has separately authenticated devices
+PASS: consumed enrollment status
+PASS: consumed enrollment excludes content bytes
+PASS: excluded C status
+PASS: excluded C excludes content bytes
+PASS: unknown and excluded areas have identical response bytes
+PASS: forwarded invitation status
+PASS: forwarded invitation excludes content bytes
+PASS: invitation race recovers same membership
+PASS: authenticated durable area command
+PASS: network retry returns original receipt
+PASS: invited B receives shared history
+PASS: forged authorship status
+PASS: forged authorship excludes content bytes
+PASS: publishing another host status
+PASS: publishing another host excludes content bytes
+PASS: same person cannot claim another device host status
+PASS: same person cannot claim another device host excludes content bytes
+PASS: transaction failure status
+PASS: transaction failure excludes content bytes
+PASS: storage failure rolls back snapshot and receipt
+PASS: retry after rollback commits once
+PASS: operation identity bound to actor status
+PASS: operation identity bound to actor excludes content bytes
+PASS: cross-area command status
+PASS: cross-area command excludes content bytes
+PASS: viewer cannot edit status
+PASS: viewer cannot edit excludes content bytes
+PASS: expired invitation under injected clock status
+PASS: expired invitation under injected clock excludes content bytes
+PASS: owner removes teammate
+PASS: stale membership removal cannot affect a later generation
+PASS: removed B loses history access status
+PASS: removed B loses history access excludes content bytes
+PASS: removed B cannot recover old receipt status
+PASS: removed B cannot recover old receipt excludes content bytes
+PASS: old invitation cannot restore removed B status
+PASS: old invitation cannot restore removed B excludes content bytes
+PASS: membership change invalidates queued epoch status
+PASS: membership change invalidates queued epoch excludes content bytes
+PASS: epoch changes without altering document history
+PASS: device revocation reauthenticates cached bearer status
+PASS: device revocation reauthenticates cached bearer excludes content bytes
+PASS: SQLite restart restores exact document and membership
+PASS: removal survives restart
+PASS: database/journal excludes plaintext content and credentials
+PASS: companion v2 remains functional
+PASS: companion credential is not collaboration identity status
+PASS: companion credential is not collaboration identity excludes content bytes
+PASS: reconstructed HTTP service preserves discussion and layout
+PASS: reconstructed service preserves removal status
+PASS: reconstructed service preserves removal excludes content bytes
+Collaboration service checks passed: real localhost HTTP, isolated SQLite and A/B/C; no native scene/host-execution claims.

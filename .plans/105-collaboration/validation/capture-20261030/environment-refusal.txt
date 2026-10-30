@@ -1,0 +1,53 @@
+PASS collaboration inventory: capture reads the actual production-mounted layered scene
+PASS collaboration inventory: fixture includes a persisted source below live hydration
+PASS collaboration inventory: fixture changes the live model in WORLD coordinates
+PASS collaboration inventory: complete capture includes both owners and persisted below-tier membership
+PASS collaboration inventory: live and retained source frames use WORLD model geometry exactly once, excluding presentation pose
+PASS collaboration inventory: live unsaved and below-tier note text come from their actual owners
+PASS collaboration inventory: capture and confirmation do not rewrite source canvases or note files
+PASS collaboration inventory: reading capture acquires no controller, creates no agent and leaves the armed source unchanged
+PASS collaboration inventory: actual owner reread invalidates stale note confirmation
+PASS collaboration inventory: a known tile pointer does not authorize another project identity
+PASS collaboration inventory: foreign membership rescues only within its owning project without writing repaired stamps
+PASS collaboration inventory: incomplete whole-workspace coverage names the unavailable project without acquiring it
+PASS collaboration inventory: a scoped zone capture does not acquire unrelated unavailable projects
+PASS collaboration inventory: unsupported projectless source is explicitly named instead of omitted
+Collaboration inventory checks passed: production mount, current WORLD models, source ownership, below-tier notes and fresh confirmation; no live providers or default tmux.
+PASS shared scene: production entry mounts each shared scene exactly once
+PASS shared scene: mounted independent identities acquire current authority
+PASS shared scene: first native frame converts area geometry through its private camera exactly once
+PASS shared scene: second camera renders the same area rectangle at an independent origin and zoom
+PASS shared scene: failed private focus save preserves the previous logical target and its draft
+PASS shared scene: native selected-entry reader displays accepted human discussion
+PASS shared scene: accepted remote discussion leaves both private cameras unchanged
+PASS shared scene: native agreement editor creates and displays an immutable accepted revision
+PASS shared scene: scripted submission is held after admission before its response
+PASS shared scene: late old-mount outcome cannot install uncertain-delivery state into a remounted editor
+PASS shared scene: agent observation truthfully reports absent history and execution controls
+PASS shared scene: mount, selection and discussion do not change the supplied executor census
+PASS shared scene: mounted shared interactions preserve every supplied source project file byte
+PASS shared scene: access loss clears the native shared entry reader as well as canvas objects
+PASS shared scene: access removal and close flush preserve a draft still inside the input debounce
+PASS shared scene: unmount clears presentation while closing only the view subscription
+PASS shared scene: remount restores a shared reference without executor construction
+PASS shared scene: access removal, close and remount preserve the executor census
+PASS shared scene: native remount does not retidy or rewrite source zones
+PASS shared scene: bounded rendering keeps the frontmost 128 visible objects
+PASS shared scene: an object omitted by the render budget cannot intercept pointer input
+PASS shared scene: rendered frames and pointer input use the same eligible visible objects
+PASS shared scene: Tab selects the first actually rendered object
+PASS shared scene: Shift-Tab cycles backward through eligible visible objects only
+Shared native scene checks passed: supplied production mount, actual view frames, private cameras, human content, access removal and source preservation. Scripted transport; real-provider effects remain separate.
+PASS collaboration hub: opening the shipping hub constructs no login or network request
+PASS collaboration hub: native Connect uses Array enrollment and saves a scoped FAIL: personal source window can own input in the mixed-window fixture
+account once
+PASS collaboration hub: native Create opens and remembers the admitted area through its production callback
+PASS collaboration hub: native invitation targets the entered collaboration person
+PASS collaboration hub: retargeting the hub discards a late invitation reply from the previous workspace
+PASS collaboration hub: a discarded invitation leaves a completed status instead of a false connection activity
+PASS collaboration hub: hub renders in NSAppearanceNameAqua
+PASS collaboration hub: shared scene renders an admitted connected fixture in NSAppearanceNameAqua
+PASS collaboration hub: hub renders in NSAppearanceNameDarkAqua
+PASS collaboration hub: shared scene renders an admitted connected fixture in NSAppearanceNameDarkAqua
+PASS collaboration hub: closing the hub fences a late workspace response and preserves existing source work
+PASS collaboration window commands: mounted source keeps its genuine API agent identity with a scripted executor factory

@@ -1,0 +1,11 @@
+/tmp/array-collab105-native-app-build.log
+error: input file '/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/KanbanTileNSView.swift' was modified during the build
+error: input file '/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/Canvas/KanbanTileNSView.swift' was modified during the build
+
+/tmp/array-collab105-native-focus-negative-build.log
+error: input file '/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/App/BoardLibraryChecks.swift' was modified during the build
+error: input file '/Users/dylan/Documents/personal/Array/Sources/ContinuumRevived/App/BoardLibraryChecks.swift' was modified during the build
+
+/tmp/array-collab105-native-snapshot-negative-build.log
+error: precompiled file '/Users/dylan/Documents/personal/Array/qa-runs/collaboration-native-1793334226218/context/.build/arm64-apple-macosx/debug/ModuleCache/3DBZ4DYOKALPZ/_Builtin_stdbool-2OQWMRBVRD4OJ.pcm' was compiled with module cache path '/Users/dylan/Documents/personal/Array/.build/arm64-apple-macosx/debug/ModuleCache/3DBZ4DYOKALPZ', but the path is currently '/Users/dylan/Documents/personal/Array/qa-runs/collaboration-native-1793334226218/context/.build/arm64-apple-macosx/debug/ModuleCache/3DBZ4DYOKALPZ'
+error: precompiled file '/Users/dylan/Documents/personal/Array/qa-runs/collaboration-native-1793334226218/context/.build/arm64-apple-macosx/debug/ModuleCache/3DBZ4DYOKALPZ/_Builtin_stdbool-2OQWMRBVRD4OJ.pcm' was compiled with module cache path '/Users/dylan/Documents/personal/Array/.build/arm64-apple-macosx/debug/ModuleCache/3DBZ4DYOKALPZ', but the path is currently '/Users/dylan/Documents/personal/Array/qa-runs/collaboration-native-1793334226218/context/.build/arm64-apple-macosx/debug/ModuleCache/3DBZ4DYOKALPZ'

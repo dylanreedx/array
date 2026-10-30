@@ -1,0 +1,7 @@
+{
+  "canonicalDifferences": [],
+  "collaborationSourcesMatch": true,
+  "matrixScope": "frozen QA source context",
+  "finalNativeCorrection": "only hub progress copy/accessibility status and its native assertion",
+  "qaSourceAndBuildCacheRemoved": true
+}

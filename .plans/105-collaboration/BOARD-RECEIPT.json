@@ -1,0 +1,288 @@
+{
+  "schema": "array.collaboration-planning-receipt.v1",
+  "date": "2026-10-29",
+  "status": "26 planned cards committed and read back; no implementation started",
+  "checkoutHandle": "ck_f5fcb11fee389c5a",
+  "requestingAgentTileId": "0E6EB40A-24C4-4978-ACFE-3A3C4FFE799A",
+  "boardId": "F54D4170-AB61-4595-A4D4-A400B76364A5",
+  "boardTileId": "CA73963B-1486-413C-9913-7B336742354D",
+  "boardTitle": "Array feats",
+  "initialRevision": 0,
+  "finalRevision": 26,
+  "columnId": "01DE61A9-AECF-4EB1-91BE-EF1242EB3CAF",
+  "columnName": "To Do",
+  "verification": {
+    "cardCount": 26,
+    "readbackPages": 5,
+    "exactTitleBodyAndColumnMatch": true,
+    "orderedByTicketId": true,
+    "allUnassigned": true,
+    "otherBoardId": "B551E866-A411-489E-AA66-56B32D5841A6",
+    "otherBoardInitialRevision": 33,
+    "otherBoardFinalRevision": 53,
+    "otherBoardCardCount": 17,
+    "otherBoardWriteCalls": 0
+  },
+  "cards": [
+    {
+      "key": "COL-01",
+      "title": "COL-01 — Settle shared-area architecture, UX and confidentiality gates",
+      "phase": "0",
+      "cardId": "1C205682-01FA-4D06-8439-0B7F928D2DBC",
+      "revision": 1,
+      "idempotencyKey": "collab-105-col-01-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-02",
+      "title": "COL-02 — Build an isolated three-principal collaboration harness",
+      "phase": "0",
+      "cardId": "F5555033-2BFF-4FAC-A2B3-284C34563DBB",
+      "revision": 2,
+      "idempotencyKey": "collab-105-col-02-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-03",
+      "title": "COL-03 — Define portable shared-area contracts and atomic reducer",
+      "phase": "1",
+      "cardId": "113B3A60-8F8A-49AC-A89D-03DE0276D96E",
+      "revision": 3,
+      "idempotencyKey": "collab-105-col-03-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-04",
+      "title": "COL-04 — Add person/device identity and area invitations with revocation",
+      "phase": "1",
+      "cardId": "4D34D924-8A5E-4814-ABA2-249F4184D3C2",
+      "revision": 4,
+      "idempotencyKey": "collab-105-col-04-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-05",
+      "title": "COL-05 — Persist ordered area operations, snapshots and request outcomes",
+      "phase": "1",
+      "cardId": "C36BAF41-06F5-4A7D-92D0-1AE9E0B60B50",
+      "revision": 5,
+      "idempotencyKey": "collab-105-col-05-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-06",
+      "title": "COL-06 — Implement complete replay, bounded subscriptions and ephemeral presence",
+      "phase": "1",
+      "cardId": "B1C5C51A-D150-4D8A-AB94-B5AC75110705",
+      "revision": 6,
+      "idempotencyKey": "collab-105-col-06-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-07",
+      "title": "COL-07 — Enforce object publication and host-action capability boundaries",
+      "phase": "1",
+      "cardId": "C17471F1-235D-4B9B-82A8-02509375E602",
+      "revision": 7,
+      "idempotencyKey": "collab-105-col-07-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-08",
+      "title": "COL-08 — Store local shared-area bindings and recoverable replicas",
+      "phase": "1",
+      "cardId": "BC562628-7EB5-4AD5-90AA-0210761C5F7E",
+      "revision": 8,
+      "idempotencyKey": "collab-105-col-08-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-09",
+      "title": "COL-09 — Capture reviewed tile/layout manifests from selection, zone or workspace",
+      "phase": "2",
+      "cardId": "98D1845E-682F-4841-AC30-BEF6F4FD3D94",
+      "revision": 9,
+      "idempotencyKey": "collab-105-col-09-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-10",
+      "title": "COL-10 — Mount native shared areas with private cameras and reference views",
+      "phase": "2",
+      "cardId": "EFA849C6-5FE4-4FB0-A498-CCB3C8DEEB95",
+      "revision": 10,
+      "idempotencyKey": "collab-105-col-10-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-11",
+      "title": "COL-11 — Synchronize shared geometry, atomic groups and semantic undo",
+      "phase": "2",
+      "cardId": "3AE1175B-87A3-4CAF-A9AB-D5ED870380FC",
+      "revision": 11,
+      "idempotencyKey": "collab-105-col-11-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-12",
+      "title": "COL-12 — Add durable area discussion and revisioned working agreements",
+      "phase": "2",
+      "cardId": "A6CDE9E6-E468-4A2B-A77A-3EF50B205A86",
+      "revision": 12,
+      "idempotencyKey": "collab-105-col-12-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-13",
+      "title": "COL-13 — Dispatch reviewed context through the owning host with durable receipts",
+      "phase": "2",
+      "cardId": "A154862D-D262-4D51-9D5E-BA1EAE1099BA",
+      "revision": 13,
+      "idempotencyKey": "collab-105-col-13-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-14",
+      "title": "COL-14 — Show per-agent context freshness and provenance-linked results",
+      "phase": "2",
+      "cardId": "FB7A7DBE-D060-42D3-A64D-34F51F345D3D",
+      "revision": 14,
+      "idempotencyKey": "collab-105-col-14-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-15",
+      "title": "COL-15 — Publish sequenced live agent snapshots and truthful capabilities",
+      "phase": "2",
+      "cardId": "F2524190-E2DF-4BC8-ADA0-B16D19F221FB",
+      "revision": 15,
+      "idempotencyKey": "collab-105-col-15-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-16",
+      "title": "COL-16 — Publish immutable diff/file artifacts and pinned review references",
+      "phase": "2",
+      "cardId": "0D0F7337-C752-44C4-8BC1-A08FEF16A9C2",
+      "revision": 16,
+      "idempotencyKey": "collab-105-col-16-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-17",
+      "title": "COL-17 — Normalize provider usage into an idempotent per-owner ledger",
+      "phase": "3",
+      "cardId": "329F4905-F25C-4DD4-B228-0201FF07C180",
+      "revision": 17,
+      "idempotencyKey": "collab-105-col-17-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-18",
+      "title": "COL-18 — Add contextual cursors, voluntary following and hover-only usage",
+      "phase": "3",
+      "cardId": "8FA986BA-1851-418E-B7B0-CBBB0FFA249C",
+      "revision": 18,
+      "idempotencyKey": "collab-105-col-18-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-19",
+      "title": "COL-19 — Prove replay, compaction, retention and host-outcome recovery",
+      "phase": "3",
+      "cardId": "89535081-D473-43E4-9409-85EA14D9268F",
+      "revision": 19,
+      "idempotencyKey": "collab-105-col-19-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-20",
+      "title": "COL-20 — Audit publication, revocation and attachment boundaries end to end",
+      "phase": "3",
+      "cardId": "341AFA10-416D-4501-89EC-3F987C035655",
+      "revision": 20,
+      "idempotencyKey": "collab-105-col-20-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-21",
+      "title": "COL-21 — Gate the complete two-person workflow in matrix and native QA",
+      "phase": "4",
+      "cardId": "A37FCF1A-B734-4E94-8A64-F12274638422",
+      "revision": 21,
+      "idempotencyKey": "collab-105-col-21-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-22",
+      "title": "COL-22 — Prepare isolated service deployment, restore and coworker-alpha handoff",
+      "phase": "4",
+      "cardId": "85C5D2F3-0D51-448D-92F0-F6FB273E63B1",
+      "revision": 22,
+      "idempotencyKey": "collab-105-col-22-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-23",
+      "title": "COL-23 — Design explicit patch or commit import into a recipient checkout",
+      "phase": "Later",
+      "cardId": "F9187544-CE2F-4F56-A871-054731779B29",
+      "revision": 23,
+      "idempotencyKey": "collab-105-col-23-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-24",
+      "title": "COL-24 — Evaluate browser participation against the native shared-area protocol",
+      "phase": "Later",
+      "cardId": "370890AC-80C1-4211-A597-78019EA31649",
+      "revision": 24,
+      "idempotencyKey": "collab-105-col-24-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-25",
+      "title": "COL-25 — Evaluate scoped live preview sharing beyond static snapshots",
+      "phase": "Later",
+      "cardId": "719020C8-1709-49F6-BECE-B7AD82073555",
+      "revision": 25,
+      "idempotencyKey": "collab-105-col-25-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    },
+    {
+      "key": "COL-26",
+      "title": "COL-26 — Audit richer remote control, terminal and execution-transfer capabilities",
+      "phase": "Later",
+      "cardId": "562EEBED-59B8-4300-A170-8609A60657FE",
+      "revision": 26,
+      "idempotencyKey": "collab-105-col-26-20261029-v1",
+      "durability": "committed",
+      "undoRegistered": true
+    }
+  ]
+}

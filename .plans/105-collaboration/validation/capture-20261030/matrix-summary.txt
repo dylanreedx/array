@@ -1,0 +1,35 @@
+==> scripts/check-matrix-inventory.sh
+==> swift build --disable-sandbox --skip-update --product Array
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationServiceChecks
+==> swift build --disable-sandbox --skip-update --product continuum-relay
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
+==> .build/debug/ContinuumRevivedCollaborationChecks
+Collaboration contracts passed (reducer, reviewed publications, native controller and localhost HTTP; no mounted-scene or runner claims).
+==> .build/debug/ContinuumRevivedCollaborationServiceChecks
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.wgKlOU CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.yL6nku .build/debug/Array --collaboration-native-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+FAILED: --collaboration-native-check exited 143 — recorded; the matrix continues so one regression cannot hide the rest.
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.yE7mOO CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.TkGddo .build/debug/Array --ui-probe-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+UIProbeAppearance: 468 layer colours + 608 non-layer colours across 66 adopted owners hold a DesignTokens value in both appearances (P1.10/P1.11)
+UIProbeAppearance: canvas SF Symbols are shared bitmap-only template images; NSImageView tint is included in the appearance census
+UIProbeAppearance: tile outline vs canvas — light 6.87:1; dark 8.86:1; witness (pre-ticket white@0.25 on white@0.10) 1.68:1 < 3.00 (P1.11 goal)
+UIProbeAppearance: 13 descriptor kinds x 2 appearances = 26 token fills; retired literals' widest pairwise ratio 1.13:1 (46 of 55 under 1.10:1), all 11 dark-only (P1.11 deviation, evidence pinned)
+UIProbeAppearance: 130 title-bar status-pill placements clear the drag handle and the tile title; 14 suppressed for want of room, title given the space instead (P1.11)
+UIProbeAppearance: 72 custom-composer assertions hold native editing, draft binding, empty/focus/selection states, paste/undo, accessibility, and light/dark tokens; stock-scroll-border mutation was rejected by the final custom-chrome assertion
+UIProbeAppearance: 22 semantic-transcript review assertions hold real light/dark propagation, quiet prose hierarchy, accessibility authorship, and custom-only controls
+UIProbeAppearance: 6 assistant-prose assertions hold tileBody inheritance, primary text, selection, and no card chrome in both appearances
+UIProbeAppearance: 10 rich-inline assertions hold nested native styles, link policy, theme repaint, and dual-format copy; unsafe-link negative witness remained inactive
+UIProbeAppearance: 10 user-prompt assertions hold no fill/no radius, the authorship rule, primary text, selection, no visual metadata, and non-color accessibility authorship in both appearances
+UIProbeAppearance: 357 TokenThemed views, 383 layer colours sentinelled and re-applied across a live flip (363 re-resolved to a different value); 6 hostile-current-appearance assertions held; token fixture holds both leaves; stale-fixture witness failed as required
+UIProbeAppearance: witness message — appearance.staleFixture after flip to .darkAqua: layer holds fill #FBFBFBFF / border #7C7C7CFF, the dark leaves are #171717FF / #818181FF — a CGColor assigned once at init does not follow the appearance
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.90b9xb CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.iBsco1 .build/debug/Array --menu-contract-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+ContinuumRevivedMenuContractChecks passed
+==> swift run --skip-build ContinuumRevivedRelayCoreChecks
+==> swift run --skip-build ContinuumRevivedRelayIntegrationChecks
+Relay HTTP notification checks passed: delivery, dedup, revoke, large Mac bootstrap, 8 MiB decoded/24 MiB ingress bounds, 16 MiB replay tail; fake APNs only
+Relay HTTP outbox checks passed: publish commit without sender → restart → real worker delivers persisted alert; fake APNs only
+---- Collaboration matrix (targeted): 8 leg(s) run ----
+FAILED (1):
+  - --collaboration-native-check
+Collaboration matrix (targeted) FAILED: 1 leg(s) regressed. Their output is above, in order.

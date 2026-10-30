@@ -1,0 +1,7 @@
+Combined gate ran before the corrected shutdown/403 controller changes. Four legs passed; Core failed on shutdown completion. See controller-corrected.txt for the rebuilt affected leg after correction.
+
+---- Collaboration matrix (targeted): 5 leg(s) run ----
+FAILED (1):
+  - .build/debug/ContinuumRevivedCollaborationChecks
+
+Collaboration matrix (targeted) FAILED: 1 leg(s) regressed. Their output is above, in order.

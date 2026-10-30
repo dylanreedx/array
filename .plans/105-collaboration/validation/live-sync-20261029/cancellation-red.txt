@@ -1,0 +1,17 @@
+PASS updates: more than 500 operations replay completely through the production client
+PASS updates: catch-up page is bounded
+PASS updates: concurrent commit cannot change a paged high-water mark
+PASS updates: snapshot/catch-up-to-live handoff loses no concurrent commit
+PASS updates: held HTTP subscription wakes on a committed operation
+PASS updates: refuses HTTP 404
+PASS updates: refuses HTTP 409
+PASS updates: cursor identity comes from authentication
+PASS updates: presence burst retains its final cursor
+PASS updates: late presence packets cannot move cursor backward
+PASS updates: presence produces zero durable document mutations
+PASS updates: presence expires independently of document/host state
+PASS updates: refuses HTTP 400
+PASS updates: refuses HTTP 404
+PASS updates: active removal purges presence and updates membership epoch
+PASS updates: refuses HTTP 429
+FAIL: UpdateFailure(message: "held request count did not become 0")

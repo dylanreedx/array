@@ -1,0 +1,18 @@
+PASS: a cached operation never reaches transport
+PASS: native open verifies credential identity before granting current membership
+PASS: current area state supplies the online role
+PASS: presence-only render updates do not rewrite or back up the durable cache
+PASS: accepted replica persists atomically while preserving latest private camera and both drafts
+PASS: native submit returns its admitted revision
+PASS: successful acknowledgement removes only its unchanged private draft
+PASS: delayed pre-ack live page cannot regress or revoke a healthy acknowledged document
+PASS: live reader catches up to the acknowledged document without replacing the source owner
+PASS: a newer shared cache remains read-only until this connection covers its accepted cursor
+PASS: a service conflict leaves the local draft and accepted document intact
+PASS: an uncertain request preserves the operation identity and private draft for explicit recovery
+PASS: access loss removes visible shared content and every mutation capability
+PASS: access-loss suppression persists without deleting private draft recovery
+PASS: reopening after access removal does not redisplay suppressed cached content
+PASS: native controller emits UI changes while preserving every source project byte
+FAIL: ControllerCheckFailure(message: "closing stops this view subscription only")
+FAILED: .build/debug/ContinuumRevivedCollaborationChecks exited 1 — recorded; the matrix continues so one regression cannot hide the rest.

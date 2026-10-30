@@ -56,6 +56,7 @@ TRANSCRIPT_VIEWPORT_ONLY=0
 IOS_PREVIEW_PROOF_ONLY=0
 IOS_PREVIEW_LIVE_ONLY=0
 IOS_PREVIEW_TILE_ONLY=0
+COLLABORATION_ONLY=0
 COMPANION_TASKS_ONLY=0
 NOTIFICATIONS_ONLY=0
 NOTIFICATIONS_LINUX_ONLY=0
@@ -63,6 +64,10 @@ MANAGED_MODE_ONLY=0
 HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    --collaboration)
+      COLLABORATION_ONLY=1
+      shift
+      ;;
     --cross-harness-delegation)
       CROSS_HARNESS_DELEGATION_ONLY=1
       shift
@@ -137,7 +142,7 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
+Usage: scripts/run-matrix.sh [--collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
 
 --boards rebuilds app/CoreChecks and reports the board library, lifecycle, API and reference witnesses.
 
@@ -578,6 +583,23 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationServiceChecks
+  run swift build --disable-sandbox --skip-update --product continuum-relay
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
+  run_leg .build/debug/ContinuumRevivedCollaborationChecks
+  run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
+  run_app_check .build/debug/Array --collaboration-native-check
+  run_app_check .build/debug/Array --ui-probe-check
+  run_app_check .build/debug/Array --menu-contract-check
+  run_leg swift run --skip-build ContinuumRevivedRelayCoreChecks
+  run_leg swift run --skip-build ContinuumRevivedRelayIntegrationChecks
+  matrix_report 'Collaboration matrix (targeted)'
+  exit $?
+fi
 if [[ "$CROSS_HARNESS_DELEGATION_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update
   run_app_check .build/debug/Array --workspace-api-cross-harness-delegation-check
@@ -853,6 +875,8 @@ run_ios_build
 # .plans/73-film-studio: the film recorder is compiled only into the film build
 # (-DARRAY_FILM). The normal binary must carry none of it and refuse --film.
 run_leg scripts/check-film-absent.sh
+run_leg swift run ContinuumRevivedCollaborationChecks
+run_leg swift run ContinuumRevivedCollaborationServiceChecks
 # .plans/73-film-studio: every scene in film/scenes/ still runs on this checkout's
 # app, so a UI change that breaks filming is red the day it lands. Builds the film
 # build in its own scratch path (.build-film).
@@ -1457,6 +1481,7 @@ run_app_check .build/debug/Array --workspace-switch-check
 # resulting view, which is why every tile becoming a dead placeholder after the
 # first in-process switch has been green this whole time.
 run_app_check .build/debug/Array --zone-tile-hydration-check
+run_app_check .build/debug/Array --collaboration-native-check
 # M1.10 (.plans/46): WorkspaceRuntime.canvasView is written in exactly one place,
 # install(into:appRegistry:), and NOTHING in production has ever called it -- so
 # every canvas call in switchWorkspace optional-chained through nil and did

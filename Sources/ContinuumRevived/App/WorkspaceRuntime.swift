@@ -108,6 +108,18 @@ final class WorkspaceRuntime {
         registry.controller(for: projectId)
     }
 
+    /// Read-only publication coverage. Capturing must not acquire a controller,
+    /// install a layer, persist a membership repair or arm a source zone.
+    var collaborationCanvas: CanvasNSView? { canvasView }
+    var collaborationZones: [ZonePlacement] {
+        document.zones.filter { !foreignZoneIds.contains($0.zoneId) }
+    }
+    func collaborationOwnsProject(_ projectId: UUID) throws -> Bool {
+        let current = try registryStore.loadOrEmpty()
+        return try current.exclusiveWorkspaceOwner(of: projectId) == workspaceId
+            && current.projects.contains { $0.id == projectId && !$0.missing }
+    }
+
     /// Every project controller this workspace holds live. Teardown that must
     /// reach every runtime iterates this, never `activeController`.
     var liveControllers: [ZoneRuntimeController] { registry.liveControllers }

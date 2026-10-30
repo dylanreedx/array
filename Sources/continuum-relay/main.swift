@@ -1,5 +1,6 @@
 @preconcurrency import Dispatch
 import Foundation
+import ContinuumRevivedCollaborationService
 import ContinuumRevivedRelayCore
 import ContinuumRevivedRelayNIO
 
@@ -77,8 +78,33 @@ do {
     let parent = URL(fileURLWithPath: configuration.databasePath).deletingLastPathComponent()
     try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
     let store = try RelayStore(path: configuration.databasePath, masterKey: masterKey)
+    let collaboration: CollaborationStore?
+    let collaborationPath = ProcessInfo.processInfo.environment["RELAY_COLLABORATION_DATABASE_PATH"]
+    let collaborationSecret = ProcessInfo.processInfo.environment["RELAY_COLLABORATION_MASTER_KEY"]
+    if let collaborationPath, let collaborationSecret,
+       let collaborationKey = Data(base64Encoded: collaborationSecret), collaborationKey.count >= 32 {
+        let collaborationURL = URL(fileURLWithPath: collaborationPath).standardizedFileURL.resolvingSymlinksInPath()
+        guard collaborationURL != URL(fileURLWithPath: configuration.databasePath).standardizedFileURL.resolvingSymlinksInPath() else {
+            throw CollaborationStoreError.invalidRequest
+        }
+        try FileManager.default.createDirectory(at: collaborationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        collaboration = try CollaborationStore(path: collaborationURL.path, masterKey: collaborationKey)
+    } else if collaborationPath != nil || collaborationSecret != nil {
+        throw CollaborationStoreError.invalidRequest
+    } else { collaboration = nil }
+    if CommandLine.arguments.count > 1 {
+        guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--collaboration-enroll", let collaboration else {
+            throw CollaborationStoreError.invalidRequest
+        }
+        // Intentional one-time operator output, not a diagnostic log or provider credential.
+        let enrollment = try await collaboration.provisionPerson(label: CommandLine.arguments[2])
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        FileHandle.standardOutput.write(try encoder.encode(enrollment))
+        FileHandle.standardOutput.write(Data("\n".utf8))
+        exit(0)
+    }
     let pushDelivery: (any RelayEventPushDelivering)? = try configuration.apns.map { try RelayAPNSService(store: store, configuration: $0, transport: RelayURLSessionAPNSTransport()) }
-    let server = RelayServer(store: store, configuration: .init(host: configuration.host, publicPort: configuration.port, adminPort: configuration.adminPort), pushDelivery: pushDelivery)
+    let server = RelayServer(store: store, configuration: .init(host: configuration.host, publicPort: configuration.port, adminPort: configuration.adminPort), pushDelivery: pushDelivery, collaboration: collaboration)
     try await server.start()
     log("info", "ready", fields: ["public_port": "\(configuration.port)", "admin_port": "\(configuration.adminPort)"])
 

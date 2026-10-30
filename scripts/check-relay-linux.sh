@@ -8,7 +8,7 @@ RELAY_CONTEXT=$(mktemp -d "${TMPDIR:-/tmp}/array-relay-linux-check.XXXXXX")
 trap 'rm -rf "$RELAY_CONTEXT"' EXIT
 mkdir -p "$RELAY_CONTEXT/Sources"
 cp -p "$RELAY_ROOT/Dockerfile" "$RELAY_ROOT/RelayPackage.swift" "$RELAY_CONTEXT/"
-for target in ContinuumRevivedRelayProtocol ContinuumRevivedRelayCore ContinuumRevivedRelayNIO continuum-relay ContinuumRevivedRelayCoreChecks ContinuumRevivedRelayIntegrationChecks; do
+for target in ContinuumRevivedCollaborationClient ContinuumRevivedCollaborationProtocol ContinuumRevivedCollaborationService ContinuumRevivedCollaborationServiceChecks ContinuumRevivedRelayProtocol ContinuumRevivedRelayCore ContinuumRevivedRelayNIO continuum-relay ContinuumRevivedRelayCoreChecks ContinuumRevivedRelayIntegrationChecks; do
   cp -pR "$RELAY_ROOT/Sources/$target" "$RELAY_CONTEXT/Sources/$target"
 done
 docker build --platform linux/amd64 --progress plain --target checks \
@@ -20,4 +20,7 @@ docker run --rm --platform linux/amd64 --network none \
   array-relay-review:notification-checks
 docker run --rm --platform linux/amd64 --network none \
   --entrypoint /src/.build/release/ContinuumRevivedRelayIntegrationChecks \
+  array-relay-review:notification-checks
+docker run --rm --platform linux/amd64 --network none \
+  --entrypoint /src/.build/release/ContinuumRevivedCollaborationServiceChecks \
   array-relay-review:notification-checks

@@ -67,3 +67,5 @@ hard rules are the same file — `CLAUDE.md` symlinks to it.
 
 - [`.plans/`](../.plans/) — numbered plans for work that is designed but not
   started.
+
+- [Collaboration implementation](internals/collaboration.md) — [research, plan and progress](../.plans/105-collaboration/README.md).

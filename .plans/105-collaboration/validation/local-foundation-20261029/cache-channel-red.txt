@@ -1,0 +1,102 @@
+PASS: atomic capture accepted
+PASS: capture preserves relative layout
+PASS: retry returns original receipt
+PASS: retry does not mutate document
+PASS: refuses changedIntent
+PASS: refuses conflict
+PASS: refuses invalidGeometry
+PASS: last-edit failure rolls back entire group
+PASS: refuses invalidGeometry
+PASS: refuses conflict
+PASS: context conflict preserves accepted history
+PASS: refuses duplicateIdentity
+PASS: deleted identity remains reserved
+PASS: receipt survives snapshot restore
+PASS: refuses duplicateIdentity
+PASS: accepted replay produces identical canonical bytes
+PASS: refuses unsupportedSchema
+PASS: refuses wrongArea
+PASS: refuses missingObject
+PASS: refuses duplicateIdentity
+PASS: portable payload excludes rootPath
+PASS: portable payload excludes projectId
+PASS: portable payload excludes zoneId
+PASS: portable payload excludes viewport
+PASS: portable payload excludes runnerHandle
+PASS: portable payload excludes authToken
+PASS: portable payload excludes workingDirectory
+PASS: capture fixture uses distinct project owners
+PASS: capture preserves local tile records byte for byte
+PASS: actual Tile adapter preserves model coordinates
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: refuses invalidGeometry
+PASS: refuses unsupportedSchema
+PASS: refuses invalidReference
+PASS credentials: URL aliases normalize without splitting credentials
+PASS credentials: root and default port normalize
+PASS credentials: meaningful service base paths remain distinct
+PASS credentials: loopback HTTP requires explicit opt-in
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: loopback permission cannot allow remote plaintext service
+PASS credentials: prod, dev and editor-test credentials use different services
+PASS credentials: bare binaries use dev credential namespace
+PASS credentials: canonical endpoint and identity round trip
+PASS credentials: other channels cannot see dev credential
+PASS credentials: endpoint/person/device contributes to credential account
+PASS credentials: another service/person/device sees no credential
+PASS credentials: endpoint/person/device contributes to credential account
+PASS credentials: another service/person/device sees no credential
+PASS credentials: endpoint/person/device contributes to credential account
+PASS credentials: another service/person/device sees no credential
+PASS credentials: save refuses identity swap
+PASS credentials: save refuses identity swap
+PASS credentials: serialized credential moved to another person refuses
+PASS credentials: refusal preserves displaced record
+PASS credentials: serialized credential moved to another endpoint refuses
+PASS credentials: serialized credential copied across channels refuses
+PASS credentials: other-channel removal preserves dev account
+PASS credentials: invalid bearer token refuses before persistence
+PASS credentials: invalid bearer token refuses before persistence
+PASS credentials: invalid bearer token refuses before persistence
+PASS credentials: invalid bearer token refuses before persistence
+PASS credentials: future credential schema refuses load
+PASS credentials: future credential schema refuses automatic overwrite
+PASS credentials: future credential bytes remain intact
+PASS credentials: corrupt credential refuses load
+PASS credentials: corrupt credential refuses automatic overwrite
+PASS credentials: corrupt credential bytes remain intact
+PASS credentials: vault write failure propagates
+PASS credentials: failed replacement retains original credential
+PASS credentials: explicit removal is scoped and idempotent
+PASS credentials: credential contract never requests provider or companion namespaces
+Collaboration credential checks passed with an injected memory vault; real Keychain adapter remains unexercised.
+PASS local store: missing cache is empty only without recovery history
+PASS local store: document, cursor, binding, view and private draft survive save/load
+PASS local store: fresh store restores applied cursor with its document
+PASS local store: own source resolves only to explicit local IDs
+PASS local store: remote source remains a projection reference
+PASS local store: missing object remains unavailable
+PASS local store: channel/person/endpoint/area scope cannot load another cache
+FAIL: LocalStoreCheckFailure(message: "refuses scopeMismatch")

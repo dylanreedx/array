@@ -64,6 +64,8 @@ let package = Package(
         .target(
             name: "ContinuumRevivedCore",
             dependencies: [
+                "ContinuumRevivedCollaborationProtocol",
+                "ContinuumRevivedCollaborationClient",
                 "ContinuumRevivedAgentContent",
                 "ContinuumRevivedAgentUI",
                 .product(name: "GRDB", package: "GRDB.swift")
@@ -87,6 +89,10 @@ let package = Package(
                 .linkedFramework("CloudKit")
             ]
         ),
+        .target(name: "ContinuumRevivedCollaborationProtocol", dependencies: [.product(name: "Crypto", package: "swift-crypto")]),
+        .target(name: "ContinuumRevivedCollaborationClient", dependencies: ["ContinuumRevivedCollaborationProtocol"]),
+        .target(name: "ContinuumRevivedCollaborationService", dependencies: ["ContinuumRevivedCollaborationProtocol", .product(name: "GRDB", package: "GRDB.swift"), .product(name: "Crypto", package: "swift-crypto")]),
+        .executableTarget(name: "ContinuumRevivedCollaborationServiceChecks", dependencies: ["ContinuumRevivedCollaborationProtocol", "ContinuumRevivedCollaborationClient", "ContinuumRevivedCollaborationService", "ContinuumRevivedRelayNIO", "ContinuumRevivedRelayCore", .product(name: "GRDB", package: "GRDB.swift"), .product(name: "NIOCore", package: "swift-nio"), .product(name: "NIOPosix", package: "swift-nio"), .product(name: "NIOHTTP1", package: "swift-nio")]),
         .target(name: "ContinuumRevivedRelayProtocol"),
         .target(
             name: "ContinuumRevivedRelayCore",
@@ -99,7 +105,7 @@ let package = Package(
         .target(
             name: "ContinuumRevivedRelayNIO",
             dependencies: [
-                "ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore",
+                "ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore", "ContinuumRevivedCollaborationService",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -160,6 +166,8 @@ let package = Package(
         .executableTarget(
             name: "ContinuumRevived",
             dependencies: [
+                "ContinuumRevivedCollaborationProtocol",
+                "ContinuumRevivedCollaborationClient",
                 "ContinuumRevivedAgentUI",
                 "ContinuumRevivedFileTree",
                 "ContinuumRevivedCore",
@@ -188,6 +196,7 @@ let package = Package(
                 .linkedLibrary("stdc++")
             ]
         ),
+        .executableTarget(name: "ContinuumRevivedCollaborationChecks", dependencies: ["ContinuumRevivedCore", "ContinuumRevivedCollaborationProtocol", "ContinuumRevivedCollaborationClient", "ContinuumRevivedCollaborationService", "ContinuumRevivedRelayCore", "ContinuumRevivedRelayNIO"]),
         .executableTarget(
             name: "ContinuumRevivedCoreChecks",
             // Ticket 07 (convergence fuzz) drives materialize/compact/applySnapshot
@@ -221,7 +230,7 @@ let package = Package(
         .executableTarget(name: "ContinuumRevivedRelayIntegrationChecks", dependencies: ["ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore", "ContinuumRevivedRelayNIO"]),
         .executableTarget(
             name: "continuum-relay",
-            dependencies: ["ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore", "ContinuumRevivedRelayNIO"]
+            dependencies: ["ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore", "ContinuumRevivedCollaborationService", "ContinuumRevivedRelayNIO"]
         ),
         .executableTarget(
             name: "continuum-relay-legacy",

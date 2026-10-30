@@ -1,0 +1,46 @@
+{
+  "date": "2026-10-30",
+  "board": {
+    "tileId": "CA73963B-1486-413C-9913-7B336742354D",
+    "boardId": "F54D4170-AB61-4595-A4D4-A400B76364A5",
+    "columns": [
+      {
+        "cardCount": 15,
+        "name": "To Do",
+        "columnId": "01DE61A9-AECF-4EB1-91BE-EF1242EB3CAF"
+      },
+      {
+        "cardCount": 9,
+        "name": "Doing",
+        "columnId": "E97F008C-12F2-4D04-A7E2-2835694DA2ED"
+      },
+      {
+        "cardCount": 2,
+        "name": "Done",
+        "columnId": "5D3C4E2B-BB9F-489C-9AD5-80E917EEECA4"
+      }
+    ],
+    "revision": 65,
+    "title": "Array feats"
+  },
+  "completed": [
+    "COL-01",
+    "COL-03"
+  ],
+  "inProgress": [
+    "COL-02",
+    "COL-04",
+    "COL-05",
+    "COL-06",
+    "COL-07",
+    "COL-08",
+    "COL-09",
+    "COL-10",
+    "COL-12"
+  ],
+  "otherBoardWriteCalls": 0,
+  "nativeMultiplayerVerified": false,
+  "deployed": false,
+  "latestEvidence": "validation/capture-20261030/README.md",
+  "latestNativeCaptureVerified": true
+}

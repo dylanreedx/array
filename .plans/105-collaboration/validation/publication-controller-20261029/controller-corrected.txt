@@ -1,0 +1,245 @@
+Rebuilt affected Core leg after shutdown-completion and forbidden-operation corrections. Exit 0. No repeat of passing service/companion suites.
+
+PASS: atomic capture accepted
+PASS: capture preserves relative layout
+PASS: retry returns original receipt
+PASS: retry does not mutate document
+PASS: refuses changedIntent
+PASS: refuses conflict
+PASS: refuses invalidGeometry
+PASS: last-edit failure rolls back entire group
+PASS: refuses invalidGeometry
+PASS: refuses conflict
+PASS: context conflict preserves accepted history
+PASS: refuses duplicateIdentity
+PASS: deleted identity remains reserved
+PASS: receipt survives snapshot restore
+PASS: refuses duplicateIdentity
+PASS: accepted replay produces identical canonical bytes
+PASS: refuses unsupportedSchema
+PASS: refuses wrongArea
+PASS: refuses missingObject
+PASS: refuses duplicateIdentity
+PASS: portable payload excludes rootPath
+PASS: portable payload excludes projectId
+PASS: portable payload excludes zoneId
+PASS: portable payload excludes viewport
+PASS: portable payload excludes runnerHandle
+PASS: portable payload excludes authToken
+PASS: portable payload excludes workingDirectory
+PASS: capture fixture uses distinct project owners
+PASS: capture preserves local tile records byte for byte
+PASS: actual Tile adapter preserves model coordinates
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: refuses invalidGeometry
+PASS: refuses unsupportedSchema
+PASS: refuses invalidReference
+PASS credentials: URL aliases normalize without splitting credentials
+PASS credentials: root and default port normalize
+PASS credentials: meaningful service base paths remain distinct
+PASS credentials: loopback HTTP requires explicit opt-in
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: loopback permission cannot allow remote plaintext service
+PASS credentials: prod, dev and editor-test credentials use different services
+PASS credentials: bare binaries use dev credential namespace
+PASS credentials: canonical endpoint and identity round trip
+PASS credentials: other channels cannot see dev credential
+PASS credentials: endpoint/person/device contributes to credential account
+PASS credentials: another service/person/device sees no credential
+PASS credentials: endpoint/person/device contributes to credential account
+PASS credentials: another service/person/device sees no credential
+PASS credentials: endpoint/person/device contributes to credential account
+PASS credentials: another service/person/device sees no credential
+PASS credentials: save refuses identity swap
+PASS credentials: save refuses identity swap
+PASS credentials: serialized credential moved to another person refuses
+PASS credentials: refusal preserves displaced record
+PASS credentials: serialized credential moved to another endpoint refuses
+PASS credentials: serialized credential copied across channels refuses
+PASS credentials: other-channel removal preserves dev account
+PASS credentials: invalid bearer token refuses before persistence
+PASS credentials: invalid bearer token refuses before persistence
+PASS credentials: invalid bearer token refuses before persistence
+PASS credentials: invalid bearer token refuses before persistence
+PASS credentials: future credential schema refuses load
+PASS credentials: future credential schema refuses automatic overwrite
+PASS credentials: future credential bytes remain intact
+PASS credentials: corrupt credential refuses load
+PASS credentials: corrupt credential refuses automatic overwrite
+PASS credentials: corrupt credential bytes remain intact
+PASS credentials: vault write failure propagates
+PASS credentials: failed replacement retains original credential
+PASS credentials: explicit removal is scoped and idempotent
+PASS credentials: credential contract never requests provider or companion namespaces
+Collaboration credential checks passed with an injected memory vault; real Keychain adapter remains unexercised.
+PASS local store: missing cache is empty only without recovery history
+PASS local store: document, cursor, binding, view and private draft survive save/load
+PASS local store: fresh store restores applied cursor with its document
+PASS local store: own source resolves only to explicit local IDs
+PASS local store: remote source remains a projection reference
+PASS local store: missing object remains unavailable
+PASS local store: channel/person/endpoint/area scope cannot load another cache
+PASS local store: refuses scopeMismatch
+PASS local store: channel/person/endpoint/area scope cannot load another cache
+PASS local store: refuses scopeMismatch
+PASS local store: channel/person/endpoint/area scope cannot load another cache
+PASS local store: refuses scopeMismatch
+PASS local store: channel/person/endpoint/area scope cannot load another cache
+PASS local store: refuses scopeMismatch
+PASS local store: refuses scopeMismatch
+PASS local store: cross-channel cache refusal preserves displaced bytes
+PASS local store: canonical endpoint aliases resolve the same private cache
+PASS local store: cached shared content and drafts are owner-readable only
+PASS local store: forged local binding cannot resolve a remote source before save
+PASS local store: refuses invalidState
+PASS local store: refuses invalidState
+PASS local store: refuses invalidState
+PASS local store: removing a local view binding does not turn a projection into an executor
+PASS local store: cache/view changes leave source project records byte-identical
+PASS local store: portable document excludes private draft and source-local IDs
+PASS local store: atomic cache write participates in the real store fault seam
+PASS local store: failed commit preserves prior cache bytes
+PASS local store: failed commit does not advance draft/view/cursor
+PASS local store: save returns an incremented local generation
+PASS local store: refuses staleGeneration
+PASS local store: stale same-server-revision private save preserves winning draft bytes
+PASS local store: private draft survives a racing view edit
+PASS local store: explicit reload/merge preserves both private edits
+PASS local store: refuses staleGeneration
+PASS local store: refuses staleState
+PASS local store: another store cannot roll back the accepted document cursor
+PASS local store: refuses staleState
+PASS local store: refuses unsupportedSchema
+PASS local store: refuses unsupportedSchema
+PASS local store: future schema stays intact despite valid older backups
+PASS local store: schema refusal preserves recovery generations
+PASS local store: refuses corruptState
+PASS local store: refuses corruptState
+PASS local store: corrupt primary is never silently replaced by older content
+PASS local store: refuses recoveryRequired
+PASS local store: refuses recoveryRequired
+PASS local store: refuses invalidRoot
+PASS local store: refuses invalidRoot
+PASS local store: symlinked cache target cannot touch another file
+Shared area local store checks passed: isolated cache/bindings/drafts, atomic persistence and refusal preservation; no native scene or runner claim.
+PASS publication: complete model inventory includes unsupported terminal as an explicit row
+PASS publication: agent review truthfully includes an opaque source and no transcript history
+PASS publication: agreement review shows the exact explicitly captured text
+PASS publication: confirmed command atomically admits selected source and initial agreement content
+PASS publication: negative WORLD origin normalizes once while preserving cross-project layout
+PASS publication: faraway unsupported terminal cannot alter published object offsets
+PASS publication: faraway explicitly omitted member cannot influence shared capture origin
+PASS publication: refuses reviewChanged
+PASS publication: only actual managed agent has a separate private local source binding
+PASS publication: review and confirmation preserve source models byte for byte
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: same confirmed review preserves operation identity and generated source bindings
+PASS publication: enumeration ordering alone does not change selected publication intent
+PASS publication: refuses incompleteCoverage
+PASS publication: refuses incompleteCoverage
+PASS publication: refuses incompleteCoverage
+PASS publication: explicit model tile selection works without claiming workspace coverage
+PASS publication: refuses missingSource
+PASS publication: zone review uses complete supplied zone models including non-live members
+PASS publication: capture rectangle excludes a partially overlapping note
+PASS publication: a selected managed agent is never implicitly approved
+PASS publication: refuses nothingToPublish
+PASS publication: refuses reviewIncomplete
+PASS publication: artifact intent is visibly unsupported rather than publishing a misleading empty payload
+PASS publication: unresolved local agent cannot become an executable fallback
+PASS publication: note text without an owner-captured content revision cannot be admitted
+PASS publication: refuses nothingToPublish
+PASS publication: note text without an owner-captured content revision cannot be admitted
+PASS publication: refuses nothingToPublish
+PASS publication: same tile UUID in separate projects retains distinct publication choices, objects and local agent bindings
+PASS publication: explicit source key cannot select another project's repeated tile UUID
+PASS publication: refuses reviewChanged
+PASS publication: refuses reviewChanged
+PASS publication: refuses reviewChanged
+PASS publication: refuses reviewChanged
+PASS publication: refuses reviewChanged
+PASS publication: refuses reviewChanged
+PASS publication: refuses duplicateChoice
+PASS publication: refuses invalidContent
+PASS: cached native document is visible without online mutation authority
+PASS: a cached operation never reaches transport
+PASS: native open verifies credential identity before granting current membership
+PASS: current area state supplies the online role
+PASS: presence-only render updates do not rewrite or back up the durable cache
+PASS: accepted replica persists atomically while preserving latest private camera and both drafts
+PASS: native submit returns its admitted revision
+PASS: successful acknowledgement removes only its unchanged private draft
+PASS: delayed pre-ack live page cannot regress or revoke a healthy acknowledged document
+PASS: live reader catches up to the acknowledged document without replacing the source owner
+PASS: a newer shared cache remains read-only until this connection covers its accepted cursor
+PASS: a service conflict leaves the local draft and accepted document intact
+PASS: a forbidden object mutation retains live membership, visible content and its private draft
+PASS: an uncertain request preserves the operation identity and private draft for explicit recovery
+PASS: access loss removes visible shared content and every mutation capability
+PASS: access-loss suppression persists without deleting private draft recovery
+PASS: reopening after access removal does not redisplay suppressed cached content
+PASS: native controller emits UI changes while preserving every source project byte
+PASS: close waits for an already-retired subscription whose stop is held
+PASS: closing completes only after this view subscription has stopped
+PASS: a stored credential with another online identity cannot fetch an area or submit
+PASS: scripted open is held at online identity verification
+PASS: a late identity response after view closure cannot reopen content or fetch state
+PASS: viewer keeps a private draft without sending a prohibited mutation
+Shared area controller checks passed: online identity, read-only cache, scoped lifecycle, monotonic replay/ACK, private persistence and explicit outcomes; no runner or native scene claim.
+PASS controller HTTP: confirmed reviewed capture reaches actual HTTP storage with exact content and area-local geometry
+PASS controller HTTP: cached document is visible without a reusable membership grant
+PASS controller HTTP: excluded controller receives no document or write scope
+PASS controller HTTP: actual A/B controllers converge through accepted HTTP updates
+PASS controller HTTP: incoming updates preserve each private camera and draft
+PASS controller HTTP: native controller atomically persists the revision actually applied
+PASS controller HTTP: presence delivery does not advance accepted document history
+PASS controller HTTP: stale edit stays private while accepted shared geometry arrives
+PASS controller HTTP: private drafts and source filesystem sentinels never enter the accepted service document
+PASS controller HTTP: reviewed publication excludes private source identifiers and metadata from service bytes
+PASS controller HTTP: reviewed publication excludes private source identifiers and metadata from service bytes
+PASS controller HTTP: reviewed publication excludes private source identifiers and metadata from service bytes
+PASS controller HTTP: reviewed publication excludes private source identifiers and metadata from service bytes
+PASS controller HTTP: reviewed publication excludes private source identifiers and metadata from service bytes
+PASS controller HTTP: reviewed publication excludes private source identifiers and metadata from service bytes
+PASS controller HTTP: reviewed publication excludes private source identifiers and metadata from service bytes
+PASS controller HTTP: remote layout and native client persistence preserve source project bytes
+PASS controller HTTP: a forbidden object action preserves valid area membership, visible content and private draft
+PASS controller HTTP: active removal clears visible content and authority
+PASS controller HTTP: persisted denial suppresses cached shared content on reopen and preserves private drafts
+PASS controller HTTP: online revalidation does not restore a removed area
+PASS controller HTTP: closing and reopening retains only private navigation until current authority returns
+Collaboration contracts passed (reducer, reviewed publications, native controller and localhost HTTP; no mounted-scene or runner claims).

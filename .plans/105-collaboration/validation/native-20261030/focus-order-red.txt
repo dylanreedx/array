@@ -1,0 +1,20 @@
+FAIL: Failure(message: "failed private focus save preserves the previous logical target and its draft")
+PASS collaboration inventory: capture reads the actual production-mounted layered scene
+PASS collaboration inventory: fixture includes a persisted source below live hydration
+PASS collaboration inventory: fixture changes the live model in WORLD coordinates
+PASS collaboration inventory: complete capture includes both owners and persisted below-tier membership
+PASS collaboration inventory: live and retained source frames use WORLD model geometry exactly once, excluding presentation pose
+PASS collaboration inventory: live unsaved and below-tier note text come from their actual owners
+PASS collaboration inventory: capture and confirmation do not rewrite source canvases or note files
+PASS collaboration inventory: reading capture acquires no controller, creates no agent and leaves the armed source unchanged
+PASS collaboration inventory: actual owner reread invalidates stale note confirmation
+PASS collaboration inventory: a known tile pointer does not authorize another project identity
+PASS collaboration inventory: foreign membership rescues only within its owning project without writing repaired stamps
+PASS collaboration inventory: incomplete whole-workspace coverage names the unavailable project without acquiring it
+PASS collaboration inventory: a scoped zone capture does not acquire unrelated unavailable projects
+PASS collaboration inventory: unsupported projectless source is explicitly named instead of omitted
+Collaboration inventory checks passed: production mount, current WORLD models, source ownership, below-tier notes and fresh confirmation; no live providers or default tmux.
+PASS shared scene: production entry mounts each shared scene exactly once
+PASS shared scene: mounted independent identities acquire current authority
+PASS shared scene: first native frame converts area geometry through its private camera exactly once
+PASS shared scene: second camera renders the same area rectangle at an independent origin and zoom

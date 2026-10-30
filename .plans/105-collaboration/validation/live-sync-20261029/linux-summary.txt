@@ -1,0 +1,20 @@
+Command: bash scripts/check-relay-linux.sh
+Exit: 0
+Scope: captured live-sync source before subsequent review/cache/vault changes.
+Linux/amd64 Swift 6.1 release; suites rerun with --network none.
+#17 14.51 PASS: operator entry point issues redeemable person enrollment
+#17 14.51 Collaboration service checks passed: real localhost HTTP, isolated SQLite and A/B/C; no native scene/host-execution claims.
+#17 15.34 Collaboration updates checks passed: paged catch-up, live wakeup, coalesced expiring presence, active revocation and cancellation through real HTTP/client.
+#18 5.913 Task policy checks passed: task/run graph, grandchildren/queued blockers, unknown membership, child attention, cancellation, stable task identity
+#18 5.913 ContinuumRevivedRelayCoreChecks passed: isolation, one-use pairing, fixed scope, idempotency, restart
+#19 12.73 Relay HTTP notification checks passed: delivery, dedup, revoke, large Mac bootstrap, 8 MiB decoded/24 MiB ingress bounds, 16 MiB replay tail; fake APNs only
+#19 12.73 Relay HTTP outbox checks passed: publish commit without sender → restart → real worker delivers persisted alert; fake APNs only
+#19 12.73 Task notification ownership checks passed: atomic legacy backlog cancellation, quiet historical baseline, later completion once, unknown/restore dedup, stale/conflicting/foreign revision fencing, no late pairing replay restart persistence and all-surface aggregate/no-start ownership
+Task policy checks passed: task/run graph, grandchildren/queued blockers, unknown membership, child attention, cancellation, stable task identity
+ContinuumRevivedRelayCoreChecks passed: isolation, one-use pairing, fixed scope, idempotency, restart
+Relay HTTP notification checks passed: delivery, dedup, revoke, large Mac bootstrap, 8 MiB decoded/24 MiB ingress bounds, 16 MiB replay tail; fake APNs only
+Relay HTTP outbox checks passed: publish commit without sender → restart → real worker delivers persisted alert; fake APNs only
+Task notification ownership checks passed: atomic legacy backlog cancellation, quiet historical baseline, later completion once, unknown/restore dedup, stale/conflicting/foreign revision fencing, no late pairing replay restart persistence and all-surface aggregate/no-start ownership
+PASS: operator entry point issues redeemable person enrollment
+Collaboration service checks passed: real localhost HTTP, isolated SQLite and A/B/C; no native scene/host-execution claims.
+Collaboration updates checks passed: paged catch-up, live wakeup, coalesced expiring presence, active revocation and cancellation through real HTTP/client.

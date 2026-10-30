@@ -1,0 +1,12 @@
+{
+  "date": "2026-10-30",
+  "allSwiftSourceRecords": 1033,
+  "swiftSourceDifferences": [],
+  "integrationDifferences": [
+    "docs/38-tickets/90-agent-ux/matrix-inventory.txt",
+    "scripts/run-matrix.sh"
+  ],
+  "notes": "The gate script/inventory changed concurrently after the frozen matrix. Current inventory/shell syntax passed; collaboration native invocation and Core check count 7 remain registered. Source code was refreshed coherently before the final native leg.",
+  "qaContextRemoved": true,
+  "finalSwiftSourceDifferences": []
+}

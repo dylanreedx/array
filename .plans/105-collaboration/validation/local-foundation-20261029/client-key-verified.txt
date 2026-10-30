@@ -1,0 +1,28 @@
+PASS client boundary: service redirects deliver zero requests/credentials to the target
+PASS client boundary: future-schema snapshot terminates without a retry loop
+PASS client boundary: incompatible accepted command terminates without retaining stale authority
+PASS database key: invalid key or marker refuses before writes
+PASS database key: wrong-key reopen preserves snapshots, operations and heads
+PASS database key: correct-key reopen preserves exact document
+PASS database key: correct-key reopen preserves exact document
+PASS database key: invalid key or marker refuses before writes
+PASS database key: wrong-key v2 adoption leaves no marker or migration record
+PASS database key: failed v2 adoption rolls back without ciphertext changes
+PASS database key: correct key adopts an unmarked v2 database
+PASS database key: adoption does not reencrypt or rewrite stored state
+PASS database key: adopted key reads original shared content
+PASS database key: adopted key reads original shared content
+PASS database key: invalid key or marker refuses before writes
+PASS database key: a damaged later snapshot blocks key adoption
+PASS database key: failed snapshot validation preserves damaged evidence
+PASS database key: invalid key or marker refuses before writes
+PASS database key: a damaged later operation blocks key adoption
+PASS database key: failed operation validation preserves damaged evidence
+PASS database key: restored records adopt without a ciphertext rewrite
+PASS database key: invalid key or marker refuses before writes
+PASS database key: corrupt marker is preserved rather than healed
+PASS database key: corrupt marker refusal leaves all encrypted state unchanged
+PASS database key: invalid key or marker refuses before writes
+PASS database key: marker authentication precedes even a pending migration
+PASS database key: invalid key or marker refuses before writes
+Collaboration database key checks passed: every-open marker authentication, atomic v2 adoption, all-record validation and corruption preservation.

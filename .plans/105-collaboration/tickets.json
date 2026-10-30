@@ -1,0 +1,399 @@
+[
+  {
+    "key": "COL-01",
+    "title": "COL-01 — Settle shared-area architecture, UX and confidentiality gates",
+    "phase": "0",
+    "dependencies": [],
+    "body": "**Status:** Planned; not started. **Phase:** 0.\n\n**Outcome and scope**\n\nWrite decision records for portable area identity, jointly arranged geometry/private cameras, supported publication kinds, person/device/host ownership, and trusted-relay versus real group encryption. Compare embedded mount with a dedicated shared scene without migrating source zones.\n\n**Dependencies:** None; resolve before dependent feature work.\n\n**Acceptance criteria**\n\n- All three share entry points use one membership/manifest model; unsupported tile kinds are explicit.\n- Document server-visible content, retention, key lifecycle and revocation. Preserve companion ciphertext. If group E2EE is required, expand blocking key-admission/rotation/history tickets before proceeding.\n- Record native-first and separate-checkout scope; distinguish observation, source publication and execution rights.\n\n**Behavioral witness / validation**\n\nReview concrete payload/coordinate examples and ADRs; the COL-02 fixture must exercise the selected boundaries. This ticket closes decisions, not production behavior.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/01-domain.md`\n- `.plans/105-collaboration/implementation/02-transport.md`\n- `.plans/105-collaboration/implementation/04-canvas.md`\n- `.plans/105-collaboration/implementation/10-security.md`\n- `.plans/105-collaboration/implementation/12-delivery.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "01-domain.md",
+      "02-transport.md",
+      "04-canvas.md",
+      "10-security.md",
+      "12-delivery.md"
+    ]
+  },
+  {
+    "key": "COL-02",
+    "title": "COL-02 — Build an isolated three-principal collaboration harness",
+    "phase": "0",
+    "dependencies": [
+      "COL-01"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 0.\n\n**Outcome and scope**\n\nCreate independent invited A/B and excluded C identities, temporary service/client databases, separate app support/default suites/project roots and scripted host runner transports. Exercise actual service routes and production scene/dispatch seams.\n\n**Dependencies:** COL-01\n\n**Acceptance criteria**\n\n- No test uses the default tmux socket, production relay, real CLI login, or live project state.\n- Inject clocks, dropped/duplicated/reordered frames, host restarts and transaction failures reproducibly.\n- Assertions inspect delivered bytes, mounted frames, source files, runner counts and actual command outcomes.\n\n**Behavioral witness / validation**\n\nAn intentionally unauthorized or lost-operation fixture is RED before the enforcement fix and GREEN after; register the harness in the matrix and confirm its leg runs.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/11-verification-performance.md`\n- `.plans/105-collaboration/implementation/09-persistence-recovery.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "11-verification-performance.md",
+      "09-persistence-recovery.md"
+    ]
+  },
+  {
+    "key": "COL-03",
+    "title": "COL-03 — Define portable shared-area contracts and atomic reducer",
+    "phase": "1",
+    "dependencies": [
+      "COL-01"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 1.\n\n**Outcome and scope**\n\nAdd schema-versioned area/object/placement/source-binding identities and typed operations for admission, geometry, discussion references and immutable context. Keep source-local records, camera and creation pointers out of shared payloads.\n\n**Dependencies:** COL-01\n\n**Acceptance criteria**\n\n- Multi-project capture preserves source ownership and area-relative geometry.\n- Atomic group operations either apply entirely or leave state unchanged; invalid/nonfinite frames and dangling references refuse.\n- Stable operation ID plus payload digest distinguishes identical retry from changed intent; stale deleted IDs cannot resurrect.\n\n**Behavioral witness / validation**\n\nCore reducer fixtures verify canonical state from accepted-event replay, conflict/rollback, duplicate operations and schema refusal; encoded sentinels prove host records/pointers do not cross.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/01-domain.md`\n- `.plans/105-collaboration/implementation/09-persistence-recovery.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "01-domain.md",
+      "09-persistence-recovery.md"
+    ]
+  },
+  {
+    "key": "COL-04",
+    "title": "COL-04 — Add person/device identity and area invitations with revocation",
+    "phase": "1",
+    "dependencies": [
+      "COL-01",
+      "COL-03"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 1.\n\n**Outcome and scope**\n\nIntroduce real human principals, separately authenticated devices/hosts, durable membership and object/action capabilities. Implement atomic expiring invitations and access removal without pairing teammates as personal companion devices.\n\n**Dependencies:** COL-01, COL-03\n\n**Acceptance criteria**\n\n- Two humans with independent hosts join the same area; a third cannot enumerate or fetch it.\n- Expired/consumed invitations, forged authorship and cross-area IDs refuse; history-on-join policy is explicit.\n- Removal invalidates future reads/writes and pending unadmitted actions on active clients; account/subscription scaffolding is not treated as implemented identity.\n\n**Behavioral witness / validation**\n\nActual auth/store/route fixtures cover invitation races, stolen-scope IDs, active-stream removal and epoch changes using disposable principals.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/03-identity.md`\n- `.plans/105-collaboration/implementation/10-security.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "03-identity.md",
+      "10-security.md"
+    ]
+  },
+  {
+    "key": "COL-05",
+    "title": "COL-05 — Persist ordered area operations, snapshots and request outcomes",
+    "phase": "1",
+    "dependencies": [
+      "COL-02",
+      "COL-03",
+      "COL-04"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 1.\n\n**Outcome and scope**\n\nAdd collaboration-scoped service storage/routes using existing relay plumbing. Persist area sequence, members, operations, snapshots and payload-bound idempotency atomically while preserving companion v2 behavior.\n\n**Dependencies:** COL-02, COL-03, COL-04\n\n**Acceptance criteria**\n\n- Discussion/layout survives service restart and remains area-isolated.\n- Identical retry returns the original outcome; reusing an ID for changed content refuses.\n- Snapshot replacement is scoped to one area and stream; no globally replaced instance snapshot erases other shared state.\n\n**Behavioral witness / validation**\n\nDisposable SQLite plus actual HTTP route tests cover concurrent writes, transaction failure, restart, migration rollback and companion regression fixtures.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/02-transport.md`\n- `.plans/105-collaboration/implementation/09-persistence-recovery.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "02-transport.md",
+      "09-persistence-recovery.md"
+    ]
+  },
+  {
+    "key": "COL-06",
+    "title": "COL-06 — Implement complete replay, bounded subscriptions and ephemeral presence",
+    "phase": "1",
+    "dependencies": [
+      "COL-05"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 1.\n\n**Outcome and scope**\n\nProvide authenticated area subscriptions with consistent snapshot-to-live handoff, paged catch-up, backpressure and a separate coalesced presence lane.\n\n**Dependencies:** COL-05\n\n**Acceptance criteria**\n\n- More than 500 retained operations replay completely with no handshake gap or duplicate application.\n- Slow subscribers resynchronize durable content; only ephemeral presence may drop.\n- Access removal closes delivery on already-open streams; host liveness and pointer TTL expire independently.\n\n**Behavioral witness / validation**\n\nLocalhost multi-client route/socket fixtures inject backlog, handshake races, partitions, slow consumers and midstream revocation under an injected clock.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/02-transport.md`\n- `.plans/105-collaboration/implementation/09-persistence-recovery.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "02-transport.md",
+      "09-persistence-recovery.md"
+    ]
+  },
+  {
+    "key": "COL-07",
+    "title": "COL-07 — Enforce object publication and host-action capability boundaries",
+    "phase": "1",
+    "dependencies": [
+      "COL-04",
+      "COL-05"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 1.\n\n**Outcome and scope**\n\nCreate allowlisted portable projections and explicit source publication grants. Enforce scope before bytes leave the host/service and recheck current permission at host action admission.\n\n**Dependencies:** COL-04, COL-05\n\n**Acceptance criteria**\n\n- Sharing a region exposes only reviewed members/history, including attachment and nested artifact lookups.\n- A pointer, source ID or client-supplied principal never grants access; private host records and credentials remain local.\n- View/discuss/layout/prompt/stop/approval/terminal/sharing rights are distinguishable; actual agent policy can cause effects without a new approval.\n\n**Behavioral witness / validation**\n\nA/B/C fixtures assert prohibited data is absent from transport bytes, forged grants refuse, and stale queued actions fail closed after removal.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/03-identity.md`\n- `.plans/105-collaboration/implementation/05-runners.md`\n- `.plans/105-collaboration/implementation/10-security.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "03-identity.md",
+      "05-runners.md",
+      "10-security.md"
+    ]
+  },
+  {
+    "key": "COL-08",
+    "title": "COL-08 — Store local shared-area bindings and recoverable replicas",
+    "phase": "1",
+    "dependencies": [
+      "COL-03",
+      "COL-07"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 1.\n\n**Outcome and scope**\n\nPersist channel-isolated area replica, local anchor, private drafts and opaque source bindings without importing remote projects or syncing host-bound AgentRecord values.\n\n**Dependencies:** COL-03, COL-07\n\n**Acceptance criteria**\n\n- Join/remount preserves local registry exclusive ownership and source canvas bytes.\n- One source can have multiple views while owning exactly one runner.\n- Missing remote objects render explicit unavailable state; removing a view neither deletes the source nor kills execution; incompatible schema preserves the prior store.\n\n**Behavioral witness / validation**\n\nTemporary store migration/restart fixtures and production scene mount assert disk bytes, bindings, local pointer preservation and runner count.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/01-domain.md`\n- `.plans/105-collaboration/implementation/04-canvas.md`\n- `.plans/105-collaboration/implementation/09-persistence-recovery.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "01-domain.md",
+      "04-canvas.md",
+      "09-persistence-recovery.md"
+    ]
+  },
+  {
+    "key": "COL-09",
+    "title": "COL-09 — Capture reviewed tile/layout manifests from selection, zone or workspace",
+    "phase": "2",
+    "dependencies": [
+      "COL-03",
+      "COL-07",
+      "COL-08"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 2.\n\n**Outcome and scope**\n\nImplement the three sharing entry points through one structured manifest: selected objects, exact publication modes and area-relative model geometry. Reuse styled choice components and existing selection contracts.\n\n**Dependencies:** COL-03, COL-07, COL-08\n\n**Acceptance criteria**\n\n- Drag selection previews included tiles and permits correction; cancel changes nothing.\n- Selection hover lift is excluded; negative/nonzero origins and multi-project ownership remain correct.\n- Whole-zone/workspace capture resolves persisted coverage below hydration tier or explicitly names unavailable/unsupported members; later border crossing never silently publishes.\n\n**Behavioral witness / validation**\n\nPure manifest/geometry checks plus production-mounted pointer journey compare exact layout and original persisted source bytes before/after capture.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/04-canvas.md`\n- `.plans/105-collaboration/implementation/01-domain.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "04-canvas.md",
+      "01-domain.md"
+    ]
+  },
+  {
+    "key": "COL-10",
+    "title": "COL-10 — Mount native shared areas with private cameras and reference views",
+    "phase": "2",
+    "dependencies": [
+      "COL-08",
+      "COL-09"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 2.\n\n**Outcome and scope**\n\nAdd a shared scene/container owner for area-local geometry with local anchor and independent camera. Render remote objects through data-source projections rather than local agent construction.\n\n**Dependencies:** COL-08, COL-09\n\n**Acceptance criteria**\n\n- Participants at different world origins see the same internal arrangement.\n- Mount/hydrate/reopen/close and removal never spawn a recipient executor or retidy source zones.\n- Shared clicks/creation cannot fall back to an unrelated active local project; source private and below-live-tier tiles survive persistence.\n\n**Behavioral witness / validation**\n\nTwo isolated client mounts through mountWorkspaceSceneAtBoot assert actual visible world frames, focus/armed pointers, source bytes and source/recipient runner counts.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/04-canvas.md`\n- `.plans/105-collaboration/implementation/01-domain.md`\n- `.plans/105-collaboration/implementation/05-runners.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "04-canvas.md",
+      "01-domain.md",
+      "05-runners.md"
+    ]
+  },
+  {
+    "key": "COL-11",
+    "title": "COL-11 — Synchronize shared geometry, atomic groups and semantic undo",
+    "phase": "2",
+    "dependencies": [
+      "COL-05",
+      "COL-10"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 2.\n\n**Outcome and scope**\n\nRoute shared moves/resizes through typed authoritative commands while keeping source canvas and personal anchor/camera changes local. Resolve remote edits during a drag deliberately.\n\n**Dependencies:** COL-05, COL-10\n\n**Acceptance criteria**\n\n- A group action cannot partially commit or split frames across concurrent drags.\n- Undo reverses the applicable local action without restoring a stale whole document over peer edits.\n- Permission loss mid-gesture cancels commit; placement does not run divergent local automatic-layout pushes on peers.\n\n**Behavioral witness / validation**\n\nTwo mounted clients with delayed events, concurrent group drag, revocation and failed saves converge on exact frames while preserving intervening peer actions.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/01-domain.md`\n- `.plans/105-collaboration/implementation/04-canvas.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "01-domain.md",
+      "04-canvas.md"
+    ]
+  },
+  {
+    "key": "COL-12",
+    "title": "COL-12 — Add durable area discussion and revisioned working agreements",
+    "phase": "2",
+    "dependencies": [
+      "COL-05",
+      "COL-10"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 2.\n\n**Outcome and scope**\n\nKeep human discussion, shared brief/boundaries, decisions and immutable agreement revisions in the area. Begin with explicit revision conflicts and retained drafts rather than pretending whole-string LWW merges text.\n\n**Dependencies:** COL-05, COL-10\n\n**Acceptance criteria**\n\n- Human discussion or @mention never dispatches to an agent by accident.\n- Concurrent agreement edits preserve both drafts and surface a conflict; endorsements identify the revision.\n- Both participants can read accepted discussion after an execution host sleeps; task boundaries are described as instructions, not enforced filesystem restrictions.\n\n**Behavioral witness / validation**\n\nTwo-client durable-state fixtures exercise concurrent edits, restart/late join, author validation and zero runner commands from ordinary discussion.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/06-context-discussion.md`\n- `.plans/105-collaboration/implementation/09-persistence-recovery.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "06-context-discussion.md",
+      "09-persistence-recovery.md"
+    ]
+  },
+  {
+    "key": "COL-13",
+    "title": "COL-13 — Dispatch reviewed context through the owning host with durable receipts",
+    "phase": "2",
+    "dependencies": [
+      "COL-07",
+      "COL-12",
+      "COL-15"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 2.\n\n**Outcome and scope**\n\nAdd deliberate send/queue with target agent, frozen context/artifact revision, authenticated author/operator and stable command identity. Use host prompt preparation and supervisor acceptance, not direct remote runner creation.\n\n**Dependencies:** COL-07, COL-12, COL-15\n\n**Acceptance criteria**\n\n- Own-agent dispatch and owner-accepted teammate suggestions retain provenance and exact reviewed content.\n- Host rejects removed membership, stale generation/turn and invalid content; remote local-path attachments cannot bypass materialization.\n- Dropped replies/restart never cause blind resubmission. Separate requested, host accepted, queued, provider observed and outcome unknown; do not promise exactly-once external effects.\n\n**Behavioral witness / validation**\n\nScript real runner transport seams for all managed harnesses, inject crashes around submission and verify original-operation recovery or honest ambiguity, with no duplicate authorized dispatch.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/05-runners.md`\n- `.plans/105-collaboration/implementation/06-context-discussion.md`\n- `.plans/105-collaboration/implementation/09-persistence-recovery.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "05-runners.md",
+      "06-context-discussion.md",
+      "09-persistence-recovery.md"
+    ]
+  },
+  {
+    "key": "COL-14",
+    "title": "COL-14 — Show per-agent context freshness and provenance-linked results",
+    "phase": "2",
+    "dependencies": [
+      "COL-12",
+      "COL-13"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 2.\n\n**Outcome and scope**\n\nTrack which immutable agreement revision was actually delivered to each agent and bring selected agent answers/artifact references back into human discussion.\n\n**Dependencies:** COL-12, COL-13\n\n**Acceptance criteria**\n\n- Changed-since-sent is per agent and cannot imply receipt, understanding or compliance.\n- Editing the shared agreement never rewrites already accepted execution input.\n- Result excerpts retain source turn, host and artifact revision; unavailable originals remain honestly labeled.\n\n**Behavioral witness / validation**\n\nTwo agents receive different revisions; edit/resend/restart fixtures verify correct independent receipts, stale markers, exact source links and no automatic extra dispatch.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/06-context-discussion.md`\n- `.plans/105-collaboration/implementation/05-runners.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "06-context-discussion.md",
+      "05-runners.md"
+    ]
+  },
+  {
+    "key": "COL-15",
+    "title": "COL-15 — Publish sequenced live agent snapshots and truthful capabilities",
+    "phase": "2",
+    "dependencies": [
+      "COL-06",
+      "COL-07",
+      "COL-08",
+      "COL-10"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 2.\n\n**Outcome and scope**\n\nBridge supervisor atomic transcriptAttachment snapshot/tail into authorized shared projections with host/session generation, stable sequence and remote-only view lifecycle.\n\n**Dependencies:** COL-06, COL-07, COL-08, COL-10\n\n**Acceptance criteria**\n\n- Late join receives permitted snapshot plus every allowed tail event or an explicit resnapshot.\n- Private history/raw side channels do not cross; attach/remount creates no duplicate executor.\n- Actual bound-runner capabilities govern controls. Current unwired provider approval responses and watched external sessions remain unavailable; interrupt is not teardown kill.\n\n**Behavioral witness / validation**\n\nProduction supervisor/transport fixtures cover snapshot-tail races, gaps, background turns, stale generation, all three harnesses and QA-only capability false positives.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/05-runners.md`\n- `.plans/105-collaboration/implementation/07-usage-presence.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "05-runners.md",
+      "07-usage-presence.md"
+    ]
+  },
+  {
+    "key": "COL-16",
+    "title": "COL-16 — Publish immutable diff/file artifacts and pinned review references",
+    "phase": "2",
+    "dependencies": [
+      "COL-05",
+      "COL-07",
+      "COL-10"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 2.\n\n**Outcome and scope**\n\nAdd scoped artifact storage and snapshot producers with content digest, base/revision identity, coverage and publication limits. Reuse read-only rendering without assuming branch diffs include current worktree/untracked changes.\n\n**Dependencies:** COL-05, COL-07, COL-10\n\n**Acceptance criteria**\n\n- Selected bytes and explicitly included untracked/working/branch changes have accurate coverage; excluded content never uploads.\n- Live latest and the revision under review remain distinct; source changes invalidate applicability rather than silently carry approval forward.\n- Recipient local checkout stays byte-identical; large blobs use bounded authorized storage rather than the event stream.\n\n**Behavioral witness / validation**\n\nFixture repositories and artifact routes cover changed-during-review, inaccessible blobs, hash mismatch, oversized content and precise original/recipient file-state assertions.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/08-artifacts-code.md`\n- `.plans/105-collaboration/implementation/10-security.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "08-artifacts-code.md",
+      "10-security.md"
+    ]
+  },
+  {
+    "key": "COL-17",
+    "title": "COL-17 — Normalize provider usage into an idempotent per-owner ledger",
+    "phase": "3",
+    "dependencies": [
+      "COL-03",
+      "COL-07",
+      "COL-15"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 3.\n\n**Outcome and scope**\n\nDefine accounting events with provider/source identity, period, timestamp, delta/cumulative basis, cache semantics and coverage. Aggregate usage once per actual source run, independently from view count or prompt author.\n\n**Dependencies:** COL-03, COL-07, COL-15\n\n**Acceptance criteria**\n\n- Claude run/request observations are not double-counted; Codex cumulative totals are differenced; Pi message duplicates/cache semantics have fixture-backed definitions.\n- Reconnect, subagent overlap, forks and repeated views do not inflate totals; missing telemetry remains partial/unavailable.\n- Daily boundaries/timezone and shared-area versus optional wider aggregate scope are explicit; freshest reported updates are not mislabeled token-by-token streaming.\n\n**Behavioral witness / validation**\n\nOffline translator/ledger fixture matrix asserts exact totals for duplicates, counter reset, cached subsets, timezone rollover, late reports and unavailable sources.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/07-usage-presence.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "07-usage-presence.md"
+    ]
+  },
+  {
+    "key": "COL-18",
+    "title": "COL-18 — Add contextual cursors, voluntary following and hover-only usage",
+    "phase": "3",
+    "dependencies": [
+      "COL-06",
+      "COL-10",
+      "COL-17"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 3.\n\n**Outcome and scope**\n\nRender area-local cursor/selection/viewport presence with bounded updates, optional following and a stable teammate hover card. Provide avatar and keyboard equivalents.\n\n**Dependencies:** COL-06, COL-10, COL-17\n\n**Acceptance criteria**\n\n- Different anchors/zooms point at the same shared content; local navigation exits follow without feedback loops.\n- Freshest reported token period/scope/coverage and agent activity appear on hover/focus; no permanent usage overlay.\n- Offscreen/away/stale states are usable; pointer traffic causes zero transcript measurements, canvas saves or model calls.\n\n**Behavioral witness / validation**\n\nInjected presence/clock traces plus production camera and hover input assert exact positions, stale expiry, card appearance/disappearance, keyboard parity and bounded work counters; inspect native light/dark.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/04-canvas.md`\n- `.plans/105-collaboration/implementation/07-usage-presence.md`\n- `.plans/105-collaboration/implementation/11-verification-performance.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "04-canvas.md",
+      "07-usage-presence.md",
+      "11-verification-performance.md"
+    ]
+  },
+  {
+    "key": "COL-19",
+    "title": "COL-19 — Prove replay, compaction, retention and host-outcome recovery",
+    "phase": "3",
+    "dependencies": [
+      "COL-05",
+      "COL-06",
+      "COL-08",
+      "COL-13",
+      "COL-16"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 3.\n\n**Outcome and scope**\n\nComplete persistent replica/outbox transactions, snapshot coverage, tombstones, migration compatibility and command reconciliation. Define separate retention for discussion/artifacts/deleted IDs/idempotency and unknown outcomes.\n\n**Dependencies:** COL-05, COL-06, COL-08, COL-13, COL-16\n\n**Acceptance criteria**\n\n- Over-500-event and post-compaction reconnect loses no durable object and resurrects no deletion.\n- Revocation/epoch and operation receipts survive compaction; unsupported schemas retain recoverable state.\n- Offline executable actions expire/reconfirm under current authority; relay receipt is not execution completion and ambiguous submission never silently repeats.\n\n**Behavioral witness / validation**\n\nCrash each durable boundary, restore to replacement directories, replay ancient clients and recover pending commands through actual stores/routes/host adapters.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/09-persistence-recovery.md`\n- `.plans/105-collaboration/implementation/02-transport.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "09-persistence-recovery.md",
+      "02-transport.md"
+    ]
+  },
+  {
+    "key": "COL-20",
+    "title": "COL-20 — Audit publication, revocation and attachment boundaries end to end",
+    "phase": "3",
+    "dependencies": [
+      "COL-04",
+      "COL-07",
+      "COL-13",
+      "COL-16",
+      "COL-19"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 3.\n\n**Outcome and scope**\n\nRun adversarial A/B/C schedules against real subscriptions, artifact routes and host dispatch. Cover nested IDs, raw payloads, retained history and removed-member queues; review diagnostics and selected confidentiality implementation.\n\n**Dependencies:** COL-04, COL-07, COL-13, COL-16, COL-19\n\n**Acceptance criteria**\n\n- Excluded participant never gets private object bytes or scope metadata through guessed IDs, history, previews or cached routes.\n- Removed member loses future socket/blob/action access; stale queued work cannot regain authority after reconnect.\n- Logs avoid content/credentials; actual storage/key/retention behavior matches the adopted trust contract; no unsupported E2EE claim.\n\n**Behavioral witness / validation**\n\nOffline negative integration suite asserts transport payload absence and command non-effects, with explicit before/after counterexamples and production-path enforcement.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/10-security.md`\n- `.plans/105-collaboration/implementation/03-identity.md`\n- `.plans/105-collaboration/implementation/08-artifacts-code.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "10-security.md",
+      "03-identity.md",
+      "08-artifacts-code.md"
+    ]
+  },
+  {
+    "key": "COL-21",
+    "title": "COL-21 — Gate the complete two-person workflow in matrix and native QA",
+    "phase": "4",
+    "dependencies": [
+      "COL-02",
+      "COL-09",
+      "COL-11",
+      "COL-12",
+      "COL-14",
+      "COL-15",
+      "COL-16",
+      "COL-18",
+      "COL-19",
+      "COL-20"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 4.\n\n**Outcome and scope**\n\nConnect the real shared-area workflow and register behavioral witnesses in the full matrix. Verify professional interaction, accessibility, performance and source preservation across both participants.\n\n**Dependencies:** COL-02, COL-09, COL-11, COL-12, COL-14, COL-15, COL-16, COL-18, COL-19, COL-20\n\n**Acceptance criteria**\n\n- Two participants replace prompt-file exchange using discussion/agreement/own-agent delivery and pinned review artifacts; excluded C stays excluded.\n- Actual production mount and visible frames are asserted; no checks-only install path or source-string test substitutes.\n- Native light/dark, token-owner census, keyboard/Reduce Motion and count-based presence/transcript budgets pass; matrix summary reports new legs and known-red outcomes.\n\n**Behavioral witness / validation**\n\nFull production-path deterministic harness plus native appearance sweeps and bounded soak; preserve existing scene/camera/companion gates and record remaining manual/live-provider limits.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/11-verification-performance.md`\n- `.plans/105-collaboration/implementation/12-delivery.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "11-verification-performance.md",
+      "12-delivery.md"
+    ]
+  },
+  {
+    "key": "COL-22",
+    "title": "COL-22 — Prepare isolated service deployment, restore and coworker-alpha handoff",
+    "phase": "4",
+    "dependencies": [
+      "COL-21"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** 4.\n\n**Outcome and scope**\n\nPackage collaboration service/client compatibility in isolated staging, including backup/restore, quotas, retention, rate limits, redacted diagnostics and observed operating budgets. Prepare a concrete reviewed release/deployment proposal.\n\n**Dependencies:** COL-21\n\n**Acceptance criteria**\n\n- Disposable multi-area dataset restores with membership, artifacts and outcomes intact; old revoked credentials remain invalid.\n- Linux packaging and companion regression checks pass; no production instance is silently migrated.\n- Measure usage/storage/fanout before capacity/cost claims; update maintained notification IDs if implementing actual invite/activity delivery; follow release runbook before shipping.\n\n**Behavioral witness / validation**\n\nOffline container/integration restore harness and staged operational rehearsal under separately authorized deployment. Ticket is not permission to deploy during planning.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/02-transport.md`\n- `.plans/105-collaboration/implementation/11-verification-performance.md`\n- `.plans/105-collaboration/implementation/12-delivery.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "02-transport.md",
+      "11-verification-performance.md",
+      "12-delivery.md"
+    ]
+  },
+  {
+    "key": "COL-23",
+    "title": "COL-23 — Design explicit patch or commit import into a recipient checkout",
+    "phase": "Later",
+    "dependencies": [
+      "COL-16",
+      "COL-19",
+      "COL-20",
+      "COL-21"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** Later.\n\n**Outcome and scope**\n\nInvestigate and then implement only a selected, reviewed code-transfer contract. Keep shared observation separate from applying code locally; do not add continuous file synchronization by default.\n\n**Dependencies:** COL-16, COL-19, COL-20, COL-21\n\n**Acceptance criteria**\n\n- Identify source/base/content and recipient checkout explicitly; preflight dirty files, conflicts and untracked paths.\n- No write occurs before explicit application; failed/partial application has a documented recoverable outcome.\n- Review comments/checks remain attached to their original revision rather than pretending imported content is identical after conflicts.\n\n**Behavioral witness / validation**\n\nDisposable repositories with divergent commits, dirty files, rename/conflict and failed-write schedules verify exact filesystem outcomes and original revision provenance.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/08-artifacts-code.md`\n- `.plans/105-collaboration/implementation/09-persistence-recovery.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "08-artifacts-code.md",
+      "09-persistence-recovery.md"
+    ]
+  },
+  {
+    "key": "COL-24",
+    "title": "COL-24 — Evaluate browser participation against the native shared-area protocol",
+    "phase": "Later",
+    "dependencies": [
+      "COL-04",
+      "COL-06",
+      "COL-07",
+      "COL-22"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** Later.\n\n**Outcome and scope**\n\nScope a lightweight browser client for invites, permitted area content, discussion and suggestions. Keep existing authorization and artifact/command policy instead of building a second inconsistent service.\n\n**Dependencies:** COL-04, COL-06, COL-07, COL-22\n\n**Acceptance criteria**\n\n- Document no-account versus authenticated guest tradeoffs, identity/history access and revocation.\n- Browser render/attachments preserve native publication boundaries and human attribution; provider login remains on the host.\n- A concrete browser prototype demonstrates the selected scope before wider implementation; no browser requirement blocks the native milestone.\n\n**Behavioral witness / validation**\n\nProtocol conformance/negative auth fixtures and browser-native mixed-client journey including removal, missing host, unsupported surfaces and accessible controls.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/02-transport.md`\n- `.plans/105-collaboration/implementation/03-identity.md`\n- `.plans/105-collaboration/implementation/12-delivery.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "02-transport.md",
+      "03-identity.md",
+      "12-delivery.md"
+    ]
+  },
+  {
+    "key": "COL-25",
+    "title": "COL-25 — Evaluate scoped live preview sharing beyond static snapshots",
+    "phase": "Later",
+    "dependencies": [
+      "COL-16",
+      "COL-20",
+      "COL-22"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** Later.\n\n**Outcome and scope**\n\nCompare authenticated preview forwarding, stream/snapshot and externally reachable links. Explicitly separate host localhost reachability and browser session credentials from a shared tile URL.\n\n**Dependencies:** COL-16, COL-20, COL-22\n\n**Acceptance criteria**\n\n- First capability labels snapshot, link and live interactive preview truthfully.\n- Forwarding has object-specific admission/revocation and cannot expose arbitrary host ports/cookies/headers or permit unauthorized interaction.\n- Choose one bounded preview use case and record operating/payload limits before implementing a generic remote browser.\n\n**Behavioral witness / validation**\n\nIsolated local preview servers with redirects, cookie/header sentinels, URL rebinding and revoke schedules assert actual reachable content and permitted interactions.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/08-artifacts-code.md`\n- `.plans/105-collaboration/implementation/10-security.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "08-artifacts-code.md",
+      "10-security.md"
+    ]
+  },
+  {
+    "key": "COL-26",
+    "title": "COL-26 — Audit richer remote control, terminal and execution-transfer capabilities",
+    "phase": "Later",
+    "dependencies": [
+      "COL-13",
+      "COL-15",
+      "COL-20",
+      "COL-22"
+    ],
+    "body": "**Status:** Planned; not started. **Phase:** Later.\n\n**Outcome and scope**\n\nProduce separate capability contracts and scoped follow-up tickets for direct teammate prompting, provider approvals, terminal control and cross-host execution transfer. Do not claim one generic editor role enables these.\n\n**Dependencies:** COL-13, COL-15, COL-20, COL-22\n\n**Acceptance criteria**\n\n- Audit actual production bound-runner support and current approval policy; a protocol or QA responder alone is insufficient.\n- Terminal command authority and shared common environment are explicitly distinct from agent transcript visibility.\n- Transfer proves old-owner release, code/environment readiness and recipient CLI auth before any new executor; unknown ownership refuses.\n\n**Behavioral witness / validation**\n\nProvider-specific scripted transport and isolated ownership fixtures establish each chosen action. No default tmux or live external session may be probed to satisfy the audit.\n\n**Planning references**\n\nPlan: `.plans/105-collaboration/IMPLEMENTATION-PLAN.md`.\n- `.plans/105-collaboration/implementation/05-runners.md`\n- `.plans/105-collaboration/implementation/10-security.md`\n- `.plans/105-collaboration/implementation/12-delivery.md`\n\nCreating this card does not start implementation. Keep private originating people/project details out of product copy. CLI authentication stays CLI-owned; never use production state for QA.",
+    "memos": [
+      "05-runners.md",
+      "10-security.md",
+      "12-delivery.md"
+    ]
+  }
+]

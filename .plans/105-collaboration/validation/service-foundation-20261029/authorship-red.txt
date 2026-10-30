@@ -1,0 +1,14 @@
+PASS: independent person identities
+PASS: one person has separately authenticated devices
+PASS: consumed enrollment status
+PASS: consumed enrollment excludes content bytes
+PASS: excluded C status
+PASS: excluded C excludes content bytes
+PASS: unknown and excluded areas have identical response bytes
+PASS: forwarded invitation status
+PASS: forwarded invitation excludes content bytes
+PASS: invitation race recovers same membership
+PASS: authenticated durable area command
+PASS: network retry returns original receipt
+PASS: invited B receives shared history
+FAIL: Failure(message: "forged authorship status")

@@ -1589,6 +1589,55 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--collaboration-native-check") {
+            setbuf(stdout, nil)
+            setbuf(stderr, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(45))
+                fputs("FAIL: collaboration native journey exceeded its 45-second behavioral deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do {
+                    guard let support = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] else {
+                        throw SelfCheckError("collaboration native check requires isolated app support")
+                    }
+                    print("STAGE collaboration native: source inventory")
+                    try runSharedAreaInventoryChecks()
+                    let delegate = AppDelegate()
+                    var executorConstructions = 0
+                    let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory:
+                        URL(fileURLWithPath: support).appendingPathComponent("shared-scene-supervisor")), makeRunner: { _ in
+                            executorConstructions += 1
+                            return ScriptedAgentRunner(script: [])
+                        })
+                    delegate.agentSupervisor = supervisor
+                    print("STAGE collaboration native: shared scenes")
+                    try await SharedAreaSceneChecks.run(mount: { controller, person, host in
+                        delegate.mountWorkspaceSceneAtBoot(sharedAreaController: controller, person: person, in: host)
+                    }, executorCount: {
+                        supervisor.records.keys.filter { supervisor.isRunning($0) }.count + executorConstructions
+                    })
+                    guard executorConstructions == 0, supervisor.records.isEmpty else {
+                        throw SelfCheckError("shared scene constructed a local executor or agent record")
+                    }
+                    print("STAGE collaboration native: account hub")
+                    try await CollaborationHubChecks.run(delegate: delegate)
+                    print("STAGE collaboration native: mixed-window commands")
+                    try await CollaborationWindowCommandChecks.run()
+                    print("STAGE collaboration native: capture workflow")
+                    try await SharedAreaCaptureChecks.run()
+                    print("ContinuumRevivedCollaborationNativeChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
         if CommandLine.arguments.contains("--workspace-scene-owner-check") {
             do {
                 _ = NSApplication.shared
@@ -5698,6 +5747,11 @@ enum ContinuumApp {
         newMenu.addItem(NSMenuItem(title: "File Tree", action: #selector(AppDelegate.createFileTreeFromMenu(_:)), keyEquivalent: ""))
         newItem.submenu = newMenu
         fileMenu.addItem(newItem)
+        fileMenu.addItem(NSMenuItem.separator())
+        fileMenu.addItem(NSMenuItem(title: "Collaboration…", action: #selector(AppDelegate.openCollaborationFromMenu(_:)), keyEquivalent: ""))
+        fileMenu.addItem(NSMenuItem(title: "Share workspace…", action: #selector(AppDelegate.shareWorkspaceFromMenu(_:)), keyEquivalent: ""))
+        fileMenu.addItem(NSMenuItem(title: "Share zone…", action: #selector(AppDelegate.shareZoneFromMenu(_:)), keyEquivalent: ""))
+        fileMenu.addItem(NSMenuItem(title: "Capture area to share…", action: #selector(AppDelegate.captureAreaToShareFromMenu(_:)), keyEquivalent: ""))
         fileItem.submenu = fileMenu
         mainMenu.addItem(fileItem)
 
@@ -5831,6 +5885,12 @@ enum ContinuumApp {
         try expectMenuItem(appMenu, title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h", modifiers: [.command, .option])
         try expectMenuItem(appMenu, title: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         try expectMenuItem(appMenu, title: "Quit Array", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        guard let fileMenu = mainMenu.item(withTitle: "File")?.submenu else { throw SelfCheckError("missing File menu") }
+        try expectMenuItem(fileMenu, title: "Collaboration…", action: #selector(AppDelegate.openCollaborationFromMenu(_:)), keyEquivalent: "")
+        try expectMenuItem(fileMenu, title: "Share workspace…", action: #selector(AppDelegate.shareWorkspaceFromMenu(_:)), keyEquivalent: "")
+        try expectMenuItem(fileMenu, title: "Share zone…", action: #selector(AppDelegate.shareZoneFromMenu(_:)), keyEquivalent: "")
+        try expectMenuItem(fileMenu, title: "Capture area to share…", action: #selector(AppDelegate.captureAreaToShareFromMenu(_:)), keyEquivalent: "")
 
         guard let editMenu = mainMenu.item(withTitle: "Edit")?.submenu else { throw SelfCheckError("missing Edit menu") }
         try expectMenuItem(editMenu, title: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
@@ -6404,6 +6464,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// creation picker confirmation; cleared immediately afterward.
     private var explicitCreationScopeOverride: CreationScope?
     private var componentLabPanel: ComponentLabPanel?
+    private var collaborationHub: CollaborationHubWindowController?
+    private var sharedAreaWindows: [String: SharedAreaWindowController] = [:]
+    private var pendingSharedAreaCapture: SharedAreaCaptureRequest?
+    private var captureSelectionView: SharedAreaCaptureSelectionView?
+    private var sharedAreaCaptureWindows: [UUID: SharedAreaCaptureWindowController] = [:]
+    private var captureSetupTask: Task<Void, Never>?
+    /// AppKit owns foreground scope; self-checks supply this observation without
+    /// activating the QA process over the user. Explicit workspace APIs ignore it.
+    var userCommandWindowProvider: () -> NSWindow? = { NSApp.keyWindow }
+    private var userCommandWindow: NSWindow? { userCommandWindowProvider() }
     private var settingChangeObservers: [NSObjectProtocol] = []
     private var tmuxDefaults: UserDefaults = .standard
     private var tmuxPathResolver: (UserDefaults) -> String? = { TmuxLocator.resolve(defaults: $0) }
@@ -9896,6 +9966,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// transition (released, or a second modifier joined) cancel the pending dwell and
     /// exit the leader if open.
     func handleFlagsChanged(_ event: NSEvent) {
+        guard !CollaborationWindow.owns(event.window ?? userCommandWindow) else {
+            leaderDwellWorkItem?.cancel(); leaderDwellWorkItem = nil
+            return
+        }
         guard !inWindowModalIsPresented(in: window) else { return }
         let modifiers = FocusKeyModifiers(modifierFlags: event.modifierFlags)
         // P3.10: the inbox's ⌘-hold hint pills ride this monitor rather than a
@@ -10109,6 +10183,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func handleHotkey(_ event: NSEvent) -> Bool {
+        guard !CollaborationWindow.owns(event.window ?? userCommandWindow) else {
+            leaderDwellWorkItem?.cancel(); leaderDwellWorkItem = nil
+            return false
+        }
+        if let selection = captureSelectionView, event.window === selection.window {
+            if event.keyCode == 53 { selection.onCancel?(); return true }
+            return false
+        }
         // A key while the hold-leader dwell is pending makes ⌥ a chord, not a
         // hold: the leader must not open under it, now or when the dwell ends.
         // Off text input, a chord on a jump label or zone key IS the leader's —
@@ -10320,6 +10402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         let work = DispatchWorkItem { [weak self] in
             self?.leaderDwellWorkItem = nil
+            guard !CollaborationWindow.owns(self?.userCommandWindow) else { return }
             self?.activateLeader()
         }
         leaderDwellWorkItem = work
@@ -10971,6 +11054,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func performRegisteredGlobalCommand(_ commandID: CommandID) -> Bool {
+        if CollaborationWindow.owns(userCommandWindow),
+           !["app.settings", "app.openKeybindings"].contains(commandID.rawValue) { return false }
         switch commandID.rawValue {
         case "agent.newManaged": _ = spawnManagedAgentFromPalette()
         case "tile.newTerminal": _ = spawnTerminalFromProfile("shell", trigger: "shortcut:new-terminal")
@@ -11004,6 +11089,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         return true
     }
+
+    func qaPerformRegisteredGlobalCommand(_ commandID: CommandID) -> Bool { performRegisteredGlobalCommand(commandID) }
 
     private func matchesRegisteredGlobalShortcut(_ event: NSEvent) -> Bool {
         guard let registry = try? CommandRegistry.productRegistry() else { return false }
@@ -11244,6 +11331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func openProfilePalette(initialQuery: String = "") {
+        guard !CollaborationWindow.owns(userCommandWindow) else { return }
         // M1.11 (`.plans/46`): opens with NO active controller. A workspace with no
         // projects releases every controller, and this used to `guard` on one — so
         // ⌘K and the toolbar's "Add or jump…" did nothing at all, silently, in the
@@ -11492,6 +11580,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     @objc func replayGettingStartedFromMenu(_ sender: Any?) {
+        guard !CollaborationWindow.owns(userCommandWindow) else { return }
         replayGettingStarted()
     }
 
@@ -11772,6 +11861,164 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             onboardingProgressStore.save(progress)
         }
     }
+
+    @objc func openCollaborationFromMenu(_ sender: Any?) {
+        if let collaborationHub { collaborationHub.show(); return }
+        do {
+            // Store constructors add their channel directory. A QA override is
+            // already isolated app support, so nest a parent under that root.
+            let parent = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
+                .map { $0.appendingPathComponent("collaboration-support", isDirectory: true) }
+                ?? RegistryStore.defaultApplicationSupportDirectory().deletingLastPathComponent()
+            let credentials = CollaborationCredentialStore(vault: KeychainCollaborationCredentialVault())
+            let model = try CollaborationAccountController(store: CollaborationAccountStore(applicationSupportRoot: parent),
+                credentialStore: credentials)
+            presentCollaborationHub(model: model).show()
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Collaboration could not open"
+            alert.informativeText = "Array preserved the existing collaboration records. Check that your local app data is available and try again."
+            alert.runModal()
+        }
+    }
+
+    /// Used by the menu and isolated native witnesses; construction alone makes
+    /// no credential read, provider call or network request.
+    @discardableResult
+    func presentCollaborationHub(model: CollaborationAccountController) -> CollaborationHubWindowController {
+        if let collaborationHub { return collaborationHub }
+        let hub = CollaborationHubWindowController(model: model)
+        collaborationHub = hub
+        hub.onClose = { [weak self] in
+            self?.collaborationHub = nil
+            self?.pendingSharedAreaCapture = nil
+            self?.captureSetupTask?.cancel()
+        }
+        hub.content.onOpenArea = { [weak self, weak model] controller, person, area in
+            guard let self, let model, let accountID = model.activeAccount?.id else { return }
+            let shared = showSharedArea(controller: controller, person: person, area: area, accountID: accountID)
+            if let request = pendingSharedAreaCapture {
+                pendingSharedAreaCapture = nil
+                finishSharedAreaCapture(request, in: shared, account: model, accountID: accountID, person: person)
+            }
+        }
+        return hub
+    }
+
+    @discardableResult
+    private func showSharedArea(controller: SharedAreaController, person: SharedArea.ID<SharedArea.Person>, area: UUID, accountID: String) -> SharedAreaWindowController {
+        let key = accountID + "/" + area.uuidString
+        if let existing = sharedAreaWindows[key] { existing.show(); return existing }
+        let shared = SharedAreaWindowController(controller: controller, person: person, delegate: self)
+        sharedAreaWindows[key] = shared
+        shared.onClose = { [weak self] in self?.sharedAreaWindows.removeValue(forKey: key) }
+        shared.scene.onRequestInvite = { [weak self] in
+            guard let self else { return }
+            openCollaborationFromMenu(nil)
+            collaborationHub?.content.focusAccount(accountID, area: area)
+        }
+        shared.show()
+        return shared
+    }
+
+    @objc func shareWorkspaceFromMenu(_ sender: Any?) { requestSharedAreaCapture(.workspace) }
+
+    @objc func shareZoneFromMenu(_ sender: Any?) {
+        guard !CollaborationWindow.owns(userCommandWindow), let runtime = workspaceRuntime,
+              let zoneID = runtime.document.lastActiveZoneId,
+              runtime.collaborationZones.contains(where: { $0.zoneId == zoneID && $0.projectId != nil }) else { return }
+        requestSharedAreaCapture(.zone(zoneID))
+    }
+
+    @objc func captureAreaToShareFromMenu(_ sender: Any?) {
+        guard !CollaborationWindow.owns(userCommandWindow), let canvasView, let runtime = workspaceRuntime else { return }
+        guard !revealPendingSharedAreaDelivery() else { return }
+        captureSelectionView?.removeFromSuperview()
+        let workspaceID = runtime.workspaceId
+        let overlay = SharedAreaCaptureSelectionView(canvas: canvasView)
+        captureSelectionView = overlay
+        overlay.onCancel = { [weak self, weak overlay, weak canvasView] in
+            overlay?.removeFromSuperview(); self?.captureSelectionView = nil
+            canvasView?.window?.makeFirstResponder(canvasView)
+        }
+        overlay.onComplete = { [weak self, weak runtime, weak overlay, weak canvasView] rect in
+            overlay?.removeFromSuperview(); self?.captureSelectionView = nil
+            canvasView?.window?.makeFirstResponder(canvasView)
+            guard runtime?.workspaceId == workspaceID else { return }
+            self?.requestSharedAreaCapture(.enclosed(rect))
+        }
+        canvasView.addSubview(overlay)
+        canvasView.window?.makeFirstResponder(overlay)
+    }
+
+    private func requestSharedAreaCapture(_ selection: SharedAreaPublication.Selection) {
+        guard !CollaborationWindow.owns(userCommandWindow), let runtime = workspaceRuntime, captureSetupTask == nil else { return }
+        guard !revealPendingSharedAreaDelivery() else { return }
+        pendingSharedAreaCapture = .init(runtime: runtime, workspaceID: runtime.workspaceId, selection: selection)
+        openCollaborationFromMenu(nil)
+        collaborationHub?.window.title = "Share selection · Choose or create a shared workspace"
+    }
+
+    private func revealPendingSharedAreaDelivery() -> Bool {
+        guard let review = sharedAreaCaptureWindows.values.first(where: { !$0.content.coordinator.canClose }) else { return false }
+        review.show()
+        return true
+    }
+
+    private func finishSharedAreaCapture(_ request: SharedAreaCaptureRequest, in shared: SharedAreaWindowController,
+                                        account: CollaborationAccountController, accountID: String,
+                                        person: SharedArea.ID<SharedArea.Person>) {
+        guard captureSetupTask == nil else { return }
+        captureSetupTask = Task { [weak self, weak shared, weak account] in
+            guard let self else { return }
+            defer { captureSetupTask = nil }
+            do {
+                guard let shared, let account, account.activeAccount?.id == accountID else { throw CollaborationAccountFailure.superseded }
+                await shared.waitUntilOpen()
+                guard shared.controller.canSubmit, let area = shared.controller.document?.id.rawValue else {
+                    throw SharedAreaCaptureCoordinator.Failure.unavailableArea
+                }
+                let host = try await account.registerHost()
+                guard account.activeAccount?.id == accountID, !Task.isCancelled else { throw CollaborationAccountFailure.superseded }
+                // The review owns its connection. Closing a destination scene
+                // cannot strand an uncertain publication's only retry path.
+                let publicationController = try account.makeSharedAreaController(area: area)
+                await publicationController.open()
+                guard publicationController.canSubmit, !Task.isCancelled, account.activeAccount?.id == accountID else {
+                    await publicationController.close()
+                    throw SharedAreaCaptureCoordinator.Failure.unavailableArea
+                }
+                let coordinator: SharedAreaCaptureCoordinator
+                do { coordinator = try SharedAreaCaptureCoordinator(selection: request.selection, controller: publicationController,
+                    person: person, host: host, inventoryProvider: { [weak self, weak runtime = request.runtime] in
+                        guard let self, let runtime, self.workspaceRuntime === runtime,
+                              runtime.workspaceId == request.workspaceID else { throw SharedAreaCaptureCoordinator.Failure.sourceWorkspaceChanged }
+                        return try SharedAreaInventory.capture(runtime: runtime, supervisor: self.agentSupervisor, selection: request.selection)
+                    }, submitter: { publication in
+                        await publicationController.submitPublication(publication)
+                    })
+                } catch {
+                    await publicationController.close()
+                    throw error
+                }
+                let review = SharedAreaCaptureWindowController(coordinator: coordinator)
+                sharedAreaCaptureWindows[request.id] = review
+                review.onClose = { [weak self] in self?.sharedAreaCaptureWindows.removeValue(forKey: request.id) }
+                review.show()
+            } catch {
+                guard !Task.isCancelled else { return }
+                let alert = NSAlert()
+                alert.messageText = "Sharing needs another review"
+                alert.informativeText = SharedAreaCaptureCoordinator.message(for: error)
+                if let host = collaborationHub?.window { alert.beginSheetModal(for: host, completionHandler: nil) }
+            }
+        }
+    }
+
+    var qaSharedAreaCaptureWindows: [SharedAreaCaptureWindowController] { Array(sharedAreaCaptureWindows.values) }
+    var qaSharedAreaWindows: [SharedAreaWindowController] { Array(sharedAreaWindows.values) }
+    var qaCaptureSetupTask: Task<Void, Never>? { captureSetupTask }
+    var qaCaptureSelectionView: SharedAreaCaptureSelectionView? { captureSelectionView }
 
     @objc func openSettingsFromMenu(_ sender: Any?) {
         openSettings()
@@ -14435,6 +14682,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     @objc func toggleWorkspaceSidebarFromMenu(_ sender: Any?) {
+        guard !CollaborationWindow.owns(userCommandWindow) else { return }
         toggleWorkspaceSidebar()
     }
 
@@ -14901,6 +15149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     // MARK: - Background processes (0.7.30)
 
     @objc func showProcessesFromMenu(_ sender: Any?) {
+        guard !CollaborationWindow.owns(userCommandWindow) else { return }
         showProcessesMenu()
     }
 
@@ -15002,11 +15251,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if CollaborationWindow.owns(userCommandWindow), Self.personalCanvasMenuActions.contains(menuItem.action) { return false }
         if menuItem.action == #selector(toggleWorkspaceSidebarFromMenu(_:)) {
             menuItem.state = WorkspaceSidebarConfig.resolveVisible() ? .on : .off
         }
         return true
     }
+
+    private static var personalCanvasMenuActions: Set<Selector?> { [
+        #selector(createZoneFromMenu(_:)), #selector(createAgentFromMenu(_:)),
+        #selector(createTerminalFromMenu(_:)), #selector(createNoteFromMenu(_:)),
+        #selector(createBoardFromMenu(_:)), #selector(createBrowserFromMenu(_:)),
+        #selector(createFileTreeFromMenu(_:)), #selector(openCommandCenterFromMenu(_:)),
+        #selector(toggleWorkspaceSidebarFromMenu(_:)), #selector(showProcessesFromMenu(_:)),
+        #selector(replayGettingStartedFromMenu(_:)), #selector(shareWorkspaceFromMenu(_:)),
+        #selector(shareZoneFromMenu(_:)), #selector(captureAreaToShareFromMenu(_:))
+    ] }
 
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
         guard splitView === workspaceSplitView, dividerIndex == 0 else { return proposedMinimumPosition }
@@ -17807,8 +18067,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     @objc func createZoneFromMenu(_ sender: Any?) { _ = performPaletteAction(.createZone) }
-    @objc func createAgentFromMenu(_ sender: Any?) { _ = spawnManagedAgentFromPalette() }
-    @objc func createTerminalFromMenu(_ sender: Any?) { _ = spawnTerminalFromProfile("shell", trigger: "menu:new-terminal") }
+    @objc func createAgentFromMenu(_ sender: Any?) {
+        guard !CollaborationWindow.owns(userCommandWindow) else { return }
+        _ = spawnManagedAgentFromPalette()
+    }
+    @objc func createTerminalFromMenu(_ sender: Any?) {
+        guard !CollaborationWindow.owns(userCommandWindow) else { return }
+        _ = spawnTerminalFromProfile("shell", trigger: "menu:new-terminal")
+    }
     @objc func createNoteFromMenu(_ sender: Any?) { _ = performPaletteAction(.newNote) }
     @objc func createBoardFromMenu(_ sender: Any?) { _ = performPaletteAction(.newBoard) }
     @objc func createBrowserFromMenu(_ sender: Any?) { _ = performPaletteAction(.newBrowser) }
@@ -17818,6 +18084,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// than the closure body so `--floating-toolbar-agent-spawn-check` drives the
     /// exact dispatch `FloatingToolbarHostView.onSelection` reaches in production.
     func handleFloatingToolbarSelection(_ selection: FloatingToolbarHostView.Selection) {
+        guard !CollaborationWindow.owns(userCommandWindow) else { return }
         switch selection {
         case .fanOutQueueSelection: _ = performPaletteAction(.fanOutQueueSelection)
         case let .palette(action): _ = performPaletteAction(action)
@@ -18898,6 +19165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     @discardableResult
     private func performPaletteAction(_ action: LaunchPaletteAction) -> Bool {
+        guard !CollaborationWindow.owns(userCommandWindow) else { return false }
         let tileCount = { [weak self] in self?.canvasView?.navigationTileSnapshots().count ?? 0 }
         switch action {
         case .newManagedAgent:
