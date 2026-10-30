@@ -21,6 +21,9 @@ struct CollaborationUpdateWaiter {
 extension CollaborationStore {
     public static let updatePageLimit = 128
     public static let updatePageBytes = 524_288
+    /// Native scene, source host, capture review and one replacing view.
+    public static let updateDeviceLimit = 4
+    public static let updateGlobalLimit = 1024
     public static let presenceLifetime: TimeInterval = 15
 
     /// A subscription is one bounded, cancellable held HTTP request. No payload
@@ -32,8 +35,8 @@ extension CollaborationStore {
             return page
         }
         let identity = try identity(token: token)
-        guard updateWaiters.values.filter({ $0.device == identity.device && $0.area == area }).count < 4,
-              updateWaiters.count < 1024 else { throw CollaborationStoreError.tooManySubscriptions }
+        guard updateWaiters.values.filter({ $0.device == identity.device && $0.area == area }).count < Self.updateDeviceLimit,
+              updateWaiters.count < Self.updateGlobalLimit else { throw CollaborationStoreError.tooManySubscriptions }
         // Wake at the earliest visible presence expiry, even without new traffic.
         let expiry = page.presence.map(\.expiresAt).min()?.timeIntervalSince(clock()) ?? 25
         let milliseconds = min(request.waitMilliseconds, max(1, Int(ceil(expiry * 1000))))

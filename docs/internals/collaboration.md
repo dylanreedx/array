@@ -126,7 +126,8 @@ The native client uses immediate-wakeup HTTP long polling rather than requiring
 WebSockets. A subscription holds for at most 25 seconds and returns on a commit,
 presence change, expiry or removal. It retains no event payload queue: after each
 wake it reauthenticates and reads durable operations from SQLite. The service
-allows two held requests per device/area and 1,024 globally. Cancellation has an
+allows four held requests per device/area (native scene, source host, capture
+review and one replacing view) and 1,024 globally. Cancellation has an
 explicit authenticated endpoint because closing a Foundation request did not
 reliably close its server request in the first fixture. Short-lived cancellation
 receipts also cover cancellation arriving before the original request.
