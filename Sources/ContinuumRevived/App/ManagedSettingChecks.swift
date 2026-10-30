@@ -110,6 +110,19 @@ enum ManagedSettingChecks {
         print("Managed setting checks passed: defaults, real Claude/Codex/Pi launch, API helper free, Settings deferred switches both directions, hooks/argv/resume, relaunch, badge visibility and frame fit")
     }
 
+    private static func expectManagedTextFits(_ header: AgentTileHeaderView, width: CGFloat, zoom: AgentPageZoom) throws {
+        let badge = header.subviews.flatMap(\.subviews).compactMap { $0 as? AgentManagedBadgeView }.first!
+        let label = badge.subviews.compactMap { $0 as? NSTextField }.first!
+        let textWidth = ceil((label.stringValue as NSString).size(withAttributes: [.font: label.font!]).width)
+        let textRect = label.convert(label.cell!.drawingRect(forBounds: label.bounds), to: badge)
+        let left = textRect.minX - badge.bounds.minX
+        let right = badge.bounds.maxX - textRect.maxX
+        let padding = CGFloat(zoom.scaled(Space.m))
+        try expect(textRect.width >= textWidth && abs(left - padding) <= 0.5 && abs(right - padding) <= 0.5 && abs(left - right) <= 0.5,
+            "Managed text/padding clipped at \(width)/\(zoom.percent): text \(textWidth), drawable \(textRect), badge \(badge.bounds), padding \(left)/\(right), required \(padding)")
+        print("Managed text fit: \(width)/\(zoom.percent), text \(textWidth), drawable \(textRect), padding \(left)/\(right)")
+    }
+
     static func renderAndCheck(_ b: WorkspaceAgentReportChecks.Bench, _ id: AgentID) throws {
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             var captures: [NSImage] = []
@@ -131,6 +144,7 @@ enum ManagedSettingChecks {
                     try expect(bounds.contains(header.qaBranchFrame), "branch overflow at \(width)/\(zoom.percent)")
                     if let frame = header.qaManagedFrame {
                         try expect(bounds.contains(frame) && frame.minX >= header.qaBranchFrame.maxX, "badge overflow/overlap")
+                        try expectManagedTextFits(header, width: width, zoom: zoom)
                     } else { try expect(width == 320 && zoom.percent == 150, "badge yielded too early") }
                 }
                 tile.setPageZoom(.default); tile.layoutSubtreeIfNeeded()
@@ -159,6 +173,7 @@ enum ManagedSettingChecks {
                 tile.applyAwarenessSignal(nil)
                 tile.setPageZoom(.default); tile.layoutSubtreeIfNeeded()
                 let rendered = try TranscriptViewportClippingChecks.render(tile).image
+                try expectManagedTextFits(header, width: width, zoom: .default)
                 let scale = CGFloat(rendered.width) / width
                 let crop = rendered.cropping(to: CGRect(x: 0, y: 0, width: rendered.width, height: Int(60 * scale)))!
                 captures.append(NSImage(cgImage: crop, size: NSSize(width: width, height: 60)))

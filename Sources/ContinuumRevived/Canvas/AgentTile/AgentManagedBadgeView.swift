@@ -22,14 +22,18 @@ final class AgentManagedBadgeView: NSView, TokenThemed, AgentPageZoomScalable {
     }
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+    private var horizontalPadding: CGFloat { zoom.scaled(Space.m) }
+
     override var intrinsicContentSize: NSSize {
-        NSSize(width: label.intrinsicContentSize.width + zoom.scaled(16),
+        // Round the text allocation outward: a fractional cell width can clip
+        // the final glyph when AppKit draws into its integral text backing.
+        NSSize(width: ceil(label.intrinsicContentSize.width) + 2 * horizontalPadding,
                height: BranchChipNSView.preferredHeight(zoom: zoom))
     }
     override func layout() {
         super.layout()
-        label.frame = NSRect(x: zoom.scaled(8), y: (bounds.height - label.intrinsicContentSize.height) / 2,
-                             width: max(0, bounds.width - zoom.scaled(16)), height: label.intrinsicContentSize.height)
+        label.frame = NSRect(x: horizontalPadding, y: (bounds.height - label.intrinsicContentSize.height) / 2,
+                             width: max(0, bounds.width - 2 * horizontalPadding), height: label.intrinsicContentSize.height)
     }
     func applyTokens() {
         let maroon = ManagedModeToken.maroon.nsColor(for: effectiveTokenTheme)
