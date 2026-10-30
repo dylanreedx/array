@@ -142,19 +142,6 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
         applyTokens()
     }
 
-    /// The account a tile is spending: glyph and plan, `◉ Max`.
-    func apply(account: AgentAccountUsagePresentation) {
-        state = .known
-        hasReading = true
-        applySymbol("person.crop.circle")
-        labelField.stringValue = ""
-        labelField.isHidden = true
-        bar.isHidden = true
-        valueField.stringValue = account.chipText
-        toolTip = nil
-        applyTokens()
-    }
-
     /// Cost has no window name to label, so the pill shows glyph + amount.
     func apply(cost: AgentCostElementPresentation) {
         state = .known

@@ -10,8 +10,9 @@ import Foundation
 /// login. What it pins:
 ///
 /// - attaching a tile asks for the account's limits with no turn, ONCE per
-///   harness however many tiles attach, and the answer reaches the row: the
-///   account chip names the plan, the pills say what is left;
+///   harness however many tiles attach, and the answer reaches the row: its
+///   account presentation (drawn in the hover card) names the plan, the pills
+///   say what is left;
 /// - a newer read waits out its interval and never overlaps one in flight;
 /// - a read that names no login (timeout or sign-out) changes nothing;
 /// - a different login replaces the account and drops the old login's windows;
@@ -108,15 +109,19 @@ func runAgentAccountUsageAppChecks() async throws {
         tile.attach(agentID: id, supervisor: supervisor)
         return (id, tile)
     }
+    /// The account the row holds for its hover card, e.g. `Claude · Max`.
+    func account(_ tile: ManagedAgentTileNSView) -> String? {
+        tile.qaCompactStatusRow.qaAccountPresentation?.card.title
+    }
     func facts(_ tile: ManagedAgentTileNSView) -> String {
         let row = tile.qaCompactStatusRow
-        return "chip \(String(describing: row.qaAccountChipText)) 5h '\(row.qaQuotaText(.quotaFiveHour))' 7d '\(row.qaQuotaText(.quotaSevenDay))' reads \(reader.callLog)"
+        return "account \(String(describing: account(tile))) 5h '\(row.qaQuotaText(.quotaFiveHour))' 7d '\(row.qaQuotaText(.quotaSevenDay))' reads \(reader.callLog)"
     }
 
     // (1) Attach asks once, with no turn, and the row names the account.
     let (firstID, first) = attachTile(harness: .claudeCode)
     try await expectEventually("attaching must read the account and paint it: \(facts(first))") {
-        first.qaCompactStatusRow.qaAccountChipText == "Max"
+        account(first) == "Claude · Max"
             && first.qaCompactStatusRow.qaQuotaText(.quotaFiveHour) == "5h 89%"
             && first.qaCompactStatusRow.qaQuotaText(.quotaSevenDay) == "7d 86%"
     }
@@ -124,7 +129,7 @@ func runAgentAccountUsageAppChecks() async throws {
                 "the supervisor must hold the login it read")
     let (_, second) = attachTile(harness: .claudeCode)
     try await expectEventually("a second tile on the same login must show the same account: \(facts(second))") {
-        second.qaCompactStatusRow.qaAccountChipText == "Max"
+        account(second) == "Claude · Max"
     }
     try require(reader.callLog == [.claudeCode],
                 "two tiles on one login must cause ONE read, got \(reader.callLog)")
@@ -132,7 +137,7 @@ func runAgentAccountUsageAppChecks() async throws {
     // (2) Pi is never asked and shows no account.
     let (_, piTile) = attachTile(harness: .pi)
     try await Task.sleep(for: .milliseconds(100))
-    try require(!reader.callLog.contains(.pi) && piTile.qaCompactStatusRow.qaAccountChipText == nil,
+    try require(!reader.callLog.contains(.pi) && account(piTile) == nil,
                 "pi reports no account and must not be asked: \(facts(piTile))")
 
     // (3) Throttle and in-flight: inside the interval nothing; past it one
@@ -160,7 +165,7 @@ func runAgentAccountUsageAppChecks() async throws {
     try await expectEventually("the third read must run and finish") {
         reader.callLog.count == 3 && supervisor.qaAccountUsageInFlight.isEmpty
     }
-    try require(first.qaCompactStatusRow.qaAccountChipText == "Max"
+    try require(account(first) == "Claude · Max"
                     && first.qaCompactStatusRow.qaQuotaText(.quotaFiveHour) == "5h 6%",
                 "a timeout or sign-out must not blank a real reading: \(facts(first))")
 
@@ -168,7 +173,7 @@ func runAgentAccountUsageAppChecks() async throws {
     reader.set(.claudeCode, .init(identity: identity("work@example.com", org: "org-team", plan: "team"), quota: nil))
     supervisor.refreshAccountUsage(harness: .claudeCode, minimumInterval: 0, now: now.addingTimeInterval(180))
     try await expectEventually("a changed login must replace the account and its windows: \(facts(first))") {
-        first.qaCompactStatusRow.qaAccountChipText == "Team"
+        account(first) == "Claude · Team"
             && first.qaCompactStatusRow.qaQuotaText(.quotaFiveHour).isEmpty
     }
     try require(supervisor.accountIdentity(for: firstID)?.email == "work@example.com",

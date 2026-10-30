@@ -54,13 +54,11 @@ struct AgentQuotaElementPresentation: Equatable {
     let detailText: String
 }
 
-/// The account a tile is spending: the row chip, and the hover card that
-/// replaced the plain-text tooltip (.plans/101, Option 2).
+/// The account a tile is spending: the hover card that replaced the
+/// plain-text tooltip (.plans/101, Option 2). The row draws no account chip;
+/// it only speaks the account.
 struct AgentAccountUsagePresentation: Equatable {
-    /// `Max`. The plan, because that is the word that tells two logins apart
-    /// at a glance; the provider when the plan is unknown.
-    let chipText: String
-    let chipAccessibilityLabel: String
+    let accessibilityLabel: String
     let card: AgentAccountUsageCardPresentation
 }
 
@@ -83,9 +81,7 @@ struct AgentAccountUsageCardPresentation: Equatable {
     /// The login's email (or organisation), so two accounts on one plan
     /// still read apart.
     let subtitle: String?
-    let statusText: String
     let windows: [Window]
-    let footnote: String
 }
 
 struct AgentCostElementPresentation: Equatable {
@@ -240,7 +236,8 @@ enum AgentAccountQuotaPresenter {
         return .known
     }
 
-    /// The account the tile is spending, for the row chip and the hover card.
+    /// The account the tile is spending, for the hover card and the row's
+    /// spoken label.
     /// Nil when there is nothing to say: no login was read and no window was
     /// reported, which is pi's permanent state.
     static func presentAccount(
@@ -254,29 +251,19 @@ enum AgentAccountQuotaPresenter {
                 AgentAccountIdentity(harness: harness, plan: $0, observedAt: now).planDisplayName
             }
         let provider = providerName(harness)
-        let chip = plan ?? provider
         let kinds: [AgentQuotaWindowKind] = [.fiveHour, .sevenDay]
         let windows: [AgentAccountUsageCardPresentation.Window] = kinds.compactMap { kind in
             guard let window = quota?.window(kind) else { return nil }
             return presentCardWindow(window, now: now)
         }
-        var footnote = "Limits are per account, shared by every agent on it."
-        if let quota {
-            footnote += " Read \(ago(quota.observedAt, now: now))."
-        } else {
-            footnote += " No reading yet."
-        }
         let who = identity?.email ?? identity?.organizationName
         return AgentAccountUsagePresentation(
-            chipText: chip,
-            chipAccessibilityLabel: "Account: \(provider) \(plan ?? "")\(who.map { ", \($0)" } ?? "")."
+            accessibilityLabel: "Account: \(provider) \(plan ?? "")\(who.map { ", \($0)" } ?? "")."
                 .replacingOccurrences(of: " .", with: "."),
             card: AgentAccountUsageCardPresentation(
                 title: plan.map { "\(provider) · \($0)" } ?? provider,
                 subtitle: who,
-                statusText: "in use",
-                windows: windows,
-                footnote: footnote))
+                windows: windows))
     }
 
     private static func presentCardWindow(
@@ -319,16 +306,6 @@ enum AgentAccountQuotaPresenter {
         let formatter = DateFormatter()
         formatter.setLocalizedDateFormatFromTemplate("EEE d MMM j:mm")
         return "Resets \(formatter.string(from: date))"
-    }
-
-    private static func ago(_ date: Date, now: Date) -> String {
-        let seconds = max(0, now.timeIntervalSince(date))
-        if seconds < 60 { return "just now" }
-        let minutes = Int(seconds / 60)
-        if minutes < 60 { return "\(minutes)m ago" }
-        let hours = minutes / 60
-        if hours < 24 { return "\(hours)h ago" }
-        return "\(hours / 24)d ago"
     }
 
     // MARK: - helpers

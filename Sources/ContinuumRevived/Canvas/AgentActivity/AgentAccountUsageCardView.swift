@@ -8,7 +8,8 @@ import ContinuumRevivedAgentUI
 ///
 /// What it says, in order: whose login this is (`Claude · Max`, the email),
 /// then the 5-hour and weekly windows with the SAME layout — name, `% left`, a
-/// bar, the reset — because Dylan reads both, and then one line on scope.
+/// bar, the reset — because Dylan reads both. One left edge for all of it: the
+/// title and email line up with the window names below them.
 ///
 /// Same surface as `InboxHoverCardView`: popover material, container radius,
 /// control-boundary hairline, a shadow so it reads as above the canvas. It is
@@ -19,12 +20,9 @@ final class AgentAccountUsageCardView: NSView, TokenThemed {
 
     private let effect = NSVisualEffectView()
     private let contentStack = NSStackView()
-    private let accountIcon = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let subtitleLabel = NSTextField(labelWithString: "")
-    private let statusLabel = NSTextField(labelWithString: "")
     private let windowsStack = NSStackView()
-    private let footnoteLabel = NSTextField(wrappingLabelWithString: "")
     private var windowRows: [(title: NSTextField, value: NSTextField, bar: AgentUsageBarView,
                               reset: NSTextField, state: AgentQuotaElementState)] = []
     private(set) var presentation: AgentAccountUsageCardPresentation?
@@ -46,46 +44,31 @@ final class AgentAccountUsageCardView: NSView, TokenThemed {
         layer?.shadowOffset = NSSize(width: 0, height: -2)
         layer?.masksToBounds = false
 
-        accountIcon.image = NSImage(systemSymbolName: "person.crop.circle", accessibilityDescription: nil)
-        accountIcon.imageScaling = .scaleProportionallyDown
-        accountIcon.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.font = .token(.label)
         subtitleLabel.font = .token(.caption)
-        statusLabel.font = .token(.caption)
         for label in [titleLabel, subtitleLabel] {
             label.lineBreakMode = .byTruncatingTail
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
-        statusLabel.setContentHuggingPriority(.required, for: .horizontal)
-        statusLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let names = NSStackView(views: [titleLabel, subtitleLabel])
-        names.orientation = .vertical
-        names.alignment = .leading
-        names.spacing = 1
-        names.detachesHiddenViews = true
-        let header = NSStackView(views: [accountIcon, names, statusLabel])
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.spacing = CGFloat(Space.m)
+        let header = NSStackView(views: [titleLabel, subtitleLabel])
+        header.orientation = .vertical
+        header.alignment = .leading
+        header.spacing = 1
+        header.detachesHiddenViews = true
 
         windowsStack.orientation = .vertical
         windowsStack.alignment = .leading
         windowsStack.spacing = CGFloat(Space.l)
-
-        footnoteLabel.font = .token(.caption)
-        footnoteLabel.preferredMaxLayoutWidth = Self.width - CGFloat(Inset.card.left + Inset.card.right)
 
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
         contentStack.spacing = CGFloat(Space.l)
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         contentStack.detachesHiddenViews = true
-        for view in [header, windowsStack, footnoteLabel] { contentStack.addArrangedSubview(view) }
+        for view in [header, windowsStack] { contentStack.addArrangedSubview(view) }
         addSubview(contentStack)
         let innerWidth = Self.width - CGFloat(Inset.card.left + Inset.card.right)
         NSLayoutConstraint.activate([
-            accountIcon.widthAnchor.constraint(equalToConstant: 16),
-            accountIcon.heightAnchor.constraint(equalToConstant: 16),
             contentStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: CGFloat(Inset.card.left)),
             contentStack.topAnchor.constraint(equalTo: topAnchor, constant: CGFloat(Inset.card.top)),
             contentStack.widthAnchor.constraint(equalToConstant: innerWidth),
@@ -110,8 +93,6 @@ final class AgentAccountUsageCardView: NSView, TokenThemed {
         titleLabel.stringValue = next.title
         subtitleLabel.stringValue = next.subtitle ?? ""
         subtitleLabel.isHidden = next.subtitle == nil
-        statusLabel.stringValue = next.statusText
-        footnoteLabel.stringValue = next.footnote
         windowsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         windowRows.removeAll()
         for window in next.windows {
@@ -148,8 +129,7 @@ final class AgentAccountUsageCardView: NSView, TokenThemed {
         }
         windowsStack.isHidden = next.windows.isEmpty
         setAccessibilityLabel(([next.title, next.subtitle].compactMap { $0 }
-            + next.windows.map { "\($0.title) \($0.valueText), \($0.resetText)" }
-            + [next.footnote]).joined(separator: ". "))
+            + next.windows.map { "\($0.title) \($0.valueText), \($0.resetText)" }).joined(separator: ". "))
         applyTokens()
         invalidateIntrinsicContentSize()
         needsLayout = true
@@ -164,9 +144,6 @@ final class AgentAccountUsageCardView: NSView, TokenThemed {
         let secondary = TextToken.textSecondary.color.nsColor(in: self)
         titleLabel.textColor = primary
         subtitleLabel.textColor = secondary
-        statusLabel.textColor = secondary
-        accountIcon.contentTintColor = secondary
-        footnoteLabel.textColor = secondary
         for row in windowRows {
             row.title.textColor = primary
             row.value.textColor = Self.valueColor(row.state, in: self)
@@ -196,8 +173,14 @@ final class AgentAccountUsageCardView: NSView, TokenThemed {
         [titleLabel.stringValue]
             + (subtitleLabel.isHidden ? [] : [subtitleLabel.stringValue])
             + windowRows.flatMap { [$0.title.stringValue, $0.value.stringValue, $0.reset.stringValue] }
-            + [footnoteLabel.stringValue]
     }
+    /// Leading x of the title, the email and each window name, in card
+    /// coordinates: the header must share the rows' left edge.
+    var qaTitleLeadingX: CGFloat { convert(titleLabel.bounds, from: titleLabel).minX }
+    var qaSubtitleLeadingX: CGFloat? {
+        subtitleLabel.isHidden ? nil : convert(subtitleLabel.bounds, from: subtitleLabel).minX
+    }
+    var qaWindowTitleLeadingX: [CGFloat] { windowRows.map { convert($0.title.bounds, from: $0.title).minX } }
     var qaBarRemaining: [Double?] { windowRows.map(\.bar.remaining) }
     var qaValueColors: [NSColor?] { windowRows.map(\.value.textColor) }
 }

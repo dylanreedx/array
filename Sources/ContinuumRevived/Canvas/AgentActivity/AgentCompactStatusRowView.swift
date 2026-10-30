@@ -77,9 +77,8 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     /// so toggling one costs no view churn.
     private var quotaPills: [AgentStatusElement: AgentStatusPillView] = [:]
     private let quotaGroup: NSStackView
-    /// .plans/101 — which account the tile is spending (`◉ Max`), first in the
-    /// account group. Hovering the group opens `accountCard`.
-    private let accountPill = AgentStatusPillView()
+    /// .plans/101 — hovering the account group opens `accountCard`, the only
+    /// place the row's account (plan, email) is drawn.
     private var accountCard: AgentAccountUsageCardView?
     private var accountCardDwell: DispatchWorkItem?
     private var accountHoverArea: NSTrackingArea?
@@ -273,8 +272,6 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         quotaGroup.detachesHiddenViews = true
         quotaGroup.setContentHuggingPriority(.required, for: .horizontal)
         quotaGroup.setContentCompressionResistancePriority(.required, for: .horizontal)
-        accountPill.isHidden = true
-        quotaGroup.addArrangedSubview(accountPill)
         let hover = NSTrackingArea(
             rect: .zero,
             options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
@@ -435,7 +432,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         let spokenCost = next.cost.map { " \($0.accessibilityLabel)" } ?? ""
         let spokenJobs = backgroundJobs.map { " \($0.spoken)" } ?? ""
         // Which account, before its windows: the card says it to the eye.
-        let spokenAccount = next.account.map { " \($0.chipAccessibilityLabel)" } ?? ""
+        let spokenAccount = next.account.map { " \($0.accessibilityLabel)" } ?? ""
         setAccessibilityLabel(
             "Agent compact status. \(next.location.accessibilityLabel)\(spokenActivity)\(spokenJobs)\(spokenContext)\(spokenAccount)\(spokenQuotas)\(spokenCost)")
         setAccessibilityHelp(rowDetailText)
@@ -486,13 +483,6 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         } else {
             processesPill.isHidden = true
         }
-        if let account = next.account {
-            accountPill.apply(account: account)
-            accountPill.setAccessibilityLabel(account.chipAccessibilityLabel)
-            accountPill.isHidden = false
-        } else {
-            accountPill.isHidden = true
-        }
         // Whole groups follow their own toggles.
         locationGroup.isHidden = !enabled.contains(.location)
         contextGroup.isHidden = !enabled.contains(.contextMeter)
@@ -507,7 +497,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         // right to: a stack view with no visible arranged subview still claims a
         // slot and its spacing, so the row gains a phantom gap at exactly the
         // narrow widths where every chip has been dropped.
-        quotaGroup.isHidden = quotaPills.values.allSatisfy(\.isHidden) && accountPill.isHidden
+        quotaGroup.isHidden = quotaPills.values.allSatisfy(\.isHidden)
         // Everything the row can drop under width pressure survives here, so a
         // dropped element is never unreachable — only unshown. An account
         // window still ON screen is the exception: the account card that opens
@@ -644,19 +634,6 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
             default: quotaPills[element]?.isHidden = true
             }
         }
-        // The account chip is no element of its own and it gives way FIRST: the
-        // 5-hour and weekly numbers are what matter, so the chip only takes
-        // room the kept elements left over, and leaves with the last window.
-        if !accountPill.isHidden {
-            let shown = kept.filter { (widths[$0] ?? 0) > 0 }
-            let used = shown.reduce(CGFloat(0)) { $0 + (widths[$1] ?? 0) }
-                + CGFloat(max(0, shown.count - 1)) * rootStack.spacing
-            let windowsShown = presentation.enabledElements.filter(\.isAccountScoped)
-                .contains { !(quotaPills[$0]?.isHidden ?? true) }
-            if !windowsShown || used + accountPill.fittingSize.width + quotaGroup.spacing > available {
-                accountPill.isHidden = true
-            }
-        }
     }
 
     // MARK: - .plans/101 account card
@@ -736,7 +713,6 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     /// same handler the tracking area calls.
     func qaHoverAccountPills() { accountPillsPointerEntered(dwell: 0) }
     var qaAccountCard: AgentAccountUsageCardView? { accountCard?.superview == nil ? nil : accountCard }
-    var qaAccountChipText: String? { accountPill.isHidden ? nil : accountPill.qaValueText }
     var qaAccountPresentation: AgentAccountUsagePresentation? { presentation?.account }
     var qaAccountPillsFrame: NSRect? { quotaGroup.isHidden ? nil : frame(of: quotaGroup) }
     /// What the row's tooltip says at a point in row coordinates.
@@ -783,7 +759,6 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         // Each pill owns its own fill and value tint; the row only has to ask.
         contextLabel.textColor = contextLabelColor(for: presentation?.context.state ?? .unknown, theme: theme)
         for pill in quotaPills.values { pill.applyTokens() }
-        accountPill.applyTokens()
     }
 
     /// Re-derives every metric this row owns from `zoom`. Same contract as
@@ -799,7 +774,6 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         elapsedLabel.font = .token(.captionMono, zoom: pageZoom)
         contextLabel.font = .token(.captionMono, zoom: pageZoom)
         for pill in quotaPills.values { pill.applyPageZoom(pageZoom) }
-        accountPill.applyPageZoom(pageZoom)
         quotaGroup.spacing = CGFloat(pageZoom.scaled(Space.m))
         locationGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
         activityGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))

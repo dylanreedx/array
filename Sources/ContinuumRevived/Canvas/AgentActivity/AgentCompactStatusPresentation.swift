@@ -169,7 +169,7 @@ struct AgentCompactStatusPresentation: Equatable {
             enabledElements: enabledElements)
     }
 
-    /// The account chip and card ride with the account elements: turning off
+    /// The account card rides with the account elements: turning off
     /// every 5h/7d/cap element turns the account off too, rather than adding
     /// a toggle of its own.
     static func presentAccount(

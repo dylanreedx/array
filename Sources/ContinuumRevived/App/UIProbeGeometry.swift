@@ -918,8 +918,18 @@ enum UIProbeGeometry {
             "Claude · Max", "personal@example.com",
             "5-hour", "84% left", "Resets \(timeOnly(now.addingTimeInterval(2 * 3_600 + 17 * 60))) · in 2h 17m",
             "Weekly", "93% left", card.qaLines.count > 7 ? card.qaLines[7] : "",
-            "Limits are per account, shared by every agent on it. Read 2m ago.",
-        ], "the card must say whose login, both windows as % left with resets, and scope; got \(card.qaLines)")
+        ], "the card must say whose login and both windows as % left with resets; got \(card.qaLines)")
+        // Nothing else is drawn: no "in use" beside the email, no scope
+        // footnote under the windows (Dylan, 2026-10-29).
+        try require(visibleTexts(in: card) == card.qaLines,
+                    "the card must draw only its title, email and windows, drew \(visibleTexts(in: card))")
+        // ONE LEFT EDGE. A 16pt icon used to sit before the title and email,
+        // indenting them from the 5-hour and Weekly rows below.
+        let rowEdges = card.qaWindowTitleLeadingX
+        let headerEdges = [card.qaTitleLeadingX] + [card.qaSubtitleLeadingX].compactMap { $0 }
+        try require(rowEdges.count == 2 && headerEdges.count == 2
+                        && headerEdges.allSatisfy { abs($0 - rowEdges[0]) <= 0.5 },
+                    "the title and email must line up with the 5-hour row, header \(headerEdges) rows \(rowEdges)")
         try require(card.qaLines.count > 7 && card.qaLines[7].hasPrefix("Resets ") && !card.qaLines[7].contains(" · in "),
                     "a reset days away reads as a date, not a countdown; got \(card.qaLines)")
         try require(card.qaBarRemaining.map { $0.map { ($0 * 100).rounded() } } == [84, 93],
@@ -944,6 +954,14 @@ enum UIProbeGeometry {
         try require(row.qaAccountCard == nil && refreshRequests == 1,
                     "with no account shown, hovering opens nothing and asks for nothing")
         return assertions
+    }
+
+    /// Every string a text field under `view` is drawing right now.
+    private static func visibleTexts(in view: NSView) -> [String] {
+        let own = (view as? NSTextField).flatMap {
+            $0.isHiddenOrHasHiddenAncestor || $0.stringValue.isEmpty ? nil : [$0.stringValue]
+        } ?? []
+        return own + view.subviews.flatMap(visibleTexts)
     }
 
     private static func timeOnly(_ date: Date) -> String {
@@ -1027,8 +1045,11 @@ enum UIProbeGeometry {
         try require(wide.qaQuotaText(.quotaSevenDay) == "7d 6%"
                         && wide.qaQuotaState(.quotaSevenDay) == .critical,
                     "a critical account window must state what is left, got \"\(wide.qaQuotaText(.quotaSevenDay))\" state \(String(describing: wide.qaQuotaState(.quotaSevenDay)))")
-        try require(wide.qaAccountChipText == "Max",
-                    "the row must name the account the tile is spending, got \(String(describing: wide.qaAccountChipText))")
+        // The account is drawn in the hover card only: the row carries the
+        // 5h/7d bars and no plan chip beside them (Dylan, 2026-10-29).
+        try require(wide.qaQuotaPill(.quotaFiveHour) != nil && wide.qaQuotaPill(.quotaSevenDay) != nil
+                        && !visibleTexts(in: wide).contains { $0.contains("Max") },
+                    "the row must show the 5h/7d bars and no account chip, drew \(visibleTexts(in: wide))")
         // AN UNREPORTED WINDOW DRAWS NOTHING. The provider named no spend limit,
         // so no reading is ever coming for it, and `cap —` would be a promise
         // the app cannot keep. A dash is reserved for a window that exists and
@@ -1115,8 +1136,7 @@ enum UIProbeGeometry {
         let card = wide.qaAccountPresentation?.card
         try require(card?.title == "Claude · Max" && card?.subtitle == "personal@example.com"
                         && card?.windows.map(\.valueText) == ["82% left", "6% left"]
-                        && card?.windows.map(\.title) == ["5-hour", "Weekly"]
-                        && card?.footnote.contains("shared by every agent on it") == true,
+                        && card?.windows.map(\.title) == ["5-hour", "Weekly"],
                     "the card must name the login and give both windows as % left, got \(String(describing: card))")
 
         // NARROW: the width pass drops the low-priority chips, and everything it
