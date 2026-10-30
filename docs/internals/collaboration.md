@@ -31,8 +31,9 @@ and operation payloads are AES-GCM encrypted at rest with the deployment-supplie
 collaboration key; opaque identity/membership metadata is not encrypted. Tokens
 and invitation/enrollment secrets are 256 random bits and stored as SHA-256
 hashes. Existing companion encryption is unchanged. This is not group E2EE.
-Deployments must supply TLS, rate/size/storage controls, key rotation, backups,
-retention and verified restore before admitting real shared content (COL-20/22).
+Deployments must supply TLS, rate/size/storage controls, key rotation and a
+backup schedule before admitting real shared content (COL-20/22). The retention
+contract and the restore procedure are under Retention below.
 
 ## Admission and recovery rules
 
@@ -117,8 +118,52 @@ device, even the same person's second device, is refused.
 Snapshots, operation append and reducer receipts commit in one SQLite transaction.
 Retries preserve the original revision; operation identity is bound to its actor
 as well as payload. Source privacy relies on typed projections before admission;
-this service does not inspect or upload the source filesystem. Operation paging is implemented as described below. Snapshot compaction and blob
-storage remain future work.
+this service does not inspect or upload the source filesystem. Operation paging
+and compaction are implemented as described below; blob storage remains future
+work.
+
+## Retention
+
+Only the operation log is bounded. Everything that decides identity, authority
+or whether a deletion holds is kept for the life of the area. Defaults live in
+`CollaborationRetention` and are passed explicitly to `CollaborationStore`.
+
+| Class | Where it lives | Retention |
+| --- | --- | --- |
+| Current area state (layout, discussion posts, agreement revisions) | sealed head snapshot | Life of the area. Discussion is part of the document, so a post outlives the operation that added it. |
+| Operation log (replayable events) | `operations` | The newest 4,096 operations, plus anything younger than 7 days. Older operations fold into the horizon snapshot in batches of at least 512. |
+| Horizon snapshot | `areas.horizon_snapshot` | Replaced by each compaction; always the exact document at `areas.horizon`. |
+| Deleted object and placement IDs (tombstones) | head and horizon snapshots | Life of the area. A stale create of a deleted ID is refused before and after compaction. |
+| Operation receipts (ID, digest, original revision) | snapshots, plus `operation_receipts` for the actor | Life of the area. A retry returns its original revision; another person reusing the ID gets `changedIntent`. |
+| Membership epochs, removals, device revocation | `areas`, `members`, `devices` | Life of the service. Compaction never touches them. |
+| Artifact references | document items/tombstones | As current state. The service stores references, never artifact bytes. |
+| Executable requests not yet admitted by their host | `agent_dispatches` (`queued`, `claimed`) | 15 minutes from enqueue, then refused. The requester reconfirms with a new request under current authority. |
+| Admitted attempts and unknown outcomes | `agent_dispatches` (`dispatching`, `uncertain`, `accepted`, `refused`) | Life of the area. Expiry never rewrites them; the host's journal decides between accepted and uncertain. |
+
+Compaction runs in its own transaction after a command commits. It folds the
+horizon snapshot forward through the eligible prefix with the same reducer
+clients use, writes the new snapshot and horizon, and only then deletes the
+covered operations. A fault anywhere in that transaction keeps the full log and
+the old horizon, never undoes the command that triggered it, and increments
+`compactionFailures`. The next commit retries.
+
+A cursor below the horizon gets `409 snapshotRequired` rather than an empty or
+partial page. `CollaborationSession` treats every 409 as a resnapshot: it drops
+its replica, fetches the head snapshot and resumes paging from there. That
+client ends byte-for-byte equal to one that replayed every operation. Receipts
+and tombstones keep growing for as long as the area lives. Pruning them would
+need a reducer schema change.
+
+Restore is a whole-file operation. `backup(to:)` writes a consistent online
+copy with SQLite's backup API, and a cold copy of every `collaboration.*` file
+after SIGKILL is also valid. The key never enters the copy; the operator carries
+it separately. `verifyIntegrity()` checks every area: horizon snapshot plus the
+retained tail must reproduce the stored head exactly, with one receipt per
+revision and no operation left at or below the horizon. Run it against a
+restored database before serving it.
+
+Queued executable requests that predate the retention migration have no
+enqueue time and are refused the first time they are seen.
 
 ## Live updates and presence
 
@@ -135,7 +180,8 @@ receipts also cover cancellation arriving before the original request.
 Each catch-up page contains at most 128 events and at most 512 KiB of encoded
 event content. `through` fixes one consistent high-water mark while the client
 drains pages. A subsequent request without `through` discovers newer commits.
-Out-of-range cursors and history gaps require resynchronization; the client never
+Out-of-range cursors and history gaps require resynchronization; a cursor behind
+the compacted horizon gets `snapshotRequired` (see Retention). The client never
 advances to a head it has not applied. The v2 head-revision migration decrypts
 v1 snapshots to backfill the exact head transactionally and refuses a wrong key
 without committing a schema change.
@@ -158,7 +204,10 @@ fixtures. Provider auth, cookies and a shared URL cache are not used. Its owned 
 refuses redirects through the session delegate before another endpoint receives
 a request; per-request redirect delegates were insufficient on Linux. Unsupported
 schemas and incompatible accepted commands terminate the session rather than
-being retried as transient network failures. The session
+being retried as transient network failures. That ends in its own
+`incompatible` status, distinct from access loss: the controller closes the view
+but leaves the local cache bytes, drafts and outbox untouched, where loss of
+access would mark the cache denied. A newer build can then read them. The session
 gets a snapshot, catches up from its actual revision, reconnects with bounded
 backoff and clears state on access loss. Full replica notifications can coalesce
 for rendering after events are applied; durable events themselves cannot drop.
@@ -353,6 +402,12 @@ crash at that boundary, the outcome is honestly uncertain and never automaticall
 resent. Queue drain checks the original typed command and current authority;
 human text is never interpreted as a grant.
 
+A queued or claimed request that its host has not admitted within the authority
+window (15 minutes by default) is refused, not executed late. Retrying its exact
+ID returns that refusal. A relay receipt is never execution: `queued` says the
+host has not accepted the prompt. An attempt already past admission is the
+host's record and is never rewritten by expiry.
+
 ## Hover usage accounting
 
 Only explicitly published local managed agents contribute. Codex session counters
@@ -427,6 +482,22 @@ The live fixture replays 600 retained messages, races catch-up with a new commit
 checks byte limits, publishes/coalesces/expires presence, cancels held reads,
 removes active members/devices, reconstructs the server on the same port and
 verifies automatic client recovery plus the v1 migration rollback/backfill.
+
+The retention fixture (`CollaborationRetentionChecks`, in the default service
+run) commits more than 500 operations, then compacts them under an injected
+clock. It checks that an ancient cursor gets `snapshotRequired` and that the
+resnapshotting client ends byte-equal to a full-replay client. It also checks
+that deleted IDs, receipts, removals, revocations and stale epochs survive, and
+that a SQLite trigger fault inside compaction rolls back atomically. Then it
+restores twice into replacement directories with a separately carried key: once
+from an online backup, and once from a cold copy after SIGKILLing the restored
+relay mid-burst. Each restore is served by a new relay process and checked
+through real HTTP. `CollaborationRetentionRecoveryChecks` in the portable
+checks covers three things. A future-schema response leaves the cache bytes
+unchanged. A schema-2 cache behind a compacted horizon recovers over real HTTP
+with its draft. Unadmitted host requests expire at the real host dispatcher
+instead of executing. Receipts and teeth logs are in
+[col-compaction](../../.plans/105-collaboration/validation/col-compaction/README.md).
 
 `bash scripts/check-relay-linux.sh` copies only relay/collaboration sources into a
 throwaway container context. Its checks stage builds and runs the collaboration
