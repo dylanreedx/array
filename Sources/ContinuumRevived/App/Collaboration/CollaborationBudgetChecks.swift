@@ -294,7 +294,66 @@ enum CollaborationBudgetChecks {
         try expect((await authority.applies) == 0 && supervisor.records.isEmpty,
             "no budgeted traffic sent a shared operation or created an agent record")
         await modelA.close()
-        print("Collaboration budgets passed: presence flood, follow, agreement edits and remote operations counted on the production mount.")
+        try await liveViewRows()
+        print("Collaboration budgets passed: presence flood, follow, agreement edits, remote operations and live agent rows counted on the production mount.")
+    }
+
+    private final class ScriptedReads {
+        var queue: [Collaboration.AgentProjection.Read]
+        init(_ queue: [Collaboration.AgentProjection.Read]) { self.queue = queue }
+        func next() -> Collaboration.AgentProjection.Read {
+            queue.isEmpty ? .frames(generation: 1, frames: [], more: false) : queue.removeFirst()
+        }
+    }
+
+    /// 5. Shared live view: one delta re-renders only the retained rows, so the
+    /// work is the same whether the agent has produced 10, 100 or 1,000 rows.
+    /// The projection keeps at most `maxRows`; the view never sees the rest.
+    private static func liveViewRows() async throws {
+        typealias P = Collaboration.AgentProjection
+        let host = SharedArea.ID<SharedArea.Host>(), item = SharedArea.Item(id: .init(), kind: .agentObservation,
+            source: .init(owner: .init(), host: host, binding: .init()))
+        var document = SharedArea.Document()
+        try document.apply(.init(area: document.id, expectedRevision: 0, edits: [
+            .admit(item, .init(id: .init(), object: item.id, rect: .init(x: 40, y: 40, width: 420, height: 300)))]))
+        let capabilities = P.Capabilities(locallyManaged: true, canSend: false, canQueue: true, canSteer: true, canInterrupt: true)
+        let root = try Rig.root("live-rows")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let me = Collaboration.Identity(person: .init(), device: UUID())
+        let model = try Rig.controller(root: root, identity: me, label: "You",
+            authority: Rig.Authority(document: document, members: [(me, .editor)]), seed: (document, .editor))
+        var measured: [(rows: Int, layouts: Int, appKit: Int, rendered: Int, omitted: Int)] = []
+        for count in [10, 100, 1_000] {
+            func frame(_ sequence: Int, _ payload: P.Payload) -> P.Frame {
+                .init(host: host, object: item.id, generation: 1, sequence: UInt64(sequence), payload: payload)
+            }
+            var snapshot = P.Snapshot(host: host, object: item.id, generation: 1, history: .assistantOutput, phase: .working, capabilities: capabilities)
+            for index in 1...count { try snapshot.apply(frame(index, .assistantText(row: "r\(index)", turn: "t", delta: "Row \(index) of the agent's answer."))) }
+            let reads = ScriptedReads([.resnapshot(snapshot)])
+            let view = SharedAgentLiveView(controller: model, read: { _, _ in reads.next() })
+            let window = NSView(frame: .init(x: 0, y: 0, width: 520, height: 420))
+            view.frame = window.bounds; window.addSubview(view)
+            defer { view.stop() }
+            view.show(object: item.id, in: document)
+            try await Rig.eventually("live view takes the \(count)-row snapshot", attempts: 1_000) { view.replica.state?.through == UInt64(count) }
+            window.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            CollaborationWorkCensus.watch([window])
+            reads.queue.append(.frames(generation: 1, frames: [frame(count + 1, .assistantText(row: "r\(count)", turn: "t", delta: " More."))], more: false))
+            try await Rig.eventually("live view applies one delta over \(count) rows", attempts: 1_000) { view.replica.state?.through == UInt64(count + 1) }
+            window.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            let state = view.replica.state!
+            try expect(CollaborationWorkCensus.insertionTotal == 0 && view.transcriptText.hasSuffix("answer. More."),
+                "one delta over \(count) rows: the changed row shows, no Array view created")
+            let appKitLayouts = CollaborationWorkCensus.layouts.filter { $0.key.hasPrefix("_") }.values.reduce(0, +)
+            measured.append((count, CollaborationWorkCensus.layoutTotal - appKitLayouts, appKitLayouts,
+                view.transcriptText.components(separatedBy: "\n\n").count - (state.omittedRows > 0 ? 1 : 0), state.omittedRows))
+            CollaborationWorkCensus.stop()
+        }
+        let layouts = measured.map(\.layouts), appKit = measured.map(\.appKit), rendered = measured.map(\.rendered)
+        try expect(rendered[0] == 10 && rendered[1] == P.maxRows && rendered[2] == P.maxRows
+            && measured[2].omitted == 1_000 - P.maxRows && layouts.max()! <= layouts.min()! + 1 && layouts.max()! <= layoutPassesPerEvent
+            && appKit[1] == appKit[2] && appKit.max()! <= P.maxRows,
+            "live view delta is flat across 10 / 100 / 1,000 rows: renders \(rendered) rows (≤ \(P.maxRows) retained), \(layouts) Array layout passes, \(appKit) TextKit fragment layouts (visible rows only)")
     }
 
     /// Runs `work` to completion off the main thread while the main thread
