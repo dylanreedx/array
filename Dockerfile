@@ -10,7 +10,10 @@ RUN swift build -c release --product continuum-relay
 FROM build AS checks
 RUN swift build -c release --product ContinuumRevivedRelayCoreChecks
 RUN swift build -c release --product ContinuumRevivedRelayIntegrationChecks
-RUN swift build -c release --product ContinuumRevivedCollaborationServiceChecks
+# Whole-module codegen runs one LLVM thread per CPU; at 15 under amd64
+# emulation this module peaked at 7.2 GB of the 7.75 GB VM and was killed.
+# Two threads peak at 3.7 GB. Checks stage only; the shipped relay is unchanged.
+RUN swift build -c release -Xswiftc -num-threads -Xswiftc 2 --product ContinuumRevivedCollaborationServiceChecks
 RUN .build/release/ContinuumRevivedCollaborationServiceChecks
 RUN .build/release/ContinuumRevivedRelayCoreChecks
 RUN .build/release/ContinuumRevivedRelayIntegrationChecks
