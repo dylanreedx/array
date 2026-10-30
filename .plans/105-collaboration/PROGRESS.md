@@ -1055,3 +1055,39 @@ agent result.
 Then merged w5 `array/mp-w5-liveness` (all but `040704a7`). That commit
 patched the backup "damaged pages" check to damage one page header; the tip
 already has w10's `cdc244a4`, which damages every page, so it was left out.
+
+## Integrator gate — w5 liveness + w9 security + two Linux fixes on `4b83a7c3`, 30 October 2026
+
+The gate on `cfab6252` (w5 alone) failed only at `check-relay-linux.sh`, for
+two separate reasons:
+
+1. **`continuum-relay` did not compile on Linux Swift 6.1** after w5's
+   heartbeat commit: `CollaborationUpdates.swift:112: sending 'db' risks
+   causing data races`. The presence `.map` closure captures the
+   transaction's `db`, and the stricter Linux compiler refuses any later use
+   of `db` once it has been sent into that closure. `hostLiveness(db)` was
+   added after it. Fixed in `75aefe90` by reading host liveness first, in the
+   same transaction. The Mac compiler accepted both orders. A native arm64
+   container compile confirmed the relay builds.
+2. **The build was flaky under amd64 emulation.** SwiftPM's copy of GRDB's
+   `PrivacyInfo.xcprivacy` failed with EINTR, which Foundation does not
+   retry. `bbbf11e4` retries the docker build once, only on that error.
+   Separately, w9's `3eec1012` caps the service checks build at two codegen
+   threads: at fifteen it ran out of the 7.75 GB Docker VM.
+
+Merged: w9 `array/mp-w9-security` (`7bac65cf`..`91b902c6`, five commits,
+clean).
+
+Gate: `--collaboration` under the lock, isolated. Log:
+`qa-runs/coordinator/gate-4b83a7c3.log`. **11 legs run, all passed**,
+including the Linux leg. Unrelated containers were running in Docker
+during the run.
+
+Board (revision 158): COL-06 → Done (w5's independent host liveness:
+heartbeats, lost/expired/rejoined/fenced over HTTP, production-client and
+rendered-card witnesses). COL-20 → Done (w9's audit across artifacts,
+retention, backups and logs, receipt `workers/w9-security.md`). The
+history-on-join and 404/403 policies are recorded as decisions for Dylan in
+`docs/internals/collaboration.md`.
+
+Still to merge: w6 artifacts, w7 live views, then `array/col-native-budgets`.
