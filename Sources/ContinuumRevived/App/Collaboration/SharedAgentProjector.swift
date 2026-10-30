@@ -268,7 +268,12 @@ final class SharedAgentProjector {
     /// Prompts, notices, tool titles and error cards are never history rows.
     static func assistantRows(_ model: ManagedAgentTranscriptModel?, salt: String) -> [Projection.Row] {
         guard let model else { return [] }
-        return model.cards.filter { $0.kind == .message && !Projection.sanitize($0.body).isEmpty }.map { card in
+        // `.message` cards also carry reasoning entries and system notices; only
+        // the assistant role's own cards are output.
+        return model.cards.filter { card in
+            card.kind == .message && card.title == "assistant" && card.id.hasPrefix("assistant-")
+                && !Projection.sanitize(card.body).isEmpty
+        }.map { card in
             let id = SHA256.hash(data: Data("\(salt)\u{0}history:\(card.id)".utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
             var row = Projection.Row(id: id, turn: nil, kind: .assistant)
             var budget = Projection.maxRowTextBytes
