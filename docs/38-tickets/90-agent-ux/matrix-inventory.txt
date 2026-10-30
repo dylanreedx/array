@@ -1,5 +1,6 @@
 check --add-zone-check
 check --agent-account-quota-check
+check --agent-account-usage-check
 check --agent-awareness-check
 check --agent-browser-spawn-check
 check --agent-compaction-check
@@ -389,6 +390,7 @@ leg run swift build --product Array
 leg run swift build --product ContinuumRevivedCoreChecks
 leg run swift run ContinuumRevivedSyncIntegrationChecks
 leg run_app_check .build/debug/Array --add-zone-check
+leg run_app_check .build/debug/Array --agent-account-usage-check
 leg run_app_check .build/debug/Array --agent-awareness-check
 leg run_app_check .build/debug/Array --agent-browser-spawn-check
 leg run_app_check .build/debug/Array --agent-compaction-ui-check
@@ -716,6 +718,7 @@ leg run_app_check .build/debug/Array --zone-tile-hydration-check
 leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-usage-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-composer-draft-store-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-message-transcript-check
@@ -801,7 +804,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 22
-count ContinuumRevivedCoreChecks 194
+count ContinuumRevivedCoreChecks 196
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
