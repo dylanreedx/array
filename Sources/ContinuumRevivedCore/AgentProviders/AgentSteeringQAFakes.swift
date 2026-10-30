@@ -71,12 +71,19 @@ public enum AgentSteeringQAFakes {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let executable = directory.appendingPathComponent(harness.rawValue)
         let body: String
+        var preflight = ""
         switch harness {
-        case .claude: body = claudeSource
+        case .claude:
+            body = claudeSource
+            // The runner probes claude's hook surface (`--version`, `--help`)
+            // before a turn. Answer before the prelude so a probe is never a
+            // spawn, never rewrites argv.json and never reaches the turn log;
+            // the help names no `--settings`, so the probe finds no hooks.
+            preflight = claudeProbeAnswers
         case .codex: body = codexSource
         case .pi: body = piSource
         }
-        try ("#!/usr/bin/env python3\n" + sharedPrelude + body)
+        try ("#!/usr/bin/env python3\n" + preflight + sharedPrelude + body)
             .write(to: executable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         return executable
@@ -180,6 +187,17 @@ def shape(text):
         if word in text:
             return word
     return "TEXT"
+
+"""#
+
+    private static let claudeProbeAnswers = #"""
+import sys as _probe_sys
+if "--version" in _probe_sys.argv[1:]:
+    print("0.0.0 (fake claude)")
+    _probe_sys.exit(0)
+if "--help" in _probe_sys.argv[1:]:
+    print("fake claude: no hook surface")
+    _probe_sys.exit(0)
 
 """#
 
