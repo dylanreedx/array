@@ -117,7 +117,7 @@ private final class PendingReply: @unchecked Sendable {
     }
 }
 
-private final class WorkspaceMCPHTTPListener: @unchecked Sendable {
+final class WorkspaceMCPHTTPListener: @unchecked Sendable {
     let endpoint: String
     private let socketFD: Int32
     private let source: DispatchSourceRead
@@ -161,6 +161,7 @@ private final class WorkspaceMCPHTTPListener: @unchecked Sendable {
         let client = withUnsafeMutablePointer(to: &address) { pointer in pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.accept(socketFD, $0, &length) } }
         guard client >= 0 else { return }
         _ = fcntl(client, F_SETFD, FD_CLOEXEC)
+        guard Self.prepareResponseSocket(client) else { close(client); return }
         DispatchQueue.global(qos: .userInitiated).async { [handler] in
             let body = Self.readBody(client)
             let response = handler(body)
@@ -189,9 +190,24 @@ private final class WorkspaceMCPHTTPListener: @unchecked Sendable {
         return Data()
     }
 
-    private static func writeResponse(_ body: Data, to fd: Int32) {
+    /// Install this before handing the connection to a worker: a hook may time
+    /// out while its reply is queued on main. Darwin can reject setsockopt after
+    /// a peer reset, so a descriptor we cannot protect must be closed unread.
+    static func prepareResponseSocket(_ fd: Int32) -> Bool {
+        var noSignal: Int32 = 1
+        return setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size)) == 0
+    }
+
+    /// Return the write error so the offline witness can assert EPIPE itself.
+    @discardableResult
+    static func writeResponse(_ body: Data, to fd: Int32) -> Int32? {
         let head = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
-        head.withUnsafeBytes { _ = send(fd, $0.baseAddress, $0.count, 0) }
-        body.withUnsafeBytes { _ = send(fd, $0.baseAddress, $0.count, 0) }
+        for bytes in [head, body] {
+            let failure: Int32? = bytes.withUnsafeBytes {
+                send(fd, $0.baseAddress, $0.count, 0) < 0 ? errno : nil
+            }
+            if let failure { return failure }
+        }
+        return nil
     }
 }

@@ -988,6 +988,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--workspace-mcp-disconnect-check") {
+            do {
+                _ = NSApplication.shared
+                try runWorkspaceMCPDisconnectCheck()
+                print("WorkspaceMCPDisconnectChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-mcp-host-check") {
             do {
                 _ = NSApplication.shared

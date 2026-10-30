@@ -618,6 +618,7 @@ if [[ "$HOOK_BRIDGE_ONLY" -eq 1 ]]; then
   run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
   run_app_check .build/debug/Array --workspace-hook-bridge-check
   run_app_check .build/debug/Array --workspace-mcp-host-check
+  run_app_check .build/debug/Array --workspace-mcp-disconnect-check
   run_app_check .build/debug/Array --workspace-agent-report-check
   run_app_check .build/debug/Array --workspace-hook-pushback-check
   matrix_report 'Hook bridge matrix (targeted)'
@@ -630,6 +631,7 @@ if [[ "$IOS_PREVIEW_TILE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --ios-preview-tile-check
   run_app_check .build/debug/Array --workspace-api-device-check
   run_app_check .build/debug/Array --workspace-mcp-host-check
+  run_app_check .build/debug/Array --workspace-mcp-disconnect-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --agent-tool-detail-store-check
@@ -893,6 +895,7 @@ run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 # main keeps running, and that a reply's picture leaves as an MCP image item.
 # The leg existed since T3 (0.7.26) but was never registered, so it never ran.
 run_app_check .build/debug/Array --workspace-mcp-host-check
+run_app_check .build/debug/Array --workspace-mcp-disconnect-check
 # .plans/102 P1: the real `array-workspace-mcp hook` command against the same
 # production listener: inert without the marker, exits 0 silently when Array is
 # down or silent, refuses a wrong token, and records a recorded claude
