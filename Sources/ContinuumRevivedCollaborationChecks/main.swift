@@ -135,6 +135,8 @@ try await runSharedAreaPublicationSubmissionChecks()
 try await runSharedAreaControllerChecks()
 try await runCollaborationAccountChecks()
 try await runSharedAreaControllerHTTPChecks()
+try runSharedAreaAgreementReducerChecks()
+try await runSharedAreaAgreementHTTPChecks()
 print("Collaboration contracts passed (reducer, reviewed publications, native controller and localhost HTTP; no mounted-scene or runner claims).")
 
 } catch {

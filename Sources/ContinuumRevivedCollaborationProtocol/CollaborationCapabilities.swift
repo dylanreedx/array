@@ -14,7 +14,7 @@ extension Collaboration {
             return [.layout, item.kind == .discussion || item.kind == .agreement ? .discuss : .publish]
         case .place: return [.layout]
         case .remove: return [.layout, .publish]
-        case .context, .post: return [.discuss]
+        case .context, .post, .endorse: return [.discuss]
         }
     }
 }

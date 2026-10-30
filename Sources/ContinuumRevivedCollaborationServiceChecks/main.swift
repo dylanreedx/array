@@ -198,7 +198,7 @@ do {
         }
         try await runCollaborationDatabaseKeyChecks()
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationCapabilityChecks() }
-        if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationHandoffChecks(); try await runCollaborationUsageChecks() }
+        if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationHandoffChecks(); try await runCollaborationUsageChecks(); try await runCollaborationEndorsementChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationRecoveryScaleChecks() }
     }
 } catch { print("FAIL: \(error)"); exit(1) }

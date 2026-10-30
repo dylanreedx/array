@@ -89,12 +89,20 @@ public enum SharedArea {
             self.id = id; self.object = object; self.author = author; self.text = text; self.context = context
         }
     }
+    /// One authenticated person's endorsement of one immutable agreement
+    /// revision. A later revision starts with none; nothing carries forward.
+    public struct Endorsement: Codable, Equatable, Sendable {
+        public let revision: ID<Revision>
+        public let person: ID<Person>
+        public init(revision: ID<Revision>, person: ID<Person>) { self.revision = revision; self.person = person }
+    }
     public enum Edit: Codable, Equatable, Sendable {
         case admit(Item, Position)
         case place(Position)
         case remove(ID<Object>)
         case context(Context)
         case post(Post)
+        case endorse(Endorsement)
     }
     public struct Command: Codable, Equatable, Sendable {
         public let schema: Int
@@ -126,14 +134,27 @@ public enum SharedArea {
         public private(set) var placementWrites: [PlacementWrite] = []
         public private(set) var contexts: [Context] = []
         public private(set) var posts: [Post] = []
+        public private(set) var endorsements: [Endorsement] = []
         private var deletedObjects: [ID<Object>] = []
         private var deletedPlacements: [ID<Placement>] = []
         private var receipts: [Receipt] = []
         public init(id: ID<Area> = ID()) { self.id = id }
 
         private enum CodingKeys: String, CodingKey {
-            case schema, id, revision, items, positions, contexts, posts
+            case schema, id, revision, items, positions, contexts, posts, endorsements
             case deletedObjects, deletedPlacements, receipts, placementWrites
+        }
+        /// Additive field: a document with no endorsements keeps its exact
+        /// pre-endorsement canonical bytes, and older snapshots still decode.
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(schema, forKey: .schema); try c.encode(id, forKey: .id)
+            try c.encode(revision, forKey: .revision); try c.encode(items, forKey: .items)
+            try c.encode(positions, forKey: .positions); try c.encode(placementWrites, forKey: .placementWrites)
+            try c.encode(contexts, forKey: .contexts); try c.encode(posts, forKey: .posts)
+            if !endorsements.isEmpty { try c.encode(endorsements, forKey: .endorsements) }
+            try c.encode(deletedObjects, forKey: .deletedObjects); try c.encode(deletedPlacements, forKey: .deletedPlacements)
+            try c.encode(receipts, forKey: .receipts)
         }
         /// Network and disk snapshots take the same strict validation path.
         public init(from decoder: Decoder) throws {
@@ -149,6 +170,7 @@ public enum SharedArea {
             placementWrites = try c.decodeIfPresent([PlacementWrite].self, forKey: .placementWrites) ?? []
             contexts = try c.decode([Context].self, forKey: .contexts)
             posts = try c.decode([Post].self, forKey: .posts)
+            endorsements = try c.decodeIfPresent([Endorsement].self, forKey: .endorsements) ?? []
             deletedObjects = try c.decode([ID<Object>].self, forKey: .deletedObjects)
             deletedPlacements = try c.decode([ID<Placement>].self, forKey: .deletedPlacements)
             receipts = try c.decode([Receipt].self, forKey: .receipts)
@@ -190,6 +212,13 @@ public enum SharedArea {
                       post.context == nil || contexts.contains(where: { $0.id == post.context })
                 else { throw Failure.invalidReference }
             }
+            // Same rules as the reducer: a known revision, once per person.
+            var endorsed = Set<String>()
+            for endorsement in endorsements {
+                guard contexts.contains(where: { $0.id == endorsement.revision }),
+                      endorsed.insert(endorsement.revision.rawValue.uuidString + endorsement.person.rawValue.uuidString).inserted
+                else { throw Failure.invalidReference }
+            }
         }
 
         /// Copy/validate/commit: even the last edit failing leaves no changes.
@@ -229,6 +258,14 @@ public enum SharedArea {
             self = next
             return .applied(revision)
         }
+        /// The agreement's current immutable revision, if it has one.
+        public func currentRevision(of agreement: ID<Object>) -> Context? {
+            contexts.last { $0.object == agreement }
+        }
+        /// Endorsements of exactly this revision; never of its parent or child.
+        public func endorsements(of revision: ID<Revision>) -> [Endorsement] {
+            endorsements.filter { $0.revision == revision }
+        }
         public func placementWrite(for placement: ID<Placement>) -> PlacementWrite? {
             placementWrites.first { $0.placement == placement }
         }
@@ -257,6 +294,14 @@ public enum SharedArea {
                 guard !posts.contains(where: { $0.id == post.id }) else { throw Failure.duplicateIdentity }
                 if let context = post.context, !contexts.contains(where: { $0.id == context }) { throw Failure.invalidReference }
                 posts.append(post)
+            case let .endorse(endorsement):
+                guard let context = contexts.first(where: { $0.id == endorsement.revision }) else { throw Failure.invalidReference }
+                guard items.contains(where: { $0.id == context.object && $0.kind == .agreement }) else { throw Failure.missingObject }
+                // Endorsing text someone has since revised would endorse words
+                // the endorser may not have read. Refuse; the client re-reads.
+                guard currentRevision(of: context.object)?.id == context.id else { throw Failure.conflict }
+                guard !endorsements.contains(endorsement) else { throw Failure.duplicateIdentity }
+                endorsements.append(endorsement)
             }
         }
         private mutating func setPosition(_ position: Position) throws {

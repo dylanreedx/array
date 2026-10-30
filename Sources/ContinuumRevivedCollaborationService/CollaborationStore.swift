@@ -307,6 +307,10 @@ public actor CollaborationStore {
                 guard post.author == caller.person else { throw CollaborationStoreError.forbidden }
             case let .context(context):
                 guard context.author == caller.person else { throw CollaborationStoreError.forbidden }
+            case let .endorse(endorsement):
+                // Endorsement is a person's own statement, never one made for
+                // a teammate, an agent or a host.
+                guard endorsement.person == caller.person else { throw CollaborationStoreError.forbidden }
             }
         }
     }

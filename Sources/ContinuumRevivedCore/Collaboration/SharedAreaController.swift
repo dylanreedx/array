@@ -298,6 +298,27 @@ public final class SharedAreaController {
         return await submit(publication.command, preserving: nil, publication: publication)
     }
 
+    /// Endorses exactly the revision the person was shown, as the verified
+    /// person. If a teammate has since revised it, this is a conflict, so an
+    /// endorsement can never land on words the endorser did not see.
+    public func endorse(_ revision: SharedArea.ID<SharedArea.Revision>) async -> Submission {
+        guard let document else { return .rejected(.notConnected) }
+        return await submit(.init(area: document.id, expectedRevision: document.revision,
+            edits: [.endorse(.init(revision: revision, person: credentialScope.identity.person))]))
+    }
+
+    /// A deliberate rebase of a private agreement draft onto the current
+    /// revision. The text is unchanged and nothing is sent; the author reads the
+    /// teammate's revision and saves again when ready.
+    @discardableResult
+    public func rebaseDraft(id: UUID) throws -> SharedAreaLocalDraft {
+        guard var draft = drafts.first(where: { $0.id == id }), let object = draft.object,
+              let current = document?.currentRevision(of: object) else { throw SharedAreaLocalStoreError.invalidState }
+        draft.basedOn = current.id
+        try saveDraft(draft)
+        return draft
+    }
+
     public func retryPending(_ operation: SharedArea.ID<SharedArea.Operation>) async -> Submission {
         if status != .connected { await open() }
         guard let record = deliveryRecord(for: operation) else { return .rejected(.invalidCommand) }

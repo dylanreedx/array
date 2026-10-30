@@ -65,6 +65,8 @@ public struct SharedAreaPendingOperation: Codable, Equatable, Sendable {
                 guard post.author == actor.person else { throw SharedAreaLocalStoreError.invalidState }
             case .context(let context):
                 guard context.author == actor.person else { throw SharedAreaLocalStoreError.invalidState }
+            case .endorse(let endorsement):
+                guard endorsement.person == actor.person else { throw SharedAreaLocalStoreError.invalidState }
             case .remove: break
             }
         }
