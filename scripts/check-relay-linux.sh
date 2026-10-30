@@ -11,8 +11,23 @@ cp -p "$RELAY_ROOT/Dockerfile" "$RELAY_ROOT/RelayPackage.swift" "$RELAY_CONTEXT/
 for target in ContinuumRevivedCollaborationClient ContinuumRevivedCollaborationProtocol ContinuumRevivedCollaborationService ContinuumRevivedCollaborationServiceChecks ContinuumRevivedRelayProtocol ContinuumRevivedRelayCore ContinuumRevivedRelayNIO continuum-relay ContinuumRevivedRelayCoreChecks ContinuumRevivedRelayIntegrationChecks; do
   cp -pR "$RELAY_ROOT/Sources/$target" "$RELAY_CONTEXT/Sources/$target"
 done
-docker build --platform linux/amd64 --progress plain --target checks \
-  --tag array-relay-review:notification-checks "$RELAY_CONTEXT"
+# Under amd64 emulation SwiftPM's resource copy can fail with EINTR
+# ("Interrupted system call"), which Foundation does not retry. Retry the
+# build once for that error only; a real compile failure still fails.
+BUILD_LOG="$RELAY_CONTEXT.build.log"
+trap 'rm -rf "$RELAY_CONTEXT" "$BUILD_LOG"' EXIT
+build_image() {
+  docker build --platform linux/amd64 --progress plain --target checks \
+    --tag array-relay-review:notification-checks "$RELAY_CONTEXT" 2>&1 | tee "$BUILD_LOG"
+}
+if ! build_image; then
+  if grep -F 'Interrupted system call' "$BUILD_LOG" >/dev/null; then
+    echo "relay linux check: build interrupted by EINTR under emulation; retrying once" >&2
+    build_image
+  else
+    exit 1
+  fi
+fi
 # BuildKit may reuse successful RUN layers. Execute witnesses again on every
 # gate invocation so the matrix reports a witnessed run of the rebuilt image.
 docker run --rm --platform linux/amd64 --network none \
