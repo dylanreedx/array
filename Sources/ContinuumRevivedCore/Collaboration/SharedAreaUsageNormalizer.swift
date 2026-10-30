@@ -4,8 +4,8 @@ import Foundation
 /// observations. Each harness keeps its own counter semantics:
 ///
 /// - Codex reports a cumulative total per provider thread (`input` already
-///   contains `cached_input`). A thread replacing the agent's previous thread
-///   inherits it, so the previous thread is the new one's baseline.
+///   contains `cached_input`). A fork's parent (codex `forkedFromId`), or else
+///   the agent's previous thread, is the new thread's baseline.
 /// - Claude reports one figure per result. The translator's result identity
 ///   makes a re-reported result count once, and its subagent-inclusive share
 ///   replaces the main-conversation `usage`. Per-request assistant frames are
@@ -47,7 +47,11 @@ public struct SharedAreaUsageNormalizer: Sendable {
         case .some(.codex):
             let session = providerSession ?? thread
             counter = SharedAreaUsageLedger.privateCounter(["codex", session])
-            if let previous = lastCodexSession, previous != session {
+            // Codex names a fork's parent directly; otherwise a thread replacing
+            // the agent's previous one is taken to have inherited it.
+            if let parent = value.accountingForkedFrom, parent != session {
+                inheritsFrom = SharedAreaUsageLedger.privateCounter(["codex", parent])
+            } else if let previous = lastCodexSession, previous != session {
                 inheritsFrom = SharedAreaUsageLedger.privateCounter(["codex", previous])
             }
             lastCodexSession = session

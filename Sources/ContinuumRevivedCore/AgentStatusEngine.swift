@@ -351,9 +351,13 @@ public struct TokenUsageSnapshot: Codable, Equatable, Sendable {
     /// Claude's subagent-inclusive output for one result; `outputTokens` stays
     /// the main conversation's figure the meter has always shown.
     public var accountingOutputTokens: Int?
+    /// The provider session a cumulative reporter's session was forked from
+    /// (codex `forkedFromId`). Its total already contains the parent's.
+    public var accountingForkedFrom: String?
 
     public init(inputTokens: Int, outputTokens: Int, totalCostUsd: Double?, accountingObservationID: String? = nil,
-                accountingInputTokens: Int? = nil, observedAt: Date? = nil, accountingOutputTokens: Int? = nil) {
+                accountingInputTokens: Int? = nil, observedAt: Date? = nil, accountingOutputTokens: Int? = nil,
+                accountingForkedFrom: String? = nil) {
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
         self.totalCostUsd = totalCostUsd
@@ -361,6 +365,7 @@ public struct TokenUsageSnapshot: Codable, Equatable, Sendable {
         self.accountingInputTokens = accountingInputTokens
         self.observedAt = observedAt
         self.accountingOutputTokens = accountingOutputTokens
+        self.accountingForkedFrom = accountingForkedFrom
     }
 }
 

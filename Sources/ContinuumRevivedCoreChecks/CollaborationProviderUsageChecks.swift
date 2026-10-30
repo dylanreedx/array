@@ -37,8 +37,8 @@ func runCollaborationProviderUsageChecks() {
         var normalizer: SharedAreaUsageNormalizer
         var clock: Date
         var unattributable = 0
-        init(root: URL, harness: AgentHarness, start: Date) {
-            ledger = try! SharedAreaUsageLedger(directory: root.appendingPathComponent(UUID().uuidString), host: .init())
+        init(root: URL, harness: AgentHarness, start: Date, sharing: SharedAreaUsageLedger? = nil) {
+            ledger = try! sharing ?? SharedAreaUsageLedger(directory: root.appendingPathComponent(UUID().uuidString), host: .init())
             normalizer = SharedAreaUsageNormalizer(source: UUID().uuidString, harness: harness,
                 startedAt: start, providerSessionAtStart: nil)
             clock = start
@@ -227,6 +227,51 @@ func runCollaborationProviderUsageChecks() {
         expect(small.input == 64_996 + 3_000 && small.output == 313 + 10 && small.partial,
                "provider usage: a smaller replacement thread must set a baseline, then count its growth; got \(small)")
         print("PASS provider usage: a replacement thread below its parent only sets a baseline and reports partial")
+    }
+
+    // A forked COPY: a second agent whose only thread was forked from the
+    // first agent's (`forkedFromId` on `thread/started`). It has no previous
+    // thread of its own, so only codex's own lineage field can tell the ledger
+    // its totals contain the parent's. Derived from the real single-agent
+    // capture: the fork's frames carry that capture's totals on top of the
+    // parent's final 64,996 / 313. Exact = 64,996 + 64,996 / 313 + 313, never
+    // the fork in full (194,988).
+    do {
+        let source = Agent(root: root, harness: .codex, start: base)
+        var parentTranslator = CodexAppServerEventTranslator(now: { base })
+        source.deliver(parentTranslator.translate(stream: single), session: parentThread)
+        let copyThread = "00000000-0000-4000-8000-0000000000c0"
+        let forked = single.map { line -> String in
+            guard var object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  var params = object["params"] as? [String: Any] else { return line }
+            switch object["method"] as? String {
+            case "thread/started"?:
+                guard var thread = params["thread"] as? [String: Any] else { return line }
+                thread["id"] = copyThread; thread["forkedFromId"] = parentThread; params["thread"] = thread
+            case "thread/tokenUsage/updated"?:
+                guard var usage = params["tokenUsage"] as? [String: Any], var total = usage["total"] as? [String: Any] else { return line }
+                total["inputTokens"] = ((total["inputTokens"] as? Int) ?? 0) + 64_996
+                total["outputTokens"] = ((total["outputTokens"] as? Int) ?? 0) + 313
+                usage["total"] = total; params["tokenUsage"] = usage; params["threadId"] = copyThread
+                object["emittedAtMs"] = ((object["emittedAtMs"] as? Int) ?? 0) + 600_000
+            default: return line
+            }
+            object["params"] = params
+            return String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        }
+        var copyTranslator = CodexAppServerEventTranslator(now: { base })
+        let copyEvents = copyTranslator.translate(stream: forked)
+        let lineage = copyEvents.compactMap { event -> String? in
+            if case let .tokenUsageUpdated(_, value) = event { return value.accountingForkedFrom }
+            return nil
+        }
+        let copy = Agent(root: root, harness: .codex, start: base, sharing: source.ledger)
+        copy.clock = source.clock
+        copy.deliver(copyEvents, session: copyThread)
+        let total = copy.total()
+        expect(!lineage.isEmpty && lineage.allSatisfy { $0 == parentThread } && total.input == 129_992 && total.output == 626,
+               "provider usage: a forked copy must count only what its thread adds (129,992 / 626) from codex's forkedFromId; lineage \(lineage), got \(total.input) / \(total.output)")
+        print("PASS provider usage: codex forkedFromId marks a forked copy's inherited total; only its own growth counts (129,992 / 626)")
     }
 
     // Codex reset and late reports. The cumulative drops from 64,996 to 1,200

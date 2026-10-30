@@ -92,6 +92,9 @@ public struct CodexAppServerEventTranslator {
     /// here so the boundary carries it as an estimated after-count; without it
     /// the boundary blanked the meter to "unknown" until the next turn.
     private var openCompactionItemByThread: [String: String] = [:]
+    /// `thread.forkedFromId` per thread, so its cumulative totals say what
+    /// they inherited (collaboration accounting).
+    private var forkedFromByThread: [String: String] = [:]
     private var recountedCompactionTokensByThread: [String: Int] = [:]
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
@@ -214,6 +217,7 @@ public struct CodexAppServerEventTranslator {
         guard let thread = params["thread"] as? [String: Any],
               let id = thread["id"] as? String, !id.isEmpty
         else { return [] }
+        if let parent = thread["forkedFromId"] as? String, !parent.isEmpty, parent != id { forkedFromByThread[id] = parent }
         // Fire session-ready/running once, on the first thread/started this
         // translator ever sees (the primary thread). A measured caveat: no
         // captured session ever delivered a SECOND thread/started for a child,
@@ -659,7 +663,8 @@ public struct CodexAppServerEventTranslator {
                 events.append(.tokenUsageUpdated(
                     threadId: threadId,
                     snapshot: TokenUsageSnapshot(inputTokens: input ?? 0, outputTokens: output ?? 0, totalCostUsd: nil,
-                        observedAt: (emittedAtMs as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue / 1000) })))
+                        observedAt: (emittedAtMs as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue / 1000) },
+                        accountingForkedFrom: forkedFromByThread[threadId])))
             }
         }
         if let last = usage["last"] as? [String: Any],
