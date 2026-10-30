@@ -97,8 +97,13 @@ final class InboxGroupBackgroundView: NSView {
     var ownershipStrip: (rect: NSRect, roundsTop: Bool, roundsBottom: Bool)? {
         didSet { layoutSheets() }
     }
-    /// The solid card's fill, as a `textPrimary` mix over the panel.
-    static func cardAlpha(dark: Bool) -> CGFloat { dark ? 0.06 : 0.035 }
+    /// The solid card's fill, as a `textPrimary` mix over the panel. Kept close
+    /// to the panel so a resting row reads as the sidebar, not a lit tile.
+    static func cardAlpha(dark: Bool) -> CGFloat { dark ? 0.035 : 0.025 }
+    /// The shade a card's hover and active steps start from: the card's
+    /// 0.7.35 shade, so quietening the resting card leaves a lit row as bright
+    /// as it was.
+    static func interactionUnderlay(dark: Bool) -> CGFloat { dark ? 0.06 : 0.035 }
 
     /// How far each tucked card shows below the one in front of it, and how much
     /// narrower it is on each side.
@@ -166,10 +171,11 @@ final class InboxGroupBackgroundView: NSView {
     /// How much fill already sits under the card's centre at rest — the wash
     /// and every tucked card beneath it, composited. A stacked parent's face is
     /// this, not the panel, so its interaction steps must start from here or a
-    /// hover paints the colour the card already is.
+    /// hover paints the colour the card already is. A lead's solid card steps
+    /// from `interactionUnderlay`, which sits above its resting shade.
     var alphaUnderCard: CGFloat {
         if ownershipStrip != nil {
-            return Self.cardAlpha(dark: effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+            return Self.interactionUnderlay(dark: effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
         }
         guard isGroupMember, let card = cardRect else { return 0 }
         let centre = NSPoint(x: card.midX, y: card.midY)

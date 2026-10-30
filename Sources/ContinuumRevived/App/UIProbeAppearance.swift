@@ -1303,10 +1303,11 @@ enum UIProbeAppearance {
 
     /// The sidebar row card's fills: the ladder's three emphases, and — plan 106,
     /// every card now sitting on its lead's solid card — the same three stepped
-    /// up from that card's shade, composited from the same tokens.
+    /// up from the shade its interaction steps start at, composited from the
+    /// same tokens.
     private static func sidebarCardFills(theme: TokenTheme) -> Set<String> {
         var values: Set<String> = []
-        let card = InboxGroupBackgroundView.cardAlpha(dark: theme == .dark)
+        let card = InboxGroupBackgroundView.interactionUnderlay(dark: theme == .dark)
         for role in SidebarSurfaceRole.rowEmphases {
             values.insert(hex(role.color.cgColor(for: theme)))
             for contrast in [false, true] {
