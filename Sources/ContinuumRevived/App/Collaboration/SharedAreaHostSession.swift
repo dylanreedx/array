@@ -12,6 +12,7 @@ final class SharedAreaHostSession {
     let heartbeat: SharedAreaHostHeartbeat?
     private let supervisor: AgentSupervisor
     private var collector: SharedAreaUsageCollector?
+    private(set) var projections: SharedAreaAgentProjectionHost?
     private var host: SharedArea.ID<SharedArea.Host>?
     private var changeObserver: UUID?
     private var pump: Task<Void, Never>?
@@ -52,6 +53,7 @@ final class SharedAreaHostSession {
             await controller.open()
             while ticket == generation, !Task.isCancelled {
                 await updateUsage()
+                await projections?.flush()
                 do { try await Task.sleep(for: .seconds(2)) } catch { return }
             }
         }
@@ -59,6 +61,7 @@ final class SharedAreaHostSession {
     func stop() {
         generation = UUID()
         pump?.cancel(); pump = nil; collector?.stop(); handoff.stopHosting(); heartbeat?.end()
+        projections?.stop(); projections = nil
         collector = nil; host = nil; lastReported = nil; lastUsage = nil
         if let changeObserver { controller.removeChangeObserver(changeObserver) }; changeObserver = nil
         let precedingClose = closing
@@ -90,6 +93,8 @@ final class SharedAreaHostSession {
             document.items.contains { $0.id == binding.object && $0.source?.host == binding.host && $0.source?.owner == controller.identity.person }
         }
         heartbeat?.track(host: bindings.first?.host)
+        if projections == nil { projections = SharedAreaAgentProjectionHost(supervisor: supervisor, controller: controller) }
+        projections?.sync(bindings)
         guard let host = bindings.first?.host else {
             collector?.stop(); collector = nil; self.host = nil; lastReported = nil; lastUsage = nil; return
         }

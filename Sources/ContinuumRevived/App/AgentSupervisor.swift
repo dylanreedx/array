@@ -8556,6 +8556,18 @@ final class AgentSupervisor {
         var tail: AsyncStream<AgentRuntimeEvent>
     }
 
+    /// Whether `transcriptAttachment` returns a semantic snapshot boundary. Without
+    /// a transcript store the tail replays bounded history first, so a consumer
+    /// that must not publish pre-attach turns cannot tell replay from live.
+    var hasTranscriptSnapshotBoundary: Bool { transcriptStore != nil }
+
+    /// COL-15 witness only: binds a constructed, never-run runner so capability
+    /// projection reads the production runner types without starting a CLI.
+    func qaBindRunnerForCapabilities(_ runner: AgentRunning?, for id: AgentID) {
+        runners[id] = runner
+        notifyTurnCapabilitiesChanged(id)
+    }
+
     /// Atomically snapshot the complete transcript and register its live tail.
     /// `AgentSupervisor` is main-actor isolated, so no delivery can interleave the
     /// snapshot read and continuation registration.

@@ -20,6 +20,8 @@ public protocol SharedAreaControllerTransport: Sendable {
     func publishPresence(_ input: Collaboration.PresenceInput) async throws
     func endPresence(_ session: UUID) async throws
     func reportUsage(_ report: Collaboration.UsageReport) async throws
+    func publishAgentProjection(object: UUID, report: Collaboration.AgentProjection.PublishReport) async throws
+    func readAgentProjection(object: UUID, cursor: Collaboration.AgentProjection.Cursor?) async throws -> Collaboration.AgentProjection.Read
 }
 
 public extension SharedAreaControllerTransport {
@@ -27,6 +29,12 @@ public extension SharedAreaControllerTransport {
     func publishPresence(_ input: Collaboration.PresenceInput) async throws { throw CollaborationClientError.server(status: 503, code: "presenceUnavailable") }
     func endPresence(_ session: UUID) async throws { throw CollaborationClientError.server(status: 503, code: "presenceUnavailable") }
     func reportUsage(_ report: Collaboration.UsageReport) async throws { throw CollaborationClientError.server(status: 503, code: "usageUnavailable") }
+    func publishAgentProjection(object: UUID, report: Collaboration.AgentProjection.PublishReport) async throws {
+        throw CollaborationClientError.server(status: 503, code: "projectionUnavailable")
+    }
+    func readAgentProjection(object: UUID, cursor: Collaboration.AgentProjection.Cursor?) async throws -> Collaboration.AgentProjection.Read {
+        throw CollaborationClientError.server(status: 503, code: "projectionUnavailable")
+    }
 }
 
 private actor SharedAreaAPIConnection: SharedAreaControllerConnection {
@@ -60,6 +68,12 @@ public struct SharedAreaAPITransport: SharedAreaControllerTransport {
     public func publishPresence(_ input: Collaboration.PresenceInput) async throws { try await api.publishPresence(area: area, value: input) }
     public func endPresence(_ session: UUID) async throws { try await api.endPresence(area: area, session: session) }
     public func reportUsage(_ report: Collaboration.UsageReport) async throws { try await api.reportUsage(area: area, report: report) }
+    public func publishAgentProjection(object: UUID, report: Collaboration.AgentProjection.PublishReport) async throws {
+        try await api.publishAgentProjection(area: area, object: object, report: report)
+    }
+    public func readAgentProjection(object: UUID, cursor: Collaboration.AgentProjection.Cursor?) async throws -> Collaboration.AgentProjection.Read {
+        try await api.readAgentProjection(area: area, object: object, cursor: cursor)
+    }
 }
 
 /// Owns a native shared-area view, not the source tiles observed by that view.
@@ -151,6 +165,18 @@ public final class SharedAreaController {
         let current = generation
         try await transport.reportUsage(.init(epoch: scope.epoch, snapshot: snapshot))
         guard generation == current, status == .connected else { throw CollaborationClientError.server(status: 409, code: "superseded") }
+    }
+
+    /// COL-15. The host publishes its own agents' projections; any member reads.
+    public func publishAgentProjection(object: SharedArea.ID<SharedArea.Object>, batch: Collaboration.AgentProjection.Batch) async throws {
+        guard status == .connected, let transport, let scope else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
+        let current = generation
+        try await transport.publishAgentProjection(object: object.rawValue, report: .init(epoch: scope.epoch, batch: batch))
+        guard generation == current, status == .connected else { throw CollaborationClientError.server(status: 409, code: "superseded") }
+    }
+    public func readAgentProjection(object: SharedArea.ID<SharedArea.Object>, cursor: Collaboration.AgentProjection.Cursor?) async throws -> Collaboration.AgentProjection.Read {
+        guard status == .connected, let transport else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
+        return try await transport.readAgentProjection(object: object.rawValue, cursor: cursor)
     }
 
     private let localStore: SharedAreaLocalStore
