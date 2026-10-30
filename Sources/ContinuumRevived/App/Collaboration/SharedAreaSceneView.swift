@@ -233,6 +233,11 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         guard isMounted, let rect = canvas.renderedFrame(for: object) else { return nil }
         return canvas.convert(rect, to: self)
     }
+    /// The preview text the canvas draws for a visible card, nil when the card
+    /// is not drawn or the zoom hides previews.
+    func renderedCardPreview(for object: SharedArea.ID<SharedArea.Object>) -> String? {
+        isMounted ? canvas.renderedPreview(for: object) : nil
+    }
     func setCamera(_ value: SharedAreaLocalView) throws {
         guard [value.x, value.y, value.zoom].allSatisfy(\.isFinite), value.zoom > 0 else { throw SharedArea.Failure.invalidGeometry }
         if value.x != localCamera.x || value.y != localCamera.y || value.zoom != localCamera.zoom { cancelGeometry() }
@@ -915,6 +920,10 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
     }
     func renderedFrame(for object: SharedArea.ID<SharedArea.Object>) -> NSRect? {
         visibleCards().cards.first(where: { $0.card.position.object == object })?.frame
+    }
+    func renderedPreview(for object: SharedArea.ID<SharedArea.Object>) -> String? {
+        guard camera.zoom >= 0.35 else { return nil }
+        return visibleCards().cards.first(where: { $0.card.position.object == object })?.card.preview
     }
     func object(at point: NSPoint) -> SharedArea.ID<SharedArea.Object>? {
         visibleCards().cards.reversed().first(where: { $0.frame.contains(point) })?.card.position.object

@@ -1661,6 +1661,11 @@ enum ContinuumApp {
                     try await SharedAreaUsageCollectorChecks.run()
                     print("STAGE collaboration native: agent handoff controls and draft recovery")
                     try await SharedAreaHandoffViewChecks.run()
+                    print("STAGE collaboration native: host liveness on cards and before Send now")
+                    try await SharedAreaHostLivenessNativeChecks.run(mount: { controller, person, host in
+                        delegate.mountWorkspaceSceneAtBoot(sharedAreaController: controller, person: person, in: host)
+                    }, supervisor: supervisor)
+                    guard executorConstructions == 0 else { throw SelfCheckError("host liveness stage constructed a local executor") }
                     print("ContinuumRevivedCollaborationNativeChecks passed")
                     Foundation.exit(0)
                 } catch {
