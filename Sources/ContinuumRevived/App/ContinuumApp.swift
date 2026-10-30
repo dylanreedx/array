@@ -1641,6 +1641,12 @@ enum ContinuumApp {
                     }, executorCount: {
                         supervisor.records.keys.filter { supervisor.isRunning($0) }.count + executorConstructions
                     })
+                    print("STAGE collaboration native: per-agent agreement freshness and excerpts")
+                    try await SharedAreaFreshnessSceneChecks.run(mount: { controller, person, host in
+                        delegate.mountWorkspaceSceneAtBoot(sharedAreaController: controller, person: person, in: host)
+                    }, executorCount: {
+                        supervisor.records.keys.filter { supervisor.isRunning($0) }.count + executorConstructions
+                    })
                     guard executorConstructions == 0, supervisor.records.isEmpty else {
                         throw SelfCheckError("shared scene constructed a local executor or agent record")
                     }
@@ -11933,6 +11939,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     let host = try sharedAreaHostSessions[key] ?? SharedAreaHostSession(account: model, area: area, supervisor: agentSupervisor)
                     sharedAreaHostSessions[key] = host; host.start()
                     shared.scene.onRequestHandoff = { [weak host] object in host?.handoff.show(object: object) }
+                    shared.scene.agentFreshness = try? SharedAgentFreshnessModel(handoff: host.handoff.model)
                 } catch {
                     let alert = NSAlert()
                     alert.messageText = "The publishing host is unavailable"

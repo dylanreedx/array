@@ -43,6 +43,15 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         accessibilityLabel: "Post to discussion", isEnabled: false, isLoading: false, secondaryActions: []))
     private let canvas = SharedAreaSceneCanvas(frame: .zero)
     private(set) lazy var agreementPanel = SharedAreaAgreementView(controller: controller)
+    private(set) lazy var freshnessPanel = SharedAreaAgentFreshnessView()
+    /// Per-agent agreement freshness and excerpt source checks (COL-14).
+    var agentFreshness: SharedAgentFreshnessModel? {
+        didSet {
+            oldValue?.stopWatchingLedger()
+            agentFreshness?.onChange = { [weak self] in self?.refreshFreshness() }
+            agentFreshness?.startWatchingLedger()
+        }
+    }
     private var localCamera = SharedAreaLocalView()
     private var cameraDirty = false
     private var cameraTimer: Timer?
@@ -138,6 +147,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             addSubview(view)
         }
         addSubview(agreementPanel)
+        addSubview(freshnessPanel)
         agreementPanel.onRebaseDraft = { [weak self] in self?.rebaseAgreementDraft() }
         setAccessibilityRole(.group)
         setAccessibilityLabel("Shared workspace")
@@ -190,8 +200,10 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         setFrame(entryLabel, .init(x: x, y: header + 39, width: width, height: 18))
         setFrame(history, .init(x: x, y: header + 63, width: min(148, width), height: ChoiceButton.controlHeight))
         let editorTop = max(header + 220, bounds.height - 190)
-        let agreement = agreementPanel.isHidden ? 0 : SharedAreaAgreementView.height + 8
+        let agreement = !agreementPanel.isHidden ? SharedAreaAgreementView.height + 8
+            : !freshnessPanel.isHidden ? SharedAreaAgentFreshnessView.height + 8 : 0
         setFrame(agreementPanel, .init(x: x, y: header + 106, width: width, height: SharedAreaAgreementView.height))
+        setFrame(freshnessPanel, .init(x: x, y: header + 106, width: width, height: SharedAreaAgentFreshnessView.height))
         setFrame(readerScroll, .init(x: x, y: header + 106 + agreement, width: width, height: max(48, editorTop - header - 118 - agreement)))
         setFrame(editorScroll, .init(x: x, y: editorTop, width: width, height: 112))
         setFrame(postButton, .init(x: x, y: editorTop + 122, width: min(width, 160), height: ComposerActionButton.controlHeight))
@@ -611,6 +623,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     }
     private func refreshControls() {
         agreementPanel.show(agreement: selectedObject, in: knownDocument, draft: activeDraft)
+        freshnessPanel.show(agent: selectedObject, in: knownDocument, model: agentFreshness)
         let key = ControlsKey(status: controller.status, submitting: controller.isSubmitting, canSubmit: controller.canSubmit,
             epoch: controller.scope?.epoch, role: controller.scope?.role.rawValue,
             documentRevision: controller.document?.revision, selected: selectedObject,
@@ -656,7 +669,8 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         detailLabel.stringValue = Self.title(for: item.kind)
         let entries: [String]
         switch item.kind {
-        case .discussion: entries = document.posts.filter { $0.object == object }.map(\.text)
+        case .discussion:
+            entries = document.posts.filter { $0.object == object }.map { SharedAreaExcerptPresentation.entry(for: $0, in: document, model: agentFreshness) }
         case .agreement: entries = document.contexts.filter { $0.object == object }.map(\.text)
         case .agentObservation:
             entries = [onRequestHandoff == nil
@@ -677,6 +691,11 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             .init(id: "latest", title: "Latest entry", enabled: !entries.isEmpty)
         ]
         history.setPresentationTitle("History")
+    }
+    private func refreshFreshness() {
+        guard isMounted else { return }
+        freshnessPanel.show(agent: selectedObject, in: knownDocument, model: agentFreshness)
+        refreshReader()
     }
     private func navigateHistory(_ action: String) {
         if action == "earlier" { readerIndex = max(0, readerIndex - 1); followsLatestEntry = false }

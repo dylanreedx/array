@@ -112,6 +112,11 @@ public final class SharedAgentFreshnessLedger: @unchecked Sendable {
         }
     }
 
+    /// Changes when another connection (the handoff client's hook) commits.
+    public func changeToken() throws -> Int {
+        try database.read { db in try Int.fetchOne(db, sql: "PRAGMA data_version") ?? 0 }
+    }
+
     /// Commands still between queued and a final outcome. A client re-reads
     /// each from the service; only the most recent one is otherwise refreshed.
     public func unsettledCommands() throws -> [UUID] {

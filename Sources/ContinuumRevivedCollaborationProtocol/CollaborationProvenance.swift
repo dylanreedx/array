@@ -62,7 +62,8 @@ extension Collaboration {
         }
 
         /// What can honestly be said about the original right now. The frozen
-        /// text stays readable whatever this returns.
+        /// text stays readable whatever this returns. `nil` lookups mean "not
+        /// checked", never "gone".
         public enum Availability: Equatable, Sendable {
             case linked
             /// The published agent left the area.
@@ -70,19 +71,24 @@ extension Collaboration {
             /// The agent's host binding was replaced; this turn belongs to an
             /// earlier incarnation and cannot be opened through the current one.
             case sourceReplaced
+            /// The agent's current incarnation could not be confirmed.
+            case sourceUnchecked
             /// The artifact's latest revision is not the one quoted.
             case artifactChanged(current: UUID)
             /// The quoted artifact is no longer published.
             case artifactRemoved
+            /// The artifact's latest revision could not be confirmed.
+            case artifactUnchecked
         }
         public func availability(in document: SharedArea.Document, currentGeneration: UUID?,
-                                                                  /// The artifact's live `State.latest.manifest.id.rawValue`.
+                                 /// The artifact's live `State.latest.manifest.id.rawValue`.
                                  currentArtifactRevision: (SharedArea.ID<SharedArea.Object>) -> UUID?) -> Availability {
             guard document.items.contains(where: { $0.id == source.incarnation.object }) else { return .sourceRemoved }
+            guard let currentGeneration else { return .sourceUnchecked }
             guard currentGeneration == source.incarnation.hostGeneration else { return .sourceReplaced }
             if let artifact = source.artifact {
-                guard document.items.contains(where: { $0.id == artifact.object }),
-                      let current = currentArtifactRevision(artifact.object) else { return .artifactRemoved }
+                guard document.items.contains(where: { $0.id == artifact.object }) else { return .artifactRemoved }
+                guard let current = currentArtifactRevision(artifact.object) else { return .artifactUnchecked }
                 if current != artifact.revision { return .artifactChanged(current: current) }
             }
             return .linked

@@ -153,10 +153,10 @@ func runSharedAgentFreshnessChecks() async throws {
         // 4. A refused resend of revision 4 leaves the baseline where it was.
         refuseNext = true
         let resend = try await settle(try await send("Pick up revision 4.", to: first, context: rev4))
-        let afterRefusal = try ledger.freshness(of: firstAgent, agreement: agreement.id, in: try await document())
-        try freshnessCheck(resend.phase == .refused && afterRefusal.lastAccepted?.id == toFirst.command.id
-            && afterRefusal.state == .changedSinceSent(sent: rev2.id, current: rev4.id, newerRevisions: 2)
-            && afterRefusal.unresolved?.command.id == resend.command.id && afterRefusal.unresolved?.phase == .refused,
+        let afterRefusedResend = try ledger.freshness(of: firstAgent, agreement: agreement.id, in: try await document())
+        try freshnessCheck(resend.phase == .refused && afterRefusedResend.lastAccepted?.id == toFirst.command.id
+            && afterRefusedResend.state == .changedSinceSent(sent: rev2.id, current: rev4.id, newerRevisions: 2)
+            && afterRefusedResend.unresolved?.command.id == resend.command.id && afterRefusedResend.unresolved?.phase == .refused,
             "a refused delivery is reported but does not advance the baseline")
         let stale = try ledger.record(.init(command: toFirst.command, phase: .queued))
         try freshnessCheck(stale == .accepted, "a late, older receipt cannot move an accepted delivery backwards")
@@ -233,6 +233,34 @@ func runSharedAgentFreshnessChecks() async throws {
         try freshnessCheck((try ledger.freshness(of: firstAgent, agreement: agreement.id, in: doc)).state == .agreementRemoved(sent: rev2.id),
             "an agent whose agreement was removed keeps its last accepted revision, labelled as no longer shared")
         try freshnessCheck(acceptances.count == 2, "only the two deliberate sends were ever accepted")
+
+        // 10. Excerpts in discussion over real HTTP. Only the agent's owner may
+        // export its result; the post replays to the teammate unchanged.
+        let discussion = SharedArea.Item(id: .init(), kind: .discussion)
+        try await edit([.admit(discussion, .init(id: .init(), object: discussion.id, rect: rect(1400)))])
+        let shared = Collaboration.ResultExcerpt(area: initial.document.id, capturedBy: a.identity.person,
+            source: .init(incarnation: firstAgent, host: host.id, turn: "turn-3", sequence: 9, command: toFirst.command.id), text: "Parser change done.")
+        try await edit([.post(.init(id: .init(), object: discussion.id, author: a.identity.person, text: "Result from my agent.", excerpt: shared))])
+        let teammateView = try await bb.state(area: area).document
+        try freshnessCheck(teammateView.posts.last?.excerpt == shared && teammateView.posts.last?.excerpt?.source.turn == "turn-3",
+            "an owner's excerpt post replays to the teammate with its exact source turn, host and session")
+        let current = try await bb.state(area: area)
+        let foreign = Collaboration.ResultExcerpt(area: initial.document.id, capturedBy: b.identity.person,
+            source: .init(incarnation: firstAgent, host: host.id, turn: "turn-3"), text: "Parser change done.")
+        var exportRefused = false
+        do {
+            _ = try await bb.apply(area: area, mutation: .init(epoch: current.scope.epoch, command: .init(area: current.document.id,
+                expectedRevision: current.document.revision, edits: [.post(.init(id: .init(), object: discussion.id, author: b.identity.person,
+                    text: "Quoting your agent.", excerpt: foreign))])))
+        } catch let CollaborationClientError.server(status, _) where status == 400 { exportRefused = true }
+        let afterRefusal = try await aa.state(area: area).document
+        try freshnessCheck(exportRefused && afterRefusal.posts.count == teammateView.posts.count,
+            "a teammate cannot export a result from an agent they do not own")
+        let plain = SharedArea.Post(id: .init(), object: discussion.id, author: a.identity.person, text: "No quote.")
+        let plainBytes = String(decoding: try JSONEncoder().encode(plain), as: UTF8.self)
+        let reloaded = try JSONDecoder().decode(SharedArea.Document.self, from: try JSONEncoder().encode(teammateView))
+        try freshnessCheck(!plainBytes.contains("excerpt") && reloaded == teammateView,
+            "a post without an excerpt keeps its earlier bytes and a snapshot with excerpts reloads through validation")
 
         try await server.stop()
         print("Shared agent freshness checks passed: independent per-agent baselines through real HTTP, stale markers without dispatch, immutable accepted input, refusal and rebind honesty, provenance excerpts and relaunch.")

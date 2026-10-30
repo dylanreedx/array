@@ -85,8 +85,12 @@ public enum SharedArea {
         public let author: ID<Person>
         public let text: String
         public let context: ID<Revision>?
-        public init(id: ID<Message>, object: ID<Object>, author: ID<Person>, text: String, context: ID<Revision>? = nil) {
-            self.id = id; self.object = object; self.author = author; self.text = text; self.context = context
+        /// A frozen agent result the author chose to share. Additive: a post
+        /// without one keeps its exact earlier bytes.
+        public let excerpt: Collaboration.ResultExcerpt?
+        public init(id: ID<Message>, object: ID<Object>, author: ID<Person>, text: String, context: ID<Revision>? = nil,
+                    excerpt: Collaboration.ResultExcerpt? = nil) {
+            self.id = id; self.object = object; self.author = author; self.text = text; self.context = context; self.excerpt = excerpt
         }
     }
     /// One authenticated person's endorsement of one immutable agreement
@@ -211,6 +215,13 @@ public enum SharedArea {
                         || deletedObjects.contains(post.object),
                       post.context == nil || contexts.contains(where: { $0.id == post.context })
                 else { throw Failure.invalidReference }
+                if let excerpt = post.excerpt {
+                    let present = Set(items.map(\.id)).union(deletedObjects)
+                    let known = { (object: ID<Object>) in present.contains(object) }
+                    guard excerpt.isWellFormed, excerpt.area == id, excerpt.capturedBy == post.author,
+                          known(excerpt.source.incarnation.object), excerpt.source.artifact.map({ known($0.object) }) ?? true
+                    else { throw Failure.invalidReference }
+                }
             }
             // Same rules as the reducer: a known revision, once per person.
             var endorsed = Set<String>()
@@ -293,6 +304,16 @@ public enum SharedArea {
                 guard items.contains(where: { $0.id == post.object && $0.kind == .discussion }) else { throw Failure.missingObject }
                 guard !posts.contains(where: { $0.id == post.id }) else { throw Failure.duplicateIdentity }
                 if let context = post.context, !contexts.contains(where: { $0.id == context }) { throw Failure.invalidReference }
+                if let excerpt = post.excerpt {
+                    // Export rule: only the agent's owner may share its result,
+                    // from an agent and artifact currently in this area. The
+                    // service binds `post.author` to the authenticated caller.
+                    guard excerpt.isWellFormed, excerpt.area == id, excerpt.capturedBy == post.author,
+                          let agent = items.first(where: { $0.id == excerpt.source.incarnation.object && $0.kind == .agentObservation }),
+                          agent.source?.owner == post.author, agent.source?.host == excerpt.source.host,
+                          excerpt.source.artifact.map({ artifact in items.contains { $0.id == artifact.object && $0.kind == .artifact } }) ?? true
+                    else { throw Failure.invalidReference }
+                }
                 posts.append(post)
             case let .endorse(endorsement):
                 guard let context = contexts.first(where: { $0.id == endorsement.revision }) else { throw Failure.invalidReference }
