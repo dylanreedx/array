@@ -1,0 +1,74 @@
+STAGE collaboration native: source inventory
+PASS collaboration inventory: capture reads the actual production-mounted layered scene
+PASS collaboration inventory: fixture includes a persisted source below live hydration
+PASS collaboration inventory: fixture changes the live model in WORLD coordinates
+PASS collaboration inventory: complete capture includes both owners and persisted below-tier membership
+PASS collaboration inventory: live and retained source frames use WORLD model geometry exactly once, excluding presentation pose
+PASS collaboration inventory: live unsaved and below-tier note text come from their actual owners
+PASS collaboration inventory: capture and confirmation do not rewrite source canvases or note files
+PASS collaboration inventory: reading capture acquires no controller, creates no agent and leaves the armed source unchanged
+PASS collaboration inventory: actual owner reread invalidates stale note confirmation
+PASS collaboration inventory: a known tile pointer does not authorize another project identity
+PASS collaboration inventory: foreign membership rescues only within its owning project without writing repaired stamps
+PASS collaboration inventory: incomplete whole-workspace coverage names the unavailable project without acquiring it
+PASS collaboration inventory: a scoped zone capture does not acquire unrelated unavailable projects
+PASS collaboration inventory: unsupported projectless source is explicitly named instead of omitted
+Collaboration inventory checks passed: production mount, current WORLD models, source ownership, below-tier notes and fresh confirmation; no live providers or default tmux.
+STAGE collaboration native: shared scenes
+PASS shared scene: production entry mounts each shared scene exactly once
+PASS shared scene: mounted independent identities acquire current authority
+PASS shared scene: first native frame converts area geometry through its private camera exactly once
+PASS shared scene: second camera renders the same area rectangle at an independent origin and zoom
+PASS shared scene: failed private focus save preserves the previous logical target and its draft
+PASS shared scene: native selected-entry reader displays accepted human discussion
+PASS shared scene: accepted remote discussion leaves both private cameras unchanged
+PASS shared scene: native agreement editor creates and displays an immutable accepted revision
+PASS shared scene: scripted submission is held after admission before its response
+PASS shared scene: late old-mount outcome cannot install uncertain-delivery state into a remounted editor
+PASS shared scene: agent observation truthfully reports absent history and execution controls
+PASS shared scene: mount, selection and discussion do not change the supplied executor census
+PASS shared scene: mounted shared interactions preserve every supplied source project file byte
+PASS shared scene: access loss clears the native shared entry reader as well as canvas objects
+PASS shared scene: access removal and close flush preserve a draft still inside the input debounce
+PASS shared scene: unmount clears presentation while closing only the view subscription
+PASS shared scene: remount restores a shared reference without executor construction
+PASS shared scene: access removal, close and remount preserve the executor census
+PASS shared scene: native remount does not retidy or rewrite source zones
+PASS shared scene: bounded rendering keeps the frontmost 128 visible objects
+PASS shared scene: an object omitted by the render budget cannot intercept pointer input
+PASS shared scene: rendered frames and pointer input use the same eligible visible objects
+PASS shared scene: Tab selects the first actually rendered object
+PASS shared scene: Shift-Tab cycles backward through eligible visible objects only
+Shared native scene checks passed: supplied production mount, actual view frames, private cameras, human content, access removal and source preservation. Scripted transport; real-provider effects remain separate.
+STAGE collaboration native: geometry and compensating undo
+PASS native shared geometry: real pointer drag previews locally through camera zoom without mutating either authoritative document
+PASS native shared geometry: pointer packets do not send durable geometry operations
+PASS native shared geometry: mouse release commits exactly one shared move
+PASS native shared geometry: participant at another camera sees the identical area-local frame
+PASS native shared geometry: Edit Undo reaches the actual shared-canvas responder
+PASS native shared geometry: native semantic Undo preserves a newer teammate discussion
+PASS native shared geometry: second participant can begin its own shared move
+PASS native shared geometry: second participant proposes a complete frame
+PASS native shared geometry: an older local Undo never replaces the teammate's newer placement
+PASS native shared geometry: one native group gesture moves both members rigidly in one operation
+PASS native shared geometry: native resize handle scales the complete group in one accepted operation
+PASS native shared geometry: shared moves, resize and compensation preserve both private cameras
+PASS native shared geometry: fixture has a live shared geometry preview
+PASS native shared geometry: teammate prepares conflicting full-frame intent
+PASS native shared geometry: remote-authority cancellation never sends the stale local drag on mouse release
+PASS native shared geometry: Escape cancels preview without a shared operation
+PASS native shared geometry: read-only participant cannot begin a geometry mutation
+PASS native shared geometry: all geometry input preserves supplied private source bytes and executor census
+PASS native shared geometry: cold fixture prepares one exact resize intent
+PASS native shared geometry: before the remote reply, disk retains exact data command and complete inverse
+PASS native shared geometry: new controller recovers remote-success/local-ack loss without sending the accepted move twice
+PASS native shared geometry: late old-controller outcome cannot replace the relaunched controller's compensation
+PASS native shared geometry: cold geometry recovery and compensation preserve supplied source bytes and execution
+Native shared geometry passed: production mounts, pointer group move/resize, responder Undo/keyboard Redo, private cameras, remote conflict, cancellation, cold inverse recovery and no source execution.
+STAGE collaboration native: agreements and endorsements
+PASS shared agreement scene: both mounted scenes connect
+PASS shared agreement scene: selecting an agreement shows its current revision with an enabled Endorse control
+PASS shared agreement scene: agreement copy reads as instructions to agents, not an enforced restriction
+PASS shared agreement scene: the Endorse control records the signed-in person against the displayed revision
+PASS shared agreement scene: B's endorsement of revision 1 is not shown on revision 2
+FAIL: Failure(message: "B\'s save against revision 1 conflicts, leaves A\'s revision current and keeps B\'s draft")

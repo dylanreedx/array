@@ -1,0 +1,10 @@
+PASS: atomic capture accepted
+PASS: capture preserves relative layout
+PASS: retry returns original receipt
+PASS: retry does not mutate document
+PASS: refuses changedIntent
+PASS: refuses conflict
+PASS: refuses invalidGeometry
+PASS: last-edit failure rolls back entire group
+PASS: refuses invalidGeometry
+FAIL: CheckFailure(label: "expected refusal: conflict")
