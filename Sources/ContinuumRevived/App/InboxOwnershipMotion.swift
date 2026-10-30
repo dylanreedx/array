@@ -421,8 +421,6 @@ struct InboxOwnershipSlice: Equatable {
     var groupHeight: CGFloat = 0
     var continuesAbove = false
     var continuesBelow = false
-    /// The lead's title column, in card x: where a subagent row's content starts.
-    var titleLeading: CGFloat = 12
     var leadLane: InboxStemLane = .none
     var helperLane: InboxStemLane = .none
     /// The card's light, while anything in it works and nothing in it asks.
@@ -452,16 +450,11 @@ struct InboxOwnershipChrome {
     /// How far an open lead's row overlaps its first subagent, so the first row
     /// sits right under the lead's second line.
     static let headOverlap: CGFloat = 6
+    /// Where a subagent row's content starts in the card: just right of the
+    /// stem, the same for every lead whatever its count and dot.
+    static var subagentLeading: CGFloat { laneX + 10 }
     /// A helper's content, one step in from its parent subagent's.
-    static let helperIndent: CGFloat = 14
-
-    /// Where the lead's title starts in its card: after the fold glyph and its
-    /// count, then the identity dot. Subagent rows line up under it.
-    static func titleLeading(foldWidth: CGFloat, hasDot: Bool) -> CGFloat {
-        var x = foldWidth > 0 ? foldX + foldWidth + 6 : pad
-        if hasDot { x += AgentInboxView.identityDotSide + CGFloat(Space.m) }
-        return x
-    }
+    static let helperIndent: CGFloat = 12
 
     func install(in view: NSView) {
         for child in [sweep, stem] as [NSView] {
@@ -498,10 +491,11 @@ struct InboxOwnershipChrome {
         let dark = stem.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         stem.colour = TextToken.textSecondary.color.nsColor(in: stem).withAlphaComponent(dark ? 0.14 : 0.16)
         let leadX = gutter + Self.laneX
-        let helperX = gutter + slice.titleLeading + 5
+        let helperX = gutter + Self.subagentLeading + 5
         stem.lanes = [
+            // The foot turns toward the row and stops just short of its dots.
             .init(kind: slice.leadLane, x: leadX, top: laneTop - top, turn: rowMid - top,
-                  reach: (gutter + slice.titleLeading - 1 - leadX) * 0.25),
+                  reach: gutter + Self.subagentLeading - 3 - leadX),
             .init(kind: slice.helperLane, x: helperX, top: rowMid + 6 - top, turn: rowMid - top, reach: 0),
         ]
     }

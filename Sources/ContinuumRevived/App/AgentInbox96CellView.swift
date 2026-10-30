@@ -1829,6 +1829,16 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var subagentActionTitlesForQA: [String] {
         [hoverStop, hoverPopOut].filter { !$0.isHidden && $0.alphaValue > 0 }.compactMap { $0.accessibilityLabel() }
     }
+    /// The stem's lanes as this row paints them, in this cell's x.
+    var stemLanesForQA: [InboxOwnershipStemView.Lane] {
+        ownershipChrome.stem.lanes.map { lane in
+            var lane = lane
+            lane.x = ownershipChrome.stem.convert(NSPoint(x: lane.x, y: 0), to: self).x
+            return lane
+        }
+    }
+    /// Where a subagent row's content begins: its dots (or its fold glyph).
+    var subagentContentFrameForQA: NSRect { pulseDots.convert(pulseDots.bounds, to: self) }
     func subagentActionButtonForQA(_ label: String) -> NSView? {
         [hoverStop, hoverPopOut].first { $0.accessibilityLabel() == label && !$0.isHidden }
     }
@@ -1865,7 +1875,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let sub = isSubagentRow
         let pad = InboxOwnershipChrome.pad
         if sub {
-            let left = gutter + ownership.titleLeading - 8
+            let left = gutter + InboxOwnershipChrome.subagentLeading - 6
             card.frame = NSRect(x: left, y: -spacing / 2,
                                 width: max(0, bounds.width - gutter - 6 - left),
                                 height: InboxOwnershipChrome.subagentHeight + spacing)
@@ -2068,7 +2078,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private func layoutSubagentLine() {
         guard let row = shown?.row else { return }
         let mid = card.bounds.height / 2
-        let x0 = 8 + InboxOwnershipChrome.helperIndent * CGFloat(min(max(0, row.depth - 1), 1))
+        let x0 = 6 + InboxOwnershipChrome.helperIndent * CGFloat(min(max(0, row.depth - 1), 1))
         let right = card.bounds.width - 6
         // A subagent with helpers of its own keeps the fold glyph — no count, its
         // helpers are right below — where its dots would be; its helpers' short

@@ -295,7 +295,73 @@ enum SidebarOwnershipChecks {
             report.append("\(label): counts once, subagents carry no project or branch, ask raised on the lead, "
                 + "line 2 per state, light/shimmer/dots, stem lanes, hover Pop out + Stop, right-click verbs")
         }
+        for dark in [true, false] {
+            for width in [260, 380] as [CGFloat] {
+                report.append(try checkIndent(dark: dark, width: width, outputDirectory: outputDirectory))
+            }
+        }
         return "SidebarOwnershipChecks passed:\n" + report.joined(separator: "\n")
+    }
+
+    /// Subagent rows sit just right of the stem, whatever their lead's count and
+    /// dot, and a helper steps in by one small, fixed amount — at a narrow and a
+    /// wide sidebar. The stem's foot stops short of the row, and hover's Stop and
+    /// Pop out and the title's truncation keep clear of each other.
+    static func checkIndent(dark: Bool, width: CGFloat, outputDirectory: URL?) throws -> String {
+        let (inbox, window) = build(dark: dark, width: width, height: 1400) { _, _ in }
+        defer { window.orderOut(nil) }
+        let label = "\(dark ? "dark" : "light") \(Int(width))pt"
+        func cell(_ n: Int) throws -> AgentInbox96CellView {
+            guard let cell = inbox.ownershipCellForQA(id: uuid(n)) else {
+                throw Failure(description: "\(label): no row for \(String(n, radix: 16))")
+            }
+            cell.layoutSubtreeIfNeeded()
+            return cell
+        }
+        let lane = CGFloat(AgentInbox96CellView.outerGutter) + InboxOwnershipChrome.laneX
+        let underFive = try cell(verify + 1), underFiftyThree = try cell(quality + 2), helper = try cell(0x481)
+        let first = underFive.qaTitleFrameForQA.minX, second = underFiftyThree.qaTitleFrameForQA.minX
+        guard abs(first - second) <= 0.5 else {
+            throw Failure(description: "\(label): subagent rows start at \(first) under one lead and \(second) under another — the indent follows the lead's count")
+        }
+        guard first - lane <= 26 else {
+            throw Failure(description: "\(label): a subagent's words start \(first - lane)pt right of the stem, wanted 26pt or less")
+        }
+        let step = helper.qaTitleFrameForQA.minX - second
+        guard abs(step - InboxOwnershipChrome.helperIndent) <= 0.5, step <= 12.5 else {
+            throw Failure(description: "\(label): a helper steps in \(step)pt, wanted \(InboxOwnershipChrome.helperIndent)pt")
+        }
+        // The foot reaches toward the row and stops short of its dots.
+        let last = try cell(verify + 5)
+        guard let foot = last.stemLanesForQA.first(where: { $0.kind == .foot }),
+              foot.x + max(InboxOwnershipStemView.footRadius + 1, foot.reach) < last.subagentContentFrameForQA.minX,
+              foot.x < last.qaCardFrameForQA.minX else {
+            throw Failure(description: "\(label): the stem's foot runs into its last row — lanes \(last.stemLanesForQA), row content at \(last.subagentContentFrameForQA.minX)")
+        }
+        // Hover: Stop and Pop out inside the row, the truncated title clear of them.
+        let target = underFive
+        let centre = target.convert(NSPoint(x: target.bounds.midX, y: target.bounds.height / 2), to: nil)
+        inbox.mouseMoved(with: try mouse(.mouseMoved, at: centre, window: window))
+        inbox.layoutForQA()
+        target.layoutSubtreeIfNeeded()
+        guard target.subagentActionTitlesForQA == ["Stop", "Pop out"],
+              let stop = target.subagentActionButtonForQA("Stop"),
+              let popOut = target.subagentActionButtonForQA("Pop out") else {
+            throw Failure(description: "\(label): hover offers \(target.subagentActionTitlesForQA)")
+        }
+        let stopFrame = stop.convert(stop.bounds, to: target), popFrame = popOut.convert(popOut.bounds, to: target)
+        guard popFrame.maxX <= target.bounds.width - CGFloat(AgentInbox96CellView.outerGutter) + 0.5,
+              target.qaTitleFrameForQA.maxX <= min(stopFrame.minX, popFrame.minX) + 0.5 else {
+            throw Failure(description: "\(label): hovered, the title \(target.qaTitleFrameForQA) meets Stop \(stopFrame) / Pop out \(popFrame)")
+        }
+        inbox.mouseExited(with: try mouse(.mouseMoved, at: .zero, window: window))
+        inbox.layoutForQA()
+        if let outputDirectory {
+            try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+            try write(inbox, to: outputDirectory.appendingPathComponent(
+                "indent-\(dark ? "dark" : "light")-\(Int(width)).png"))
+        }
+        return "\(label): subagents \(first - lane)pt right of the stem under every lead, helpers +\(step)pt, foot short of the row, hover clear"
     }
 
     /// The view as composited, sublayers and masks included.
