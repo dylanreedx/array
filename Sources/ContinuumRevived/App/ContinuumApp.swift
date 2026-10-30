@@ -805,6 +805,9 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        // Before anything can order a window or activate: a check run never takes
+        // the user's focus or screen (CheckFocusGuard).
+        CheckFocusGuard.installIfQARun()
         if (ProcessInfo.processInfo.environment["ARRAY_SIDEBAR_PREVIEW"] == "1"
             || Bundle.main.bundleIdentifier == "dev.arrayapp.macos.sidebar-preview"),
            Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier,
@@ -5069,6 +5072,10 @@ enum ContinuumApp {
 
         // The fresh-install witness mounts the real project-free workspace,
         // including its Ghostty runtime, so it requires the global bootstrap.
+        if CommandLine.arguments.contains("--checks-never-take-focus-check") {
+            do { _ = NSApplication.shared; try AppDelegate.runChecksNeverTakeFocusCheck(); print("ChecksNeverTakeFocus passed"); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+        }
         if CommandLine.arguments.contains("--fresh-install-check") {
             do { _ = NSApplication.shared; try AppDelegate.runFreshInstallSelfCheck(); print("FreshInstallChecks passed"); Foundation.exit(0) }
             catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
@@ -22894,6 +22901,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try rep.representation(using: .png, properties: [:])?.write(to: artifact.appendingPathComponent("getting-started-\(count).png"))
         }
         print("Claude onboarding: scanning, live discovery, idle cross-project chooser, cancellation, stale selection, read-only watch, and new Claude/chat with tmux off passed")
+    }
+
+    /// `--checks-never-take-focus-check`: a check run must never take the user's
+    /// focus or screen. Drives the real project-free boot (whose titled workspace
+    /// window `center()`s onto the display), the exact `NSApp.activate` the boot
+    /// path makes, and a window that forgot `orderFrontOffscreenForChecks()`; then
+    /// asserts Array never became active or frontmost and no window of ours is on
+    /// a display. The guard under test is the one `main()` installed for this
+    /// flag, not one this check installs.
+    static func runChecksNeverTakeFocusCheck() throws {
+        func expect(_ value: Bool, _ message: String) throws {
+            if !value { throw NSError(domain: "ChecksNeverTakeFocus", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+        }
+        let env = ["CONTINUUM_APP_SUPPORT": "/tmp/x"]
+        try expect(CheckFocusGuard.isQARun(arguments: ["Array", "--fresh-install-check"], environment: [:]), "a --*-check run must be guarded")
+        try expect(CheckFocusGuard.isQARun(arguments: ["Array"], environment: ["CONTINUUM_QA_FLOW": "x"]), "a QA flow must be guarded")
+        try expect(!CheckFocusGuard.isQARun(arguments: ["Array"], environment: env), "an interactive launch must not be guarded")
+        try expect(!CheckFocusGuard.isQARun(arguments: ["Array", "--ui-baseline-check"], environment: [:]), "the display-dependent baseline leg is exempt")
+        try expect(!CheckFocusGuard.isQARun(arguments: ["Array", "--fresh-install-check"], environment: ["CONTINUUM_QA_HOLD_OPEN": "1"]), "a held-open QA run is exempt")
+        try expect(CheckFocusGuard.isInstalled, "main() did not install the focus guard for a --*-check run")
+
+        let ownPid = ProcessInfo.processInfo.processIdentifier
+        var frontmostWasArray = false
+        let sampler = Timer(timeInterval: 0.02, repeats: true) { _ in
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == ownPid || NSApp.isActive { frontmostWasArray = true }
+        }
+        RunLoop.main.add(sampler, forMode: .common)
+        defer { sampler.invalidate() }
+
+        // As the interactive launch does: a `.regular` app CAN take focus, which
+        // is what the after-launch legs ran as. Under the default policy of a bare
+        // check binary, activation is inert and this check would have no teeth.
+        NSApp.setActivationPolicy(.regular)
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("array-no-focus-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let store = RegistryStore(applicationSupportDirectory: root.appendingPathComponent("support"))
+        let app = AppDelegate()
+        let suite = "array.no-focus.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else { throw CocoaError(.fileReadUnknown) }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        app.onboardingProgressStore = OnboardingProgressStore(defaults: defaults)
+        app.agentSupervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("agents")), makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        try app.launchProjectFreeWorkspace(registryStore: store, installsGlobalEventMonitors: false)
+        defer {
+            app.window?.orderOut(nil)
+            app.workspaceRuntime?.closeAll()
+            app.ghostty?.shutdown()
+            app.browserEngine?.shutdown()
+        }
+        try expect(app.window?.isVisible == true, "the boot path did not order its workspace window in")
+        // The boot path's own activation (applicationDidFinishLaunching).
+        NSApp.activate(ignoringOtherApps: true)
+        let forgetful = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
+        forgetful.isReleasedWhenClosed = false
+        forgetful.makeKeyAndOrderFront(nil)
+        defer { forgetful.orderOut(nil) }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+
+        try expect(CheckFocusGuard.blockedActivations.contains("NSApp.activate(ignoringOtherApps:)"), "positive control: the activation never reached the guard")
+        try expect(!frontmostWasArray && !NSApp.isActive, "Array became the active/frontmost app during a check")
+        let onScreen = NSApp.windows.filter { window in
+            window.isVisible && window.alphaValue > 0 && NSScreen.screens.contains { $0.frame.intersects(window.frame) }
+        }
+        try expect(onScreen.isEmpty, "check windows on a display: \(onScreen.map { "\($0.title.isEmpty ? String(describing: type(of: $0)) : $0.title) \($0.frame)" })")
     }
 
     static func runFreshInstallSelfCheck() throws {

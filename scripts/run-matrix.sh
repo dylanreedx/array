@@ -208,10 +208,14 @@ run() {
 run_leg() {
   local status
   printf '\n==> %s\n' "$*"
+  matrix_focus_watch_start
   set +e
   "$@"
   status=$?
   set -e
+  if ! matrix_focus_watch_stop && [[ $status -eq 0 ]]; then
+    status=1
+  fi
   matrix_classify "$(matrix_leg_name "$@")" "$status"
 }
 
@@ -430,6 +434,53 @@ matrix_report() {
   return 0
 }
 
+# A check must never take the user's focus (CheckFocusGuard in the app, witnessed
+# by --checks-never-take-focus-check). Every leg also runs under this
+# frontmost-app sampler, which sees what the in-process guard cannot (a launch
+# through LaunchServices, a simulator, a helper): a leg fails, whatever it exited
+# with, if a descendant of this matrix, anything run from this checkout, or
+# Simulator became the frontmost app. Other agents' processes are not blamed.
+matrix_focus_watch_start() {
+  MATRIX_FOCUS_LOG=$(mktemp "${TMPDIR:-/tmp}/continuum-matrix-focus.XXXXXX")
+  MATRIX_FOCUS_WATCH_PID=""
+  command -v lsappinfo >/dev/null || return 0
+  local matrix_pid=$$
+  (
+    last=""
+    while :; do
+      pid=$(lsappinfo info -only pid "$(lsappinfo front 2>/dev/null)" 2>/dev/null \
+        | sed -n 's/.*pid = \([0-9][0-9]*\).*/\1/p' | head -1)
+      if [[ -n "$pid" && "$pid" != "$last" ]]; then
+        last=$pid
+        ours=0
+        ancestor=$pid
+        while [[ -n "$ancestor" && "$ancestor" -gt 1 ]]; do
+          if [[ "$ancestor" == "$matrix_pid" ]]; then ours=1; break; fi
+          ancestor=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d ' ')
+        done
+        printf '%s %s %s\n' "$ours" "$pid" "$(ps -o comm= -p "$pid" 2>/dev/null)" >>"$MATRIX_FOCUS_LOG"
+      fi
+      sleep 0.1
+    done
+  ) &
+  MATRIX_FOCUS_WATCH_PID=$!
+}
+
+matrix_focus_watch_stop() {
+  local stolen
+  if [[ -n "$MATRIX_FOCUS_WATCH_PID" ]]; then
+    kill "$MATRIX_FOCUS_WATCH_PID" 2>/dev/null || true
+    wait "$MATRIX_FOCUS_WATCH_PID" 2>/dev/null || true
+  fi
+  stolen=$(grep -E "^1 |^0 [0-9]+ ($ROOT_DIR/|.*/Simulator\.app/)" "$MATRIX_FOCUS_LOG" | cut -d' ' -f2- || true)
+  rm -f "$MATRIX_FOCUS_LOG"
+  if [[ -n "$stolen" ]]; then
+    printf 'FOCUS STOLEN: this leg made the frontmost app: %s\nA check must never take the user'"'"'s focus (CheckFocusGuard).\n' "$stolen"
+    return 1
+  fi
+  return 0
+}
+
 run_app_check() {
   local project_root app_support status stdout_log
   local tmux_args=()
@@ -453,6 +504,7 @@ run_app_check() {
   # stdout is teed so a leg can surface a MATRIX-NOTE line in the final report;
   # the leg's own exit status is still the verdict.
   stdout_log=$(mktemp "${TMPDIR:-/tmp}/continuum-matrix-stdout.XXXXXX")
+  matrix_focus_watch_start
   set +e
   if [[ ${#tmux_args[@]} -gt 0 ]]; then
     CONTINUUM_PROJECT_ROOT="$project_root" \
@@ -465,6 +517,9 @@ run_app_check() {
   fi
   status=${PIPESTATUS[0]}
   set -e
+  if ! matrix_focus_watch_stop && [[ $status -eq 0 ]]; then
+    status=1
+  fi
 
   matrix_collect_notes "$(matrix_leg_name "$@")" "$stdout_log"
   rm -rf "$project_root" "$app_support" "$stdout_log"
@@ -1896,6 +1951,7 @@ run_app_check .build/debug/Array --project-lock-check
 run_app_check .build/debug/Array --project-root-resolution-check
 run_app_check .build/debug/Array --project-picker-resolution-check
 run_app_check .build/debug/Array --fresh-install-check
+run_app_check .build/debug/Array --checks-never-take-focus-check
 run_app_check .build/debug/Array --child-crash-isolation-check
 run_app_check .build/debug/Array --sidebar-push-coalescing-check
 run_app_check .build/debug/Array --topology-migration-check

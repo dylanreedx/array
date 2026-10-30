@@ -7043,6 +7043,8 @@ enum UIProbeGeometry {
             contentRect: NSRect(origin: .zero, size: windowSize),
             styleMask: .borderless, backing: .buffered, defer: false, screen: screen
         )
+        // Screen-edge placement needs a real screen; the guard keeps it invisible.
+        CheckFocusGuard.keepScreenGeometry(window)
         let anchor = NSView(frame: NSRect(x: 20, y: 20, width: 100, height: 32))
         window.contentView?.addSubview(anchor)
         let controller = ChoicePopoverController()

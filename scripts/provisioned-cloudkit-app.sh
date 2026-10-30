@@ -188,7 +188,7 @@ EOF
   if [[ "$SKIP_LAUNCH_SMOKE" -eq 1 ]]; then
     echo "planned launch smoke: skipped by --skip-launch-smoke"
   else
-    echo "planned launch smoke: /usr/bin/open -n -W \"$app_path\" --args --menu-contract-check --launch-probe-sentinel <sentinel>"
+    echo "planned launch smoke: /usr/bin/open -g -n -W \"$app_path\" --args --menu-contract-check --launch-probe-sentinel <sentinel>"
   fi
   printf '{\n'
   printf '  "dryRun": true,\n'
@@ -369,7 +369,7 @@ diagnose_signed_app() {
   if [[ "$SKIP_LAUNCH_SMOKE" -eq 0 ]]; then
     rm -f "$launch_sentinel"
     set +e
-    /usr/bin/open -n -W "$app" --args --menu-contract-check --launch-probe-sentinel "$launch_sentinel" >"$LAUNCH_LOG" 2>&1
+    /usr/bin/open -g -n -W "$app" --args --menu-contract-check --launch-probe-sentinel "$launch_sentinel" >"$LAUNCH_LOG" 2>&1
     launch_status=$?
     set -e
     if [[ ! -f "$launch_sentinel" ]] || ! grep -Fq 'menu-contract-check passed' "$launch_sentinel"; then

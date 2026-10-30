@@ -329,7 +329,7 @@ HOME="$launch_home" \
   CFFIXED_USER_HOME="$launch_home" \
   CONTINUUM_PROJECT_ROOT="$launch_project_root" \
   CONTINUUM_APP_SUPPORT="$launch_app_support" \
-  open -n -W "$BUNDLE_PATH" --args --menu-contract-check --launch-probe-sentinel "$LAUNCH_SENTINEL" >"$LAUNCH_LOG" 2>&1
+  open -g -n -W "$BUNDLE_PATH" --args --menu-contract-check --launch-probe-sentinel "$LAUNCH_SENTINEL" >"$LAUNCH_LOG" 2>&1
 open_status=$?
 set -e
 cat "$LAUNCH_LOG"
@@ -420,7 +420,7 @@ manifest = {
     "cfFixedUserHome": os.environ["cf_fixed_user_home"],
     "bundleSelfChecks": self_checks,
     "codesignVerification": {"exitCode": int(os.environ["codesign_status"]), "log": os.environ["CODESIGN_LOG"]},
-    "launchServicesProbe": {"command": "open -n -W <bundle> --args --menu-contract-check --launch-probe-sentinel <path>", "exitCode": int(os.environ["launch_status"]), "log": os.environ["LAUNCH_LOG"], "sentinel": os.environ["LAUNCH_SENTINEL"]},
+    "launchServicesProbe": {"command": "open -g -n -W <bundle> --args --menu-contract-check --launch-probe-sentinel <path>", "exitCode": int(os.environ["launch_status"]), "log": os.environ["LAUNCH_LOG"], "sentinel": os.environ["LAUNCH_SENTINEL"]},
     "fileLog": os.environ["FILE_LOG"],
     "otoolLog": os.environ["OTOOL_LOG"],
     "ghosttyArtifactsLog": os.environ["GHOSTTY_LOG"],
