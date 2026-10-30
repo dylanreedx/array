@@ -1,0 +1,440 @@
+exit=1
+STAGE collaboration native: source inventory
+PASS collaboration inventory: capture reads the actual production-mounted layered scene
+PASS collaboration inventory: fixture includes a persisted source below live hydration
+PASS collaboration inventory: fixture changes the live model in WORLD coordinates
+PASS collaboration inventory: complete capture includes both owners and persisted below-tier membership
+PASS collaboration inventory: live and retained source frames use WORLD model geometry exactly once, excluding presentation pose
+PASS collaboration inventory: live unsaved and below-tier note text come from their actual owners
+PASS collaboration inventory: capture and confirmation do not rewrite source canvases or note files
+PASS collaboration inventory: reading capture acquires no controller, creates no agent and leaves the armed source unchanged
+PASS collaboration inventory: actual owner reread invalidates stale note confirmation
+PASS collaboration inventory: a known tile pointer does not authorize another project identity
+PASS collaboration inventory: foreign membership rescues only within its owning project without writing repaired stamps
+PASS collaboration inventory: incomplete whole-workspace coverage names the unavailable project without acquiring it
+PASS collaboration inventory: a scoped zone capture does not acquire unrelated unavailable projects
+PASS collaboration inventory: unsupported projectless source is explicitly named instead of omitted
+Collaboration inventory checks passed: production mount, current WORLD models, source ownership, below-tier notes and fresh confirmation; no live providers or default tmux.
+STAGE collaboration native: shared scenes
+PASS shared scene: production entry mounts each shared scene exactly once
+PASS shared scene: mounted independent identities acquire current authority
+PASS shared scene: first native frame converts area geometry through its private camera exactly once
+PASS shared scene: second camera renders the same area rectangle at an independent origin and zoom
+PASS shared scene: failed private focus save preserves the previous logical target and its draft
+PASS shared scene: native selected-entry reader displays accepted human discussion
+PASS shared scene: accepted remote discussion leaves both private cameras unchanged
+PASS shared scene: native agreement editor creates and displays an immutable accepted revision
+PASS shared scene: scripted submission is held after admission before its response
+PASS shared scene: late old-mount outcome cannot install uncertain-delivery state into a remounted editor
+PASS shared scene: agent observation truthfully reports absent history and execution controls
+PASS shared scene: mount, selection and discussion do not change the supplied executor census
+PASS shared scene: mounted shared interactions preserve every supplied source project file byte
+PASS shared scene: access loss clears the native shared entry reader as well as canvas objects
+PASS shared scene: access removal and close flush preserve a draft still inside the input debounce
+PASS shared scene: unmount clears presentation while closing only the view subscription
+PASS shared scene: remount restores a shared reference without executor construction
+PASS shared scene: access removal, close and remount preserve the executor census
+PASS shared scene: native remount does not retidy or rewrite source zones
+PASS shared scene: bounded rendering keeps the frontmost 128 visible objects
+PASS shared scene: an object omitted by the render budget cannot intercept pointer input
+PASS shared scene: rendered frames and pointer input use the same eligible visible objects
+PASS shared scene: Tab selects the first actually rendered object
+PASS shared scene: Shift-Tab cycles backward through eligible visible objects only
+Shared native scene checks passed: supplied production mount, actual view frames, private cameras, human content, access removal and source preservation. Scripted transport; real-provider effects remain separate.
+STAGE collaboration native: geometry and compensating undo
+PASS native shared geometry: real pointer drag previews locally through camera zoom without mutating either authoritative document
+PASS native shared geometry: pointer packets do not send durable geometry operations
+PASS native shared geometry: mouse release commits exactly one shared move
+PASS native shared geometry: participant at another camera sees the identical area-local frame
+PASS native shared geometry: Edit Undo reaches the actual shared-canvas responder
+PASS native shared geometry: native semantic Undo preserves a newer teammate discussion
+PASS native shared geometry: second participant can begin its own shared move
+PASS native shared geometry: second participant proposes a complete frame
+PASS native shared geometry: an older local Undo never replaces the teammate's newer placement
+PASS native shared geometry: one native group gesture moves both members rigidly in one operation
+PASS native shared geometry: native resize handle scales the complete group in one accepted operation
+PASS native shared geometry: shared moves, resize and compensation preserve both private cameras
+PASS native shared geometry: fixture has a live shared geometry preview
+PASS native shared geometry: teammate prepares conflicting full-frame intent
+PASS native shared geometry: remote-authority cancellation never sends the stale local drag on mouse release
+PASS native shared geometry: Escape cancels preview without a shared operation
+PASS native shared geometry: read-only participant cannot begin a geometry mutation
+PASS native shared geometry: editor holds a live group-drag preview before its access changes
+PASS native shared geometry: losing edit permission cancels the live group drag at once
+PASS native shared geometry: the editor's group returns to its exact pre-gesture frames
+PASS native shared geometry: pointer movement and release after the permission loss commit no operation
+PASS native shared geometry: the canceled drag leaves no local Undo entry or prepared intent
+PASS native shared geometry: both mounted clients keep the exact accepted frames
+PASS native shared geometry: the commit's pre-effect ledger write was the one that failed
+PASS native shared geometry: a failed pre-effect ledger write sends nothing
+PASS native shared geometry: frames return to the last accepted state and the peer's replica is unchanged
+PASS native shared geometry: the failed save leaves the accepted ledger generation untouched
+PASS native shared geometry: after the failure a later gesture commits once and lands on exact frames on both clients
+PASS native shared geometry: editor holds a live group-resize preview before revocation
+PASS native shared geometry: revocation cancels the resize and withdraws the shared frames
+PASS native shared geometry: a revoked editor's release commits nothing and records no Undo entry
+PASS native shared geometry: the remaining participant keeps exact frames through the revocation
+PASS native shared geometry: all geometry input preserves supplied private source bytes and executor census
+PASS native shared geometry: cold fixture prepares one exact resize intent
+PASS native shared geometry: before the remote reply, disk retains exact data command and complete inverse
+PASS native shared geometry: new controller recovers remote-success/local-ack loss without sending the accepted move twice
+PASS native shared geometry: late old-controller outcome cannot replace the relaunched controller's compensation
+PASS native shared geometry: cold geometry recovery and compensation preserve supplied source bytes and execution
+Native shared geometry passed: production mounts, pointer group move/resize, responder Undo/keyboard Redo, private cameras, remote conflict, cancellation, permission loss and revocation mid-gesture, failed ledger save, cold inverse recovery and no source execution.
+STAGE collaboration native: agreements and endorsements
+PASS shared agreement scene: both mounted scenes connect
+PASS shared agreement scene: selecting an agreement shows its current revision with an enabled Endorse control
+PASS shared agreement scene: agreement copy reads as instructions to agents, not an enforced restriction
+PASS shared agreement scene: the Endorse control records the signed-in person against the displayed revision
+PASS shared agreement scene: B's endorsement of revision 1 is not shown on revision 2
+PASS shared agreement scene: B's save against revision 1 conflicts, leaves A's revision current and keeps B's draft
+PASS shared agreement scene: the scene offers a deliberate rebase of the stale draft
+PASS shared agreement scene: rebasing pins B's exact text to revision 2 and sends nothing
+PASS shared agreement scene: B's resubmission lands on top of A's revision; both drafts survive in history
+PASS shared agreement scene: a new revision starts with zero endorsements in the mounted scene
+PASS shared agreement scene: the endorsement strip is shown only for an agreement
+PASS shared agreement scene: endorsing, revising and @mention discussion construct no executor and start no agent
+PASS shared agreement scene: the agreement strip re-resolves its token text colour for light and dark offscreen renders
+Shared agreement scene checks passed: Endorse control on the current revision, conflict and deliberate rebase, instruction copy and zero executors from @mention discussion. Scripted authority runs the real reducer.
+STAGE collaboration native: account hub
+PASS collaboration hub: opening the shipping hub constructs no login or network request
+PASS collaboration hub: native Connect uses Array enrollment and saves a scoped account once
+PASS collaboration hub: native Create opens and remembers the admitted area through its production callback
+PASS collaboration hub: native invitation targets the entered collaboration person
+PASS collaboration hub: retargeting the hub discards a late invitation reply from the previous workspace
+PASS collaboration hub: a discarded invitation leaves a completed status instead of a false connection activity
+PASS collaboration hub: hub renders in NSAppearanceNameAqua
+PASS collaboration hub: shared scene renders an admitted connected fixture in NSAppearanceNameAqua
+PASS collaboration hub: hub renders in NSAppearanceNameDarkAqua
+PASS collaboration hub: shared scene renders an admitted connected fixture in NSAppearanceNameDarkAqua
+PASS collaboration hub: closing the hub fences a late workspace response and preserves existing source work
+STAGE collaboration native: mixed-window commands
+PASS collaboration window commands: mounted source keeps its genuine API agent identity with a scripted executor factory
+PASS collaboration window commands: injected platform lookup supplies the actual personal window without activating the self-check app
+PASS collaboration window commands: actual shared window mounts and admits scripted portable state beside the personal source
+PASS collaboration window commands: injected platform lookup supplies the actual shared workspace window and its collaboration hierarchy
+PASS collaboration window commands: shared workspace disables personal menu action createZoneFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: shared workspace disables personal menu action createAgentFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: shared workspace disables personal menu action createTerminalFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: shared workspace disables personal menu action createNoteFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: shared workspace disables personal menu action createBoardFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: shared workspace disables personal menu action createBrowserFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: shared workspace disables personal menu action createFileTreeFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: shared workspace disables personal menu action openCommandCenterFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: shared workspace refuses registered command agent.newManaged
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: shared workspace passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: shared workspace refuses registered command tile.newTerminal
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: shared workspace passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: shared workspace refuses registered command tile.newNote
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: shared workspace passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: shared workspace refuses registered command tile.quickSpawn.1
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: shared workspace passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: shared workspace refuses registered command tile.quickSpawn.2
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: shared workspace passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: shared workspace refuses registered command tile.quickSpawn.3
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: shared workspace passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: shared workspace refuses registered command tile.quickSpawn.4
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: shared workspace passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: shared workspace refuses registered command app.commandCenter
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: shared workspace passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: shared workspace refuses stale personal palette callbacks
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: shared workspace modifier input cannot activate the personal hold leader
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: shared workspace command-delete cannot delete the personal selected tile
+PASS collaboration window commands: shared workspace preserves source project, workspace and agent file bytes and membership
+PASS collaboration window commands: shared workspace leaves source WORLD geometry, workspace document and camera unchanged
+PASS collaboration window commands: shared workspace leaves personal focus, armed zone and interaction generation unchanged
+PASS collaboration window commands: shared workspace creates no agent record or executor and leaves existing execution unchanged
+PASS collaboration window commands: injected platform lookup supplies the actual collaboration hub window and its collaboration hierarchy
+PASS collaboration window commands: collaboration hub disables personal menu action createZoneFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration hub disables personal menu action createAgentFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration hub disables personal menu action createTerminalFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration hub disables personal menu action createNoteFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration hub disables personal menu action createBoardFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration hub disables personal menu action createBrowserFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration hub disables personal menu action createFileTreeFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration hub disables personal menu action openCommandCenterFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration hub refuses registered command agent.newManaged
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration hub passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration hub refuses registered command tile.newTerminal
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration hub passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration hub refuses registered command tile.newNote
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration hub passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration hub refuses registered command tile.quickSpawn.1
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration hub passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration hub refuses registered command tile.quickSpawn.2
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration hub passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration hub refuses registered command tile.quickSpawn.3
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration hub passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration hub refuses registered command tile.quickSpawn.4
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration hub passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration hub refuses registered command app.commandCenter
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration hub passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration hub refuses stale personal palette callbacks
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration hub modifier input cannot activate the personal hold leader
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration hub command-delete cannot delete the personal selected tile
+PASS collaboration window commands: collaboration hub preserves source project, workspace and agent file bytes and membership
+PASS collaboration window commands: collaboration hub leaves source WORLD geometry, workspace document and camera unchanged
+PASS collaboration window commands: collaboration hub leaves personal focus, armed zone and interaction generation unchanged
+PASS collaboration window commands: collaboration hub creates no agent record or executor and leaves existing execution unchanged
+PASS collaboration window commands: choice-style child uses a distinct actual AppKit parent relationship
+PASS collaboration window commands: injected platform lookup supplies the actual collaboration choice child window and its collaboration hierarchy
+PASS collaboration window commands: collaboration choice child disables personal menu action createZoneFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration choice child disables personal menu action createAgentFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration choice child disables personal menu action createTerminalFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration choice child disables personal menu action createNoteFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration choice child disables personal menu action createBoardFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration choice child disables personal menu action createBrowserFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration choice child disables personal menu action createFileTreeFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration choice child disables personal menu action openCommandCenterFromMenu:
+PASS collaboration window commands: shipping menu selector is wired
+PASS collaboration window commands: collaboration choice child refuses registered command agent.newManaged
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration choice child passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration choice child refuses registered command tile.newTerminal
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration choice child passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration choice child refuses registered command tile.newNote
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration choice child passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration choice child refuses registered command tile.quickSpawn.1
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration choice child passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration choice child refuses registered command tile.quickSpawn.2
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration choice child passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration choice child refuses registered command tile.quickSpawn.3
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration choice child passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration choice child refuses registered command tile.quickSpawn.4
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration choice child passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration choice child refuses registered command app.commandCenter
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration choice child passes its own registered shortcut to its responder instead of the personal canvas
+PASS collaboration window commands: collaboration choice child refuses stale personal palette callbacks
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration choice child modifier input cannot activate the personal hold leader
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: collaboration choice child command-delete cannot delete the personal selected tile
+PASS collaboration window commands: collaboration choice child preserves source project, workspace and agent file bytes and membership
+PASS collaboration window commands: collaboration choice child leaves source WORLD geometry, workspace document and camera unchanged
+PASS collaboration window commands: collaboration choice child leaves personal focus, armed zone and interaction generation unchanged
+PASS collaboration window commands: collaboration choice child creates no agent record or executor and leaves existing execution unchanged
+STAGE collaboration window commands: attach nonwaiting sheet
+STAGE collaboration window commands: sheet attached
+PASS collaboration window commands: collaboration sheets inherit their actual parent's UI scope
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: shared sheet keyboard input cannot create a personal note
+PASS collaboration window commands: shared sheet preserves source project, workspace and agent file bytes and membership
+PASS collaboration window commands: shared sheet leaves source WORLD geometry, workspace document and camera unchanged
+PASS collaboration window commands: shared sheet leaves personal focus, armed zone and interaction generation unchanged
+PASS collaboration window commands: shared sheet creates no agent record or executor and leaves existing execution unchanged
+PASS collaboration window commands: synthetic input retains its actual owning window
+PASS collaboration window commands: pending personal hold-leader activation rechecks collaboration window ownership
+PASS collaboration window commands: pending personal dwell preserves source project, workspace and agent file bytes and membership
+PASS collaboration window commands: pending personal dwell leaves source WORLD geometry, workspace document and camera unchanged
+PASS collaboration window commands: pending personal dwell leaves personal focus, armed zone and interaction generation unchanged
+PASS collaboration window commands: pending personal dwell creates no agent record or executor and leaves existing execution unchanged
+PASS collaboration window commands: authorized explicit API open still resolves the source agent's checkout and existing file tile
+PASS collaboration window commands: explicit source API open preserves supplied shared window context, personal camera and armed zone
+PASS collaboration window commands: returning the platform lookup to the personal window restores its input scope
+PASS collaboration window commands: personal File New Note is enabled again
+PASS collaboration window commands: personal note menu still reaches its production action
+PASS collaboration window commands: personal source creation still adds exactly one note after visiting shared windows
+PASS collaboration window commands: all mixed-window verification used zero provider executor constructions
+Collaboration mixed-window command checks passed: real source mount and shared/hub/sheet window contexts, injected platform focus lookup, shipping menu and event outcomes, delayed leader and explicit API independence; no app activation or native key-window ownership claim.
+STAGE collaboration native: capture workflow
+PASS collaboration capture: actual capture drag normalizes a reversed rectangle through the source camera exactly once
+PASS collaboration capture: dragged capture includes the enclosed WORLD model and excludes a partial overlap
+PASS collaboration capture: a click-sized gesture does not publish or create a review
+PASS collaboration capture: camera movement during capture refuses a stale screen-space selection
+PASS collaboration capture: Escape cancels capture without moving tiles, changing source membership or saving source files
+PASS collaboration capture: long review fixture stays within the admitted note-content budget
+PASS collaboration capture: 121-source review retains all membership while constructing only 40 current picker choices
+PASS collaboration capture: Next exposes another bounded page of actual source identities
+PASS collaboration capture: paging reuses its single retained content reader
+PASS collaboration capture: Next exposes another bounded page of actual source identities
+PASS collaboration capture: paging reuses its single retained content reader
+PASS collaboration capture: Next exposes another bounded page of actual source identities
+PASS collaboration capture: paging reuses its single retained content reader
+PASS collaboration capture: last page remains reachable and every source identity is reviewable without truncation
+PASS collaboration capture: returning to the source preserves its explicit choice and complete long note
+PASS collaboration capture: legacy scroller constrains the long-note reader to clip width and can reveal its final line
+PASS collaboration capture: growing review membership from one to 121 sources does not create one AppKit view per source
+Collaboration capture bounds: 121 sources / 4 pages / at most 40 choices / 1 retained content reader; legacy scrolling checked. No wall-clock or maximum-inventory claim.
+PASS collaboration capture: root workflow arms its explicit source zone before sharing
+PASS collaboration capture: production-mounted Capture area pointer path opens the destination hub and retires its gesture surface
+PASS collaboration capture: shipping destination callback constructs a separate review controller bound to the original source workspace
+PASS collaboration capture: production-mounted pointer selection preserves its exact WORLD rectangle through hub and review
+PASS collaboration capture: closing the destination scene leaves its independent publication review connected
+PASS collaboration capture: shipping source→hub→destination→review publishes captured content and retains the exact source agent binding
+PASS collaboration capture: captured native layout preserves Agent size and relative WORLD frame exactly once
+PASS collaboration capture: captured native layout preserves Note size and relative WORLD frame exactly once
+PASS collaboration capture: the complete native sharing route preserves source files, WORLD models, workspace ownership and executor census
+PASS collaboration capture: root capture registers the owning collaboration host once
+PASS collaboration capture: opening native review opts in no content and explicitly excludes unsupported tiles
+PASS collaboration capture: explicit native choices include captured note content and a host-owned observation
+PASS collaboration capture: native Confirm rereads current owners and refuses changed text before sending
+PASS collaboration capture: Refresh replaces stale review content before another explicit confirmation
+PASS collaboration capture: lost publication reply is durably retained so its review can close without losing recovery
+PASS collaboration capture: private source binding is durable before unknown publication delivery
+PASS collaboration capture: reopening verifies the durable receipt without recapture, duplicate transport or reallocation
+PASS collaboration capture: accepted native publication resolves only through its saved local owner binding
+PASS collaboration capture: review remains bound to its original source workspace
+PASS collaboration capture: cancelled review submits no publication
+PASS collaboration capture: capture review renders in NSAppearanceNameAqua
+PASS collaboration capture: capture review renders in NSAppearanceNameDarkAqua
+Collaboration capture checks passed: native choices/confirmation, current owner read, immutable source workspace and exact uncertain receipt recovery. Scripted authority; no provider or Keychain calls.
+STAGE collaboration native: hover-only teammate usage
+PASS cursor usage: NSAppearanceNameAqua resting cursor paints no persistent usage overlay
+PASS cursor usage: NSAppearanceNameAqua hovering the actual cursor reveals measured totals, UTC day and honest coverage
+PASS cursor usage: leaving the cursor removes its usage immediately
+PASS cursor usage: NSAppearanceNameDarkAqua resting cursor paints no persistent usage overlay
+PASS cursor usage: NSAppearanceNameDarkAqua hovering the actual cursor reveals measured totals, UTC day and honest coverage
+PASS cursor usage: leaving the cursor removes its usage immediately
+PASS cursor usage: a teammate moving away dismisses hover without another local mouse event
+PASS cursor usage: a moving cursor cannot create a new clamped card underneath a stationary pointer
+PASS cursor usage: camera navigation rechecks a stationary hover against the transformed cursor
+PASS cursor usage: the native tracking exit clears hover and informs cursor publication
+PASS cursor usage: accessibility focus exposes the same transient teammate inspection without a constant counter
+PASS cursor usage: expired cursor/usage disappears even without another local mouse event
+PASS cursor usage: missing telemetry is unavailable rather than a fabricated zero
+PASS cursor usage: invalid maximum counters render unavailable without integer overflow
+PASS cursor usage: only the card's Follow button takes the pointer; the rest of the canvas stays interactive
+PASS cursor usage: Follow from the cursor card centres the leader's area-local viewport at the follower's own size and zoom
+PASS cursor usage: different windows and zooms point at the same shared content
+PASS cursor usage: following shows a clear state
+PASS cursor usage: tracked camera frames are applied without saving the private camera per frame
+PASS cursor usage: the follower's publications never move the followed person's camera
+PASS cursor usage: following back a follower is refused, so two cameras cannot chase each other
+PASS cursor usage: follow traffic made zero transcript measurements, canvas or store saves, executor/model calls or shared operations (4 camera frames)
+PASS cursor usage: a keyboard camera pan exits follow immediately
+PASS cursor usage: after exiting, leader movement no longer moves the follower
+PASS cursor usage: the accessibility Follow action on the teammate's cursor starts the same follow
+PASS cursor usage: a pointer pan exits follow immediately
+PASS cursor usage: follow resumes for the scroll exit
+PASS cursor usage: a scroll exits follow immediately
+PASS cursor usage: follow resumes for the zoom exit
+PASS cursor usage: a zoom to fit exits follow immediately
+PASS cursor usage: follow resumes for the grab exit
+PASS cursor usage: taking hold of shared content exits follow before a followed frame could cancel the gesture
+PASS cursor usage: follow resumes for the off-screen exit
+PASS cursor usage: an off-screen teammate shows a clear state, keeps the last view and saves it at most once
+PASS cursor usage: follow resumes for the away exit
+PASS cursor usage: a teammate who leaves shows a clear state and follow stops
+PASS cursor usage: follow resumes for the stale exit
+PASS cursor usage: the followed teammate's card offers Stop following
+PASS cursor usage: NSAppearanceNameAqua follow-active render keeps the follow state visible
+PASS cursor usage: NSAppearanceNameDarkAqua follow-active render keeps the follow state visible
+PASS cursor usage: a teammate whose presence goes stale shows away and follow stops
+PASS cursor usage: NSAppearanceNameAqua follow-stopped render keeps the follow state visible
+PASS cursor usage: NSAppearanceNameDarkAqua follow-stopped render keeps the follow state visible
+PASS cursor usage: follow never touches the source canvas, executors or the shared document
+Voluntary follow passed: pointer and accessibility entry, area-local tracking across sizes and zooms, immediate exit on keyboard/pan/scroll/zoom/grab, no feedback loop, stale/away/off-screen stops, zero transcript/canvas/model work.
+PASS host usage lifecycle: switching source hosts publishes equal-numbered snapshots independently
+PASS host usage lifecycle: restarting the same host restores its delivered-event observer and records new provider usage
+PASS host usage lifecycle: closing the shared presentation retains host accounting and its existing agent identity
+PASS host usage lifecycle: replayed delivered usage is counted once without constructing any executor
+PASS provider dispatch: claude runner transport carries the frozen context once; stale generation, removed membership and a busy turn write nothing; queued is distinct from observed; a crash is outcome unknown with no resend
+PASS provider dispatch: codex runner transport carries the frozen context once; stale generation, removed membership and a busy turn write nothing; queued is distinct from observed; a crash is outcome unknown with no resend
+PASS provider dispatch: pi runner transport carries the frozen context once; stale generation, removed membership and a busy turn write nothing; queued is distinct from observed; a crash is outcome unknown with no resend
+PASS provider dispatch: Claude Code, Codex and Pi runners each received exactly the frozen reviewed context once, refused stale/removed authority before any write, and reported a crash as outcome unknown with no second write
+PASS usage provider adapter: two published records of one Codex session share a durable high-water counter without another executor
+PASS usage provider adapter: a Codex counter reset re-baselines through the production collector (180 / 44, partial)
+STAGE collaboration native: agent handoff controls and draft recovery
+PASS handoff UI: reopening the native dialog restores private prompt and recipient fields
+PASS handoff UI: reopening preserves exact context revision and prompt timing
+PASS handoff UI: handoff controls render in NSAppearanceNameAqua
+PASS handoff UI: handoff controls render in NSAppearanceNameDarkAqua
+PASS handoff UI: every handoff action title fits its label (clipped: [])
+PASS handoff UI: native Offer uses the explicitly entered teammate identity
+PASS handoff UI: native Send preserves reviewed text, exact immutable context and chosen timing
+PASS handoff UI: acknowledged native prompt clears only its saved private draft
+PASS handoff UI: a late acknowledgement preserves newer edits made while its prompt was in flight
+PASS handoff UI: failed close flush refuses before discarding the private draft
+PASS handoff UI: failed private save keeps the complete editable draft
+PASS handoff UI: successful retry survives a new controller without another service prompt
+PASS handoff UI: private draft saves never dispatch additional agent work
+PASS shared supervisor: source-owner input can wait for CLI startup before handoff
+PASS shared supervisor: control lost during startup preserves the complete held prompt and starts no provider
+PASS shared supervisor: restored source control releases its held prompt once
+PASS shared supervisor: control lost after steer admission prevents provider handover and retains exact queued text
+PASS shared supervisor: restored control can deliberately hand the retained steer to its original provider
+PASS shared supervisor: control lost before compaction drain starts no provider and restores its exact durable work item
+PASS shared supervisor: restored control deliberately drains compaction once
+PASS shared supervisor: force send rechecks authority after asynchronous attachment preparation
+PASS shared supervisor: late control loss cannot interrupt or stage work on the original provider
+PASS shared supervisor: shared force-while-busy refuses before interrupting until delayed grants are supported
+PASS handoff UI: a late snapshot after stop cannot reinstall host hooks, register or dispatch provider work
+PASS handoff UI: stopping during an awaited authority check fences the older intent before provider creation
+PASS handoff UI: explicit stop removes only its hooks and permits a new deliberate private prompt
+Shared area handoff UI checks passed: real controls, private draft recovery/save refusal, exact context/timing and light/dark renders; scripted authority, no executor or Keychain.
+STAGE collaboration native: host liveness on cards and before Send now
+PASS host liveness native: the selected agent's reader names the host as not checked in
+PASS host liveness native: the not checked in card renders in light
+PASS host liveness native: the not checked in card renders in dark
+PASS host liveness native: the selected agent's reader names the host as online
+PASS host liveness native: the online card renders in light
+PASS host liveness native: the online card renders in dark
+PASS host liveness native: the selected agent's reader names the host as not responding
+PASS host liveness native: the not responding card renders in light
+PASS host liveness native: the not responding card renders in dark
+PASS host liveness native: the selected agent's reader names the host as offline
+PASS host liveness native: the offline card renders in light
+PASS host liveness native: the offline card renders in dark
+PASS host liveness native: each liveness state draws different card pixels in light and in dark
+PASS host liveness native: the controller exposes the published agent's host liveness
+PASS host liveness native: the shared workspace stays readable while the host is offline
+AgentSupervisor.requestGeneratedName: agent D403A78E-2DD3-49D0-A094-A2E19DFC5482 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent D403A78E-2DD3-49D0-A094-A2E19DFC5482 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent D403A78E-2DD3-49D0-A094-A2E19DFC5482 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 83D6EB32-3D92-4A1F-B1CC-78D4E647F295 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 83D6EB32-3D92-4A1F-B1CC-78D4E647F295 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 83D6EB32-3D92-4A1F-B1CC-78D4E647F295 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 0EC86A52-0A2F-4069-A335-D415FE49B300 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 0EC86A52-0A2F-4069-A335-D415FE49B300 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 0EC86A52-0A2F-4069-A335-D415FE49B300 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+FAIL: Failure(message: "Send now to an offline host shows a warning and relabels the action")

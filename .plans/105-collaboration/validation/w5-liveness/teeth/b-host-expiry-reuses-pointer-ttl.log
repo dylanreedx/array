@@ -1,0 +1,13 @@
+exit=1
+PASS host liveness: a host that never beat is absent, not online
+PASS host liveness: a teammate cannot beat for another device's host
+PASS host liveness: a non-member cannot beat into the area
+PASS host liveness: an unauthenticated beat is refused
+PASS host liveness: sequence zero is not a beat
+PASS host liveness: refused beats leave no liveness behind
+PASS host liveness: the owning device's beat is online
+PASS host liveness: a teammate sees the host online
+PASS host liveness: an excluded person sees no liveness
+PASS host liveness: pointer published
+PASS host liveness: after 20 s the pointer has expired and the beating host is still online
+FAIL: LivenessFailure(message: "after 30 s without a beat the host is stale while the pointer is live")

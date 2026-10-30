@@ -1,0 +1,11 @@
+exit=1
+PASS host liveness client: before any beat the teammate's card says the host has not checked in
+PASS host liveness client: the teammate sees the tracked host online
+PASS host liveness client: a lost host reads as not responding, not as stopped
+PASS host liveness client: the owner's live pointer does not keep the lost host online
+PASS host liveness client: an expired host reads as offline with execution unavailable
+PASS host liveness client: the teammate keeps the shared workspace readable while the host is offline
+PASS host liveness client: the relaunched host rejoins under a new run generation
+PASS host liveness client: the retired run is told it was superseded and stops
+FAIL: CheckFailure(label: "a superseded run does not mint a replacement to take the host back")
+ERROR: Cannot schedule tasks on an EventLoop that has already shut down. This will be upgraded to a forced crash in future SwiftNIO versions.

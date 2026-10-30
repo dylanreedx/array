@@ -1,0 +1,4 @@
+exit=1
+PASS host liveness client: before any beat the teammate's card says the host has not checked in
+FAIL: CheckFailure(label: "timeout: first run online for the teammate")
+ERROR: Cannot schedule tasks on an EventLoop that has already shut down. This will be upgraded to a forced crash in future SwiftNIO versions.

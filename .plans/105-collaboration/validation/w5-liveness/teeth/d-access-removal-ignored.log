@@ -1,0 +1,31 @@
+exit=1
+PASS host liveness: a host that never beat is absent, not online
+PASS host liveness: a teammate cannot beat for another device's host
+PASS host liveness: a non-member cannot beat into the area
+PASS host liveness: an unauthenticated beat is refused
+PASS host liveness: sequence zero is not a beat
+PASS host liveness: refused beats leave no liveness behind
+PASS host liveness: the owning device's beat is online
+PASS host liveness: a teammate sees the host online
+PASS host liveness: an excluded person sees no liveness
+PASS host liveness: pointer published
+PASS host liveness: after 20 s the pointer has expired and the beating host is still online
+PASS host liveness: after 30 s without a beat the host is stale while the pointer is live
+PASS host liveness: stale carries no offline reason and names when it will go offline
+PASS host liveness: 89.7 s without a beat is still stale
+PASS host liveness: a held reader is woken at the offline transition, not after its 25 s hold
+PASS host liveness: the relaunched run rejoins online
+PASS host liveness: a teammate sees the new run generation
+PASS host liveness: a late beat from the retired run is refused
+PASS host liveness: the retired run did not take the host back
+PASS host liveness: a replayed sequence does not refresh last-seen
+PASS host liveness: the next sequence does
+PASS host liveness: after a relay restart the current run is still online at its persisted last-seen
+PASS host liveness: after a relay restart the retired run is still fenced
+PASS host liveness: a restarted relay ages the persisted run on its own clock
+PASS host liveness: ending some other run leaves the current one alone
+PASS host liveness: an explicit end is offline immediately
+PASS host liveness: an ended run cannot beat itself back online
+PASS host liveness: a new run after a clean end is online
+PASS host liveness: an editor's own host is online
+FAIL: LivenessFailure(message: "a removed member\'s host is offline without waiting for expiry")

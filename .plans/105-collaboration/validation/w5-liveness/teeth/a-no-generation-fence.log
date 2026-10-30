@@ -1,0 +1,19 @@
+exit=1
+PASS host liveness: a host that never beat is absent, not online
+PASS host liveness: a teammate cannot beat for another device's host
+PASS host liveness: a non-member cannot beat into the area
+PASS host liveness: an unauthenticated beat is refused
+PASS host liveness: sequence zero is not a beat
+PASS host liveness: refused beats leave no liveness behind
+PASS host liveness: the owning device's beat is online
+PASS host liveness: a teammate sees the host online
+PASS host liveness: an excluded person sees no liveness
+PASS host liveness: pointer published
+PASS host liveness: after 20 s the pointer has expired and the beating host is still online
+PASS host liveness: after 30 s without a beat the host is stale while the pointer is live
+PASS host liveness: stale carries no offline reason and names when it will go offline
+PASS host liveness: 89.7 s without a beat is still stale
+PASS host liveness: a held reader is woken at the offline transition, not after its 25 s hold
+PASS host liveness: the relaunched run rejoins online
+PASS host liveness: a teammate sees the new run generation
+FAIL: LivenessFailure(message: "a late beat from the retired run is refused unexpectedly succeeded")
