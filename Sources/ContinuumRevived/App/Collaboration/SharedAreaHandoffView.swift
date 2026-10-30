@@ -56,6 +56,10 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
     private let prompt = NSTextView()
     private let promptScroll = NSScrollView()
     private let status = NSTextField(wrappingLabelWithString: "")
+    private let hostWarning = NSTextField(wrappingLabelWithString: "")
+    /// The executing host's relay liveness. Nil provider: liveness is not known
+    /// to this dialog and no warning is shown.
+    var hostLiveness: (@MainActor () -> Collaboration.HostLiveness?)? { didSet { refreshActions() } }
     private let refresh = ComposerActionButton(presentation: CollaborationHubView.action("Refresh", symbol: "arrow.clockwise"))
     private let check = ComposerActionButton(presentation: CollaborationHubView.action("Check delivery", symbol: "checkmark.circle"))
     private let send = ComposerActionButton(presentation: CollaborationHubView.action("Send reviewed prompt", symbol: "arrow.up"))
@@ -73,7 +77,8 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
         self.model = model; self.object = object
         super.init(frame: .init(x: 0, y: 0, width: 780, height: 820))
         heading.font = .token(.title)
-        for label in [explanation, controlLabel, status] { label.font = .token(.body); label.isSelectable = true }
+        for label in [explanation, controlLabel, status, hostWarning] { label.font = .token(.body); label.isSelectable = true }
+        hostWarning.setAccessibilityLabel("Host availability warning"); hostWarning.isHidden = true
         for label in [recipientLabel, contextLabel, promptLabel] { label.font = .token(.label) }
         // Fields and editors are transparent; `draw` paints their wells.
         recipient.font = .token(.body); recipient.isBezeled = false; recipient.drawsBackground = false; recipient.focusRingType = .none
@@ -85,7 +90,7 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
         modeChoice.items = [.init(id: "send", title: "Send now", detail: "The host can refuse while its turn is busy"),
                             .init(id: "queue", title: "Queue for next turn", detail: "Array's durable next-turn queue on the original host")]
         modeChoice.selectedID = "send"
-        modeChoice.onSelection = { [weak self] _ in self?.scheduleDraftSave() }
+        modeChoice.onSelection = { [weak self] _ in self?.scheduleDraftSave(); self?.refreshActions() }
         contextChoice.onSelection = { [weak self] _ in self?.updateContext(); self?.scheduleDraftSave() }
         for (button, selector) in [(offer, #selector(offerHandoff)), (accept, #selector(acceptHandoff)),
                                    (reclaim, #selector(reclaimControl)), (refresh, #selector(refreshAction)),
@@ -93,7 +98,7 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
             button.target = self; button.action = selector
         }
         for child in [heading, explanation, controlLabel, recipientLabel, contextLabel, promptLabel, recipient, offer, accept, reclaim, contextChoice, modeChoice,
-                      contextScroll, promptScroll, status, refresh, check, send] { addSubview(child) }
+                      contextScroll, promptScroll, status, hostWarning, refresh, check, send] { addSubview(child) }
         do {
             let draft = try model.draft(object: object)
             prompt.string = draft.text; recipient.stringValue = draft.recipient; preferredContext = draft.context
@@ -107,6 +112,7 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
     required init?(coder: NSCoder) { fatalError("init(coder:) unavailable") }
     func stop() { stopped = true; draftTimer?.invalidate(); draftTimer = nil; task?.cancel(); task = nil; model.onChange = nil }
     func prepareToClose() throws { draftTimer?.invalidate(); draftTimer = nil; try saveDraft() }
+    func refreshHostLiveness() { refreshActions() }
     func refreshFromAuthority() { run { [weak self] in guard let self else { return }; await model.refresh(object: object) } }
     func textDidChange(_ notification: Notification) { scheduleDraftSave(); refreshActions() }
     func controlTextDidChange(_ notification: Notification) { scheduleDraftSave() }
@@ -176,7 +182,12 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
         accept.presentation = CollaborationHubView.action("Accept handoff", symbol: "person.crop.circle.badge.checkmark",
             enabled: idle && usable && control?.offer?.recipient == model.identity.person)
         reclaim.presentation = CollaborationHubView.action("Reclaim control", symbol: "arrow.uturn.backward", enabled: idle && owner && usable)
-        send.presentation = CollaborationHubView.action("Send reviewed prompt", symbol: "arrow.up",
+        let warning = modeChoice.selectedID == "send" ? hostLiveness.flatMap { SharedAreaHostLivenessCopy.sendNowWarning($0()) } : nil
+        if hostWarning.stringValue != (warning ?? "") || hostWarning.isHidden != (warning == nil) {
+            hostWarning.stringValue = warning ?? ""; hostWarning.isHidden = warning == nil; needsLayout = true
+        }
+        send.presentation = CollaborationHubView.action(warning == nil ? "Send reviewed prompt" : "Send now anyway",
+            symbol: warning == nil ? "arrow.up" : "exclamationmark.triangle",
             enabled: idle && usable && control?.controller == model.identity.person && contextChoice.selectedID != nil && !prompt.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         check.presentation = CollaborationHubView.action("Check delivery", symbol: "checkmark.circle", enabled: !model.isBusy && model.pending != nil)
         refresh.presentation = CollaborationHubView.action("Refresh", symbol: "arrow.clockwise", enabled: !model.isBusy)
@@ -225,6 +236,7 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
     private func applyAppearance() {
         for label in [heading, recipientLabel, contextLabel, promptLabel, recipient] { label.textColor = TextToken.textPrimary.color.nsColor(in: self) }
         for label in [explanation, controlLabel, status] { label.textColor = TextToken.textSecondary.color.nsColor(in: self) }
+        hostWarning.textColor = TextToken.textPrimary.color.nsColor(in: self)
         for view in [contextReader, prompt] { view.textColor = TextToken.textPrimary.color.nsColor(in: self) }
         needsDisplay = true
     }
@@ -246,13 +258,14 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
         place(contextLabel, 254, 18)
         place(contextChoice, 276, row, w: width - 227); place(modeChoice, 276, row, x: width - 215, w: 215)
         // Below the fixed rows: agreement reader, prompt editor, status, actions.
-        let statusTop = bounds.height - 104, flexible = max(0, statusTop - 12 - 316 - 12 - 22)
+        let warningTop = bounds.height - 104, statusTop = warningTop - (hostWarning.isHidden ? 0 : 44), flexible = max(0, statusTop - 12 - 316 - 12 - 22)
         let contextHeight = max(96, (flexible * 0.4).rounded())
         place(contextScroll, 316, contextHeight)
         place(promptLabel, 316 + contextHeight + 12, 18)
         let promptTop = 316 + contextHeight + 34
         place(promptScroll, promptTop, max(96, statusTop - 12 - promptTop))
         place(status, statusTop, 40)
+        place(hostWarning, warningTop, hostWarning.isHidden ? 0 : 40)
         place(refresh, bounds.height - 52, row, w: 110); place(check, bounds.height - 52, row, x: 122, w: 170)
         place(send, bounds.height - 52, row, x: width - 230, w: 230)
         if moved { needsDisplay = true }

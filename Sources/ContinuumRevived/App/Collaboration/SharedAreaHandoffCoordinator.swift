@@ -22,6 +22,9 @@ final class SharedAreaHandoffCoordinator {
     private var installedScopes: Set<String> = []
     private let lifetime: Lifetime
     private var isPolling = false
+    /// Relay liveness of the host executing a shared agent, for the dialog's
+    /// send-now warning. Supplied by the owning host session.
+    var hostLiveness: (@MainActor (SharedArea.ID<SharedArea.Object>) -> Collaboration.HostLiveness?)?
 
     init(model: SharedAgentHandoffController, supervisor: AgentSupervisor,
          bindings: @escaping @MainActor () -> [SharedAreaLocalSourceBinding]) throws {
@@ -126,6 +129,7 @@ final class SharedAreaHandoffCoordinator {
         for scope in installedScopes { supervisor?.removeSharedAgentControlGates(scope: scope) }
         installedScopes = []
     }
+    func hostLivenessChanged() { dialog?.content.refreshHostLiveness() }
     func show(object: SharedArea.ID<SharedArea.Object>) {
         if let dialog, dialog.object == object { dialog.show(); return }
         if let dialog {
@@ -134,6 +138,7 @@ final class SharedAreaHandoffCoordinator {
             dialog.window.performClose(nil)
         }
         let window = SharedAreaHandoffWindowController(model: model, object: object)
+        if let provider = hostLiveness { window.content.hostLiveness = { provider(object) } }
         dialog = window
         window.onClose = { [weak self, weak window] in
             if self?.dialog === window { self?.dialog = nil }

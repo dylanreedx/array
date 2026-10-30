@@ -37,12 +37,13 @@ final class SharedAreaHostSession {
                     document.items.contains { $0.id == binding.object && $0.source?.host == binding.host && $0.source?.owner == controller.identity.person }
                 }
             })
+        handoff.hostLiveness = { [weak controller] object in controller?.hostLiveness(forObject: object) }
     }
     func start() {
         guard pump == nil else { return }
         generation = UUID(); let ticket = generation
         let precedingClose = closing
-        changeObserver = controller.addChangeObserver { [weak self] in self?.ensureCollector() }
+        changeObserver = controller.addChangeObserver { [weak self] in self?.ensureCollector(); self?.handoff.hostLivenessChanged() }
         handoff.startHosting()
         pump = Task { [weak self] in
             guard let self else { return }

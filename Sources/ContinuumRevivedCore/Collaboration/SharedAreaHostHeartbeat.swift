@@ -104,6 +104,19 @@ public enum SharedAreaHostLivenessCopy {
             }
         }
     }
+    /// Shown before "Send now" when the executing host is not online. Nil when
+    /// it is online. Queueing stays available: the host takes queued prompts
+    /// when it returns.
+    public static func sendNowWarning(_ liveness: Collaboration.HostLiveness?) -> String? {
+        guard liveness?.state != .online else { return nil }
+        let lead: String
+        switch liveness?.state {
+        case .stale: lead = "The agent's host is not responding."
+        case .offline: lead = "The agent's host is offline."
+        default: lead = "The agent's host has not checked in."
+        }
+        return lead + " Send now may not reach the agent until it returns. Queue for next turn waits for the host."
+    }
     public static func liveness(for item: SharedArea.Item, in hosts: [Collaboration.HostLiveness]) -> Collaboration.HostLiveness? {
         guard let host = item.source?.host else { return nil }
         return hosts.first { $0.host == host }
