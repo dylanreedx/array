@@ -297,6 +297,19 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// new ones (P6.1). WEAK — the tile is a view of an agent the supervisor owns,
     /// and a view must never keep it alive.
     private weak var agentSource: AgentSupervisor?
+    private let leadPlanView = AgentLeadPlanView(frame: .zero)
+    private var leadPlanObserverToken: UUID?
+    var qaLeadPlanView: AgentLeadPlanView { leadPlanView }
+
+    private func refreshLeadPlan() {
+        let value = attachedAgentID.flatMap { agentSource?.leadPlan(for: $0) }
+        guard value != leadPlanView.presentation else { return }
+        leadPlanView.update(value)
+        contentBackdrop.needsLayout = true
+        chromeCanvas?.forceRestingRedraw()
+        chromeDidChange()
+    }
+
     /// Whose events the transcript on screen actually holds. Distinct from
     /// `attachedAgentID`, which `detach()` clears: a detached tile still SHOWS the
     /// agent it was following, so attaching a different one after a detach must
@@ -724,6 +737,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // tile can learn which checkout this agent works in — before its first
         // event, and without the tile ever reading a repository itself.
         agentSource = supervisor
+        leadPlanObserverToken = supervisor.addLeadPlanObserver(for: agentID) { [weak self] in self?.refreshLeadPlan() }
+        leadPlanView.onToggle = { [weak self, weak supervisor] in
+            guard let self, let supervisor, let record = supervisor.records[agentID] else { return }
+            _ = supervisor.setLeadPlanCollapsed(!record.leadPlanCollapsed, for: agentID)
+        }
+        refreshLeadPlan()
         followsSupervisorPresence = true
         backgroundJobsObserver = NotificationCenter.default.addObserver(
             forName: .agentBackgroundJobsDidChange, object: nil, queue: .main
@@ -1092,6 +1111,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // Constraint constants move here, which the resting fingerprint cannot see.
         defer { chromeCanvas?.forceRestingRedraw(); chromeDidChange() }
         let zoom = pageZoom
+        leadPlanView.zoom = zoom
         agentHeaderHeight?.constant = AgentTileHeaderView.preferredHeight(zoom: zoom)
         compactStatusRowHeight?.constant = AgentCompactStatusRowView.preferredHeight(zoom: zoom)
         providerFooterHeight?.constant = AgentComposerFooterView.height(zoom: zoom)
@@ -1955,6 +1975,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     var isAttachedToAgent: Bool { attachedAgentID != nil }
 
     func detach() {
+        if let leadPlanObserverToken { agentSource?.removeLeadPlanObserver(leadPlanObserverToken) }
+        leadPlanObserverToken = nil
+        leadPlanView.onToggle = nil
+        leadPlanView.update(nil)
         prepareStreamingMarkupForTeardown(final: true)
         // A detached tile follows nothing: no session file is read for it.
         sessionFollowTimer?.invalidate()
@@ -3410,6 +3434,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         composeBackdrop.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
         locationStatus.applyTokens()
         compactStatusRow.applyTokens()
+        leadPlanView.applyTokens()
         // Idle v2 agent tiles do not claim a state-bearing perimeter edge.
         // Keyboard focus and needs-attention remain the canvas-owned strong
         // overlays; the surface ladder supplies the quiet containment. The one
@@ -3547,7 +3572,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let transcriptInStack: NSView = slot ?? transcript
         let layout = NSStackView(views: [
             agentHeader, locationStatus, transcriptInStack, pendingDock, faceFlipBanner, sessionHandoffBanner,
-            composeBackdrop,
+            leadPlanView, composeBackdrop,
         ])
         layout.orientation = .vertical
         layout.spacing = 0
@@ -3590,6 +3615,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             locationStatus.widthAnchor.constraint(equalTo: layout.widthAnchor),
             transcriptInStack.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeBackdrop.widthAnchor.constraint(equalTo: layout.widthAnchor),
+            leadPlanView.widthAnchor.constraint(equalTo: layout.widthAnchor),
             faceFlipBanner.widthAnchor.constraint(equalTo: layout.widthAnchor),
             sessionHandoffBanner.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeColumn.leadingAnchor.constraint(equalTo: composeBackdrop.leadingAnchor),

@@ -150,6 +150,17 @@ public struct AgentReport: Codable, Equatable, Sendable {
     static func oneLine(_ text: String) -> String { text.split(whereSeparator: \.isWhitespace).joined(separator: " ") }
 }
 
+/// A declared step. Helper owners are resolved to stable IDs by the host.
+public struct AgentPlanStep: Codable, Equatable, Sendable {
+    public enum State: String, Codable, Sendable { case waiting, done }
+    public var title: String
+    public var owner: String
+    public var state: State?
+    public init(title: String, owner: String, state: State? = nil) {
+        self.title = title; self.owner = owner; self.state = state
+    }
+}
+
 /// What an agent declared about itself through `array_status`.
 public struct AgentDeclaredStatus: Codable, Equatable, Sendable {
     /// Always `declared`: the agent said it; Array did not observe it.
@@ -159,18 +170,20 @@ public struct AgentDeclaredStatus: Codable, Equatable, Sendable {
     public var now: String
     public var next: String?
     public var needsYou: String?
+    public var plan: [AgentPlanStep]?
     public var declaredAt: Date
     public var provenance: String
 
-    public init(now: String, next: String? = nil, needsYou: String? = nil, declaredAt: Date) {
+    public init(now: String, next: String? = nil, needsYou: String? = nil, plan: [AgentPlanStep]? = nil, declaredAt: Date) {
         self.now = now
         self.next = next
         self.needsYou = needsYou
+        self.plan = plan
         self.declaredAt = declaredAt
         self.provenance = Self.provenance
     }
 
-    private struct Wire: Decodable { var now: String?; var next: String?; var needsYou: String? }
+    private struct Wire: Decodable { var now: String?; var next: String?; var needsYou: String?; var plan: [AgentPlanStep]? }
 
     public static func validated(payload: [String: Any], at date: Date) -> Result<AgentDeclaredStatus, WorkspaceAPIError> {
         func refuse(_ message: String) -> Result<AgentDeclaredStatus, WorkspaceAPIError> {
@@ -180,7 +193,7 @@ public struct AgentDeclaredStatus: Codable, Equatable, Sendable {
         do {
             wire = try JSONDecoder().decode(Wire.self, from: JSONSerialization.data(withJSONObject: payload))
         } catch {
-            return refuse("array_status takes now, next and needsYou, each one short line of text.")
+            return refuse("array_status takes short now, next, needsYou lines and an optional plan [{title, owner, state?: waiting|done}].")
         }
         func line(_ value: String?, _ name: String) -> Result<String?, WorkspaceAPIError> {
             guard let value else { return .success(nil) }
@@ -196,7 +209,21 @@ public struct AgentDeclaredStatus: Codable, Equatable, Sendable {
         case let (.failure(error), _, _), let (_, .failure(error), _), let (_, _, .failure(error)): return .failure(error)
         }
         guard let now else { return refuse("now is required.") }
-        return .success(AgentDeclaredStatus(now: now, next: next, needsYou: needsYou, declaredAt: date))
+        var plan = wire.plan
+        if plan != nil {
+            guard (1...6).contains(plan!.count) else { return refuse("plan must have 1–6 steps.") }
+            for i in plan!.indices {
+                plan![i].title = AgentReport.oneLine(plan![i].title)
+                plan![i].owner = AgentReport.oneLine(plan![i].owner)
+                guard (1...80).contains(plan![i].title.count), (1...160).contains(plan![i].owner.count) else {
+                    return refuse("A plan step needs a title of 1–80 characters and an owner of 1–160 characters.")
+                }
+                guard ["lead", "you"].contains(plan![i].owner) || plan![i].state == nil else {
+                    return refuse("Only lead/you steps accept state; helper state is observed by Array.")
+                }
+            }
+        }
+        return .success(AgentDeclaredStatus(now: now, next: next, needsYou: needsYou, plan: plan, declaredAt: date))
     }
 }
 
@@ -237,17 +264,19 @@ extension AgentDeclaredStatus {
         var now: String
         var next: String?
         var needsYou: String?
+        var plan: [AgentPlanStep]?
         var declaredAtReferenceInterval: Double
 
         init(_ status: AgentDeclaredStatus) {
             now = status.now
             next = status.next
             needsYou = status.needsYou
+            plan = status.plan
             declaredAtReferenceInterval = status.declaredAt.timeIntervalSinceReferenceDate
         }
 
         var status: AgentDeclaredStatus {
-            AgentDeclaredStatus(now: now, next: next, needsYou: needsYou,
+            AgentDeclaredStatus(now: now, next: next, needsYou: needsYou, plan: plan,
                                 declaredAt: Date(timeIntervalSinceReferenceDate: declaredAtReferenceInterval))
         }
     }

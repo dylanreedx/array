@@ -5589,6 +5589,7 @@ final class AgentSupervisor {
         pendingHelperAlerts[id] = nil
         if records[id]?.helperWatchdogNeedsYou != nil {
             records[id]?.helperWatchdogNeedsYou = nil
+            notifyLeadPlanChanged(id)
             onSelfReportChanged?(id)
         }
     }
@@ -5605,6 +5606,7 @@ final class AgentSupervisor {
                 pendingHelperAlerts[id] = nil
                 if records[id]?.helperWatchdogNeedsYou != nil {
                     records[id]?.helperWatchdogNeedsYou = nil
+                    notifyLeadPlanChanged(id)
                     onSelfReportChanged?(id)
                 }
                 continue
@@ -5618,6 +5620,7 @@ final class AgentSupervisor {
             helperProgress[id] = progress
             let minutes = max(1, Int(helperWatchdogThreshold / 60))
             records[id]?.helperWatchdogNeedsYou = "no progress for \(minutes) min"
+            notifyLeadPlanChanged(id)
             onSelfReportChanged?(id)
             // A gone parent gets no message. The child's sidebar still speaks.
             if records[parent] != nil {
@@ -5718,6 +5721,8 @@ final class AgentSupervisor {
             record.helperWatchdogNeedsYou = nil
         }
         helperFoldEligibleSince[id] = nil
+        var status = status
+        if status.plan == nil { status.plan = record.declaredStatus?.plan }
         record.declaredStatus = status
         guard persist(record) else { return false }
         onSelfReportChanged?(id)
@@ -7135,6 +7140,14 @@ final class AgentSupervisor {
 
     private var pendingModeRestarts: Set<AgentID> = []
     private var runningModes: [AgentID: AgentMode] = [:]
+    @discardableResult
+    func setLeadPlanCollapsed(_ collapsed: Bool, for id: AgentID) -> Bool {
+        guard var record = records[id] else { return false }
+        record.leadPlanCollapsed = collapsed
+        return persist(record)
+    }
+
+    var leadPlanObservers: [UUID: (AgentID, () -> Void)] = [:]
     private var managedHookStates: [AgentID: ManagedLeadHookState] = [:]
 
     /// Read before offering a switch. A changed lead policy starts a cold
@@ -9880,6 +9893,7 @@ final class AgentSupervisor {
             continuation.yield(event)
         }
         for observe in deliveredEventObservers.values { observe(id, event) }
+        notifyLeadPlanChanged(id)
 
         // T1 — an IN-TURN compaction (claude's `status: compacting`, pi's
         // `compaction_start`) has no operation of its own to finish it; only a
@@ -10289,6 +10303,7 @@ final class AgentSupervisor {
             // Keep the live copy coherent too: a stale parent write that was
             // merged upward must not leave this supervisor holding the old value.
             records[record.id] = persisted.record
+            notifyLeadPlanChanged(record.id)
             if persisted.previousDisplayName != persisted.record.displayName {
                 notifyDisplayNameChanged(for: persisted.record)
             }

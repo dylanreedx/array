@@ -74,6 +74,7 @@ public enum WorkspaceAPIExposure {
         "agent.snoozedAtReferenceInterval": .internal,
         "agent.closeRequestedAtReferenceInterval": .internal,
         "agent.lastReport": .internal, // Written by the agent about itself (agent.report); not user-editable.
+        "agent.leadPlanCollapsed": .internal, // Host UI disclosure preference.
         "agent.declaredStatus": .internal, // Written by the agent about itself (agent.status); not user-editable.
 
         "tile.id": .internal,

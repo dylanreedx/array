@@ -551,6 +551,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// without dropping the agent.
     public var lastReport: AgentFiledReport? = nil
     public var declaredStatus: AgentDeclaredStatus? = nil
+    /// Host-only disclosure preference; absent in older records means expanded.
+    public var leadPlanCollapsed: Bool = false
     /// Host observation, transient: never encoded, never conflated with the
     /// agent's declared status. A relaunched watchdog starts a fresh interval.
     public var helperWatchdogNeedsYou: String? = nil
@@ -1053,7 +1055,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // Confidence pass: the close intent, encoded like every lifecycle date.
         case closeRequestedAtReferenceInterval
         // `.plans/102` P2a: self-filed report and declared status.
-        case lastReport, declaredStatus
+        case lastReport, declaredStatus, leadPlanCollapsed
     }
 
     public init(from decoder: Decoder) throws {
@@ -1179,6 +1181,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
             Double.self, forKey: .closeRequestedAtReferenceInterval)) ?? nil)
             .map(Date.init(timeIntervalSinceReferenceDate:))
         lastReport = (try? container.decodeIfPresent(AgentFiledReport.self, forKey: .lastReport)) ?? nil
+        leadPlanCollapsed = (try? container.decodeIfPresent(Bool.self, forKey: .leadPlanCollapsed)) ?? false
         declaredStatus = ((try? container.decodeIfPresent(
             AgentDeclaredStatus.Stored.self, forKey: .declaredStatus)) ?? nil)?.status
     }
@@ -1264,6 +1267,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(closeRequestedAt?.timeIntervalSinceReferenceDate,
                                       forKey: .closeRequestedAtReferenceInterval)
         try container.encodeIfPresent(lastReport, forKey: .lastReport)
+        try container.encode(leadPlanCollapsed, forKey: .leadPlanCollapsed)
         try container.encodeIfPresent(declaredStatus.map(AgentDeclaredStatus.Stored.init), forKey: .declaredStatus)
     }
 

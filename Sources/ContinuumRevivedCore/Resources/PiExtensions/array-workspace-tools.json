@@ -1869,7 +1869,7 @@
       "name": "array_status",
       "label": "Status",
       "op": "agent.status",
-      "description": "Say what you are doing, in short lines Array shows as declared by you. Each call replaces the last.",
+      "description": "Say what you are doing, in short lines Array shows as declared by you.",
       "promptSnippet": "Declare what you are doing now, next, and what you need",
       "promptGuidelines": [
         "Post it when your focus changes, not on every step. needsYou is only for something the user must do or decide."
@@ -1889,6 +1889,21 @@
           "needsYou": {
             "type": "string",
             "maxLength": 140
+          },
+          "plan": {
+            "type": "array",
+            "description": "Lead plan; omission keeps it. Helper state is observed.",
+            "minItems": 1,
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "owner": { "type": "string", "description": "lead, you, or helper ID/name", "minLength": 1, "maxLength": 160 },
+                "state": { "type": "string", "enum": ["waiting", "done"], "description": "Lead/you only" }
+              },
+              "required": ["title", "owner"]
+            }
           }
         },
         "required": [

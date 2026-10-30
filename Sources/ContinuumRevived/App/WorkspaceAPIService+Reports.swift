@@ -34,8 +34,15 @@ extension WorkspaceAPIService {
         switch AgentDeclaredStatus.validated(payload: payload, at: Date()) {
         case .failure(let error):
             return .error(error)
-        case .success(let status):
-            guard supervisor.declareStatus(status, for: agentId), let object = Self.jsonObject(status) else {
+        case .success(var status):
+            if let plan = status.plan {
+                switch supervisor.resolveLeadPlan(plan, for: agentId) {
+                case .failure(let error): return .error(error)
+                case .success(let resolved): status.plan = resolved
+                }
+            }
+            guard supervisor.declareStatus(status, for: agentId),
+                  let recorded = supervisor.records[agentId]?.declaredStatus, let object = Self.jsonObject(recorded) else {
                 return .error(WorkspaceAPIError(code: .unsupported, message: "The status could not be recorded."))
             }
             return .result(object)
