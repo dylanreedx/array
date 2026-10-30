@@ -1647,6 +1647,8 @@ enum ContinuumApp {
                     }, executorCount: {
                         supervisor.records.keys.filter { supervisor.isRunning($0) }.count + executorConstructions
                     })
+                    print("STAGE collaboration native: live agent projections")
+                    try await SharedAgentProjectorChecks.run()
                     guard executorConstructions == 0, supervisor.records.isEmpty else {
                         throw SelfCheckError("shared scene constructed a local executor or agent record")
                     }
