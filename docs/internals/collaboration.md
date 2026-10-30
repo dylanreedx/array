@@ -429,6 +429,36 @@ only in the transient hover or accessibility inspection card; exiting the window
 peer expiry or losing access clears inspection. This reports published agents,
 not an account-wide provider billing total.
 
+## Shared artifacts
+
+An artifact is an admitted `.artifact` item WITH a source (owner, host,
+binding). Its revisions and bytes live beside the document, never in the
+operation stream. A revision is an immutable manifest (host-minted id, parent
+= the live revision it supersedes, base HEAD/merge base, a coverage
+declaration and per-path entries) plus SHA-256-named blobs. The declaration
+counts omitted changed/untracked paths without naming them; only `included`
+entries carry bytes. `branch` covers committed `mergeBase...head` only.
+Limits: 1 MiB per blob, 8 MiB per revision, 64 MiB per area, 256 entries.
+
+Routes under `/areas/{a}/artifacts/{o}`: `PUT blobs/{sha256}` (raw bytes,
+hash-checked), `POST revisions`, `GET` (live state), `GET revisions/{r}`,
+`GET revisions/{r}/blobs/{sha256}`, `POST reviews`, `POST revisions/{r}/drift`.
+Only the source owner, from the source host's device, uploads, publishes or
+reports drift. A blob is reachable only as (current member, currently admitted
+artifact, a revision of it, a digest that revision includes); storage is per
+area and object with no cross-area dedup, and every miss is the unknown-id 404.
+Bytes and manifests are AES-GCM sealed; blob AAD binds area/object/digest.
+
+Reviews pin (object, revision, content digest). Applicability is `current`,
+`superseded(by:)` or `sourceChanged`; drift is set once by the owner host and a
+new revision is the remedy, so approval never carries forward. The owner-host
+`SharedArtifactProducer` (Core) runs git on a private copy of the index,
+because `git diff` rewrites a stale index even with optional locks off; it
+re-reads until two reads agree or refuses with `changedDuringCapture`. The
+recipient's `readArtifact` verifies digests and returns bytes in memory; it
+takes no path. Native capture review still lists diff/file tiles as
+unsupported, and recipients learn of a new revision by fetching state.
+
 ## Opt-in process configuration
 
 The existing relay starts collaboration only when both
