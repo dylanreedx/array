@@ -68,16 +68,22 @@ public final class SharedAgentHostDispatcher {
                 }
                 admitted.append(binding)
             }
+            // One command the authority refuses (a stale generation, a revoked
+            // requester) must not hold every later command behind it.
+            var failure: (any Error)?
             for host in Set(admitted.map(\.host)) {
                 for receipt in try await transport.pending(host: host.rawValue) {
                     guard let binding = admitted.first(where: { $0.object == receipt.command.object && $0.host == receipt.command.source.host && $0.binding == receipt.command.source.binding }) else { continue }
                     try Task.checkCancellation()
-                    if let result = try await dispatch(receipt, binding: binding) {
-                        lastReceipts.removeAll { $0.command.id == result.command.id }; lastReceipts.append(result)
-                    }
+                    do {
+                        if let result = try await dispatch(receipt, binding: binding) {
+                            lastReceipts.removeAll { $0.command.id == result.command.id }; lastReceipts.append(result)
+                        }
+                    } catch is CancellationError { throw CancellationError() }
+                    catch { failure = error }
                 }
             }
-            lastError = nil
+            lastError = failure
         } catch { lastError = error }
     }
 
@@ -102,6 +108,7 @@ public final class SharedAgentHostDispatcher {
             throw SharedAgentHostJournalError.invalidState
         }
         guard try journal.beginAttempt(attempt, bootID: bootID) else { return nil }
+        var executing = false
         do {
             let admission = try await transport.admit(id: command.id, request: claim)
             guard admission.phase == .dispatching, admission.command == command, admission.claimID == claim.claimID else {
@@ -110,6 +117,7 @@ public final class SharedAgentHostDispatcher {
             try Task.checkCancellation()
             // No task hop or filesystem work is inserted between the fresh
             // authority response and the actual checked supervisor intent.
+            executing = true
             let accepted = await execute(binding, command)
             let phase: Collaboration.AgentDispatchPhase = accepted == .accepted ? .accepted : .refused
             try journal.finish(attempt, phase: accepted == .accepted ? .accepted : .refused)
@@ -117,9 +125,13 @@ public final class SharedAgentHostDispatcher {
         } catch {
             // The irreversible marker precedes both admission and the provider
             // call. A lost response cannot license another attempt after boot.
+            // In this process the provider call is known not to have started
+            // when admission failed (membership or generation changed, or a lost
+            // reply): nothing was sent, so the honest outcome is a refusal.
             if let saved = try journal.attempts().first(where: { $0.id == command.id }), saved.phase == .attempting {
-                try journal.finish(attempt, phase: .uncertain)
-                _ = try? await transport.finish(id: command.id, outcome: .init(claim: claim, phase: .uncertain))
+                let phase: SharedAgentHostJournal.Phase = executing ? .uncertain : .refused
+                try journal.finish(attempt, phase: phase)
+                _ = try? await transport.finish(id: command.id, outcome: .init(claim: claim, phase: executing ? .uncertain : .refused))
             }
             throw error
         }

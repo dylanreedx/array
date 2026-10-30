@@ -99,6 +99,7 @@ enum SharedAreaHostSessionChecks {
         try expect(session.lastUsage?.inputTokens == 24 && session.lastUsage?.outputTokens == 5 && executorConstructions == 0,
             "replayed delivered usage is counted once without constructing any executor")
         session.stop(); await controller.close()
+        try await SharedAreaProviderDispatchChecks.run()
     }
 
     private final class MemoryVault: CollaborationCredentialVault, @unchecked Sendable {
