@@ -20,6 +20,8 @@ enum CollaborationAppearanceSurfaces {
             .init(id: "sharedAreaScene", size: .init(width: 960, height: 680), view: try SharedAreaSceneChecks.makeAppearanceFixture()),
             .init(id: "sharedAreaAgreement", size: .init(width: 960, height: 680), view: try agreementScene(following: false)),
             .init(id: "sharedAreaFollow", size: .init(width: 960, height: 680), view: try agreementScene(following: true)),
+            .init(id: "sharedAreaAgent", size: .init(width: 960, height: 680), view: try selectedScene(.agentObservation)),
+            .init(id: "sharedAreaArtifact", size: .init(width: 960, height: 680), view: try selectedScene(.artifact)),
             .init(id: "collaborationHub", size: .init(width: 680, height: 720), view: try CollaborationHubChecks.makeAppearanceFixture()),
             .init(id: "collaborationCapture", size: .init(width: 780, height: 800), view: try SharedAreaCaptureChecks.makeAppearanceFixture()),
             .init(id: "collaborationCaptureArea", size: .init(width: 800, height: 500), view: captureArea()),
@@ -62,6 +64,29 @@ enum CollaborationAppearanceSurfaces {
         return host
     }
 
+    /// A scene with one published agent or artifact selected: the agent shows
+    /// its freshness panel and live view, the artifact its revision panel.
+    private static func selectedScene(_ kind: SharedArea.Kind) throws -> NSView {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-\(kind.rawValue)-appearance-\(UUID())")
+        let me = Collaboration.Identity(person: .init(), device: UUID()), mate = Collaboration.Identity(person: .init(), device: UUID())
+        let item = SharedArea.Item(id: .init(), kind: kind, source: .init(owner: mate.person, host: .init(), binding: .init()))
+        var document = SharedArea.Document()
+        try document.apply(.init(area: document.id, expectedRevision: 0, edits: [
+            .admit(item, .init(id: .init(), object: item.id, rect: .init(x: 40, y: 40, width: 420, height: 300), z: 1))]))
+        let authority = SharedAreaCheckRig.Authority(document: document, members: [(me, .editor), (mate, .editor)])
+        let model = try SharedAreaCheckRig.controller(root: root, identity: me, label: "You", authority: authority, seed: (document, .editor))
+        let host = OwnedRootHost(root: root, size: .init(width: 960, height: 680))
+        let scene = SharedAreaSceneView(controller: model, person: me.person)
+        scene.frame = host.bounds; scene.autoresizingMask = [.width, .height]
+        host.addSubview(scene); scene.mount(); host.layoutSubtreeIfNeeded()
+        try scene.fitContent(); try scene.selectObject(item.id)
+        // The rig serves no projection: keep the live view on its first
+        // rendered state rather than polling for the life of the process.
+        scene.livePanel.stop()
+        host.layoutSubtreeIfNeeded()
+        return host
+    }
+
     /// The capture drag hint over a personal canvas.
     private static func captureArea() -> NSView {
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
@@ -85,7 +110,7 @@ enum CollaborationAppearanceSurfaces {
         var names = Set<String>()
         for index in 0..<Int(count) {
             let runtime = String(cString: list[index])
-            guard runtime.contains("SharedArea") || runtime.contains("Collaboration"), !runtime.contains("Checks"),
+            guard runtime.contains("SharedArea") || runtime.contains("SharedAgent") || runtime.contains("Collaboration"), !runtime.contains("Checks"),
                   let cls = NSClassFromString(runtime), cls.isSubclass(of: NSView.self) else { continue }
             names.insert(String(describing: cls))
         }
