@@ -1638,6 +1638,7 @@ final class AgentSupervisor {
             guard let threadId = record.codexThreadId else { return nil }
             return CodexRolloutTelemetry.latestSnapshot(threadId: threadId, freshness: .stale)
         }
+        startHelperWatchdog()
     }
 
     /// Whether the explicit Generate Name action is offered at all. Resolving
@@ -5518,6 +5519,92 @@ final class AgentSupervisor {
     private var lastSpawnRefusals: [AgentID: SpawnRefusal] = [:]
     func spawnRefusal(for parentId: AgentID) -> SpawnRefusal? { lastSpawnRefusals[parentId] }
 
+    // Ten minutes tolerates long builds/tool calls, but catches an abandoned
+    // approval or silent helper before it consumes a work session. No setting.
+    static let defaultHelperWatchdogThreshold: TimeInterval = 10 * 60
+    var helperWatchdogThreshold = AgentSupervisor.defaultHelperWatchdogThreshold
+    var helperWatchdogNow: () -> Date = { Date() }
+    private var helperWatchdogTimer: Timer?
+    private struct HelperProgress {
+        var at: Date
+        var last: String
+        var status: AgentStatus?
+        var escalated = false
+    }
+    private var helperProgress: [AgentID: HelperProgress] = [:]
+    private var pendingHelperAlerts: [AgentID: (parent: AgentID, text: String)] = [:]
+
+    private func startHelperWatchdog() {
+        helperWatchdogTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            Task { @MainActor in await self.sweepHelperWatchdog() }
+        }
+    }
+
+    private func noteHelperProgress(_ id: AgentID, last: String) {
+        guard records[id]?.parentAgentID != nil else { return }
+        helperProgress[id] = HelperProgress(at: helperWatchdogNow(), last: last, status: presenceRowStatus(for: id))
+        pendingHelperAlerts[id] = nil
+        if records[id]?.helperWatchdogNeedsYou != nil {
+            records[id]?.helperWatchdogNeedsYou = nil
+            onSelfReportChanged?(id)
+        }
+    }
+
+    /// Runs on the same actor as hook and transcript ingestion. The clock is
+    /// injected by the witness; the production timer samples every 30 seconds.
+    func sweepHelperWatchdog() async {
+        let now = helperWatchdogNow()
+        for id in Array(records.keys) {
+            guard let record = records[id], let parent = record.parentAgentID else { continue }
+            let status = presenceRowStatus(for: id)
+            guard status == .working || status == .needsAttention else {
+                helperProgress[id] = nil
+                pendingHelperAlerts[id] = nil
+                if records[id]?.helperWatchdogNeedsYou != nil {
+                    records[id]?.helperWatchdogNeedsYou = nil
+                    onSelfReportChanged?(id)
+                }
+                continue
+            }
+            if helperProgress[id] == nil || helperProgress[id]?.status != status {
+                noteHelperProgress(id, last: status == .needsAttention ? "needs you" : "working")
+            }
+            guard var progress = helperProgress[id], !progress.escalated,
+                  now.timeIntervalSince(progress.at) >= helperWatchdogThreshold else { continue }
+            progress.escalated = true
+            helperProgress[id] = progress
+            let minutes = max(1, Int(helperWatchdogThreshold / 60))
+            records[id]?.helperWatchdogNeedsYou = "no progress for \(minutes) min"
+            onSelfReportChanged?(id)
+            // A gone parent gets no message. The child's sidebar still speaks.
+            if records[parent] != nil {
+                let name = String(record.humanDisplayName.split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ").prefix(40))
+                pendingHelperAlerts[id] = (parent, "Helper \(name) has shown no progress for \(minutes) min (last: \(progress.last)). Check it, message it, or stop it.")
+            }
+        }
+        for (child, alert) in pendingHelperAlerts {
+            guard records[child] != nil, records[alert.parent] != nil else {
+                pendingHelperAlerts[child] = nil
+                continue
+            }
+            // Reserve before awaiting queue persistence so overlapping sweeps
+            // cannot send twice. Use exactly the agent-message envelope/path.
+            pendingHelperAlerts[child] = nil
+            let accepted: Bool
+            if isRunning(alert.parent) {
+                let prompt = AgentPrompt(agentMessageText(alert.text, from: child))
+                let result = await accept(.queue(prompt), for: alert.parent)
+                if case .accepted = result { accepted = true } else { accepted = false }
+            } else {
+                accepted = sendAgentMessage(alert.text, from: child, to: alert.parent)
+            }
+            if !accepted, helperProgress[child]?.escalated == true {
+                pendingHelperAlerts[child] = alert
+            }
+        }
+    }
+
     /// `.plans/102` P1: what each agent's hooks reported, newest last,
     /// at most `AgentHookReceipt.ringCapacity` per agent. Observation only:
     /// reports compare command evidence against this bounded history.
@@ -5540,6 +5627,7 @@ final class AgentSupervisor {
         ring.append(receipt)
         if ring.count > AgentHookReceipt.ringCapacity { ring.removeFirst(ring.count - AgentHookReceipt.ringCapacity) }
         hookReceipts[id] = ring
+        noteHelperProgress(id, last: String((receipt.toolName ?? receipt.event).split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ").prefix(40)))
     }
 
     /// `.plans/102` P2a: each agent's latest `array_report`, with when it was
@@ -5581,6 +5669,11 @@ final class AgentSupervisor {
     @discardableResult
     func declareStatus(_ status: AgentDeclaredStatus, for id: AgentID) -> Bool {
         guard var record = records[id] else { return false }
+        if record.declaredStatus?.now != status.now || record.declaredStatus?.needsYou != status.needsYou
+            || record.declaredStatus?.next != status.next {
+            noteHelperProgress(id, last: status.needsYou == nil ? "status changed" : "needs you")
+            record.helperWatchdogNeedsYou = nil
+        }
         record.declaredStatus = status
         guard persist(record) else { return false }
         onSelfReportChanged?(id)
@@ -6092,6 +6185,8 @@ final class AgentSupervisor {
         managedHookStates.removeValue(forKey: id)
         hookReceipts.removeValue(forKey: id)
         codexHookPushBacks.removeValue(forKey: id)
+        helperProgress[id] = nil
+        pendingHelperAlerts[id] = nil
         lastSettledAt.removeValue(forKey: id)
         runnerGenerationTokens.removeValue(forKey: id)
         history.removeValue(forKey: id)
@@ -9385,7 +9480,19 @@ final class AgentSupervisor {
         default:
             break
         }
+        let previousHelperStatus = presenceRowStatus(for: id)
         updateTurnFacts(with: event, for: id, now: now)
+        if previousHelperStatus != presenceRowStatus(for: id) {
+            noteHelperProgress(id, last: "status changed")
+        } else {
+            switch event {
+            case .contentDelta(_, _, _, let delta) where !delta.isEmpty:
+                noteHelperProgress(id, last: "transcript grew")
+            case .itemStarted, .itemCompleted:
+                noteHelperProgress(id, last: "transcript item")
+            default: break
+            }
+        }
         recordCompanionTaskEvent(event, for: id)
         if case let .contextWindowUpdated(_, snapshot) = event {
             contextWindowSnapshots[id] = snapshot

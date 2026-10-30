@@ -545,6 +545,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// without dropping the agent.
     public var lastReport: AgentFiledReport? = nil
     public var declaredStatus: AgentDeclaredStatus? = nil
+    /// Host observation, transient: never encoded, never conflated with the
+    /// agent's declared status. A relaunched watchdog starts a fresh interval.
+    public var helperWatchdogNeedsYou: String? = nil
 
     /// The only timestamps that keep a neutral row out of auto-settle. A prompt
     /// or a turn start is real work; `lastActivityAt` is deliberately absent.

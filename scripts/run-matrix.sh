@@ -628,6 +628,7 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --workspace-mcp-host-check
   run_app_check .build/debug/Array --workspace-agent-report-check
   run_app_check .build/debug/Array --helper-command-evidence-check
+  run_app_check .build/debug/Array --helper-watchdog-check
   run_app_check .build/debug/Array --workspace-hook-pushback-check
   run_app_check .build/debug/Array --claude-adopted-turn-check
   run_app_check .build/debug/Array --sidebar-agent-status-line-check
@@ -942,6 +943,7 @@ run_app_check .build/debug/Array --workspace-codex-hook-check
 # the final text's place; a later turn without one carries none.
 run_app_check .build/debug/Array --workspace-agent-report-check
 run_app_check .build/debug/Array --helper-command-evidence-check
+run_app_check .build/debug/Array --helper-watchdog-check
 # The opt-in push-back through the real hook command: silent while off; on,
 # one block for a helper's long hand-back, and silent for a continuation, a
 # short one, a top-level Stop, or an app that is down or silent.

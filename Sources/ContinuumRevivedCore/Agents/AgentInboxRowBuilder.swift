@@ -320,10 +320,11 @@ public enum AgentInboxRowBuilder {
         let turnStart = record.latestTurnAt ?? .distantPast
         let status = record.declaredStatus.flatMap { $0.declaredAt >= turnStart ? $0 : nil }
         let report = record.lastReport.flatMap { $0.filedAt >= turnStart ? $0.report : nil }
-        guard status != nil || report != nil else { return nil }
+        let watchdog = record.parentAgentID == nil ? nil : record.helperWatchdogNeedsYou
+        guard status != nil || report != nil || watchdog != nil else { return nil }
         let checks = report?.checks ?? []
         return InboxSelfReport(
-            now: status?.now, needsYou: status?.needsYou,
+            now: status?.now, needsYou: watchdog ?? status?.needsYou,
             checksPassed: checks.filter { $0.result == .pass }.count,
             checksFailed: checks.filter { $0.result == .fail }.count)
     }
