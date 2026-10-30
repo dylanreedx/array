@@ -817,10 +817,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             probe.symbol = symbol
             return probe
         }
-        branchInkMidY = Self.inkMidY("branch", of: InkAlignedSymbol.image(Decorations.branchSymbol),
+        let detailSymbol = decorations.detailSymbol
+        branchInkMidY = Self.inkMidY("branch", of: InkAlignedSymbol.image(detailSymbol),
                                      side: Self.branchGlyphSide, scale: scale) { _, box in
             let probe = Decorations(frame: box)
             probe.drawsBranchGlyph = true
+            probe.detailSymbol = detailSymbol
             probe.branchSlot = box
             return probe
         }
@@ -838,6 +840,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private let stateLabel = NSTextField(labelWithString: "")
     private let titleLabel = NSTextField(labelWithString: "")
     private let branchLabel = NSTextField(labelWithString: "")
+    // Plan: .plans/102-managed-agent-mode (P2b, the sidebar status line)
+    /// What the agent said about this turn — "Needs you: …", its declared `now`,
+    /// or its report's check result — drawn in the branch lane while there is one.
+    /// The compact card has no fourth band (see the rollup, which takes this lane
+    /// the same way), so the row's height never moves; the branch stays in the
+    /// hover card. Hidden, and the row exactly as before, when there is nothing.
+    private let selfReportLabel = NSTextField(labelWithString: "")
+    private var selfReportLine: InboxSelfReportLine?
     /// The model NAME, drawn only when there is no mark for its vendor. §4.5
     /// specifies a two-character badge here; `GE` for Gemini was unreadable to the
     /// person who commissioned it, so the fallback is the name. Recorded as a
@@ -969,7 +979,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         stateLabel.alignment = .right
         modelLabel.alignment = .right
         branchLabel.lineBreakMode = .byTruncatingMiddle
-        for label in [placementLabel, stateLabel, titleLabel, branchLabel, modelLabel] {
+        selfReportLabel.font = .token(.label)
+        selfReportLabel.isHidden = true
+        for label in [placementLabel, stateLabel, titleLabel, branchLabel, modelLabel, selfReportLabel] {
             label.lineBreakMode = label === branchLabel ? .byTruncatingMiddle : .byTruncatingTail
             label.cell?.truncatesLastVisibleLine = true
             card.addSubview(label)
@@ -1165,7 +1177,15 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // the settle nudge's job, and it is a different row entirely.
         statusGlyph.setPulsing(false)
         applyThrobber(isWorking: row.state == .working)
-        decorations.drawsBranchGlyph = rollupSummary == nil && !branchLabel.stringValue.isEmpty
+        // A folded parent's rollup keeps the lane; otherwise what the agent said
+        // about this turn takes it from the branch.
+        let line = rollupSummary == nil ? row.selfReportLine : nil
+        selfReportLine = line
+        selfReportLabel.isHidden = line == nil
+        branchLabel.isHidden = line != nil
+        decorations.detailSymbol = line.map(Self.selfReportSymbol) ?? Decorations.branchSymbol
+        decorations.drawsBranchGlyph = line != nil
+            || (rollupSummary == nil && !branchLabel.stringValue.isEmpty)
         refreshContentInk()
 
         disclosureButton.show(
@@ -1382,6 +1402,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         hoverHide.applyTokens()
         titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         branchLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        applySelfReportText()
         modelLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         let accent = Self.accentColour(row, now: shown.now, in: self)
         stateLabel.textColor = accent
@@ -1402,11 +1423,73 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // state at full strength however far the row recedes, which is queue-94's
         // rule and not one to re-litigate here.
         let alpha = CGFloat(shown.emphasis.textOpacity) * contentDim
-        for label in [placementLabel, titleLabel, branchLabel, modelLabel] {
+        for label in [placementLabel, titleLabel, branchLabel, modelLabel, selfReportLabel] {
             label.alphaValue = alpha
         }
         stateLabel.alphaValue = CGFloat(shown.emphasis.accentOpacity) * contentDim
         decorations.alphaValue = CGFloat(shown.emphasis.accentOpacity) * contentDim
+    }
+
+    // Plan: .plans/102-managed-agent-mode (P2b)
+    static func selfReportSymbol(_ line: InboxSelfReportLine) -> String {
+        switch line {
+        case .needsYou: return "hand.raised.fill"
+        case .now: return "text.bubble"
+        case .checks: return "checklist"
+        }
+    }
+
+    /// The words of the self-report line, in this appearance's tokens: the ask in
+    /// the asking amber, the declared `now` in the row's secondary ink, and a
+    /// report's failures in the failure red.
+    static func selfReportText(_ line: InboxSelfReportLine, in view: NSView) -> NSAttributedString {
+        let secondary = TextToken.textSecondary.color.nsColor(in: view)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        func run(_ text: String, _ colour: NSColor, _ font: NSFont = .token(.label)) -> NSAttributedString {
+            NSAttributedString(string: text, attributes: [
+                .font: font, .foregroundColor: colour, .paragraphStyle: paragraph,
+            ])
+        }
+        switch line {
+        case .needsYou(let ask):
+            return run("Needs you: \(ask)", AccentToken.accentApproval.color.nsColor(in: view),
+                       .systemFont(ofSize: Typography.style(for: .label).size, weight: .semibold))
+        case .now(let now):
+            return run(now, secondary)
+        case let .checks(failed, total):
+            let text = NSMutableAttributedString(attributedString: run("Done · ", secondary))
+            let noun = total == 1 ? "check" : "checks"
+            if failed > 0 {
+                text.append(run("\(failed) of \(total) \(noun) failed",
+                                AccentToken.accentFailed.color.nsColor(in: view)))
+            } else {
+                text.append(run(total == 1 ? "1 check passed" : "all \(total) checks passed", secondary))
+            }
+            return text
+        }
+    }
+
+    private func applySelfReportText() {
+        guard let line = selfReportLine else {
+            selfReportLabel.stringValue = ""
+            decorations.detailColour = nil
+            return
+        }
+        selfReportLabel.attributedStringValue = Self.selfReportText(line, in: self)
+        if case .needsYou = line {
+            decorations.detailColour = AccentToken.accentApproval.color.nsColor(in: self)
+        } else {
+            decorations.detailColour = nil
+        }
+    }
+
+    /// The self-report line as drawn: nil when the label is hidden.
+    var selfReportTextForQA: NSAttributedString? {
+        selfReportLabel.isHidden ? nil : selfReportLabel.attributedStringValue
+    }
+    var selfReportFrameForQA: NSRect? {
+        selfReportLabel.isHidden ? nil : selfReportLabel.convert(selfReportLabel.bounds, to: self)
     }
 
     /// What a revealed hidden row multiplies its words by (.plans/87).
@@ -1484,6 +1567,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             titleLabel.stringValue,
             stateLabel.isHidden ? nil : stateLabel.stringValue,
             placementLabel.stringValue.isEmpty ? nil : placementLabel.stringValue,
+            selfReportLabel.isHidden ? nil : selfReportLabel.stringValue,
             branchLabel.stringValue.isEmpty ? nil : "branch \(branchLabel.stringValue)",
             shown.row.model.map { "model \($0)" },
         ].compactMap { $0 }.filter { !$0.isEmpty }
@@ -1806,6 +1890,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             branchFrame.size.width = max(0, min(branchFrame.width, actionRight - branchLeft))
             branchLabel.frame = branchFrame
         }
+        selfReportLabel.frame = branchLabel.frame
         decorations.removeAllToolTips()
         markToolTipRect = nil
         if let slot = decorations.markSlot, let markToolTip {
@@ -1906,7 +1991,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // The words carry the row's emphasis; re-derive them with the dim folded in.
         if let emphasis = shown?.emphasis {
             let text = CGFloat(emphasis.textOpacity) * contentDim
-            for label in [placementLabel, titleLabel, branchLabel, modelLabel] { label.alphaValue = text }
+            for label in [placementLabel, titleLabel, branchLabel, modelLabel, selfReportLabel] { label.alphaValue = text }
             stateLabel.alphaValue = CGFloat(emphasis.accentOpacity) * contentDim
             decorations.alphaValue = CGFloat(emphasis.accentOpacity) * contentDim
         }
@@ -2027,7 +2112,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // only the presentation fades. The state word's alpha belongs to the
         // hover crossfade that follows.
         let fades = !prefersReducedMotion() && window != nil
-        for label in [placementLabel, titleLabel, branchLabel, modelLabel] {
+        for label in [placementLabel, titleLabel, branchLabel, modelLabel, selfReportLabel] {
             Self.setAlpha(label, CGFloat(emphasis.textOpacity) * contentDim, fading: fades)
         }
         Self.setAlpha(decorations, CGFloat(emphasis.accentOpacity) * contentDim, fading: fades)
@@ -2161,7 +2246,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         let top = line([placementLabel, whereLabel, stateLabel])
         let title = line([titleLabel])
-        let detail = line([branchLabel, modelLabel])
+        let detail = line([selfReportLabel, branchLabel, modelLabel])
         if !statusGlyph.isHidden, statusGlyph.symbol != nil {
             add("status \(statusGlyph.symbol ?? "")", qaRenderedInk(statusGlyph)?.midY, top)
         }
@@ -2626,6 +2711,9 @@ final class StatusGlyphView: NSView {
 @MainActor
 private final class Decorations: NSView {
     static let branchSymbol = "arrow.triangle.branch"
+    /// The lane's glyph: the branch, or the self-report line's own.
+    var detailSymbol = branchSymbol
+    var detailColour: NSColor?
     var branchSlot: NSRect?
     var drawsBranchGlyph = false
     var markSlot: NSRect?
@@ -2670,7 +2758,7 @@ private final class Decorations: NSView {
         }
         if let slot = branchSlot, drawsBranchGlyph {
             InkAlignedSymbol.draw(
-                Self.branchSymbol, in: slot, colour: muted,
+                detailSymbol, in: slot, colour: detailColour ?? muted,
                 alignment: .centred, flipped: isFlipped)
         }
         // Full-strength black in Aqua, white in Dark Aqua. The old secondary

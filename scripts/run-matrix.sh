@@ -159,8 +159,8 @@ It is a targeted development gate, not the full release matrix.
 --hook-bridge rebuilds the app, CoreChecks and array-workspace-mcp, then reports
 the Claude observation-hook argv and the hook command against the production
 listener (.plans/102 P1), plus array_report/array_status, wait_agents' report
-and the opt-in report push-back (P2a). A targeted development gate, not the
-full matrix.
+and the opt-in report push-back (P2a), and the sidebar row's status line
+(P2b). A targeted development gate, not the full matrix.
 --codex-permissions rebuilds CoreChecks and verifies Full Access launch arguments
 for fresh/resumed exec and production app-server runs using an offline stand-in.
 --ios-preview-proof builds the standalone native fixture harness and reports
@@ -622,6 +622,7 @@ if [[ "$HOOK_BRIDGE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --workspace-agent-report-check
   run_app_check .build/debug/Array --workspace-hook-pushback-check
   run_app_check .build/debug/Array --claude-adopted-turn-check
+  run_app_check .build/debug/Array --sidebar-agent-status-line-check
   matrix_report 'Hook bridge matrix (targeted)'
   exit $?
 fi
@@ -911,6 +912,11 @@ run_app_check .build/debug/Array --workspace-agent-report-check
 # one block for a helper's long hand-back, and silent for a continuation, a
 # short one, a top-level Stop, or an app that is down or silent.
 run_app_check .build/debug/Array --workspace-hook-pushback-check
+# .plans/102 P2b: the line under an agent's name in the shipped sidebar, from
+# real records: its declared now or "Needs you" (amber) while it works, its
+# report's check result once done, nothing from an earlier turn, one truncated
+# line, and the card height never moving.
+run_app_check .build/debug/Array --sidebar-agent-status-line-check
 # S2 (.plans/80-browser-computer-use): the engine an agent drives a browser
 # tile through. Outline past a tampering page, trusted clicks at three canvas
 # zooms without moving the user's focus, typing, the user-typing hold, refusals,

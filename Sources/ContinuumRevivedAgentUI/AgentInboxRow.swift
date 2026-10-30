@@ -778,6 +778,34 @@ public struct InboxWhereMarker: Equatable, Sendable {
     }
 }
 
+// Plan: .plans/102-managed-agent-mode (P2b, the sidebar status line)
+/// What an agent said about its OWN current turn: the `now`/`needsYou` it
+/// declared through `array_status`, and the check counts of the report it filed
+/// through `array_report`. The builder carries only what was said in the
+/// current turn, so a status from an earlier one cannot reach the row at all.
+public struct InboxSelfReport: Equatable, Sendable {
+    public let now: String?
+    public let needsYou: String?
+    /// Counted from the report's checks; `info` checks are neither.
+    public let checksPassed: Int
+    public let checksFailed: Int
+
+    public init(now: String? = nil, needsYou: String? = nil, checksPassed: Int = 0, checksFailed: Int = 0) {
+        self.now = now
+        self.needsYou = needsYou
+        self.checksPassed = checksPassed
+        self.checksFailed = checksFailed
+    }
+}
+
+/// The one line the row draws under the agent's name for `InboxSelfReport`.
+public enum InboxSelfReportLine: Equatable, Sendable {
+    case needsYou(String)
+    case now(String)
+    /// The turn is over and its report has checks.
+    case checks(failed: Int, total: Int)
+}
+
 /// What makes a row a session from another app rather than an Array agent.
 public struct InboxExternalSession: Equatable, Sendable {
     /// `ExternalAgentSession.id`: the provider-qualified session id the host
@@ -979,6 +1007,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// no AppKit, and the host resolves names exactly as it does a zone's. nil —
     /// the default — draws nothing and moves nothing.
     public let identityColor: String?
+    /// What the agent said about this turn itself (`.plans/102` P2b). nil — the
+    /// default — draws nothing and moves nothing.
+    public let selfReport: InboxSelfReport?
     /// Where the session lives when it is not an Array tile's Array face. nil —
     /// the default — draws nothing.
     public var whereMarker: InboxWhereMarker?
@@ -1100,6 +1131,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         closingSince: Date? = nil,
         hasLiveRunner: Bool = false,
         identityColor: String? = nil,
+        selfReport: InboxSelfReport? = nil,
         whereMarker: InboxWhereMarker? = nil,
         externalSession: InboxExternalSession? = nil
     ) {
@@ -1139,6 +1171,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.closingSince = closingSince
         self.hasLiveRunner = hasLiveRunner
         self.identityColor = identityColor
+        self.selfReport = selfReport
         self.whereMarker = whereMarker
         self.externalSession = externalSession
     }
@@ -1166,8 +1199,25 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             harness: harness, checkedOutBranch: checkedOutBranch,
             terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
             closingSince: closingSince, hasLiveRunner: hasLiveRunner,
-            identityColor: identityColor, whereMarker: whereMarker,
+            identityColor: identityColor, selfReport: selfReport, whereMarker: whereMarker,
             externalSession: externalSession)
+    }
+
+    /// The line under the name for `selfReport`, by the row's state: a declared
+    /// status only while the agent is working or waiting on you, the report's
+    /// check result only once it is done, and nothing when there is nothing to say.
+    public var selfReportLine: InboxSelfReportLine? {
+        guard let selfReport else { return nil }
+        switch state {
+        case .working, .approval, .input:
+            if let needsYou = selfReport.needsYou { return .needsYou(needsYou) }
+            return selfReport.now.map(InboxSelfReportLine.now)
+        case .ready:
+            let total = selfReport.checksPassed + selfReport.checksFailed
+            return total > 0 ? .checks(failed: selfReport.checksFailed, total: total) : nil
+        case .failed:
+            return nil
+        }
     }
 
     /// The agent's branch and the checkout's disagree. `checkedOutBranch` is nil
@@ -1213,7 +1263,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             zoneName: zoneName, harness: harness, checkedOutBranch: checkedOutBranch,
             terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
             closingSince: closingSince, hasLiveRunner: hasLiveRunner,
-            identityColor: identityColor)
+            identityColor: identityColor, selfReport: selfReport)
     }
 
     /// Equal but for `elapsed`, when both rows carry the same live turn start: the

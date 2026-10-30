@@ -306,8 +306,26 @@ public enum AgentInboxRowBuilder {
             } ?? false,
             closingSince: closingSince,
             hasLiveRunner: observedFacts.hasLiveRunner,
-            identityColor: record?.identityColor
+            identityColor: record?.identityColor,
+            selfReport: record.flatMap(selfReport(for:))
         )
+    }
+
+    /// `.plans/102` P2b: what the agent said about its CURRENT turn — the status
+    /// it declared and the report it filed since that turn started. Either one
+    /// from an earlier turn is history, not news, and never reaches the row: a
+    /// new turn's `latestTurnAt` is stamped at its start, after anything the
+    /// last one said. The row decides by its state which of the two it draws.
+    static func selfReport(for record: AgentRecord) -> InboxSelfReport? {
+        let turnStart = record.latestTurnAt ?? .distantPast
+        let status = record.declaredStatus.flatMap { $0.declaredAt >= turnStart ? $0 : nil }
+        let report = record.lastReport.flatMap { $0.filedAt >= turnStart ? $0.report : nil }
+        guard status != nil || report != nil else { return nil }
+        let checks = report?.checks ?? []
+        return InboxSelfReport(
+            now: status?.now, needsYou: status?.needsYou,
+            checksPassed: checks.filter { $0.result == .pass }.count,
+            checksFailed: checks.filter { $0.result == .fail }.count)
     }
 
     /// Translate the existing child rollup's two hold-open states into the same

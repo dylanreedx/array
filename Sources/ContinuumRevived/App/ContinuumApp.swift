@@ -3003,6 +3003,26 @@ enum ContinuumApp {
             }
         }
 
+        // `.plans/102` P2b: the line under an agent's name — its declared status
+        // while it works, its report's checks once done — in the shipped sidebar.
+        if CommandLine.arguments.contains("--sidebar-agent-status-line-check") {
+            _ = NSApplication.shared
+            let arguments = CommandLine.arguments
+            let renderDirectory = arguments.firstIndex(of: "--render-dir").flatMap {
+                arguments.indices.contains($0 + 1) ? URL(fileURLWithPath: arguments[$0 + 1], isDirectory: true) : nil
+            }
+            Task { @MainActor in
+                do {
+                    try await SidebarStatusLineChecks.run(renderDirectory: renderDirectory)
+                    print("ContinuumRevivedSidebarStatusLineChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--sidebar-truth-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -21170,6 +21190,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // a rename from the inbox does.
         agentSupervisor.onIdentityColorChanged = { [weak self] _, _ in
             self?.reloadWorkspaceSidebar()
+        }
+        // An agent's own status or report is drawn under its name in the sidebar
+        // (`.plans/102` P2b), from the record on every row build.
+        agentSupervisor.onSelfReportChanged = { [weak self] _ in
+            self?.scheduleAgentSurfacePush(debounce: 0.05)
         }
         canvasView.onTileHoverChanged = { [weak self] tileId, hovered in
             self?.completionHoverChanged(tileId: tileId, hovered: hovered)

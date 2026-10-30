@@ -1143,6 +1143,9 @@ final class AgentSupervisor {
     /// A deliberate rename landed (sidebar, tile title or workspace API). The
     /// sidebar rows are rebuilt from the record, so the host re-pushes them.
     var onDisplayNameRenamed: ((AgentID) -> Void)?
+    /// An agent filed a report or declared a status (`.plans/102` P2b). The
+    /// sidebar row draws them from the record, so the host re-pushes the rows.
+    var onSelfReportChanged: ((AgentID) -> Void)?
     /// The runner for the prompt currently in flight, if any.
     private var runners: [AgentID: AgentRunning] = [:]
     /// The latest runner generation to own each agent. Unlike `runners`, this is
@@ -5541,14 +5544,18 @@ final class AgentSupervisor {
     func fileReport(_ report: AgentReport, for id: AgentID, at date: Date = Date()) -> Bool {
         guard var record = records[id] else { return false }
         record.lastReport = AgentFiledReport(report: report, filedAt: date)
-        return persist(record)
+        guard persist(record) else { return false }
+        onSelfReportChanged?(id)
+        return true
     }
 
     @discardableResult
     func declareStatus(_ status: AgentDeclaredStatus, for id: AgentID) -> Bool {
         guard var record = records[id] else { return false }
         record.declaredStatus = status
-        return persist(record)
+        guard persist(record) else { return false }
+        onSelfReportChanged?(id)
+        return true
     }
 
     /// The agents this one spawned.
