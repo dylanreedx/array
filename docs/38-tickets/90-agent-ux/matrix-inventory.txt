@@ -91,6 +91,7 @@ check --canvas-unreadable-check
 check --canvas-visibility-index-check
 check --canvas-zoom-invalidation-probe-check
 check --canvas-zoom-momentum-check
+check --checks-never-take-focus-check
 check --child-crash-isolation-check
 check --choice-geometry-check
 check --claude-adopted-turn-check
@@ -489,6 +490,7 @@ leg run_app_check .build/debug/Array --canvas-unreadable-check
 leg run_app_check .build/debug/Array --canvas-visibility-index-check
 leg run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 leg run_app_check .build/debug/Array --canvas-zoom-momentum-check
+leg run_app_check .build/debug/Array --checks-never-take-focus-check
 leg run_app_check .build/debug/Array --child-crash-isolation-check
 leg run_app_check .build/debug/Array --choice-geometry-check
 leg run_app_check .build/debug/Array --claude-adopted-turn-check
