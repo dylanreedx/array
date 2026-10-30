@@ -15,6 +15,9 @@ public actor CollaborationSession {
     private let sleep: @Sendable (Int) async throws -> Void
     private var replica: CollaborationReplica?
     private var through: UInt64?
+    // After a failure the next held read is short, so admission is observed
+    // within a second instead of when the next event or 25s timeout arrives.
+    private var recovering = false
     private var task: Task<Void, Never>?
     private var continuation: AsyncStream<Status>.Continuation?
     private var generation = UUID()
@@ -89,13 +92,14 @@ public actor CollaborationSession {
     private func request(_ current: UUID) -> Collaboration.UpdateRequest? {
         guard current == generation, let replica else { return nil }
         return .init(after: replica.document.revision, through: through,
-            presenceVersion: replica.presenceVersion, waitMilliseconds: through == nil ? 25_000 : 0)
+            presenceVersion: replica.presenceVersion, waitMilliseconds: through != nil ? 0 : recovering ? 1_000 : 25_000)
     }
     private func receive(_ page: Collaboration.Updates, generation current: UUID) throws -> Bool {
         guard current == generation, var replica else { return false }
         try replica.receive(page)
         self.replica = replica
         through = page.hasMore ? page.through : nil
+        recovering = false
         emit(.connected(replica))
         return true
     }
@@ -119,6 +123,7 @@ public actor CollaborationSession {
                 return false
             }
         }
+        recovering = true
         emit(.reconnecting(replica))
         return true
     }
