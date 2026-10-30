@@ -198,6 +198,59 @@ public struct AgentDeclaredStatus: Codable, Equatable, Sendable {
     }
 }
 
+/// `.plans/102` P2a: an agent's latest report and when it was filed, as stored
+/// on its `AgentRecord` so a relaunch keeps it. The date is a reference
+/// interval, like every record date: `filedAt` decides which turn the report
+/// belongs to, so it must come back exactly.
+public struct AgentFiledReport: Codable, Equatable, Sendable {
+    public var report: AgentReport
+    public var filedAt: Date
+
+    public init(report: AgentReport, filedAt: Date) {
+        self.report = report
+        self.filedAt = filedAt
+    }
+
+    enum CodingKeys: String, CodingKey { case report, filedAtReferenceInterval }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        report = try container.decode(AgentReport.self, forKey: .report)
+        filedAt = Date(timeIntervalSinceReferenceDate: try container.decode(Double.self, forKey: .filedAtReferenceInterval))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(report, forKey: .report)
+        try container.encode(filedAt.timeIntervalSinceReferenceDate, forKey: .filedAtReferenceInterval)
+    }
+}
+
+extension AgentDeclaredStatus {
+    /// The form an `AgentRecord` stores. The status's own coding is the
+    /// `agent.status` reply and keeps the encoder's date; on disk `declaredAt`
+    /// is a reference interval so it survives a relaunch exactly. Provenance
+    /// is not stored: a declared status is always `declared`.
+    struct Stored: Codable {
+        var now: String
+        var next: String?
+        var needsYou: String?
+        var declaredAtReferenceInterval: Double
+
+        init(_ status: AgentDeclaredStatus) {
+            now = status.now
+            next = status.next
+            needsYou = status.needsYou
+            declaredAtReferenceInterval = status.declaredAt.timeIntervalSinceReferenceDate
+        }
+
+        var status: AgentDeclaredStatus {
+            AgentDeclaredStatus(now: now, next: next, needsYou: needsYou,
+                                declaredAt: Date(timeIntervalSinceReferenceDate: declaredAtReferenceInterval))
+        }
+    }
+}
+
 public struct AgentReportResult: Codable, Equatable, Sendable {
     public var recorded: Bool
     public init(recorded: Bool) { self.recorded = recorded }

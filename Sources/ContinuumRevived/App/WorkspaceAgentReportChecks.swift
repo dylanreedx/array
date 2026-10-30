@@ -17,6 +17,10 @@ import Foundation
 /// - `wait_agents` over the parent's registration: setting off, today's entry
 ///   plus `report`; setting on, the report in the final text's place; a later
 ///   turn that filed nothing carries no report.
+/// - Relaunch: a fresh supervisor restored from the same store has the report
+///   and both statuses with the same content and timestamps; the restored
+///   report does not ride the next turn's courier or `wait_agents`; an older
+///   record, or one whose report and status are malformed, restores without them.
 ///
 /// `--workspace-hook-pushback-check`: the hook command with the setting off
 /// prints nothing for a 600-word hand-back; on, it prints the block JSON once
@@ -323,8 +327,13 @@ enum WorkspaceAgentReportChecks {
                    && supervisor.declaredStatuses[child]?.now == "checking the ledger" && Set(supervisor.declaredStatuses.keys) == [child],
                    "the declared status is not stored on the child, labelled declared: \(supervisor.declaredStatuses)")
         // Declared is never merged with observed.
+        // The record now carries the report and status (so a relaunch keeps
+        // them); nothing else on it may move.
+        func withoutDeclared(_ records: [AgentID: AgentRecord]) -> [AgentID: AgentRecord] {
+            records.mapValues { var record = $0; record.lastReport = nil; record.declaredStatus = nil; return record }
+        }
         try expect(supervisor.derivedStreamStatus(for: child) == observedBefore.0 && supervisor.presenceRowStatus(for: child) == observedBefore.1
-                   && supervisor.isRunning(child) == observedBefore.2 && supervisor.records == observedBefore.3,
+                   && supervisor.isRunning(child) == observedBefore.2 && withoutDeclared(supervisor.records) == withoutDeclared(observedBefore.3),
                    "filing a report or a status changed the observed status or a record")
         // The parent's own status lands on the parent.
         _ = try await call(parentConfig, "array_status", ["now": "waiting on the child"])
@@ -388,6 +397,78 @@ enum WorkspaceAgentReportChecks {
         settings.removeObject(forKey: AgentShortReportConfig.enabledKey)
         let secondOff = try await waitEntry()
         try expect(jsonEqual(secondOff.entry, second.entry), "with no report, the setting must change nothing: \(secondOff.entry)")
+
+        // (h) Relaunch: quit this supervisor's runners and restore a fresh one
+        // from the same app-support store, as the app does at launch. The
+        // report and both statuses come back with the same content and
+        // timestamps.
+        guard let filedBefore = supervisor.agentReports[child], let childStatus = supervisor.declaredStatuses[child],
+              let parentStatus = supervisor.declaredStatuses[parent] else {
+            throw Failure(description: "the report or a status is missing before the relaunch")
+        }
+        supervisor.stopAll()
+        let relaunched = AgentSupervisor(store: AgentStore(smokeTest: false))
+        defer { relaunched.stopAll() }
+        _ = relaunched.restore()
+        try expect(relaunched.records[child] != nil && relaunched.records[parent] != nil, "the relaunch must restore both agents")
+        try expect(relaunched.agentReports[child]?.report == stored && relaunched.agentReports[child]?.filedAt == filedBefore.filedAt
+                   && Set(relaunched.agentReports.keys) == [child],
+                   "the relaunch must restore the child's report and when it was filed: \(String(describing: relaunched.agentReports[child]))")
+        try expect(relaunched.declaredStatuses[child] == childStatus && relaunched.declaredStatuses[parent] == parentStatus
+                   && relaunched.declaredStatuses[child]?.provenance == AgentDeclaredStatus.provenance
+                   && Set(relaunched.declaredStatuses.keys) == [child, parent],
+                   "the relaunch must restore each declared status exactly: \(relaunched.declaredStatuses)")
+
+        // (i) The restored report belongs to an earlier turn: the relaunched
+        // child's next turn files nothing, so its courier and wait_agents
+        // carry no report. The old courier is removed first so the wait sees
+        // only the third turn's. (This bare supervisor has no transcript
+        // store, so the courier's final text is not asserted here.)
+        let parentCwd = relaunched.records[parent]?.cwd ?? ""
+        try? FileManager.default.removeItem(at: SpawnResultFile.url(parentCwd: parentCwd, handle: operation))
+        try expect(relaunched.send("THIRD-TURN: after the relaunch", to: child), "the relaunched child must accept a turn")
+        let thirdSettled = await waitUntil(timeout: 30, pollInterval: 0.05) {
+            promptLog().contains("THIRD-TURN") && !relaunched.isRunning(child)
+                && SpawnResultFile.read(parentCwd: parentCwd, handle: operation) != nil
+        }
+        let thirdCourier = SpawnResultFile.read(parentCwd: parentCwd, handle: operation)
+        try expect(thirdSettled, "the relaunched child must run and settle its third turn: prompted \(promptLog().contains("THIRD-TURN")), running \(relaunched.isRunning(child)), courier \(String(describing: thirdCourier))")
+        try expect(thirdCourier?.status == .completed && thirdCourier?.report == nil,
+                   "a restored report must not ride the next turn's courier: \(String(describing: thirdCourier))")
+        let third = try await waitEntry()
+        try expect(third.entry["report"] == nil && third.entry["status"] as? String == "completed"
+                   && third.entry["childAgentId"] as? String == child.rawValue.uuidString,
+                   "a restored report must not be attached to the next turn's wait_agents result: \(third.entry)")
+        try expect(relaunched.agentReports[child]?.filedAt == filedBefore.filedAt, "the restored report is still the latest one on record")
+
+        // (j) Older and damaged stores: a record without the new keys, and one
+        // whose report and status are malformed, both restore, with neither.
+        let oldStoreRoot = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-report-oldstore-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: oldStoreRoot) }
+        let oldStore = AgentStore(applicationSupportDirectory: oldStoreRoot)
+        let childFile = AgentStore(smokeTest: false).layout.agentFile(id: child)
+        guard var childJSON = try JSONSerialization.jsonObject(with: Data(contentsOf: childFile)) as? [String: Any],
+              childJSON["lastReport"] != nil, childJSON["declaredStatus"] != nil else {
+            throw Failure(description: "the child's stored record carries no report or status")
+        }
+        let oldFormat = AgentID(rawValue: UUID()), damaged = AgentID(rawValue: UUID())
+        childJSON.removeValue(forKey: "parentAgentID")
+        childJSON.removeValue(forKey: "spawnResultHandle")
+        var oldJSON = childJSON
+        oldJSON.removeValue(forKey: "lastReport"); oldJSON.removeValue(forKey: "declaredStatus")
+        oldJSON["id"] = oldFormat.rawValue.uuidString
+        var damagedJSON = childJSON
+        damagedJSON["id"] = damaged.rawValue.uuidString
+        damagedJSON["lastReport"] = ["report": ["summary": 5], "filedAtReferenceInterval": "soon"]
+        damagedJSON["declaredStatus"] = "busy"
+        try FileManager.default.createDirectory(at: oldStore.layout.agentsDirectory, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: oldJSON).write(to: oldStore.layout.agentFile(id: oldFormat))
+        try JSONSerialization.data(withJSONObject: damagedJSON).write(to: oldStore.layout.agentFile(id: damaged))
+        let oldSupervisor = AgentSupervisor(store: oldStore)
+        let oldRestore = oldSupervisor.restore()
+        try expect(Set(oldRestore.restored) == [oldFormat, damaged], "an older store and a damaged report must not stop a record loading: \(oldRestore)")
+        try expect(oldSupervisor.agentReports.isEmpty && oldSupervisor.declaredStatuses.isEmpty,
+                   "an older or damaged record restores with no report and no status: \(oldSupervisor.agentReports.keys) \(oldSupervisor.declaredStatuses)")
     }
 
     // MARK: - --workspace-hook-pushback-check

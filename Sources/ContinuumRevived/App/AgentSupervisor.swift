@@ -5517,28 +5517,38 @@ final class AgentSupervisor {
     /// `.plans/102` P2a: each agent's latest `array_report`, with when it was
     /// filed. A delegated child's report is handed to its parent with the turn
     /// it was filed in (`writeTerminalSpawnResult`), never with a later one.
-    /// In memory; gone with the record.
-    private(set) var agentReports: [AgentID: (report: AgentReport, filedAt: Date)] = [:]
+    /// Stored on the record (`AgentRecord.lastReport`), so it survives a
+    /// relaunch and goes with the record.
+    var agentReports: [AgentID: (report: AgentReport, filedAt: Date)] {
+        records.compactMapValues { $0.lastReport.map { ($0.report, $0.filedAt) } }
+    }
     /// When each delegated child's last turn settled: a report filed before
     /// this belongs to an earlier turn.
     private var lastSettledAt: [AgentID: Date] = [:]
+    /// The baseline for a child that has not settled under this supervisor: a
+    /// report restored from disk was filed in an earlier process's turn, so it
+    /// never rides this process's next courier.
+    private let reportTurnBaseline = Date()
     /// `.plans/102` P2a: what each agent last DECLARED through `array_status`.
     /// Kept apart from every observed status on purpose (principle 6); nothing
-    /// here feeds the stream status, the presence row or the record.
-    private(set) var declaredStatuses: [AgentID: AgentDeclaredStatus] = [:]
+    /// here feeds the stream status or the presence row. Stored on the record
+    /// (`AgentRecord.declaredStatus`), so it survives a relaunch.
+    var declaredStatuses: [AgentID: AgentDeclaredStatus] {
+        records.compactMapValues(\.declaredStatus)
+    }
 
     @discardableResult
     func fileReport(_ report: AgentReport, for id: AgentID, at date: Date = Date()) -> Bool {
-        guard records[id] != nil else { return false }
-        agentReports[id] = (report, date)
-        return true
+        guard var record = records[id] else { return false }
+        record.lastReport = AgentFiledReport(report: report, filedAt: date)
+        return persist(record)
     }
 
     @discardableResult
     func declareStatus(_ status: AgentDeclaredStatus, for id: AgentID) -> Bool {
-        guard records[id] != nil else { return false }
-        declaredStatuses[id] = status
-        return true
+        guard var record = records[id] else { return false }
+        record.declaredStatus = status
+        return persist(record)
     }
 
     /// The agents this one spawned.
@@ -6042,9 +6052,7 @@ final class AgentSupervisor {
 
         records.removeValue(forKey: id)
         hookReceipts.removeValue(forKey: id)
-        agentReports.removeValue(forKey: id)
         lastSettledAt.removeValue(forKey: id)
-        declaredStatuses.removeValue(forKey: id)
         runnerGenerationTokens.removeValue(forKey: id)
         history.removeValue(forKey: id)
         rehydratedTranscripts.removeValue(forKey: id)
@@ -9517,7 +9525,7 @@ final class AgentSupervisor {
         // P2a: the report this turn filed, and only this turn's.
         let settledAt = Date()
         var report: AgentReport?
-        if let filed = agentReports[id], filed.filedAt > (lastSettledAt[id] ?? .distantPast) { report = filed.report }
+        if let filed = child.lastReport, filed.filedAt > (lastSettledAt[id] ?? reportTurnBaseline) { report = filed.report }
         lastSettledAt[id] = settledAt
         SpawnResultFile.write(
             SpawnResultFile(

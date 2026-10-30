@@ -529,6 +529,15 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// hook writes anything. Optional, decode-if-present, no schema bump — the
     /// `snoozedAt` convention.
     public var closeRequestedAt: Date?
+    /// `.plans/102` P2a: the latest report this agent filed about its own work
+    /// (`array_report`) and the latest status it DECLARED (`array_status`). The
+    /// agent writes these about itself; nothing reads the status into any
+    /// observed state. On the record so a relaunch keeps them, and gone with it.
+    /// Optional and tolerant, no schema bump (the `snoozedAt` convention): an
+    /// older record reads them as absent, and a malformed one is dropped
+    /// without dropping the agent.
+    public var lastReport: AgentFiledReport? = nil
+    public var declaredStatus: AgentDeclaredStatus? = nil
 
     /// The only timestamps that keep a neutral row out of auto-settle. A prompt
     /// or a turn start is real work; `lastActivityAt` is deliberately absent.
@@ -1025,6 +1034,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case snoozedAtReferenceInterval
         // Confidence pass: the close intent, encoded like every lifecycle date.
         case closeRequestedAtReferenceInterval
+        // `.plans/102` P2a: self-filed report and declared status.
+        case lastReport, declaredStatus
     }
 
     public init(from decoder: Decoder) throws {
@@ -1144,6 +1155,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         closeRequestedAt = ((try? container.decodeIfPresent(
             Double.self, forKey: .closeRequestedAtReferenceInterval)) ?? nil)
             .map(Date.init(timeIntervalSinceReferenceDate:))
+        lastReport = (try? container.decodeIfPresent(AgentFiledReport.self, forKey: .lastReport)) ?? nil
+        declaredStatus = ((try? container.decodeIfPresent(
+            AgentDeclaredStatus.Stored.self, forKey: .declaredStatus)) ?? nil)?.status
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -1222,6 +1236,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
                                       forKey: .archivedAtReferenceInterval)
         try container.encodeIfPresent(closeRequestedAt?.timeIntervalSinceReferenceDate,
                                       forKey: .closeRequestedAtReferenceInterval)
+        try container.encodeIfPresent(lastReport, forKey: .lastReport)
+        try container.encodeIfPresent(declaredStatus.map(AgentDeclaredStatus.Stored.init), forKey: .declaredStatus)
     }
 
     // Lifecycle (settle / snooze) landed above in P4.1 as STORED FACTS ONLY.

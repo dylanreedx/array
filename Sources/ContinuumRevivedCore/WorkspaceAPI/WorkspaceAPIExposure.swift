@@ -69,6 +69,8 @@ public enum WorkspaceAPIExposure {
         "agent.archivedAtReferenceInterval": .notExposed("Archiving agents is native UI only."),
         "agent.snoozedAtReferenceInterval": .internal,
         "agent.closeRequestedAtReferenceInterval": .internal,
+        "agent.lastReport": .internal, // Written by the agent about itself (agent.report); not user-editable.
+        "agent.declaredStatus": .internal, // Written by the agent about itself (agent.status); not user-editable.
 
         "tile.id": .internal,
         "tile.kind": .internal,
