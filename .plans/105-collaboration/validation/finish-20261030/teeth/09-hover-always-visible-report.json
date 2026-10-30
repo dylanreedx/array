@@ -1,0 +1,9 @@
+{
+  "mutation": "draw first peer usage card even without pointer/accessibility inspection",
+  "sourceBeforeSHA256": "5c2fa773befa1e61412b3cff88c89f3f1f2e07d5f369f00ce41599425e3bb1b3",
+  "buildExit": 0,
+  "checkExit": 1,
+  "intendedFailure": true,
+  "sourceRestoredSHA256": "5c2fa773befa1e61412b3cff88c89f3f1f2e07d5f369f00ce41599425e3bb1b3",
+  "sourceRestoredExactly": true
+}

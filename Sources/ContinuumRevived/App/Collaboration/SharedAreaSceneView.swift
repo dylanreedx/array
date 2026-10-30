@@ -10,6 +10,15 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     let controller: SharedAreaController
     let person: SharedArea.ID<SharedArea.Person>
     var onRequestInvite: (() -> Void)?
+    var onRequestHandoff: ((SharedArea.ID<SharedArea.Object>) -> Void)? {
+        didSet { lastControlsKey = nil; if isMounted { refreshReader(); refreshControls() } }
+    }
+    var onLocalCameraNavigation: (() -> Void)?
+    var onCanvasTransformChange: (() -> Void)?
+    var areaCanvasView: NSView { canvas }
+    var localViewCamera: SharedAreaLocalView { localCamera }
+    var geometryLedgerFile: URL? { geometryLedgerStore?.file }
+    var hasPendingGeometry: Bool { pendingGeometry != nil }
     private(set) var mountCount = 0
     private(set) var isMounted = false
     private(set) var selectedObject: SharedArea.ID<SharedArea.Object>?
@@ -45,6 +54,20 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     private var uncertainDraft: SharedAreaLocalDraft?
     private var pendingCreatedObject: SharedArea.ID<SharedArea.Object>?
     private var actionTask: Task<Void, Never>?
+    private var geometryHistory = SharedAreaGeometryHistory()
+    private var pendingGeometry: SharedAreaGeometryHistory.Mutation?
+    private var geometryLedgerStore: SharedAreaGeometryLedgerStore?
+    private var geometryLedger: SharedAreaGeometryLedger?
+    private var geometryUnavailable = false
+    private var geometryRecoveryTask: Task<Void, Never>?
+    private var attemptedGeometryRecovery = false
+    private var geometryGesture: GeometryGesture?
+    private struct GeometryGesture {
+        let document: SharedArea.Document
+        let placements: Set<SharedArea.ID<SharedArea.Placement>>
+        let kind: SharedAreaGeometryHistory.Kind
+        var frames: [SharedArea.ID<SharedArea.Placement>: SharedArea.Rect]
+    }
     private var mountGeneration = UUID()
     private var lastControlsKey: ControlsKey?
     private struct ControlsKey: Equatable {
@@ -58,6 +81,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         let hasText: Bool
         let uncertain: Bool
         let camera: SharedAreaLocalView
+        let pendingCount: Int
     }
 
     override var isFlipped: Bool { true }
@@ -93,6 +117,20 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         canvas.onCycleSelection = { [weak self] backwards in
             do { try self?.selectNextObject(backwards: backwards) } catch { self?.showPrivateSaveFailure() }
         }
+        canvas.onBeginGeometry = { [weak self] placements, kind in self?.beginGeometry(placements: placements, kind: kind) ?? false }
+        canvas.onPreviewGeometry = { [weak self] frames in _ = self?.updateGeometry(frames: frames) }
+        canvas.onFinishGeometry = { [weak self] in
+            self?.actionTask = Task { [weak self] in await self?.finishGeometry() }
+        }
+        canvas.onCancelGeometry = { [weak self] in self?.cancelGeometry() }
+        canvas.onUndoGeometry = { [weak self] in
+            self?.actionTask = Task { [weak self] in await self?.undoSharedGeometry() }
+        }
+        canvas.onRedoGeometry = { [weak self] in
+            self?.actionTask = Task { [weak self] in await self?.redoSharedGeometry() }
+        }
+        canvas.canUndoGeometry = { [weak self] in self?.canUndoSharedGeometry ?? false }
+        canvas.canRedoGeometry = { [weak self] in self?.canRedoSharedGeometry ?? false }
         for view in [canvas, titleLabel, statusLabel, objectNavigator, actions, detailLabel, entryLabel, history, readerScroll, editorScroll, postButton, messageLabel] {
             addSubview(view)
         }
@@ -108,6 +146,8 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         guard !isMounted else { return }
         mountGeneration = UUID(); lastControlsKey = nil
         isMounted = true; mountCount += 1
+        geometryHistory = .init(); pendingGeometry = nil
+        geometryLedgerStore = nil; geometryLedger = nil; geometryUnavailable = false; attemptedGeometryRecovery = false
         localCamera = controller.view; selectedObject = localCamera.focusedObject
         controller.onChange = { [weak self] in self?.refresh() }
         refresh()
@@ -121,6 +161,8 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         cameraTimer?.invalidate(); cameraTimer = nil
         draftTimer?.invalidate(); draftTimer = nil
         actionTask?.cancel(); actionTask = nil
+        geometryRecoveryTask?.cancel(); geometryRecoveryTask = nil
+        cancelGeometry()
         if uncertainCommand == nil { pendingCreatedObject = nil }
         knownDocument = nil
         canvas.install(document: nil, camera: localCamera, selected: nil)
@@ -147,6 +189,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         setFrame(editorScroll, .init(x: x, y: editorTop, width: width, height: 112))
         setFrame(postButton, .init(x: x, y: editorTop + 122, width: min(width, 160), height: ComposerActionButton.controlHeight))
         setFrame(messageLabel, .init(x: x, y: editorTop + 161, width: width, height: 17))
+        onCanvasTransformChange?()
     }
 
     func applyTokens() {
@@ -172,10 +215,12 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     }
     func setCamera(_ value: SharedAreaLocalView) throws {
         guard [value.x, value.y, value.zoom].allSatisfy(\.isFinite), value.zoom > 0 else { throw SharedArea.Failure.invalidGeometry }
+        if value.x != localCamera.x || value.y != localCamera.y || value.zoom != localCamera.zoom { cancelGeometry() }
         localCamera = value; cameraDirty = true
         try controller.setView(value)
         cameraDirty = false
         canvas.setCamera(value)
+        onCanvasTransformChange?()
     }
     func selectObject(_ object: SharedArea.ID<SharedArea.Object>?) throws {
         try prepareToClose()
@@ -205,6 +250,217 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     func object(at point: NSPoint) -> SharedArea.ID<SharedArea.Object>? {
         guard isMounted else { return nil }
         return canvas.object(at: canvas.convert(point, from: self))
+    }
+    /// Points are scene-relative screen points, including the canvas header
+    /// offset, and portable area points independent of each person's camera.
+    func screenPoint(forAreaPoint point: CGPoint) -> CGPoint {
+        canvas.convert(.init(x: (point.x - localCamera.x) * localCamera.zoom,
+                             y: (point.y - localCamera.y) * localCamera.zoom), to: self)
+    }
+    func areaPoint(forScreenPoint point: CGPoint) -> CGPoint {
+        let local = canvas.convert(point, from: self)
+        return .init(x: localCamera.x + local.x / localCamera.zoom,
+                     y: localCamera.y + local.y / localCamera.zoom)
+    }
+    var canUndoSharedGeometry: Bool {
+        guard isMounted, !geometryUnavailable, controller.canSubmit, !controller.isSubmitting, pendingGeometry == nil,
+              geometryGesture == nil, let document = controller.document else { return false }
+        return geometryHistory.canUndo(in: document)
+    }
+    var isGeometryGestureActive: Bool { geometryGesture != nil }
+    var canRedoSharedGeometry: Bool {
+        guard isMounted, !geometryUnavailable, controller.canSubmit, !controller.isSubmitting, pendingGeometry == nil,
+              geometryGesture == nil, let document = controller.document else { return false }
+        return geometryHistory.canRedo(in: document)
+    }
+    @discardableResult
+    func beginGeometry(placements: Set<SharedArea.ID<SharedArea.Placement>>,
+                       kind: SharedAreaGeometryHistory.Kind = .move) -> Bool {
+        guard isMounted, !geometryUnavailable, geometryLedger != nil, controller.canSubmit, !controller.isSubmitting,
+              pendingGeometry == nil, uncertainCommand == nil, geometryGesture == nil,
+              kind == .move || kind == .resize, !placements.isEmpty, placements.count <= 128,
+              let document = controller.document else { return false }
+        let selected = document.positions.filter { placements.contains($0.id) }
+        guard selected.count == placements.count else { return false }
+        geometryGesture = .init(document: document, placements: placements, kind: kind,
+            frames: Dictionary(uniqueKeysWithValues: selected.map { ($0.id, $0.rect) }))
+        canvas.geometryEnabled = true
+        lastControlsKey = nil
+        refreshControls()
+        return true
+    }
+    @discardableResult
+    func updateGeometry(frames: [SharedArea.ID<SharedArea.Placement>: SharedArea.Rect]) -> Bool {
+        guard var gesture = geometryGesture, Set(frames.keys) == gesture.placements,
+              frames.values.allSatisfy(\.valid) else { return false }
+        gesture.frames = frames; geometryGesture = gesture
+        canvas.setPreview(frames)
+        return true
+    }
+    func cancelGeometry() {
+        geometryGesture = nil
+        canvas.cancelGeometryGesture()
+        canvas.setPreview([:])
+        lastControlsKey = nil
+    }
+    func finishGeometry() async {
+        guard let gesture = geometryGesture else { return }
+        guard controller.canSubmit, !controller.isSubmitting,
+              controller.document?.revision == gesture.document.revision else {
+            cancelGeometry(); messageLabel.stringValue = "Workspace changed. Move canceled."; refresh(); return
+        }
+        do {
+            let mutation = try geometryHistory.move(in: gesture.document, frames: gesture.frames, kind: gesture.kind)
+            geometryGesture = nil
+            await submitGeometry(mutation)
+        } catch SharedAreaGeometryHistory.Failure.unchanged {
+            cancelGeometry(); refreshControls()
+        } catch {
+            cancelGeometry(); messageLabel.stringValue = "That layout change is unavailable."; refreshControls()
+        }
+    }
+    func undoSharedGeometry() async {
+        guard isMounted, !geometryUnavailable, controller.canSubmit, !controller.isSubmitting, pendingGeometry == nil,
+              geometryGesture == nil, let document = controller.document else { return }
+        do { await submitGeometry(try geometryHistory.undo(in: document)) }
+        catch { messageLabel.stringValue = "Undo cannot replace a newer layout change." }
+    }
+    func redoSharedGeometry() async {
+        guard isMounted, !geometryUnavailable, controller.canSubmit, !controller.isSubmitting, pendingGeometry == nil,
+              geometryGesture == nil, let document = controller.document else { return }
+        do { await submitGeometry(try geometryHistory.redo(in: document)) }
+        catch { messageLabel.stringValue = "Redo cannot replace a newer layout change." }
+    }
+    func checkPendingDelivery() async {
+        if geometryUnavailable {
+            geometryUnavailable = false; geometryLedgerStore = nil; geometryLedger = nil
+            if let document = controller.document { loadGeometryLedger(area: document.id) }
+        }
+        if controller.status != .connected { await controller.open() }
+        _ = await controller.recoverPendingOperations()
+        reconcileDeliveredOperations()
+        if let mutation = pendingGeometry, !geometryUnavailable,
+           controller.deliveryRecord(for: mutation.command.id) == nil, controller.canSubmit {
+            await submitGeometry(mutation, prepared: true)
+        }
+        refresh()
+    }
+    private func submitGeometry(_ mutation: SharedAreaGeometryHistory.Mutation, prepared: Bool = false) async {
+        let generation = mountGeneration
+        if !prepared {
+            do {
+                guard let store = geometryLedgerStore, var ledger = geometryLedger, ledger.pending == nil else {
+                    throw SharedAreaLocalStoreError.invalidState
+                }
+                ledger.history = geometryHistory; ledger.pending = mutation
+                geometryLedger = try store.save(ledger)
+                pendingGeometry = mutation
+            } catch {
+                geometryUnavailable = true; canvas.setPreview([:])
+                messageLabel.stringValue = "Could not retain layout history. Nothing sent."
+                lastControlsKey = nil; refresh(); return
+            }
+        }
+        let result = await controller.submit(mutation.command)
+        guard isMounted, generation == mountGeneration else { return }
+        if let current = pendingGeometry, current.command.id != mutation.command.id { return }
+        switch result {
+        case .accepted(let receipt):
+            do {
+                try acknowledgeGeometry(mutation, revision: receipt.revision)
+                messageLabel.stringValue = "Layout saved"
+            }
+            catch { geometryUnavailable = true; messageLabel.stringValue = "Layout saved; Undo recovery needs attention." }
+        case .uncertain:
+            messageLabel.stringValue = "Layout delivery unknown. Check delivery."
+        case .rejected(let reason):
+            // Only a definitive authority receipt/snapshot can discard prepared
+            // intent; a disconnected or failed local attempt remains recoverable.
+            if let record = controller.deliveryRecord(for: mutation.command.id), case .rejected = record.state {
+                do { try rejectPreparedGeometry(mutation) } catch { geometryUnavailable = true }
+            }
+            messageLabel.stringValue = reason == .conflict ? "Workspace changed. Move canceled." : "Layout change unavailable."
+            if reason == .conflict { await controller.open() }
+        }
+        if geometryGesture == nil { canvas.setPreview([:]) }
+        lastControlsKey = nil; refresh()
+    }
+    private func reconcileDeliveredOperations() {
+        if let mutation = pendingGeometry, !geometryUnavailable {
+            do {
+                if let record = controller.deliveryRecord(for: mutation.command.id) {
+                    switch record.state {
+                    case .pending: break
+                    case .accepted(let revision):
+                        try acknowledgeGeometry(mutation, revision: revision); messageLabel.stringValue = "Layout saved"
+                    case .rejected:
+                        try rejectPreparedGeometry(mutation); messageLabel.stringValue = "Layout change was not accepted."
+                    }
+                }
+                if pendingGeometry != nil, controller.status == .connected, var probe = controller.document {
+                    do {
+                        if case .duplicate(let revision) = try probe.apply(mutation.command) {
+                            try acknowledgeGeometry(mutation, revision: revision)
+                        }
+                    } catch SharedArea.Failure.conflict where probe.revision > mutation.command.expectedRevision {
+                        try rejectPreparedGeometry(mutation)
+                    }
+                }
+            } catch {
+                geometryUnavailable = true; messageLabel.stringValue = "Layout recovery needs attention. Check delivery."
+            }
+        }
+        if let command = uncertainCommand, let record = controller.deliveryRecord(for: command.id) {
+            switch record.state {
+            case .pending: break
+            case .accepted:
+                uncertainCommand = nil; uncertainDraft = nil
+                if let draft = activeDraft, !controller.drafts.contains(where: { $0.id == draft.id }), editor.string == draft.text {
+                    activeDraft = nil; editor.string = ""; draftDirty = false
+                }
+                if let created = pendingCreatedObject { pendingCreatedObject = nil; try? selectObject(created) }
+                messageLabel.stringValue = "Saved"
+            case .rejected:
+                uncertainCommand = nil; uncertainDraft = nil; pendingCreatedObject = nil
+                messageLabel.stringValue = "Change was not accepted. Draft retained."
+            }
+        }
+    }
+    private func loadGeometryLedger(area: SharedArea.ID<SharedArea.Area>) {
+        guard geometryLedgerStore == nil, !geometryUnavailable else { return }
+        do {
+            let store = try SharedAreaGeometryLedgerStore(directory: controller.storageDirectory, identity: controller.identity, area: area)
+            let ledger = try store.load() ?? .init(identity: controller.identity, area: area)
+            geometryLedgerStore = store; geometryLedger = ledger
+            geometryHistory = ledger.history; pendingGeometry = ledger.pending
+        } catch {
+            geometryUnavailable = true; messageLabel.stringValue = "Layout history is unavailable. Existing work is preserved."
+        }
+    }
+    private func acknowledgeGeometry(_ mutation: SharedAreaGeometryHistory.Mutation, revision: UInt64) throws {
+        if geometryHistory.acknowledgedRevision(for: mutation.command.id) == revision { return }
+        guard let store = geometryLedgerStore, var ledger = geometryLedger,
+              ledger.pending?.command == mutation.command else { throw SharedAreaLocalStoreError.invalidState }
+        var history = ledger.history
+        try history.acknowledge(mutation, revision: revision)
+        ledger.history = history; ledger.pending = nil
+        let accepted = try store.save(ledger)
+        geometryLedger = accepted; geometryHistory = history
+        if pendingGeometry?.command.id == mutation.command.id { pendingGeometry = nil }
+        canvas.setPreview([:]); lastControlsKey = nil
+    }
+    private func rejectPreparedGeometry(_ mutation: SharedAreaGeometryHistory.Mutation) throws {
+        guard let store = geometryLedgerStore, var ledger = geometryLedger,
+              ledger.pending?.command == mutation.command else { return }
+        ledger.pending = nil
+        geometryLedger = try store.save(ledger)
+        if pendingGeometry?.command.id == mutation.command.id { pendingGeometry = nil }
+        canvas.setPreview([:]); lastControlsKey = nil
+    }
+    private var pendingDeliveryCount: Int {
+        var ids = Set(controller.pendingOperations.map { $0.command.id })
+        if let pendingGeometry { ids.insert(pendingGeometry.command.id) }
+        return ids.count
     }
     func fitContent() throws {
         guard let positions = controller.document?.positions, let first = positions.first else { return }
@@ -268,9 +524,14 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
 
     private func refresh() {
         guard isMounted else { return }
+        if let area = controller.document?.id { loadGeometryLedger(area: area) }
+        reconcileDeliveredOperations()
         if !cameraDirty { localCamera = controller.view }
         let current = controller.document
         let changed = current?.id != knownDocument?.id || current?.revision != knownDocument?.revision
+        if let gesture = geometryGesture, current?.revision != gesture.document.revision {
+            cancelGeometry(); messageLabel.stringValue = "Workspace changed. Move canceled."
+        }
         if changed {
             knownDocument = current
             canvas.install(document: current, camera: localCamera, selected: selectedObject)
@@ -281,6 +542,17 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             refreshReader()
         } else { canvas.setCamera(localCamera) }
         statusLabel.stringValue = statusText
+        canvas.geometryEnabled = !geometryUnavailable && geometryLedger != nil && controller.canSubmit && !controller.isSubmitting && pendingGeometry == nil && uncertainCommand == nil
+        if controller.status != .connected { attemptedGeometryRecovery = false }
+        if let mutation = pendingGeometry, !geometryUnavailable, !attemptedGeometryRecovery,
+           geometryRecoveryTask == nil, controller.canSubmit, controller.deliveryRecord(for: mutation.command.id) == nil {
+            attemptedGeometryRecovery = true
+            geometryRecoveryTask = Task { [weak self] in
+                guard let self else { return }
+                defer { geometryRecoveryTask = nil }
+                await submitGeometry(mutation, prepared: true)
+            }
+        }
         refreshControls()
     }
     private var statusText: String {
@@ -298,7 +570,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             epoch: controller.scope?.epoch, role: controller.scope?.role.rawValue,
             documentRevision: controller.document?.revision, selected: selectedObject,
             hasText: !editor.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-            uncertain: uncertainCommand != nil, camera: controller.view)
+            uncertain: uncertainCommand != nil, camera: controller.view, pendingCount: pendingDeliveryCount)
         guard key != lastControlsKey else { return }
         lastControlsKey = key
         let writable = controller.canSubmit && !controller.isSubmitting
@@ -311,6 +583,10 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         actions.items = [
             .init(id: "discussion", title: "New discussion", icon: .system("bubble.left"), enabled: writable && uncertainCommand == nil),
             .init(id: "agreement", title: "New agreement", icon: .system("doc.text"), enabled: writable && uncertainCommand == nil),
+            .init(id: "undo-layout", title: "Undo layout change", icon: .system("arrow.uturn.backward"), enabled: canUndoSharedGeometry),
+            .init(id: "redo-layout", title: "Redo layout change", icon: .system("arrow.uturn.forward"), enabled: canRedoSharedGeometry),
+            .init(id: "delivery", title: "Check pending delivery (\(pendingDeliveryCount))", icon: .system("arrow.clockwise"), enabled: !controller.isSubmitting && (pendingDeliveryCount > 0 || geometryUnavailable)),
+            .init(id: "handoff", title: "Hand agent off…", icon: .system("person.2"), enabled: writable && selectedObject.flatMap { selected in controller.document?.items.first(where: { $0.id == selected && $0.kind == .agentObservation }) } != nil && onRequestHandoff != nil),
             .init(id: "fit", title: "Fit shared content", icon: .system("arrow.up.left.and.arrow.down.right"), enabled: controller.document?.positions.isEmpty == false),
             .init(id: "invite", title: "Invite collaborator…", icon: .system("person.badge.plus"), enabled: controller.status == .connected && controller.scope?.allows(.manageSharing) == true)
         ]
@@ -338,7 +614,9 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         case .discussion: entries = document.posts.filter { $0.object == object }.map(\.text)
         case .agreement: entries = document.contexts.filter { $0.object == object }.map(\.text)
         case .agentObservation:
-            entries = ["This is an observation of an agent on its publishing host. Transcript history and execution controls are not available in this shared view yet."]
+            entries = [onRequestHandoff == nil
+                ? "This is an observation of an agent on its publishing host. Transcript history and execution controls are not available in this shared view yet."
+                : "History is not shared. Execution stays on the original publishing host; control requires a separate accepted handoff. Use Hand agent off in Workspace to review it."]
         case .artifact: entries = ["This artifact's content is not available in this view."]
         }
         if followsLatestEntry { readerIndex = max(0, entries.count - 1) }
@@ -363,6 +641,10 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     }
     private func performAction(_ action: String) {
         switch action {
+        case "undo-layout": actionTask = Task { [weak self] in await self?.undoSharedGeometry() }
+        case "redo-layout": actionTask = Task { [weak self] in await self?.redoSharedGeometry() }
+        case "delivery": actionTask = Task { [weak self] in await self?.checkPendingDelivery() }
+        case "handoff": if let selectedObject { onRequestHandoff?(selectedObject) }
         case "discussion", "agreement":
             actionTask = Task { [weak self] in await self?.createObject(kind: action == "discussion" ? .discussion : .agreement) }
         case "fit": do { try fitContent() } catch { showPrivateSaveFailure() }
@@ -406,8 +688,11 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         activeDraft = draft; draftDirty = false
     }
     private func navigate(_ value: SharedAreaLocalView, complete: Bool) {
+        onLocalCameraNavigation?()
+        if geometryGesture != nil { cancelGeometry() }
         localCamera = value; localCamera.focusedObject = selectedObject; cameraDirty = true
         canvas.setCamera(localCamera)
+        onCanvasTransformChange?()
         cameraTimer?.invalidate(); cameraTimer = nil
         if complete {
             do { try setCamera(localCamera) } catch { showPrivateSaveFailure() }
@@ -447,7 +732,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
 /// One bounded drawing surface. Content is prepared only when the durable
 /// document changes, never in layout or in response to a pointer packet.
 @MainActor
-private final class SharedAreaSceneCanvas: NSView {
+private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
     struct Card {
         let position: SharedArea.Position
         let title: String
@@ -456,18 +741,37 @@ private final class SharedAreaSceneCanvas: NSView {
     var onSelect: ((SharedArea.ID<SharedArea.Object>?) -> Void)?
     var onCamera: ((SharedAreaLocalView, Bool) -> Void)?
     var onCycleSelection: ((Bool) -> Void)?
+    var onBeginGeometry: ((Set<SharedArea.ID<SharedArea.Placement>>, SharedAreaGeometryHistory.Kind) -> Bool)?
+    var onPreviewGeometry: (([SharedArea.ID<SharedArea.Placement>: SharedArea.Rect]) -> Void)?
+    var onFinishGeometry: (() -> Void)?
+    var onCancelGeometry: (() -> Void)?
+    var onUndoGeometry: (() -> Void)?
+    var onRedoGeometry: (() -> Void)?
+    var canUndoGeometry: (() -> Bool)?
+    var canRedoGeometry: (() -> Bool)?
+    var geometryEnabled = false { didSet { if oldValue != geometryEnabled { needsDisplay = true } } }
     private var cards: [Card] = []
     private var hasDocument = false
     private var camera = SharedAreaLocalView()
     private var selected: SharedArea.ID<SharedArea.Object>?
     private var panStart: (point: NSPoint, camera: SharedAreaLocalView)?
+    private var selectedPlacements = Set<SharedArea.ID<SharedArea.Placement>>()
+    private var previewFrames: [SharedArea.ID<SharedArea.Placement>: SharedArea.Rect] = [:]
+    private struct GeometryDrag {
+        let point: NSPoint
+        let camera: SharedAreaLocalView
+        let positions: [SharedArea.Position]
+        let kind: SharedAreaGeometryHistory.Kind
+        var changed = false
+    }
+    private var geometryDrag: GeometryDrag?
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Shared objects")
-        setAccessibilityHelp("Tab selects the next visible object. Shift-Tab selects the previous object. Escape returns to the workspace controls.")
+        setAccessibilityHelp("Drag to move shared objects. Shift-click selects a group. Drag its lower-right handle to resize. Command-Z undoes your layout change. Tab navigates objects; Escape cancels a gesture.")
     }
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -488,11 +792,29 @@ private final class SharedAreaSceneCanvas: NSView {
             }
             return Card(position: position, title: SharedAreaSceneView.title(for: item.kind), preview: String(body.prefix(800)))
         }
+        selectedPlacements.formIntersection(Set(cards.map { $0.position.id }))
+        if selectedPlacements.isEmpty, let selected,
+           let position = cards.last(where: { $0.position.object == selected })?.position { selectedPlacements = [position.id] }
         needsDisplay = true
     }
-    func setCamera(_ value: SharedAreaLocalView) { guard value != camera else { return }; camera = value; needsDisplay = true }
+    func setCamera(_ value: SharedAreaLocalView) {
+        guard value != camera else { return }
+        if geometryDrag != nil, value.x != camera.x || value.y != camera.y || value.zoom != camera.zoom {
+            cancelGeometryGesture(); onCancelGeometry?()
+        }
+        camera = value; needsDisplay = true
+    }
+    func setPreview(_ frames: [SharedArea.ID<SharedArea.Placement>: SharedArea.Rect]) {
+        guard frames != previewFrames else { return }
+        previewFrames = frames; needsDisplay = true
+    }
+    func cancelGeometryGesture() { geometryDrag = nil; previewFrames = [:]; needsDisplay = true }
     func setSelection(_ value: SharedArea.ID<SharedArea.Object>?) {
         selected = value; needsDisplay = true
+        if let value {
+            if !cards.contains(where: { selectedPlacements.contains($0.position.id) && $0.position.object == value }),
+               let position = cards.last(where: { $0.position.object == value })?.position { selectedPlacements = [position.id] }
+        } else { selectedPlacements.removeAll() }
         setAccessibilityValue(cards.first(where: { $0.position.object == value })?.title)
         NSAccessibility.post(element: self, notification: .valueChanged)
     }
@@ -507,7 +829,7 @@ private final class SharedAreaSceneCanvas: NSView {
         var result: [(card: Card, frame: NSRect)] = []
         var omitted = false
         for card in cards.reversed() {
-            guard let frame = screenFrame(card.position.rect), frame.intersects(bounds) else { continue }
+            guard let frame = screenFrame(previewFrames[card.position.id] ?? card.position.rect), frame.intersects(bounds) else { continue }
             if result.count == 128 { omitted = true; break }
             result.append((card, frame))
         }
@@ -533,8 +855,9 @@ private final class SharedAreaSceneCanvas: NSView {
             let radius = CGFloat(CornerRole.card.radius)
             let path = NSBezierPath(roundedRect: frame.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius)
             SurfaceToken.tileBody.color.nsColor(in: self).setFill(); path.fill()
-            (selected == card.position.object ? LineToken.borderStrong : .border).color.nsColor(in: self).setStroke()
-            path.lineWidth = selected == card.position.object ? 2 : 1; path.stroke()
+            let highlighted = selectedPlacements.contains(card.position.id)
+            (highlighted ? LineToken.borderStrong : .border).color.nsColor(in: self).setStroke()
+            path.lineWidth = highlighted ? 2 : 1; path.stroke()
             NSBezierPath(rect: frame.insetBy(dx: 10, dy: 10)).addClip()
             draw(card.title, rect: .init(x: frame.minX + 14, y: frame.minY + 13, width: max(0, frame.width - 28), height: 22), role: .title, color: .textPrimary)
             if camera.zoom >= 0.35 {
@@ -543,30 +866,107 @@ private final class SharedAreaSceneCanvas: NSView {
             }
             NSGraphicsContext.restoreGraphicsState()
         }
+        if geometryEnabled, let frame = selectedGroupFrame() {
+            LineToken.borderStrong.color.nsColor(in: self).setStroke()
+            if selectedPlacements.count > 1 {
+                let outline = NSBezierPath(rect: frame.insetBy(dx: -3, dy: -3))
+                outline.setLineDash([4, 3], count: 2, phase: 0); outline.lineWidth = 1; outline.stroke()
+            }
+            let handle = NSRect(x: frame.maxX - 4, y: frame.maxY - 4, width: 8, height: 8)
+            SurfaceToken.tileBody.color.nsColor(in: self).setFill(); handle.fill()
+            NSBezierPath(rect: handle).stroke()
+        }
         if visible.omitted { draw("Showing up to 128 visible objects · zoom in to inspect", rect: .init(x: 16, y: bounds.height - 30, width: bounds.width - 32, height: 18), role: .label, color: .textSecondary) }
     }
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
-        if let object = object(at: point) {
-            onSelect?(object)
-        } else { onSelect?(nil); panStart = (point, camera) }
+        panStart = nil
+        let group = selectedGroupFrame()
+        let resize = geometryEnabled && group.map { NSRect(x: $0.maxX - 10, y: $0.maxY - 10, width: 20, height: 20).contains(point) } == true
+        if resize { startGeometry(at: point, kind: .resize); return }
+        if let entry = visibleCards().cards.reversed().first(where: { $0.frame.contains(point) }) {
+            let id = entry.card.position.id
+            if !event.modifierFlags.intersection([.shift, .command]).isEmpty {
+                if selectedPlacements.contains(id) { selectedPlacements.remove(id) } else { selectedPlacements.insert(id) }
+            } else if !selectedPlacements.contains(id) { selectedPlacements = [id] }
+            let active = selectedPlacements.contains(id) ? entry.card.position.object
+                : cards.last(where: { selectedPlacements.contains($0.position.id) })?.position.object
+            onSelect?(active)
+            if geometryEnabled && selectedPlacements.contains(id) { startGeometry(at: point, kind: .move) }
+        } else { selectedPlacements.removeAll(); onSelect?(nil); panStart = (point, camera) }
+    }
+    private func startGeometry(at point: NSPoint, kind: SharedAreaGeometryHistory.Kind) {
+        let positions = cards.filter { selectedPlacements.contains($0.position.id) }.map(\.position)
+        guard !positions.isEmpty, onBeginGeometry?(Set(positions.map(\.id)), kind) == true else { return }
+        geometryDrag = .init(point: point, camera: camera, positions: positions, kind: kind)
     }
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 48 && event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 6 && modifiers == .command { onUndoGeometry?() }
+        else if event.keyCode == 6 && modifiers == [.command, .shift] { onRedoGeometry?() }
+        else if event.keyCode == 48 && event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
             onCycleSelection?(event.modifierFlags.contains(.shift))
         } else if event.keyCode == 53 {
-            window?.selectNextKeyView(self)
+            if geometryDrag != nil { cancelGeometryGesture(); onCancelGeometry?() }
+            else { window?.selectNextKeyView(self) }
         } else { super.keyDown(with: event) }
     }
+    @objc func undo(_ sender: Any?) { onUndoGeometry?() }
+    @objc func redo(_ sender: Any?) { onRedoGeometry?() }
+    func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(undo(_:)) { return canUndoGeometry?() == true }
+        if item.action == #selector(redo(_:)) { return canRedoGeometry?() == true }
+        return true
+    }
     override func mouseDragged(with event: NSEvent) {
+        if var drag = geometryDrag {
+            guard camera.x == drag.camera.x, camera.y == drag.camera.y, camera.zoom == drag.camera.zoom else {
+                cancelGeometryGesture(); onCancelGeometry?(); return
+            }
+            let point = convert(event.locationInWindow, from: nil)
+            guard abs(point.x - drag.point.x) + abs(point.y - drag.point.y) >= 3 else { return }
+            let dx = Double(point.x - drag.point.x) / drag.camera.zoom
+            let dy = Double(point.y - drag.point.y) / drag.camera.zoom
+            guard dx.isFinite && dy.isFinite else { return }
+            let frames: [SharedArea.ID<SharedArea.Placement>: SharedArea.Rect]
+            if drag.kind == .resize {
+                let minX = drag.positions.map(\.rect.x).min()!, minY = drag.positions.map(\.rect.y).min()!
+                let width = drag.positions.map { $0.rect.x + $0.rect.width }.max()! - minX
+                let height = drag.positions.map { $0.rect.y + $0.rect.height }.max()! - minY
+                let sx = max(drag.positions.map { 80 / $0.rect.width }.max() ?? 1, (width + dx) / width)
+                let sy = max(drag.positions.map { 60 / $0.rect.height }.max() ?? 1, (height + dy) / height)
+                frames = Dictionary(uniqueKeysWithValues: drag.positions.map { position in
+                    (position.id, .init(x: minX + (position.rect.x - minX) * sx,
+                        y: minY + (position.rect.y - minY) * sy,
+                        width: position.rect.width * sx, height: position.rect.height * sy))
+                })
+            } else {
+                frames = Dictionary(uniqueKeysWithValues: drag.positions.map { position in
+                    (position.id, .init(x: position.rect.x + dx, y: position.rect.y + dy,
+                        width: position.rect.width, height: position.rect.height))
+                })
+            }
+            guard frames.values.allSatisfy(\.valid) else { return }
+            drag.changed = true; geometryDrag = drag
+            onPreviewGeometry?(frames)
+            return
+        }
         guard let panStart else { return }
         let point = convert(event.locationInWindow, from: nil)
         var moved = panStart.camera
         moved.x -= (point.x - panStart.point.x) / moved.zoom; moved.y -= (point.y - panStart.point.y) / moved.zoom
         onCamera?(moved, false)
     }
-    override func mouseUp(with event: NSEvent) { if panStart != nil { panStart = nil; onCamera?(camera, true) } }
+    override func mouseUp(with event: NSEvent) {
+        if let drag = geometryDrag {
+            mouseDragged(with: event)
+            geometryDrag = nil
+            if drag.changed || !previewFrames.isEmpty { onFinishGeometry?() } else { onCancelGeometry?() }
+            return
+        }
+        if panStart != nil { panStart = nil; onCamera?(camera, true) }
+    }
     override func scrollWheel(with event: NSEvent) {
         var moved = camera
         moved.x += event.scrollingDeltaX / moved.zoom; moved.y += event.scrollingDeltaY / moved.zoom
@@ -582,8 +982,14 @@ private final class SharedAreaSceneCanvas: NSView {
     }
     private func screenFrame(_ rect: SharedArea.Rect) -> NSRect? {
         let values = [(rect.x - camera.x) * camera.zoom, (rect.y - camera.y) * camera.zoom, rect.width * camera.zoom, rect.height * camera.zoom]
-        guard values.allSatisfy(\.isFinite) else { return nil }
+        guard values.allSatisfy(\.isFinite), (values[0] + values[2]).isFinite, (values[1] + values[3]).isFinite else { return nil }
         return .init(x: values[0], y: values[1], width: values[2], height: values[3])
+    }
+    private func selectedGroupFrame() -> NSRect? {
+        let frames = cards.filter { selectedPlacements.contains($0.position.id) }
+            .compactMap { screenFrame(previewFrames[$0.position.id] ?? $0.position.rect) }
+        guard let first = frames.first else { return nil }
+        return frames.dropFirst().reduce(first) { $0.union($1) }
     }
     private func draw(_ text: String, rect: NSRect, role: TextRole, color: TextToken) {
         guard rect.width > 0, rect.height > 0 else { return }

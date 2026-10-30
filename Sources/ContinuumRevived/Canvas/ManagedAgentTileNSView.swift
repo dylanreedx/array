@@ -2454,6 +2454,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             return "There is no agent behind this tile to send to."
         case .unsupported?:
             return "This agent can\u{2019}t run that. \(retry)"
+        case .sharedAgentControlRequired?:
+            return "Shared agent control has been handed off or could not be verified. Open the shared workspace's handoff controls to check ownership. Your draft stays here."
         case .emptyDraft?, .noTurnInProgress?, nil:
             return "Message was not sent. \(retry)"
         }

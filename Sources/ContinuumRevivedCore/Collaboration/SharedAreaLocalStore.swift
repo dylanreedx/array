@@ -62,7 +62,7 @@ public enum SharedAreaLocalResolution: Equatable, Sendable {
 }
 
 public struct SharedAreaLocalState: Codable, Equatable, Sendable {
-    public static let currentSchema = 2
+    public static let currentSchema = 3
     public let schema: Int
     public let scope: SharedAreaLocalScope
     /// Optimistic local concurrency token, independent of the server revision.
@@ -77,12 +77,14 @@ public struct SharedAreaLocalState: Codable, Equatable, Sendable {
     /// Confirmed loss of online access suppresses cached content on reopening.
     /// This is a UI/recovery marker, never authority to submit or read remotely.
     public var accessDenied: Bool
+    /// Exact document intents and final receipts, private to this local person/area.
+    public var operations: [SharedAreaPendingOperation]
 
     public init(scope: SharedAreaLocalScope, document: SharedArea.Document, observedMembershipEpoch: Int64,
-                sourceBindings: [SharedAreaLocalSourceBinding] = [], view: SharedAreaLocalView = .init(), drafts: [SharedAreaLocalDraft] = [], accessDenied: Bool = false) {
+                sourceBindings: [SharedAreaLocalSourceBinding] = [], view: SharedAreaLocalView = .init(), drafts: [SharedAreaLocalDraft] = [], accessDenied: Bool = false, operations: [SharedAreaPendingOperation] = []) {
         schema = Self.currentSchema; self.scope = scope; self.localGeneration = 0; self.document = document
         self.observedMembershipEpoch = observedMembershipEpoch; self.sourceBindings = sourceBindings
-        self.view = view; self.drafts = drafts; self.accessDenied = accessDenied
+        self.view = view; self.drafts = drafts; self.accessDenied = accessDenied; self.operations = operations
     }
     public var appliedRevision: UInt64 { document.revision }
     public func resolution(for object: SharedArea.ID<SharedArea.Object>) -> SharedAreaLocalResolution {
@@ -101,6 +103,18 @@ public struct SharedAreaLocalState: Codable, Equatable, Sendable {
         guard scope.area == document.id, observedMembershipEpoch > 0, view.valid else { throw SharedAreaLocalStoreError.invalidState }
         guard Set(sourceBindings.map(\.object)).count == sourceBindings.count,
               Set(drafts.map(\.id)).count == drafts.count else { throw SharedAreaLocalStoreError.invalidState }
+        guard Set(operations.map { $0.command.id }).count == operations.count,
+              operations.filter(\.isPending).count <= 64,
+              operations.filter({ !$0.isPending }).count <= 64 else { throw SharedAreaLocalStoreError.invalidState }
+        for operation in operations {
+            try operation.validate(scope: scope)
+            guard operation.sourceBindings.allSatisfy({ sourceBindings.contains($0) }) else { throw SharedAreaLocalStoreError.invalidState }
+            if case .accepted(let revision) = operation.state {
+                var probe = document
+                guard try probe.apply(operation.command) == .duplicate(revision) else { throw SharedAreaLocalStoreError.invalidState }
+            }
+        }
+        guard try JSONEncoder().encode(operations).count <= 16 * 1024 * 1024 else { throw SharedAreaLocalStoreError.invalidState }
         for binding in sourceBindings {
             // Retain a missing source reference for honest unavailable/recovery UI.
             guard let item = document.items.first(where: { $0.id == binding.object }) else { continue }
@@ -110,12 +124,15 @@ public struct SharedAreaLocalState: Codable, Equatable, Sendable {
         }
     }
     private enum CodingKeys: String, CodingKey {
-        case schema, scope, localGeneration, document, observedMembershipEpoch, sourceBindings, view, drafts, accessDenied
+        case schema, scope, localGeneration, document, observedMembershipEpoch, sourceBindings, view, drafts, accessDenied, operations
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        schema = try c.decode(Int.self, forKey: .schema)
-        guard schema == Self.currentSchema else { throw SharedAreaLocalStoreError.unsupportedSchema }
+        let storedSchema = try c.decode(Int.self, forKey: .schema)
+        guard storedSchema == 2 || storedSchema == Self.currentSchema else { throw SharedAreaLocalStoreError.unsupportedSchema }
+        // Migration is in memory until the next atomic successful save. Original
+        // v2 bytes/backups stay intact on any future decode/write failure.
+        schema = Self.currentSchema
         scope = try c.decode(SharedAreaLocalScope.self, forKey: .scope)
         localGeneration = try c.decode(UInt64.self, forKey: .localGeneration)
         guard localGeneration > 0 else { throw SharedAreaLocalStoreError.invalidState }
@@ -125,6 +142,14 @@ public struct SharedAreaLocalState: Codable, Equatable, Sendable {
         view = try c.decode(SharedAreaLocalView.self, forKey: .view)
         drafts = try c.decode([SharedAreaLocalDraft].self, forKey: .drafts)
         accessDenied = try c.decodeIfPresent(Bool.self, forKey: .accessDenied) ?? false
+        if storedSchema == 2 {
+            guard !c.contains(.operations) else { throw SharedAreaLocalStoreError.invalidState }
+            operations = []
+        } else {
+            // A current record missing its outbox is corrupt, not an empty
+            // queue. Do not silently erase delivery recovery on partial edits.
+            operations = try c.decode([SharedAreaPendingOperation].self, forKey: .operations)
+        }
         try validate()
     }
 }

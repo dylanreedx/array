@@ -51,6 +51,9 @@ public enum IntentRefusal: String, Equatable, Sendable {
     /// installed, a model it cannot run). The words are the supervisor's
     /// `sendRefusal(for:)`, the one copy of that rule.
     case harnessNotReady
+    /// Shared-agent input is admitted with an explicit immutable context and
+    /// current controller through the collaboration handoff route.
+    case sharedAgentControlRequired
 }
 
 /// Provider response shape compiled at the provider-neutral seam. The current

@@ -55,7 +55,7 @@ public struct CollaborationAPI: Sendable {
     public func removeMember(area: UUID, person: UUID, epoch: Int64) async throws {
         let _: Collaboration.ErrorBody = try await request("DELETE", "areas/\(area)/members/\(person)", body: Optional<Int>.none, epoch: epoch)
     }
-    private func request<Response: Decodable, Body: Encodable>(_ method: String, _ path: String, body: Body?, epoch: Int64? = nil) async throws -> Response {
+    func request<Response: Decodable, Body: Encodable>(_ method: String, _ path: String, body: Body?, epoch: Int64? = nil) async throws -> Response {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = method; request.timeoutInterval = 35
         request.cachePolicy = .reloadIgnoringLocalCacheData; request.httpShouldHandleCookies = false

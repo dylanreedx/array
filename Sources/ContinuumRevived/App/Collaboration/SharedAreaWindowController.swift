@@ -8,6 +8,7 @@ final class SharedAreaWindowController: NSObject, NSWindowDelegate {
     let controller: SharedAreaController
     let window: NSWindow
     let scene: SharedAreaSceneView
+    let presencePublisher: SharedAreaPresencePublisher
     var onClose: (() -> Void)?
     private var openTask: Task<Void, Never>?
     private var closed = false
@@ -20,6 +21,7 @@ final class SharedAreaWindowController: NSObject, NSWindowDelegate {
         window.minSize = NSSize(width: 820, height: 560)
         window.isReleasedWhenClosed = false
         scene = delegate.mountWorkspaceSceneAtBoot(sharedAreaController: controller, person: person, in: window)
+        presencePublisher = SharedAreaPresencePublisher(scene: scene)
         super.init()
         window.delegate = self
         window.center()
@@ -27,6 +29,7 @@ final class SharedAreaWindowController: NSObject, NSWindowDelegate {
     func show() {
         guard !closed else { return }
         CollaborationWindow.present(window)
+        presencePublisher.start()
         guard openTask == nil else { return }
         openTask = Task { [weak self] in
             guard let self, !closed else { return }
@@ -37,6 +40,7 @@ final class SharedAreaWindowController: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard !closed else { return }
         closed = true; openTask?.cancel(); openTask = nil
+        presencePublisher.stop()
         scene.unmount()
         let controller = controller
         Task { await controller.close() }

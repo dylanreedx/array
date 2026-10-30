@@ -110,7 +110,10 @@ public actor CollaborationSession {
             switch error {
             case .invalidSequence, .server(status: 409, code: _):
                 replica = nil; through = nil
-            case .server(let status, _) where status >= 500: break
+            // Subscription capacity is temporary, not a membership decision.
+            // Keep the validated replica/cursor while the existing bounded
+            // reconnect loop waits for another held read to release its slot.
+            case .server(let status, _) where status == 429 || status >= 500: break
             default:
                 finishUnavailable()
                 return false

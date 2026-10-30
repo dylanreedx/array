@@ -117,12 +117,15 @@ func runCollaborationUpdatesChecks() async throws {
         let revoked = try await apiA.updates(area: area, request: .init(after: 603, waitMilliseconds: 0))
         try expect(revoked.presence.isEmpty && revoked.scope.epoch == 2, "active removal purges presence and updates membership epoch")
 
-        let waiter1 = Task { try await apiA.updates(area: area, request: .init(after: 603, presenceVersion: revoked.presenceVersion)) }
-        let waiter2 = Task { try await apiA.updates(area: area, request: .init(after: 603, presenceVersion: revoked.presenceVersion)) }
-        try await waitForReaders(store, 2)
+        // A native scene, retained source host and independent capture review
+        // coexist. Keep one slot for a replacing/cancelling view as well.
+        let waiters = (0..<4).map { _ in Task { try await apiA.updates(area: area,
+            request: .init(after: 603, presenceVersion: revoked.presenceVersion)) } }
+        try await waitForReaders(store, 4)
+        print("PASS updates: native scene, source host, capture review and replacement subscription coexist")
         try await denied(429) { _ = try await apiA.updates(area: area, request: .init(after: 603, presenceVersion: revoked.presenceVersion)) }
-        waiter1.cancel(); waiter2.cancel()
-        _ = try? await waiter1.value; _ = try? await waiter2.value
+        for waiter in waiters { waiter.cancel() }
+        for waiter in waiters { _ = try? await waiter.value }
         try await waitForReaders(store, 0)
         print("PASS updates: cancellation releases held requests without waiting for timeout")
         var malformed = fixed

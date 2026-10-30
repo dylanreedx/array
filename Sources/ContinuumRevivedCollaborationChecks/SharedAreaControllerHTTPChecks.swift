@@ -193,6 +193,8 @@ func runSharedAreaControllerHTTPChecks() async throws {
         let ownerReopened = try controller(a, localA); controllers.append(ownerReopened)
         try controllerHTTPCheck(ownerReopened.view == cameraA && ownerReopened.scope == nil, "closing and reopening retains only private navigation until current authority returns")
         for client in controllers { await client.close() }
+        try await runCollaborationOverloadChecks(api: apiA, store: store, credentials: credentials, endpoint: endpoint,
+            credential: a, root: root.appendingPathComponent("overload-recovery"))
         try await server.stop()
     } catch {
         for client in controllers { await client.close() }

@@ -45,9 +45,14 @@ final class SharedAreaCaptureCoordinator {
 
     var canEditReview: Bool { state == .reviewing && !requiresRefresh }
     var canConfirm: Bool { canEditReview && review.readyToConfirm && controller.canSubmit }
-    /// Unknown delivery retains the operation in this review until its receipt
-    /// is recovered. A durable outbox will eventually make closing independent.
-    var canClose: Bool { state != .submitting && state != .uncertain }
+    /// An unknown request may close only after the exact command/bindings have
+    /// reached durable storage. The workspace recovers it after relaunch.
+    var canClose: Bool {
+        guard state != .submitting else { return false }
+        guard state == .uncertain else { return true }
+        guard let operation = pendingPublication?.command.id else { return false }
+        return controller.deliveryRecord(for: operation) != nil
+    }
     var readyCount: Int { review.rows.filter { if case .ready = $0.disposition { return true }; return false }.count }
     var pendingCount: Int { review.rows.filter { $0.disposition == .needsReview }.count }
     var excludedCount: Int { review.rows.count - readyCount - pendingCount }
@@ -121,13 +126,22 @@ final class SharedAreaCaptureCoordinator {
                 onChange?(); return
             }
         }
-        await deliver(pendingPublication)
+        if controller.deliveryRecord(for: pendingPublication.command.id) != nil {
+            state = .submitting; message = "Checking the saved request…"; onChange?()
+            let result = await controller.retryPending(pendingPublication.command.id)
+            finishDelivery(result, wasUncertain: true)
+        } else {
+            await deliver(pendingPublication)
+        }
     }
 
     private func deliver(_ publication: Publication.Confirmed) async {
         let wasUncertain = state == .uncertain
         state = .submitting; message = "Sharing the reviewed selection…"; onChange?()
         let result = await submitter(publication)
+        finishDelivery(result, wasUncertain: wasUncertain)
+    }
+    private func finishDelivery(_ result: SharedAreaController.Submission, wasUncertain: Bool) {
         switch result {
         case .accepted:
             pendingPublication = nil; state = .published
@@ -135,12 +149,17 @@ final class SharedAreaCaptureCoordinator {
             onChange?(); onPublished?()
         case .uncertain:
             state = .uncertain
-            message = "Delivery is unknown. Check delivery to recover this exact request before making another capture."
+            message = "Delivery is unknown. The exact request is saved in this workspace; check delivery now or reopen the workspace after relaunch."
             onChange?()
         case .rejected(let reason):
             // A retry of a previously uncertain request that cannot currently
             // reach authority still has an unknown outcome. Keep its identity.
-            if wasUncertain {
+            let resolvedRejection: Bool
+            if let operation = pendingPublication?.command.id,
+               let record = controller.deliveryRecord(for: operation), case .rejected = record.state {
+                resolvedRejection = true
+            } else { resolvedRejection = false }
+            if wasUncertain && !resolvedRejection {
                 state = .uncertain
                 message = "Delivery is still unknown. Reconnect and check this same request again; current permission or revision errors do not undo an earlier commit."
             } else {

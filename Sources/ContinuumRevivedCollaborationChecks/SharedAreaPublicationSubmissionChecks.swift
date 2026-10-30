@@ -160,8 +160,8 @@ func runSharedAreaPublicationSubmissionChecks() async throws {
             "receipt recovery after source removal never resurrects the object or regresses its cursor")
     } else { throw PublicationSubmissionFailure(message: "removed publication could not recover its old receipt") }
     let sent = await fixture.commands
-    try publicationSubmissionExpect(sent.count == 3 && sent.allSatisfy { $0 == publication.command },
-        "unknown recovery always sends the same confirmed command and opaque publication identities")
+    try publicationSubmissionExpect(sent.count == 1 && sent.allSatisfy { $0 == publication.command },
+        "verified durable receipts recover without resending accepted publication identities")
     await controller.close()
 
     let viewerStore = try SharedAreaLocalStore(applicationSupportRoot: root.appendingPathComponent("viewer"), bundleIdentifier: nil,
@@ -195,5 +195,5 @@ func runSharedAreaPublicationSubmissionChecks() async throws {
             "a mismatched acknowledgement cannot advance or bless the publication cursor")
     } else { throw PublicationSubmissionFailure(message: "malformed acknowledgement was accepted as a publication receipt") }
     await invalidReceiptController.close()
-    print("Publication submission checks passed: scoped admission, binding-before-effect refusal, lost-reply identity, atomic accepted cache and removal-safe receipt recovery; no durable outbox claim.")
+    print("Publication submission checks passed: scoped admission, binding-before-effect refusal, durable lost-reply identity, atomic accepted cache and removal-safe receipt recovery.")
 }

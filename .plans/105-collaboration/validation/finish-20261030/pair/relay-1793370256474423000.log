@@ -1,0 +1,3 @@
+{"admin_port":"63117","event":"ready","level":"info","public_port":"63116","timestamp":"2026-10-30T14:24:16Z"}
+{"event":"shutting_down","level":"info","timestamp":"2026-10-30T14:24:20Z"}
+{"event":"stopped","level":"info","timestamp":"2026-10-30T14:24:20Z"}

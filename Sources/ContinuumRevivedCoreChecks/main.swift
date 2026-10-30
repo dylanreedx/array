@@ -167,6 +167,11 @@ if CommandLine.arguments.contains("--transcript-rehydration-check") {
 
 // CX-01 (`.plans/59`): targeted arms so the two new sections can run without the
 // process-spawning legs of the full run.
+if CommandLine.arguments.contains("--collaboration-usage-telemetry-check") {
+    runPiEventTranslatorChecks()
+    print("Collaboration provider usage telemetry checks passed")
+    Foundation.exit(0)
+}
 if CommandLine.arguments.contains("--workspace-api-exposure-check") {
     runWorkspaceAPIExposureChecks()
     Foundation.exit(0)

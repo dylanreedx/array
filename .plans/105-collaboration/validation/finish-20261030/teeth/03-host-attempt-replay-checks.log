@@ -1,0 +1,259 @@
+PASS: atomic capture accepted
+PASS: capture preserves relative layout
+PASS: retry returns original receipt
+PASS: retry does not mutate document
+PASS: refuses changedIntent
+PASS: refuses conflict
+PASS: refuses invalidGeometry
+PASS: last-edit failure rolls back entire group
+PASS: refuses invalidGeometry
+PASS: refuses conflict
+PASS: context conflict preserves accepted history
+PASS: refuses duplicateIdentity
+PASS: deleted identity remains reserved
+PASS: receipt survives snapshot restore
+PASS: refuses duplicateIdentity
+PASS: accepted replay produces identical canonical bytes
+PASS: refuses unsupportedSchema
+PASS: refuses wrongArea
+PASS: refuses missingObject
+PASS: refuses duplicateIdentity
+PASS: portable payload excludes rootPath
+PASS: portable payload excludes projectId
+PASS: portable payload excludes zoneId
+PASS: portable payload excludes viewport
+PASS: portable payload excludes runnerHandle
+PASS: portable payload excludes authToken
+PASS: portable payload excludes workingDirectory
+PASS: capture fixture uses distinct project owners
+PASS: capture preserves local tile records byte for byte
+PASS: actual Tile adapter preserves model coordinates
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: private source sentinel absent from shared document
+PASS: refuses invalidGeometry
+PASS: refuses unsupportedSchema
+PASS: refuses invalidReference
+PASS credentials: URL aliases normalize without splitting credentials
+PASS credentials: root and default port normalize
+PASS credentials: meaningful service base paths remain distinct
+PASS credentials: loopback HTTP requires explicit opt-in
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: rejects unsafe endpoint form
+PASS credentials: loopback permission cannot allow remote plaintext service
+PASS credentials: prod, dev and editor-test credentials use different services
+PASS credentials: bare binaries use dev credential namespace
+PASS credentials: canonical endpoint and identity round trip
+PASS credentials: other channels cannot see dev credential
+PASS credentials: endpoint/person/device contributes to credential account
+PASS credentials: another service/person/device sees no credential
+PASS credentials: endpoint/person/device contributes to credential account
+PASS credentials: another service/person/device sees no credential
+PASS credentials: endpoint/person/device contributes to credential account
+PASS credentials: another service/person/device sees no credential
+PASS credentials: save refuses identity swap
+PASS credentials: save refuses identity swap
+PASS credentials: serialized credential moved to another person refuses
+PASS credentials: refusal preserves displaced record
+PASS credentials: serialized credential moved to another endpoint refuses
+PASS credentials: serialized credential copied across channels refuses
+PASS credentials: other-channel removal preserves dev account
+PASS credentials: invalid bearer token refuses before persistence
+PASS credentials: invalid bearer token refuses before persistence
+PASS credentials: invalid bearer token refuses before persistence
+PASS credentials: invalid bearer token refuses before persistence
+PASS credentials: future credential schema refuses load
+PASS credentials: future credential schema refuses automatic overwrite
+PASS credentials: future credential bytes remain intact
+PASS credentials: corrupt credential refuses load
+PASS credentials: corrupt credential refuses automatic overwrite
+PASS credentials: corrupt credential bytes remain intact
+PASS credentials: vault write failure propagates
+PASS credentials: failed replacement retains original credential
+PASS credentials: explicit removal is scoped and idempotent
+PASS credentials: credential contract never requests provider or companion namespaces
+Collaboration credential checks passed with an injected memory vault; real Keychain adapter remains unexercised.
+PASS local store: missing cache is empty only without recovery history
+PASS local store: document, cursor, binding, view and private draft survive save/load
+PASS local store: fresh store restores applied cursor with its document
+PASS local store: own source resolves only to explicit local IDs
+PASS local store: remote source remains a projection reference
+PASS local store: missing object remains unavailable
+PASS local store: channel/person/endpoint/area scope cannot load another cache
+PASS local store: refuses scopeMismatch
+PASS local store: channel/person/endpoint/area scope cannot load another cache
+PASS local store: refuses scopeMismatch
+PASS local store: channel/person/endpoint/area scope cannot load another cache
+PASS local store: refuses scopeMismatch
+PASS local store: channel/person/endpoint/area scope cannot load another cache
+PASS local store: refuses scopeMismatch
+PASS local store: refuses scopeMismatch
+PASS local store: cross-channel cache refusal preserves displaced bytes
+PASS local store: canonical endpoint aliases resolve the same private cache
+PASS local store: cached shared content and drafts are owner-readable only
+PASS local store: forged local binding cannot resolve a remote source before save
+PASS local store: refuses invalidState
+PASS local store: refuses invalidState
+PASS local store: refuses invalidState
+PASS local store: removing a local view binding does not turn a projection into an executor
+PASS local store: cache/view changes leave source project records byte-identical
+PASS local store: portable document excludes private draft and source-local IDs
+PASS local store: atomic cache write participates in the real store fault seam
+PASS local store: failed commit preserves prior cache bytes
+PASS local store: failed commit does not advance draft/view/cursor
+PASS local store: save returns an incremented local generation
+PASS local store: refuses staleGeneration
+PASS local store: stale same-server-revision private save preserves winning draft bytes
+PASS local store: private draft survives a racing view edit
+PASS local store: explicit reload/merge preserves both private edits
+PASS local store: refuses staleGeneration
+PASS local store: refuses staleState
+PASS local store: another store cannot roll back the accepted document cursor
+PASS local store: refuses staleState
+PASS local store: refuses unsupportedSchema
+PASS local store: refuses unsupportedSchema
+PASS local store: future schema stays intact despite valid older backups
+PASS local store: schema refusal preserves recovery generations
+PASS local store: refuses corruptState
+PASS local store: refuses corruptState
+PASS local store: corrupt primary is never silently replaced by older content
+PASS local store: refuses recoveryRequired
+PASS local store: refuses recoveryRequired
+PASS local store: refuses invalidRoot
+PASS local store: refuses invalidRoot
+PASS local store: symlinked cache target cannot touch another file
+Shared area local store checks passed: isolated cache/bindings/drafts, atomic persistence and refusal preservation; no native scene or runner claim.
+PASS publication: complete model inventory includes unsupported terminal as an explicit row
+PASS publication: agent review truthfully includes an opaque source and no transcript history
+PASS publication: agreement review shows the exact explicitly captured text
+PASS publication: confirmed command atomically admits selected source and initial agreement content
+PASS publication: negative WORLD origin normalizes once while preserving cross-project layout
+PASS publication: faraway unsupported terminal cannot alter published object offsets
+PASS publication: faraway explicitly omitted member cannot influence shared capture origin
+PASS publication: refuses reviewChanged
+PASS publication: only actual managed agent has a separate private local source binding
+PASS publication: review and confirmation preserve source models byte for byte
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: private source sentinel absent from exact portable bytes
+PASS publication: same confirmed review preserves operation identity and generated source bindings
+PASS publication: enumeration ordering alone does not change selected publication intent
+PASS publication: refuses incompleteCoverage
+PASS publication: refuses incompleteCoverage
+PASS publication: refuses incompleteCoverage
+PASS publication: explicit model tile selection works without claiming workspace coverage
+PASS publication: refuses missingSource
+PASS publication: zone review uses complete supplied zone models including non-live members
+PASS publication: capture rectangle excludes a partially overlapping note
+PASS publication: a selected managed agent is never implicitly approved
+PASS publication: refuses nothingToPublish
+PASS publication: refuses reviewIncomplete
+PASS publication: artifact intent is visibly unsupported rather than publishing a misleading empty payload
+PASS publication: unresolved local agent cannot become an executable fallback
+PASS publication: note text without an owner-captured content revision cannot be admitted
+PASS publication: refuses nothingToPublish
+PASS publication: note text without an owner-captured content revision cannot be admitted
+PASS publication: refuses nothingToPublish
+PASS publication: same tile UUID in separate projects retains distinct publication choices, objects and local agent bindings
+PASS publication: explicit source key cannot select another project's repeated tile UUID
+PASS publication: refuses reviewChanged
+PASS publication: refuses reviewChanged
+PASS publication: refuses reviewChanged
+PASS publication: refuses reviewChanged
+PASS publication: refuses reviewChanged
+PASS publication: refuses reviewChanged
+PASS publication: refuses duplicateChoice
+PASS publication: refuses invalidContent
+PASS shared geometry: one group gesture is one atomic two-placement command
+PASS shared geometry: negative-origin group movement changes complete frames and preserves ordering
+PASS shared geometry: reducer records causal write identity beside accepted geometry
+PASS shared geometry: geometry provenance survives the real snapshot codec
+PASS shared geometry: semantic Undo restores only its placements and preserves a newer teammate post
+PASS shared geometry: Redo is another conditional authorized placement operation
+PASS shared geometry: duplicate delivery receipts never duplicate geometry history
+PASS shared geometry: equal-frame teammate ABA invalidates Undo without overwriting either group member
+PASS shared geometry: conflicting simultaneous group is refused atomically with no mixed coordinates
+PASS shared geometry: invalid geometry cannot become a prepared command
+PASS shared geometry: geometry cannot create a member from an unknown placement
+PASS shared geometry: successive own Undo follows causal lineage instead of treating compensation as a teammate write
+PASS shared geometry: successive Redo restores the two accepted intentions in order
+PASS shared geometry: legacy snapshots keep geometry but do not invent causal Undo evidence
+PASS shared geometry: snapshot provenance requires a real matching operation receipt
+PASS geometry recovery: crash before transport retains exact command and inverse without inventing an accepted Undo
+PASS geometry recovery: remote-success/local-ack crash recovers durable Undo from the exact authoritative receipt
+PASS geometry recovery: crash after an Undo effect recovers the matching Redo stack without repeating the inverse
+PASS geometry recovery: device-local inverse history is written with private file permissions
+PASS geometry recovery: stale multi-view geometry history refuses without overwriting the newer receipt
+PASS geometry recovery: pre-effect ledger failure preserves prior accepted history and retains no partial intent
+PASS geometry recovery: history scope binds person, device and shared area
+PASS geometry recovery: future history schema is preserved for explicit recovery
+Geometry ledger recovery passed: pre-effect intent, cold authoritative receipt, inverse crash, CAS refusal, failed save and scope/schema preservation.
+Shared geometry contracts passed: atomic groups, conditional compensation, teammate ABA, conflicting moves, strict provenance, legacy snapshots and durable inverse recovery.
+PASS durable usage: temporary missing reporter clears when coverage becomes complete without erasing historical attribution gaps
+PASS durable usage: first cumulative session measurement retains reported total without inventing prior day attribution
+PASS durable usage: duplicate measurements and duplicate views create no new accounting write or tokens
+PASS durable usage: cold restart retains exact cumulative high-water and daily deltas
+PASS durable usage: reordered older cumulative reports cannot subtract or add usage
+PASS durable usage: distinct turns/messages sum, while corrected message accounting adds only its delta
+PASS durable usage: UTC day rollover preserves reported lifetime total and resets only current-day observations
+PASS durable usage: idle hover reads do not mutate durable accounting
+PASS durable usage: portable usage excludes private counter identities, prompts and local paths
+PASS durable usage: corrupt ledger refuses instead of resetting reported totals
+PASS durable usage: corruption failure preserves original bytes
+PASS durable usage: future accounting schema refuses
+PASS durable usage: future schema refusal preserves bytes
+PASS durable recovery: outbox write failure preserves complete cache bytes and refuses every remote effect
+PASS durable recovery: pre-commit disconnect retains original operation ID
+PASS durable recovery: exact command, draft and attempt boundary are durable and block allocation of another mutation
+PASS durable recovery: fresh controller reconstructs exact pending intent without offline authority
+PASS durable recovery: relaunch revalidates the new epoch and sends the identical data intent exactly once in the document
+PASS durable recovery: recovery preserves a newer private draft and independent camera
+PASS durable recovery: authenticated retained receipt resolves a post-commit crash without resending or duplicating content
+PASS durable recovery: a stale epoch preserves its exact pending operation
+PASS durable recovery: online epoch refresh retries the identical ID without rebasing or discarding its intent
+PASS durable recovery: HTTP timeout and a later forbidden response preserve exact unknown outcome
+PASS durable recovery: a retained authoritative receipt resolves a timeout plus later permission denial without another effect
+PASS durable recovery: cold publication recovery preserves reviewed IDs and source bindings without reconstructing source inventory
+PASS durable recovery: later authoritative revision proves obsolete intent absent, preserves draft and never rebases its ID
+PASS durable recovery: revocation suppresses shared content while retaining exact unknown intent and private draft across relaunch
+PASS durable recovery: revoked recovery sends no mutation with cached authority
+PASS durable recovery: schema-2 cache migration preserves original disk bytes until an atomic new save
+PASS durable recovery: missing current outbox refuses without discarding recovery bytes
+PASS durable recovery: future schema refusal preserves the previous complete recovery record
+Durable recovery checks passed: cache-before-effect, cold reconstruction, exact retry/receipt reconciliation, current epoch, conflicts/revocation, draft/camera preservation and schema refusal.
+PASS host dispatch: native-facing controller completes explicit targeted handoff through real HTTP
+PASS host dispatch: failed irreversible marker commits no provider acceptance after a durable service claim
+PASS host dispatch: host writes the attempt before its single acceptance and preserves a lost outcome report
+PASS host dispatch: source view reattachment preserves logical host generation and AgentID
+PASS host dispatch: both client relaunch and lost host report recover the original accepted receipt without another prompt
+PASS host dispatch: crash fixture persists its irreversible boundary
+FAIL: HostDispatchCheckFailure(message: "crash after attempt marker reports honest uncertainty and never replays an executable prompt")

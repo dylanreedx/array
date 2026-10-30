@@ -343,11 +343,20 @@ public struct TokenUsageSnapshot: Codable, Equatable, Sendable {
     public var inputTokens: Int
     public var outputTokens: Int
     public var totalCostUsd: Double?
+    /// Optional stable accounting identity for per-message reporters (Pi).
+    /// Context occupancy and cumulative session reporters do not require it.
+    public var accountingObservationID: String?
+    public var accountingInputTokens: Int?
+    public var observedAt: Date?
 
-    public init(inputTokens: Int, outputTokens: Int, totalCostUsd: Double?) {
+    public init(inputTokens: Int, outputTokens: Int, totalCostUsd: Double?, accountingObservationID: String? = nil,
+                accountingInputTokens: Int? = nil, observedAt: Date? = nil) {
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
         self.totalCostUsd = totalCostUsd
+        self.accountingObservationID = accountingObservationID
+        self.accountingInputTokens = accountingInputTokens
+        self.observedAt = observedAt
     }
 }
 

@@ -1,0 +1,36 @@
+{
+  "allSourceBytesRestored": true,
+  "mutants": [
+    {
+      "exitCode": 1,
+      "failure": "FAIL: teammate ABA made an old inverse applicable",
+      "name": "01-geometry-aba",
+      "seconds": 10.81
+    },
+    {
+      "exitCode": 1,
+      "failure": "FAIL: RecoveryFailure(message: \"failed outbox write was admitted\")",
+      "name": "02-outbox-refusal",
+      "seconds": 4.98
+    },
+    {
+      "exitCode": 1,
+      "failure": "FAIL: HostDispatchCheckFailure(message: \"crash after attempt marker reports honest uncertainty and never replays an executable prompt\")",
+      "name": "03-host-attempt-replay",
+      "seconds": 5.22
+    },
+    {
+      "exitCode": 1,
+      "failure": "FAIL: UsageCheckFailure(message: \"duplicate measurements and duplicate views create no new accounting write or tokens\")",
+      "name": "04-usage-dedup",
+      "seconds": 4.74
+    }
+  ],
+  "restoredBuildAndChecksGreen": true,
+  "sourceHashes": {
+    "Sources/ContinuumRevivedCore/Collaboration/SharedAgentHandoffTransport.swift": "cef491e6b35077acb17481729ae90e0f19535d9a5fdd7ae93737102dab6a5b58",
+    "Sources/ContinuumRevivedCore/Collaboration/SharedAreaController.swift": "dd27e1690edba81e847b0119342690130f837b803e4901227a7bb2385323dd2c",
+    "Sources/ContinuumRevivedCore/Collaboration/SharedAreaGeometryHistory.swift": "bd5e0f212037fbc3d7b9ca30624a710aec69be2804418feea79c224f0211730a",
+    "Sources/ContinuumRevivedCore/Collaboration/SharedAreaUsageLedger.swift": "d45b21a765cc267e2ee07d466d9480a70ceb0a22295a8d045f7fb9dbc8bafa66"
+  }
+}

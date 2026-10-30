@@ -76,7 +76,14 @@ private func runPiContextWindowTelemetryChecks() {
     let messageEndEvents = translator.translate(line:
         #"{"type":"message_end","message":{"role":"assistant","usage":{"input":1026,"output":43,"cacheRead":7,"cacheWrite":11,"reasoning":13,"totalTokens":1069,"cost":{"input":0.00513,"output":0.00129,"cacheRead":0.00007,"cacheWrite":0.00011,"total":0.00642}},"timestamp":1785037741229,"content":[{"type":"toolCall","arguments":{"prompt":"SECRET-TOOL-DETAIL"}}]}}"#
     )
-    expect(messageEndEvents.contains(.tokenUsageUpdated(threadId: "pi-unknown", snapshot: TokenUsageSnapshot(inputTokens: 1026, outputTokens: 43, totalCostUsd: 0.00642))),
+    expect(messageEndEvents.contains { event in
+        if case let .tokenUsageUpdated(thread, snapshot) = event {
+            return thread == "pi-unknown" && snapshot.inputTokens == 1026 && snapshot.outputTokens == 43
+                && snapshot.totalCostUsd == 0.00642 && snapshot.accountingInputTokens == 1044
+                && snapshot.accountingObservationID != nil && snapshot.observedAt == observedAt
+        }
+        return false
+    },
            "Pi usage: message_end must still update per-message token usage; got \(messageEndEvents)")
     guard case let .contextWindowUpdated(threadId, snapshot)? = messageEndEvents.first(where: {
         if case .contextWindowUpdated = $0 { return true }
@@ -117,7 +124,14 @@ private func runPiContextWindowTelemetryChecks() {
     let turnEndEvents = translator.translate(line:
         #"{"type":"turn_end","message":{"role":"assistant","usage":{"input":1086,"output":4,"cacheRead":0,"cacheWrite":0,"totalTokens":1090,"cost":{"total":0.00555}},"timestamp":1785037743287}}"#
     )
-    expect(turnEndEvents.contains(.tokenUsageUpdated(threadId: "pi-unknown", snapshot: TokenUsageSnapshot(inputTokens: 1086, outputTokens: 4, totalCostUsd: 0.00555))),
+    expect(turnEndEvents.contains { event in
+        if case let .tokenUsageUpdated(thread, snapshot) = event {
+            return thread == "pi-unknown" && snapshot.inputTokens == 1086 && snapshot.outputTokens == 4
+                && snapshot.totalCostUsd == 0.00555 && snapshot.accountingObservationID != nil
+                && snapshot.accountingInputTokens == 1086
+        }
+        return false
+    },
            "Pi usage: turn_end must parse committed usage shape before completion; got \(turnEndEvents)")
     expect(!turnEndEvents.contains { if case .turnCompleted = $0 { return true }; return false },
            "Pi usage: internal turn_end must not emit lifecycle completion; got \(turnEndEvents)")

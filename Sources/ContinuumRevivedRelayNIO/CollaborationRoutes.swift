@@ -9,11 +9,13 @@ enum CollaborationRoutes {
         do {
             let parts = head.uri.split(separator: "/").map(String.init)
             let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
             if head.method == .POST, head.uri == "/collaboration/v1/enrollments/redeem" {
                 return .json(.created, try await store.redeem(decoder.decode(Collaboration.RedeemEnrollment.self, from: body)))
             }
             guard let header = head.headers.first(name: "authorization"), header.hasPrefix("Bearer ") else { return .error(.unauthorized, "unauthorized") }
             let token = String(header.dropFirst(7))
+            if let handoff = try await CollaborationHandoffRoutes.route(head: head, body: body, token: token, store: store) { return handoff }
             // Every store method authenticates again within its read/write transaction.
             if head.method == .GET, head.uri == "/collaboration/v1/self" { return .json(.ok, try await store.identity(token: token)) }
             if head.method == .POST, head.uri == "/collaboration/v1/devices/enrollments" {
@@ -30,6 +32,10 @@ enum CollaborationRoutes {
                 return .json(.ok, try await store.accept(token: token, code: decoder.decode(Collaboration.AcceptInvitation.self, from: body).code))
             }
             if parts.count >= 4, parts[2] == "areas", let area = UUID(uuidString: parts[3]) {
+                if parts.count == 5, parts[4] == "usage", head.method == .POST {
+                    try await store.reportUsage(token: token, area: area, report: decoder.decode(Collaboration.UsageReport.self, from: body))
+                    return .json(.ok, Collaboration.ErrorBody(code: "observed"))
+                }
                 if parts.count == 4, head.method == .GET { return .json(.ok, try await store.state(token: token, area: area)) }
                 if parts.count == 6, parts[4] == "updates", head.method == .DELETE, let subscription = UUID(uuidString: parts[5]) {
                     try await store.cancelUpdates(token: token, area: area, subscription: subscription)

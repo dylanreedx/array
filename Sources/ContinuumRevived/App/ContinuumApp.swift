@@ -1589,6 +1589,16 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--collaboration-peer-check") {
+            setbuf(stdout, nil); setbuf(stderr, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do { try await SharedAreaPeerRuntime.run(); Foundation.exit(0) }
+                catch { fputs("FAIL collaboration peer: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+            return
+        }
         if CommandLine.arguments.contains("--collaboration-native-check") {
             setbuf(stdout, nil)
             setbuf(stderr, nil)
@@ -1619,6 +1629,12 @@ enum ContinuumApp {
                     }, executorCount: {
                         supervisor.records.keys.filter { supervisor.isRunning($0) }.count + executorConstructions
                     })
+                    print("STAGE collaboration native: geometry and compensating undo")
+                    try await SharedAreaGeometrySceneChecks.run(mount: { controller, person, host in
+                        delegate.mountWorkspaceSceneAtBoot(sharedAreaController: controller, person: person, in: host)
+                    }, executorCount: {
+                        supervisor.records.keys.filter { supervisor.isRunning($0) }.count + executorConstructions
+                    })
                     guard executorConstructions == 0, supervisor.records.isEmpty else {
                         throw SelfCheckError("shared scene constructed a local executor or agent record")
                     }
@@ -1628,6 +1644,11 @@ enum ContinuumApp {
                     try await CollaborationWindowCommandChecks.run()
                     print("STAGE collaboration native: capture workflow")
                     try await SharedAreaCaptureChecks.run()
+                    print("STAGE collaboration native: hover-only teammate usage")
+                    try await SharedAreaPresenceChecks.run()
+                    try await SharedAreaUsageCollectorChecks.run()
+                    print("STAGE collaboration native: agent handoff controls and draft recovery")
+                    try await SharedAreaHandoffViewChecks.run()
                     print("ContinuumRevivedCollaborationNativeChecks passed")
                     Foundation.exit(0)
                 } catch {
@@ -6466,6 +6487,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var componentLabPanel: ComponentLabPanel?
     private var collaborationHub: CollaborationHubWindowController?
     private var sharedAreaWindows: [String: SharedAreaWindowController] = [:]
+    private var sharedAreaHostSessions: [String: SharedAreaHostSession] = [:]
     private var pendingSharedAreaCapture: SharedAreaCaptureRequest?
     private var captureSelectionView: SharedAreaCaptureSelectionView?
     private var sharedAreaCaptureWindows: [UUID: SharedAreaCaptureWindowController] = [:]
@@ -11897,6 +11919,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         hub.content.onOpenArea = { [weak self, weak model] controller, person, area in
             guard let self, let model, let accountID = model.activeAccount?.id else { return }
             let shared = showSharedArea(controller: controller, person: person, area: area, accountID: accountID)
+            // Generic offline fixtures supply no host-service transport. The
+            // paired-process witness explicitly supplies a local live service.
+            if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) || CommandLine.arguments.contains("--collaboration-peer-check") {
+                let key = accountID + "/" + area.uuidString
+                do {
+                    let host = try sharedAreaHostSessions[key] ?? SharedAreaHostSession(account: model, area: area, supervisor: agentSupervisor)
+                    sharedAreaHostSessions[key] = host; host.start()
+                    shared.scene.onRequestHandoff = { [weak host] object in host?.handoff.show(object: object) }
+                } catch {
+                    let alert = NSAlert()
+                    alert.messageText = "The publishing host is unavailable"
+                    alert.informativeText = "The shared workspace is open. Reconnect the account before handing an agent over."
+                    alert.beginSheetModal(for: shared.window, completionHandler: nil)
+                }
+            }
             if let request = pendingSharedAreaCapture {
                 pendingSharedAreaCapture = nil
                 finishSharedAreaCapture(request, in: shared, account: model, accountID: accountID, person: person)
@@ -12017,6 +12054,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     var qaSharedAreaCaptureWindows: [SharedAreaCaptureWindowController] { Array(sharedAreaCaptureWindows.values) }
     var qaSharedAreaWindows: [SharedAreaWindowController] { Array(sharedAreaWindows.values) }
+    var qaSharedAreaHostSessions: [SharedAreaHostSession] { Array(sharedAreaHostSessions.values) }
     var qaCaptureSetupTask: Task<Void, Never>? { captureSetupTask }
     var qaCaptureSelectionView: SharedAreaCaptureSelectionView? { captureSelectionView }
 

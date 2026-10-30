@@ -3,6 +3,7 @@ import Darwin
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
+import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedSync
 import Foundation
 
@@ -1148,6 +1149,8 @@ final class AgentSupervisor {
     var onSelfReportChanged: ((AgentID) -> Void)?
     /// The runner for the prompt currently in flight, if any.
     private var runners: [AgentID: AgentRunning] = [:]
+    private var sharedAgentControlGates: [AgentID: [String: SharedAgentControlGate]] = [:]
+    private struct SharedInputPermit { let agentID: AgentID }
     /// The latest runner generation to own each agent. Unlike `runners`, this is
     /// deliberately retained after the live slot clears: it is the tombstone that
     /// prevents an older runner from becoming authoritative again merely because
@@ -1287,8 +1290,10 @@ final class AgentSupervisor {
     private func startCompaction(
         _ request: AgentCompactionRequest,
         for id: AgentID,
-        preferredRunner: AgentRunning? = nil
+        preferredRunner: AgentRunning? = nil,
+        sharedInputPermit: SharedInputPermit? = nil
     ) -> Bool {
+        if sharedAgentControlGates[id]?.isEmpty == false, sharedInputPermit?.agentID != id { return false }
         guard var record = records[id], runners[id] == nil else { return false }
         let runner = preferredRunner
             ?? idleSessionRunners[id]
@@ -3273,7 +3278,12 @@ final class AgentSupervisor {
 
     @discardableResult
     private func sendPrepared(_ prepared: PreparedAgentPrompt, to id: AgentID,
-                              taskParent: CompanionTaskRunHandle? = nil, queuedItemID: UUID? = nil) -> Bool {
+                              taskParent: CompanionTaskRunHandle? = nil, queuedItemID: UUID? = nil,
+                              sharedInputPermit: SharedInputPermit? = nil) -> Bool {
+        if sharedAgentControlGates[id]?.isEmpty == false, sharedInputPermit?.agentID != id {
+            warn("Shared agent input requires current handoff admission; use the composer or shared controls.")
+            return false
+        }
         guard !contextRecoveryInFlight.contains(id) else {
             warn("Context recovery is being prepared; keep this draft and send after recovery starts.")
             return false
@@ -3892,6 +3902,7 @@ final class AgentSupervisor {
     }
 
     private var heldForReadiness: [AgentID: PreparedAgentPrompt] = [:]
+    private var sharedHeldReleaseChecks: Set<AgentID> = []
     private var readinessObserver: NSObjectProtocol?
 
     private func installReadinessObserverIfNeeded() {
@@ -3907,19 +3918,45 @@ final class AgentSupervisor {
     func releaseHeldPrompts() {
         for (id, prepared) in heldForReadiness {
             if isStillStarting(id) { continue }
-            heldForReadiness[id] = nil
-            let heldRun = companionHeldStarts.removeValue(forKey: id)
-            if let refusal = sendRefusal(for: id) {
-                turnFacts[id]?.presence.reduce(.runtimeError(threadId: nil, message: refusal), at: Date())
-                if let heldRun { updateCompanionTasks { try $0.cancelQueued(heldRun.runID) } }
-                appendLocalNotice(id: id, key: "send-not-sent", title: "Not sent", body: refusal)
-                notifyTurnCapabilitiesChanged(id)
+            if sharedAgentControlGates[id]?.isEmpty == false {
+                guard sharedHeldReleaseChecks.insert(id).inserted else { continue }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    defer { sharedHeldReleaseChecks.remove(id) }
+                    let admitted = await permitsSharedAgentInput(id, admission: nil)
+                    // Stop or a replacement while checking cannot release the
+                    // earlier message. A denied check keeps the original held
+                    // prompt and its task reservation available to Stop.
+                    guard heldForReadiness[id]?.companionQueuedItemID == prepared.companionQueuedItemID,
+                          !isStillStarting(id) else { return }
+                    guard admitted else {
+                        appendLocalNotice(id: id, key: "shared-held-control", title: "Message still held",
+                            body: "Shared agent control could not be verified. Restore your control or stop this held message.")
+                        notifyTurnCapabilitiesChanged(id)
+                        return
+                    }
+                    releaseHeldPrompt(prepared, for: id, sharedInputPermit: .init(agentID: id))
+                }
                 continue
             }
-            if !sendPrepared(prepared, to: id) {
-                if let heldRun { updateCompanionTasks { try $0.cancelQueued(heldRun.runID) } }
-                notifyTurnCapabilitiesChanged(id)
-            }
+            releaseHeldPrompt(prepared, for: id)
+        }
+    }
+
+    private func releaseHeldPrompt(_ prepared: PreparedAgentPrompt, for id: AgentID,
+                                   sharedInputPermit: SharedInputPermit? = nil) {
+        heldForReadiness[id] = nil
+        let heldRun = companionHeldStarts.removeValue(forKey: id)
+        if let refusal = sendRefusal(for: id) {
+            turnFacts[id]?.presence.reduce(.runtimeError(threadId: nil, message: refusal), at: Date())
+            if let heldRun { updateCompanionTasks { try $0.cancelQueued(heldRun.runID) } }
+            appendLocalNotice(id: id, key: "send-not-sent", title: "Not sent", body: refusal)
+            notifyTurnCapabilitiesChanged(id)
+            return
+        }
+        if !sendPrepared(prepared, to: id, sharedInputPermit: sharedInputPermit) {
+            if let heldRun { updateCompanionTasks { try $0.cancelQueued(heldRun.runID) } }
+            notifyTurnCapabilitiesChanged(id)
         }
     }
 
@@ -7587,10 +7624,51 @@ final class AgentSupervisor {
     /// same main-actor turn, so an accepted send/stop cannot be refused by a second
     /// capability check hidden in the view.
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
+        await accept(intent, for: agentID, sharedAdmission: nil)
+    }
+
+    func installSharedAgentControlGate(for agentID: AgentID, scope: String, gate: SharedAgentControlGate) {
+        sharedAgentControlGates[agentID, default: [:]][scope] = gate
+    }
+    func removeSharedAgentControlGates(scope: String) {
+        for id in Array(sharedAgentControlGates.keys) {
+            sharedAgentControlGates[id]?.removeValue(forKey: scope)
+            if sharedAgentControlGates[id]?.isEmpty == true { sharedAgentControlGates.removeValue(forKey: id) }
+        }
+    }
+    func acceptSharedAgentPrompt(_ command: Collaboration.AgentDispatchCommand, for agentID: AgentID, scope: String) async -> IntentAcceptance {
+        let intent: AgentComposerIntent = command.mode == .queue ? .queue(.init(command.promptText)) : .sendPrompt(.init(command.promptText))
+        return await accept(intent, for: agentID, sharedAdmission: .init(scope: scope, command: command))
+    }
+    private func permitsSharedAgentInput(_ agentID: AgentID, admission: SharedAgentControlAdmission?) async -> Bool {
+        guard let gates = sharedAgentControlGates[agentID], !gates.isEmpty else { return admission == nil }
+        if let admission, gates[admission.scope] == nil { return false }
+        for gate in gates.values { guard await gate.validate(admission?.command) else { return false } }
+        return true
+    }
+    private func queuedSharedAdmission(_ agentID: AgentID, item: UUID, prompt: AgentPrompt) async -> SharedInputPermit? {
+        guard let gates = sharedAgentControlGates[agentID], !gates.isEmpty else { return nil }
+        do {
+            var admission: SharedAgentControlAdmission?
+            for (scope, gate) in gates {
+                if let command = try gate.queuedCommand(item) {
+                    guard command.mode == .queue, prompt.text == command.promptText, prompt.imageAttachments.isEmpty,
+                          prompt.fileReferences.isEmpty, prompt.agentReferences.isEmpty, prompt.boardReferences.isEmpty else { return nil }
+                    admission = .init(scope: scope, command: command); break
+                }
+            }
+            guard await permitsSharedAgentInput(agentID, admission: admission) else { return nil }
+            return .init(agentID: agentID)
+        } catch { return nil }
+    }
+    private func accept(_ intent: AgentComposerIntent, for agentID: AgentID, sharedAdmission: SharedAgentControlAdmission?) async -> IntentAcceptance {
         // What a person typed is never Array's envelope (`sendAgentMessage`
         // does not come through here).
         let intent = intent.neutralizingTypedEnvelopes
         guard records[agentID] != nil else { return .refused(.unknownAgent) }
+        if case .stop = intent {} else {
+            guard await permitsSharedAgentInput(agentID, admission: sharedAdmission) else { return .refused(.sharedAgentControlRequired) }
+        }
         // The Terminal face or another app owns the session: nothing of
         // Array's may write it.
         guard !isSessionHeld(agentID) else { return .refused(.turnNotReady) }
@@ -7603,8 +7681,12 @@ final class AgentSupervisor {
             let prepared = PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: agentID)
             // S3: the refusal carries its reason, and a CLI that is merely still
             // starting holds the prompt instead of refusing it.
+            guard await permitsSharedAgentInput(agentID, admission: sharedAdmission) else { return .refused(.sharedAgentControlRequired) }
+            // A remote send-now has no acknowledged delayed-execution grant.
+            // Queue mode is the explicit durable choice while the CLI starts.
+            if sharedAdmission != nil && isStillStarting(agentID) { return .refused(.harnessNotReady) }
             if let held = holdOrRefuseForReadiness(prepared, for: agentID) { return held }
-            guard sendPrepared(prepared, to: agentID) else { return .refused(.turnNotReady) }
+            guard sendPrepared(prepared, to: agentID, sharedInputPermit: .init(agentID: agentID)) else { return .refused(.turnNotReady) }
             // B4: an explicit Send releases a queue this agent's last turn left
             // paused after an interrupt — the user looked, and is choosing to act.
             pausedQueues.remove(agentID)
@@ -7632,8 +7714,10 @@ final class AgentSupervisor {
                     ),
                     expectedAgentID: agentID
                 )
+                guard await permitsSharedAgentInput(agentID, admission: sharedAdmission) else { return .refused(.sharedAgentControlRequired) }
+                if sharedAdmission != nil && isStillStarting(agentID) { return .refused(.harnessNotReady) }
                 if let held = holdOrRefuseForReadiness(prepared, for: agentID) { return held }
-                guard sendPrepared(prepared, to: agentID) else {
+                guard sendPrepared(prepared, to: agentID, sharedInputPermit: .init(agentID: agentID)) else {
                     return .refused(.turnNotReady)
                 }
             } catch {
@@ -7661,6 +7745,7 @@ final class AgentSupervisor {
             // (`Requires Codex`, the CLI-surface refusal) was recomputed from a
             // pristine descriptor the picker had never shown.
             let offered = await offeredCommandDescriptors(for: agentID)
+            guard await permitsSharedAgentInput(agentID, admission: sharedAdmission) else { return .refused(.sharedAgentControlRequired) }
             // Provider-resource discovery touches the filesystem, so re-read the
             // turn state after it: an agent that was idle when the row was
             // clicked can be mid-turn by the time the scan returns.
@@ -7717,7 +7802,7 @@ final class AgentSupervisor {
                 }
                 guard sendPrepared(
                     PreparedAgentPrompt(prompt: AgentPrompt(native), expectedAgentID: agentID),
-                    to: agentID
+                    to: agentID, sharedInputPermit: .init(agentID: agentID)
                 ) else { return .refused(.invalidAttachment) }
                 return .accepted
             case let .unavailable(reason):
@@ -7741,6 +7826,7 @@ final class AgentSupervisor {
                 return .refused(.unsupported)
             }
             let queued = await store.queuedWorkItems(for: agentID)
+            guard await permitsSharedAgentInput(agentID, admission: sharedAdmission) else { return .refused(.sharedAgentControlRequired) }
             guard !activeCompactionOperations.contains(agentID),
                   !queued.contains(where: { if case .compaction = $0 { return true }; return false })
             else { return .refused(.turnNotReady) }
@@ -7766,7 +7852,7 @@ final class AgentSupervisor {
                 notifyTurnCapabilitiesChanged(agentID)
                 return .accepted
             }
-            guard startCompaction(request, for: agentID, preferredRunner: candidate) else {
+            guard startCompaction(request, for: agentID, preferredRunner: candidate, sharedInputPermit: .init(agentID: agentID)) else {
                 return .refused(.unsupported)
             }
             return .accepted
@@ -7811,6 +7897,12 @@ final class AgentSupervisor {
             let fileReferences = prompt.fileReferences.map {
                 AgentComposerDraftFileReference(displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path)
             }
+            guard await permitsSharedAgentInput(agentID, admission: sharedAdmission) else { return .refused(.sharedAgentControlRequired) }
+            if let sharedAdmission {
+                guard let route = sharedAgentControlGates[agentID]?[sharedAdmission.scope] else { return .refused(.sharedAgentControlRequired) }
+                do { try route.rememberQueued(companionItemID, sharedAdmission.command) }
+                catch { return .refused(.sharedAgentControlRequired) }
+            }
             _ = await store.enqueueMessage(
                 id: companionItemID,
                 text: prompt.text,
@@ -7851,6 +7943,7 @@ final class AgentSupervisor {
                 warn("AgentSupervisor.accept: attachment preparation refused for a steer, agent \(agentID.rawValue.uuidString)")
                 return .refused(.invalidAttachment)
             }
+            guard await permitsSharedAgentInput(agentID, admission: sharedAdmission) else { return .refused(.sharedAgentControlRequired) }
             _ = await store.enqueueSteer(
                 id: companionItemID,
                 text: prompt.text,
@@ -7884,7 +7977,8 @@ final class AgentSupervisor {
             let forced = PreparedAgentPrompt(
                 prompt: AgentPrompt(text: prompt.text, imageAttachments: prepared, fileReferences: prompt.fileReferences, agentReferences: prompt.agentReferences, boardReferences: prompt.boardReferences),
                 expectedAgentID: agentID)
-            return forceSend(forced, to: agentID) ? .accepted : .refused(.turnNotReady)
+            guard await permitsSharedAgentInput(agentID, admission: sharedAdmission) else { return .refused(.sharedAgentControlRequired) }
+            return forceSend(forced, to: agentID, sharedInputPermit: .init(agentID: agentID)) ? .accepted : .refused(.turnNotReady)
         case .command:
             // Never simulated by replaying send.
             return .refused(.unsupported)
@@ -9010,9 +9104,14 @@ final class AgentSupervisor {
                 return
             }
             if case .compaction(let compact) = workItem {
+                guard await self.permitsSharedAgentInput(id, admission: nil), self.canDrainQueue(for: id) else {
+                    await self.restoreDrainedWorkItem(workItem, for: id, store: store)
+                    self.pauseQueue(id, .held); self.notifyTurnCapabilitiesChanged(id)
+                    return
+                }
                 guard self.startCompaction(
                     AgentCompactionRequest(operationID: compact.operationID, focus: compact.focus),
-                    for: id) else {
+                    for: id, sharedInputPermit: .init(agentID: id)) else {
                     await store.requeueWorkItemAtFront(workItem, for: id)
                     self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
                     self.pauseQueue(id, .afterCompaction)
@@ -9033,7 +9132,15 @@ final class AgentSupervisor {
                 await self.restoreDrainedWorkItem(workItem, for: id, store: store)
                 return
             }
-            guard self.sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id, queuedItemID: message.id) else {
+            let sharedPermit = await self.queuedSharedAdmission(id, item: message.id, prompt: prompt)
+            if self.sharedAgentControlGates[id]?.isEmpty == false, sharedPermit == nil {
+                await store.requeueWorkItemAtFront(workItem, for: id)
+                self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+                self.pauseQueue(id, .held); self.notifyTurnCapabilitiesChanged(id)
+                return
+            }
+            guard self.sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id, queuedItemID: message.id,
+                                    sharedInputPermit: sharedPermit) else {
                 // The runner became busy again in the same beat (a fresh
                 // interactive send won the race) — put the message back rather
                 // than lose it.
@@ -9229,7 +9336,9 @@ final class AgentSupervisor {
             }
             return false
         }
-        guard forceSend(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id, companionQueuedItemID: itemID), to: id, echo: true) else {
+        let sharedPermit = await queuedSharedAdmission(id, item: itemID, prompt: prompt)
+        guard forceSend(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id, companionQueuedItemID: itemID), to: id, echo: true,
+                        sharedInputPermit: sharedPermit) else {
             await store.requeueWorkItemAtFront(item, for: id)
             queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
             notifyTurnCapabilitiesChanged(id)
@@ -9242,10 +9351,16 @@ final class AgentSupervisor {
     /// `prepared` immediately. It bypasses a paused queue without releasing it,
     /// and the interrupt it causes does not pause the queue either: everything
     /// queued stays held behind the forced message.
-    private func forceSend(_ prepared: PreparedAgentPrompt, to id: AgentID, echo: Bool = false) -> Bool {
+    private func forceSend(_ prepared: PreparedAgentPrompt, to id: AgentID, echo: Bool = false,
+                           sharedInputPermit: SharedInputPermit? = nil) -> Bool {
+        // Interrupt-then-send needs a durable delayed grant. A shared agent can
+        // use the explicit queue; until that grant exists, refuse before any
+        // interrupt or queue mutation and leave its caller's draft intact.
+        if sharedAgentControlGates[id]?.isEmpty == false,
+           sharedInputPermit?.agentID != id || runners[id] != nil { return false }
         guard records[id]?.capabilities.locallyManaged == true else { return false }
         guard let runner = runners[id] else {
-            guard sendPrepared(prepared, to: id) else { return false }
+            guard sendPrepared(prepared, to: id, sharedInputPermit: sharedInputPermit) else { return false }
             if echo { echoPrompt(prepared.prompt, for: id) }
             return true
         }
@@ -9376,8 +9491,14 @@ final class AgentSupervisor {
                     continue
                 }
                 guard let prompt = await self.preparedQueuedPrompt(message, for: id) else { continue }
-                self.deliveringSteers[id, default: []].append((message.id, message, prompt))
                 self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+                let sharedPermit = await self.queuedSharedAdmission(id, item: message.id, prompt: prompt)
+                guard self.runners[id] === runner, self.runnerGenerationTokens[id] == generation,
+                      self.sharedAgentControlGates[id]?.isEmpty != false || sharedPermit != nil else {
+                    notTaken.append(message)
+                    continue
+                }
+                self.deliveringSteers[id, default: []].append((message.id, message, prompt))
                 self.notifyTurnCapabilitiesChanged(id)
                 let accepted = await Task.detached(priority: .userInitiated) {
                     (try? runner.steer(prompt, id: message.id)) != nil
@@ -22814,4 +22935,131 @@ func checkManagedSessionReadGateSources() throws -> String {
         throw ScanError(description: "P3.2: \(path) contains no gated listing read at all, so the scan above passed vacuously")
     }
     return "managed-session read gate: 0 ungated/swallowed listing reads in ContinuumApp.swift, \(gatedReads.count) gated reads present"
+}
+
+extension AgentSupervisor {
+    /// Exercises the production deferred-input paths with a changing authority
+    /// and a scripted provider. No provider process, credentials or live session
+    /// is involved; the assertions watch runner calls and retained user text.
+    static func runSharedAgentDeferredControlChecks() async throws {
+        struct Failure: Error { let message: String }
+        func expect(_ value: Bool, _ label: String) throws {
+            guard value else { throw Failure(message: label) }
+            print("PASS shared supervisor: \(label)")
+        }
+        func eventually(_ label: String, _ check: () -> Bool) async throws {
+            for _ in 0..<200 { if check() { return }; try await Task.sleep(for: .milliseconds(10)) }
+            throw Failure(message: "timeout \(label)")
+        }
+        final class Provider: AgentSteeringRunning, AgentCompactionRunning, @unchecked Sendable {
+            private let lock = NSLock()
+            private var effects = [0, 0, 0, 0]
+            var counts: [Int] { lock.withLock { effects } }
+            var acceptsSteerNow: Bool { true }
+            var hasBackgroundWork: Bool { false }
+            var compactionCapabilities: AgentCompactionCapabilities { .init(supportsManual: true) }
+            func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+                lock.withLock { effects[0] += 1 }
+            }
+            func steer(_ prompt: AgentPrompt, id: UUID) throws { lock.withLock { effects[1] += 1 } }
+            func compact(_ request: AgentCompactionRequest, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+                lock.withLock { effects[2] += 1 }
+            }
+            func interrupt() throws { lock.withLock { effects[3] += 1 } }
+            func stop() {}
+            func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+            func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
+            func observeSteerDispositions(_ handler: @escaping @Sendable (UUID, AgentSteerDisposition) -> Void) {}
+        }
+        @MainActor final class Authority {
+            var allowed = true
+            var checks = 0
+            var refuseAt: Int?
+            func validate() -> Bool {
+                checks += 1
+                if checks == refuseAt { allowed = false }
+                return allowed
+            }
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-shared-supervisor-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AgentCatalogQAFixture.pi[0]
+        let previous = AgentModelCatalog.shared.snapshot(for: .pi)
+        defer { AgentModelCatalog.shared.resetForQA(snapshot: previous) }
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .checking,
+            models: [model], displayNames: [:], refreshedAt: Date()))
+        let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("agents"))
+        let id = AgentID(rawValue: UUID())
+        try store.upsert(.init(id: id, displayName: "Shared source", harness: .pi, model: model, thinking: "medium",
+            cwd: root.path, createdAt: Date(), lastActivityAt: Date()))
+        let drafts = AgentComposerDraftStore(applicationSupportDirectory: root.appendingPathComponent("drafts"))
+        let provider = Provider(), authority = Authority()
+        let supervisor = AgentSupervisor(store: store, makeRunner: { _ in provider }, warn: { _ in },
+            nameTitlerCommand: { _ in nil }, submissionRecoveryStore: drafts)
+        _ = supervisor.restore()
+        supervisor.installSharedAgentControlGate(for: id, scope: "witness", gate: .init(validate: { _ in authority.validate() },
+            rememberQueued: { _, _ in }, queuedCommand: { _ in nil }))
+
+        let held = "Retain the exact source-owner prompt while control is unavailable."
+        try expect(await supervisor.accept(.sendPrompt(.init(held)), for: id) == .accepted,
+            "source-owner input can wait for CLI startup before handoff")
+        authority.allowed = false
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready,
+            models: [model], displayNames: [:], refreshedAt: Date()))
+        supervisor.releaseHeldPrompts()
+        try await eventually("held authority refusal") { supervisor.sharedHeldReleaseChecks.isEmpty }
+        try expect(supervisor.heldForReadiness[id]?.prompt.text == held && provider.counts[0] == 0,
+            "control lost during startup preserves the complete held prompt and starts no provider")
+        authority.allowed = true
+        supervisor.releaseHeldPrompts()
+        try await eventually("restored held input") { provider.counts[0] == 1 && supervisor.runners[id] == nil }
+        try expect(supervisor.heldForReadiness[id] == nil, "restored source control releases its held prompt once")
+
+        supervisor.runners[id] = provider
+        supervisor.runnerGenerationTokens[id] = RunnerGenerationToken()
+        let steer = await drafts.enqueueSteer(text: "Keep this held steer intact.", for: id)
+        authority.allowed = false
+        supervisor.handOverHeldSteers(for: id, only: steer.id)
+        await supervisor.queueOpTasks[id]?.value
+        let retainedSteers = await drafts.queuedMessages(for: id)
+        try expect(provider.counts[1] == 0 && retainedSteers.contains(where: { $0.id == steer.id && $0.text == steer.text }),
+            "control lost after steer admission prevents provider handover and retains exact queued text")
+        authority.allowed = true
+        supervisor.handOverHeldSteers(for: id, only: steer.id)
+        await supervisor.queueOpTasks[id]?.value
+        try expect(provider.counts[1] == 1, "restored control can deliberately hand the retained steer to its original provider")
+        supervisor.deliveringSteers[id] = nil
+        supervisor.runners[id] = nil
+        await drafts.clearQueue(for: id)
+
+        let compact = await drafts.enqueueCompaction(focus: "Retain this queued compaction.", for: id)
+        supervisor.qaBeforeQueueDrain = { authority.allowed = false }
+        supervisor.drainQueue(for: id)
+        await supervisor.queueOpTasks[id]?.value
+        let retainedWork = await drafts.queuedWorkItems(for: id)
+        try expect(provider.counts[2] == 0 && retainedWork.first?.id == compact.id && supervisor.records[id]?.inFlightCompaction == nil,
+            "control lost before compaction drain starts no provider and restores its exact durable work item")
+        supervisor.qaBeforeQueueDrain = nil
+        supervisor.pausedQueues.remove(id)
+        authority.allowed = true
+        supervisor.drainQueue(for: id)
+        await supervisor.queueOpTasks[id]?.value
+        try await eventually("restored compaction") { provider.counts[2] == 1 && supervisor.runners[id] == nil }
+        try expect(await drafts.queuedWorkItems(for: id).isEmpty, "restored control deliberately drains compaction once")
+
+        supervisor.runners[id] = provider
+        supervisor.runnerGenerationTokens[id] = RunnerGenerationToken()
+        authority.allowed = true; authority.checks = 0; authority.refuseAt = 2
+        try expect(await supervisor.accept(.forceSend(.init("Keep this force-send draft.")), for: id) == .refused(.sharedAgentControlRequired),
+            "force send rechecks authority after asynchronous attachment preparation")
+        try expect(provider.counts[3] == 0 && supervisor.pendingForceSends[id] == nil,
+            "late control loss cannot interrupt or stage work on the original provider")
+        authority.allowed = true; authority.refuseAt = nil
+        try expect(await supervisor.accept(.forceSend(.init("Use an explicit queue while busy.")), for: id) == .refused(.turnNotReady)
+            && provider.counts[3] == 0 && supervisor.pendingForceSends[id] == nil,
+            "shared force-while-busy refuses before interrupting until delayed grants are supported")
+        supervisor.runners[id] = nil
+        supervisor.removeSharedAgentControlGates(scope: "witness")
+    }
 }

@@ -168,7 +168,7 @@ final class SharedAreaCaptureView: NSView, TokenThemed {
             items += [ChoiceItem(id: "agreement", title: "Agreement snapshot", detail: "A captured revision teammates can discuss and revise"),
                       ChoiceItem(id: "discussion", title: "Discussion snapshot", detail: "Captured note text as the first shared message")]
         case .managedAgent:
-            items.append(ChoiceItem(id: "agent", title: "Agent observation", detail: "Host-owned reference; no transcript history or remote control"))
+            items.append(ChoiceItem(id: "agent", title: "Agent observation", detail: "Host-owned reference; history excluded, control needs a separate handoff"))
         default: break
         }
         items.append(ChoiceItem(id: "omit", title: "Keep private", detail: "Exclude this tile from the shared arrangement"))
@@ -181,7 +181,7 @@ final class SharedAreaCaptureView: NSView, TokenThemed {
         detail.stringValue = Self.disposition(row)
         switch row.disposition {
         case .ready(.agreement), .ready(.discussion): reader.string = row.previewText ?? ""
-        case .ready(.agentObservation): reader.string = "This shares an opaque reference to the host's agent. Agent history, prompts, terminal contents, files and checkout changes are not included. Live observation and control are not available yet."
+        case .ready(.agentObservation): reader.string = "This shares an opaque reference to the host's agent. Agent history, prompts, terminal contents, files and checkout changes are not included. Execution stays on the original host; control needs a separate accepted handoff."
         case .omitted: reader.string = "This tile stays private and will not appear in the shared arrangement."
         case .unsupported: reader.string = "This tile cannot be published in this version. It is excluded from the shared arrangement."
         default: reader.string = "Choose a sharing mode to preview exactly what becomes shared."
@@ -220,7 +220,7 @@ final class SharedAreaCaptureView: NSView, TokenThemed {
         case .unsupported(.unavailableAgent): return "Managed agent unavailable · excluded"
         case .unsupported(.unavailableContentRevision): return "Note content unavailable · excluded"
         case .unsupported: return "\(row.tileKind.displayName) · sharing unsupported; excluded"
-        case .ready(.agentObservation): return "Agent observation · no history or remote control"
+        case .ready(.agentObservation): return "Agent observation · history excluded; separate handoff for control"
         case .ready(.agreement): return "Agreement · captured text, independent of the source note"
         case .ready(.discussion): return "Discussion · captured first message"
         case .ready: return "Included"

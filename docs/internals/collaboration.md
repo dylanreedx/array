@@ -3,8 +3,10 @@
 Implementation status: portable document and initial human membership service.
 Live HTTP subscriptions, presence transport, the persisted native-facing controller
 and reviewed publication preparation are implemented. Native accounts, shared
-scenes and source capture/review are wired; shared geometry gestures, agent
-dispatch and artifact blobs remain separate work. [Progress](../../.plans/105-collaboration/PROGRESS.md)
+scenes and source capture/review are wired. Shared group geometry/causal Undo,
+durable pending delivery, explicit person-to-person source-host handoff and
+hover-only authenticated usage are implemented in the finish bench. Their current
+verification status is recorded in Progress; artifact blobs remain separate work. [Progress](../../.plans/105-collaboration/PROGRESS.md)
 tracks the board and actual verification; the research packet describes the full
 intended feature.
 
@@ -55,11 +57,13 @@ retained shared-area history**; there is no partial-history mode yet.
 One owner is retained: self-removal is refused, and ownership transfer is not yet
 implemented. Editors may arrange admitted content, discuss, edit revisioned
 agreements and publish observations from their own registered execution device.
-Viewers may read. These roles convey no authority to prompt/stop an agent, approve
-a provider request or type into a terminal: those routes do not exist yet.
+Viewers may read. Membership alone conveys no agent control. The source owner
+may separately offer exclusive prompting control to a teammate; the teammate
+must accept against the current host generation and membership epoch. Provider
+approvals, terminal typing and credentials remain owned by the source machine.
 
 `Collaboration.Capability` separates view, discuss, layout, publish and membership
-management from the unavailable host actions. The service classifies every edit
+management from separately admitted host actions. The service classifies every edit
 inside its write transaction; a client-supplied grant or principal is not authority.
 An editor can arrange a teammate's published observation but cannot remove that
 teammate's source publication. The area's owner has the same source-ownership
@@ -75,7 +79,9 @@ commands require the current epoch, and member removal requires `If-Match` with
 the observed epoch. Revoked devices lose subsequent requests on all their areas;
 revoking one device preserves the person's other devices. Held live requests are woken on removal and reauthenticate before any result is
 returned. The client ends its session and clears its replica on access loss.
-Host-side pre-effect admission and complete recovery remain open on COL-04/07/08.
+Host-side pre-effect admission rechecks the exact publication, generation,
+controller, membership epoch and immutable context revision. Data recovery uses
+the exact persisted request; executable dispatch uses a separate host journal.
 
 ## HTTP contract
 
@@ -138,8 +144,10 @@ server-issued session supersedes old packets for the same device/area; sequence
 numbers refuse reordered observations. Bursts keep their latest cursor and
 coalesce notification to at most 20 Hz per device/area. Presence never writes an
 operation or snapshot and does not imply execution-host liveness. Viewport
-publication is optional; a client can omit it. Camera/follow UI and token hover
-usage are still separate work. Removal/device revocation purges presence and
+publication is optional; a client can omit it. Native cursors follow the local
+camera transform. Token counts appear only while hovering a cursor or inspecting
+it through accessibility; they are absent from resting cursor labels. Following
+a teammate's camera remains separate work. Removal/device revocation purges presence and
 wakes affected readers immediately.
 
 `ContinuumRevivedCollaborationClient` supplies the authenticated HTTP API,
@@ -154,8 +162,8 @@ gets a snapshot, catches up from its actual revision, reconnects with bounded
 backoff and clears state on access loss. Full replica notifications can coalesce
 for rendering after events are applied; durable events themselves cannot drop.
 A native view must stop its session on close. The Core controller described below
-now persists accepted replicas; an executable outbox and production canvas mount
-remain COL-10/19.
+now persists accepted replicas and pending data requests, and native shared
+scenes mount through the production shared-scene entry point.
 
 ## Private local persistence
 
@@ -172,7 +180,9 @@ Future/corrupt state or missing primary with recovery history refuses overwrite.
 Bindings contain local IDs, not a checkout root or `AgentRecord`. A local reference
 is a resolution hint, never authority to instantiate a runner. Cached documents
 remain read-only until the native controller establishes live identity/scope.
-No executable outbox or production scene mount is provided yet.
+Schema 3 also persists exact data commands, reviewed bindings, delivery state
+and matching private drafts before the transport effect. Schema 2 is migrated in
+memory without overwriting its original bytes until the next complete save.
 
 `CollaborationCredentialStore` requires an injected vault and scopes one device's
 credential by canonical endpoint, person, device and AppChannel. Its memory-vault
@@ -209,7 +219,10 @@ be promised after a failed disk write. Cache bytes and backups are not remotely
 erased copies. Submission saves an explicitly supplied private draft first, retains
 it on conflict/refusal/unknown outcome, and removes only the matching unchanged
 draft after acceptance. Unknown outcomes retain the original operation ID for an
-explicit identical retry; they do not automatically replay an action.
+identical retry. After fresh online admission, cold recovery reconciles retained
+receipts first, then may replay the exact still-eligible data command. It never
+rebases an obsolete command or treats a later denial as proof an earlier request
+did not commit. This data retry policy does not apply to executable prompts.
 
 ## Reviewed publication preparation
 
@@ -265,9 +278,13 @@ scene receives a shared controller/person and a host view, with no source spawne
 zone arming or project persistence callback. It renders portable observations,
 discussions and immutable agreement revisions on a jointly arranged model with
 private camera/focus. Joining and closing cannot mint or stop a source executor.
-The native window currently supports human discussion/agreement creation and
-editing; observation history and execution controls are explicitly unavailable.
-Geometry dragging/semantic undo remain separate work.
+The native window supports discussion/agreement editing, atomic selected-group
+moves/resizes and compensating Undo/Redo. Placement write stamps prevent Undo
+from overwriting a teammate's intervening change, including equal-looking ABA
+moves. A host-local geometry ledger saves the inverse intent and original request
+before submission, restoring eligible Undo after crash/relaunch and lost replies.
+Observation transcript history is not published. A separate handoff dialog offers
+control and sends reviewed context to the original executor.
 
 Collaboration windows and their sheets own a separate UI command scope. Personal
 creation, palette/toolbar callbacks and the hold-leader keyboard routes refuse
@@ -291,8 +308,9 @@ revision against the deterministic applied/duplicate outcome. Identical retry
 retains the reviewed operation and IDs; every rejected retry after uncertain
 delivery remains uncertain, because current permission/epoch errors cannot
 disprove an earlier commit. A pending review is brought forward before another
-capture can allocate a duplicate. The full command remains in memory: durable
-restart recovery/outbox and close-independent pending delivery are still open.
+capture can allocate a duplicate. The full reviewed command and bindings are
+durable before transmission, so a closed review or restarted app can recover the
+original receipt without allocating new object or operation IDs.
 
 Rendering uses one drawn canvas, at most 128 frontmost visible objects and bounded
 800-character previews with a visible limit notice. The inspector pages full
@@ -311,8 +329,49 @@ project/tile matches resolve managed agents without creating one. It never
 acquires a missing controller, writes a membership repair or copies lifted hover
 frames. Missing project access or projectless ambient ownership is named as
 incomplete coverage; those members are not silently omitted. This bridge is
-witnessed through a mounted source workspace, but the user-facing selection and
-review flow has not yet been connected to it.
+witnessed through the production-mounted source workspace and connected to the
+user-facing selection, destination and explicit review flow.
+
+## Handoff and source execution
+
+A published agent stays on its original machine and checkout. Shared layout,
+human context and explicit prompt control travel; source files, provider login,
+process handles and terminal sessions do not. Merely publishing a reference
+preserves the source owner's normal composer. After a teammate accepts control,
+the former controller's prompts are refused with their draft intact. Source view
+closure/reattachment does not mint another executor or change its logical host
+generation. Reclaiming control is explicit.
+
+`SharedAgentHandoffController` persists immutable pending prompt identity and
+private recipient/text/context/timing drafts. The dialog offers send-now or queue
+through the shared Choice controls. Network uncertainty retains the same request
+and a close-save failure retains the editable draft. `SharedAreaHostSession`
+retains the host dispatcher independently of the shared window. Its journal
+commits an irreversible attempt marker before supervisor acceptance. After a
+crash at that boundary, the outcome is honestly uncertain and never automatically
+resent. Queue drain checks the original typed command and current authority;
+human text is never interpreted as a grant.
+
+## Hover usage accounting
+
+Only explicitly published local managed agents contribute. Codex session counters
+use cumulative high-water marks, Claude turns use distinct turn identities, and
+Pi messages use stable message identities with cached input included. Provider
+observations feed a private atomic ledger outside the source project; duplicate
+or reordered measurements and reopened views cannot add the same tokens twice.
+Unknown historical day attribution remains partial, while temporary missing
+reporters can become complete. UTC-day observed deltas and reported totals have
+separate labels. Private counter IDs, source paths and prompt text never enter
+the usage report.
+
+The service accepts reports only from that registered publishing device with
+current area membership. Durable encrypted reports survive relay restart;
+unpublishing the last source for a host removes its future projection. Multiple
+registered hosts on one device aggregate for its cursor. Presence supplies the
+authenticated human label. Counts and last-measurement/coverage details render
+only in the transient hover or accessibility inspection card; exiting the window,
+peer expiry or losing access clears inspection. This reports published agents,
+not an account-wide provider billing total.
 
 ## Opt-in process configuration
 

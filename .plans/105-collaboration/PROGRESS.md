@@ -567,3 +567,68 @@ receipts and six renders were retained. Final comparison still found zero change
 among all 1,033 Swift sources. Scoped whitespace/doc links passed. Bench inventory
 was inspected at pickup/end; no worktree was created, mutated or removed by this
 work. Other active benches and unrelated source changes were preserved.
+
+
+## 30 October 2026 — Finish pass on release-0735
+
+Coordinator request: finish shared drag/undo, person-to-person agent handoff,
+durable crash/relaunch recovery and hover-only teammate usage, then run two
+background Array processes against a local relay. Neither live app, the Desktop
+preview, production relay, focus nor default tmux may be touched. No deployment
+or push. Scoped commits under Dylan; no matrix-inventory commit.
+
+Created `.worktrees/collaboration-finish`, branch `array/collaboration-finish`,
+from exact release tip `d49c0cbe`. Ported only collaboration changes; left the
+canonical checkout and its unrelated dirty work intact. Resolved the sole token
+owner conflict by retaining both managed-badge and collaboration rules. Preserved
+the release's stronger focus/tmux matrix guards. Reviewed foundation is committed
+as `3bef5505` (`feat(collaboration): add reviewed shared workspace foundation`),
+without an inventory change or AI trailer. That commit's port still awaits the
+finish-pass integration gate; previous receipts remain historical evidence.
+
+Three Codex helpers own geometry/causal Undo, durable delivery/paired harness and
+service-to-supervisor handoff. Root owns usage accounting, hover presence, UI
+integration and combined verification. All changes are in this bench.
+
+Current implementation (not yet verified): causal placement stamps, compensating
+Undo/Redo and a pre-effect persistent geometry ledger; schema3 data outbox with
+exact-command/receipt cold recovery; source-owned targeted handoff/control CAS,
+immutable context prompts, fresh pre-effect host admission and a durable no-blind-
+resend host journal; independently retained source host sessions; normalized
+provider usage (Codex cumulative sessions, Claude turns, Pi stable message IDs
+including cached input), a durable deduplicated UTC-day ledger and authenticated
+service projection. Teammate cursors draw counts only in a transient hover/focus
+card; unknown/partial measurement is explicit. Sharing a reference alone preserves
+normal local owner input; accepting a teammate handoff gates the former controller.
+
+The paired harness launches separate real Array check processes with explicit
+app support, project roots, preference suites and physical tmux namespaces. It
+uses local live HTTP and scripted provider transports; APNs and proxy environment
+are stripped. Planned witnessed flows include conflicting native geometry/Undo,
+SIGTERM/relaunch before send and after commit, restored inverse/camera, >500
+ordered events through a held subscriber, local relay restart, source/recipient
+handoff and hover-only usage. Static parse checks alone do not establish this.
+
+First build refused the ignored Ghostty artifact absent from a fresh worktree;
+its existing artifact was copied into this bench only. The first Core typecheck
+then reached one root error using an old StoreFileWrite helper; corrected to this
+release's StoreFileWriter.perform. Integration and behavioral testing continue.
+
+Focused rebuilt Core/controller and real service suites passed. Five compile-valid
+teeth mutations were each RED on the intended behavior: causal Undo/ABA, failed
+outbox-before-effect, uncertain host attempt replay, duplicate usage accounting,
+and forged publishing-device usage. Exact source bytes were restored and fresh
+builds/checks returned GREEN; receipts are under `validation/finish-20261030/teeth`.
+The native lifecycle review also corrected stopped accounting observers, host
+sequence reuse, temporary coverage becoming permanently partial, repeated Codex
+sessions represented by multiple local records, and deferred input authority.
+
+The first combined finish gate reported **10 legs, 8 passed / 2 failed**. Native
+checks found a stationary hover surviving camera navigation because a newly
+clamped card was mistaken for the previous hover target. The pair witness refused
+its first peer before ready: Foundation's `/private/tmp` canonicalization differed
+from Python/pwd-P/tmux. Both fixes are staged in source, not yet verified by a new
+native run. The gate still reported the other eight legs, including appearance,
+menu contracts, provider telemetry and both existing relay suites. No baseline
+was updated. Light/dark cursor renders were inspected; handoff renders remain
+pending because the earlier native failure stopped that stage.

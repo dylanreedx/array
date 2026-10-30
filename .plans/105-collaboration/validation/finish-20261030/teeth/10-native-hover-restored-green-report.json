@@ -1,0 +1,272 @@
+{
+  "phase": "10-native-hover-restored-green",
+  "exit": 0,
+  "samples": 52,
+  "frontmost": [
+    {
+      "time": 1225176.904419958,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225177.022601666,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225177.142148125,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225177.255640583,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225177.373846583,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225177.490811833,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225177.606633291,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225177.724843041,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225177.838645791,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225177.95680625,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225178.07300025,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225178.1894035,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225178.306702958,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225178.425061833,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225178.543082833,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225178.662092458,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225178.780336875,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225178.898190541,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225179.0218575,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225179.143214333,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225179.262056208,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225179.380572041,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225179.498815375,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225179.61381075,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225179.732501333,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225179.851059083,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225179.967394958,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225180.087847958,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225180.208658416,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225180.329382,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225180.443993208,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225180.559058125,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225180.677618833,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225180.796099541,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225180.913991291,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225181.031309916,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225181.148469333,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225181.269466541,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225181.385903291,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225181.506745333,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225181.624303041,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225181.738824333,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225181.859995708,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225181.973645291,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225182.092996666,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225182.209358041,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225182.323276583,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225182.446679333,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225182.565300083,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225182.68226575,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225182.797175833,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    },
+    {
+      "time": 1225182.91290525,
+      "pid": 1674,
+      "command": "/Applications/Array.app/Contents/MacOS/Array"
+    }
+  ],
+  "focusStolen": [],
+  "tmuxPhysicalRoot": "/private/tmp/array-native-hover-pmfwptrh/tmux",
+  "socket": "/private/tmp/array-native-hover-pmfwptrh/tmux/tmux-501/default",
+  "projectRoot": "/tmp/array-native-hover-pmfwptrh/project",
+  "supportRoot": "/tmp/array-native-hover-pmfwptrh/support"
+}

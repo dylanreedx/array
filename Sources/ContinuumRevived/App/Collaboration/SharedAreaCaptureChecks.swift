@@ -69,23 +69,19 @@ enum SharedAreaCaptureChecks {
         let pending = coordinator.pendingPublication
         let operation = pending?.command.id
         let unknownCalls = await authority.callCount
-        try expect(operation != nil && !coordinator.canClose && unknownCalls == 1,
-            "lost publication reply retains its operation and prevents silent review replacement")
+        try expect(operation != nil && coordinator.canClose && unknownCalls == 1,
+            "lost publication reply is durably retained so its review can close without losing recovery")
         try expect(try pair.cache.load()?.sourceBindings.count == 1,
             "private source binding is durable before unknown publication delivery")
         let beforeRetryReads = reads
         await model.close()
-        await authority.rejectNextConflict()
-        try click("Check delivery", in: view)
-        try await eventually("reconnected receipt check conflict") { await authority.callCount == 2 && coordinator.state == .uncertain }
-        try expect(coordinator.pendingPublication?.command.id == operation && !coordinator.canClose && model.status == .connected,
-            "reopening the review connection and a stale-epoch conflict retain an earlier uncertain operation")
         try click("Check delivery", in: view)
         try await eventually("duplicate receipt recovery") { coordinator.state == .published }
         let operations = await authority.operations
-        try expect(operations.count == 3 && Set(operations).count == 1 && operations.first == operation
-            && reads == beforeRetryReads && model.document?.items.count == 2,
-            "Check delivery reuses the exact reviewed command without recapture, duplicate admission or reallocation")
+        try expect(operations.count == 1 && operations.first == operation
+            && reads == beforeRetryReads && model.document?.items.count == 2
+            && model.deliveryRecord(for: operation!)?.state == .accepted(1),
+            "reopening verifies the durable receipt without recapture, duplicate transport or reallocation")
         let saved = try pair.cache.load()
         guard let binding = saved?.sourceBindings.first else { throw Failure(message: "missing saved source binding") }
         try expect(saved?.resolution(for: binding.object) == .localReference(binding),
@@ -102,7 +98,7 @@ enum SharedAreaCaptureChecks {
         catch SharedAreaCaptureCoordinator.Failure.sourceWorkspaceChanged { print("PASS collaboration capture: review remains bound to its original source workspace") }
         fixed.cancel()
         let finalCalls = await authority.callCount
-        try expect(fixed.state == .cancelled && finalCalls == 3,
+        try expect(fixed.state == .cancelled && finalCalls == 1,
             "cancelled review submits no publication")
 
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {

@@ -71,6 +71,8 @@ public actor CollaborationStore {
             try db.execute(sql: "CREATE TABLE collaboration_key_marker(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, sealed BLOB NOT NULL)")
             try db.execute(sql: "INSERT INTO collaboration_key_marker(id,version,sealed) VALUES (1,1,?)", arguments: [marker])
         }
+        Self.registerHandoffMigration(&migrator)
+        Self.registerUsageMigration(&migrator)
         try migrator.migrate(database)
         try Self.preflightDatabaseKey(database, keyData: normalizedKeyData)
     }
@@ -120,6 +122,7 @@ public actor CollaborationStore {
                       UUID(uuidString: row["operation_id"]) == command.id.rawValue,
                       command.expectedRevision == UInt64(revision - 1) else { throw CollaborationStoreError.invalidDatabaseKey }
             }
+            try Self.validateHandoffCiphertext(db, keyData: keyData)
         } catch { throw CollaborationStoreError.invalidDatabaseKey }
     }
 
@@ -256,6 +259,8 @@ public actor CollaborationStore {
             case let .duplicate(revision): return .init(revision: revision, duplicate: true)
             case let .applied(revision):
                 guard revision <= UInt64(Int64.max) else { throw CollaborationStoreError.invalidRequest }
+                try refreshUsageAccess(db, area: area, document: document)
+                try refreshHandoffAccess(db, area: area, document: document)
                 try db.execute(sql: "UPDATE areas SET snapshot=?,revision=? WHERE id=?", arguments: [try seal(document), Int64(revision), area.uuidString])
                 try db.execute(sql: "INSERT INTO operations(area,revision,actor,operation_id,command) VALUES (?,?,?,?,?)", arguments: [area.uuidString, Int64(revision), caller.device.uuidString, request.command.id.rawValue.uuidString, try seal(request.command)])
                 return .init(revision: revision, duplicate: false)
@@ -323,7 +328,7 @@ public actor CollaborationStore {
     private func validate(_ lifetime: TimeInterval) throws {
         guard lifetime.isFinite, lifetime > 0, lifetime <= 86400 else { throw CollaborationStoreError.invalidRequest }
     }
-    private func seal<T: Encodable>(_ value: T) throws -> Data {
+    func seal<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return try AES.GCM.seal(encoder.encode(value), using: key).combined!
     }

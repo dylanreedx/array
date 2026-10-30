@@ -454,7 +454,7 @@ matrix_focus_watch_start() {
     last=""
     while :; do
       pid=$(lsappinfo info -only pid "$(lsappinfo front 2>/dev/null)" 2>/dev/null \
-        | sed -n 's/.*pid = \([0-9][0-9]*\).*/\1/p' | head -1)
+        | sed -n 's/.*pid"* = \([0-9][0-9]*\).*/\1/p' | head -1)
       if [[ -n "$pid" && "$pid" != "$last" ]]; then
         last=$pid
         ours=0
@@ -590,11 +590,14 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product continuum-relay
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
   run_leg .build/debug/ContinuumRevivedCollaborationChecks
   run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
   run_app_check .build/debug/Array --collaboration-native-check
   run_app_check .build/debug/Array --ui-probe-check
   run_app_check .build/debug/Array --menu-contract-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
+  run_leg python3 scripts/check-collaboration-pair.py
   run_leg swift run --skip-build ContinuumRevivedRelayCoreChecks
   run_leg swift run --skip-build ContinuumRevivedRelayIntegrationChecks
   matrix_report 'Collaboration matrix (targeted)'
@@ -1482,6 +1485,8 @@ run_app_check .build/debug/Array --workspace-switch-check
 # first in-process switch has been green this whole time.
 run_app_check .build/debug/Array --zone-tile-hydration-check
 run_app_check .build/debug/Array --collaboration-native-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
+run_leg python3 scripts/check-collaboration-pair.py
 # M1.10 (.plans/46): WorkspaceRuntime.canvasView is written in exactly one place,
 # install(into:appRegistry:), and NOTHING in production has ever called it -- so
 # every canvas call in switchWorkspace optional-chained through nil and did

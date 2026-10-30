@@ -95,8 +95,13 @@ extension CollaborationStore {
             }
             let next = events.last?.revision ?? request.after
             guard next == through || !events.isEmpty else { throw CollaborationStoreError.invalidCursor }
-            let presence = presenceEntries.filter { $0.key.area == area }.values.compactMap(\.value)
+            let presence = try presenceEntries.filter { $0.key.area == area }.values.compactMap(\.value)
                 .sorted { $0.identity.device.uuidString < $1.identity.device.uuidString }
+                .map { value in
+                    Collaboration.Presence(identity: value.identity, cursor: value.cursor, viewport: value.viewport,
+                        expiresAt: value.expiresAt, label: value.label,
+                        usage: try usageForPresence(db, area: area, identity: value.identity))
+                }
             let version = presenceVersions[area] ?? UUID()
             presenceVersions[area] = version
             return .init(scope: scope, after: request.after, through: through, events: events, nextCursor: next,
@@ -129,7 +134,8 @@ extension CollaborationStore {
             // Keep the latest observation and bound fanout to 20 updates/sec.
             entry.sequence = input.sequence
             entry.value = .init(identity: identity, cursor: input.cursor, viewport: input.viewport,
-                expiresAt: now.addingTimeInterval(Self.presenceLifetime))
+                expiresAt: now.addingTimeInterval(Self.presenceLifetime),
+                label: try String.fetchOne(db, sql: "SELECT label FROM people WHERE id=?", arguments: [identity.person.rawValue.uuidString]))
             if let last = entry.lastPublished, now.timeIntervalSince(last) < 0.05 {
                 presenceEntries[key] = entry
                 if presenceFlushes[key] == nil {
@@ -194,7 +200,7 @@ extension CollaborationStore {
         presenceEntries[key] = entry
         presenceChanged(key.area)
     }
-    private func presenceChanged(_ area: UUID) { presenceVersions[area] = UUID(); wakeArea(area) }
+    func presenceChanged(_ area: UUID) { presenceVersions[area] = UUID(); wakeArea(area) }
     private func sweepPresence() {
         let now = clock()
         for key in Array(presenceEntries.keys) {

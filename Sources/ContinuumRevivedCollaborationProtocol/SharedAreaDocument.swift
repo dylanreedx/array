@@ -59,6 +59,16 @@ public enum SharedArea {
             self.id = id; self.object = object; self.rect = rect; self.z = z
         }
     }
+    /// Reducer-owned causal identity of a placement write. Equal frames do not
+    /// imply equal intent: a teammate can move away and back before Undo.
+    public struct PlacementWrite: Codable, Equatable, Sendable {
+        public let placement: ID<Placement>
+        public let operation: ID<Operation>
+        public let revision: UInt64
+        public init(placement: ID<Placement>, operation: ID<Operation>, revision: UInt64) {
+            self.placement = placement; self.operation = operation; self.revision = revision
+        }
+    }
     public struct Context: Codable, Equatable, Sendable {
         public let id: ID<Revision>
         public let object: ID<Object>
@@ -113,6 +123,7 @@ public enum SharedArea {
         public private(set) var revision: UInt64 = 0
         public private(set) var items: [Item] = []
         public private(set) var positions: [Position] = []
+        public private(set) var placementWrites: [PlacementWrite] = []
         public private(set) var contexts: [Context] = []
         public private(set) var posts: [Post] = []
         private var deletedObjects: [ID<Object>] = []
@@ -122,7 +133,7 @@ public enum SharedArea {
 
         private enum CodingKeys: String, CodingKey {
             case schema, id, revision, items, positions, contexts, posts
-            case deletedObjects, deletedPlacements, receipts
+            case deletedObjects, deletedPlacements, receipts, placementWrites
         }
         /// Network and disk snapshots take the same strict validation path.
         public init(from decoder: Decoder) throws {
@@ -133,6 +144,9 @@ public enum SharedArea {
             revision = try c.decode(UInt64.self, forKey: .revision)
             items = try c.decode([Item].self, forKey: .items)
             positions = try c.decode([Position].self, forKey: .positions)
+            // Unreleased v1 snapshots may predate causal geometry metadata.
+            // Absence stays unknown; it never fabricates a safe Undo stamp.
+            placementWrites = try c.decodeIfPresent([PlacementWrite].self, forKey: .placementWrites) ?? []
             contexts = try c.decode([Context].self, forKey: .contexts)
             posts = try c.decode([Post].self, forKey: .posts)
             deletedObjects = try c.decode([ID<Object>].self, forKey: .deletedObjects)
@@ -145,10 +159,17 @@ public enum SharedArea {
                   Set(receipts.map(\.id)).count == receipts.count,
                   Set(deletedObjects).count == deletedObjects.count,
                   Set(deletedPlacements).count == deletedPlacements.count,
+                  Set(placementWrites.map(\.placement)).count == placementWrites.count,
                   items.allSatisfy({ !deletedObjects.contains($0.id) }),
                   positions.allSatisfy({ !deletedPlacements.contains($0.id) })
             else { throw Failure.duplicateIdentity }
             guard positions.allSatisfy({ $0.rect.valid }) else { throw Failure.invalidGeometry }
+            let positionIDs = Set(positions.map(\.id))
+            let receiptRevisions = Dictionary(uniqueKeysWithValues: receipts.map { ($0.id, $0.revision) })
+            guard placementWrites.allSatisfy({ write in
+                positionIDs.contains(write.placement) && write.revision > 0
+                    && write.revision <= revision && receiptRevisions[write.operation] == write.revision
+            }) else { throw Failure.invalidReference }
             guard positions.allSatisfy({ p in items.contains { $0.id == p.object } }),
                   items.allSatisfy({ item in positions.contains { $0.object == item.id } }),
                   UInt64(receipts.count) == revision,
@@ -191,11 +212,25 @@ public enum SharedArea {
             guard !command.edits.isEmpty else { throw Failure.emptyCommand }
             guard revision < UInt64.max else { throw Failure.exhaustedRevision }
             var next = self
-            for edit in command.edits { try next.reduce(edit) }
+            for edit in command.edits {
+                try next.reduce(edit)
+                switch edit {
+                case .admit(_, let position), .place(let position):
+                    next.placementWrites.removeAll { $0.placement == position.id }
+                    next.placementWrites.append(.init(placement: position.id, operation: command.id, revision: revision + 1))
+                case .remove:
+                    let retained = Set(next.positions.map(\.id))
+                    next.placementWrites.removeAll { !retained.contains($0.placement) }
+                default: break
+                }
+            }
             next.revision += 1
             next.receipts.append(Receipt(id: command.id, digest: digest, revision: next.revision))
             self = next
             return .applied(revision)
+        }
+        public func placementWrite(for placement: ID<Placement>) -> PlacementWrite? {
+            placementWrites.first { $0.placement == placement }
         }
         private mutating func reduce(_ edit: Edit) throws {
             switch edit {

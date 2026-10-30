@@ -253,6 +253,19 @@ public final class CollaborationAccountController {
             credentialScope: .init(endpoint: endpoint, identity: account.identity), bundleIdentifier: bundleIdentifier,
             transportFactory: areaTransportFactory)
     }
+    public func makeAgentHandoffController(area: UUID) throws -> SharedAgentHandoffController {
+        guard status == .ready, let account = active?.account else { throw CollaborationAccountFailure.notConnected }
+        let endpoint = try account.endpointValue
+        guard let credential = try credentials.load(for: .init(endpoint: endpoint, identity: account.identity)) else {
+            throw CollaborationAccountFailure.credentialsMissing
+        }
+        let api = try CollaborationAPI(baseURL: endpoint.canonicalURL, credential: credential.token,
+            allowsInsecureLoopback: endpoint.canonicalURL.scheme == "http")
+        let local = try SharedAreaLocalStore(applicationSupportRoot: store.applicationSupportRoot, bundleIdentifier: bundleIdentifier,
+            endpoint: endpoint, person: account.identity.person, area: .init(area))
+        return try SharedAgentHandoffController(identity: account.identity,
+            transport: SharedAgentHandoffAPI(api: api, area: area), directory: local.layout.areaDirectory)
+    }
 
     private func withAccount<T>(_ action: @MainActor (Active, UUID) async throws -> T) async throws -> T {
         guard status == .ready, let active else { throw CollaborationAccountFailure.notConnected }

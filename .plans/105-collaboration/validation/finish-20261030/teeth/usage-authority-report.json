@@ -1,0 +1,7 @@
+{
+  "exitCode": 1,
+  "failure": "FAIL: ServiceUsageFailure(message: \"teammate forged another host\\'s accounting\")",
+  "sourceBytesRestored": true,
+  "sourceHash": "da3723de86f6979d7e84aa219cc65d8a2d57317fe5c40203daf4c515f0473832",
+  "restoredChecksGreen": true
+}

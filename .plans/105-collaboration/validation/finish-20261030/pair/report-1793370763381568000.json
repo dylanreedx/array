@@ -1,0 +1,1 @@
+{"error": "peer A shareZone: source-zone publication failed", "passed": false, "steps": ["two real background Array processes use different human/device accounts, source roots, app support, vaults and physical tmux sockets"], "type": "AssertionError"}

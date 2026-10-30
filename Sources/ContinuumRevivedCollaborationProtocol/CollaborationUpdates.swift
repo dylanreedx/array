@@ -43,8 +43,11 @@ extension Collaboration {
         public let cursor: Point?
         public let viewport: SharedArea.Rect?
         public let expiresAt: Date
-        public init(identity: Identity, cursor: Point?, viewport: SharedArea.Rect?, expiresAt: Date) {
+        public let label: String?
+        public let usage: UsageSnapshot?
+        public init(identity: Identity, cursor: Point?, viewport: SharedArea.Rect?, expiresAt: Date, label: String? = nil, usage: UsageSnapshot? = nil) {
             self.identity = identity; self.cursor = cursor; self.viewport = viewport; self.expiresAt = expiresAt
+            self.label = label; self.usage = usage
         }
     }
     public struct Updates: Codable, Sendable {

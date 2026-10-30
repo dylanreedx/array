@@ -537,7 +537,9 @@ public struct PiEventTranslator {
         if let input, let output {
             events.append(.tokenUsageUpdated(
                 threadId: threadId,
-                snapshot: TokenUsageSnapshot(inputTokens: input, outputTokens: output, totalCostUsd: totalCost)
+                snapshot: TokenUsageSnapshot(inputTokens: input, outputTokens: output, totalCostUsd: totalCost,
+                    accountingObservationID: Self.accountingIdentity(message: message),
+                    accountingInputTokens: Self.accountingInput(usage), observedAt: observedAt)
             ))
         }
 
@@ -581,6 +583,23 @@ public struct PiEventTranslator {
         let cacheWrite = intValue(usage["cacheWrite"]).map { String($0) } ?? ""
         let total = intValue(usage["totalTokens"]).map { String($0) } ?? ""
         return [responseId, timestamp, input, output, cacheRead, cacheWrite, total].joined(separator: "|")
+    }
+
+    private static func accountingIdentity(message: [String: Any]) -> String? {
+        let response = message["responseId"] as? String ?? ""
+        let timestamp = doubleValue(message["timestamp"]).map { String($0) } ?? ""
+        guard !response.isEmpty || !timestamp.isEmpty else { return nil }
+        return response + "|" + timestamp
+    }
+    private static func accountingInput(_ usage: [String: Any]) -> Int? {
+        let values = [intValue(usage["input"]) ?? 0, intValue(usage["cacheRead"]) ?? 0, intValue(usage["cacheWrite"]) ?? 0]
+        var total = 0
+        for value in values {
+            let (next, overflow) = total.addingReportingOverflow(value)
+            guard value >= 0, !overflow else { return nil }
+            total = next
+        }
+        return total
     }
 
     private static func intValue(_ value: Any?) -> Int? {

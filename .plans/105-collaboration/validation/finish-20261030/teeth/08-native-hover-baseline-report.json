@@ -1,0 +1,262 @@
+{
+  "phase": "08-native-hover-baseline",
+  "exit": 0,
+  "samples": 50,
+  "frontmost": [
+    {
+      "time": 1224842.295443416,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224842.413526625,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224842.534469083,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224842.653443125,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224842.769609,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224842.885014625,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224842.999267083,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224843.116473333,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224843.234302125,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224843.354763541,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224843.474348625,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224843.591512166,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224843.716552458,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224843.833353083,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224843.949730333,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224844.065503291,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224844.195457,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224844.316496916,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224844.437901958,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224844.57010475,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224844.689955041,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224844.815388583,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224844.937648,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224845.063222166,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224845.183711208,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224845.298637833,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224845.417079375,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224845.534097916,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224845.652989083,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224845.772845041,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224845.891819958,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224846.011015625,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224846.130079458,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224846.254988208,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224846.378440791,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224846.504926916,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224846.62856725,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224846.75578675,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224846.875714416,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224846.990251916,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224847.107722458,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224847.228252916,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224847.3519755,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224847.4797615,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224847.622603833,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224847.74036175,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224847.857893375,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224847.976205208,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224848.090709708,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    },
+    {
+      "time": 1224848.206047708,
+      "pid": 91893,
+      "command": "/Applications/Spotify.app/Contents/MacOS/Spotify"
+    }
+  ],
+  "focusStolen": [],
+  "tmuxPhysicalRoot": "/private/tmp/array-native-hover-gjse40rk/tmux",
+  "socket": "/private/tmp/array-native-hover-gjse40rk/tmux/tmux-501/default",
+  "projectRoot": "/tmp/array-native-hover-gjse40rk/project",
+  "supportRoot": "/tmp/array-native-hover-gjse40rk/support"
+}
