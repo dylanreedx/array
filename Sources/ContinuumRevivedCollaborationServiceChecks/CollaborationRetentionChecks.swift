@@ -69,7 +69,10 @@ func runCollaborationRetentionChecks() async throws {
         _ = try await apiB.accept(code: try await apiA.invite(area: areaID, request: .init(person: b.identity.person)).code)
         _ = try await apiC.accept(code: try await apiA.invite(area: areaID, request: .init(person: c.identity.person)).code)
 
-        let thread = SharedArea.Item(id: .init(), kind: .discussion), artifact = SharedArea.Item(id: .init(), kind: .artifact)
+        // Artifacts carry their publishing source (COL-16).
+        let artifactHost = try await apiA.registerHost()
+        let thread = SharedArea.Item(id: .init(), kind: .discussion), artifact = SharedArea.Item(id: .init(), kind: .artifact,
+            source: .init(owner: a.identity.person, host: artifactHost.id, binding: .init()))
         let threadPlacement = SharedArea.ID<SharedArea.Placement>()
         let artifactAdmit = SharedArea.Edit.admit(artifact, .init(id: .init(), object: artifact.id, rect: .init(x: 700, y: 0, width: 200, height: 120)))
         _ = try await apiA.apply(area: areaID, mutation: .init(epoch: 1, command: .init(area: area, expectedRevision: 0, edits: [

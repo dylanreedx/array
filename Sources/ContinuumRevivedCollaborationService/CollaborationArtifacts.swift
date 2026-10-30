@@ -29,6 +29,52 @@ extension CollaborationStore {
                   PRIMARY KEY(area,id));
                 """)
         }
+        migrator.registerMigration("collaboration-artifacts-v2-staging") { db in
+            // Existing blobs of an object that already has a revision are kept
+            // as published: never collect bytes a pinned revision might name.
+            try db.execute(sql: """
+                ALTER TABLE collaboration_artifact_blobs ADD COLUMN uploaded DOUBLE NOT NULL DEFAULT 0;
+                ALTER TABLE collaboration_artifact_blobs ADD COLUMN published INTEGER NOT NULL DEFAULT 0;
+                UPDATE collaboration_artifact_blobs SET published=1 WHERE EXISTS (SELECT 1 FROM collaboration_artifact_revisions r
+                  WHERE r.area=collaboration_artifact_blobs.area AND r.object=collaboration_artifact_blobs.object);
+                """)
+        }
+    }
+
+    /// Retention: blobs no published revision names expire after the staging
+    /// lifetime; everything of an unpublished artifact goes with it, because a
+    /// removed object ID can never be admitted again and every read is a 404.
+    func refreshArtifactAccess(_ db: Database, area: UUID, document: SharedArea.Document) throws {
+        let admitted = Set(document.items.filter { $0.kind == .artifact }.map { $0.id.rawValue.uuidString })
+        let stored = try String.fetchAll(db, sql: """
+            SELECT object FROM collaboration_artifact_blobs WHERE area=? UNION SELECT object FROM collaboration_artifact_revisions WHERE area=?
+            """, arguments: [area.uuidString, area.uuidString])
+        for object in stored where !admitted.contains(object) {
+            for table in ["collaboration_artifact_blobs", "collaboration_artifact_revisions", "collaboration_artifact_reviews"] {
+                try db.execute(sql: "DELETE FROM \(table) WHERE area=? AND object=?", arguments: [area.uuidString, object])
+            }
+        }
+    }
+    private func collectStagedArtifactBlobs(_ db: Database, area: UUID) throws {
+        try db.execute(sql: "DELETE FROM collaboration_artifact_blobs WHERE area=? AND published=0 AND uploaded<?",
+            arguments: [area.uuidString, clock().timeIntervalSince1970 - retention.artifactStagingLifetime])
+    }
+
+    /// One head per admitted artifact with at least one revision.
+    func artifactHeads(_ db: Database, area: UUID) throws -> [Artifact.Head] {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT r.object,r.record,(SELECT COUNT(*) FROM collaboration_artifact_reviews v WHERE v.area=r.area AND v.object=r.object) AS reviews
+            FROM collaboration_artifact_revisions r WHERE r.area=? AND r.sequence=(SELECT MAX(sequence) FROM collaboration_artifact_revisions m
+              WHERE m.area=r.area AND m.object=r.object) ORDER BY r.object
+            """, arguments: [area.uuidString])
+        guard !rows.isEmpty else { return [] }
+        let snapshot = try Data.fetchOne(db, sql: "SELECT snapshot FROM areas WHERE id=?", arguments: [area.uuidString])!
+        let admitted = Set(try unseal(SharedArea.Document.self, snapshot).items.filter { $0.kind == .artifact }.map { $0.id.rawValue.uuidString })
+        return try rows.filter { admitted.contains($0["object"] as String) }.map { row in
+            let record = try unseal(Artifact.Record.self, row["record"])
+            return .init(object: record.manifest.object, revision: record.manifest.id, sequence: record.sequence,
+                         sourceChanged: record.drift != nil, reviews: row["reviews"])
+        }
     }
 
     public func uploadArtifactBlob(token: String, area: UUID, object: UUID, digest: String, bytes: Data) throws -> Artifact.BlobReceipt {
@@ -38,6 +84,7 @@ extension CollaborationStore {
         return try database.write { db in
             let caller = try authenticate(db, token)
             _ = try artifactOwnerAccess(db, caller, area, object)
+            try collectStagedArtifactBlobs(db, area: area)
             if try Int.fetchOne(db, sql: "SELECT length FROM collaboration_artifact_blobs WHERE area=? AND object=? AND digest=?",
                                 arguments: [area.uuidString, object.uuidString, digest]) != nil {
                 return .init(digest: digest, length: bytes.count)
@@ -45,8 +92,8 @@ extension CollaborationStore {
             let used = try Int.fetchOne(db, sql: "SELECT COALESCE(SUM(length),0) FROM collaboration_artifact_blobs WHERE area=?", arguments: [area.uuidString]) ?? 0
             guard used <= Artifact.Limits.areaBytes - bytes.count else { throw CollaborationArtifactError.quotaExceeded }
             let sealed = try AES.GCM.seal(bytes, using: key, authenticating: Self.blobAAD(area, object, digest)).combined!
-            try db.execute(sql: "INSERT INTO collaboration_artifact_blobs(area,object,digest,length,sealed,uploader) VALUES (?,?,?,?,?,?)",
-                arguments: [area.uuidString, object.uuidString, digest, bytes.count, sealed, caller.device.uuidString])
+            try db.execute(sql: "INSERT INTO collaboration_artifact_blobs(area,object,digest,length,sealed,uploader,uploaded) VALUES (?,?,?,?,?,?,?)",
+                arguments: [area.uuidString, object.uuidString, digest, bytes.count, sealed, caller.device.uuidString, clock().timeIntervalSince1970])
             return .init(digest: digest, length: bytes.count)
         }
     }
@@ -58,7 +105,7 @@ extension CollaborationStore {
         catch { throw CollaborationArtifactError.invalidManifest }
         guard manifest.object.rawValue == object else { throw CollaborationArtifactError.invalidManifest }
         let digest = manifest.contentDigest
-        return try database.write { db in
+        let receipt: Artifact.PublishReceipt = try database.write { db in
             let caller = try authenticate(db, token)
             let (scope, source) = try artifactOwnerAccess(db, caller, area, object)
             guard scope.epoch == request.epoch else { throw CollaborationStoreError.staleEpoch }
@@ -79,8 +126,15 @@ extension CollaborationStore {
                                          publishedAt: clock(), contentDigest: digest)
             try db.execute(sql: "INSERT INTO collaboration_artifact_revisions(area,object,id,sequence,digest,record) VALUES (?,?,?,?,?,?)",
                 arguments: [area.uuidString, object.uuidString, manifest.id.rawValue.uuidString, sequence, digest, try seal(record)])
+            for entry in manifest.entries where entry.coverage == .included {
+                try db.execute(sql: "UPDATE collaboration_artifact_blobs SET published=1 WHERE area=? AND object=? AND digest=?",
+                    arguments: [area.uuidString, object.uuidString, entry.blob!])
+            }
             return .init(revision: manifest.id, sequence: UInt64(sequence), duplicate: false)
         }
+        // Wake held subscriptions only after commit; their page carries the head.
+        if !receipt.duplicate { presenceChanged(area) }
+        return receipt
     }
 
     public func artifactState(token: String, area: UUID, object: UUID) throws -> Artifact.State {
@@ -131,6 +185,7 @@ extension CollaborationStore {
 
     public func reviewArtifact(token: String, area: UUID, object: UUID, request: Artifact.ReviewRequest) throws -> Artifact.Review {
         guard request.note.utf8.count <= Artifact.Limits.reviewNoteBytes else { throw CollaborationStoreError.invalidRequest }
+        defer { presenceChanged(area) }
         return try database.write { db in
             let caller = try authenticate(db, token)
             let scope = try artifactReadAccess(db, caller, area, object)
@@ -159,6 +214,9 @@ extension CollaborationStore {
         guard report.changedPaths >= 0, report.changedPaths <= Artifact.Limits.entries, report.changedPaths > 0 || report.baseMoved else {
             throw CollaborationStoreError.invalidRequest
         }
+        // A spurious wake after a refusal costs one re-read; a missed one
+        // leaves a teammate's applicability stale.
+        defer { presenceChanged(area) }
         return try database.write { db in
             let caller = try authenticate(db, token)
             let (scope, _) = try artifactOwnerAccess(db, caller, area, object)

@@ -256,6 +256,18 @@ extension Collaboration {
             }
         }
 
+        /// Live pointer for one artifact, carried on every updates page.
+        public struct Head: Codable, Equatable, Sendable {
+            public let object: SharedArea.ID<SharedArea.Object>
+            public let revision: SharedArea.ID<RevisionTag>
+            public let sequence: UInt64
+            public let sourceChanged: Bool
+            public let reviews: Int
+            public init(object: SharedArea.ID<SharedArea.Object>, revision: SharedArea.ID<RevisionTag>, sequence: UInt64, sourceChanged: Bool, reviews: Int) {
+                self.object = object; self.revision = revision; self.sequence = sequence; self.sourceChanged = sourceChanged; self.reviews = reviews
+            }
+        }
+
         public enum ValidationFailure: Error, Equatable, Sendable {
             case invalidManifest(String), hashMismatch, tooLarge
         }

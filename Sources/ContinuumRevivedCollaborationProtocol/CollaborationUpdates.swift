@@ -63,10 +63,15 @@ extension Collaboration {
         /// Execution-host liveness, versioned with presence but expiring on its own
         /// policy. Absent from a relay that predates host liveness.
         public let hosts: [HostLiveness]?
+        /// Latest revision of each admitted artifact. Bytes never ride here;
+        /// a changed head tells a view to refetch that artifact's state.
+        public let artifactHeads: [Artifact.Head]?
         public init(scope: Scope, after: UInt64, through: UInt64, events: [Event], nextCursor: UInt64,
-                    presenceVersion: UUID, presence: [Presence], serverTime: Date, hosts: [HostLiveness]? = nil) {
+                    presenceVersion: UUID, presence: [Presence], serverTime: Date, hosts: [HostLiveness]? = nil,
+                    artifactHeads: [Artifact.Head]? = nil) {
             self.scope = scope; self.after = after; self.through = through; self.events = events; self.nextCursor = nextCursor
             self.presenceVersion = presenceVersion; self.presence = presence; self.serverTime = serverTime; self.hosts = hosts
+            self.artifactHeads = artifactHeads
         }
     }
 }

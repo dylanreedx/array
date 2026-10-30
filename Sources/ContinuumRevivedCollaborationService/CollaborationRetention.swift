@@ -15,10 +15,15 @@ public struct CollaborationRetention: Sendable, Equatable {
     /// An executable request not admitted by its host within this window is
     /// refused. The requester reconfirms under current authority with a new ID.
     public var dispatchAuthorityWindow: TimeInterval
+    /// An artifact blob that no published revision names is discarded after
+    /// this long, so abandoned uploads stop counting against the area quota.
+    public var artifactStagingLifetime: TimeInterval
     public init(operationTail: Int = 4096, operationAge: TimeInterval = 7 * 86_400,
-                compactionBatch: Int = 512, dispatchAuthorityWindow: TimeInterval = 900) {
+                compactionBatch: Int = 512, dispatchAuthorityWindow: TimeInterval = 900,
+                artifactStagingLifetime: TimeInterval = 3600) {
         self.operationTail = max(0, operationTail); self.operationAge = max(0, operationAge)
         self.compactionBatch = max(1, compactionBatch); self.dispatchAuthorityWindow = max(0, dispatchAuthorityWindow)
+        self.artifactStagingLifetime = max(0, artifactStagingLifetime)
     }
 }
 

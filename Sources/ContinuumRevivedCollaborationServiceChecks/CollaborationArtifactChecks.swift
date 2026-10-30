@@ -2,6 +2,7 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+import GRDB
 import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedCollaborationClient
 import ContinuumRevivedCollaborationService
@@ -9,6 +10,12 @@ import ContinuumRevivedRelayCore
 import ContinuumRevivedRelayNIO
 
 private struct ArtifactCheckFailure: Error { let message: String }
+private final class ArtifactClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var date = Date(timeIntervalSince1970: 1_800_000_000)
+    func now() -> Date { lock.withLock { date } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { date = date.addingTimeInterval(seconds) } }
+}
 
 /// COL-16 / COL-07 artifact witnesses through the real NIO routes and the
 /// production client: publication, pinned review, applicability, nested blob
@@ -23,7 +30,8 @@ func runCollaborationArtifactChecks() async throws {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
     let key = Data(repeating: 43, count: 32), path = root.appendingPathComponent("collaboration.sqlite").path
-    let store = try CollaborationStore(path: path, masterKey: key)
+    let clock = ArtifactClock()
+    let store = try CollaborationStore(path: path, masterKey: key, clock: { clock.now() })
     let companion = try RelayStore(path: root.appendingPathComponent("companion.sqlite").path, masterKey: key)
     let server = RelayServer(store: companion, configuration: .init(host: "127.0.0.1", publicPort: 0, adminPort: 0), collaboration: store)
     try await server.start()
@@ -69,6 +77,12 @@ func runCollaborationArtifactChecks() async throws {
             return item.id
         }
         let object = try await admitArtifact(apiA, area: area, owner: a, host: host.id, revision: &revision)
+        let sourceless = SharedArea.Item(id: .init(), kind: .artifact)
+        let sourcelessCommand = SharedArea.Command(area: .init(area), expectedRevision: revision,
+            edits: [.admit(sourceless, .init(id: .init(), object: sourceless.id, rect: .init(x: 0, y: 0, width: 10, height: 10)))])
+        try await refused("artifact admitted without a publishing source", status: 400) {
+            _ = try await apiA.apply(area: area, mutation: .init(epoch: 1, command: sourcelessCommand))
+        }
 
         // A synthetic capture: the producer's own witness covers git; this
         // leg covers what the service and client do with any capture.
@@ -144,7 +158,20 @@ func runCollaborationArtifactChecks() async throws {
             _ = try await apiA.publishArtifact(area: area, epoch: 1, capture: capture(object, parent: nil, "stale parent"))
         }
         let second = capture(object, parent: .init(r1), "@@ -1 +1 @@\n-old\n+shared-artifact-sentinel-r2\n")
+        // Live wake: B's held subscription returns on publication with the new head.
+        let idle = try await store.updates(token: b.token, area: area, request: .init(after: revision, waitMilliseconds: 0))
+        try expect(idle.artifactHeads?.first(where: { $0.object == object })?.sequence == 1
+                   && idle.artifactHeads?.first(where: { $0.object == object })?.sourceChanged == true
+                   && idle.artifactHeads?.first(where: { $0.object == object })?.reviews == 1,
+                   "updates page carries the artifact head, its drift and review count")
+        let heldStart = Date(), heldRequest = Collaboration.UpdateRequest(after: revision, presenceVersion: idle.presenceVersion, waitMilliseconds: 10_000)
+        async let held = store.updates(token: b.token, area: area, request: heldRequest)
+        try await Task.sleep(for: .milliseconds(200))
         _ = try await apiA.publishArtifact(area: area, epoch: 1, capture: second)
+        let woken = try await held
+        try expect(Date().timeIntervalSince(heldStart) < 5 && woken.events.isEmpty
+                   && woken.artifactHeads?.first(where: { $0.object == object })?.revision == second.manifest.id,
+                   "a held subscription wakes on publication and names the new latest revision")
         try await refused("same revision id, different content", status: 409, code: "changedIntent") {
             _ = try await apiA.publishArtifact(area: area, epoch: 1, capture: capture(object, parent: .init(r1), "rewritten", id: second.manifest.id))
         }
@@ -204,6 +231,24 @@ func runCollaborationArtifactChecks() async throws {
         try expect(disk.range(of: Data("shared-artifact-sentinel".utf8)) == nil && disk.range(of: Data("src/main.swift".utf8)) == nil,
                    "artifact bytes and manifests are sealed at rest")
 
+        // Quota and staging retention: abandoned uploads stop counting once expired.
+        let quotaObject = try await admitArtifact(apiA, area: area, owner: a, host: host.id, revision: &revision)
+        var stagedCount = 0, quotaStatus = 0, quotaBody = Data()
+        for index in 0..<70 {
+            var chunk = Data(repeating: UInt8(index), count: A.Limits.blobBytes); chunk[0] = 0xff
+            let response = try await raw("PUT", "areas/\(area)/artifacts/\(quotaObject.rawValue)/blobs/\(A.digest(chunk))", a.token, chunk)
+            if response.0 == 201 { stagedCount += 1; continue }
+            quotaStatus = response.0; quotaBody = response.1; break
+        }
+        try expect(stagedCount >= 62 && stagedCount < 64 && quotaStatus == 413 && String(decoding: quotaBody, as: UTF8.self).contains("artifactQuotaExceeded"),
+                   "the 64 MiB area quota refuses the next blob after \(stagedCount) MiB")
+        clock.advance(3601)
+        var fresh = Data(repeating: 0xab, count: A.Limits.blobBytes); fresh[0] = 0x01
+        let afterExpiry = try await raw("PUT", "areas/\(area)/artifacts/\(quotaObject.rawValue)/blobs/\(A.digest(fresh))", a.token, fresh)
+        try expect(afterExpiry.0 == 201, "unpublished staged blobs expire after the staging lifetime and free the quota")
+        let stillPinned = try await apiV.readArtifact(area: area, object: object.rawValue, revision: r1)
+        try expect(stillPinned.bytes == read.bytes, "published revision bytes survive staging collection")
+
         // Revocation: removal and unpublication close the routes.
         let before = try await raw("GET", blobPath, b.token)
         try expect(before.0 == 200, "B reads the blob before removal")
@@ -216,6 +261,15 @@ func runCollaborationArtifactChecks() async throws {
         _ = try await apiA.apply(area: area, mutation: .init(epoch: current.scope.epoch, command: unpublish))
         try await sameMiss("unpublished artifact, even for its owner", blobPath, a.token)
         try await sameMiss("unpublished artifact for a remaining viewer", blobPath, v.token)
+        let database = try DatabaseQueue(path: path)
+        let leftovers = try await database.read { db in
+            try ["collaboration_artifact_blobs", "collaboration_artifact_revisions", "collaboration_artifact_reviews"].map {
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \($0) WHERE area=? AND object=?", arguments: [area.uuidString, object.rawValue.uuidString]) ?? -1
+            }
+        }
+        try expect(leftovers == [0, 0, 0], "unpublishing an artifact deletes its blobs, revisions and reviews")
+        let heads = try await store.updates(token: v.token, area: area, request: .init(after: try await apiV.state(area: area).document.revision, waitMilliseconds: 0))
+        try expect(heads.artifactHeads?.contains(where: { $0.object == object }) == false, "an unpublished artifact has no head")
         try await server.stop()
     } catch { try? await server.stop(); throw error }
     print("Collaboration artifact checks passed: real localhost routes, pinned revisions, nested 404s, no event-stream bytes.")

@@ -162,7 +162,7 @@ func runSharedAgentFreshnessChecks() async throws {
         try freshnessCheck(stale == .accepted, "a late, older receipt cannot move an accepted delivery backwards")
 
         // 5. Frozen result excerpts keep their source turn, host and artifact revision.
-        let artifact = SharedArea.Item(id: .init(), kind: .artifact)
+        let artifact = SharedArea.Item(id: .init(), kind: .artifact, source: .init(owner: a.identity.person, host: host.id, binding: .init()))
         try await edit([.admit(artifact, .init(id: .init(), object: artifact.id, rect: rect(1050)))])
         let artifactR1 = UUID(), artifactR2 = UUID()
         let excerpt = Collaboration.ResultExcerpt(area: initial.document.id, capturedBy: a.identity.person,

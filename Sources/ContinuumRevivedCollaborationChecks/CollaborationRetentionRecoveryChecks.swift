@@ -163,7 +163,9 @@ private func ancientCacheRecoversOverHTTP(root: URL) async throws {
         let credential = try await service.redeem(.init(code: enrollment.code, deviceLabel: "Ancient client"))
         let api = try CollaborationAPI(baseURL: url, credential: credential.token, allowsInsecureLoopback: true)
         let created = try await api.createArea(), area = created.scope.area
-        let thread = SharedArea.Item(id: .init(), kind: .discussion), artifact = SharedArea.Item(id: .init(), kind: .artifact)
+        let artifactHost = try await api.registerHost()
+        let thread = SharedArea.Item(id: .init(), kind: .discussion), artifact = SharedArea.Item(id: .init(), kind: .artifact,
+            source: .init(owner: credential.identity.person, host: artifactHost.id, binding: .init()))
         _ = try await api.apply(area: area.rawValue, mutation: .init(epoch: 1, command: .init(area: area, expectedRevision: 0, edits: [
             .admit(thread, .init(id: .init(), object: thread.id, rect: .init(x: 0, y: 0, width: 400, height: 300))),
             .admit(artifact, .init(id: .init(), object: artifact.id, rect: .init(x: 500, y: 0, width: 200, height: 120)))

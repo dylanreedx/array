@@ -9,6 +9,7 @@ public struct CollaborationReplica: Sendable {
     public private(set) var presence: [Collaboration.Presence] = []
     public private(set) var hosts: [Collaboration.HostLiveness]?
     public private(set) var serverTime: Date?
+    public private(set) var artifactHeads: [Collaboration.Artifact.Head] = []
     public init(state: Collaboration.State) throws {
         guard state.document.id == state.scope.area else { throw CollaborationClientError.invalidSequence }
         document = state.document; scope = state.scope
@@ -26,6 +27,7 @@ public struct CollaborationReplica: Sendable {
         // Commit the entire received page, never half a malformed page.
         document = next; scope = page.scope; presenceVersion = page.presenceVersion
         presence = page.presence; serverTime = page.serverTime; hosts = page.hosts
+        if let heads = page.artifactHeads { artifactHeads = heads }
     }
     /// Catch up to one fixed high-water mark, then resume live polling.
     public mutating func catchUp(using api: CollaborationAPI) async throws {
