@@ -67,8 +67,9 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
     /// The raw string width plus the label cell's own horizontal padding, which
     /// `NSString.size` does not include — without it the cell truncates the title.
     private var measuredTitleWidth: CGFloat {
-        ceil((presentation.title as NSString).size(withAttributes: [.font: NSFont.token(.label, zoom: pageZoom)]).width)
-            + CGFloat(pageZoom.scaled(4))
+        // The label's own cell, not NSString sizing: at 11pt the cell lays the
+        // title out ~4pt wider, and a short frame wrapped the last glyph away.
+        ceil(titleLabel.cell?.cellSize.width ?? 0)
     }
 
     override var intrinsicContentSize: NSSize {

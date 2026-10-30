@@ -60,6 +60,11 @@ enum SharedAreaHandoffViewChecks {
                 try png.write(to: directory.appendingPathComponent("handoff-\(appearance == .aqua ? "light" : "dark").png"))
             }
         }
+        view.layoutSubtreeIfNeeded()
+        let clipped = descendants(view).compactMap { $0 as? ComposerActionButton }.flatMap { button in
+            button.subviews.compactMap { $0 as? NSTextField }.filter { !$0.stringValue.isEmpty && $0.frame.width < $0.fittingSize.width.rounded(.up) }
+        }.map(\.stringValue)
+        try expect(clipped.isEmpty, "every handoff action title fits its label (clipped: \(clipped))")
         try click("Offer handoff", in: view)
         try await eventually("native offer") { await authority.offers == 1 && !model.isBusy }
         try expect(model.control?.offer?.recipient.rawValue == teammate,
