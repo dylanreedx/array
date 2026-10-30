@@ -253,6 +253,15 @@ func runSharedAreaAgreementHTTPChecks() async throws {
         try agreementCheck(dispatcher.lastError == nil && runnerCommands == 0 && pending.isEmpty
             && (try journal.attempts().count) == journalBefore && dispatchesAfter == dispatchesBefore && dispatchesBefore == 0,
             "100 human posts with @mentions and agent-addressed text queue zero host commands and reach zero runners")
+        // Positive control: the same counters do see one deliberate prompt.
+        let handoffA = try SharedAgentHandoffController(identity: a.identity, transport: SharedAgentHandoffAPI(api: apiA, area: area.rawValue),
+            directory: root.appendingPathComponent("handoff-a"))
+        await handoffA.refresh(object: agent.id)
+        await handoffA.send(text: "Deliberate reviewed prompt.", context: third.id)
+        await dispatcher.pollOnce(bindings: [binding])
+        let controlRows = try await dispatchRows(servicePath)
+        try agreementCheck(runnerCommands == 1 && controlRows == 1 && (try journal.attempts().count) == journalBefore + 1,
+            "positive control: one deliberate prompt moves every counter by exactly one")
 
         // 3. A's execution host sleeps: its process state is gone, the service restarts,
         // and both B and a late joiner read every accepted post, revision and endorsement.

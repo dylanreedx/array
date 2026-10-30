@@ -42,6 +42,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     private let postButton = ComposerActionButton(presentation: .init(primaryAction: .send, title: "Post", symbolName: "arrow.up",
         accessibilityLabel: "Post to discussion", isEnabled: false, isLoading: false, secondaryActions: []))
     private let canvas = SharedAreaSceneCanvas(frame: .zero)
+    private(set) lazy var agreementPanel = SharedAreaAgreementView(controller: controller)
     private var localCamera = SharedAreaLocalView()
     private var cameraDirty = false
     private var cameraTimer: Timer?
@@ -136,6 +137,8 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         for view in [canvas, titleLabel, statusLabel, objectNavigator, actions, detailLabel, entryLabel, history, readerScroll, editorScroll, postButton, messageLabel] {
             addSubview(view)
         }
+        addSubview(agreementPanel)
+        agreementPanel.onRebaseDraft = { [weak self] in self?.rebaseAgreementDraft() }
         setAccessibilityRole(.group)
         setAccessibilityLabel("Shared workspace")
         applyTokens()
@@ -187,7 +190,9 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         setFrame(entryLabel, .init(x: x, y: header + 39, width: width, height: 18))
         setFrame(history, .init(x: x, y: header + 63, width: min(148, width), height: ChoiceButton.controlHeight))
         let editorTop = max(header + 220, bounds.height - 190)
-        setFrame(readerScroll, .init(x: x, y: header + 106, width: width, height: max(48, editorTop - header - 118)))
+        let agreement = agreementPanel.isHidden ? 0 : SharedAreaAgreementView.height + 8
+        setFrame(agreementPanel, .init(x: x, y: header + 106, width: width, height: SharedAreaAgreementView.height))
+        setFrame(readerScroll, .init(x: x, y: header + 106 + agreement, width: width, height: max(48, editorTop - header - 118 - agreement)))
         setFrame(editorScroll, .init(x: x, y: editorTop, width: width, height: 112))
         setFrame(postButton, .init(x: x, y: editorTop + 122, width: min(width, 160), height: ComposerActionButton.controlHeight))
         setFrame(messageLabel, .init(x: x, y: editorTop + 161, width: width, height: 17))
@@ -605,6 +610,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         }
     }
     private func refreshControls() {
+        agreementPanel.show(agreement: selectedObject, in: knownDocument, draft: activeDraft)
         let key = ControlsKey(status: controller.status, submitting: controller.isSubmitting, canSubmit: controller.canSubmit,
             epoch: controller.scope?.epoch, role: controller.scope?.role.rawValue,
             documentRevision: controller.document?.revision, selected: selectedObject,
@@ -717,6 +723,11 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             messageLabel.stringValue = "Delivery unknown. Draft retained."
         }
         refreshControls()
+    }
+    private func rebaseAgreementDraft() {
+        guard let id = activeDraft?.id else { return }
+        do { try saveCurrentDraft(); activeDraft = try controller.rebaseDraft(id: id) } catch { showPrivateSaveFailure() }
+        lastControlsKey = nil; refreshControls()
     }
     private func saveCurrentDraft() throws {
         draftTimer?.invalidate(); draftTimer = nil
