@@ -1,0 +1,11 @@
+{
+  "cli": "claude",
+  "version": "2.1.314",
+  "model": "sonnet",
+  "models": [
+    "sonnet"
+  ],
+  "captured_at_utc": "2026-10-30T05:51:50.163304+00:00",
+  "turn": "tool-free tiny prompt",
+  "scrubbed": true
+}
