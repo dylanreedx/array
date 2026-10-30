@@ -1,0 +1,8 @@
+== follow-stale-stop mutation (diff)
+129c129
+<         guard peer.expiresAt > Date() else { stopFollowing(notice: "\(followedLabel) is away · stopped following"); return }
+---
+>         guard true || peer.expiresAt > Date() else { stopFollowing(notice: "\(followedLabel) is away · stopped following"); return }
+mutant build exit=0
+mutant run exit=1
+FAIL: Failure(message: "Timed out: stale presence stops follow without another frame")

@@ -1,0 +1,6 @@
+== geometry-failed-save-restore mutation (diff)
+363d362
+<                 canvas.setPreview([:])
+mutant build exit=0
+mutant run exit=1
+FAIL: frames return to the last accepted state and the peer's replica is unchanged

@@ -1,0 +1,6 @@
+== natural RED before the permission fix
+FAIL: losing edit permission cancels the live group drag at once
+exit=1
+== natural RED before the failed-save fix
+FAIL: Timed out: a later gesture is accepted
+exit=1

@@ -1,0 +1,8 @@
+== follow-no-loop mutation (diff)
+179c179
+<                 let viewport = followedDevice != nil ? nil : SharedArea.Rect(x: camera.x, y: camera.y,
+---
+>                 let viewport = false ? nil : SharedArea.Rect(x: camera.x, y: camera.y,
+mutant build exit=0
+mutant run exit=1
+FAIL: Failure(message: "Timed out: follower withdraws its own viewport")

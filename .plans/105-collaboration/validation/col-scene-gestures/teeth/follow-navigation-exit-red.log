@@ -1,0 +1,8 @@
+== follow-navigation-exit mutation (diff)
+121c121
+<         if followedDevice != nil { stopFollowing(notice: nil) } else { overlay.followBanner = nil }
+---
+>         if false, followedDevice != nil { stopFollowing(notice: nil) } else { overlay.followBanner = nil }
+mutant build exit=0
+mutant run exit=1
+FAIL: Failure(message: "a keyboard camera pan exits follow immediately")

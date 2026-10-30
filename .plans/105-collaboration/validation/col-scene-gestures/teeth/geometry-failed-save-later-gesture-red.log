@@ -1,0 +1,8 @@
+== geometry-failed-save-later-gesture mutation (diff)
+362c362
+<                 geometryUnavailable = !geometryLedgerUnchanged()
+---
+>                 geometryUnavailable = true
+mutant build exit=0
+mutant run exit=1
+FAIL: Timed out: a later gesture is accepted

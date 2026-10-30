@@ -1,0 +1,8 @@
+== follow-no-frame-save mutation (diff)
+143c143
+<         if scene.applyFollowedCamera(camera) { followCameraApplies += 1 }
+---
+>         if scene.applyFollowedCamera(camera) { followCameraApplies += 1; try? scene.persistFollowedCamera() }
+mutant build exit=0
+mutant run exit=1
+FAIL: Failure(message: "tracked camera frames are applied without saving the private camera per frame")

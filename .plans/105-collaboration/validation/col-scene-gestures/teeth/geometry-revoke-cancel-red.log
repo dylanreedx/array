@@ -1,0 +1,8 @@
+== geometry-revoke-cancel mutation (diff)
+545c545
+<         } else if geometryGesture != nil, controller.status != .connected || controller.scope == nil || controller.scope?.role == .viewer {
+---
+>         } else if false, geometryGesture != nil, controller.status != .connected || controller.scope == nil || controller.scope?.role == .viewer {
+mutant build exit=0
+mutant run exit=1
+FAIL: losing edit permission cancels the live group drag at once
