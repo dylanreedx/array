@@ -1,4 +1,4 @@
-PASS backup/restore: operator backup command copies the live database while it serves writes (61 concurrent commits)
+PASS backup/restore: operator backup command copies the live database while it serves writes (96 concurrent commits)
 PASS backup/restore: backup report counts every area, person, revocation, removal, dispatch and usage row
 PASS backup/restore: backup file is private to the operator account
 PASS backup/restore: backup bytes exclude plaintext content, bearer tokens and invitation codes
@@ -11,10 +11,10 @@ PASS backup/restore: verification of the published backup reproduces its report
 PASS backup/restore: restore with the wrong key installs nothing
 PASS backup/restore: operator restore installs the backup in a replacement directory
 PASS backup/restore: restored database refuses a different master key
-PASS backup/restore: restored HTTP service returns area 57AD34E6 byte-identical with its membership epoch
-PASS backup/restore: restored HTTP service returns area 40584AC7 byte-identical with its membership epoch
+PASS backup/restore: restored HTTP service returns area D41520F6 byte-identical with its membership epoch
+PASS backup/restore: restored HTTP service returns area 802432BD byte-identical with its membership epoch
 PASS backup/restore: a write after the backup point is absent: restore is point-in-time
-PASS backup/restore: the area written during the backup restores one consistent revision (55 of 1...62)
+PASS backup/restore: the area written during the backup restores one consistent revision (91 of 1...97)
 PASS backup/restore: accepted handoff receipt and its human attribution survive restore
 PASS backup/restore: an original command retried after restore returns its first receipt
 PASS backup/restore: a device revoked before the backup stays revoked after restore
@@ -32,3 +32,15 @@ PASS backup/restore: the replaced database is kept byte-identical, never deleted
 PASS backup/restore: the in-place restored database verifies
 PASS backup/restore: no operator command created the companion database
 Collaboration backup/restore checks passed: online operator backup under writes, verification, replacement and in-place restore through the real HTTP service.
+PASS backup/restore: operator roster lists each person with device and area counts
+PASS backup/restore: roster output carries no bearer token or enrollment code
+PASS backup/restore: recovering an unknown person ID refuses
+PASS backup/restore: recovery issues an enrollment for the SAME person ID, not a new account
+PASS operator recovery: the lost device's credential is revoked by recovery
+PASS operator recovery: an enrollment the lost device issued earlier is dead
+PASS backup/restore: the replacement Mac redeems into the original person
+PASS backup/restore: the replacement device keeps area ownership and sees the unchanged document
+PASS operator recovery: the recovery enrollment cannot be replayed
+PASS backup/restore: recovery leaves other people's devices untouched
+PASS backup/restore: recovery commands never open the companion database
+Collaboration operator recovery checks passed: roster, same-person recovery, lost-device revocation and preserved membership.

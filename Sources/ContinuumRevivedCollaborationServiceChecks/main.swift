@@ -192,6 +192,7 @@ do {
         try await runCollaborationBoundaryAuditChecks()
     } else if CommandLine.arguments.contains("--backup-restore-only") {
         try await runCollaborationBackupRestoreChecks()
+        try await runCollaborationOperatorRecoveryChecks()
     } else if CommandLine.arguments.contains("--recovery-scale-only") {
         try await runCollaborationRecoveryScaleChecks()
     } else if CommandLine.arguments.contains("--capabilities-only") {
@@ -211,6 +212,6 @@ do {
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationRetentionChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationArtifactChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationBoundaryAuditChecks() }
-        if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationBackupRestoreChecks() }
+        if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationBackupRestoreChecks(); try await runCollaborationOperatorRecoveryChecks() }
     }
 } catch { print("FAIL: \(error)"); exit(1) }

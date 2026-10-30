@@ -29,7 +29,7 @@ private struct OperatorRun { let status: Int32; let report: CollaborationBackupR
 private func operatorCommand(_ command: String, _ path: String, live: String, key: Data, companion: String) async throws -> OperatorRun {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().appendingPathComponent("continuum-relay")
-    process.arguments = [command, path]
+    process.arguments = path.isEmpty ? [command] : [command, path]
     var environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("RELAY_") && !$0.key.hasPrefix("APNS_") }
     environment["RELAY_COLLABORATION_DATABASE_PATH"] = live
     environment["RELAY_COLLABORATION_MASTER_KEY"] = key.base64EncodedString()
@@ -267,4 +267,75 @@ func runCollaborationBackupRestoreChecks() async throws {
     try backupCheck(reverified.status == 0 && reverified.report?.areas == 3, "the in-place restored database verifies")
     try backupCheck(!fileManager.fileExists(atPath: (companionNever as NSString).deletingLastPathComponent), "no operator command created the companion database")
     print("Collaboration backup/restore checks passed: online operator backup under writes, verification, replacement and in-place restore through the real HTTP service.")
+}
+
+/// Existing-account recovery through the operator command: the lost devices
+/// die, the same person ID gets one enrollment, and membership survives.
+func runCollaborationOperatorRecoveryChecks() async throws {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory.appendingPathComponent("array-collaboration-recovery-\(UUID())")
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fileManager.removeItem(at: root) }
+    let key = Data(repeating: 81, count: 32)
+    let live = root.appendingPathComponent("collaboration.sqlite").path
+    let companionNever = root.appendingPathComponent("companion-never/relay.sqlite").path
+    let store = try CollaborationStore(path: live, masterKey: key)
+    let companion = try RelayStore(path: root.appendingPathComponent("companion.sqlite").path, masterKey: key)
+    let server = RelayServer(store: companion, configuration: .init(host: "127.0.0.1", publicPort: 0, adminPort: 0), collaboration: store)
+    try await server.start()
+    do {
+        let endpoint = URL(string: "http://127.0.0.1:\(server.listeningPublicPort!)")!
+        func enroll(_ label: String) async throws -> Collaboration.Credential {
+            let code = try await store.provisionPerson(label: label)
+            return try await CollaborationAPI(baseURL: endpoint, allowsInsecureLoopback: true).redeem(code: code.code, deviceLabel: label)
+        }
+        func refuses(_ code: Int, _ label: String, _ action: () async throws -> Void) async throws {
+            do { try await action(); throw BackupCheckFailure(message: "\(label) unexpectedly succeeded") }
+            catch let error as CollaborationClientError {
+                guard case .server(let actual, _) = error, actual == code else { throw BackupCheckFailure(message: "\(label): \(error)") }
+                print("PASS operator recovery: \(label)")
+            }
+        }
+        let a = try await enroll("Recovery A"), b = try await enroll("Recovery B")
+        let aa = try CollaborationAPI(baseURL: endpoint, credential: a.token, allowsInsecureLoopback: true)
+        let bb = try CollaborationAPI(baseURL: endpoint, credential: b.token, allowsInsecureLoopback: true)
+        let state = try await aa.createArea(), area = state.document.id.rawValue
+        _ = try await bb.accept(code: try await aa.invite(area: area, request: .init(person: b.identity.person)).code)
+        let host = try await aa.registerHost()
+        let agent = SharedArea.Item(id: .init(), kind: .agentObservation, source: .init(owner: a.identity.person, host: host.id, binding: .init()))
+        _ = try await aa.apply(area: area, mutation: .init(epoch: 1, command: .init(area: state.document.id, expectedRevision: 0, edits: [
+            .admit(agent, .init(id: .init(), object: agent.id, rect: .init(x: 0, y: 0, width: 300, height: 200)))])))
+        let before = try await aa.state(area: area)
+        let lostSibling = try await store.enrollDevice(token: a.token, lifetime: 600)
+
+        let listed = try await operatorCommand("--collaboration-list-people", "", live: live, key: key, companion: companionNever)
+        let people = try JSONDecoder().decode([CollaborationPersonSummary].self, from: Data((listed.output.split(separator: "\n").first ?? "").utf8))
+        try backupCheck(listed.status == 0 && people.contains { $0.person == a.identity.person.rawValue && $0.label == "Recovery A" && $0.activeDevices == 1 && $0.areas == 1 },
+            "operator roster lists each person with device and area counts")
+        try backupCheck(!listed.output.contains(a.token) && !listed.output.contains(lostSibling.code), "roster output carries no bearer token or enrollment code")
+        let unknown = try await operatorCommand("--collaboration-recover-person", UUID().uuidString, live: live, key: key, companion: companionNever)
+        try backupCheck(unknown.status != 0, "recovering an unknown person ID refuses")
+        let recovered = try await operatorCommand("--collaboration-recover-person", a.identity.person.rawValue.uuidString, live: live, key: key, companion: companionNever)
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let enrollment = try decoder.decode(Collaboration.Enrollment.self, from: Data((recovered.output.split(separator: "\n").first ?? "").utf8))
+        try backupCheck(recovered.status == 0 && enrollment.person == a.identity.person, "recovery issues an enrollment for the SAME person ID, not a new account")
+        try await refuses(401, "the lost device's credential is revoked by recovery") { _ = try await aa.state(area: area) }
+        try await refuses(410, "an enrollment the lost device issued earlier is dead") {
+            _ = try await CollaborationAPI(baseURL: endpoint, allowsInsecureLoopback: true).redeem(code: lostSibling.code, deviceLabel: "Thief")
+        }
+        let replacement = try await CollaborationAPI(baseURL: endpoint, allowsInsecureLoopback: true).redeem(code: enrollment.code, deviceLabel: "Replacement Mac")
+        try backupCheck(replacement.identity.person == a.identity.person && replacement.identity.device != a.identity.device, "the replacement Mac redeems into the original person")
+        let restoredClient = try CollaborationAPI(baseURL: endpoint, credential: replacement.token, allowsInsecureLoopback: true)
+        let after = try await restoredClient.state(area: area)
+        try backupCheck(after.scope.role == before.scope.role && (try after.document.canonicalData()) == (try before.document.canonicalData()),
+            "the replacement device keeps area ownership and sees the unchanged document")
+        try await refuses(410, "the recovery enrollment cannot be replayed") {
+            _ = try await CollaborationAPI(baseURL: endpoint, allowsInsecureLoopback: true).redeem(code: enrollment.code, deviceLabel: "Replay")
+        }
+        let teammate = try await bb.state(area: area)
+        try backupCheck(teammate.document.revision == before.document.revision, "recovery leaves other people's devices untouched")
+        try backupCheck(!fileManager.fileExists(atPath: (companionNever as NSString).deletingLastPathComponent), "recovery commands never open the companion database")
+        try await server.stop()
+    } catch { try? await server.stop(); throw error }
+    print("Collaboration operator recovery checks passed: roster, same-person recovery, lost-device revocation and preserved membership.")
 }
