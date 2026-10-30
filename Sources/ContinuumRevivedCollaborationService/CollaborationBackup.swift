@@ -133,6 +133,13 @@ extension CollaborationStore {
                     for row in try Row.fetchAll(db, sql: "SELECT record FROM collaboration_artifact_revisions") { _ = try unseal(Artifact.Record.self, row["record"]) }
                     for row in try Row.fetchAll(db, sql: "SELECT review FROM collaboration_artifact_reviews") { _ = try unseal(Artifact.Review.self, row["review"]) }
                 }
+                if try db.tableExists("collaboration_agent_projection") {
+                    for row in try Row.fetchAll(db, sql: "SELECT object,host,payload FROM collaboration_agent_projection") {
+                        let log = try unseal(Collaboration.AgentProjection.Log.self, row["payload"])
+                        guard log.head.object.rawValue == UUID(uuidString: row["object"]), log.head.host.rawValue == UUID(uuidString: row["host"]),
+                              log.head.valid else { throw CollaborationBackupError.damaged }
+                    }
+                }
                 try Self.validateHandoffCiphertext(db, keyData: keyData)
             } catch let error as CollaborationBackupError { throw error }
             catch { throw CollaborationBackupError.damaged }
