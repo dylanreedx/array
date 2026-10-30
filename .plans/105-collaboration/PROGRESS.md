@@ -1153,3 +1153,29 @@ Known limits, not acceptance gaps:
 Remaining: `array/col-native-budgets` (COL-21 native slice, which also closes
 COL-18's keyboard parity). COL-13 still owes its per-harness handoff seam
 witness.
+
+## Integrator gate — artifact gaps + per-harness handoff on `c20a3819`, 30 October 2026
+
+Merged in one batch, both cherry-picked clean:
+- `array/mp-artifact-gaps` (`a7ee9817`, `ffe5481c`, `ba93a7bc`): a failed
+  artifact upload is retried after relaunch, and the artifact panel is
+  rendered in a real offscreen window. Receipt `workers/artifact-gaps.md`.
+  Its own gate failed only on the damaged-pages backup check because its base
+  predates `cdc244a4`; on this tip that check passes.
+- `array/col-handoff-seams` (`a7fe1f0f`, `7f7d2afe`): the per-harness handoff
+  witness. Receipt `validation/col-handoff-seams/README.md`.
+
+An earlier gate started on `6a5d8337` (artifact gaps alone) was stopped so the
+batch could be gated once.
+
+Gate: `--collaboration` under the lock, isolated. Log:
+`qa-runs/coordinator/gate-c20a3819.log`. **11 legs run, all passed.** The
+three `PASS handoff seam: claude / codex / pi` lines are in it.
+
+Board (revision 163): **COL-13 → Done.** The last item was the handoff through
+each managed harness's real runner. It is now witnessed for Claude Code,
+Codex and Pi: the new controller's prompt reaches the CLI once, the former
+owner's input is refused while the agent is handed over, and a prompt that
+the reclaim overtook reads refused with no write.
+
+Remaining: `array/col-native-budgets`.
