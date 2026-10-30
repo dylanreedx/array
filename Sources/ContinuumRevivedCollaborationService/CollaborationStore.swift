@@ -341,7 +341,7 @@ public actor CollaborationStore {
               let role = Collaboration.Role(rawValue: row["role"]) else { throw CollaborationStoreError.unavailable }
         return .init(area: SharedArea.ID(area), epoch: row["epoch"], role: role)
     }
-    private func insertEnrollment(_ db: Database, person: String, code: String, expires: Date, issuer: String?) throws {
+    func insertEnrollment(_ db: Database, person: String, code: String, expires: Date, issuer: String?) throws {
         try db.execute(sql: "INSERT INTO enrollments(code_hash,person,issuer_device,expires) VALUES (?,?,?,?)", arguments: [Self.hash(code), person, issuer, expires.timeIntervalSince1970])
     }
     private func validate(_ label: String) throws {
@@ -357,8 +357,8 @@ public actor CollaborationStore {
     func unseal<T: Decodable>(_ type: T.Type, _ data: Data) throws -> T {
         try JSONDecoder().decode(type, from: AES.GCM.open(AES.GCM.SealedBox(combined: data), using: key))
     }
-    private static func hash(_ value: String) -> Data { Data(SHA256.hash(data: Data(value.utf8))) }
-    private static func secret() -> String {
+    static func hash(_ value: String) -> Data { Data(SHA256.hash(data: Data(value.utf8))) }
+    static func secret() -> String {
         var generator = SystemRandomNumberGenerator()
         return Data((0..<32).map { _ in UInt8.random(in: 0...255, using: &generator) }).base64EncodedString()
     }
