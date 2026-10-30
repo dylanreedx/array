@@ -70,6 +70,7 @@ private final class SignalSourceRetention: @unchecked Sendable {
 
 private let processSignalSources = SignalSourceRetention()
 
+if let status = runCollaborationOperatorCommand(CommandLine.arguments) { exit(status) }
 let configuration = RelayProcessConfiguration()
 guard let masterKey = configuration.masterKey, masterKey.count >= 32 else {
     log("error", "invalid_configuration", fields: ["field": "RELAY_MASTER_KEY"]); exit(2)
