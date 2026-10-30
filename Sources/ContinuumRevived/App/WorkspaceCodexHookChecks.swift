@@ -29,7 +29,12 @@ enum WorkspaceCodexHookChecks {
             let lock = NSLock(); var done = false; var error: String?
         }
         let completion = Completion()
-        let runner = CodexAgentRunner(config: .init(model: "fixture", cwd: bench.binDir, workspaceMCP: config))
+        guard let record = supervisor.records[child] else {
+            throw WorkspaceAgentReportChecks.Failure(description: "the supervisor lost the Codex child")
+        }
+        // Use the production factory: the supervisor owns runner construction,
+        // and the actual child's record supplies its model and working directory.
+        let runner = AgentSupervisor.codexRunner(for: record, workspaceMCP: config)
         DispatchQueue.global().async {
             var failure: String?
             do { try runner.run(prompt: "scripted Codex turn") { _ in } } catch { failure = String(describing: error) }
