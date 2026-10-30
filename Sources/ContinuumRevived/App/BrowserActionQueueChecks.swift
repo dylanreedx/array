@@ -142,7 +142,7 @@ func runBrowserActionQueueCheck() throws {
     // Cached results must not retain the action's captured browser/runtime.
     final class LifetimeToken: @unchecked Sendable {}
     weak var weakToken: LifetimeToken?
-    func submitLifetimeProbe() {
+    @MainActor func submitLifetimeProbe() {
         let token = LifetimeToken()
         weakToken = token
         q.submit(tileId: UUID(), agentId: f.agentId, key: "lifetime", operation: "test", payload: "lifetime",
