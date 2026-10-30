@@ -32,9 +32,6 @@ final class SharedAreaCaptureCoordinator {
     private(set) var drafts: [Key: SharedArtifactProducer.Draft] = [:]
     private(set) var artifactFailures: [Key: String] = [:]
     private(set) var capturing: Set<Key> = []
-    /// The exact bytes confirmed with `pendingPublication`, published as each
-    /// artifact's first revision once the arrangement is accepted.
-    private var pendingDrafts: [Key: SharedArtifactProducer.Draft] = [:]
     private(set) var publishedArtifacts = 0
     private var captureGeneration = 0
     private let artifactProducer: SharedArtifactProducer
@@ -181,6 +178,7 @@ final class SharedAreaCaptureCoordinator {
     func confirm() async {
         guard canConfirm else { return }
         let publication: Publication.Confirmed
+        let captures: [Collaboration.Artifact.Capture]
         do {
             let fresh = try inventoryProvider()
             guard fresh.inventory.workspaceID == workspaceID else { throw Failure.sourceWorkspaceChanged }
@@ -195,10 +193,21 @@ final class SharedAreaCaptureCoordinator {
             guard state == .reviewing else { return }
             publication = try Publication.confirm(review, expectedDigest: review.digest,
                 inventory: fresh.inventory, choices: fresh.choices(for: modes, drafts: freshDrafts))
-            pendingDrafts = freshDrafts
+            // Each artifact's first revision, under the revision ID reserved at review.
+            captures = try publication.artifacts.map { artifact in
+                guard let draft = freshDrafts[artifact.source], draft.contentDigest == artifact.contentDigest else { throw Publication.Failure.reviewChanged }
+                return try draft.capture(object: artifact.object, id: artifact.revision, parent: nil)
+            }
         } catch {
             requiresRefresh = true
             message = Self.message(for: error)
+            onChange?(); return
+        }
+        // Durable before anything is sent: an accepted arrangement can always
+        // get these exact bytes, after a failed upload or a relaunch.
+        do { try controller.stageArtifactUploads(captures, for: publication.command.id) }
+        catch {
+            message = "The snapshots could not be saved on this Mac. Nothing was sent."
             onChange?(); return
         }
         pendingPublication = publication
@@ -233,22 +242,16 @@ final class SharedAreaCaptureCoordinator {
         let result = await submitter(publication)
         await finishDelivery(result, wasUncertain: wasUncertain)
     }
-    /// Each artifact's first revision, under the revision ID reserved at
-    /// review. Retrying is idempotent; a failure leaves the shared item honest
-    /// about having no revision yet rather than inventing one.
+    /// Uploads the staged first revisions. A failure leaves the shared item
+    /// honest about having no revision yet; the controller retries the same
+    /// bytes on reconnect and after a relaunch.
     private func publishArtifacts(_ publication: Publication.Confirmed) async -> String? {
         guard !publication.artifacts.isEmpty else { return nil }
-        guard let transport = controller.artifactTransport, let epoch = controller.scope?.epoch else {
-            return "The arrangement was shared, but its snapshots could not be uploaded while disconnected."
-        }
-        var failures = 0
-        for artifact in publication.artifacts {
-            guard let draft = pendingDrafts[artifact.source], draft.contentDigest == artifact.contentDigest,
-                  let capture = try? draft.capture(object: artifact.object, id: artifact.revision, parent: nil) else { failures += 1; continue }
-            do { _ = try await transport.publishArtifact(epoch: epoch, capture: capture); publishedArtifacts += 1 }
-            catch { failures += 1 }
-        }
-        return failures == 0 ? nil : "The arrangement was shared, but \(failures) snapshot\(failures == 1 ? "" : "s") could not be uploaded. Teammates see them as having no revision yet."
+        await controller.uploadStagedArtifacts()
+        let waiting = Set(controller.stagedArtifactUploads.map(\.manifest.id))
+        let failures = publication.artifacts.filter { waiting.contains($0.revision) }.count
+        publishedArtifacts += publication.artifacts.count - failures
+        return failures == 0 ? nil : "The arrangement was shared, but \(failures) snapshot\(failures == 1 ? "" : "s") could not be uploaded yet. Array retries when it reconnects or relaunches; until then teammates see no revision."
     }
     private func finishDelivery(_ result: SharedAreaController.Submission, wasUncertain: Bool) async {
         switch result {
@@ -256,7 +259,7 @@ final class SharedAreaCaptureCoordinator {
             if let publication = pendingPublication, !publication.artifacts.isEmpty {
                 message = "Shared. Uploading snapshots…"; onChange?()
                 let failure = await publishArtifacts(publication)
-                pendingPublication = nil; pendingDrafts = [:]; state = .published
+                pendingPublication = nil; state = .published
                 message = failure ?? "Shared. Each teammate views this arrangement and its snapshots without access to your files or checkout."
                 onChange?(); onPublished?()
                 return

@@ -193,6 +193,7 @@ public final class SharedAreaController {
     private var admittedEpoch: Int64?
     private var isRecoveringOperations = false
     private var recoveryTask: Task<Void, Never>?
+    private var uploadPass: Task<Void, Never>?
 
     public init(localStore: SharedAreaLocalStore, credentialStore: CollaborationCredentialStore,
                 credentialScope: CollaborationCredentialScope,
@@ -372,7 +373,51 @@ public final class SharedAreaController {
             guard status == .connected else { break }
             results[record.command.id] = await submit(record.command, preserving: nil, publication: nil)
         }
+        if status == .connected { scheduleUploads() }
         return results
+    }
+
+    /// Written before the publication that admits these objects is sent, so an
+    /// accepted arrangement still gets its exact bytes after a failed upload,
+    /// a reconnect or a relaunch (COL-16).
+    public func stageArtifactUploads(_ captures: [Collaboration.Artifact.Capture], for operation: SharedArea.ID<SharedArea.Operation>) throws {
+        for capture in captures { try localStore.stageUpload(.init(operation: operation, capture: capture)) }
+    }
+    public var stagedArtifactUploads: [SharedAreaPendingArtifactUpload] { localStore.stagedUploads() }
+
+    /// Uploads each staged revision whose item the document admits. The service
+    /// is asked first, so a revision that already landed (its reply lost, or the
+    /// app quit before forgetting it) is never sent again. A failure stays
+    /// staged for the next open or reconnect.
+    public func uploadStagedArtifacts() async {
+        while let running = uploadPass { await running.value }
+        // The pass clears itself, so no waiter can see a finished pass as running.
+        let pass = Task { await runUploadPass(); uploadPass = nil }
+        uploadPass = pass
+        await pass.value
+    }
+    private func scheduleUploads() {
+        guard uploadPass == nil, localStore.hasStagedUploads else { return }
+        Task { [weak self] in await self?.uploadStagedArtifacts() }
+    }
+    private func runUploadPass() async {
+        for upload in localStore.stagedUploads() {
+            guard status == .connected, let transport = artifactTransport, let epoch = scope?.epoch, let document else { return }
+            let object = upload.manifest.object
+            guard document.items.contains(where: { $0.id == object && $0.kind == .artifact }) else {
+                // Never admitted (refused, or never sent) or since removed.
+                if deliveryRecord(for: upload.operation)?.isPending != true { localStore.removeStagedUpload(revision: upload.manifest.id) }
+                continue
+            }
+            do {
+                let state = try await transport.artifactState(object: object.rawValue)
+                // A different revision already leading means this first one can never land.
+                if !state.revisions.contains(where: { $0.id == upload.manifest.id }), state.latest == nil {
+                    _ = try await transport.publishArtifact(epoch: epoch, capture: upload.capture)
+                }
+                localStore.removeStagedUpload(revision: upload.manifest.id)
+            } catch { continue }
+        }
     }
 
     private func submit(_ command: SharedArea.Command, preserving draft: SharedAreaLocalDraft?,
@@ -528,6 +573,7 @@ public final class SharedAreaController {
                    !wasConnected || oldRevision != document?.revision || oldEpoch != scope?.epoch {
                     scheduleRecovery()
                 }
+                if status == .connected, !wasConnected { scheduleUploads() }
             }
             catch let error as CollaborationClientError {
                 failClosed(.incompatibleState, generation: current); lastPersistenceError = error

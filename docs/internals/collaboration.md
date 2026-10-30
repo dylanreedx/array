@@ -545,9 +545,14 @@ Capture review offers diff tiles as "Diff snapshot" (tracked changes only) or
 "File snapshot" of the saved bytes. Capture runs off main. The draft's
 content digest joins the review digest, and confirmation re-captures, so an
 edit after review refuses. The confirmed command admits a host-sourced
-artifact item with a reserved first revision ID, which the coordinator
-publishes after acceptance. If that upload fails the item honestly has no
-revision. A branch diff of a branch other than the checkout's HEAD is refused.
+artifact item with a reserved first revision ID. Before the command is sent,
+the exact confirmed capture is staged on disk beside the area's local state
+(`uploads/<revision>.json`); after acceptance the controller uploads it. If
+that upload fails the item honestly has no revision until the controller
+retries the same bytes under the same revision ID, on reconnect and when the
+area is opened after a relaunch. It asks the service first, so a revision that
+already landed is never sent again; a staged capture whose item was never
+admitted is dropped. A branch diff of a branch other than the checkout's HEAD is refused.
 
 In the shared scene, selecting an artifact replaces the text reader with
 `SharedAreaArtifactView`: one text view rendered by the diff tile's token

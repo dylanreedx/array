@@ -282,3 +282,53 @@ public struct SharedAreaLocalStore: Sendable {
         }
     }
 }
+
+/// The exact first revision of an artifact a confirmed publication admits,
+/// written before the arrangement is sent. It survives relaunch until the
+/// service holds that revision, so a failed upload is retried with the same
+/// revision ID and the same bytes, never a fresh capture.
+public struct SharedAreaPendingArtifactUpload: Codable, Equatable, Sendable {
+    public let operation: SharedArea.ID<SharedArea.Operation>
+    public let manifest: Collaboration.Artifact.Manifest
+    public let blobs: [String: Data]
+    public init(operation: SharedArea.ID<SharedArea.Operation>, capture: Collaboration.Artifact.Capture) {
+        self.operation = operation; manifest = capture.manifest; blobs = capture.blobs
+    }
+    public var capture: Collaboration.Artifact.Capture { .init(manifest: manifest, blobs: blobs) }
+}
+
+extension SharedAreaLocalStoreLayout {
+    /// One file per staged revision, beside (not inside) state.json: a revision
+    /// may hold 8 MiB and the state is rewritten on every frame.
+    public var uploadsDirectory: URL { areaDirectory.appendingPathComponent("uploads", isDirectory: true) }
+}
+
+extension SharedAreaLocalStore {
+    public func stageUpload(_ upload: SharedAreaPendingArtifactUpload) throws {
+        let directory = layout.uploadsDirectory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        guard (try? FileManager.default.destinationOfSymbolicLink(atPath: directory.path)) == nil else { throw SharedAreaLocalStoreError.invalidRoot }
+        let file = uploadFile(upload.manifest.id.rawValue)
+        try JSONEncoder().encode(upload).write(to: file, options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+    /// An unreadable record is dropped: it can never be published as written.
+    public func stagedUploads() -> [SharedAreaPendingArtifactUpload] {
+        let files = (try? FileManager.default.contentsOfDirectory(at: layout.uploadsDirectory, includingPropertiesForKeys: nil,
+                                                                  options: [.skipsHiddenFiles])) ?? []
+        return files.filter { $0.pathExtension == "json" }.sorted { $0.lastPathComponent < $1.lastPathComponent }.compactMap { file in
+            guard let upload = try? JSONDecoder().decode(SharedAreaPendingArtifactUpload.self, from: Data(contentsOf: file)),
+                  file.lastPathComponent == upload.manifest.id.rawValue.uuidString + ".json" else { try? FileManager.default.removeItem(at: file); return nil }
+            return upload
+        }
+    }
+    public var hasStagedUploads: Bool {
+        ((try? FileManager.default.contentsOfDirectory(atPath: layout.uploadsDirectory.path)) ?? []).contains { $0.hasSuffix(".json") }
+    }
+    public func removeStagedUpload(revision: SharedArea.ID<Collaboration.Artifact.RevisionTag>) {
+        try? FileManager.default.removeItem(at: uploadFile(revision.rawValue))
+    }
+    private func uploadFile(_ revision: UUID) -> URL {
+        layout.uploadsDirectory.appendingPathComponent(revision.uuidString + ".json")
+    }
+}

@@ -183,6 +183,94 @@ enum SharedAreaArtifactChecks {
         return abs(a.redComponent - b.redComponent) < 0.002 && abs(a.greenComponent - b.greenComponent) < 0.002
             && abs(a.blueComponent - b.blueComponent) < 0.002 && abs(a.alphaComponent - b.alphaComponent) < 0.002
     }
+    /// An accepted share whose uploads failed must still publish exactly the
+    /// confirmed bytes, under the reserved revision IDs, after a relaunch and on
+    /// reconnect — and never send a revision that already landed.
+    static func runUploadRecovery() async throws {
+        guard let support = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] else { throw Failure(message: "isolated app support required") }
+        let root = URL(fileURLWithPath: support).appendingPathComponent("artifact-upload-recovery-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let owner = root.appendingPathComponent("owner")
+        try FileManager.default.createDirectory(at: owner, withIntermediateDirectories: true); try git(owner, "init", "-q")
+        try write(owner, "src/feature.swift", "let value = 1\n")
+        try git(owner, "add", "-A"); try git(owner, "commit", "-q", "-m", "base")
+        try write(owner, "src/feature.swift", "let value = 2 // confirmed-upload-sentinel\n")
+
+        let a = Collaboration.Identity(person: .init(), device: UUID()), b = Collaboration.Identity(person: .init(), device: UUID())
+        let authority = Authority(owner: a, member: b)
+        let cache = root.appendingPathComponent("a")
+        var model = try controller(root: cache, identity: a, authority: authority)
+        await model.open()
+        let project = UUID(), zone = UUID(), workspace = UUID()
+        let tiles = [Tile(id: UUID(), kind: .diffReview, title: "Working diff", frame: .init(x: 0, y: 0, width: 400, height: 300),
+                          zPosition: .fromLegacyRank(1), zoneId: zone, runtimeRef: nil, metadata: TileMetadata(diffSource: "workingTreeVsHEAD")),
+                     Tile(id: UUID(), kind: .file, title: "Feature file", frame: .init(x: 450, y: 0, width: 400, height: 300),
+                          zPosition: .fromLegacyRank(1), zoneId: zone, runtimeRef: nil,
+                          metadata: TileMetadata(filePath: owner.appendingPathComponent("src/feature.swift").path))]
+        func snapshot() -> SharedAreaInventory.Snapshot {
+            let sources = tiles.map { SharedAreaPublication.SourceTile(projectID: project, tile: $0) }
+            var value = SharedAreaInventory.Snapshot(inventory: .init(workspaceID: workspace, coverage: .completeWorkspace, sources: sources),
+                                                     noteTexts: [:], issues: [])
+            for source in sources { value.artifactSources[source.key] = SharedArtifactSource.resolve(tile: source.tile, projectRoot: owner) }
+            return value
+        }
+        let sharing = model
+        let coordinator = try SharedAreaCaptureCoordinator(selection: .workspace, controller: sharing, person: a.person, host: .init(),
+            inventoryProvider: { snapshot() }, submitter: { await sharing.submitPublication($0) })
+        for row in coordinator.review.rows {
+            try coordinator.setMode(.artifact, for: row.source)
+            await coordinator.captureTask?.value
+        }
+        // One upload never reaches the service; the other commits but its reply is lost.
+        await authority.script([.refuse, .loseReply])
+        await coordinator.confirm()
+        let objects = Set(await authority.document.items.filter { $0.kind == .artifact }.map(\.id))
+        let firstAttempts = await authority.attempts, firstRevisions = await authority.revisionCount
+        try expect(coordinator.state == .published && coordinator.publishedArtifacts == 0 && objects.count == 2
+                   && firstAttempts.count == 2 && firstRevisions == 1,
+                   "the arrangement is accepted while one upload fails and one reply is lost")
+        try expect(coordinator.message.contains("could not be uploaded yet") && coordinator.message.contains("relaunches"),
+                   "the owner is told the snapshots upload later instead of being lost")
+        // Edits after sharing must not reach the retry: it sends the confirmed capture.
+        try write(owner, "src/feature.swift", "let value = 3 // edited-after-share\n")
+
+        // Relaunch: a new controller over the same local cache, the service still failing.
+        await model.close()
+        await authority.script([.refuse])
+        model = try controller(root: cache, identity: a, authority: authority)
+        await model.open()
+        let uploads = model.localAreaDirectory.appendingPathComponent("uploads")
+        func staged() -> Int { ((try? FileManager.default.contentsOfDirectory(atPath: uploads.path)) ?? []).filter { $0.hasSuffix(".json") }.count }
+        try await eventually("relaunch retries the upload that never landed") { staged() == 1 }
+        try await Task.sleep(for: .milliseconds(200))
+        let relaunchAttempts = await authority.attempts.count, relaunchRevisions = await authority.revisionCount
+        try expect(relaunchAttempts == 3 && relaunchRevisions == 1,
+                   "relaunch retries the missing snapshot once and never resends the one whose reply was lost")
+
+        // Reconnect with the service healthy: the remaining snapshot lands.
+        await authority.reconnect(a)
+        try await eventually("reconnect uploads the remaining snapshot") { staged() == 0 }
+        let attempts = await authority.attempts, revisions = await authority.records
+        try expect(attempts.count == 4 && objects.allSatisfy { revisions[$0]?.count == 1 },
+                   "reconnect publishes the remaining snapshot; each artifact has exactly one revision")
+        let reserved = Dictionary(firstAttempts.map { ($0.manifest.object, $0.manifest.id) }, uniquingKeysWith: { first, _ in first })
+        let landed = attempts.filter { attempt in revisions[attempt.manifest.object]?.first?.manifest.id == attempt.manifest.id }
+        let bytes = landed.flatMap { $0.blobs.values }.map { String(decoding: $0, as: UTF8.self) }.joined()
+        try expect(objects.allSatisfy { revisions[$0]?.first?.manifest.id == reserved[$0] }
+                   && bytes.contains("confirmed-upload-sentinel") && !bytes.contains("edited-after-share"),
+                   "every revision carries the ID reserved at review and the confirmed bytes, not a new capture")
+
+        // A second relaunch has nothing left to send.
+        await model.close()
+        model = try controller(root: cache, identity: a, authority: authority)
+        await model.open()
+        try await Task.sleep(for: .milliseconds(300))
+        let finalAttempts = await authority.attempts.count, finalRevisions = await authority.revisionCount
+        try expect(model.status == .connected && finalAttempts == 4 && finalRevisions == 2,
+                   "a later relaunch sends nothing again")
+        await model.close()
+    }
+
 
     private static func git(_ repo: URL, _ args: String...) throws {
         let process = Process()
@@ -216,7 +304,7 @@ enum SharedAreaArtifactChecks {
         try credentials.save(.init(identity: identity, token: "scripted-artifacts-only"), for: scope)
         let cache = try SharedAreaLocalStore(applicationSupportRoot: root, bundleIdentifier: nil, endpoint: endpoint,
                                              person: identity.person, area: authority.area)
-        try cache.save(.init(scope: cache.scope, document: .init(id: authority.area), observedMembershipEpoch: 1))
+        if try cache.load() == nil { try cache.save(.init(scope: cache.scope, document: .init(id: authority.area), observedMembershipEpoch: 1)) }
         return try SharedAreaController(localStore: cache, credentialStore: credentials, credentialScope: scope,
             bundleIdentifier: nil, transportFactory: { _, _, _ in Transport(identityValue: identity, authority: authority) })
     }
@@ -258,6 +346,17 @@ enum SharedAreaArtifactChecks {
             let result = try document.apply(mutation.command)
             await broadcast()
             switch result { case .applied(let r): return .init(revision: r, duplicate: false); case .duplicate(let r): return .init(revision: r, duplicate: true) }
+        enum PublishOutcome { case refuse, loseReply }
+        /// Outcomes for the next publish calls; an empty script commits.
+        private var publishScript: [PublishOutcome] = []
+        /// Every publish call, including refused ones.
+        var attempts: [Artifact.Capture] = []
+        var revisionCount: Int { records.values.reduce(0) { $0 + $1.count } }
+        func script(_ outcomes: [PublishOutcome]) { publishScript = outcomes }
+        func reconnect(_ identity: Collaboration.Identity) async {
+            await connections[identity.device]?.1.emit(.reconnecting(nil))
+            await broadcast()
+        }
         }
         func publish(_ capture: Artifact.Capture, by identity: Collaboration.Identity) async throws -> Artifact.PublishReceipt {
             let m = capture.manifest
@@ -275,6 +374,13 @@ enum SharedAreaArtifactChecks {
             return .init(revision: m.id, sequence: sequence, duplicate: false)
         }
         func review(_ identity: Collaboration.Identity, object: SharedArea.ID<SharedArea.Object>, revision: SharedArea.ID<Artifact.RevisionTag>) async throws -> Artifact.Review {
+            attempts.append(capture)
+            let outcome = publishScript.isEmpty ? nil : publishScript.removeFirst()
+            if outcome == .refuse { throw CollaborationClientError.server(status: 503, code: "unavailable") }
+            // The service's idempotency: a known revision ID is a duplicate.
+            if let record = records[m.object]?.first(where: { $0.manifest.id == m.id }), record.contentDigest == m.contentDigest {
+                return .init(revision: m.id, sequence: record.sequence, duplicate: true)
+            }
             guard let record = records[object]?.first(where: { $0.manifest.id == revision }) else { throw CollaborationClientError.server(status: 404, code: "notFound") }
             let value = Artifact.Review(id: .init(), object: object, revision: revision, contentDigest: record.contentDigest,
                                         author: identity.person, verdict: .approve, note: "", createdAt: Date())
@@ -286,6 +392,7 @@ enum SharedAreaArtifactChecks {
             await broadcast()
         }
         func artifactState(_ object: SharedArea.ID<SharedArea.Object>) throws -> Artifact.State {
+            if outcome == .loseReply { throw URLError(.networkConnectionLost) }
             guard document.items.contains(where: { $0.id == object && $0.kind == .artifact }) else { throw CollaborationClientError.server(status: 404, code: "notFound") }
             let list = records[object] ?? []
             func applicability(_ id: SharedArea.ID<Artifact.RevisionTag>) -> Artifact.Applicability {

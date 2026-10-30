@@ -1667,6 +1667,8 @@ enum ContinuumApp {
                     }, executorCount: {
                         supervisor.records.keys.filter { supervisor.isRunning($0) }.count + executorConstructions
                     })
+                    print("STAGE collaboration native: shared artifact upload recovery")
+                    try await SharedAreaArtifactChecks.runUploadRecovery()
                     print("STAGE collaboration native: hover-only teammate usage")
                     try await SharedAreaPresenceChecks.run()
                     try await SharedAreaUsageCollectorChecks.run()
