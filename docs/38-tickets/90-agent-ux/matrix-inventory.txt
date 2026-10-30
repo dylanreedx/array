@@ -49,6 +49,7 @@ check --ambient-tile-frame-space-check
 check --app-support-channel-check
 check --attention-notification-check
 check --board-interaction-check
+check --board-library-check
 check --board-model-check
 check --board-task-transcript-check
 check --board-task-workflow-check
@@ -430,6 +431,7 @@ leg run_app_check .build/debug/Array --ambient-tile-frame-space-check
 leg run_app_check .build/debug/Array --app-support-channel-check
 leg run_app_check .build/debug/Array --attention-notification-check
 leg run_app_check .build/debug/Array --board-interaction-check
+leg run_app_check .build/debug/Array --board-library-check
 leg run_app_check .build/debug/Array --board-task-workflow-check
 leg run_app_check .build/debug/Array --board-tile-lifecycle-check
 leg run_app_check .build/debug/Array --border-census-check
