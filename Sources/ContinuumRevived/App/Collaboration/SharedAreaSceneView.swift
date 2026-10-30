@@ -59,6 +59,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     private var activeDraft: SharedAreaLocalDraft?
     private var draftDirty = false
     private var knownDocument: SharedArea.Document?
+    private var knownHosts: [Collaboration.HostLiveness] = []
     private var readerIndex = 0
     private var displayedContextRevision: SharedArea.ID<SharedArea.Revision>?
     private var followsLatestEntry = true
@@ -589,12 +590,17 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             cancelGeometry(); messageLabel.stringValue = "Editing access changed. Move canceled."
         }
         if changed {
-            knownDocument = current
-            canvas.install(document: current, camera: localCamera, selected: selectedObject)
+            knownDocument = current; knownHosts = controller.hostLiveness
+            canvas.install(document: current, hosts: knownHosts, camera: localCamera, selected: selectedObject)
             if activeDraft == nil, let object = selectedObject {
                 activeDraft = controller.drafts.last(where: { $0.object == object })
                 editor.string = activeDraft?.text ?? ""
             }
+            refreshReader()
+        } else if controller.hostLiveness != knownHosts {
+            // Host liveness changes without a document revision.
+            knownHosts = controller.hostLiveness
+            canvas.install(document: current, hosts: knownHosts, camera: localCamera, selected: selectedObject)
             refreshReader()
         } else { canvas.setCamera(localCamera) }
         statusLabel.stringValue = statusText
@@ -673,9 +679,10 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             entries = document.posts.filter { $0.object == object }.map { SharedAreaExcerptPresentation.entry(for: $0, in: document, model: agentFreshness) }
         case .agreement: entries = document.contexts.filter { $0.object == object }.map(\.text)
         case .agentObservation:
-            entries = [onRequestHandoff == nil
+            let host = SharedAreaHostLivenessCopy.cardLine(SharedAreaHostLivenessCopy.liveness(for: item, in: knownHosts))
+            entries = [host + " " + (onRequestHandoff == nil
                 ? "This is an observation of an agent on its publishing host. Transcript history and execution controls are not available in this shared view yet."
-                : "History is not shared. Execution stays on the original publishing host; control requires a separate accepted handoff. Use Hand agent off in Workspace to review it."]
+                : "History is not shared. Execution stays on the original publishing host; control requires a separate accepted handoff. Use Hand agent off in Workspace to review it.")]
         case .artifact: entries = ["This artifact's content is not available in this view."]
         }
         if followsLatestEntry { readerIndex = max(0, entries.count - 1) }
@@ -844,7 +851,7 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
     }
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func install(document: SharedArea.Document?, camera: SharedAreaLocalView, selected: SharedArea.ID<SharedArea.Object>?) {
+    func install(document: SharedArea.Document?, hosts: [Collaboration.HostLiveness] = [], camera: SharedAreaLocalView, selected: SharedArea.ID<SharedArea.Object>?) {
         self.camera = camera; self.selected = selected
         hasDocument = document != nil
         let items = Dictionary(uniqueKeysWithValues: (document?.items ?? []).map { ($0.id, $0) })
@@ -854,7 +861,9 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
             guard let item = items[position.object] else { return nil }
             let body: String
             switch item.kind {
-            case .agentObservation: body = "Agent stays on its publishing host.\nTranscript history is not shared yet."
+            case .agentObservation:
+                body = SharedAreaHostLivenessCopy.cardLine(SharedAreaHostLivenessCopy.liveness(for: item, in: hosts))
+                    + "\nAgent stays on its publishing host.\nTranscript history is not shared yet."
             case .artifact: body = "Artifact content unavailable."
             case .discussion: body = posts[item.id]?.last?.text ?? "No messages yet."
             case .agreement: body = contexts[item.id]?.last?.text ?? "No agreement revision yet."

@@ -107,6 +107,8 @@ except enrollment redemption require `Authorization: Bearer …`.
 | `POST /areas/{area}/presence-sessions` | Replace this device's presence session |
 | `POST /areas/{area}/presence` | Publish cursor/optional viewport in that session |
 | `DELETE /areas/{area}/presence-sessions/{session}` | End that presence session |
+| `POST /areas/{area}/hosts/{host}/heartbeat` | Beat for this device's own host under a run generation; returns its liveness |
+| `DELETE /areas/{area}/hosts/{host}/runs/{generation}` | End exactly that run; the host reads offline at once |
 
 Unknown and excluded areas both return the same 404 response. Invalid credentials
 return 401, insufficient capability 403, invalid/expired invitation 410, stale
@@ -196,6 +198,16 @@ camera transform. Token counts appear only while hovering a cursor or inspecting
 it through accessibility; they are absent from resting cursor labels. Following
 a teammate's camera remains separate work. Removal/device revocation purges presence and
 wakes affected readers immediately.
+
+Execution-host liveness is separate. The app's host session beats every 10 s per
+area from the device that registered the host, under a run generation minted per
+hosting session. The relay persists last-seen and retires a replaced generation;
+a beat from a retired or ended run is refused with 409, including after a relay
+restart, and a refused run stops rather than minting another. `Updates.hosts`
+projects online, stale after 30 s without a beat, and offline after 90 s, on a
+clean end, or as soon as the host's device or person loses access. Held readers
+wake at the next transition. Shared agent cards state the host's liveness; cached
+discussion stays readable while a host is offline.
 
 `ContinuumRevivedCollaborationClient` supplies the authenticated HTTP API,
 sequence-checking replica and `CollaborationSession` lifecycle. It has no implicit

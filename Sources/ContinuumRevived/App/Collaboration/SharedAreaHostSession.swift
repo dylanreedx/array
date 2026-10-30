@@ -8,6 +8,8 @@ import ContinuumRevivedCollaborationProtocol
 final class SharedAreaHostSession {
     let controller: SharedAreaController
     let handoff: SharedAreaHandoffCoordinator
+    /// Nil only for a fixture transport that cannot speak for a host.
+    let heartbeat: SharedAreaHostHeartbeat?
     private let supervisor: AgentSupervisor
     private var collector: SharedAreaUsageCollector?
     private var host: SharedArea.ID<SharedArea.Host>?
@@ -26,6 +28,7 @@ final class SharedAreaHostSession {
     init(controller: SharedAreaController, handoffModel: SharedAgentHandoffController, supervisor: AgentSupervisor) throws {
         self.supervisor = supervisor
         self.controller = controller
+        heartbeat = (handoffModel.transport as? any SharedAreaHostHeartbeatTransport).map { SharedAreaHostHeartbeat(transport: $0) }
         handoff = try SharedAreaHandoffCoordinator(model: handoffModel,
             supervisor: supervisor, bindings: { [weak controller] in
                 guard let controller else { return [] }
@@ -54,7 +57,7 @@ final class SharedAreaHostSession {
     }
     func stop() {
         generation = UUID()
-        pump?.cancel(); pump = nil; collector?.stop(); handoff.stopHosting()
+        pump?.cancel(); pump = nil; collector?.stop(); handoff.stopHosting(); heartbeat?.end()
         collector = nil; host = nil; lastReported = nil; lastUsage = nil
         if let changeObserver { controller.removeChangeObserver(changeObserver) }; changeObserver = nil
         let precedingClose = closing
@@ -85,6 +88,7 @@ final class SharedAreaHostSession {
         let bindings = controller.sourceBindings.filter { binding in
             document.items.contains { $0.id == binding.object && $0.source?.host == binding.host && $0.source?.owner == controller.identity.person }
         }
+        heartbeat?.track(host: bindings.first?.host)
         guard let host = bindings.first?.host else {
             collector?.stop(); collector = nil; self.host = nil; lastReported = nil; lastUsage = nil; return
         }
