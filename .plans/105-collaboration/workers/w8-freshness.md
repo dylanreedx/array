@@ -124,6 +124,8 @@ already committed here.
 - **Shapes from worker 7.** Turn and sequence shapes are provisional
   (`turn: String`, `sequence: UInt64?`). They should match whatever worker 7's
   live projection publishes.
-- **Shapes from worker 6.** `ArtifactRevisionRef.revision` and `digest` are
-  opaque strings. They should match worker 6's artifact revision identity.
+- **Shapes from worker 6.** Aligned: `ArtifactRevisionRef.revision` is the UUID of
+  `Artifact.Manifest.id` and `contentDigest` matches (w6 1f5687d6). Drift
+  (`sourceChanged`) stays on w6's `Applicability`; excerpts report only a moved
+  latest revision or a removed artifact.
 - **UI.** No native UI renders freshness or excerpts yet.

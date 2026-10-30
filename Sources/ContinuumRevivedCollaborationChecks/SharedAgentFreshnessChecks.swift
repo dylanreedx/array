@@ -164,9 +164,10 @@ func runSharedAgentFreshnessChecks() async throws {
         // 5. Frozen result excerpts keep their source turn, host and artifact revision.
         let artifact = SharedArea.Item(id: .init(), kind: .artifact)
         try await edit([.admit(artifact, .init(id: .init(), object: artifact.id, rect: rect(1050)))])
+        let artifactR1 = UUID(), artifactR2 = UUID()
         let excerpt = Collaboration.ResultExcerpt(area: initial.document.id, capturedBy: a.identity.person,
             source: .init(incarnation: secondAgent, host: host.id, turn: "turn-7", sequence: 42, command: toSecond.command.id,
-                          artifact: .init(object: artifact.id, revision: "artifact-r1", digest: String(repeating: "a", count: 64))),
+                          artifact: .init(object: artifact.id, revision: artifactR1, contentDigest: String(repeating: "a", count: 64))),
             text: "Error type added; parser tests pass.")
         try ledger.keep(excerpt)
         var oversized = false, rewrittenExcerpt = false
@@ -218,9 +219,9 @@ func runSharedAgentFreshnessChecks() async throws {
             && (try ledger.freshness(of: replacement, agreement: agreement.id, in: doc)).state == .notSent
             && (try ledger.freshness(of: secondAgent, agreement: agreement.id, in: doc)).state == .changedSinceSent(sent: rev3.id, current: rev4.id, newerRevisions: 1),
             "a replaced binding starts with no baseline and cannot inherit revision 3")
-        try freshnessCheck(excerpt.availability(in: doc, currentGeneration: replacement.hostGeneration, currentArtifactRevision: { _ in "artifact-r1" }) == .sourceReplaced
-            && excerpt.availability(in: doc, currentGeneration: secondAgent.hostGeneration, currentArtifactRevision: { _ in "artifact-r1" }) == .linked
-            && excerpt.availability(in: doc, currentGeneration: secondAgent.hostGeneration, currentArtifactRevision: { _ in "artifact-r2" }) == .artifactChanged(current: "artifact-r2"),
+        try freshnessCheck(excerpt.availability(in: doc, currentGeneration: replacement.hostGeneration, currentArtifactRevision: { _ in artifactR1 }) == .sourceReplaced
+            && excerpt.availability(in: doc, currentGeneration: secondAgent.hostGeneration, currentArtifactRevision: { _ in artifactR1 }) == .linked
+            && excerpt.availability(in: doc, currentGeneration: secondAgent.hostGeneration, currentArtifactRevision: { _ in artifactR2 }) == .artifactChanged(current: artifactR2),
             "an excerpt says honestly when its turn's incarnation or artifact revision has moved on")
         try await edit([.remove(second.id), .remove(artifact.id)])
         doc = try await document()

@@ -12,14 +12,14 @@ extension Collaboration {
         }
     }
 
-    /// An immutable artifact revision a result refers to. `revision` is opaque
-    /// to this layer; artifact publication owns its meaning and digest.
+    /// An immutable artifact revision a result refers to: the pinned
+    /// `Artifact.Manifest.id.rawValue` and its `contentDigest` (COL-16).
     public struct ArtifactRevisionRef: Codable, Equatable, Sendable {
         public let object: SharedArea.ID<SharedArea.Object>
-        public let revision: String
-        public let digest: String
-        public init(object: SharedArea.ID<SharedArea.Object>, revision: String, digest: String) {
-            self.object = object; self.revision = revision; self.digest = digest
+        public let revision: UUID
+        public let contentDigest: String
+        public init(object: SharedArea.ID<SharedArea.Object>, revision: UUID, contentDigest: String) {
+            self.object = object; self.revision = revision; self.contentDigest = contentDigest
         }
     }
 
@@ -70,13 +70,14 @@ extension Collaboration {
             /// The agent's host binding was replaced; this turn belongs to an
             /// earlier incarnation and cannot be opened through the current one.
             case sourceReplaced
-            /// The quoted artifact has a newer revision than the one quoted.
-            case artifactChanged(current: String)
+            /// The artifact's latest revision is not the one quoted.
+            case artifactChanged(current: UUID)
             /// The quoted artifact is no longer published.
             case artifactRemoved
         }
         public func availability(in document: SharedArea.Document, currentGeneration: UUID?,
-                                 currentArtifactRevision: (SharedArea.ID<SharedArea.Object>) -> String?) -> Availability {
+                                                                  /// The artifact's live `State.latest.manifest.id.rawValue`.
+                                 currentArtifactRevision: (SharedArea.ID<SharedArea.Object>) -> UUID?) -> Availability {
             guard document.items.contains(where: { $0.id == source.incarnation.object }) else { return .sourceRemoved }
             guard currentGeneration == source.incarnation.hostGeneration else { return .sourceReplaced }
             if let artifact = source.artifact {
