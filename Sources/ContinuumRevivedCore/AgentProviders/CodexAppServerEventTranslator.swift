@@ -179,7 +179,7 @@ public struct CodexAppServerEventTranslator {
         case "item/completed":
             return translateItemCompleted(params)
         case "thread/tokenUsage/updated":
-            return translateTokenUsage(params)
+            return translateTokenUsage(params, emittedAtMs: object["emittedAtMs"])
         case "turn/completed":
             return translateTurnCompleted(params)
         // ST-01 — ACCOUNT quota. Not a timeline item: it leaves on the
@@ -644,7 +644,10 @@ public struct CodexAppServerEventTranslator {
     /// what codex's own context indicator and the rollout path
     /// (`CodexRolloutTelemetry`) read; `total` is cumulative and never reaches
     /// the ring.
-    private mutating func translateTokenUsage(_ params: [String: Any]) -> [AgentRuntimeEvent] {
+    /// `emittedAtMs` is codex's own send time on the frame. It orders cumulative
+    /// totals for collaboration accounting, so a replayed older total is
+    /// recognisably late rather than a counter reset.
+    private mutating func translateTokenUsage(_ params: [String: Any], emittedAtMs: Any? = nil) -> [AgentRuntimeEvent] {
         guard let threadId = params["threadId"] as? String,
               let usage = params["tokenUsage"] as? [String: Any]
         else { return [] }
@@ -655,7 +658,8 @@ public struct CodexAppServerEventTranslator {
             if (input ?? 0) + (output ?? 0) > 0 {
                 events.append(.tokenUsageUpdated(
                     threadId: threadId,
-                    snapshot: TokenUsageSnapshot(inputTokens: input ?? 0, outputTokens: output ?? 0, totalCostUsd: nil)))
+                    snapshot: TokenUsageSnapshot(inputTokens: input ?? 0, outputTokens: output ?? 0, totalCostUsd: nil,
+                        observedAt: (emittedAtMs as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue / 1000) })))
             }
         }
         if let last = usage["last"] as? [String: Any],

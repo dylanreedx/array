@@ -11,9 +11,10 @@ final class SharedAreaUsageCollector {
     private let ledger: SharedAreaUsageLedger
     private let startedAt: Date
     private var observer: UUID?
-    private var currentTurns: [AgentID: String] = [:]
-    private var freshTurns: Set<AgentID> = []
-    private var newCodexSessions: Set<AgentID> = []
+    private var normalizers: [AgentID: SharedAreaUsageNormalizer] = [:]
+    /// Codex threads of the agents published when observation began. An agent
+    /// published later has no entry, so its first total is never attributed today.
+    private var sessionsAtStart: [AgentID: String?] = [:]
     private var knownReporting: Set<AgentID> = []
     private var queue: Task<Void, Never>?
     private(set) var lastError: (any Error)?
@@ -23,7 +24,7 @@ final class SharedAreaUsageCollector {
          directory: URL, host: SharedArea.ID<SharedArea.Host>, now: Date = Date()) throws {
         self.supervisor = supervisor; self.bindings = bindings; self.startedAt = now
         ledger = try SharedAreaUsageLedger(directory: directory, host: host)
-        for id in ownedAgents() where supervisor.records[id]?.codexThreadId == nil { newCodexSessions.insert(id) }
+        for id in ownedAgents() { sessionsAtStart[id] = supervisor.records[id]?.codexThreadId }
         observer = supervisor.addDeliveredEventObserver { [weak self] id, event in self?.receive(id, event) }
     }
     func stop() {
@@ -48,43 +49,29 @@ final class SharedAreaUsageCollector {
     }
     private func receive(_ id: AgentID, _ event: AgentRuntimeEvent) {
         guard ownedAgents().contains(id), let record = supervisor.records[id] else { return }
+        let sessionAtStart: String? = if let known = sessionsAtStart[id] { known } else { record.codexThreadId ?? "published-later" }
+        var normalizer = normalizers[id] ?? SharedAreaUsageNormalizer(source: id.rawValue.uuidString,
+            harness: record.harness, startedAt: startedAt, providerSessionAtStart: sessionAtStart)
+        defer { normalizers[id] = normalizer }
         switch event {
         case .turnStarted(_, let turn):
-            currentTurns[id] = turn; freshTurns.insert(id)
+            normalizer.turnStarted(turn)
         case .tokenUsageUpdated(let thread, let value):
-            guard value.inputTokens >= 0, value.outputTokens >= 0 else { return }
-            let source = id.rawValue.uuidString
-            let counter: String
-            let initialToday: Bool
-            switch record.harness {
-            case .some(.codex):
-                counter = SharedAreaUsageLedger.privateCounter(["codex", record.codexThreadId ?? thread])
-                initialToday = newCodexSessions.contains(id)
-            case .some(.claudeCode):
-                let turn = currentTurns[id] ?? record.latestTurnAt.map { String($0.timeIntervalSince1970) } ?? "unattributed"
-                counter = SharedAreaUsageLedger.privateCounter([source, "claude", turn])
-                initialToday = freshTurns.contains(id)
-            case .some(.pi):
-                guard let message = value.accountingObservationID else {
-                    lastError = SharedAreaUsageLedger.Failure.invalidObservation; onChange?(); return
+            switch normalizer.usage(value, providerSession: record.codexThreadId, thread: thread,
+                                    latestTurnAt: record.latestTurnAt, receivedAt: Date()) {
+            case nil: return
+            case .unattributable?:
+                lastError = SharedAreaUsageLedger.Failure.invalidObservation; onChange?()
+            case .record(let observation)?:
+                let prior = queue, ledger = ledger
+                queue = Task { [weak self] in
+                    await prior?.value
+                    do {
+                        _ = try await Task.detached { try ledger.record(observation) }.value
+                        self?.knownReporting.insert(id)
+                    } catch { self?.lastError = error }
+                    self?.onChange?()
                 }
-                counter = SharedAreaUsageLedger.privateCounter([source, "pi", message])
-                initialToday = value.observedAt.map { $0 >= startedAt } ?? freshTurns.contains(id)
-            case nil:
-                lastError = SharedAreaUsageLedger.Failure.invalidObservation; onChange?(); return
-            }
-            let input = value.accountingInputTokens ?? value.inputTokens
-            guard input >= 0 else { return }
-            let observation = SharedAreaUsageLedger.Observation(counter: counter, input: UInt64(input), output: UInt64(value.outputTokens),
-                observedAt: value.observedAt ?? Date(), initialBelongsToToday: initialToday)
-            let prior = queue, ledger = ledger
-            queue = Task { [weak self] in
-                await prior?.value
-                do {
-                    _ = try await Task.detached { try ledger.record(observation) }.value
-                    self?.knownReporting.insert(id)
-                } catch { self?.lastError = error }
-                self?.onChange?()
             }
         default: break
         }

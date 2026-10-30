@@ -14,13 +14,19 @@ public struct SharedAreaUsageLedger: Sendable {
         /// A session total first seen midway through a day has no trustworthy
         /// day attribution. Retain its reported total, then count later deltas.
         public let initialBelongsToToday: Bool
-        public init(counter: String, input: UInt64, output: UInt64, observedAt: Date, initialBelongsToToday: Bool) {
+        /// A forked cumulative session's parent counter. Its first report carries
+        /// the parent's history, so the parent's high-water is its baseline.
+        public let inheritsFrom: String?
+        public init(counter: String, input: UInt64, output: UInt64, observedAt: Date, initialBelongsToToday: Bool,
+                    inheritsFrom: String? = nil) {
             self.counter = counter; self.input = input; self.output = output; self.observedAt = observedAt
-            self.initialBelongsToToday = initialBelongsToToday
+            self.initialBelongsToToday = initialBelongsToToday; self.inheritsFrom = inheritsFrom
         }
     }
     public enum Failure: Error { case invalidObservation, corrupt, exhausted, changedScope }
-    private struct Count: Codable { var input: UInt64 = 0; var output: UInt64 = 0 }
+    /// `observedAt` orders reports of one counter. Ledgers written before it
+    /// existed decode it as nil, and a lower report against those stays ignored.
+    private struct Count: Codable { var input: UInt64 = 0; var output: UInt64 = 0; var observedAt: Date? }
     private struct State: Codable {
         var schema = 1
         let host: SharedArea.ID<SharedArea.Host>
@@ -69,11 +75,32 @@ public struct SharedAreaUsageLedger: Sendable {
         return try transaction(now: now) { state in
             let key = Self.privateCounter([observation.counter])
             guard state.counters.count < 250_000 || state.counters[key] != nil else { throw Failure.exhausted }
-            let old = state.counters[key]
-            let next = Count(input: max(old?.input ?? 0, observation.input), output: max(old?.output ?? 0, observation.output))
-            let delta = Count(input: next.input - (old?.input ?? 0), output: next.output - (old?.output ?? 0))
-            guard old == nil || delta.input != 0 || delta.output != 0 else { return false }
-            state.counters[key] = next
+            var old = state.counters[key]
+            let reported = Count(input: observation.input, output: observation.output, observedAt: observation.observedAt)
+            if old == nil, let parent = observation.inheritsFrom.flatMap({ state.counters[Self.privateCounter([$0])] }) {
+                // A fork reporting less than its parent cannot contain the whole
+                // parent history; its fork point is unknown, so it only sets a baseline.
+                guard observation.input >= parent.input, observation.output >= parent.output else {
+                    state.counters[key] = reported; state.partial = true; return true
+                }
+                old = Count(input: parent.input, output: parent.output)
+            }
+            if let old {
+                // A report older than this counter's newest is late: never counted.
+                if let seen = old.observedAt, observation.observedAt < seen { return false }
+                // A newer, lower cumulative is a reset: the lower value is the new
+                // baseline. What ran between the reset and this report is unknown.
+                if observation.input < old.input || observation.output < old.output {
+                    guard let seen = old.observedAt, observation.observedAt > seen else { return false }
+                    state.counters[key] = reported; state.partial = true; return true
+                }
+            }
+            let delta = Count(input: observation.input - (old?.input ?? 0), output: observation.output - (old?.output ?? 0))
+            guard old == nil || delta.input != 0 || delta.output != 0 else {
+                guard state.counters[key] == nil else { return false }
+                state.counters[key] = reported; return true
+            }
+            state.counters[key] = reported
             try Self.add(delta, into: &state.total)
             if old != nil || observation.initialBelongsToToday {
                 let day = Self.dayUTC(observation.observedAt)

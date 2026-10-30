@@ -59,6 +59,10 @@ public struct ClaudeEventTranslator {
     /// The bare model id `system/init` reported — the key of this run's entry in
     /// `result.modelUsage`, where claude states the model's context window.
     private var model: String?
+    /// The last process-cumulative `modelUsage` a numbered result reported, so
+    /// a later numbered result without `model_usage_since_last_result` still
+    /// yields only its own share.
+    private var lastCumulativeModelUsage: (input: Int, output: Int)?
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
 
@@ -667,7 +671,7 @@ public struct ClaudeEventTranslator {
 
     // MARK: - result (usage + turn completion)
 
-    private func translateResult(_ object: [String: Any]) -> [AgentRuntimeEvent] {
+    private mutating func translateResult(_ object: [String: Any]) -> [AgentRuntimeEvent] {
         // A result with no init before it is a run that never started — the
         // shape `--resume` emits for an unknown session. The runner reports
         // that from exit+stderr (and retries as `--session-id`); emitting a
@@ -691,12 +695,16 @@ public struct ClaudeEventTranslator {
             // A failed-before-start result carries an all-zero usage block;
             // publishing it would clobber real telemetry with zeros.
             if total > 0 {
+                let accounting = resultAccounting(object)
                 events.append(.tokenUsageUpdated(
                     threadId: threadId,
                     snapshot: TokenUsageSnapshot(
                         inputTokens: summedInput,
                         outputTokens: output ?? 0,
-                        totalCostUsd: totalCost)
+                        totalCostUsd: totalCost,
+                        accountingObservationID: accounting?.id,
+                        accountingInputTokens: accounting?.input,
+                        accountingOutputTokens: accounting?.output)
                 ))
                 // The result's own counters are the run's SUM — cost accounting,
                 // and the trap this whole path fell into. Publish them as the
@@ -983,6 +991,47 @@ public struct ClaudeEventTranslator {
     private static func isSafePathText(_ raw: String) -> Bool {
         guard !raw.isEmpty, raw.utf8.count <= maximumObservedPathBytes else { return false }
         return !raw.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+    }
+
+    /// Collaboration accounting for one result (COL-17), keyed by the result's
+    /// own `uuid` so a re-reported result counts once. `usage` is the MAIN
+    /// conversation only: on claude-subagent-turn it is 4 + 9,586 + 42,081,
+    /// while the subagent's requests appear only in `modelUsage`, claude's
+    /// inclusive per-model account (the figure `total_cost_usd` sums). A CLI
+    /// that numbers its results (`result_index`) reports `modelUsage`
+    /// cumulatively for the process and this result's share as
+    /// `model_usage_since_last_result` (claude-background-result-turn). The
+    /// ephemeral cache-creation splits are subsets and are never added.
+    private mutating func resultAccounting(_ object: [String: Any]) -> (id: String, input: Int, output: Int)? {
+        func sum(_ raw: Any?) -> (input: Int, output: Int)? {
+            guard let models = raw as? [String: Any], !models.isEmpty else { return nil }
+            var input = 0, output = 0
+            for case let usage as [String: Any] in models.values {
+                for key in ["inputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"] {
+                    let value = Self.intValue(usage[key]) ?? 0
+                    guard value >= 0 else { return nil }
+                    input += value
+                }
+                let value = Self.intValue(usage["outputTokens"]) ?? 0
+                guard value >= 0 else { return nil }
+                output += value
+            }
+            return (input, output)
+        }
+        let index = Self.intValue(object["result_index"])
+        let cumulative = sum(object["modelUsage"])
+        let previous = lastCumulativeModelUsage
+        if index != nil, let cumulative { lastCumulativeModelUsage = cumulative }
+        guard let uuid = object["uuid"] as? String, !uuid.isEmpty else { return nil }
+        let id = "claude-result|" + ((object["session_id"] as? String) ?? "") + "|" + uuid
+        if let share = sum(object["model_usage_since_last_result"]) { return (id, share.input, share.output) }
+        guard let cumulative else { return nil }
+        switch index {
+        case nil, 0?: return (id, cumulative.input, cumulative.output)
+        default:
+            guard let previous, cumulative.input >= previous.input, cumulative.output >= previous.output else { return nil }
+            return (id, cumulative.input - previous.input, cumulative.output - previous.output)
+        }
     }
 
     private static func intValue(_ value: Any?) -> Int? {

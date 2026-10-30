@@ -348,15 +348,19 @@ public struct TokenUsageSnapshot: Codable, Equatable, Sendable {
     public var accountingObservationID: String?
     public var accountingInputTokens: Int?
     public var observedAt: Date?
+    /// Claude's subagent-inclusive output for one result; `outputTokens` stays
+    /// the main conversation's figure the meter has always shown.
+    public var accountingOutputTokens: Int?
 
     public init(inputTokens: Int, outputTokens: Int, totalCostUsd: Double?, accountingObservationID: String? = nil,
-                accountingInputTokens: Int? = nil, observedAt: Date? = nil) {
+                accountingInputTokens: Int? = nil, observedAt: Date? = nil, accountingOutputTokens: Int? = nil) {
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
         self.totalCostUsd = totalCostUsd
         self.accountingObservationID = accountingObservationID
         self.accountingInputTokens = accountingInputTokens
         self.observedAt = observedAt
+        self.accountingOutputTokens = accountingOutputTokens
     }
 }
 

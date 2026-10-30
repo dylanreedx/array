@@ -169,6 +169,7 @@ if CommandLine.arguments.contains("--transcript-rehydration-check") {
 // process-spawning legs of the full run.
 if CommandLine.arguments.contains("--collaboration-usage-telemetry-check") {
     runPiEventTranslatorChecks()
+    runCollaborationProviderUsageChecks()
     print("Collaboration provider usage telemetry checks passed")
     Foundation.exit(0)
 }
