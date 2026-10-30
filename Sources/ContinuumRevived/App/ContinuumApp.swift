@@ -841,7 +841,8 @@ enum ContinuumApp {
             MainActor.assumeIsolated {
                 do {
                     let next = CommandLine.arguments.index(after: index)
-                    let dir = next < CommandLine.arguments.endIndex && !CommandLine.arguments[next].hasPrefix("--")
+                    // Any flag, not just `--`: the matrix appends `-continuum.…` defaults.
+                    let dir = next < CommandLine.arguments.endIndex && !CommandLine.arguments[next].hasPrefix("-")
                         ? URL(fileURLWithPath: CommandLine.arguments[next]) : nil
                     print(try SidebarOwnershipChecks.run(outputDirectory: dir))
                     Foundation.exit(0)
