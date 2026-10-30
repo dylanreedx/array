@@ -1670,10 +1670,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// a finished subagent how long ago it finished; a subagent that asked reads
     /// "waiting", because the ask itself is raised on its lead.
     static func ownershipClock(_ row: AgentInboxRow, isSubagent: Bool, now: Date) -> String? {
+        // A subagent that asks waits, even with its turn still open (a helper the
+        // watchdog flagged); its lead carries the words.
+        if isSubagent, ask(row) != nil { return "waiting" }
         if row.state == .working {
             return AgentInboxCellView.elapsedText(stateAge(row, now: now))
         }
-        if ask(row) != nil { return isSubagent ? "waiting" : nil }
+        if ask(row) != nil { return nil }
         if let terminal = row.terminalEvent {
             switch terminal.outcome {
             case .failed, .runtimeError: return "Failed"
@@ -1803,7 +1806,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Start, re-key or stop the title shimmer and the dots.
     private func applyOwnershipMotion() {
         guard proposal.isTwoLine, let row = shown?.row else { return }
-        let working = row.state == .working
+        // Waiting is not progress: a row that asks stops pulsing and shimmering.
+        let working = row.state == .working && Self.ask(row) == nil
         let reduced = prefersReducedMotion()
         let phase = InboxOwnershipClock.phase(for: row.id)
         let foldsHelpers = (shown?.disclosure ?? .none) != .none

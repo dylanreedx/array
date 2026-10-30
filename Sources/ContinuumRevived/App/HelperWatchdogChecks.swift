@@ -5,6 +5,12 @@ import ContinuumRevivedCore
 @MainActor
 enum HelperWatchdogChecks {
     static func run() async throws {
+        // A headless check with no window on screen is App Nap's first target:
+        // with the display asleep its timers — the sidebar push among them — are
+        // deferred by seconds. The watchdog's own state never waits on them.
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .latencyCritical], reason: "helper watchdog check")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
         let bench = try WorkspaceAgentReportChecks.makeBench(label: "helper-watchdog")
         defer { bench.tearDown() }
         let supervisor = bench.supervisor, parent = bench.f.agentId
@@ -34,9 +40,20 @@ enum HelperWatchdogChecks {
         }
         window.orderFrontOffscreenForChecks()
         defer { window.orderOut(nil) }
+        // The watchdog's state is the MODEL — the record and the row the sidebar
+        // was pushed — and it must hold the moment the sweep returns, whatever the
+        // display is doing. Drawing it is the sidebar's job: plan 106 raises a
+        // helper's ask to its lead's second line, and the helper reads "waiting".
+        let ask = "no progress for 10 min"
+        func modelSays() -> String? {
+            guard let stored = supervisor.records[child]?.helperWatchdogNeedsYou,
+                  sidebar.inboxForQA.pushedRowForQA(id: child.rawValue)?.selfReportLine == .needsYou(stored)
+            else { return nil }
+            return stored
+        }
         func line() -> String? {
             sidebar.inboxForQA.layoutForQA()
-            return sidebar.inboxForQA.onScreenCardForQA(id: child.rawValue)?.selfReportTextForQA?.string
+            return sidebar.inboxForQA.onScreenCardForQA(id: parent.rawValue)?.selfReportTextForQA?.string
         }
         func alerts() -> [AgentComposerQueuedMessage] {
             supervisor.queuedMessages(for: parent).filter { $0.text.contains("has shown no progress") }
@@ -44,11 +61,17 @@ enum HelperWatchdogChecks {
         await supervisor.sweepHelperWatchdog()
         now.addTimeInterval(599)
         await supervisor.sweepHelperWatchdog()
-        try HelperGuardChecks.expect(alerts().isEmpty && line() == nil, "watchdog fired early")
+        try HelperGuardChecks.expect(alerts().isEmpty && modelSays() == nil && line() == nil, "watchdog fired early")
         now.addTimeInterval(2)
         await supervisor.sweepHelperWatchdog()
-        let drawn = await waitUntil(timeout: 5, pollInterval: 0.02) { line() == "Needs you: no progress for 10 min" }
-        try HelperGuardChecks.expect(drawn, "supervisor did not push the needs-you sidebar line: \(String(describing: line())), stored \(String(describing: supervisor.records[child]?.helperWatchdogNeedsYou)), row \(String(describing: sidebar.inboxForQA.pushedRowForQA(id: child.rawValue)?.selfReportLine)), alerts \(alerts().count)")
+        // The state is set by the sweep itself, before anything is drawn.
+        try HelperGuardChecks.expect(supervisor.records[child]?.helperWatchdogNeedsYou == ask,
+                                     "the sweep returned without setting the watchdog's needs-you")
+        let pushed = await waitUntil(timeout: 30, pollInterval: 0.02) { modelSays() == ask }
+        try HelperGuardChecks.expect(pushed, "the watchdog's needs-you did not reach the model: stored \(String(describing: supervisor.records[child]?.helperWatchdogNeedsYou)), pushed row \(String(describing: sidebar.inboxForQA.pushedRowForQA(id: child.rawValue)?.selfReportLine))")
+        try HelperGuardChecks.expect(line() == "Needs you: \(ask)"
+                                     && sidebar.inboxForQA.onScreenCardForQA(id: child.rawValue)?.clockTextForQA == "waiting",
+                                     "the lead does not raise its helper's needs-you: lead \(String(describing: line())), helper \(String(describing: sidebar.inboxForQA.onScreenCardForQA(id: child.rawValue)?.clockTextForQA))")
         try HelperGuardChecks.expect(alerts().count == 1, "expected exactly one queued parent message, got \(alerts().count)")
         let text = AgentMessageEnvelope.unwrappedText(alerts()[0].text)
         try HelperGuardChecks.expect(text.split(whereSeparator: \.isWhitespace).count <= 40
@@ -57,18 +80,22 @@ enum HelperWatchdogChecks {
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             window.appearance = NSAppearance(named: appearance)
             sidebar.inboxForQA.layoutForQA()
-            guard let cell = sidebar.inboxForQA.onScreenCardForQA(id: child.rawValue),
-                  let actual = cell.selfReportTextForQA else {
+            guard let cell = sidebar.inboxForQA.onScreenCardForQA(id: parent.rawValue),
+                  let actual = cell.selfReportTextForQA, actual.length > 0 else {
                 throw WorkspaceAgentReportChecks.Failure(description: "no painted watchdog line")
             }
-            let expected = AgentInbox96CellView.selfReportText(.needsYou("no progress for 10 min"), in: cell)
-            try HelperGuardChecks.expect(actual.isEqual(to: expected), "watchdog did not reuse amber needs-you rendering")
+            let amber = AccentToken.accentApproval.color.nsColor(in: cell).usingColorSpace(.sRGB)
+            let painted = (actual.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor)?.usingColorSpace(.sRGB)
+            try HelperGuardChecks.expect(painted != nil && amber != nil && painted!.isEqual(amber!),
+                                         "watchdog did not reuse the amber needs-you ink in \(appearance.rawValue)")
         }
         now.addTimeInterval(1200)
         await supervisor.sweepHelperWatchdog()
         try HelperGuardChecks.expect(alerts().count == 1, "same episode escalated twice")
         try await HelperGuardChecks.hook(bench, child, tool: "Read")
-        let cleared = await waitUntil(timeout: 5, pollInterval: 0.02) { line() == nil }
+        try HelperGuardChecks.expect(supervisor.records[child]?.helperWatchdogNeedsYou == nil,
+                                     "hook progress did not clear the watchdog's state")
+        let cleared = await waitUntil(timeout: 30, pollInterval: 0.02) { modelSays() == nil && line() == nil }
         try HelperGuardChecks.expect(cleared, "hook progress did not clear sidebar")
         now.addTimeInterval(601)
         await supervisor.sweepHelperWatchdog()
