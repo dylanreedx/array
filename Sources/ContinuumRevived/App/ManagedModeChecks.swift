@@ -15,6 +15,23 @@ enum ManagedModeChecks {
     #!/usr/bin/env python3
     import json, os, sys, time
     args = sys.argv[1:]
+    if '--version' in args: print('fixture-claude-managed'); sys.exit(0)
+    if '--help' in args: print('--settings <file-or-json>'); sys.exit(0)
+    if '--tools' in args and '--settings' in args:  # the hook-surface probe
+        import subprocess
+        hooks = []
+        for event, groups in json.loads(args[args.index('--settings')+1])['hooks'].items():
+            for group in groups:
+                for hook in group['hooks']:
+                    hooks.append(dict(event=event, source='flagSettings', type=hook['type'], commandText=hook['command'],
+                                      timeout=hook['timeout'], matcher=group.get('matcher', '')))
+                    if event == 'SessionStart': subprocess.run(hook['command'], shell=True, check=True)
+        for line in sys.stdin:
+            r = json.loads(line)
+            if r.get('request', {}).get('subtype') == 'get_hooks_listing':
+                print(json.dumps(dict(type='control_response', response=dict(subtype='success', request_id=r['request_id'],
+                    response=dict(eventCatalog=[dict(name=h['event']) for h in hooks], hooks=hooks)))), flush=True)
+        sys.exit(0)
     if '--tools' in args: sys.exit(0)  # no titler/probe effects
     sid = args[args.index('--resume')+1] if '--resume' in args else args[args.index('--session-id')+1]
     with open('managed-argv.jsonl', 'a') as f:
