@@ -166,6 +166,32 @@ enum AgentFaceChecks {
         }
     }
 
+    /// Ghostty's view and layer while the Terminal face shows, read before the
+    /// flip back frees the surface.
+    static func ghosttyLayer(of view: ManagedAgentTileNSView) -> (view: GhosttyTerminalView, layer: CALayer)? {
+        guard let ghostty = view.terminalFaceSession?.runtime.qaTerminalView, let layer = ghostty.layer else { return nil }
+        return (ghostty, layer)
+    }
+
+    /// The flip back frees the surface at once, but its view stays on screen
+    /// until the face's turns are read. Ghostty's layer draws through a raw
+    /// pointer to the freed renderer, so it must already be out of the tree:
+    /// otherwise the next commit that displays it crashes inside Ghostty.
+    static func expectGhosttyLayerRetired(_ before: (view: GhosttyTerminalView, layer: CALayer)?, _ label: String,
+                                          onScreen: Bool = false) throws {
+        guard let before else { throw Failure(description: "\(label): the Terminal face showed no Ghostty layer") }
+        try expect(before.view.surface == nil, "\(label): the flip back did not free the surface")
+        if onScreen {
+            try expect(before.view.window != nil, "\(label): the freed surface's view had already left the window, so this proves nothing")
+        }
+        try expect(before.layer.superlayer == nil && before.view.layer !== before.layer,
+                   "\(label): Ghostty's layer is still in the window's tree after its surface was freed")
+        // A commit that displays everything still on screen now reaches no freed renderer.
+        before.view.layer?.setNeedsDisplay()
+        before.view.window?.displayIfNeeded()
+        CATransaction.flush()
+    }
+
     static func windowPoint(of rect: NSRect, in view: NSView) -> NSPoint {
         view.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
     }
@@ -239,7 +265,10 @@ enum AgentFaceChecks {
             try expect(view.toggleFace() && view.face == .terminal, "hiding the icon must preserve the face action")
             view.layoutSubtreeIfNeeded()
             try expect(view.qaFaceSwitchMode == "icon", "the active Terminal view must retain its return toggle")
-            try expect(view.toggleFace() && fixture.pump(until: { view.face == .array }, timeout: 3),
+            let ghostty = ghosttyLayer(of: view)
+            try expect(view.toggleFace(), "the hidden-toggle preference must still allow returning to chat")
+            try expectGhosttyLayerRetired(ghostty, "keyboard toggle", onScreen: true)
+            try expect(fixture.pump(until: { view.face == .array }, timeout: 3),
                        "the hidden-toggle preference must still allow returning to chat")
             view.layoutSubtreeIfNeeded()
             try expect(view.qaFaceSwitchMode == "hidden", "returning to chat must restore the hidden preference")
@@ -328,7 +357,9 @@ enum AgentFaceChecks {
                         guard let backItem = switchItem(in: back), backItem.title == "Switch to Array" else {
                             throw Failure(description: "\(label): in the Terminal face the menu must offer Switch to Array")
                         }
+                        let ghostty = ghosttyLayer(of: view)
                         back.performActionForItem(at: back.index(of: backItem))
+                        try expectGhosttyLayerRetired(ghostty, label)
                         try expect(fixture.pump(until: { view.face == .array }, timeout: 3),
                                    "\(label): Switch to Array from the menu did not flip back")
                         outcome["switch"] = "menu only"
@@ -340,7 +371,9 @@ enum AgentFaceChecks {
                         let terminalControls = view.qaBandControlFrames
                         try expect(terminalControls.map(\.name) == names,
                                    "\(label): the band changed shape in the Terminal face: \(terminalControls.map(\.name))")
+                        let ghostty = ghosttyLayer(of: view)
                         try click(windowPoint(of: toggle, in: view), in: fixture.window)
+                        try expectGhosttyLayerRetired(ghostty, label)
                         try expect(fixture.pump(until: { view.face == .array }, timeout: 3),
                                    "\(label): a click on the chat toggle did not flip back")
                         outcome["switch"] = "toggled in and out"

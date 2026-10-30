@@ -673,9 +673,28 @@ final class GhosttyTerminalView: NSView {
         processExitPoller = nil
         guard let surface else { return }
         self.surface = nil
+        retireGhosttyLayer()
         ghostty_surface_free(surface)
         Self.liveSurfaceCount -= 1
         Self.liveSurfaceViews.remove(self)
+    }
+
+    /// Takes Ghostty's layer out of the tree before its surface is freed.
+    /// Ghostty makes this view layer-hosting with an `IOSurfaceLayer` whose
+    /// `display` draws through a raw pointer to the surface's renderer, and
+    /// `ghostty_surface_free` never clears it. A surface is freed while its
+    /// view is still on screen (a force close, a shell that exits, Ghostty's
+    /// close callback), so the next Core Animation commit that displays the
+    /// layer draws through freed memory. A plain layer keeps the last frame.
+    private func retireGhosttyLayer() {
+        guard let hosted = layer else { return }
+        let still = CALayer()
+        still.contents = hosted.contents
+        still.contentsGravity = hosted.contentsGravity
+        still.contentsScale = hosted.contentsScale
+        still.backgroundColor = hosted.backgroundColor
+        still.frame = hosted.frame
+        layer = still
     }
 
     private func reportSurfaceSize() {
