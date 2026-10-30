@@ -999,3 +999,9 @@ Working tree at handoff:
   `array/mp-gate`, `array/mp-pair` and `array/mp-recovery` are fully landed.
 - `.worktrees/.locks/app-build.sh` is the shared lock wrapper; it is
   uncommitted and outside git.
+
+**Final gate result (finished after handoff):** 10 legs ran, 9 passed, 1
+failed. The failure is `ContinuumRevivedCollaborationServiceChecks`, at the
+backup "damaged pages" check above. The pair passed (15 behaviours, 552
+replayed events), and so did both companion relay suites. Log:
+`qa-runs/lead/gate-merge-0735.log`.
