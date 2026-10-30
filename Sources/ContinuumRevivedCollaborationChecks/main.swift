@@ -17,6 +17,9 @@ if let flag = CommandLine.arguments.firstIndex(of: "--kill-child"), CommandLine.
 if CommandLine.arguments.contains("--artifacts-only") {
     do { try await runSharedArtifactProducerChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
 }
+if CommandLine.arguments.contains("--host-liveness-only") {
+    do { try await runSharedAreaHostLivenessChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
+}
 if CommandLine.arguments.contains("--kill-relaunch-only") {
     do { try await runCollaborationKillRelaunchChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
 }
@@ -144,6 +147,7 @@ try runSharedAreaAgreementReducerChecks()
 try await runSharedAreaAgreementHTTPChecks()
 try await runCollaborationRetentionRecoveryChecks()
 try await runSharedArtifactProducerChecks()
+try await runSharedAreaHostLivenessChecks()
 print("Collaboration contracts passed (reducer, reviewed publications, native controller and localhost HTTP; no mounted-scene or runner claims).")
 
 } catch {
