@@ -835,6 +835,22 @@ enum ContinuumApp {
         // sidebar; Copy forks one into a managed agent in its project.
         // .plans/87 (quick hide/show): the sidebar's toggle pills, driven through
         // real events on the production sidebar.
+        // .plans/106: who owns whom — subagents in their lead's card.
+        if let index = CommandLine.arguments.firstIndex(of: "--sidebar-ownership-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    let next = CommandLine.arguments.index(after: index)
+                    let dir = next < CommandLine.arguments.endIndex && !CommandLine.arguments[next].hasPrefix("--")
+                        ? URL(fileURLWithPath: CommandLine.arguments[next]) : nil
+                    print(try SidebarOwnershipChecks.run(outputDirectory: dir))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if CommandLine.arguments.contains("--sidebar-scope-popover-check") {
             _ = NSApplication.shared
             MainActor.assumeIsolated {
@@ -13591,6 +13607,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // not a binding, so it is cleared and the agent gets a fresh tile, which
         // is the same answer a headless agent already gets one line down
         // (.plans/05-close-to-history.md).
+        // Plan 106: a tile-less helper opens the way its row's Pop out does, so the
+        // lead's cap of three holds (`.plans/102-managed-agent-mode/p3-helper-tiles.md`
+        // forbids the sidebar making helper tiles itself). Refused, its lead opens.
+        if record.tileId == nil, let lead = agentSupervisor.helperLead(for: agentId),
+           agentSupervisor.records[lead]?.mode == .managed {
+            do {
+                let tile = try agentSupervisor.popOut(agentId)
+                refreshAgentSurfaces(notify: false)
+                guard revealTileFromInbox(tile) else { return false }
+                agentSupervisor.focus(agentID: agentId)
+                return true
+            } catch {
+                setWorkspaceManagementMessage(error.localizedDescription)
+                return lead != agentId && revealAgentFromInbox(lead.rawValue)
+            }
+        }
         let boundTileId = record.tileId.flatMap { tileIsReachable($0) ? $0 : nil }
         if record.tileId != nil, boundTileId == nil {
             fputs("Reveal from inbox: \(agentId.rawValue.uuidString) names tile \(record.tileId!.uuidString), which no canvas holds; giving it a new one\n", stderr)
@@ -13677,6 +13709,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     static let wiredInboxRowActions: Set<InboxRowAction> = [
         .settle, .unsettle, .snooze, .wake, .markUnread,
         .stopAgent, .archive, .delete, .generateName, .color,
+        .popOut, .foldBack, .pin, .unpin,
     ]
     /// The bulk bar's half. No `.stopAgent` — the bar has no such action (`P3.11`'s five
     /// are settle / snooze / mark-unread / archive / delete).
@@ -13696,6 +13729,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @discardableResult
     func performInboxRowAction(_ action: InboxRowAction, on rowIds: [UUID]) -> Bool {
         switch action {
+        case .popOut, .foldBack, .pin, .unpin:
+            return helperTileActionFromInbox(action, rowIds)
         case .stopAgent:
             return stopAgentsFromInbox(rowIds)
         case .settle:
@@ -13956,6 +13991,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// stays, and this is P2A.5's rule made reachable: closing a tile must never stop an
     /// agent, so somewhere has to deliberately.
     @discardableResult
+    // Plan: .plans/106-sidebar-ownership
+    /// Pop a subagent out to its own tile, fold it back into its lead's card, or
+    /// pin it there. The supervisor owns the cap and the tiles
+    /// (`.plans/102-managed-agent-mode/p3-helper-tiles.md`); a refusal is said in
+    /// its own words, with no confirmation.
+    private func helperTileActionFromInbox(_ action: InboxRowAction, _ rowIds: [UUID]) -> Bool {
+        var done = 0
+        for rowId in rowIds {
+            let id = AgentID(rawValue: rowId)
+            do {
+                switch action {
+                case .popOut: try agentSupervisor.popOut(id)
+                case .foldBack: try agentSupervisor.foldBack(id)
+                case .pin, .unpin:
+                    guard agentSupervisor.setPinned(id, action == .pin) else {
+                        setWorkspaceManagementMessage("Could not \(action == .pin ? "pin" : "unpin") that subagent.")
+                        continue
+                    }
+                default: continue
+                }
+                done += 1
+            } catch {
+                setWorkspaceManagementMessage(error.localizedDescription)
+            }
+        }
+        refreshAgentSurfaces(notify: false)
+        return done > 0
+    }
+
     private func stopAgentsFromInbox(_ rowIds: [UUID]) -> Bool {
         let running = managedAgents(for: rowIds).filter { agentSupervisor.isRunning($0.id) }
         guard !running.isEmpty else {
@@ -36238,7 +36302,8 @@ extension AppDelegate {
     try expect(clockInbox.elapsedTickIntervalForQA == 1,
                "a visible running row must select the shared clock's one-second cadence")
     clockInbox.updateElapsedClockForQA(now: inboxCheckNow.addingTimeInterval(2))
-    try expect(clockInbox.stateLabelsForQA == ["Working · 1m 1s"],
+    // Plan 106: the running glyph says "working"; the clock is the duration alone.
+    try expect(clockInbox.stateLabelsForQA == ["1m 1s"],
                "the visible elapsed label did not advance without hover — got \(clockInbox.stateLabelsForQA)")
 
     let completedClockRow = AgentInboxRow(
@@ -36266,6 +36331,11 @@ extension AppDelegate {
     try expect(inbox.titlesForQA == sorted.map(\.displayTitle),
                "each row shows its human-facing agent name — got \(inbox.titlesForQA)")
     let expectedStateLabels = sorted.map { row in
+        // Plan 106: the clock alone — the running glyph says "working", and an
+        // asking lead says so in amber on its second line.
+        if SidebarDensityProposal.production.isTwoLine {
+            return AgentInbox96CellView.ownershipClock(row, isSubagent: row.depth > 0, now: inboxCheckNow) ?? ""
+        }
         let word = AgentInbox96CellView.stateWord(row, now: inboxCheckNow)
         let age = AgentInbox96CellView.stateAge(row, now: inboxCheckNow)
             .flatMap(AgentInboxCellView.elapsedText)
@@ -36368,8 +36438,15 @@ extension AppDelegate {
     inbox.layoutForQA()
     let rebuilt = inbox.cellBuildCountForQA - buildsBefore
     try expect(rebuilt == 1, "one agent moved, so exactly 1 cell may be rebuilt — \(rebuilt) were")
+    if SidebarDensityProposal.production.isTwoLine {
+        // Plan 106: an asking lead says it on line 2, in amber.
+        let asked = inbox.onScreenCardForQA(id: moved.id)?.selfReportTextForQA?.string
+        try expect(asked == "Needs you: approve a request",
+                   "…and that one cell must show the new state — got '\(asked ?? "nothing")'")
+    } else {
     try expect(inbox.stateLabelsForQA[2] == InboxState.approval.label,
                "…and that one cell must show the new state — got '\(inbox.stateLabelsForQA[2])'")
+    }
     try expect(inbox.rowIdsForQA == expectedOrder,
                "a state change must not move a row — the desktop order is frozen (P3.4)")
 
@@ -36783,7 +36860,13 @@ extension AppDelegate {
         // The two heights spelled out here rather than asked of `height(for:)`:
         // comparing the table against the function that set it would assert nothing.
         let height = parked.rowHeightsForQA[index]
-        if wanted == .slim {
+        let nestedDepth = parked.rowNestingsForQA[index].depth
+        if SidebarDensityProposal.production.isTwoLine, wanted == .card, nestedDepth > 0 {
+            // Plan 106: a subagent is one line inside its lead's card.
+            let gap = AgentInbox96CellView.ownershipTrailingGap(for: parked.rowNestingsForQA[index])
+            try expect(abs(height - (Double(InboxOwnershipChrome.subagentHeight) + gap)) < 0.5,
+                       "'\(row.title)' is a subagent, so it is one \(InboxOwnershipChrome.subagentHeight)pt line plus \(gap)pt — laid out at \(height)pt")
+        } else if wanted == .slim {
             // Sidebar nesting (held 0.7.26 work): a slim row that ends a group,
             // or a root followed by a root, carries the same trailing gap a card
             // does, reserved BELOW its 36pt content.
@@ -36888,8 +36971,15 @@ extension AppDelegate {
     let tail = live.rows.last!
     // P0.4: "a card" is asserted as visibly-taller-than-slim rather than as the
     // fixed constant, so P2.3's content-derived card heights stay assertable.
+    if SidebarDensityProposal.production.isTwoLine, tail.depth > 0 {
+        // Plan 106: a subagent card is one line inside its lead's card.
+        try expect(abs(live.rowHeightsForQA[live.rows.count - 1]
+                       - (Double(InboxOwnershipChrome.subagentHeight) + AgentInbox96CellView.ownershipTrailingGap(for: live.rowNestingsForQA[live.rows.count - 1]))) < 0.5,
+                   "the tail row starts as a one-line subagent — \(live.rowHeightsForQA[live.rows.count - 1])pt")
+    } else {
     try expect(live.rowHeightsForQA[live.rows.count - 1] > AgentInboxView.slimRowHeight + 0.5,
                "the tail row starts as a card, visibly taller than a slim row — \(live.rowHeightsForQA[live.rows.count - 1])pt")
+    }
     let settledLifecycle = InboxLifecycle.settled(at: LabFixtures.inboxNow.addingTimeInterval(-300))
     let settledTail = AgentInboxRow(
         id: tail.id, title: tail.title, projectName: tail.projectName, state: tail.state,
@@ -37169,7 +37259,9 @@ extension AppDelegate {
                "a folded child stays folded when its agent reports in — got \(nested.titlesForQA)")
     try expect(nested.clickDisclosureForQA(id: parentRow.id), "unfold for the next section")
     nested.layoutForQA()
-    try expect(nested.stateLabelsForQA[childIndex] == InboxState.approval.label,
+    // Plan 106: an asking subagent reads "waiting"; its lead raises the ask.
+    let hiddenEventWord = SidebarDensityProposal.production.isTwoLine ? "waiting" : InboxState.approval.label
+    try expect(nested.stateLabelsForQA[childIndex] == hiddenEventWord,
                "…and the event was not lost while it was hidden — got '\(nested.stateLabelsForQA[childIndex])'")
 
     // A CHAIN, AND THE CAP. A grandchild indents twice; a great-grandchild — which
@@ -37294,7 +37386,9 @@ extension AppDelegate {
     // root followed by a root, which earns the group-end gap BELOW the card. The
     // card itself is what must not grow.
     let preFoldHeight = waiting.rowHeightsForQA[preFoldIndex]
-        - AgentInbox96CellView.trailingGap(for: waiting.rowNestingsForQA[preFoldIndex])
+        - (SidebarDensityProposal.production.isTwoLine
+            ? AgentInbox96CellView.ownershipTrailingGap(for: waiting.rowNestingsForQA[preFoldIndex])
+            : AgentInbox96CellView.trailingGap(for: waiting.rowNestingsForQA[preFoldIndex]))
     try expect(waiting.clickDisclosureForQA(id: parentRow.id), "fold the group that is waiting")
     waiting.layoutForQA()
     let waitingIndex = waiting.rowIdsForQA.firstIndex(of: parentRow.id)!
@@ -37306,7 +37400,9 @@ extension AppDelegate {
     // and the label must still be laid out with room in it. Asserted numerically —
     // the runbook forbids certifying a rendering by eye.
     let foldedCardHeight = waiting.rowHeightsForQA[waitingIndex]
-        - AgentInbox96CellView.trailingGap(for: waiting.rowNestingsForQA[waitingIndex])
+        - (SidebarDensityProposal.production.isTwoLine
+            ? AgentInbox96CellView.ownershipTrailingGap(for: waiting.rowNestingsForQA[waitingIndex])
+            : AgentInbox96CellView.trailingGap(for: waiting.rowNestingsForQA[waitingIndex]))
     try expect(foldedCardHeight == preFoldHeight,
                "a rollup must not change the card's height — \(foldedCardHeight)pt, was \(preFoldHeight)pt before the fold")
 
@@ -37492,6 +37588,48 @@ extension AppDelegate {
     try expect(siblingRow == 4 && treeDepths[siblingRow] == 0 && treeDepths[siblingRow - 1] > 0,
                "…with an unrelated ROOT drawn immediately under a nested child, which is the defect — depths \(treeDepths), root at \(siblingRow)")
 
+    // Plan 106: the tree is ONE quiet stem from under the lead's fold glyph to its
+    // last direct subagent, a helper's own short stem under its parent subagent,
+    // all inside the lead's card — and nothing reaches the next lead.
+    if SidebarDensityProposal.production.isTwoLine {
+        let treeRowRects = tree.tableRowRectsForQA
+        let siblingRect = treeRowRects[siblingRow]
+        func slice(_ id: UUID) -> InboxOwnershipSlice? { tree.ownershipSliceForQA(id: id) }
+        let lanes = tree.rowIdsForQA.map { id in slice(id).map { ($0.leadLane, $0.helperLane) } }
+        try expect(lanes.count == 5 && lanes.allSatisfy { $0 != nil },
+                   "every tree row must have a slice of its card — got \(lanes)")
+        try expect(lanes[0]! == (.start, .none), "the stem starts under the lead's glyph — got \(lanes[0]!)")
+        try expect(lanes[siblingRow]! == (.none, .none), "the next lead carries no stem — got \(lanes[siblingRow]!)")
+        let lastDirect = (1..<siblingRow).last { treeDepths[$0] == 1 }!
+        try expect(lanes[lastDirect]!.0 == .foot, "the stem's foot is at the last direct subagent — got \(lanes[lastDirect]!)")
+        for row in 1..<lastDirect { try expect(lanes[row]!.0 == .through, "the stem runs through row \(row) — got \(lanes[row]!)") }
+        let helperParent = (1..<siblingRow).first { treeDepths[$0] == 1 && treeDepths[$0 + 1] == 2 }!
+        try expect(lanes[helperParent]!.1 == .start && lanes[helperParent + 1]!.1 == .foot,
+                   "a subagent's helper hangs off its own short stem — got \(lanes[helperParent]!), \(lanes[helperParent + 1]!)")
+        try expect(slice(treeSibling.id).map { abs($0.groupHeight - treeRowRects[siblingRow].height + CGFloat(AgentInboxView.rowSpacing)) <= 0.5 } == true,
+                   "the next lead's card is its own — \(String(describing: slice(treeSibling.id)))")
+        // The pixels: the stem crosses the gap between two subagent rows, and the
+        // next lead's row has no ink in its lane.
+        let laneX = Double(AgentInbox96CellView.outerGutter) + Double(InboxOwnershipChrome.laneX)
+        let crossing = NSPoint(x: laneX, y: Double(treeRowRects[1].maxY))
+        let besideCrossing = NSPoint(x: laneX + Space.m, y: Double(treeRowRects[1].maxY))
+        let inSibling = NSPoint(x: laneX, y: Double(siblingRect.minY) + 30)
+        let besideSibling = NSPoint(x: laneX + Space.m, y: Double(siblingRect.minY) + 30)
+        let ink = tree.tableInkForQA(at: [crossing, besideCrossing, inSibling, besideSibling])
+        func differs(_ a: NSColor?, _ b: NSColor?) -> Bool {
+            guard let a = a?.usingColorSpace(.sRGB), let b = b?.usingColorSpace(.sRGB) else { return false }
+            return abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent)
+                + abs(a.blueComponent - b.blueComponent) > 0.01
+        }
+        try expect(differs(ink[0], ink[1]), "the stem is not painted across the gap between subagent rows")
+        try expect(!differs(ink[2], ink[3]), "the stem reaches into the next lead's card")
+        // Folding takes every lane with it.
+        try expect(tree.clickDisclosureForQA(id: treeRoot.id), "the group must fold")
+        tree.layoutForQA()
+        try expect(slice(treeRoot.id).map { $0.leadLane == .none } == true, "a folded lead keeps its stem")
+        try expect(tree.clickDisclosureForQA(id: treeRoot.id), "unfold it again")
+        tree.layoutForQA()
+    } else {
     let treePainting = tree.spinePaintingForQA
     let treeRowRects = tree.tableRowRectsForQA
     let siblingRect = treeRowRects[siblingRow]
@@ -37666,6 +37804,8 @@ extension AppDelegate {
     let remainderInk = capped.spinePaintingForQA.filter { $0.tableRow == remainderRow }
     try expect(remainderInk.contains { $0.segment.kind == .elbow && $0.segment.level == 1 },
                "…carrying its group's connector like any other member — got \(remainderInk.map { "\($0.segment.kind.rawValue)@\($0.segment.level)" })")
+
+    }
 
     let empty = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 200))
     empty.reload(rows: [])
@@ -37965,8 +38105,16 @@ extension AppDelegate {
     app.pushAgentSurfaces(notify: false)
     sidebar.inboxForQA.layoutForQA()
     let headlessIndex = sidebar.inboxForQA.rowIdsForQA.firstIndex(of: headlessId.rawValue)!
+    if SidebarDensityProposal.production.isTwoLine {
+        // Plan 106: a lead asks in amber on line 2; a subagent reads "waiting".
+        let headlessCard = sidebar.inboxForQA.onScreenCardForQA(id: headlessId.rawValue)
+        let said = headlessCard?.selfReportTextForQA?.string ?? headlessCard?.clockTextForQA ?? ""
+        try expect(said.hasPrefix("Needs you") || said == "waiting",
+                   "an agent's own event must reach its row — got '\(said)'")
+    } else {
     try expect(sidebar.inboxForQA.stateLabelsForQA[headlessIndex] == InboxState.approval.label,
                "an agent's own event must reach its row — got '\(sidebar.inboxForQA.stateLabelsForQA[headlessIndex])'")
+    }
     let rebuiltByEvent = sidebar.inboxForQA.cellBuildCountForQA - buildsBeforeEvent
     try expect(rebuiltByEvent <= 2,
                "one agent's event must not rebuild the whole list — \(rebuiltByEvent) cells were rebuilt")
@@ -39159,8 +39307,12 @@ extension AppDelegate {
                "…and so is an active one, with Wake greyed rather than absent — got \(activeItems.map(\.baseTitle))")
     try expect(InboxRowAction.snooze.isAvailable(for: snoozedRow),
                "snoozing a snoozed agent is a real action: it moves the preset (P4.5)")
-    try expect(activeItems.count == InboxRowAction.allCases.count - 2
-                && settledItems.count == InboxRowAction.allCases.count - 2,
+    // Plan 106: the four subagent tile verbs appear only over subagents.
+    let subagentVerbs = [InboxRowAction.popOut, .foldBack, .pin, .unpin]
+    try expect(!activeItems.contains(where: subagentVerbs.contains) && !settledItems.contains(where: subagentVerbs.contains),
+               "a lead's menu offers subagent tile verbs — got \(activeItems.map(\.baseTitle))")
+    try expect(activeItems.count == InboxRowAction.allCases.count - 2 - subagentVerbs.count
+                && settledItems.count == InboxRowAction.allCases.count - 2 - subagentVerbs.count,
                "the capability-hidden menu is every action but the other half of the pair and Generate Name — got \(activeItems.count) and \(settledItems.count) of \(InboxRowAction.allCases.count)")
     try expect(InboxRowAction.menuItems(for: [quietRow, settledRow], includeGeneratedName: false).contains(.settle),
                "a MIXED selection gets the forward action (the capability rule then greys it), not both halves")
@@ -39187,11 +39339,30 @@ extension AppDelegate {
                "Wake needs something snoozed")
     try expect(InboxRowAction.openInTile.isAvailable(for: archivedRow),
                "every row names an agent, so reading one is always allowed (P4.9: reading is free)")
+    // Plan 106: a subagent in its lead's card, one popped out to a tile, one pinned.
+    func subagent(_ hasTile: Bool, pinned: Bool) -> AgentInboxRow {
+        AgentInboxRow(id: UUID(), title: "subagent", state: .ready, depth: 1,
+                      createdAt: LabFixtures.inboxNow, parentId: quietRow.id, hasTile: hasTile, isPinned: pinned)
+    }
+    let tilelessSubagent = subagent(false, pinned: false)
+    let poppedSubagent = subagent(true, pinned: false)
+    let pinnedSubagent = subagent(true, pinned: true)
+    try expect(InboxRowAction.menuItems(for: [tilelessSubagent]).contains(.popOut)
+                && !InboxRowAction.menuItems(for: [tilelessSubagent]).contains(.pin),
+               "a subagent in its lead's card is offered Pop Out, not Pin")
+    try expect(InboxRowAction.menuItems(for: [poppedSubagent]).contains(.pin)
+                && InboxRowAction.menuItems(for: [poppedSubagent]).contains(.foldBack)
+                && !InboxRowAction.menuItems(for: [poppedSubagent]).contains(.popOut),
+               "a popped-out subagent is offered Pin and Fold Back")
+    try expect(InboxRowAction.menuItems(for: [pinnedSubagent]).contains(.unpin)
+                && !InboxRowAction.menuItems(for: [pinnedSubagent]).contains(.pin),
+               "a pinned subagent is offered Unpin")
+    let swept = menuCandidates + [tilelessSubagent, poppedSubagent, pinnedSubagent]
     // No rule is inert, the same sweep E1 runs over the bulk actions.
     for action in InboxRowAction.allCases where action != .openInTile {
-        try expect(menuCandidates.contains { action.isAvailable(for: $0) },
+        try expect(swept.contains { action.isAvailable(for: $0) },
                    "\(action.baseTitle) must be available to some row, or its rule is unreachable")
-        try expect(menuCandidates.contains { !action.isAvailable(for: $0) },
+        try expect(swept.contains { !action.isAvailable(for: $0) },
                    "\(action.baseTitle) must be withheld from some row, or its rule is inert")
     }
 

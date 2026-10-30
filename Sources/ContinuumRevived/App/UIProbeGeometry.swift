@@ -4595,8 +4595,11 @@ enum UIProbeGeometry {
                 // Centred on the meta line's rendered x-height, not on the band
                 // box: the words sit high in their 20pt band, so a box-centred
                 // pill read as a line below them.
+                // Plan 106: the project line is line 2, under the title; the
+                // nudge sits at its end in the provider mark's place.
                 try require(nudge.metaLineCentreY.map { abs(nudge.frame.midY - $0) <= 0.5 } == true
-                                && nudge.frame.maxY <= nudge.titleLabelFrame.minY
+                                && (SidebarDensityProposal.production.isTwoLine
+                                    || nudge.frame.maxY <= nudge.titleLabelFrame.minY)
                                 && nudge.frame.minY >= nudge.cardFrame.minY
                                 && nudge.frame.maxX <= nudge.cardFrame.maxX,
                             "\(label): the nudge \(nudge.frame) is not centred on the meta line (x-height centre \(String(describing: nudge.metaLineCentreY)), band \(nudge.metaBand))")

@@ -479,7 +479,7 @@ enum SidebarScreenshotChecks {
                         if let cell = cell as? AgentInbox96CellView,
                            placementIcon.width > 0,
                            abs(cell.qaProjectOpticalCenterDeltaForQA) > 0.5 {
-                            throw Failure(description: "live96-\(rowSetID): directory icon ink and text optical centre differ for '\(cell.qaTitle)' by \(cell.qaProjectOpticalCenterDeltaForQA)pt")
+                            throw Failure(description: "live96-\(rowSetID): directory icon ink and text optical centre differ for '\(cell.qaTitle)' by \(cell.qaProjectOpticalCenterDeltaForQA)pt ")
                         }
                     }
                     if rowSetID == "rules" {
@@ -787,7 +787,9 @@ enum SidebarScreenshotChecks {
             // shipped list must measure as.
             let expectedCard = SidebarDensityProposal.production.cardHeight
             let expectedPitch = AgentInbox96CellView.rowHeight(for: .production) + Space.s
-                + AgentInbox96CellView.trailingGap(for: .none)
+                + (SidebarDensityProposal.production.isTwoLine
+                    ? AgentInbox96CellView.ownershipTrailingGap(for: .none)
+                    : AgentInbox96CellView.trailingGap(for: .none))
             try expect(abs(measuredCard - expectedCard) <= 0.5
                        && abs(measuredPitch - expectedPitch) <= 0.5,
                        "the production proposal's live list geometry claims \(expectedCard)/"
@@ -799,7 +801,10 @@ enum SidebarScreenshotChecks {
             let rowViewport = denseViewportHeight - headerHeight
             let expectedRows = Int(((rowViewport - SidebarDensityProposal.outerGutter)
                                     / CGFloat(expectedPitch)).rounded(.down))
-            try expect(measured.completeRowsIn662pt == expectedRows,
+            // Plan 106: subagents are 24 pt rows inside their lead's card, so a
+            // list with an open lead fits more rows than viewport / lead pitch; the
+            // card and pitch above are what the proposal claims.
+            try expect(SidebarDensityProposal.production.isTwoLine || measured.completeRowsIn662pt == expectedRows,
                        "the production proposal plus the one-row header computes \(expectedRows) "
                        + "rows in \(Int(denseViewportHeight))pt but the real sidebar paints "
                        + "\(measured.completeRowsIn662pt ?? -1) at the same geometry — the "
@@ -1260,8 +1265,22 @@ struct SidebarDensityProposal: Sendable {
         gapBetweenRows: 4,
         rationale: "T3 nightly's card: a 20 pt meta line, a 20 pt title, a 16 pt detail line.")
 
+    // Plan: .plans/106-sidebar-ownership (LOCKED: T2 + N1)
+    /// The ownership card: two lines, no metadata band. Line 1 is the fold glyph,
+    /// the agent's dot, its title and its clock; line 2, under the title, the
+    /// project and then what needs saying. `8 + 18 + 16 + 8 = 50`, 54 pt pitch.
+    /// Subagents are one-line rows inside their lead's card.
+    static let locked = SidebarDensityProposal(
+        id: "locked", title: "50 pt card / 54 pt pitch — ownership, two lines",
+        insetV: 8, bandTop: 0, gapTop: 0, bandTitle: 18, gapBottom: 0, bandDetail: 16,
+        gapBetweenRows: 4,
+        rationale: "Plan 106: the project moves under the title; subagents live in the card.")
+
+    /// The ownership layout: no band above the title.
+    var isTwoLine: Bool { bandTop == 0 }
+
     /// What the shipped sidebar draws.
-    static let production = t3
+    static let production = locked
 
     static let all: [SidebarDensityProposal] = [a, b, c]
 }

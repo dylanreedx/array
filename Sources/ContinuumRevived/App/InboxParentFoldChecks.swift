@@ -288,6 +288,19 @@ enum InboxParentFoldChecks {
               let lone = inbox.tuckedCardsForQA(id: loneRoot) else {
             throw Failure(description: "\(label): a parent or the lone root has no materialized cell")
         }
+        // Plan 106: the fold glyph and its count say what a folded lead holds;
+        // no cards are tucked behind it. Its row is a childless root's.
+        if SidebarDensityProposal.production.isTwoLine {
+            try expect(one.count == 0 && three.count == 0 && lone.count == 0,
+                       "\(label): a folded lead tucks cards behind it — got \(one.count), \(three.count)")
+            try expect(one.rowFrame.height == lone.rowFrame.height && three.rowFrame.height == lone.rowFrame.height,
+                       "\(label): a folded lead's row is not a childless root's")
+            try expect(inbox.clickDisclosureForQA(id: threeChildParent), "\(label): the fold glyph could not be clicked")
+            inbox.layoutForQA()
+            try expect(threeChildren.allSatisfy(inbox.rowIdsForQA.contains),
+                       "\(label): opening the lead did not draw its subagents")
+            return "\(label): folded leads tuck nothing, rows \(one.rowFrame.height)pt = lone \(lone.rowFrame.height)pt; opened draws its subagents"
+        }
         try expect(one.count == 1 && one.rects.count == 1,
                    "\(label): one hidden child tucks ONE card behind its parent — got \(one.count)")
         try expect(three.count == 2 && three.rects.count == 2,
@@ -339,6 +352,33 @@ enum InboxParentFoldChecks {
         try expect(inbox.clickDisclosureForQA(id: askingParent), "wash: the asking parent's triangle could not be clicked")
         inbox.layoutForQA()
         func near(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) <= 0.5 }
+        // Plan 106: every lead is a solid card and its strip IS the card, folded or
+        // open, at rest or hovered; nothing is tucked behind a folded one.
+        if SidebarDensityProposal.production.isTwoLine {
+            var notes: [String] = []
+            for (name, id) in [("one-child", oneChildParent), ("three-child", threeChildParent)] {
+                guard let cell = inbox.onScreenCardForQA(id: id), let wash = cell.qaWashRectForQA else {
+                    throw Failure(description: "wash \(name): no folded lead with a card strip")
+                }
+                let card = cell.qaCardFrameForQA
+                try expect(near(wash.minY, card.minY) && near(wash.maxY, card.maxY),
+                           "wash \(name): the folded lead's strip \(wash) is not its card \(card) — hover will swap sheets")
+                try expect(cell.qaTuckedCardsForQA.count == 0, "wash \(name): cards are tucked behind a folded lead")
+                notes.append("\(name) strip = card \(card.minY)–\(card.maxY)")
+            }
+            guard let open = inbox.onScreenCardForQA(id: askingParent), let openWash = open.qaWashRectForQA else {
+                throw Failure(description: "wash: the opened lead drew no card strip")
+            }
+            try expect(near(openWash.minY, open.qaCardFrameForQA.minY),
+                       "wash open: an open lead's strip starts at \(openWash.minY), its card at \(open.qaCardFrameForQA.minY)")
+            try expect(inbox.hoverRowForQA(id: threeChildParent), "wash: could not hover the folded lead")
+            inbox.layoutForQA()
+            guard let hovered = inbox.onScreenCardForQA(id: threeChildParent), let hoveredWash = hovered.qaWashRectForQA,
+                  near(hoveredWash.minY, hovered.qaCardFrameForQA.minY), near(hoveredWash.maxY, hovered.qaCardFrameForQA.maxY) else {
+                throw Failure(description: "wash: hovered, the lead's plate is not its card strip")
+            }
+            return "wash: " + notes.joined(separator: "; ") + "; open lead strip top = card top; hovered plate = strip"
+        }
         let peek = InboxGroupBackgroundView.tuckedPeek
         var notes: [String] = []
         for (name, id, depths) in [("one-child", oneChildParent, 1), ("three-child", threeChildParent, 2)] {
@@ -461,6 +501,16 @@ enum InboxParentFoldChecks {
         let deck = InboxGroupBackgroundView.Deck.self
 
         let three = try card(threeChildParent)
+        // Plan 106: the lead's card is one flat surface with its subagents and
+        // nothing is tucked behind it, so hover lifts nothing.
+        if SidebarDensityProposal.production.isTwoLine {
+            try expect(inbox.hoverRowForQA(id: threeChildParent), "deck: could not hover")
+            let posed = three.qaDeckForQA
+            try expect(near(posed.card.m42, 0) && posed.sheets.allSatisfy(isIdentity),
+                       "deck: a hovered lead must not lift — card \(posed.card.m42)")
+            _ = inbox.hoverRowForQA(id: nil)
+            return "deck: a hovered lead stays flat on its card"
+        }
         let spine = three.qaSpineSegmentsForQA
         try expect(inbox.hoverRowForQA(id: threeChildParent), "deck: could not hover")
         let posed = three.qaDeckForQA
@@ -611,8 +661,14 @@ enum InboxParentFoldChecks {
         quiet.layoutForQA()
         try expect(!quiet.rowIdsForQA.contains(askingChildren[0]),
                    "a group you folded must stay folded when a child reports in")
+        if SidebarDensityProposal.production.isTwoLine {
+            // Plan 106: no tucked cards; the folded lead raises the ask itself.
+            try expect(quiet.onScreenCardForQA(id: askingParent)?.selfReportTextForQA?.string.hasPrefix("Needs you") == true,
+                       "the folded asking lead does not raise its subagent's ask")
+        } else {
         try expect(quiet.tuckedCardsForQA(id: askingParent)?.count == 2,
                    "the folded asking parent shows its two children as tucked cards")
+        }
         return "auto-expand: approval and failed children open an untouched group; a folded one stays folded"
     }
 

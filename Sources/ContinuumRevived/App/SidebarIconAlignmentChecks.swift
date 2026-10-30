@@ -70,7 +70,9 @@ enum SidebarIconAlignmentChecks {
     static func run() throws -> String {
         var windows: [NSWindow] = []
         defer { windows.forEach { $0.orderOut(nil) } }
-        let expected: Set<String> = [
+        // Plan 106 retired the hand and the check: colour and a glyph are for
+        // failure only; an ask is amber words on its lead's second line.
+        var expected: Set<String> = [
             "status hand.raised.fill", "status exclamationmark.triangle.fill",
             "status checkmark.circle.fill", "gyro (orbit centre)", "folder", "where",
             "hover snooze", "hover settle", "settle nudge icon", "identity dot", "branch",
@@ -78,6 +80,9 @@ enum SidebarIconAlignmentChecks {
             "slim identity dot", "slim status",
             "slim disclosure", "hover slim restore", "hover slim stop",
         ]
+        if SidebarDensityProposal.production.isTwoLine {
+            expected.subtract(["status hand.raised.fill", "status checkmark.circle.fill"])
+        }
         var seen: Set<String> = []
         var worst: [String: CGFloat] = [:]
         var failures: [String] = []

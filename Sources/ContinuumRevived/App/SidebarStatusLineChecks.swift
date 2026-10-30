@@ -18,8 +18,8 @@ import Foundation
 /// Asserts: a working agent's declared `now` in the secondary ink; its
 /// `needsYou` as "Needs you: …" painted in the asking amber, in light and dark;
 /// once the turn ends the declared status is gone; a report with a failed check
-/// reads "Done · 1 of 4 checks failed" with the failure painted red, an all-pass
-/// one "Done · all 3 checks passed"; a new turn hides the last turn's report and
+/// reads "1 of 4 checks failed" with the failure painted red, an all-pass
+/// one "all 3 checks passed" (plan 106 dropped the "Done ·"); a new turn hides the last turn's report and
 /// status; an over-long ask stays one truncated line; and the card height never
 /// moves, equal to a row that never said anything.
 ///
@@ -195,12 +195,13 @@ enum SidebarStatusLineChecks {
             ["what": "screenshots", "result": "pass"], ["what": "lint", "result": "pass"],
             ["what": "read the ledger", "result": "info"],
         ]])
-        try await waitForLine("Done · 1 of 4 checks failed", "a finished agent's report with a failure")
+        try await waitForLine("1 of 4 checks failed", "a finished agent's report with a failure")
         cell = try card(agent)
         let red = AccentToken.accentFailed.color.nsColor(in: cell)
         try expect(same(colour(of: cell.selfReportTextForQA!, at: "1 of 4"), red), "the failure count must be in the failure red")
-        try expect(same(colour(of: cell.selfReportTextForQA!, at: "Done"), TextToken.textSecondary.color.nsColor(in: cell)),
-                   "Done must be in the secondary ink")
+        // Plan 106 dropped the "Done ·": the line opens with the result itself.
+        try expect(cell.selfReportTextForQA?.string.hasPrefix("1 of 4") == true,
+                   "the report result must lead the line, with no \"Done ·\"")
         try expect(paints(red, in: cell), "the failure red must reach the drawn pixels")
         try expect(cell.frame.height == restingHeight, "a report line must not change the card's height")
         try shoot("Done: a check failed")
@@ -209,7 +210,7 @@ enum SidebarStatusLineChecks {
             ["what": "swift build", "result": "pass"], ["what": "matrix leg", "result": "pass"],
             ["what": "screenshots", "result": "pass"],
         ]])
-        try await waitForLine("Done · all 3 checks passed", "a finished agent's all-pass report")
+        try await waitForLine("all 3 checks passed", "a finished agent's all-pass report")
         cell = try card(agent)
         try expect(!paints(red, in: cell), "an all-pass line must paint no failure red")
         try shoot("Done: all passed")
@@ -219,7 +220,7 @@ enum SidebarStatusLineChecks {
 
         // A new turn: last turn's report and status are history, not news.
         try file(["summary": "All green", "checks": [["what": "swift build", "result": "pass"]]])
-        try await waitForLine("Done · 1 check passed", "a one-check report")
+        try await waitForLine("1 check passed", "a one-check report")
         try expect(supervisor.send("now the dark mode", to: agent), "the agent must accept a second prompt")
         let secondTurn = await waitUntil(timeout: 10, pollInterval: 0.02) {
             supervisor.isRunning(agent) && inbox.drawnRowForQA(id: agent.rawValue)?.state == .working

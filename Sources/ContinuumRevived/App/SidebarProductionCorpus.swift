@@ -106,7 +106,7 @@ enum SidebarProductionCorpus {
             // provider reported a turn, so an agent whose CLI was still launching
             // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
             // which is the boundary that matters: a draft is not work, a send is.
-            expected.stateLabel = "Working · 0s"
+            expected.stateLabel = "0s"
             // Elapsed is still live execution duration only — what changed is that
             // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
             // launching a CLI is live execution; the old reading conflated the two and
@@ -123,7 +123,7 @@ enum SidebarProductionCorpus {
             // provider reported a turn, so an agent whose CLI was still launching
             // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
             // which is the boundary that matters: a draft is not work, a send is.
-            expected.stateLabel = "Working · 0s"
+            expected.stateLabel = "0s"
             // Elapsed is still live execution duration only — what changed is that
             // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
             // launching a CLI is live execution; the old reading conflated the two and
@@ -139,7 +139,7 @@ enum SidebarProductionCorpus {
             // provider reported a turn, so an agent whose CLI was still launching
             // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
             // which is the boundary that matters: a draft is not work, a send is.
-            expected.stateLabel = "Working · 0s"
+            expected.stateLabel = "0s"
             // Elapsed is still live execution duration only — what changed is that
             // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
             // launching a CLI is live execution; the old reading conflated the two and
@@ -155,7 +155,7 @@ enum SidebarProductionCorpus {
             // provider reported a turn, so an agent whose CLI was still launching
             // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
             // which is the boundary that matters: a draft is not work, a send is.
-            expected.stateLabel = "Working · 0s"
+            expected.stateLabel = "0s"
             // Elapsed is still live execution duration only — what changed is that
             // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
             // launching a CLI is live execution; the old reading conflated the two and
@@ -171,7 +171,7 @@ enum SidebarProductionCorpus {
             // provider reported a turn, so an agent whose CLI was still launching
             // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
             // which is the boundary that matters: a draft is not work, a send is.
-            expected.stateLabel = "Working · 0s"
+            expected.stateLabel = "0s"
             // Elapsed is still live execution duration only — what changed is that
             // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
             // launching a CLI is live execution; the old reading conflated the two and
@@ -182,12 +182,13 @@ enum SidebarProductionCorpus {
             expected.elapsedIsEmpty = false
         case .working:
             expected.titleContains = "run the matrix"
-            expected.stateLabel = "Working · 0s"
+            expected.stateLabel = "0s"
             expected.elapsedIsEmpty = false
         case .approval, .input:
             // §4.6 wants the distinct words `Approval` and `Input`.
             expected.titleContains = flow == .approval ? "apply the patch" : "pick a provider"
-            expected.stateLabel = "Needs attention"
+            // Plan 106: an asking lead says it on line 2, in amber, not in the clock.
+            expected.stateLabel = ""
         case .succeeded:
             expected.titleContains = "work that ends"
             // This flow is observed after its completion has been visited. It no
@@ -226,7 +227,7 @@ enum SidebarProductionCorpus {
             // provider reported a turn, so an agent whose CLI was still launching
             // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
             // which is the boundary that matters: a draft is not work, a send is.
-            expected.stateLabel = "Working · 0s"
+            expected.stateLabel = "0s"
             // Elapsed is still live execution duration only — what changed is that
             // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
             // launching a CLI is live execution; the old reading conflated the two and
@@ -262,7 +263,7 @@ enum SidebarProductionCorpus {
             // provider reported a turn, so an agent whose CLI was still launching
             // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
             // which is the boundary that matters: a draft is not work, a send is.
-            expected.stateLabel = "Working · 0s"
+            expected.stateLabel = "0s"
             // Elapsed is still live execution duration only — what changed is that
             // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
             // launching a CLI is live execution; the old reading conflated the two and
@@ -278,7 +279,7 @@ enum SidebarProductionCorpus {
             // provider reported a turn, so an agent whose CLI was still launching
             // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
             // which is the boundary that matters: a draft is not work, a send is.
-            expected.stateLabel = "Working · 0s"
+            expected.stateLabel = "0s"
             // Elapsed is still live execution duration only — what changed is that
             // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
             // launching a CLI is live execution; the old reading conflated the two and

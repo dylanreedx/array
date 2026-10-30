@@ -90,6 +90,15 @@ final class InboxGroupBackgroundView: NSView {
     private var deckRoom: CGFloat = .greatestFiniteMagnitude
     /// How much of the specified fan the last pose used, 1 when it fits whole.
     private(set) var deckScale: CGFloat = 1
+    // Plan: .plans/106-sidebar-ownership
+    /// The locked sidebar's solid card, as this row's strip of it: the lead's
+    /// card and every subagent row under it are one surface. Set, it replaces
+    /// the wash and the tucked cards.
+    var ownershipStrip: (rect: NSRect, roundsTop: Bool, roundsBottom: Bool)? {
+        didSet { layoutSheets() }
+    }
+    /// The solid card's fill, as a `textPrimary` mix over the panel.
+    static func cardAlpha(dark: Bool) -> CGFloat { dark ? 0.06 : 0.035 }
 
     /// How far each tucked card shows below the one in front of it, and how much
     /// narrower it is on each side.
@@ -159,6 +168,9 @@ final class InboxGroupBackgroundView: NSView {
     /// this, not the panel, so its interaction steps must start from here or a
     /// hover paints the colour the card already is.
     var alphaUnderCard: CGFloat {
+        if ownershipStrip != nil {
+            return Self.cardAlpha(dark: effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+        }
         guard isGroupMember, let card = cardRect else { return 0 }
         let centre = NSPoint(x: card.midX, y: card.midY)
         var clear: CGFloat = washRect.contains(centre) ? 1 - Self.washAlpha : 1
@@ -172,6 +184,7 @@ final class InboxGroupBackgroundView: NSView {
     /// The shared wash this strip paints, in this view's coordinates. One
     /// property read by the layers and by the witness.
     var washRect: NSRect {
+        if let strip = ownershipStrip { return strip.rect }
         // A group's first row starts at its card; a row inside the group runs
         // edge to edge so it joins the strips above and below across the
         // intercell gap; a folded parent ends at its card, and its tucked cards
@@ -221,6 +234,12 @@ final class InboxGroupBackgroundView: NSView {
             sublayer.bounds = CGRect(origin: .zero, size: rect.size)
             sublayer.position = CGPoint(x: rect.midX, y: flipped ? rect.minY : bounds.height - rect.minY)
             sublayer.paint(fill: fill, top: top, bottom: bottom)
+        }
+        if let strip = ownershipStrip {
+            place(sheet, strip.rect, fill: colour(Self.cardAlpha(dark: theme == .dark)),
+                  top: strip.roundsTop ? radius : 0, bottom: strip.roundsBottom ? radius : 0)
+            for sublayer in tuckedLayers { sublayer.isHidden = true }
+            return
         }
         let wash = isGroupMember ? washRect : nil
         place(sheet, wash, fill: colour(Self.washAlpha),
@@ -356,7 +375,7 @@ final class InboxGroupBackgroundView: NSView {
         layoutSheets()
     }
 
-    var qaIsVisibleForQA: Bool { isGroupMember }
+    var qaIsVisibleForQA: Bool { isGroupMember || ownershipStrip != nil }
     var qaRoundsTopForQA: Bool { roundsTop }
     var qaRoundsBottomForQA: Bool { roundsBottom }
     var qaTuckedCardsForQA: Int { tuckedCards }

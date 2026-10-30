@@ -1016,6 +1016,12 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// Set on a row that is a session from another app. Such a row offers Watch,
     /// Move here and Copy, and none of an Array agent's verbs.
     public var externalSession: InboxExternalSession?
+    // Plan: .plans/106-sidebar-ownership (helpers live in their lead's card)
+    /// Whether the agent has a canvas tile. A tile-less helper is drawn only as
+    /// its row inside its lead's card; popping it out gives it one.
+    public let hasTile: Bool
+    /// A popped-out helper the user pinned, so it never folds back on its own.
+    public let isPinned: Bool
     /// Whether the card's upper metadata band has something to draw. These
     /// predicates intentionally inspect only the content slots, never a row's
     /// semantic importance or lifecycle. The AppKit cell uses the same facts to
@@ -1133,7 +1139,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         identityColor: String? = nil,
         selfReport: InboxSelfReport? = nil,
         whereMarker: InboxWhereMarker? = nil,
-        externalSession: InboxExternalSession? = nil
+        externalSession: InboxExternalSession? = nil,
+        hasTile: Bool = true,
+        isPinned: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -1174,6 +1182,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.selfReport = selfReport
         self.whereMarker = whereMarker
         self.externalSession = externalSession
+        self.hasTile = hasTile
+        self.isPinned = isPinned
     }
 
     /// The same row, placed where its PARENT is: a subagent travels with the agent
@@ -1200,7 +1210,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
             closingSince: closingSince, hasLiveRunner: hasLiveRunner,
             identityColor: identityColor, selfReport: selfReport, whereMarker: whereMarker,
-            externalSession: externalSession)
+            externalSession: externalSession, hasTile: hasTile, isPinned: isPinned)
     }
 
     /// The line under the name for `selfReport`, by the row's state: a declared
@@ -1263,7 +1273,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             zoneName: zoneName, harness: harness, checkedOutBranch: checkedOutBranch,
             terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
             closingSince: closingSince, hasLiveRunner: hasLiveRunner,
-            identityColor: identityColor, selfReport: selfReport)
+            identityColor: identityColor, selfReport: selfReport,
+            hasTile: hasTile, isPinned: isPinned)
     }
 
     /// Equal but for `elapsed`, when both rows carry the same live turn start: the

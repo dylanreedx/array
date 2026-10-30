@@ -597,7 +597,11 @@ enum BrandMark96 {
 @MainActor
 final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// The folded parent's rollup shares this lane with the branch.
-    var branchLaneTextForQA: String { branchLabel.stringValue }
+    var branchLaneTextForQA: String {
+        // Plan 106: a folded lead's facts follow its project on line 2.
+        if proposal.isTwoLine, let tail = selfReportTextForQA?.string { return tail }
+        return branchLabel.stringValue
+    }
 
     static let statusSymbolsInUse = [
         "checkmark.circle.fill", "hand.raised.fill",
@@ -676,6 +680,26 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     // Ticket: .plans/0721-subagents-handoff.md
     /// The tree connector, in the indent gutters to the left of the card.
     private let spine = InboxSpineView()
+    // Plan: .plans/106-sidebar-ownership (LOCKED: T2 + N1)
+    /// This row's strip of its lead's card, its slice of the moving border, and
+    /// the stem. Used by the two-line proposal only.
+    private lazy var ownershipChrome = InboxOwnershipChrome(sheet: groupBackground)
+    private(set) var ownership = InboxOwnershipSlice()
+    /// A subagent: one line inside its lead's card, under the lead's title.
+    var isSubagentRow: Bool { proposal.isTwoLine && (shown?.row.depth ?? 0) > 0 }
+    private let titleShimmer = InboxShimmerOverlay()
+    private let pulseDots = InboxPulseDotsView()
+    /// A lead's second line after its project — what it needs from you, what it
+    /// says it is doing, or its folded subagents' live facts — and, on a
+    /// subagent row, the status after its title.
+    private let tailLabel = NSTextField(labelWithString: "")
+    /// A subagent's report result, painted as a small pill in its clock's place.
+    private var reportPillText: String?
+    private let hoverPopOut = InboxRowHoverActionButton(symbol: "arrow.up.forward.app", label: "Pop out")
+    private let hoverStop = InboxRowHoverActionButton(symbol: "stop.fill", label: "Stop")
+    private var onHoverPopOut: (() -> Void)?
+    private var onHoverStop: (() -> Void)?
+    static let subagentTitleFont = NSFont.systemFont(ofSize: Typography.style(for: .body).size)
     private let jumpHint = InboxJumpHintView()
     private let disclosureButton = InboxSwarmFoldControl(frame: .zero)
     var onToggleDisclosure: (() -> Void)?
@@ -936,6 +960,18 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         spineMetrics.trailingGap(nesting)
     }
 
+    // Plan: .plans/106-sidebar-ownership
+    /// The same, when subagents live inside their lead's card: an open lead
+    /// tucks its first row up under its second line, and the card's last row
+    /// carries the card's foot and half the gap to the next card.
+    static func ownershipTrailingGap(for nesting: InboxNesting) -> Double {
+        if nesting.depth == 0 && nesting.nextDepth > 0 { return -Double(InboxOwnershipChrome.headOverlap) }
+        if nesting.depth > 0 && nesting.nextDepth == 0 {
+            return Double(InboxOwnershipChrome.footPad + SidebarDensityProposal.production.gapBetweenRows / 2)
+        }
+        return 0
+    }
+
     init(
         proposal: SidebarDensityProposal, anatomy: SidebarRowAnatomy,
         prefersReducedMotion: @escaping () -> Bool = {
@@ -959,6 +995,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // ABOVE the card: a parent's descender crosses its own card's leading
         // inset, and the card paints a fill while hovered, selected or active.
         addSubview(spine)
+        ownershipChrome.install(in: self)
         card.addSubview(decorations)
         card.addSubview(workspaceLabel)
         card.addSubview(statusGlyph)
@@ -986,6 +1023,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             label.cell?.truncatesLastVisibleLine = true
             card.addSubview(label)
         }
+        tailLabel.lineBreakMode = .byTruncatingTail
+        tailLabel.cell?.truncatesLastVisibleLine = true
+        tailLabel.isHidden = true
+        card.addSubview(tailLabel)
+        card.addSubview(titleShimmer)
+        card.addSubview(pulseDots)
 
         disclosureButton.target = self
         disclosureButton.action = #selector(disclosureClicked)
@@ -1017,6 +1060,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         hoverSnooze.action = #selector(hoverSnoozeClicked)
         hoverSettle.action = #selector(hoverSettleClicked)
+        for button in [hoverPopOut, hoverStop] {
+            button.target = self
+            button.alphaValue = 0
+            button.isHidden = true
+            card.addSubview(button)
+        }
+        hoverPopOut.action = #selector(hoverPopOutClicked)
+        hoverStop.action = #selector(hoverStopClicked)
         for (button, title, symbol) in [
             (hoverMoveHere, InboxExternalSessionAction.moveHere.title, "arrow.down.right.square"),
             (hoverCopy, InboxExternalSessionAction.copy.title, "plus.square.on.square"),
@@ -1093,6 +1144,15 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     func setNesting(_ nesting: InboxNesting) {
         guard nesting != self.nesting else { return }
         self.nesting = nesting
+        needsLayout = true
+    }
+
+    // Plan: .plans/106-sidebar-ownership
+    /// Tell the row where it sits in its lead's card. See `InboxOwnershipSlice`.
+    func setOwnership(_ slice: InboxOwnershipSlice) {
+        guard slice != ownership else { return }
+        ownership = slice
+        if proposal.isTwoLine, let shown { applyOwnershipContent(shown.row, now: shown.now) }
         needsLayout = true
     }
 
@@ -1191,6 +1251,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         disclosureButton.show(
             disclosure, childCount: rollup?.children ?? 0, workingChildren: rollup?.working ?? 0,
             seed: row.id, leadColour: row.identityColor.map(AgentInboxView.identityDotColour(named:)))
+        if proposal.isTwoLine { applyOwnershipContent(row, now: now) }
 
         applyColours()
         applyAccessibility()
@@ -1309,6 +1370,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
 
     private func updateStateLabel(for row: AgentInboxRow, now: Date) {
+        if proposal.isTwoLine {
+            stateLabel.stringValue = Self.ownershipClock(row, isSubagent: row.depth > 0, now: now) ?? ""
+            stateLabel.isHidden = stateLabel.stringValue.isEmpty || reportPillText != nil
+            return
+        }
         let word = Self.stateWord(row, now: now)
         let elapsed = AgentInboxCellView.elapsedText(Self.stateAge(row, now: now))
         let completion = word == nil && elapsed == nil
@@ -1322,7 +1388,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// canvas layout. Only a running or seen-completed row participates.
     func updateElapsedClock(now: Date) {
         guard let row = shown?.row,
-              row.state == .working || Self.seenCompletionDate(row) != nil else { return }
+              row.state == .working || Self.seenCompletionDate(row) != nil
+                || (proposal.isTwoLine && row.terminalEvent != nil) else { return }
         updateStateLabel(for: row, now: now)
         needsLayout = true
         applyAccessibility()
@@ -1406,6 +1473,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         modelLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         let accent = Self.accentColour(row, now: shown.now, in: self)
         stateLabel.textColor = accent
+        if proposal.isTwoLine { applyOwnershipColours(row) }
         decorations.accent = accent
         statusGlyph.colour = accent
         decorations.muted = TextToken.textSecondary.color.nsColor(in: self)
@@ -1486,10 +1554,19 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     /// The self-report line as drawn: nil when the label is hidden.
     var selfReportTextForQA: NSAttributedString? {
-        selfReportLabel.isHidden ? nil : selfReportLabel.attributedStringValue
+        // Plan 106: the ownership card says it after the project, past a dot.
+        if proposal.isTwoLine {
+            guard !tailLabel.isHidden else { return nil }
+            let text = tailLabel.attributedStringValue
+            let lead = (text.string as NSString).range(of: "  ·  ")
+            return lead.location == 0 ? text.attributedSubstring(from: NSRange(
+                location: lead.length, length: text.length - lead.length)) : text
+        }
+        return selfReportLabel.isHidden ? nil : selfReportLabel.attributedStringValue
     }
     var selfReportFrameForQA: NSRect? {
-        selfReportLabel.isHidden ? nil : selfReportLabel.convert(selfReportLabel.bounds, to: self)
+        if proposal.isTwoLine { return tailLabel.isHidden ? nil : tailLabel.convert(tailLabel.bounds, to: self) }
+        return selfReportLabel.isHidden ? nil : selfReportLabel.convert(selfReportLabel.bounds, to: self)
     }
 
     /// What a revealed hidden row multiplies its words by (.plans/87).
@@ -1568,11 +1645,500 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             stateLabel.isHidden ? nil : stateLabel.stringValue,
             placementLabel.stringValue.isEmpty ? nil : placementLabel.stringValue,
             selfReportLabel.isHidden ? nil : selfReportLabel.stringValue,
+            proposal.isTwoLine ? selfReportTextForQA?.string : nil,
             branchLabel.stringValue.isEmpty ? nil : "branch \(branchLabel.stringValue)",
             shown.row.model.map { "model \($0)" },
         ].compactMap { $0 }.filter { !$0.isEmpty }
         setAccessibilityLabel(parts.joined(separator: ", "))
     }
+
+    // MARK: Ownership content (plan 106)
+
+    /// What a row in the ownership layout is asking the user, in a few words, or
+    /// nil. The asking row's own words when it declared them; otherwise its kind.
+    static func ask(_ row: AgentInboxRow) -> String? {
+        if case .needsYou(let ask)? = row.selfReportLine { return ask }
+        switch row.state {
+        case .approval: return "approve a request"
+        case .input: return "answer a question"
+        case .working, .ready, .failed: return nil
+        }
+    }
+
+    /// The right of line 1 on a lead, or the clock slot on a subagent row. A
+    /// running agent shows how long it has run (its glyph says it is running);
+    /// a finished subagent how long ago it finished; a subagent that asked reads
+    /// "waiting", because the ask itself is raised on its lead.
+    static func ownershipClock(_ row: AgentInboxRow, isSubagent: Bool, now: Date) -> String? {
+        if row.state == .working {
+            return AgentInboxCellView.elapsedText(stateAge(row, now: now))
+        }
+        if ask(row) != nil { return isSubagent ? "waiting" : nil }
+        if let terminal = row.terminalEvent {
+            switch terminal.outcome {
+            case .failed, .runtimeError: return "Failed"
+            case .interrupted: return "Stopped"
+            case .cancelled: return "Cancelled"
+            case .succeeded:
+                if !isSubagent, row.terminalIsUnread { return "Done" }
+                let age = max(0, now.timeIntervalSince(terminal.endedAt))
+                if age < 60 { return "now" }
+                let minutes = Int(age / 60)
+                if minutes < 60 { return "\(minutes)m ago" }
+                let hours = minutes / 60
+                return hours < 24 ? "\(hours)h ago" : "\(hours / 24)d ago"
+            }
+        }
+        if row.state == .failed { return "Failed" }
+        return relativeCompletionText(row, now: now)
+    }
+
+    /// Everything the ownership layout derives from the row and its slice:
+    /// fonts, the clock, the tail, the shimmer and the dots.
+    private func applyOwnershipContent(_ row: AgentInboxRow, now: Date) {
+        let sub = row.depth > 0
+        titleLabel.font = sub ? Self.subagentTitleFont : .token(.title)
+        placementLabel.font = .token(.label)
+        // A report with failed checks is a small pill in the clock's place.
+        if sub, case let .checks(failed, total)? = row.selfReportLine, failed > 0 {
+            reportPillText = "\(failed)/\(total) failed"
+        } else {
+            reportPillText = nil
+        }
+        updateStateLabel(for: row, now: now)
+        // Colour is for attention only: no check, no hand. Failure keeps its mark.
+        let symbol = Self.attentionSymbol(row, now: now)
+        statusGlyph.symbol = symbol == "exclamationmark.triangle.fill" && !sub ? symbol : nil
+        // A subagent works under three dots, never the gyro.
+        if sub { applyThrobber(isWorking: false) }
+        // The self-report line and the rollup words are folded into the tail.
+        selfReportLine = nil
+        selfReportLabel.isHidden = true
+        tailLabel.attributedStringValue = ownershipTail(row) ?? NSAttributedString()
+        tailLabel.isHidden = tailLabel.stringValue.isEmpty
+        branchLabel.stringValue = sub ? "" : (row.branch ?? "")
+        branchLabel.isHidden = sub || !tailLabel.isHidden
+        decorations.detailSymbol = Decorations.branchSymbol
+        decorations.detailColour = nil
+        decorations.drawsBranchGlyph = !branchLabel.isHidden && !branchLabel.stringValue.isEmpty
+        placementLabel.isHidden = sub
+        projectIcon.isHidden = sub
+        refreshContentInk()
+        applyOwnershipMotion()
+    }
+
+    /// The words after the project on a lead's line 2, or after a subagent's
+    /// title. nil leaves a lead its branch.
+    private func ownershipTail(_ row: AgentInboxRow) -> NSAttributedString? {
+        let secondary = TextToken.textSecondary.color.nsColor(in: self)
+        let font: NSFont = row.depth > 0 ? Self.subagentTitleFont : .token(.label)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        func run(_ text: String, _ colour: NSColor, _ font: NSFont = font) -> NSAttributedString {
+            NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: colour, .paragraphStyle: paragraph])
+        }
+        let text = NSMutableAttributedString(attributedString: run("  ·  ", secondary.withAlphaComponent(0.6)))
+        if row.depth > 0 {
+            guard case .now(let says)? = row.selfReportLine else { return nil }
+            text.append(run(says, secondary))
+            return text
+        }
+        if let ask = ownership.raisedAsk ?? Self.ask(row) {
+            text.append(run("Needs you: \(ask)", AccentToken.accentApproval.color.nsColor(in: self)))
+            return text
+        }
+        switch row.selfReportLine {
+        case .now(let says)?:
+            text.append(run(says, secondary))
+            return text
+        case let .checks(failed, total)? where failed > 0:
+            text.append(run("\(failed) of \(total) \(total == 1 ? "check" : "checks") failed",
+                            AccentToken.accentFailed.color.nsColor(in: self)))
+            return text
+        case let .checks(_, total)?:
+            text.append(run(total == 1 ? "1 check passed" : "all \(total) checks passed", secondary))
+            return text
+        default: break
+        }
+        // A folded lead speaks for the subagents it hides.
+        guard shown?.disclosure == .collapsed, let rollup = shown?.rollup else { return nil }
+        var facts: [NSAttributedString] = []
+        if rollup.working > 0 { facts.append(run("\(rollup.working) working", secondary)) }
+        if rollup.failed > 0 {
+            facts.append(run("\(rollup.failed) failed", AccentToken.accentFailed.color.nsColor(in: self)))
+        }
+        guard !facts.isEmpty else { return nil }
+        for (index, fact) in facts.enumerated() {
+            if index > 0 { text.append(run("  ·  ", secondary.withAlphaComponent(0.6))) }
+            text.append(fact)
+        }
+        return text
+    }
+
+    /// Colour is for attention only: the clock is quiet unless it failed, a
+    /// finished subagent recedes, and working text is muted under its shimmer.
+    private func applyOwnershipColours(_ row: AgentInboxRow) {
+        let theme = effectiveTokenTheme
+        let primary = TextToken.textPrimary.color.nsColor(in: self)
+        let secondary = TextToken.textSecondary.color.nsColor(in: self)
+        let failed = AccentToken.accentFailed.color.nsColor(in: self)
+        let clock = stateLabel.stringValue
+        stateLabel.textColor = clock == "Failed" ? failed : clock == "Done" ? primary : secondary
+        decorations.failure = failed
+        decorations.dark = theme == .dark
+        let resting = isSubagentRow && row.state != .working && Self.ask(row) == nil
+        if titleShimmerPhase != nil {
+            // The muted base the band passes over.
+            titleLabel.textColor = secondary
+        } else {
+            titleLabel.textColor = resting ? secondary : primary
+        }
+        tailLabel.textColor = secondary
+        tailLabel.attributedStringValue = shown.flatMap { ownershipTail($0.row) } ?? NSAttributedString()
+        if isSubagentRow { tailLabel.isHidden = tailLabel.stringValue.isEmpty || tailLabel.frame.width == 0 }
+        hoverPopOut.applyTokens()
+        hoverStop.applyTokens()
+    }
+
+    /// Start, re-key or stop the title shimmer and the dots.
+    private func applyOwnershipMotion() {
+        guard proposal.isTwoLine, let row = shown?.row else { return }
+        let working = row.state == .working
+        let reduced = prefersReducedMotion()
+        let phase = InboxOwnershipClock.phase(for: row.id)
+        let foldsHelpers = (shown?.disclosure ?? .none) != .none
+        pulseDots.show(colour: TextToken.textSecondary.color.nsColor(in: self),
+                       phase: isSubagentRow && working && !foldsHelpers ? phase : nil, reducedMotion: reduced)
+        // The shimmer is laid over the title in `layout`, once its frame is known.
+        titleShimmerPhase = working && !reduced ? phase : nil
+    }
+    private var titleShimmerPhase: Double?
+
+    /// A subagent's hover actions; nil hides one. Set by the list.
+    func configureSubagentActions(popOut: (() -> Void)?, stop: (() -> Void)?) {
+        onHoverPopOut = popOut
+        onHoverStop = stop
+        setHoverActionsShown(hoverActionsHovered)
+    }
+    @objc private func hoverPopOutClicked() { onHoverPopOut?() }
+    @objc private func hoverStopClicked() { onHoverStop?() }
+    var subagentActionTitlesForQA: [String] {
+        [hoverStop, hoverPopOut].filter { !$0.isHidden && $0.alphaValue > 0 }.compactMap { $0.accessibilityLabel() }
+    }
+    func subagentActionButtonForQA(_ label: String) -> NSView? {
+        [hoverStop, hoverPopOut].first { $0.accessibilityLabel() == label && !$0.isHidden }
+    }
+    @discardableResult
+    func clickSubagentActionForQA(_ label: String) -> Bool {
+        guard let button = [hoverStop, hoverPopOut].first(where: { $0.accessibilityLabel() == label && !$0.isHidden })
+        else { return false }
+        button.performClick(nil)
+        return true
+    }
+    var tailTextForQA: String? { tailLabel.isHidden ? nil : tailLabel.stringValue }
+    var clockTextForQA: String? { stateLabel.isHidden ? nil : stateLabel.stringValue }
+    var reportPillForQA: String? { reportPillText }
+    var isTitleShimmeringForQA: Bool { titleShimmer.isShimmeringForQA }
+    var isPulsingForQA: Bool { pulseDots.isPulsingForQA }
+    var isSweepingForQA: Bool { ownershipChrome.sweep.isMovingForQA }
+    var titleTextForQA: String { titleLabel.stringValue }
+    var visibleTextForQA: [String] {
+        [titleLabel, stateLabel, placementLabel, tailLabel, branchLabel, modelLabel]
+            .filter { !$0.isHidden && !$0.stringValue.isEmpty && $0.frame.width > 0 }
+            .map(\.stringValue) + (disclosureButton.isHidden ? [] : [disclosureButton.countTextForQA])
+            + (reportPillText.map { [$0] } ?? [])
+    }
+
+    // MARK: Ownership layout (plan 106)
+
+    private func layoutOwnership() {
+        let gutter = CGFloat(Self.outerGutter)
+        let gap = proposal.gapBetweenRows
+        let spacing = CGFloat(AgentInboxView.rowSpacing)
+        clipsToBounds = false
+        groupBackground.setDeck(nil, animated: false)
+        spine.isHidden = true
+        let sub = isSubagentRow
+        let pad = InboxOwnershipChrome.pad
+        if sub {
+            let left = gutter + ownership.titleLeading - 8
+            card.frame = NSRect(x: left, y: -spacing / 2,
+                                width: max(0, bounds.width - gutter - 6 - left),
+                                height: InboxOwnershipChrome.subagentHeight + spacing)
+        } else {
+            card.frame = NSRect(x: gutter, y: gap / 2, width: max(0, bounds.width - gutter * 2),
+                                height: proposal.cardHeight)
+        }
+        decorations.frame = card.bounds
+        card.underlayAlpha = groupBackground.alphaUnderCard
+        let l1 = proposal.insetV + lineCentres.title
+        ownershipChrome.layout(
+            ownership, bounds: bounds, gutter: gutter, gap: gap, spacing: spacing,
+            laneTop: gap / 2 + l1 + SwarmPose.stemBottom,
+            rowMid: InboxOwnershipChrome.subagentHeight / 2)
+        decorations.workspaceSlot = nil
+        if !sub, workspaceMarkColour != nil,
+           workspaceTreatmentForQA == .outline || workspaceTreatmentForQA == .wash {
+            decorations.workspaceSlot = decorations.bounds.insetBy(dx: 0.5, dy: 0.5)
+        }
+        decorations.workspaceColour = workspaceMarkColour
+        decorations.workspaceTreatment = workspaceTreatmentForQA
+        decorations.paintsBorder = false
+        decorations.removeAllToolTips()
+        decorations.reportPill = nil
+        for view in [whereDot, whereIcon, whereLabel, workspaceLabel, selfReportLabel] as [NSView] where sub {
+            view.isHidden = true
+        }
+        if sub { layoutSubagentLine() } else { layoutLeadLines(pad: pad, l1: l1) }
+        if let slot = decorations.markSlot, let markToolTip {
+            decorations.addToolTip(slot, owner: markToolTip, userData: nil)
+            markToolTipRect = decorations.convert(slot, to: self)
+        } else {
+            markToolTipRect = nil
+        }
+        titleShimmer.cover(titleLabel, phase: titleShimmerPhase)
+        decorations.needsDisplay = true
+        let hintSize = jumpHint.fittingSize
+        jumpHint.frame = NSRect(x: bounds.width - hintSize.width - 8,
+                                y: (min(bounds.height, sub ? bounds.height : proposal.cardHeight) - hintSize.height) / 2,
+                                width: hintSize.width, height: hintSize.height)
+    }
+
+    /// Place a label so its x-height centre sits on `centre` (top-down card y),
+    /// and answer where it landed once on the backing grid.
+    @discardableResult
+    private func place(_ label: NSTextField, x: CGFloat, centre: CGFloat, width: CGFloat) -> CGFloat {
+        let font = label.font ?? .token(.label)
+        let height = ceil(font.ascender - font.descender) + 2
+        let mid = InkProbe.xHeightCentre(font: font, height: height, scale: metadataRasterScale)
+        let top = snapped(centre - mid)
+        label.frame = inCard(NSRect(x: x, y: top, width: max(0, width), height: height))
+        return top + mid
+    }
+
+    private func layoutLeadLines(pad: CGFloat, l1: CGFloat) {
+        guard let shown else { return }
+        let right = card.bounds.width - pad
+        let l2 = proposal.insetV + proposal.bandTitle + proposal.gapBottom + lineCentres.detail
+        // Line 1: fold glyph and count, dot, title — running glyph and clock right.
+        var x = pad
+        if !disclosureButton.isHidden {
+            let width = Self.disclosureTrailing(for: shown.disclosure, childCount: shown.rollup?.children ?? 0)
+            // A generous target down both lines, inside the card's edges.
+            let inset: CGFloat = 4
+            disclosureButton.frame = inCard(NSRect(x: InboxOwnershipChrome.foldX, y: inset,
+                                                   width: width, height: card.bounds.height - inset * 2))
+            disclosureButton.glyphCentreY = l1 - inset
+            x = InboxOwnershipChrome.foldX + width + 6
+        }
+        if let name = shown.row.identityColor {
+            let side = AgentInboxView.identityDotSide
+            decorations.identityDot = NSRect(x: x, y: snapped(l1 - side / 2), width: side, height: side)
+            decorations.identityDotColour = AgentInboxView.identityDotColour(named: name)
+            x += side + CGFloat(Space.m)
+        } else {
+            decorations.identityDot = nil
+        }
+        let textX = x
+        var r = right
+        let clockWidth = stateLabel.isHidden ? 0 : Self.width(of: stateLabel)
+        if !stateLabel.isHidden {
+            place(stateLabel, x: r - clockWidth, centre: l1, width: clockWidth)
+            r -= clockWidth + 4
+        }
+        if let throbber {
+            let side: CGFloat = 16
+            throbber.frame = inCard(NSRect(x: r - side, y: snapped(l1 - side / 2), width: side, height: side))
+            r -= side + 4
+            statusGlyph.isHidden = true
+        } else if statusGlyph.symbol != nil {
+            let side = anatomy.statusIconSide - 2
+            statusGlyph.isHidden = false
+            statusGlyph.frame = inCard(NSRect(x: r - side, y: snapped(l1 - side / 2), width: side, height: side))
+            r -= side + 4
+        } else {
+            statusGlyph.isHidden = true
+        }
+        // The title gives way to the settle nudge below it, so the two never meet.
+        if !settleNudge.isHidden { r = min(r, right - settleNudge.intrinsicContentSize.width - 6) }
+        place(titleLabel, x: textX, centre: l1, width: r - 4 - textX)
+
+        // Line 2, under the title: folder and project, then the tail or the branch;
+        // the provider mark at the right.
+        let markSide: CGFloat = 12
+        // The settle nudge takes the mark's place on line 2, as hover actions do.
+        let hasMark = decorations.mark != nil && settleNudge.isHidden
+        let modelWidth = modelLabel.isHidden ? 0 : min(card.bounds.width * 0.4, Self.width(of: modelLabel))
+        let trailing = (hasMark ? markSide : 0) + (modelLabel.isHidden ? 0 : modelWidth + (hasMark ? 6 : 0))
+        decorations.markSlot = hasMark
+            ? NSRect(x: right - markSide, y: snapped(l2 - markSide / 2), width: markSide, height: markSide) : nil
+        if !modelLabel.isHidden {
+            place(modelLabel, x: right - trailing, centre: l2, width: modelWidth)
+        }
+        var lineRight = right - trailing - 8
+        if !settleNudge.isHidden {
+            let size = settleNudge.intrinsicContentSize
+            let top = snapped(l2 - size.height / 2)
+            settleNudge.opticalCentreY = l2 - top
+            settleNudge.frame = inCard(NSRect(x: right - size.width, y: top, width: size.width, height: size.height))
+            lineRight = min(lineRight, right - size.width - 8)
+        } else {
+            settleNudge.frame = .zero
+        }
+        // Hover actions take the mark's place, as they always have.
+        let actionEdge = (hoverActionsShown && (onHoverSnooze != nil || onHoverSettle != nil)) ? right : lineRight + 8
+        var actionRight = actionEdge
+        for button in [hoverSettle, hoverSnooze, hoverHide, hoverCopy, hoverMoveHere] where !button.isHidden {
+            let size = button.intrinsicContentSize
+            let top = snapped(l2 - size.height / 2)
+            button.opticalCentreY = l2 - top
+            button.frame = inCard(NSRect(x: actionRight - size.width, y: top, width: size.width, height: size.height))
+            actionRight -= size.width + 6
+        }
+        lineRight = min(lineRight, actionRight - 2)
+        // The project's text lands first; its icon lines up on where it landed,
+        // so the two round to the backing grid once, not twice.
+        var x2 = textX
+        workspaceLabel.isHidden = true
+        // The QA-only workspace treatments, on the same line.
+        if let colour = workspaceMarkColour, workspaceTreatmentForQA == .workspaceLabel {
+            workspaceLabel.textColor = workspaceTextInk(colour)
+            let width = min(workspaceLabelNaturalWidth, min(90, max(0, (lineRight - x2) * 0.4)))
+            if width >= 24 {
+                workspaceLabel.isHidden = false
+                let centre = place(workspaceLabel, x: x2 + 5, centre: l2, width: width)
+                decorations.workspaceSlot = NSRect(x: x2, y: snapped(centre - 8), width: width + 10, height: 16)
+                x2 += width + 15
+            }
+        }
+        let side = Self.metadataIconSide
+        let badged = projectIcon.image != nil && workspaceMarkColour != nil && workspaceTreatmentForQA == .iconBadge
+        let badgeSide: CGFloat = 18
+        if projectIcon.image != nil { x2 += badged ? badgeSide + 4 : side + 3 }
+        let placementWidth = min(Self.width(of: placementLabel), max(0, (lineRight - x2) * 0.5))
+        let textCentre = place(placementLabel, x: x2, centre: l2, width: placementWidth)
+        if projectIcon.image != nil {
+            if badged {
+                let badge = NSRect(x: textX, y: snapped(textCentre - badgeSide / 2), width: badgeSide, height: badgeSide)
+                decorations.workspaceSlot = badge
+                projectIcon.frame = inCard(NSRect(x: snapped(badge.midX - projectIconInkRect.midX),
+                                                  y: snapped(textCentre - projectIconInkRect.midY), width: side, height: side))
+            } else {
+                projectIcon.frame = inCard(NSRect(x: textX, y: snapped(textCentre - side / 2),
+                                                  width: side, height: side))
+            }
+        } else {
+            projectIcon.frame = .zero
+        }
+        if let colour = workspaceMarkColour, workspaceTreatmentForQA == .projectText {
+            placementLabel.textColor = workspaceTextInk(colour)
+            decorations.workspaceSlot = decorations.convert(placementLabel.frame, from: card)
+        }
+        x2 += placementWidth
+        if !whereLabel.isHidden {
+            let dotWidth = Self.width(of: whereDot)
+            place(whereDot, x: x2 + 2, centre: l2, width: dotWidth)
+            x2 += dotWidth + 4
+            whereIcon.frame = inCard(NSRect(x: x2, y: snapped(l2 - whereIconInkCenterY),
+                                            width: Self.metadataIconSide, height: Self.metadataIconSide))
+            x2 += Self.metadataIconSide + 3
+            let width = min(Self.width(of: whereLabel), max(0, lineRight - x2))
+            place(whereLabel, x: x2, centre: l2, width: width)
+            x2 += width
+        }
+        if !tailLabel.isHidden {
+            place(tailLabel, x: x2, centre: l2, width: lineRight - x2)
+            decorations.branchSlot = nil
+        } else if decorations.drawsBranchGlyph {
+            x2 += 10
+            let glyph = Self.branchGlyphSide
+            decorations.branchSlot = NSRect(x: x2, y: snapped(l2 - branchInkMidY), width: glyph, height: glyph)
+            x2 += glyph + 3
+            place(branchLabel, x: x2, centre: l2, width: lineRight - x2)
+        } else {
+            decorations.branchSlot = nil
+            branchLabel.frame = .zero
+        }
+    }
+
+    private func layoutSubagentLine() {
+        guard let row = shown?.row else { return }
+        let mid = card.bounds.height / 2
+        let x0 = 8 + InboxOwnershipChrome.helperIndent * CGFloat(min(max(0, row.depth - 1), 1))
+        let right = card.bounds.width - 6
+        // A subagent with helpers of its own keeps the fold glyph — no count, its
+        // helpers are right below — where its dots would be; its helpers' short
+        // stem leaves from under it.
+        if let disclosure = shown?.disclosure, disclosure != .none {
+            disclosureButton.isHidden = false
+            disclosureButton.frame = inCard(NSRect(
+                x: x0 + 5 - InboxSwarmFoldControl.glyphCentreX, y: 0,
+                width: InboxSwarmFoldControl.glyphCentreX + SwarmPose.side / 2, height: card.bounds.height))
+            disclosureButton.glyphCentreY = mid
+        } else {
+            disclosureButton.frame = .zero
+            disclosureButton.isHidden = true
+        }
+        decorations.identityDot = nil
+        decorations.branchSlot = nil
+        projectIcon.frame = .zero
+        placementLabel.frame = .zero
+        branchLabel.frame = .zero
+        settleNudge.frame = .zero
+        statusGlyph.isHidden = true
+        let dots = InboxPulseDotsView.size
+        pulseDots.frame = inCard(NSRect(x: x0 - 1, y: snapped(mid - dots.height / 2), width: dots.width, height: dots.height))
+        var used: CGFloat = 0
+        if !hoverPopOut.isHidden || !hoverStop.isHidden {
+            var cx = right
+            for button in [hoverPopOut, hoverStop] where !button.isHidden {
+                let size = button.intrinsicContentSize
+                let top = snapped(mid - size.height / 2)
+                button.opticalCentreY = mid - top
+                button.frame = inCard(NSRect(x: cx - size.width, y: top, width: size.width, height: size.height))
+                cx -= size.width + 4
+            }
+            used = right - cx
+        }
+        let showsResting = hoverPopOut.isHidden && hoverStop.isHidden
+        var restingWidth: CGFloat = 0
+        if let pill = reportPillText {
+            let font = Self.pillFont
+            let width = ceil((pill as NSString).size(withAttributes: [.font: font]).width) + 12
+            decorations.reportPill = showsResting
+                ? (NSRect(x: right - width, y: snapped(mid - 7.5), width: width, height: 15), pill) : nil
+            restingWidth = width
+            stateLabel.frame = .zero
+        } else if !stateLabel.isHidden {
+            let width = Self.width(of: stateLabel)
+            place(stateLabel, x: right - width, centre: mid, width: width)
+            restingWidth = width
+        }
+        stateLabel.alphaValue = showsResting ? CGFloat(shown?.emphasis.accentOpacity ?? 1) : 0
+        let markSide: CGFloat = 11
+        if decorations.mark != nil, showsResting {
+            decorations.markSlot = NSRect(x: right - restingWidth - 7 - markSide, y: snapped(mid - markSide / 2),
+                                          width: markSide, height: markSide)
+            restingWidth += markSide + 7
+        } else {
+            decorations.markSlot = nil
+        }
+        used = max(used, restingWidth)
+        let titleX = x0 + 14
+        let titleMax = max(0, right - used - 12 - titleX)
+        let titleNatural = Self.width(of: titleLabel)
+        place(titleLabel, x: titleX, centre: mid, width: min(titleNatural, titleMax))
+        // The status after the title only shows when it fits whole.
+        if !tailLabel.attributedStringValue.string.isEmpty {
+            let need = ceil(tailLabel.attributedStringValue.size().width) + CGFloat(Metrics.cellTextInset)
+            let fits = titleNatural + need <= titleMax
+            tailLabel.isHidden = !fits
+            if fits { place(tailLabel, x: titleX + titleNatural - CGFloat(Metrics.cellTextInset), centre: mid, width: need) }
+        }
+    }
+
+    static let pillFont = NSFont.monospacedDigitSystemFont(
+        ofSize: Typography.style(for: .caption).size - 0.5, weight: .medium)
 
     // MARK: Layout
 
@@ -1609,6 +2175,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     override func layout() {
         super.layout()
+        if proposal.isTwoLine {
+            layoutOwnership()
+            return
+        }
         let gutter = CGFloat(Self.outerGutter)
         let gap = proposal.gapBetweenRows
         // The last row of a group is TALLER than its card by `endGap`. Space is the
@@ -2022,6 +2592,21 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Cross-fade the status slot and the actions over 150ms (instant under Reduce
     /// Motion). Only the actions the row offers ever appear.
     private func setHoverActionsShown(_ shown: Bool) {
+        if isSubagentRow {
+            let popOn = shown && onHoverPopOut != nil
+            let stopOn = shown && onHoverStop != nil
+            hoverActionsShown = popOn || stopOn
+            for (button, on) in [(hoverPopOut, popOn), (hoverStop, stopOn)] {
+                button.isHidden = !on
+                button.alphaValue = on ? 1 : 0
+            }
+            for button in [hoverSnooze, hoverSettle, hoverMoveHere, hoverCopy, hoverHide] {
+                button.isHidden = true
+            }
+            needsLayout = true
+            return
+        }
+        for button in [hoverPopOut, hoverStop] { button.isHidden = true }
         let snoozeOn = (shown || card.isSelected) && onHoverSnooze != nil
         // The nudge IS the settle action while it shows; a second one beside it
         // is the duplicate the first version drew.
@@ -2148,7 +2733,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Pose the card (a 1pt lift) and, for a folded parent, the deck behind it.
     /// Reduce Motion poses nothing: the fill's cross-fade is the whole answer.
     private func poseDeck(animated: Bool) {
-        let moves = deckHovered && !reducesHoverMotion()
+        // Plan 106: a lead and its subagents are one flat card; nothing lifts.
+        let moves = deckHovered && !reducesHoverMotion() && !proposal.isTwoLine
         let deck = moves ? shown.map { InboxGroupBackgroundView.Deck.pose(for: $0.row.id) } : nil
         if let layer = card.layer {
             // Up is -y in this flipped cell's layer space.
@@ -2244,15 +2830,19 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             guard let ink, let line else { return }
             out.append(IconInkForQA(name: name, inkMidY: ink, lineCentreY: line.centre, neighbour: line.text))
         }
-        let top = line([placementLabel, whereLabel, stateLabel])
+        // Plan 106: two lines — the status glyph on the title's, the folder, the
+        // where marker and the actions on the project's.
+        let twoLine = proposal.isTwoLine
+        let top = twoLine ? line([titleLabel, stateLabel]) : line([placementLabel, whereLabel, stateLabel])
         let title = line([titleLabel])
-        let detail = line([selfReportLabel, branchLabel, modelLabel])
+        let metadata = twoLine ? line([placementLabel, whereLabel, tailLabel, branchLabel]) : top
+        let detail = twoLine ? metadata : line([selfReportLabel, branchLabel, modelLabel])
         if !statusGlyph.isHidden, statusGlyph.symbol != nil {
             add("status \(statusGlyph.symbol ?? "")", qaRenderedInk(statusGlyph)?.midY, top)
         }
         if let throbber { add("gyro (orbit centre)", throbber.frame.midY, top) }
-        add("folder", projectIcon.image == nil ? nil : qaRenderedInk(projectIcon)?.midY, top)
-        add("where", whereIcon.isHidden ? nil : qaRenderedInk(whereIcon)?.midY, top)
+        add("folder", projectIcon.image == nil ? nil : qaRenderedInk(projectIcon)?.midY, metadata)
+        add("where", whereIcon.isHidden ? nil : qaRenderedInk(whereIcon)?.midY, metadata)
         func pillIcon(_ pill: InboxSettleNudgeButton) -> CGFloat? {
             guard !pill.isHidden, let rect = pill.cell?.imageRect(forBounds: pill.bounds) else { return nil }
             // The capsule's fill is ink too; measure the glyph without it.
@@ -2284,7 +2874,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 out[index].horizontalDelta = ink.midX - slot.midX
             }
         }
-        add("settle nudge icon", pillIcon(settleNudge), top)
+        add("settle nudge icon", pillIcon(settleNudge), twoLine ? metadata : top)
         func decoration(_ slot: NSRect?) -> CGFloat? {
             guard let slot,
                   let ink = InkProbe.ink(of: decorations, scale: metadataRasterScale, in: slot.insetBy(dx: -1, dy: -1))
@@ -2477,6 +3067,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if workspaceTreatmentForQA == .iconBadge, let slot = decorations.workspaceSlot {
             frames["project container"] = decorations.convert(slot, to: self)
         }
+        // Plan 106: the running glyph sits at the end of line 1, not before the project.
+        guard !proposal.isTwoLine else { return frames }
         if let throbber { frames["status"] = throbber.convert(throbber.bounds, to: self) }
         else if !statusGlyph.isHidden { frames["status"] = statusGlyph.convert(statusGlyph.bounds, to: self) }
         return frames
@@ -2730,6 +3322,10 @@ private final class Decorations: NSView {
     var workspaceColour: NSColor?
     var workspaceSlot: NSRect?
     var workspaceTreatment: AgentInbox96CellView.WorkspaceTreatment = .workspaceLabel
+    /// Plan 106: a subagent's report result, "1/6 failed", in a small quiet pill.
+    var reportPill: (rect: NSRect, text: String)?
+    var failure = AccentToken.accentFailed.color.nsColor(for: TokenTheme.light)
+    var dark = false
 
     override var isFlipped: Bool { true }
     /// Decoration only — every click belongs to the row beneath it.
@@ -2752,6 +3348,15 @@ private final class Decorations: NSView {
             }
         }
         if paintsBorder { drawBorder() }
+        if let pill = reportPill {
+            failure.withAlphaComponent(dark ? 0.16 : 0.1).setFill()
+            NSBezierPath(roundedRect: pill.rect, xRadius: pill.rect.height / 2, yRadius: pill.rect.height / 2).fill()
+            let font = AgentInbox96CellView.pillFont
+            let size = (pill.text as NSString).size(withAttributes: [.font: font])
+            (pill.text as NSString).draw(
+                at: NSPoint(x: pill.rect.midX - size.width / 2, y: pill.rect.midY - size.height / 2),
+                withAttributes: [.font: font, .foregroundColor: failure])
+        }
         if let slot = identityDot, let identityDotColour {
             identityDotColour.setFill()
             NSBezierPath(ovalIn: slot).fill()

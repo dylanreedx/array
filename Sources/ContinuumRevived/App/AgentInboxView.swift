@@ -333,6 +333,9 @@ struct AgentInboxCardStyleOverride {
     /// A 96 card's height is fixed by its pitch rather than derived from which
     /// bands have content, because every band always has content.
     let cardHeight: (AgentInboxRow) -> Double
+    // Plan: .plans/106-sidebar-ownership
+    /// Subagents are one-line rows inside their lead's card.
+    var ownsSubagents = false
 
     static var production: Self {
         let proposal = SidebarDensityProposal.production
@@ -347,7 +350,13 @@ struct AgentInboxCardStyleOverride {
                         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
                     })
             },
-            cardHeight: { _ in AgentInbox96CellView.rowHeight(for: proposal) })
+            // Plan 106: a subagent is a one-line row inside its lead's card.
+            cardHeight: { row in
+                proposal.isTwoLine && row.depth > 0
+                    ? Double(InboxOwnershipChrome.subagentHeight)
+                    : AgentInbox96CellView.rowHeight(for: proposal)
+            },
+            ownsSubagents: proposal.isTwoLine)
     }
 }
 
@@ -816,6 +825,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     // Ticket: .plans/0721-subagents-handoff.md
     /// One `InboxNesting` per table row, in step with `items`. See `nestings(for:)`.
     private var nestingByTableRow: [InboxNesting] = []
+    // Plan: .plans/106-sidebar-ownership
+    /// Each table row's place in its lead's card, derived with `nestingByTableRow`.
+    private var ownershipByTableRow: [InboxOwnershipSlice] = []
+    /// What someone in each lead's card is asking the user, from the FULL sorted
+    /// list, so a folded lead still raises its subagent's ask.
+    private var ownershipAskByLead: [UUID: String] = [:]
+    private var ownsSubagents: Bool { cardStyleOverride?.ownsSubagents == true }
     /// Whether the shelf is open. VIEW-LOCAL and COLLAPSED BY DEFAULT, exactly like
     /// `collapsedParents` and for the same reason the packet gives ("local UI state,
     /// not persisted per-agent"): whether you have the shelf open on this Mac right
@@ -2184,6 +2200,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let scrollAnchor = visibleScrollAnchor(
             excluding: changed.touched.union(valueChanged))
         setItems(next)
+        // Plan 106: the same rows in the same places; their cards may have changed.
+        refreshVisibleOwnership()
         let indexes = IndexSet(rows.indices.filter {
             changed.touched.contains(rows[$0].id) || !rows[$0].matchesIgnoringLiveElapsed(previous[$0])
                 || disclosureMoved.contains(rows[$0].id)
@@ -2249,6 +2267,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // these derivations would make a hidden child's disclosure, rollup and
         // lifecycle blocker disappear together.
         parentsWithChildren = InboxSort.parentIds(in: sorted)
+        ownershipAskByLead = Self.asksByLead(in: sorted)
         var fullRollups = InboxSort.rollups(in: sorted)
         let bounded = InboxSort.boundedForInbox(
             rows: sorted, expandedParents: expandedFanoutParents)
@@ -2497,10 +2516,107 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         nestingByTableRow.indices.contains(row) ? nestingByTableRow[row] : .none
     }
 
+    // Plan: .plans/106-sidebar-ownership
+    /// The row at this table index's place in its lead's card.
+    func ownership(atTableRow row: Int) -> InboxOwnershipSlice {
+        ownershipByTableRow.indices.contains(row) ? ownershipByTableRow[row] : InboxOwnershipSlice()
+    }
+
+    /// Each lead's ask: its own, or the first one asked anywhere under it. The
+    /// asking subagent's row reads "waiting"; the lead is the one that asks you.
+    static func asksByLead(in rows: [AgentInboxRow]) -> [UUID: String] {
+        let byId = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var asks: [UUID: String] = [:]
+        for row in rows {
+            guard let ask = AgentInbox96CellView.ask(row) else { continue }
+            var lead = row
+            var seen: Set<UUID> = [row.id]
+            while let parent = lead.parentId.flatMap({ byId[$0] }), seen.insert(parent.id).inserted { lead = parent }
+            if asks[lead.id] == nil { asks[lead.id] = ask }
+        }
+        return asks
+    }
+
+    /// Every row's slice of its lead's card, in one pass over the list: where the
+    /// card starts and ends, the lead's title column its subagents line up under,
+    /// the stem's lanes, and whether the card's light runs.
+    private func ownershipSlices() -> [InboxOwnershipSlice] {
+        var slices = Array(repeating: InboxOwnershipSlice(), count: items.count)
+        let spacing = CGFloat(AgentInboxView.rowSpacing)
+        var start = 0
+        while start < items.count {
+            guard case .agent(let lead) = items[start], nesting(atTableRow: start).depth == 0 else {
+                start += 1
+                continue
+            }
+            var end = start
+            while end + 1 < items.count, nesting(atTableRow: end + 1).depth > 0 { end += 1 }
+            let heights = (start...end).map { tableView(tableView, heightOfRow: $0) }
+            let groupHeight = heights.reduce(0, +) + spacing * CGFloat(end - start)
+            let rollup = rollupsByParent[lead.id]
+            let leadDisclosure = disclosure(for: lead)
+            let titleLeading = InboxOwnershipChrome.titleLeading(
+                foldWidth: AgentInbox96CellView.disclosureTrailing(for: leadDisclosure, childCount: rollup?.children ?? 0),
+                hasDot: lead.identityColor != nil)
+            let ask = ownershipAskByLead[lead.id]
+            let working = lead.state == .working || (rollup?.working ?? 0) > 0
+            let sweepPhase = working && ask == nil ? InboxOwnershipClock.phase(for: lead.id) : nil
+            // The lanes, read backwards: a lane runs through a row while a later
+            // row at its level is still to come, and ends in a foot at the last.
+            var laterAt = [Bool](repeating: false, count: AgentInboxRow.maxDepth + 2)
+            var lanes = [(InboxStemLane, InboxStemLane)](repeating: (.none, .none), count: end - start + 1)
+            if end > start {
+                for index in stride(from: end, through: start + 1, by: -1) {
+                    let depth = min(max(1, nesting(atTableRow: index).depth), AgentInboxRow.maxDepth)
+                    func lane(_ level: Int) -> InboxStemLane {
+                        if depth < level { return .none }
+                        if depth == level { return laterAt[level] ? .through : .foot }
+                        return laterAt[level] ? .through : .none
+                    }
+                    var helper = lane(2)
+                    if depth == 1, nesting(atTableRow: index).nextDepth >= 2 { helper = .start }
+                    lanes[index - start] = (lane(1), helper)
+                    laterAt[depth] = true
+                    for level in (depth + 1)..<laterAt.count { laterAt[level] = false }
+                }
+                lanes[0] = (.start, .none)
+            }
+            var offset: CGFloat = 0
+            for index in start...end {
+                slices[index] = InboxOwnershipSlice(
+                    offset: offset, groupHeight: groupHeight,
+                    continuesAbove: index > start, continuesBelow: index < end,
+                    titleLeading: titleLeading,
+                    leadLane: lanes[index - start].0, helperLane: lanes[index - start].1,
+                    sweepPhase: sweepPhase, sweepColour: lead.identityColor,
+                    raisedAsk: index == start ? ask : nil)
+                offset += heights[index - start] + spacing
+            }
+            start = end + 1
+        }
+        return slices
+    }
+
+    /// Hand every row already on screen its slice again: a subagent that starts
+    /// working or asks changes its lead's card without reloading the lead's row.
+    private func refreshVisibleOwnership() {
+        guard ownsSubagents, tableView.numberOfRows > 0 else { return }
+        let visible = tableView.rows(in: tableView.visibleRect)
+        guard visible.length > 0 else { return }
+        for row in visible.location..<min(tableView.numberOfRows, visible.location + visible.length) {
+            switch tableView.view(atColumn: 0, row: row, makeIfNecessary: false) {
+            case let cell as AgentInbox96CellView: cell.setOwnership(ownership(atTableRow: row))
+            case let cell as AgentInboxRemainderView: cell.setOwnership(ownership(atTableRow: row))
+            default: break
+            }
+        }
+    }
+
     private func setItems(_ next: [InboxListItem]) {
         items = next
         rows = next.compactMap(\.agentRow)
         nestingByTableRow = AgentInboxView.nestings(for: next)
+        ownershipByTableRow = ownsSubagents ? ownershipSlices() : []
         rowIndexByTableRow = []
         tableRowByRowIndex = []
         rowIndexByTableRow.reserveCapacity(next.count)
@@ -2649,6 +2765,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 cellsByRow[row] = cell
             }
         }
+        refreshVisibleOwnership()
         let nudges: Set<UUID> = Set([oldNudge, settleNudgeTargetID(now: renderNow)].compactMap { $0 })
         var stale = IndexSet(new.indices.filter { row in
             guard !inserted.contains(row) else { return false }
@@ -2701,6 +2818,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 cellsByRow[row] = cell
             }
         }
+        refreshVisibleOwnership()
         // A survivor is redrawn when what it draws from its neighbours changed: its
         // place in the tree, its rollup (a child in another workspace left), or the
         // settle nudge moving to or from it.
@@ -3381,12 +3499,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         lastHeightQueryColumnWidth = column.width
         // The room under the LAST row of a group. Added here and reserved by the
         // cell out of the same function, so the card cannot grow into it.
-        let groupEndGap = CGFloat(
-            AgentInbox96CellView.trailingGap(for: nesting(atTableRow: row)))
+        let ownsRow = ownsSubagents && (item(at: row)?.agentRow.map { $0.variant == .card } ?? true)
+        let groupEndGap = CGFloat(ownsRow
+            ? AgentInbox96CellView.ownershipTrailingGap(for: nesting(atTableRow: row))
+            : AgentInbox96CellView.trailingGap(for: nesting(atTableRow: row)))
         guard let item = item(at: row) else { return AgentInboxView.shelfHeaderHeight }
         guard let model = item.agentRow else {
             switch item {
-            case .fanoutRemainder: return AgentInboxView.slimRowHeight + groupEndGap
+            case .fanoutRemainder:
+                return (ownsSubagents ? InboxOwnershipChrome.subagentHeight : AgentInboxView.slimRowHeight) + groupEndGap
             case .shelfHeader, .historyHeader, .settledMore:
                 return AgentInboxView.shelfHeaderHeight
             case .shelfSpacer:
@@ -3464,6 +3585,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     "agent-inbox-fanout-\(remainder.parentId.uuidString)")
                 cell.onExpand = { [weak self] in self?.expandFanout(parentId: remainder.parentId) }
                 cell.setNesting(nesting(atTableRow: row))
+                if ownsSubagents { cell.setOwnership(ownership(atTableRow: row)) }
                 cell.apply(remainder: remainder)
                 fanoutRemainderCellsByParent[remainder.parentId] = cell
                 return cell
@@ -3541,6 +3663,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // The tree connector. Set from the LIST, which is the only thing that
             // knows what is drawn above and below this row.
             redesigned.setNesting(nesting(atTableRow: row))
+            if ownsSubagents { redesigned.setOwnership(ownership(atTableRow: row)) }
             // How far the drawn parent's counted triangle reaches, so this row's
             // title can clear it. Same inputs the parent's own cell is given.
             var parentTrailing: CGFloat = 0
@@ -3626,6 +3749,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             let hide: (() -> Void)? = canHide(model) ? { [weak self] in self?.hideRows([id]) } : nil
             card.configureHoverActions(snooze: hide ?? action(.snooze), settle: action(.settle))
             card.configureExternalActions(moveHere: nil, copy: nil, hide: nil)
+            // Plan 106: a subagent row offers Pop out and Stop on hover.
+            card.configureSubagentActions(popOut: action(.popOut), stop: action(.stopAgent))
         } else if let slim = cell as? AgentInboxSlimCellView {
             if model.closingSince != nil {
                 slim.configureBackgroundActions(
@@ -4622,7 +4747,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             presentIdentityColorOptions(
                 for: targets.map(\.id), anchor: tableView.rect(ofRow: tableRow), relativeTo: tableView)
         case .settle, .unsettle, .snooze, .wake, .markUnread, .generateName, .stopAgent,
-             .archive, .delete:
+             .archive, .delete, .popOut, .foldBack, .pin, .unpin:
             // P4.10: armed before the host runs, for the reason `performBulkAction`
             // records — a synchronous host has already re-pushed by the time it returns.
             if AgentInboxView.advancesSelection(action) { armAdvance(targetIds: targets.map(\.id)) }
@@ -4649,7 +4774,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // lifecycle callback used by the remaining host-owned actions.
             return true
         case .settle, .unsettle, .snooze, .wake, .markUnread, .generateName, .color, .stopAgent,
-             .archive, .delete:
+             .archive, .delete, .popOut, .foldBack, .pin, .unpin:
             return onRowAction != nil && wiredRowActions.contains(action)
         }
     }
@@ -4694,7 +4819,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     static func advancesSelection(_ action: InboxRowAction) -> Bool {
         switch action {
         case .settle, .snooze, .archive, .delete: return true
-        case .openInTile, .unsettle, .wake, .markUnread, .rename, .generateName, .color, .stopAgent:
+        case .openInTile, .unsettle, .wake, .markUnread, .rename, .generateName, .color, .stopAgent,
+             .popOut, .foldBack, .pin, .unpin:
             return false
         }
     }
@@ -6804,6 +6930,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return true
     }
 
+    func clearSelectionForQA() { tableView.deselectAll(nil) }
     var selectedRowIdsForQA: [UUID] { selectedRows.map(\.id) }
     var isMultipleSelectionAllowedForQA: Bool { tableView.allowsMultipleSelection }
     /// Whether the bar is on screen, and what it is OFFERING — read off the rendered
@@ -7141,6 +7268,21 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Return to the top through the real clip-view path without materializing the
     /// rest of the document. Virtual-AX checks use this to make the first rows
     /// visible while keeping a later row genuinely offscreen.
+    // Plan: .plans/106-sidebar-ownership
+    /// The row an agent is drawn in, built if it is off screen.
+    func ownershipCellForQA(id: UUID) -> AgentInbox96CellView? {
+        guard let row = tableRow(forAgentId: id) else { return nil }
+        return tableView.view(atColumn: 0, row: row, makeIfNecessary: true) as? AgentInbox96CellView
+    }
+    func ownershipSliceForQA(id: UUID) -> InboxOwnershipSlice? {
+        tableRow(forAgentId: id).map { ownership(atTableRow: $0) }
+    }
+    /// Every remainder row ("N more") on screen, by parent.
+    var ownershipRemaindersForQA: [AgentInboxRemainderView] {
+        (0..<tableView.numberOfRows).compactMap {
+            tableView.view(atColumn: 0, row: $0, makeIfNecessary: false) as? AgentInboxRemainderView
+        }
+    }
     func scrollToTopForQA() {
         let origin = scrollView.contentView.bounds.origin
         scrollView.contentView.scroll(to: NSPoint(x: origin.x, y: 0))
@@ -7678,8 +7820,38 @@ final class AgentInboxRemainderView: NSTableCellView {
         needsLayout = true
     }
 
+    /// Top-down, like the agent rows: the card slice above is laid out that way.
+    /// Everything else here is symmetric or constrained.
+    override var isFlipped: Bool { true }
+
+    // Plan: .plans/106-sidebar-ownership
+    private lazy var ownershipChrome = InboxOwnershipChrome(sheet: groupBackground)
+    private var ownership: InboxOwnershipSlice?
+
+    /// Draw as the last line of its lead's card: under the subagents' titles,
+    /// on the card's strip, its stem and its border.
+    func setOwnership(_ slice: InboxOwnershipSlice) {
+        guard slice != ownership else { return }
+        if ownership == nil { ownershipChrome.install(in: self) }
+        ownership = slice
+        labelLeading?.constant = AgentInbox96CellView.outerGutter + Double(slice.titleLeading) + 14
+        labelCentre?.constant = -AgentInbox96CellView.ownershipTrailingGap(for: nesting) / 2
+        needsLayout = true
+    }
+
     override func layout() {
         super.layout()
+        if let ownership {
+            spine.isHidden = true
+            clipsToBounds = false
+            labelCentre?.constant = -AgentInbox96CellView.ownershipTrailingGap(for: nesting) / 2
+            ownershipChrome.layout(
+                ownership, bounds: bounds, gutter: CGFloat(AgentInbox96CellView.outerGutter),
+                gap: SidebarDensityProposal.production.gapBetweenRows,
+                spacing: CGFloat(AgentInboxView.rowSpacing), laneTop: 0,
+                rowMid: InboxOwnershipChrome.subagentHeight / 2)
+            return
+        }
         let metrics = AgentInbox96CellView.spineMetrics
         let content = Double(bounds.height) - metrics.trailingGap(nesting)
         let bleed = CGFloat(AgentInboxView.rowSpacing) / 2
@@ -8212,6 +8384,11 @@ enum InboxBulkAction: String, CaseIterable, Equatable {
 /// P3.13's, the stop is `AgentSupervisor.stop`'s and the reveal is P3.9's.
 enum InboxRowAction: String, CaseIterable, Equatable {
     case openInTile
+    // Plan: .plans/106-sidebar-ownership — a subagent's tile, from its row.
+    case popOut
+    case foldBack
+    case pin
+    case unpin
     case settle
     case unsettle
     case snooze
@@ -8233,6 +8410,10 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     var baseTitle: String {
         switch self {
         case .openInTile: return "Open in Tile"
+        case .popOut: return "Pop Out"
+        case .foldBack: return "Fold Back"
+        case .pin: return "Pin"
+        case .unpin: return "Unpin"
         case .settle: return "Settle"
         case .unsettle: return "Un-settle"
         case .snooze: return "Snooze"
@@ -8250,6 +8431,10 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     var icon: ChoiceIcon {
         switch self {
         case .openInTile: return .system("rectangle.on.rectangle")
+        case .popOut: return .system("arrow.up.forward.app")
+        case .foldBack: return .system("arrow.down.right.and.arrow.up.left")
+        case .pin: return .system("pin")
+        case .unpin: return .system("pin.slash")
         case .settle: return .system("checkmark.circle")
         case .unsettle: return .system("arrow.uturn.backward.circle")
         case .snooze: return .system("clock")
@@ -8292,7 +8477,8 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         case .wake: return InboxUndoToast.wokenVerb
         case .archive: return InboxUndoToast.archivedVerb
         case .delete: return InboxUndoToast.deletedVerb
-        case .openInTile, .markUnread, .rename, .generateName, .color, .stopAgent: return nil
+        case .openInTile, .markUnread, .rename, .generateName, .color, .stopAgent,
+             .popOut, .foldBack, .pin, .unpin: return nil
         }
     }
 
@@ -8317,6 +8503,10 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         // that has none — so there is no row this cannot be asked of. What it cannot take
         // is a SET, which `disabledReason` handles: "open" has no plural.
         case .openInTile: return true
+        case .popOut: return row.parentId != nil && !row.hasTile
+        case .foldBack: return row.parentId != nil && row.hasTile
+        case .pin: return row.parentId != nil && row.hasTile && !row.isPinned
+        case .unpin: return row.parentId != nil && row.hasTile && row.isPinned
         case .settle: return InboxBulkAction.settle.isAvailable(for: row, rollups: rollups)
         case .unsettle: return InboxBulkAction.isSettled(row)
         case .snooze: return InboxBulkAction.snooze.isAvailable(for: row)
@@ -8362,6 +8552,12 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         switch self {
         case .settle: return !rows.allSatisfy(InboxBulkAction.isSettled)
         case .unsettle: return rows.allSatisfy(InboxBulkAction.isSettled)
+        // A subagent's tile verbs appear only over subagents, and only the ones
+        // that apply: Pop Out while it has no tile, Pin and Fold Back once it has.
+        case .popOut: return rows.allSatisfy { $0.parentId != nil && !$0.hasTile }
+        case .foldBack: return rows.allSatisfy { $0.parentId != nil && $0.hasTile }
+        case .pin: return rows.allSatisfy { $0.parentId != nil && $0.hasTile } && !rows.allSatisfy(\.isPinned)
+        case .unpin: return rows.allSatisfy { $0.parentId != nil && $0.hasTile && $0.isPinned }
         case .openInTile, .snooze, .wake, .markUnread, .rename, .generateName, .color, .stopAgent,
              .archive, .delete:
             return true
@@ -8404,6 +8600,10 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         // answered above. Present because the switch is total, which is what makes a new
         // action a compile error here.
         case .openInTile: return "cannot be opened."
+        case .popOut: return row.parentId == nil ? "is not a subagent." : "already has a tile."
+        case .foldBack: return row.parentId == nil ? "is not a subagent." : "has no tile to fold."
+        case .pin: return row.isPinned ? "is already pinned." : "has no tile to pin."
+        case .unpin: return "is not pinned."
         case .settle:
             if row.settlementBlocked {
                 switch row.state {

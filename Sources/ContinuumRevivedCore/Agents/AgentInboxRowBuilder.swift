@@ -307,7 +307,10 @@ public enum AgentInboxRowBuilder {
             closingSince: closingSince,
             hasLiveRunner: observedFacts.hasLiveRunner,
             identityColor: record?.identityColor,
-            selfReport: record.flatMap(selfReport(for:))
+            selfReport: record.flatMap(selfReport(for:)),
+            // A row with no record is a terminal session, which is its tile.
+            hasTile: record.map { $0.tileId != nil } ?? true,
+            isPinned: record?.pinned ?? false
         )
     }
 

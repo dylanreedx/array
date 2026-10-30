@@ -551,6 +551,7 @@ if [[ "$SIDEBAR_REFINEMENTS_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --sidebar-hidden-footer-check
   run_app_check .build/debug/Array --sidebar-bulk-hide-check
   run_app_check .build/debug/Array --sidebar-scope-popover-check
+  run_app_check .build/debug/Array --sidebar-ownership-check
   run_app_check .build/debug/Array --hide-external-rows-check
   run_app_check .build/debug/Array --sidebar-truth-check
   matrix_report 'Sidebar refinements matrix (targeted)'
@@ -1541,6 +1542,11 @@ run_app_check .build/debug/Array --sidebar-hide-any-row-check
 run_app_check .build/debug/Array --sidebar-hidden-footer-check
 run_app_check .build/debug/Array --sidebar-bulk-hide-check
 run_app_check .build/debug/Array --sidebar-scope-popover-check
+# .plans/106: who owns whom. Subagents are one-line rows in their lead's card:
+# each count drawn once, no repeated project or branch, a subagent's ask raised
+# on its lead, the stem's lanes, the card's light, and Pop out / Stop on hover
+# and the right-click tile verbs through real events, in light and dark.
+run_app_check .build/debug/Array --sidebar-ownership-check
 # The sidebar's project icon: `.array/icon.*` beats a shipped favicon; static/,
 # website/public/, Packaging/*.icns and an xcassets AppIcon resolve; a miss is
 # cached, and an added override or an edited winning file still shows.

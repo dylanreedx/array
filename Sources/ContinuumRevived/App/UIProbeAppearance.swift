@@ -1294,11 +1294,27 @@ enum UIProbeAppearance {
             // owns no slot for this gate to check. Admitting it here would let an
             // opaque resting card back in under the name of the role that means
             // "unfilled".
-            for role in SidebarSurfaceRole.rowEmphases {
-                values.insert(hex(role.color.cgColor(for: theme)))
-            }
+            values.formUnion(sidebarCardFills(theme: theme))
         default:
             break
+        }
+        return values
+    }
+
+    /// The sidebar row card's fills: the ladder's three emphases, and — plan 106,
+    /// every card now sitting on its lead's solid card — the same three stepped
+    /// up from that card's shade, composited from the same tokens.
+    private static func sidebarCardFills(theme: TokenTheme) -> Set<String> {
+        var values: Set<String> = []
+        let card = InboxGroupBackgroundView.cardAlpha(dark: theme == .dark)
+        for role in SidebarSurfaceRole.rowEmphases {
+            values.insert(hex(role.color.cgColor(for: theme)))
+            for contrast in [false, true] {
+                if let fill = AgentInboxCardView.interactionFill(
+                    for: role, increasedContrast: contrast, theme: theme, underlay: card) {
+                    values.insert(hex(fill))
+                }
+            }
         }
         return values
     }
@@ -1493,9 +1509,7 @@ enum UIProbeAppearance {
             // EMPHASES and nothing else — pinned here so a later packet cannot
             // quietly widen it to `resting` (which would re-admit an opaque
             // resting card) or to a tile role.
-            let sidebarValues = Set(SidebarSurfaceRole.rowEmphases.map {
-                hex($0.color.cgColor(for: theme))
-            })
+            let sidebarValues = sidebarCardFills(theme: theme)
             for kind in [ColorSlot.Kind.background, .fill] {
                 let base = legalValues(for: kind, theme: theme)
                 guard legalValues(forOwner: "ChoiceButton", kind: kind, theme: theme)

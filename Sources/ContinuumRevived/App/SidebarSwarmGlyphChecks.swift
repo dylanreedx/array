@@ -109,15 +109,23 @@ enum SidebarSwarmGlyphChecks {
                     let singleLeading = single.qaLeadingMetadataFramesForQA.values.map(\.minX).min()! - single.qaCardFrameForQA.minX
                     for value in [singleton, parent, bigParent, nestedParent] {
                         let cell = try card(value)
+                        // Plan 106: a subagent row carries none of its lead's place.
+                        if cell.isSubagentRow { continue }
                         let slots = cell.qaLeadingMetadataFramesForQA
                         guard let project = slots["project"], let container = slots["project container"] else {
                             throw Failure(description: "\(label): project text/container absent")
                         }
                         let leading = slots.values.map(\.minX).min()! - cell.qaCardFrameForQA.minX
-                        try expect(abs(leading - singleLeading) <= 0.5,
-                                   "\(label): a fold or parent indents metadata (\(leading) vs singleton \(singleLeading))")
+                        if SidebarDensityProposal.production.isTwoLine {
+                            // Plan 106: line 2 sits under the title, wherever the fold and dot put it.
+                            try expect(abs(slots.values.map(\.minX).min()! - cell.qaTitleFrameForQA.minX) <= 0.5,
+                                       "\(label): line 2 does not start under the title")
+                        } else {
+                            try expect(abs(leading - singleLeading) <= 0.5,
+                                       "\(label): a fold or parent indents metadata (\(leading) vs singleton \(singleLeading))")
+                        }
                         try expect(project.minX >= container.maxX + 3.5, "\(label): project label crowds its container")
-                        if state == .working {
+                        if state == .working, !SidebarDensityProposal.production.isTwoLine {
                             guard let status = slots["status"] else { throw Failure(description: "\(label): working glyph absent") }
                             try expect(status.maxX <= container.minX + 0.5, "\(label): working glyph overlaps the project container")
                         }
@@ -321,7 +329,10 @@ enum SidebarSwarmGlyphChecks {
                    "\(label): the filled share is not the working share of the children")
         // The glyph heads its lane, inset from the window edge.
         let glyph = working.convert(working.glyphFrameForQA, to: inbox)
-        let lane = AgentInbox96CellView.spineMetrics.spineX(level: 0)
+        // Plan 106: the glyph heads the one stem, `pad + 7` into the card.
+        let lane = SidebarDensityProposal.production.isTwoLine
+            ? Double(AgentInbox96CellView.outerGutter) + Double(InboxOwnershipChrome.laneX)
+            : AgentInbox96CellView.spineMetrics.spineX(level: 0)
         let laneInInbox = workingCell.convert(NSPoint(x: lane, y: 0), to: inbox).x
         try expect(abs(glyph.midX - laneInInbox) < 0.5 && glyph.midX >= 16,
                    "\(label): the glyph centre \(glyph.midX) is not on its lane \(laneInInbox) at least 16pt in")
