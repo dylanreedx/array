@@ -1649,6 +1649,16 @@ enum ContinuumApp {
         // `.plans/102` P1: the real hook command against the production
         // listener and supervisor — inert without the marker, fails open, and
         // a recorded subagent pair becomes receipts that change nothing else.
+        if CommandLine.arguments.contains("--workspace-codex-hook-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceCodexHookChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-hook-bridge-check") {
             do {
                 _ = NSApplication.shared
@@ -5325,6 +5335,7 @@ enum ContinuumApp {
             }
         } else {
             AgentModelCatalog.shared.enableLiveRefresh()
+            AgentHookSurfaceCatalog.shared.startRefresh()
             AgentSupervisor.enableLiveNameTitling()
             AgentSupervisor.enableLiveAccountUsage()
         }
@@ -5334,6 +5345,7 @@ enum ContinuumApp {
         // re-check) so the picker offers whatever providers the user has
         // authed in pi. QA never enables this and keeps the frozen fallback.
         AgentModelCatalog.shared.enableLiveRefresh()
+        AgentHookSurfaceCatalog.shared.startRefresh()
         // Session titles: each harness titles with its own CLI. Same opt-in rule
         // as the catalogue, so no check can ever spend a real provider call.
         AgentSupervisor.enableLiveNameTitling()

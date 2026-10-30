@@ -84,7 +84,8 @@ public enum CodexCLIBackend {
         cwdPath: String,
         extraArgs: [String],
         prompt: AgentPrompt,
-        workspaceMCP: WorkspaceMCPConfiguration? = nil
+        workspaceMCP: WorkspaceMCPConfiguration? = nil,
+        hookOverrides: [String] = []
     ) -> [String] {
         var args: [String]
         switch sessionMode {
@@ -111,6 +112,7 @@ public enum CodexCLIBackend {
         if let workspaceMCP {
             for override in workspaceMCP.codexConfigOverrides { args += ["-c", override] }
         }
+        for override in hookOverrides { args += ["-c", override] }
         args += [promptArgument(prompt)]
         return args
     }
@@ -153,7 +155,7 @@ public enum CodexCLIBackend {
     /// never sets it — that field only carries pi's role `--tools` args) but
     /// is threaded through for the same reason `processArguments` threads it:
     /// a slot for a future per-agent override, not a currently-used one.
-    public static func appServerArguments(extraArgs: [String], workspaceMCP: WorkspaceMCPConfiguration? = nil) -> [String] {
+    public static func appServerArguments(extraArgs: [String], workspaceMCP: WorkspaceMCPConfiguration? = nil, hookOverrides: [String] = []) -> [String] {
         var args = [
             "-c", "approval_policy=never",
             "-c", "sandbox_mode=\(sandboxMode)",
@@ -162,6 +164,7 @@ public enum CodexCLIBackend {
         if let workspaceMCP {
             for override in workspaceMCP.codexConfigOverrides { args += ["-c", override] }
         }
+        for override in hookOverrides { args += ["-c", override] }
         args += ["app-server"]
         args += extraArgs
         return args
@@ -431,7 +434,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
         }
 
         let command = Self.liveResolvedCommand()
-        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs, workspaceMCP: config.workspaceMCP)
+        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs, workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command))
         let spawned: ProcessGroupChild
         do {
             spawned = try ProcessGroupChild.spawn(
@@ -624,7 +627,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
         onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
     ) throws {
         let command = Self.liveResolvedCommand()
-        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs, workspaceMCP: config.workspaceMCP)
+        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs, workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command))
 
         queue.sync {
             appServerTranslator = CodexAppServerEventTranslator(workingDirectory: config.cwd)
@@ -1007,6 +1010,11 @@ public final class CodexAgentRunner: @unchecked Sendable {
             enabled: limit.map { $0 > 0 }, thresholdTokens: limit, thresholdScope: scope)
     }
 
+    private func hookOverrides(command: PiAgentRunner.ResolvedCommand) -> [String] {
+        guard let workspaceMCP = config.workspaceMCP else { return [] }
+        return AgentHookSurfaceCatalog.shared.codexOverrides(command: command, hookCommand: workspaceMCP.claudeHookCommand)
+    }
+
     // MARK: - one spawn
 
     private func runOnce(
@@ -1026,7 +1034,8 @@ public final class CodexAgentRunner: @unchecked Sendable {
             cwdPath: config.cwd.path,
             extraArgs: config.extraArgs,
             prompt: prompt,
-            workspaceMCP: config.workspaceMCP
+            workspaceMCP: config.workspaceMCP,
+            hookOverrides: hookOverrides(command: command)
         )
 
         queue.sync {

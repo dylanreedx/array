@@ -5518,11 +5518,21 @@ final class AgentSupervisor {
     private var lastSpawnRefusals: [AgentID: SpawnRefusal] = [:]
     func spawnRefusal(for parentId: AgentID) -> SpawnRefusal? { lastSpawnRefusals[parentId] }
 
-    /// `.plans/102` P1: what each agent's Claude hooks reported, newest last,
+    /// `.plans/102` P1: what each agent's hooks reported, newest last,
     /// at most `AgentHookReceipt.ringCapacity` per agent. Observation only:
     /// nothing reads a receipt to change behaviour, and recording one touches
     /// no record, transcript or child. In memory; gone with the record.
     private(set) var hookReceipts: [AgentID: [AgentHookReceipt]] = [:]
+    private var codexHookPushBacks: [AgentID: Set<[String]>] = [:]
+
+    /// Codex has no Stop-loop cap. Reserve only a qualifying decision, and
+    /// keep its identity independently of the bounded observation ring.
+    func claimCodexHookPushBack(for id: AgentID, payload: [String: Any]) -> Bool {
+        guard let session = payload["session_id"] as? String, !session.isEmpty,
+              let turn = payload["turn_id"] as? String, !turn.isEmpty else { return false }
+        let key = [session, turn, payload["agent_id"] as? String ?? ""]
+        return codexHookPushBacks[id, default: []].insert(key).inserted
+    }
 
     func recordHookReceipt(_ receipt: AgentHookReceipt, for id: AgentID) {
         guard records[id] != nil else { return }
@@ -6077,6 +6087,7 @@ final class AgentSupervisor {
         runningModes.removeValue(forKey: id)
         managedHookStates.removeValue(forKey: id)
         hookReceipts.removeValue(forKey: id)
+        codexHookPushBacks.removeValue(forKey: id)
         lastSettledAt.removeValue(forKey: id)
         runnerGenerationTokens.removeValue(forKey: id)
         history.removeValue(forKey: id)

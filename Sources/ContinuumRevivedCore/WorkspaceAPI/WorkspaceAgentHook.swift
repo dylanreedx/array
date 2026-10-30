@@ -1,10 +1,11 @@
 import Foundation
 
 /// P1 of the agent communication layer (`.plans/102-managed-agent-mode`): the
-/// hook bridge, Claude Code side.
+/// hook bridge for Claude Code and Codex.
 ///
 /// Array registers one command, `array-workspace-mcp hook …`, for a fixed set
-/// of Claude hook events through a per-session `--settings` value. The command
+/// of hook events through per-session `--settings` (Claude) or `-c` overrides
+/// (Codex, with narrowly scoped trusted hashes). The command
 /// posts the hook's stdin JSON to the app over the workspace endpoint, and the
 /// app keeps a short receipt. Nothing reads a receipt to change behaviour.
 /// The command prints a decision only when the app returns one: P2a's report
@@ -25,6 +26,26 @@ public enum WorkspaceAgentHook {
         "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
         "Stop", "SubagentStart", "SubagentStop",
     ]
+    // Codex 0.165.0: event config names and hooks/list key labels (P0 source).
+    public static let codexEventKeys = [
+        ("SessionStart", "session_start"), ("UserPromptSubmit", "user_prompt_submit"),
+        ("PreToolUse", "pre_tool_use"), ("PostToolUse", "post_tool_use"),
+        ("Stop", "stop"), ("SubagentStart", "subagent_start"), ("SubagentStop", "subagent_stop"),
+    ]
+    public static let codexEvents = codexEventKeys.map { $0.0 }
+
+    public static func codexDefinitions(command: String) -> [String] {
+        codexEvents.map { event in
+            let matcher = toolMatcherEvents.contains(event) ? "matcher=\"*\"," : ""
+            return "hooks.\(event)=[{\(matcher)hooks=[{type=\"command\",command=\(tomlString(command)),timeout=5}]}]"
+        }
+    }
+
+    static func tomlString(_ value: String) -> String {
+        // JSON basic strings are TOML basic strings for these scalar values.
+        let data = try! JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+        return String(decoding: data, as: UTF8.self)
+    }
     /// Events whose matcher is a tool name; `*` covers every tool. The others
     /// match a source or agent type, so no matcher means "all".
     public static let toolMatcherEvents: Set<String> = ["PreToolUse", "PostToolUse"]
@@ -124,6 +145,8 @@ extension WorkspaceMCPConfiguration {
 /// What the app keeps of one hook event. Small on purpose: no prompt, tool
 /// input or output, and no transcript path.
 public struct AgentHookReceipt: Equatable, Sendable {
+    /// Assigned from the authenticated host record, never from hook input.
+    public var harness: AgentHarness?
     public var event: String
     public var toolName: String?
     /// Claude's subagent id and type, on events fired by or about a subagent.
@@ -134,7 +157,8 @@ public struct AgentHookReceipt: Equatable, Sendable {
     public var receivedAt: Date
 
     public init(event: String, toolName: String? = nil, subagentID: String? = nil,
-                subagentType: String? = nil, sessionID: String? = nil, receivedAt: Date) {
+                subagentType: String? = nil, sessionID: String? = nil, receivedAt: Date, harness: AgentHarness? = nil) {
+        self.harness = harness
         self.event = event
         self.toolName = toolName
         self.subagentID = subagentID
@@ -144,13 +168,13 @@ public struct AgentHookReceipt: Equatable, Sendable {
     }
 
     /// nil when the body names no event.
-    public init?(hookPayload payload: [String: Any], receivedAt: Date) {
+    public init?(hookPayload payload: [String: Any], receivedAt: Date, harness: AgentHarness? = nil) {
         guard let event = payload["hook_event_name"] as? String, !event.isEmpty else { return nil }
         func text(_ key: String) -> String? {
             (payload[key] as? String).flatMap { $0.isEmpty ? nil : String($0.prefix(256)) }
         }
         self.init(event: String(event.prefix(64)), toolName: text("tool_name"), subagentID: text("agent_id"),
-                  subagentType: text("agent_type"), sessionID: text("session_id"), receivedAt: receivedAt)
+                  subagentType: text("agent_type"), sessionID: text("session_id"), receivedAt: receivedAt, harness: harness)
     }
 
     /// How many receipts the app keeps per agent; the oldest go first.

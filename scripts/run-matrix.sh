@@ -642,9 +642,11 @@ if [[ "$HOOK_BRIDGE_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
   run swift build --disable-sandbox --skip-update --product array-workspace-mcp
   run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
   run_app_check .build/debug/Array --workspace-hook-bridge-check
+  run_app_check .build/debug/Array --workspace-codex-hook-check
   run_app_check .build/debug/Array --workspace-mcp-host-check
   run_app_check .build/debug/Array --workspace-mcp-disconnect-check
   run_app_check .build/debug/Array --workspace-agent-report-check
@@ -855,6 +857,7 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
 # hooks through one --settings value: exactly seven events, a short timeout,
 # earlier flags unchanged, never --setting-sources (it drops the user's hooks).
 run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
 # .plans/102 P2a: array_report/array_status bounds, the once-only push-back
 # decision and its wording, the courier unchanged without a report, and the
 # Settings toggle off by default.
@@ -931,6 +934,7 @@ run_app_check .build/debug/Array --workspace-mcp-disconnect-check
 # down or silent, refuses a wrong token, and records a recorded claude
 # SubagentStart/SubagentStop pair on the calling agent without changing it.
 run_app_check .build/debug/Array --workspace-hook-bridge-check
+run_app_check .build/debug/Array --workspace-codex-hook-check
 # .plans/102 P2a: array_report/array_status through the real binary and host
 # (bounds, the right agent, another agent's token refused, status declared),
 # and wait_agents: setting off, today's entry plus report; on, the report in

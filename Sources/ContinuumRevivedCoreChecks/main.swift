@@ -204,6 +204,10 @@ if CommandLine.arguments.contains("--agent-report-contract-check") {
     Foundation.exit(0)
 }
 // `.plans/102` P1: Array's observation hooks in the Claude argv.
+if CommandLine.arguments.contains("--codex-hook-bridge-check") {
+    runCodexHookBridgeChecks()
+    Foundation.exit(0)
+}
 if CommandLine.arguments.contains("--claude-hook-bridge-check") {
     runClaudeHookBridgeChecks()
     Foundation.exit(0)

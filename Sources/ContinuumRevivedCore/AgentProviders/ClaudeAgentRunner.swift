@@ -279,7 +279,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         sessionId: String,
         extraArgs: [String],
         workspaceMCP: WorkspaceMCPConfiguration? = nil,
-        mode: AgentMode = .free
+        mode: AgentMode = .free,
+        hookSurfaceAvailable: Bool = true
     ) -> [String] {
         let sessionArgs: [String]
         switch sessionMode {
@@ -323,8 +324,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             args += ["--append-system-prompt", WorkspaceMCPConfiguration.agentGuidance,
                      "--allowedTools", "mcp__array_workspace"]
                 + (mode == .free ? ["--disallowedTools", "ListAgents"] : [])
-                + ["--settings", workspaceMCP.claudeHookSettingsJSON,
-                     "--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigPath]
+            if hookSurfaceAvailable { args += ["--settings", workspaceMCP.claudeHookSettingsJSON] }
+            args += ["--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigPath]
         }
         return args
     }
@@ -857,7 +858,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             sessionId: config.sessionId,
             extraArgs: config.extraArgs,
             workspaceMCP: config.workspaceMCP,
-            mode: config.mode
+            mode: config.mode,
+            hookSurfaceAvailable: config.workspaceMCP != nil && AgentHookSurfaceCatalog.shared.claudeAvailable(command: command)
         )
         let spawned: ProcessGroupChild
         do {

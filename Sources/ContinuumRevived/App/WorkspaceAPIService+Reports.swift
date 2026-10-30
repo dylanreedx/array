@@ -52,6 +52,8 @@ extension WorkspaceAPIService {
               let output = WorkspaceAgentHook.reportPushBack(payload: payload, callerHasParent: record.parentAgentID != nil) else {
             return [:]
         }
+        if record.harness == .codex,
+           !supervisor.claimCodexHookPushBack(for: record.id, payload: payload) { return [:] }
         return [WorkspaceAgentHook.hookOutputKey: output]
     }
 
