@@ -59,7 +59,8 @@ private func unavailableSession(api: CollaborationAPI, area: UUID, initial: Coll
     let observer = Task { for await _ in stream {} }
     let deadline = ContinuousClock.now.advanced(by: .seconds(3))
     while true {
-        if case .unavailable = await session.status { break }
+        // Incompatible bytes are their own terminal state, never access loss.
+        if case .incompatible = await session.status { break }
         guard ContinuousClock.now < deadline else {
             await session.stop(); _ = await observer.value
             throw BoundaryFailure(message: "incompatible data was retried as a network failure")

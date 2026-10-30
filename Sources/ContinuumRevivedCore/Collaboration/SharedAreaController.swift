@@ -506,6 +506,8 @@ public final class SharedAreaController {
             scope = nil; status = .reconnecting; changed()
         case .unavailable:
             failClosed(.accessDenied, generation: current)
+        case .incompatible:
+            failClosed(.incompatibleState, generation: current)
         case .stopped:
             failClosed(.connectionEnded, generation: current)
         }
@@ -576,10 +578,14 @@ public final class SharedAreaController {
         guard generation == current else { return }
         // Suppress this cache on reopen too. Keep private drafts and source IDs
         // for recovery; they remain incapable of authorizing reads or effects.
-        do {
-            if try localStore.load() != nil || localState != nil { try persist { $0.accessDenied = true } }
+        // An incompatible schema is not loss of access: leave the cache bytes,
+        // drafts and outbox exactly as they were so a newer build can read them.
+        if reason != .incompatibleState {
+            do {
+                if try localStore.load() != nil || localState != nil { try persist { $0.accessDenied = true } }
+            }
+            catch { lastPersistenceError = error }
         }
-        catch { lastPersistenceError = error }
         generation = UUID()
         let previous = connection; connection = nil
         updateTask?.cancel(); updateTask = nil; transport = nil

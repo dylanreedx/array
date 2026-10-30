@@ -8,6 +8,9 @@ public actor CollaborationSession {
         case connected(CollaborationReplica)
         case reconnecting(CollaborationReplica?)
         case unavailable
+        /// The service answered with a schema or document this build cannot
+        /// apply. Not loss of access: the caller keeps its local cache intact.
+        case incompatible
         case stopped
     }
     private let api: CollaborationAPI
@@ -83,7 +86,7 @@ public actor CollaborationSession {
     private func install(_ state: Collaboration.State, generation current: UUID) -> Bool {
         guard current == generation else { return false }
         guard state.scope.area.rawValue == area, let replica = try? CollaborationReplica(state: state) else {
-            finishUnavailable()
+            finishUnavailable(.incompatible)
             return false
         }
         self.replica = replica; through = nil
@@ -111,11 +114,13 @@ public actor CollaborationSession {
         recovering = true
         if error is DecodingError || error is SharedArea.Failure {
             replica = nil; through = nil
-            finishUnavailable()
+            finishUnavailable(.incompatible)
             return false
         }
         if let error = error as? CollaborationClientError {
             switch error {
+            // A compacted cursor ("snapshotRequired"), a gap or a revision
+            // conflict all refetch the full snapshot; none is a silent gap.
             case .invalidSequence, .server(status: 409, code: _):
                 replica = nil; through = nil
             // Subscription capacity is temporary, not a membership decision.
@@ -130,9 +135,9 @@ public actor CollaborationSession {
         emit(.reconnecting(replica))
         return true
     }
-    private func finishUnavailable() {
+    private func finishUnavailable(_ terminal: Status = .unavailable) {
         replica = nil; through = nil
-        emit(.unavailable)
+        emit(terminal)
         // Finishing a stream is not an explicit user close. Its termination
         // callback must not overwrite this terminal state with .stopped.
         generation = UUID(); task = nil
