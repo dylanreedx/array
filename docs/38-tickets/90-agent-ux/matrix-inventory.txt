@@ -93,12 +93,14 @@ check --canvas-zoom-invalidation-probe-check
 check --canvas-zoom-momentum-check
 check --child-crash-isolation-check
 check --choice-geometry-check
+check --claude-adopted-turn-check
 check --claude-hook-bridge-check
 check --cli-install-owner-check
 check --cli-update-runner-check
 check --cli-update-settings-check
 check --codex-appserver-parity-check
 check --codex-appserver-runner-check
+check --codex-hook-bridge-check
 check --command-center-check
 check --companion-agent-destination-check
 check --companion-sync-health-check
@@ -152,6 +154,13 @@ check --focus-mode-check
 check --focus-scope-dispatch-check
 check --fresh-install-check
 check --gesture-telemetry-check
+check --helper-command-evidence-check
+check --helper-retry-check
+check --helper-tile-auto-fold-check
+check --helper-tile-cap-check
+check --helper-tile-lifecycle-check
+check --helper-watchdog-check
+check --helper-worktree-check
 check --hide-external-rows-check
 check --inbox-parent-fold-check
 check --inbox-reveal-project-check
@@ -175,6 +184,13 @@ check --local-pairing-endpoint-check
 check --location-action-surface-check
 check --managed-agent-model-spawn-check
 check --managed-agent-page-zoom-check
+check --managed-codex-hooks-check
+check --managed-codex-launch-check
+check --managed-lead-plan-check
+check --managed-mode-hooks-check
+check --managed-mode-launch-check
+check --managed-mode-persistence-check
+check --managed-setting-check
 check --multi-zone-render-check
 check --nav-mode-check
 check --nav-overlay-visible-check
@@ -233,6 +249,7 @@ check --settings-search-check
 check --settle-closes-tile-check
 check --shell-open-as-agent-check
 check --shell-tool-row-check
+check --sidebar-agent-status-line-check
 check --sidebar-bulk-hide-check
 check --sidebar-hidden-footer-check
 check --sidebar-hide-any-row-check
@@ -321,6 +338,7 @@ check --workspace-api-open-check
 check --workspace-api-pi-bridge-check
 check --workspace-boot-persistence-check
 check --workspace-chrome-polish-check
+check --workspace-codex-hook-check
 check --workspace-delete-failure-check
 check --workspace-filter-sheet-check
 check --workspace-hook-bridge-check
@@ -329,6 +347,7 @@ check --workspace-invariants-check
 check --workspace-lifecycle-check
 check --workspace-management-polish-check
 check --workspace-mcp-check
+check --workspace-mcp-disconnect-check
 check --workspace-mcp-host-check
 check --workspace-profile-check
 check --workspace-restart-fault-check
@@ -471,6 +490,7 @@ leg run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 leg run_app_check .build/debug/Array --canvas-zoom-momentum-check
 leg run_app_check .build/debug/Array --child-crash-isolation-check
 leg run_app_check .build/debug/Array --choice-geometry-check
+leg run_app_check .build/debug/Array --claude-adopted-turn-check
 leg run_app_check .build/debug/Array --cli-update-settings-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
 leg run_app_check .build/debug/Array --companion-task-host-check
@@ -513,6 +533,13 @@ leg run_app_check .build/debug/Array --focus-mode-check
 leg run_app_check .build/debug/Array --focus-scope-dispatch-check
 leg run_app_check .build/debug/Array --fresh-install-check
 leg run_app_check .build/debug/Array --gesture-telemetry-check
+leg run_app_check .build/debug/Array --helper-command-evidence-check
+leg run_app_check .build/debug/Array --helper-retry-check
+leg run_app_check .build/debug/Array --helper-tile-auto-fold-check
+leg run_app_check .build/debug/Array --helper-tile-cap-check
+leg run_app_check .build/debug/Array --helper-tile-lifecycle-check
+leg run_app_check .build/debug/Array --helper-watchdog-check
+leg run_app_check .build/debug/Array --helper-worktree-check
 leg run_app_check .build/debug/Array --hide-external-rows-check
 leg run_app_check .build/debug/Array --inbox-parent-fold-check
 leg run_app_check .build/debug/Array --inbox-reveal-project-check
@@ -531,6 +558,13 @@ leg run_app_check .build/debug/Array --leader-zone-jump-check
 leg run_app_check .build/debug/Array --location-action-surface-check
 leg run_app_check .build/debug/Array --managed-agent-model-spawn-check
 leg run_app_check .build/debug/Array --managed-agent-page-zoom-check
+leg run_app_check .build/debug/Array --managed-codex-hooks-check
+leg run_app_check .build/debug/Array --managed-codex-launch-check
+leg run_app_check .build/debug/Array --managed-lead-plan-check
+leg run_app_check .build/debug/Array --managed-mode-hooks-check
+leg run_app_check .build/debug/Array --managed-mode-launch-check
+leg run_app_check .build/debug/Array --managed-mode-persistence-check
+leg run_app_check .build/debug/Array --managed-setting-check
 leg run_app_check .build/debug/Array --multi-zone-render-check
 leg run_app_check .build/debug/Array --nav-mode-check
 leg run_app_check .build/debug/Array --nav-overlay-visible-check
@@ -584,6 +618,7 @@ leg run_app_check .build/debug/Array --settings-search-check
 leg run_app_check .build/debug/Array --settle-closes-tile-check
 leg run_app_check .build/debug/Array --shell-open-as-agent-check
 leg run_app_check .build/debug/Array --shell-tool-row-check
+leg run_app_check .build/debug/Array --sidebar-agent-status-line-check
 leg run_app_check .build/debug/Array --sidebar-bulk-hide-check
 leg run_app_check .build/debug/Array --sidebar-hidden-footer-check
 leg run_app_check .build/debug/Array --sidebar-hide-any-row-check
@@ -667,6 +702,7 @@ leg run_app_check .build/debug/Array --workspace-api-open-check
 leg run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 leg run_app_check .build/debug/Array --workspace-boot-persistence-check
 leg run_app_check .build/debug/Array --workspace-chrome-polish-check
+leg run_app_check .build/debug/Array --workspace-codex-hook-check
 leg run_app_check .build/debug/Array --workspace-delete-failure-check
 leg run_app_check .build/debug/Array --workspace-filter-sheet-check
 leg run_app_check .build/debug/Array --workspace-hook-bridge-check
@@ -674,6 +710,7 @@ leg run_app_check .build/debug/Array --workspace-hook-pushback-check
 leg run_app_check .build/debug/Array --workspace-invariants-check
 leg run_app_check .build/debug/Array --workspace-lifecycle-check
 leg run_app_check .build/debug/Array --workspace-management-polish-check
+leg run_app_check .build/debug/Array --workspace-mcp-disconnect-check
 leg run_app_check .build/debug/Array --workspace-mcp-host-check
 leg run_app_check .build/debug/Array --workspace-profile-check
 leg run_app_check .build/debug/Array --workspace-restart-fault-check
@@ -739,6 +776,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --cli-install-owner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --cli-update-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-parity-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-runner-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --command-center-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --companion-agent-destination-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --companion-task-ledger-check
@@ -806,7 +844,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 22
-count ContinuumRevivedCoreChecks 196
+count ContinuumRevivedCoreChecks 197
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
