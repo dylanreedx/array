@@ -1594,6 +1594,12 @@ enum TileSurfaceResidencyChecks {
     static func checkThemeChangeGivesTheBodyBack() throws {
         let previous = AppTheme.current
         defer { AppThemeController.apply(previous) }
+        // Only the row-list renderer bakes a surface; the drawn default refuses
+        // pictures (`surfaceableBody` is nil), so pin the renderer that can.
+        let rendererKey = AgentTranscriptCanvasView.rendererEnvironmentKey
+        let previousRenderer = ProcessInfo.processInfo.environment[rendererKey]
+        defer { if let previousRenderer { setenv(rendererKey, previousRenderer, 1) } else { unsetenv(rendererKey) } }
+        setenv(rendererKey, "list", 1)
         AppThemeController.apply(.neutral)
         let world = World(tileCount: 4)
         defer { world.teardown() }
