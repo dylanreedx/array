@@ -43,13 +43,13 @@ public enum Collaboration {
         public let code: String
         public init(code: String) { self.code = code }
     }
-    public struct Scope: Codable, Sendable {
+    public struct Scope: Codable, Equatable, Sendable {
         public let area: SharedArea.ID<SharedArea.Area>
         public let epoch: Int64
         public let role: Role
         public init(area: SharedArea.ID<SharedArea.Area>, epoch: Int64, role: Role) { self.area = area; self.epoch = epoch; self.role = role }
     }
-    public struct State: Codable, Sendable {
+    public struct State: Codable, Equatable, Sendable {
         public let scope: Scope
         public let document: SharedArea.Document
         public init(scope: Scope, document: SharedArea.Document) { self.scope = scope; self.document = document }
