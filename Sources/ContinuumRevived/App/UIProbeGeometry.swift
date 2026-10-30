@@ -905,12 +905,14 @@ enum UIProbeGeometry {
         contentView.addSubview(row)
         var refreshRequests = 0
         row.onAccountCardShown = { refreshRequests += 1 }
+        row.prefersReducedMotion = { false }
         let elements: [AgentStatusElement] = [.location, .activity, .contextMeter, .quotaFiveHour, .quotaSevenDay]
         row.apply(presentation(quota(0.16, 0.07), elements: elements))
         row.layoutSubtreeIfNeeded()
 
         row.qaHoverAccountPills()
         guard let card = row.qaAccountCard else { throw fail("accountUsageCard: hovering the account pills must open the card") }
+        let accountIn = motion(card, HoverCardMotion.presentKey)
         try require(card.superview === contentView,
                     "the card must live in the window's content view, not inside the tile")
         try require(refreshRequests == 1, "opening the card must ask for a fresh reading once, asked \(refreshRequests)")
@@ -950,10 +952,83 @@ enum UIProbeGeometry {
         // Turning the account elements off takes the card with them.
         row.apply(presentation(quota(0.16, 0.07), elements: [.location, .activity, .contextMeter]))
         try require(row.qaAccountCard == nil, "an account the row no longer shows must close its card")
+        let accountOut = motion(row.qaAccountCardFading, HoverCardMotion.dismissKey)
         row.qaHoverAccountPills()
         try require(row.qaAccountCard == nil && refreshRequests == 1,
                     "with no account shown, hovering opens nothing and asks for nothing")
+
+        // THE SIDEBAR CARD'S MOTION. The card used to appear and vanish with no
+        // animation; it must fade and pop in, and fade out, exactly as the
+        // sidebar row card does. Both driven through their real hover paths.
+        var windows: [NSWindow] = []
+        defer { windows.forEach { $0.orderOut(nil) } }
+        func sidebar(reducedMotion: Bool) throws -> AgentInboxView {
+            let inbox = InboxParentFoldChecks.makeInbox(
+                InboxParentFoldChecks.rows(), appearance: .darkAqua, windows: &windows)
+            inbox.prefersReducedMotion = { reducedMotion }
+            inbox.hoverCardScheduler = { _, work in work(); return {} }
+            try require(inbox.hoverRowForQA(id: InboxParentFoldChecks.loneRoot) && inbox.isHoverCardVisibleForQA,
+                        "the sidebar hover card did not open")
+            return inbox
+        }
+        let inbox = try sidebar(reducedMotion: false)
+        let sidebarCard = inbox.hoverCardViewForQA
+        let sidebarIn = motion(sidebarCard, HoverCardMotion.presentKey)
+        inbox.hoverRowForQA(id: nil)
+        let sidebarOut = motion(sidebarCard, HoverCardMotion.dismissKey)
+        try require(sidebarIn != nil && accountIn == sidebarIn,
+                    "the card must open with the sidebar card's fade and pop, got \(String(describing: accountIn)) vs \(String(describing: sidebarIn))")
+        try require(sidebarOut != nil && accountOut == sidebarOut,
+                    "the card must leave with the sidebar card's fade, got \(String(describing: accountOut)) vs \(String(describing: sidebarOut))")
+
+        // Reduce Motion: both cards appear and leave at once, with no animation.
+        let still = try sidebar(reducedMotion: true)
+        let stillSidebarIn = motion(still.hoverCardViewForQA, HoverCardMotion.presentKey)
+        still.hoverRowForQA(id: nil)
+        let stillSidebarGone = still.hoverCardViewForQA == nil
+        let stillRow = AgentCompactStatusRowView(
+            frame: NSRect(x: 0, y: 24, width: 900, height: AgentCompactStatusRowView.preferredHeight),
+            configuration: AgentCompactStatusRowConfiguration(reducedMotion: true, deterministicSnapshotPhase: 0.25),
+            thinkingIndicatorFactory: { CompactStatusProbeThinkingIndicatorView() })
+        contentView.addSubview(stillRow)
+        stillRow.prefersReducedMotion = { true }
+        stillRow.apply(presentation(quota(0.16, 0.07), elements: elements))
+        stillRow.layoutSubtreeIfNeeded()
+        stillRow.qaHoverAccountPills()
+        let stillAccountIn = motion(stillRow.qaAccountCard, HoverCardMotion.presentKey)
+        let stillAccountOpened = stillRow.qaAccountCard != nil
+        stillRow.dismissAccountCard()
+        try require(stillSidebarIn == nil && stillSidebarGone,
+                    "with Reduce Motion the sidebar card must open and close without animating")
+        try require(stillAccountOpened && stillAccountIn == nil
+                        && stillRow.qaAccountCard == nil && stillRow.qaAccountCardFading == nil,
+                    "with Reduce Motion the account card must open and close at once, as the sidebar card does; opened \(stillAccountOpened) animation \(String(describing: stillAccountIn)) fading \(stillRow.qaAccountCardFading != nil)")
         return assertions
+    }
+
+    /// A hover card's running animation under `key`, as comparable text: kind,
+    /// duration, curve, and each property's from and to.
+    private static func motion(_ view: NSView?, _ key: String) -> String? {
+        guard let animation = view?.layer?.animation(forKey: key) else { return nil }
+        func describe(_ animation: CAAnimation) -> String {
+            var curve: [Float] = []
+            if let timing = animation.timingFunction {
+                for index in 0..<4 {
+                    var point: [Float] = [0, 0]
+                    timing.getControlPoint(at: index, values: &point)
+                    curve += point
+                }
+            }
+            let head = "\(type(of: animation)) \(animation.duration)s \(curve)"
+            if let group = animation as? CAAnimationGroup {
+                return head + " [" + (group.animations ?? []).map(describe).joined(separator: ", ") + "]"
+            }
+            if let basic = animation as? CABasicAnimation {
+                return head + " \(basic.keyPath ?? "?") \(String(describing: basic.fromValue)) -> \(String(describing: basic.toValue))"
+            }
+            return head
+        }
+        return describe(animation)
     }
 
     /// Every string a text field under `view` is drawing right now.

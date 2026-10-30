@@ -224,26 +224,81 @@ final class InboxHoverCardView: NSView, TokenThemed {
     var qaBrandMarkTintForQA: NSColor? {
         lineRows.first(where: \.isBrandMark)?.icon.contentTintColor
     }
+}
 
-    /// The same scale/fade entrance as T3's tooltip primitive. This is a
-    /// presentation-only Core Animation group: the model layer is already in its
-    /// final state, so reuse can swap cards instantly during the 400ms grace run.
-    func animatePresentation(duration: TimeInterval) {
-        guard let layer else { return }
-        layer.removeAnimation(forKey: "inbox-hover-card-present")
+/// How a hover card arrives and leaves: the sidebar row card's fade and small
+/// pop, and its fade out. Each presenter owns one; the account usage card
+/// runs this same code (.plans/101), so the two cards cannot drift apart.
+///
+/// The entrance is the same scale/fade as T3's tooltip primitive. It is a
+/// presentation-only Core Animation group: the model layer is already in its
+/// final state, so reuse can swap cards instantly during the 400ms grace run.
+@MainActor
+final class HoverCardMotion {
+    static let presentDuration: TimeInterval = AgentInboxView.crossfadeDuration
+    static let presentScale: CGFloat = 0.98
+    /// The card leaves over this long instead of vanishing mid-read.
+    static let dismissDuration: TimeInterval = 0.12
+    static let presentKey = "hover-card-present"
+    static let dismissKey = "hover-card-dismiss"
+
+    private var removal: DispatchWorkItem?
+    /// On screen but already leaving.
+    var isDismissing: Bool { removal != nil }
+
+    /// Puts `card` in `container`. A card still fading out is taken back rather
+    /// than stacked on; one already showing stays as it is.
+    func present(_ card: NSView, in container: NSView, reducedMotion: Bool) {
+        let wasFading = removal != nil
+        removal?.cancel()
+        removal = nil
+        if wasFading, card.superview != nil {
+            card.alphaValue = 1
+            card.layer?.removeAnimation(forKey: Self.dismissKey)
+        }
+        guard card.superview !== container else { return }
+        card.removeFromSuperview()
+        container.addSubview(card)
+        guard !reducedMotion, let layer = card.layer else { return }
+        layer.removeAnimation(forKey: Self.presentKey)
 
         let opacity = CABasicAnimation(keyPath: "opacity")
         opacity.fromValue = 0
         opacity.toValue = 1
 
         let scale = CABasicAnimation(keyPath: "transform.scale")
-        scale.fromValue = 0.98
+        scale.fromValue = Self.presentScale
         scale.toValue = 1
 
         let group = CAAnimationGroup()
         group.animations = [opacity, scale]
-        group.duration = duration
+        group.duration = Self.presentDuration
         group.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        layer.add(group, forKey: "inbox-hover-card-present")
+        layer.add(group, forKey: Self.presentKey)
+    }
+
+    /// Fades `card` out and removes it; with Reduce Motion, or off-window,
+    /// removes it at once.
+    func dismiss(_ card: NSView, reducedMotion: Bool) {
+        guard card.superview != nil, removal == nil else { return }
+        guard !reducedMotion, card.window != nil, let layer = card.layer else {
+            card.removeFromSuperview()
+            return
+        }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = layer.presentation()?.opacity ?? 1
+        fade.toValue = 0
+        fade.duration = Self.dismissDuration
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        card.alphaValue = 0
+        layer.add(fade, forKey: Self.dismissKey)
+        let work = DispatchWorkItem { [weak self, weak card] in
+            guard let self, let card, self.removal != nil else { return }
+            self.removal = nil
+            card.removeFromSuperview()
+            card.alphaValue = 1
+        }
+        removal = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.dismissDuration, execute: work)
     }
 }

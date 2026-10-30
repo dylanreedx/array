@@ -80,6 +80,12 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     /// .plans/101 — hovering the account group opens `accountCard`, the only
     /// place the row's account (plan, email) is drawn.
     private var accountCard: AgentAccountUsageCardView?
+    /// The sidebar row card's fade and pop, in and out.
+    private let accountCardMotion = HoverCardMotion()
+    /// Reduce Motion, read the way the sidebar reads it; a check overrides it.
+    var prefersReducedMotion: () -> Bool = {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
     private var accountCardDwell: DispatchWorkItem?
     private var accountHoverArea: NSTrackingArea?
     /// Called when the card opens, so the host can ask for a fresh reading.
@@ -682,10 +688,6 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         let card = accountCard ?? AgentAccountUsageCardView(frame: .zero)
         accountCard = card
         card.apply(account.card)
-        if card.superview !== contentView {
-            card.removeFromSuperview()
-            contentView.addSubview(card)
-        }
         card.layoutSubtreeIfNeeded()
         let size = card.intrinsicContentSize
         let anchor = quotaGroup.convert(quotaGroup.bounds, to: contentView)
@@ -700,19 +702,28 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
             if origin.y + size.height > contentView.bounds.maxY - gap { origin.y = anchor.minY - gap - size.height }
         }
         card.frame = NSRect(origin: origin, size: size)
+        accountCardMotion.present(card, in: contentView, reducedMotion: prefersReducedMotion())
         onAccountCardShown?()
     }
 
     func dismissAccountCard() {
         accountCardDwell?.cancel()
         accountCardDwell = nil
-        accountCard?.removeFromSuperview()
+        guard let card = accountCard else { return }
+        accountCardMotion.dismiss(card, reducedMotion: prefersReducedMotion())
     }
 
     /// The pointer path a hover takes, minus the dwell: a witness drives the
     /// same handler the tracking area calls.
     func qaHoverAccountPills() { accountPillsPointerEntered(dwell: 0) }
-    var qaAccountCard: AgentAccountUsageCardView? { accountCard?.superview == nil ? nil : accountCard }
+    /// Open and not on its way out.
+    var qaAccountCard: AgentAccountUsageCardView? {
+        accountCard?.superview == nil || accountCardMotion.isDismissing ? nil : accountCard
+    }
+    /// Still on screen, fading out.
+    var qaAccountCardFading: AgentAccountUsageCardView? {
+        accountCard?.superview != nil && accountCardMotion.isDismissing ? accountCard : nil
+    }
     var qaAccountPresentation: AgentAccountUsagePresentation? { presentation?.account }
     var qaAccountPillsFrame: NSRect? { quotaGroup.isHidden ? nil : frame(of: quotaGroup) }
     /// What the row's tooltip says at a point in row coordinates.

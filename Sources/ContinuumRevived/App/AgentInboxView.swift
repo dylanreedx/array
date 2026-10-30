@@ -5704,49 +5704,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         origin.y = max(Self.hoverCardGap, min(origin.y, contentView.bounds.maxY - size.height))
         card.frame = NSRect(origin: origin, size: size)
 
-        // A card still fading out is taken back rather than stacked on.
-        let wasFading = hoverCardRemoval != nil
-        hoverCardRemoval?.cancel()
-        hoverCardRemoval = nil
-        if wasFading, card.superview != nil {
-            card.alphaValue = 1
-            card.layer?.removeAnimation(forKey: Self.hoverCardFadeKey)
-        }
-        guard card.superview == nil else { return }
-        contentView.addSubview(card)
-        guard !prefersReducedMotion() else { return }
-        card.animatePresentation(duration: Self.crossfadeDuration)
+        hoverCardMotion.present(card, in: contentView, reducedMotion: prefersReducedMotion())
     }
 
     /// The card leaves over this long instead of vanishing mid-read.
-    static let hoverCardFadeOut: TimeInterval = 0.12
-    private static let hoverCardFadeKey = "inbox-hover-card-dismiss"
-    private var hoverCardRemoval: DispatchWorkItem?
+    static let hoverCardFadeOut = HoverCardMotion.dismissDuration
+    private let hoverCardMotion = HoverCardMotion()
 
     private func dismissHoverCard() {
         hoverCardCancel?()
         hoverCardCancel = nil
-        guard let card = hoverCard, card.superview != nil, hoverCardRemoval == nil else { return }
+        guard let card = hoverCard, card.superview != nil, !hoverCardMotion.isDismissing else { return }
         hoverCardClosedAt = clock()
-        guard !prefersReducedMotion(), window != nil, let layer = card.layer else {
-            card.removeFromSuperview()
-            return
-        }
-        let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = layer.presentation()?.opacity ?? 1
-        fade.toValue = 0
-        fade.duration = Self.hoverCardFadeOut
-        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        card.alphaValue = 0
-        layer.add(fade, forKey: Self.hoverCardFadeKey)
-        let removal = DispatchWorkItem { [weak self, weak card] in
-            guard let self, let card, self.hoverCardRemoval != nil else { return }
-            self.hoverCardRemoval = nil
-            card.removeFromSuperview()
-            card.alphaValue = 1
-        }
-        hoverCardRemoval = removal
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hoverCardFadeOut, execute: removal)
+        hoverCardMotion.dismiss(card, reducedMotion: prefersReducedMotion())
     }
 
     /// The hovered row's rect, in the window content view's coordinates.
@@ -5834,13 +5804,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     /// Open and not on its way out: a card fading after its hover ended is
     /// already dismissed.
-    var isHoverCardVisibleForQA: Bool { hoverCard?.superview != nil && hoverCardRemoval == nil }
+    var isHoverCardVisibleForQA: Bool { hoverCard?.superview != nil && !hoverCardMotion.isDismissing }
     /// Still on screen, fading: the half of a dismissal a still image misses.
     var isHoverCardFadingOutForQA: Bool {
-        hoverCard?.superview != nil && hoverCardRemoval != nil
-            && hoverCard?.layer?.animation(forKey: Self.hoverCardFadeKey) != nil
+        hoverCard?.superview != nil && hoverCardMotion.isDismissing
+            && hoverCard?.layer?.animation(forKey: HoverCardMotion.dismissKey) != nil
     }
     var hoverCardFrameForQA: NSRect? { hoverCard?.superview == nil ? nil : hoverCard?.frame }
+    /// The card itself, for a witness comparing its motion with another card's.
+    var hoverCardViewForQA: NSView? { hoverCard?.superview == nil ? nil : hoverCard }
     var hoverCardLinesForQA: [String] { hoverCard?.qaLinesForQA ?? [] }
     var hoverCardTruncatedLinesForQA: [String] { hoverCard?.qaTruncatedLinesForQA ?? [] }
     var hoverCardBrandMarksAreTemplatesForQA: Bool {
