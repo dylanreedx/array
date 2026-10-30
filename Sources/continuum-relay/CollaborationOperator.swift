@@ -63,3 +63,20 @@ func runCollaborationOperatorCommand(_ arguments: [String]) async -> Int32? {
         return 1
     }
 }
+
+/// Optional retention overrides; the built-in defaults apply when unset.
+/// RELAY_COLLABORATION_OPERATION_TAIL, RELAY_COLLABORATION_OPERATION_AGE_SECONDS
+/// and RELAY_COLLABORATION_COMPACTION_BATCH take non-negative integers. A
+/// malformed value fails startup rather than silently keeping the defaults.
+func collaborationRetentionFromEnvironment() throws -> CollaborationRetention {
+    let environment = ProcessInfo.processInfo.environment, defaults = CollaborationRetention()
+    func value(_ name: String, _ fallback: Int) throws -> Int {
+        guard let raw = environment[name] else { return fallback }
+        guard let parsed = Int(raw), parsed >= 0 else { throw CollaborationStoreError.invalidRequest }
+        return parsed
+    }
+    return .init(operationTail: try value("RELAY_COLLABORATION_OPERATION_TAIL", defaults.operationTail),
+                 operationAge: TimeInterval(try value("RELAY_COLLABORATION_OPERATION_AGE_SECONDS", Int(defaults.operationAge))),
+                 compactionBatch: try value("RELAY_COLLABORATION_COMPACTION_BATCH", defaults.compactionBatch),
+                 dispatchAuthorityWindow: defaults.dispatchAuthorityWindow)
+}

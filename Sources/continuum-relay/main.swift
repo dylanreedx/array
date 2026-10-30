@@ -89,7 +89,7 @@ do {
             throw CollaborationStoreError.invalidRequest
         }
         try FileManager.default.createDirectory(at: collaborationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        collaboration = try CollaborationStore(path: collaborationURL.path, masterKey: collaborationKey)
+        collaboration = try CollaborationStore(path: collaborationURL.path, masterKey: collaborationKey, retention: try collaborationRetentionFromEnvironment())
     } else if collaborationPath != nil || collaborationSecret != nil {
         throw CollaborationStoreError.invalidRequest
     } else { collaboration = nil }
