@@ -1,0 +1,9 @@
+== h1-teammate-prompt-loses-context
+RED:   FAIL: handoff seam: timeout: claude: the new controller's prompt never reached the runner: ["Owner before handoff.", "Teammate prompt after handoff."]
+GREEN: ContinuumRevivedCollaborationNativeChecks passed
+== h2-former-owner-keeps-input
+RED:   FAIL: handoff seam: claude: the former owner's input must be refused before any write, got accepted / 1 writes
+GREEN: ContinuumRevivedCollaborationNativeChecks passed
+== h3-refused-send-left-unresolved
+RED:   FAIL: handoff seam: claude: a send without control must be refused, not left unresolved — Delivery is unresolved. Check this saved request again. Current membership, source-host ownership or control does not permit this action.
+GREEN: ContinuumRevivedCollaborationNativeChecks passed

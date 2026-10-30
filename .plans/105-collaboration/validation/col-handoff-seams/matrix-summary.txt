@@ -1,0 +1,25 @@
+app-build lock acquired after 34s
+==> scripts/check-matrix-inventory.sh
+==> swift build --disable-sandbox --skip-update --product Array
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationServiceChecks
+==> swift build --disable-sandbox --skip-update --product continuum-relay
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
+==> swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+==> .build/debug/ContinuumRevivedCollaborationChecks
+==> .build/debug/ContinuumRevivedCollaborationServiceChecks
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.UXUJMx CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.oieczY .build/debug/Array --collaboration-native-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+PASS handoff seam: claude — the new controller's prompt reaches the runner once, the former owner's input is refused while handed over, and a prompt the reclaim overtook reads refused with no write
+PASS handoff seam: codex — the new controller's prompt reaches the runner once, the former owner's input is refused while handed over, and a prompt the reclaim overtook reads refused with no write
+PASS handoff seam: pi — the new controller's prompt reaches the runner once, the former owner's input is refused while handed over, and a prompt the reclaim overtook reads refused with no write
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.Dh4zgY CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.hZJvWx .build/debug/Array --ui-probe-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+==> CONTINUUM_PROJECT_ROOT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-project.1evAnl CONTINUUM_APP_SUPPORT=/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T//continuum-matrix-appsupport.UDkWl8 .build/debug/Array --menu-contract-check -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+==> .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
+==> python3 scripts/check-collaboration-pair.py
+==> swift run --skip-build ContinuumRevivedRelayCoreChecks
+==> swift run --skip-build ContinuumRevivedRelayIntegrationChecks
+==> bash scripts/check-relay-linux.sh
+---- Collaboration matrix (targeted): 11 leg(s) run ----
+Collaboration matrix (targeted) passed.
+EXIT 0
