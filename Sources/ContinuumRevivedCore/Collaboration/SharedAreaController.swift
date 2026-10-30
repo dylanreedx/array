@@ -247,10 +247,10 @@ public final class SharedAreaController {
                 // Retryable service faults still allow an explicit reopen;
                 // malformed authority/document data never enables mutations.
                 if let client = error as? CollaborationClientError, case let .server(code, _) = client, code >= 500 {
-                    status = .reconnecting; changed()
+                    scope = nil; status = .reconnecting; changed()
                 } else { failClosed(.incompatibleState, generation: current) }
             } else {
-                status = .reconnecting; changed()
+                scope = nil; status = .reconnecting; changed()
             }
         }
     }
@@ -482,7 +482,7 @@ public final class SharedAreaController {
         case .reconnecting:
             // The last accepted content stays visible, but queued execution and
             // mutations are never inferred from a cached or disconnected Scope.
-            status = .reconnecting; changed()
+            scope = nil; status = .reconnecting; changed()
         case .unavailable:
             failClosed(.accessDenied, generation: current)
         case .stopped:
