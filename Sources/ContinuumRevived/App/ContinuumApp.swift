@@ -1679,6 +1679,12 @@ enum ContinuumApp {
                         delegate.mountWorkspaceSceneAtBoot(sharedAreaController: controller, person: person, in: host)
                     }, supervisor: supervisor)
                     guard executorConstructions == 0 else { throw SelfCheckError("host liveness stage constructed a local executor") }
+                    print("STAGE collaboration native: keyboard parity and Reduce Motion")
+                    try await CollaborationAccessibilityChecks.run(delegate: delegate)
+                    print("STAGE collaboration native: presence, follow and remote work budgets")
+                    try await CollaborationBudgetChecks.run(delegate: delegate)
+                    print("STAGE collaboration native: collaboration appearance census")
+                    try CollaborationAppearanceSurfaces.runCensus()
                     print("ContinuumRevivedCollaborationNativeChecks passed")
                     Foundation.exit(0)
                 } catch {

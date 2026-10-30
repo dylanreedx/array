@@ -158,6 +158,9 @@ enum SharedAreaPresenceChecks {
         let leader = delegate.mountWorkspaceSceneAtBoot(sharedAreaController: leaderModel, person: leaderID.person, in: leaderHost)
         let follower = delegate.mountWorkspaceSceneAtBoot(sharedAreaController: followerModel, person: followerID.person, in: followerHost)
         leaderHost.layoutSubtreeIfNeeded(); followerHost.layoutSubtreeIfNeeded()
+        // This witness asserts exact cameras right after each follow step, so it
+        // pins the instant path; CollaborationAccessibilityChecks covers the glide.
+        leader.reduceMotion = { true }; follower.reduceMotion = { true }
         await leaderModel.open(); await followerModel.open()
         try leader.setCamera(.init(x: -60, y: -40, zoom: 1.25))
         try follower.setCamera(.init(x: -300, y: -200, zoom: 0.5))

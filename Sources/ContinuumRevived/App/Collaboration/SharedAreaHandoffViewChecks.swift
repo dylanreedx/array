@@ -25,6 +25,28 @@ enum SharedAreaHandoffViewChecks {
         for _ in 0..<200 { if await check() { return }; try await Task.sleep(for: .milliseconds(10)) }
         throw Failure(message: "timeout \(label)")
     }
+    /// The production handoff window over this file's scripted authority, for
+    /// keyboard and appearance witnesses. `root` is the caller's to remove.
+    static func makeWindowFixture(root: URL) async throws -> SharedAreaHandoffWindowController {
+        let identity = Collaboration.Identity(person: .init(), device: UUID())
+        let authority = try Authority(identity: identity)
+        let model = try SharedAgentHandoffController(identity: identity, transport: authority, directory: root)
+        await model.refresh(object: authority.object)
+        return SharedAreaHandoffWindowController(model: model, object: authority.object)
+    }
+    /// The handoff view before its first authority refresh, for the appearance
+    /// census. The returned host removes its store when it is released.
+    static func makeAppearanceFixture() throws -> NSView {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-handoff-appearance-\(UUID())")
+        let identity = Collaboration.Identity(person: .init(), device: UUID())
+        let authority = try Authority(identity: identity)
+        let model = try SharedAgentHandoffController(identity: identity, transport: authority, directory: root)
+        let host = OwnedRootHost(root: root, size: .init(width: 780, height: 820))
+        let view = SharedAreaHandoffView(model: model, object: authority.object)
+        view.frame = host.bounds; view.autoresizingMask = [.width, .height]
+        host.addSubview(view); host.layoutSubtreeIfNeeded()
+        return host
+    }
     static func run() async throws {
         guard let support = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] else { throw Failure(message: "isolated support required") }
         let root = URL(fileURLWithPath: support).appendingPathComponent("handoff-ui-\(UUID())")
