@@ -104,6 +104,9 @@ extension CollaborationStore {
             }
             let next = events.last?.revision ?? request.after
             guard next == through || !events.isEmpty else { throw CollaborationStoreError.invalidCursor }
+            // Read before the presence map: Linux Swift 6.1 treats `db` as sent into
+            // that closure and refuses any later use of it.
+            let hosts = try hostLiveness(db, area: area)
             let presence = try presenceEntries.filter { $0.key.area == area }.values.compactMap(\.value)
                 .sorted { $0.identity.device.uuidString < $1.identity.device.uuidString }
                 .map { value in
@@ -111,7 +114,6 @@ extension CollaborationStore {
                         expiresAt: value.expiresAt, label: value.label,
                         usage: try usageForPresence(db, area: area, identity: value.identity))
                 }
-            let hosts = try hostLiveness(db, area: area)
             let version = presenceVersions[area] ?? UUID()
             presenceVersions[area] = version
             return .init(scope: scope, after: request.after, through: through, events: events, nextCursor: next,
