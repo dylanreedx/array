@@ -706,6 +706,7 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --helper-tile-lifecycle-check
   run_app_check .build/debug/Array --helper-tile-cap-check
   run_app_check .build/debug/Array --helper-tile-auto-fold-check
+  run_app_check .build/debug/Array --workspace-api-cross-harness-delegation-check
   matrix_report 'Managed mode matrix (targeted)'
   exit $?
 fi

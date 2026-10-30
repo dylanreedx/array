@@ -270,79 +270,108 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
 
     if crossHarness {
         supervisor.workspaceToolsPermission = { .free }
-        // Managed mode, the app-wide default, gives a lead tile-less helpers by
-        // design. This leg witnesses Free-mode cross-harness delegation (a child
-        // with its own tile), so it pins Free through a private suite, never
-        // `.standard`. One fixed suite, so runs reuse a single file.
-        let freeSuite = "array.qa.cross-harness-free"
-        let freePolicy = UserDefaults(suiteName: freeSuite)!
-        freePolicy.removePersistentDomain(forName: freeSuite)
-        freePolicy.set(false, forKey: AgentManagedModeConfig.enabledKey)
-        supervisor.configureManagedMode(defaults: freePolicy)
+        // Free delegation attaches immediately; Managed delegation stays in the
+        // sidebar until popped out. Exercise the same cross-harness contract in
+        // both modes. Ignore ambient argument/global defaults as well as the
+        // user's app preferences, and remove the private suite after the run.
+        let modeSuite = "array.qa.cross-harness-mode"
+        let modePolicy = QAIsolatedDefaults(isolatedSuiteName: modeSuite)!
+        modePolicy.removePersistentDomain(forName: modeSuite)
+        defer { modePolicy.removePersistentDomain(forName: modeSuite) }
         AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
         AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.codex)
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
         api.approvalHandler = { _ in .allowForSession }
-        for (source, target) in [(AgentHarness.claudeCode, AgentHarness.codex), (.claudeCode, .pi), (.codex, .claudeCode), (.claudeCode, .claudeCode)] {
-            let model = AgentModelCatalog.shared.snapshot(for: source).seedModel!
-            let parent = supervisor.spawn(role: nil, prompt: nil, cwd: pbRoot, harness: source, model: model, thinking: "low", projectId: projectPb, projectRoot: pbRoot)
-            _ = supervisor.setWorkspaceToolsEnabled(agentID: parent, true)
-            let handle = "cross-\(source.rawValue)-\(target.rawValue)".replacingOccurrences(of: " ", with: "-")
-            var payload: [String: Any] = ["task": "cross harness task", "idempotencyKey": handle, "presentation": ["camera": "preserve"]]
-            if target != source { payload["harness"] = target.rawValue }
-            let expectedModel = source == .codex ? AgentCatalogQAFixture.claude.models.last! : (target == source ? model : AgentModelCatalog.shared.snapshot(for: target).seedModel!)
-            if source == .codex { payload["model"] = expectedModel }
-            let created = try result(api.dispatch(agentId: parent, requestId: handle, op: "agent.delegate", payload: payload), "cross harness delegation")
-            let replay = try result(api.dispatch(agentId: parent, requestId: handle + "-retry", op: "agent.delegate", payload: payload), "cross retry")
-            try expect(replay["childAgentId"] == created["childAgentId"], "cross retry creates no duplicate")
-            let childId = AgentID(rawValue: UUID(uuidString: created["childAgentId"]!.string!)!)
-            let child = supervisor.records[childId]!
-            try expect(child.harness == target && child.model == expectedModel, "child owns selected harness and catalogue model")
-            try expect(child.parentAgentID == parent && child.workspaceToolsEnabled && child.tileId != nil, "cross child retains parent, tools and visible tile")
-            try expect(created["provider"]?.string == target.rawValue, "result reports actual child provider")
-            delegate.wireManagedAgentTile(child.tileId!, agentID: childId)
-            guard let childView = canvas.tileView(for: child.tileId!) as? ManagedAgentTileNSView,
-                  let composer = childView.qaComposerForChecks else { throw Failure(message: "missing child composer") }
-            await composer.qaAwaitDraftRestore()
-            let reference = AgentPromptReference(agentID: parent, displayName: source.rawValue)
-            try expect(childView.handleAgentReference(reference, commit: true), "cross child accepts parent reference")
-            await childView.qaAwaitReferenceDrop()
-            try expect(composer.draft.agentReferences.contains(where: { $0.agentID == parent }), "cross reference reaches child's draft")
-            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
-                var windows: [NSWindow] = []
-                let inbox = InboxParentFoldChecks.makeInbox([
-                    AgentInboxRow(id: parent.rawValue, title: source.rawValue, state: .ready, createdAt: InboxParentFoldChecks.epoch),
-                    AgentInboxRow(id: childId.rawValue, title: target.rawValue, state: .ready, depth: 1, createdAt: InboxParentFoldChecks.epoch, parentId: child.parentAgentID?.rawValue)
-                ], appearance: appearance, windows: &windows)
-                try expect(inbox.collapsedParentsForQA.contains(parent.rawValue) && !inbox.rowIdsForQA.contains(childId.rawValue), "cross child folds under actual parent in \(appearance.rawValue)")
-                windows.forEach { $0.orderOut(nil) }
-            }
-            let stream = supervisor.events(for: parent)
-            var chipMatches: Bool?
-            let chip = Task { @MainActor in
-                for await event in stream {
-                    if case let .childAgentSpawned(_, id, parentID, _, sourceID, provider, _) = event, id == childId.rawValue {
-                        chipMatches = parentID == parent.rawValue && sourceID == handle && provider == target.rawValue
-                        return
+        for managed in [false, true] {
+            modePolicy.set(managed, forKey: AgentManagedModeConfig.enabledKey)
+            supervisor.configureManagedMode(defaults: modePolicy)
+            for (source, target) in [(AgentHarness.claudeCode, AgentHarness.codex), (.claudeCode, .pi), (.codex, .claudeCode), (.claudeCode, .claudeCode)] {
+                let model = AgentModelCatalog.shared.snapshot(for: source).seedModel!
+                let parent = supervisor.spawn(role: nil, prompt: nil, cwd: pbRoot, harness: source, model: model, thinking: "low", projectId: projectPb, projectRoot: pbRoot)
+                try expect(supervisor.effectiveMode(for: parent) == (managed ? .managed : .free), "cross parent must use the selected app-wide policy")
+                _ = supervisor.setWorkspaceToolsEnabled(agentID: parent, true)
+                let spawner = try runtime.ensureSpawner(forProjectId: projectPb)
+                let scope = CreationScope(projectId: projectPb, projectRoot: pbRoot.path,
+                    homeRelativePath: nil, source: .zone, zoneId: zoneB)
+                guard case let .spawned(leadTile) = spawner.spawnManagedAgentForExistingAgent(parent, supervisor: supervisor, creationScope: scope) else {
+                    throw Failure(message: "cross lead must have a tile for helper pop-out")
+                }
+                supervisor.attach(agentID: parent, to: leadTile)
+                delegate.wireManagedAgentTile(leadTile, agentID: parent)
+                let handle = "cross-\(source.rawValue)-\(target.rawValue)".replacingOccurrences(of: " ", with: "-")
+                var payload: [String: Any] = ["task": "cross harness task", "idempotencyKey": handle, "presentation": ["camera": "preserve"]]
+                if target != source { payload["harness"] = target.rawValue }
+                let expectedModel = source == .codex ? AgentCatalogQAFixture.claude.models.last! : (target == source ? model : AgentModelCatalog.shared.snapshot(for: target).seedModel!)
+                if source == .codex { payload["model"] = expectedModel }
+                let tilesBefore = agentTileCount()
+                let created = try result(api.dispatch(agentId: parent, requestId: handle, op: "agent.delegate", payload: payload), "cross harness delegation")
+                let replay = try result(api.dispatch(agentId: parent, requestId: handle + "-retry", op: "agent.delegate", payload: payload), "cross retry")
+                try expect(replay["childAgentId"] == created["childAgentId"], "cross retry creates no duplicate")
+                let childId = AgentID(rawValue: UUID(uuidString: created["childAgentId"]!.string!)!)
+                var child = supervisor.records[childId]!
+                try expect(child.harness == target && child.model == expectedModel, "child owns selected harness and catalogue model")
+                try expect(child.mode == .free, "cross helper must remain able to edit in both lead modes")
+                if managed {
+                    try expect(child.tileId == nil && created["tileId"] == nil && agentTileCount() == tilesBefore,
+                               "managed cross helper must start without a tile")
+                    let tile = try supervisor.popOut(childId)
+                    child = supervisor.records[childId]!
+                    try expect(child.tileId == tile, "managed cross helper pop-out must attach its own tile")
+                }
+                try expect(child.parentAgentID == parent && child.workspaceToolsEnabled && child.tileId != nil, "cross child retains parent, tools and visible tile")
+                try expect(agentTileCount() == tilesBefore + 1, "cross delegation/pop-out must attach exactly one tile")
+                guard let frame = canvas.navigationTileSnapshot(for: child.tileId!)?.worldFrame else {
+                    throw Failure(message: "cross helper has no world frame")
+                }
+                let world = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+                let parentZoneWorld = try zoneWorldRect(zoneB)
+                try expect(canvas.zoneId(containing: child.tileId!) == zoneB && parentZoneWorld.contains(world),
+                           "cross helper's world frame must stay in its lead's zone")
+                try expect(created["provider"]?.string == target.rawValue, "result reports actual child provider")
+                delegate.wireManagedAgentTile(child.tileId!, agentID: childId)
+                guard let childView = canvas.tileView(for: child.tileId!) as? ManagedAgentTileNSView,
+                      let composer = childView.qaComposerForChecks else { throw Failure(message: "missing child composer") }
+                await composer.qaAwaitDraftRestore()
+                let reference = AgentPromptReference(agentID: parent, displayName: source.rawValue)
+                try expect(childView.handleAgentReference(reference, commit: true), "cross child accepts parent reference")
+                await childView.qaAwaitReferenceDrop()
+                try expect(composer.draft.agentReferences.contains(where: { $0.agentID == parent }), "cross reference reaches child's draft")
+                for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                    var windows: [NSWindow] = []
+                    let inbox = InboxParentFoldChecks.makeInbox([
+                        AgentInboxRow(id: parent.rawValue, title: source.rawValue, state: .ready, createdAt: InboxParentFoldChecks.epoch),
+                        AgentInboxRow(id: childId.rawValue, title: target.rawValue, state: .ready, depth: 1, createdAt: InboxParentFoldChecks.epoch, parentId: child.parentAgentID?.rawValue)
+                    ], appearance: appearance, windows: &windows)
+                    try expect(inbox.collapsedParentsForQA.contains(parent.rawValue) && !inbox.rowIdsForQA.contains(childId.rawValue), "cross child folds under actual parent in \(appearance.rawValue)")
+                    windows.forEach { $0.orderOut(nil) }
+                }
+                let stream = supervisor.events(for: parent)
+                var chipMatches: Bool?
+                let chip = Task { @MainActor in
+                    for await event in stream {
+                        if case let .childAgentSpawned(_, id, parentID, _, sourceID, provider, _) = event, id == childId.rawValue {
+                            chipMatches = parentID == parent.rawValue && sourceID == handle && provider == target.rawValue
+                            return
+                        }
                     }
                 }
+                _ = await waitUntil(timeout: 5, pollInterval: 0.02) { chipMatches != nil }
+                chip.cancel()
+                try expect(chipMatches == true, "parent transcript chip names child's actual provider and source")
+                let settled = await waitUntil(timeout: 5, pollInterval: 0.02) { !supervisor.isRunning(childId) }
+                try expect(settled && fixtureRunners[childId] != nil, "selected child runs and settles")
+                guard let helper = AppDelegate.workspaceMCPExecutablePath(), let config = delegate.workspaceMCPHost.configuration(for: parent, serverExecutable: helper) else { throw Failure(message: "missing MCP helper") }
+                let client = try WorkspaceMCPCheckClient(executable: helper, environment: config.environment)
+                defer { client.close() }
+                let waited = try await client.request("tools/call", ["name": "wait_agents", "arguments": ["handles": [handle], "timeoutSeconds": 5]])
+                let content = (waited["result"] as? [String: Any])?["structuredContent"] as? [String: Any]
+                let agents = (content?["result"] as? [String: Any])?["agents"] as? [[String: Any]]
+                try expect(agents?.first?["status"] as? String == "completed", "wait_agents collects cross child: \(waited)")
+                _ = try result(api.dispatch(agentId: parent, requestId: handle + "-message", op: "agent.message", payload: ["agentId": childId.rawValue.uuidString, "text": "follow up", "idempotencyKey": handle + "-message"]), "cross child message")
+                let delivered = await waitUntil(timeout: 5, pollInterval: 0.02) { fixtureRunners[childId]?.prompts.contains(where: { $0.contains("follow up") }) == true }
+                try expect(delivered, "cross child's runner receives the message")
+                _ = try failure(api.dispatch(agentId: parent, requestId: handle + "-bad", op: "agent.delegate", payload: ["task": "bad", "idempotencyKey": handle + "-bad", "model": "unknown/model"]), .unsupported, "unknown model")
             }
-            _ = await waitUntil(timeout: 5, pollInterval: 0.02) { chipMatches != nil }
-            chip.cancel()
-            try expect(chipMatches == true, "parent transcript chip names child's actual provider and source")
-            let settled = await waitUntil(timeout: 5, pollInterval: 0.02) { !supervisor.isRunning(childId) }
-            try expect(settled && fixtureRunners[childId] != nil, "selected child runs and settles")
-            guard let helper = AppDelegate.workspaceMCPExecutablePath(), let config = delegate.workspaceMCPHost.configuration(for: parent, serverExecutable: helper) else { throw Failure(message: "missing MCP helper") }
-            let client = try WorkspaceMCPCheckClient(executable: helper, environment: config.environment)
-            defer { client.close() }
-            let waited = try await client.request("tools/call", ["name": "wait_agents", "arguments": ["handles": [handle], "timeoutSeconds": 5]])
-            let content = (waited["result"] as? [String: Any])?["structuredContent"] as? [String: Any]
-            let agents = (content?["result"] as? [String: Any])?["agents"] as? [[String: Any]]
-            try expect(agents?.first?["status"] as? String == "completed", "wait_agents collects cross child: \(waited)")
-            _ = try result(api.dispatch(agentId: parent, requestId: handle + "-message", op: "agent.message", payload: ["agentId": childId.rawValue.uuidString, "text": "follow up", "idempotencyKey": handle + "-message"]), "cross child message")
-            let delivered = await waitUntil(timeout: 5, pollInterval: 0.02) { fixtureRunners[childId]?.prompts.contains(where: { $0.contains("follow up") }) == true }
-            try expect(delivered, "cross child's runner receives the message")
-            _ = try failure(api.dispatch(agentId: parent, requestId: handle + "-bad", op: "agent.delegate", payload: ["task": "bad", "idempotencyKey": handle + "-bad", "model": "unknown/model"]), .unsupported, "unknown model")
         }
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .codex, readiness: .loggedOut, models: []))
         _ = try failure(dispatch("agent.delegate", ["task": "unready", "idempotencyKey": "unready", "harness": "Codex"]), .unsupported, "signed out harness")
@@ -351,7 +380,7 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
         AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.codex)
         supervisor.qaDeliverAccountQuota(.init(harness: .codex, windows: [.init(kind: .fiveHour, utilization: 1, resetsAt: Date().addingTimeInterval(600))], observedAt: Date(), source: .unknown("fixture")))
         _ = try failure(dispatch("agent.delegate", ["task": "exhausted", "idempotencyKey": "exhausted", "harness": "Codex"]), .unsupported, "exhausted usage")
-        print("cross-harness delegation: Claude → Codex/Pi, Codex → Claude, inheritance, unknown model, signed out, MCP wait and message passed")
+        print("cross-harness delegation: Free and Managed Claude → Codex/Pi, Codex → Claude, immediate attachment/pop-out, inheritance, unknown model, signed out, MCP wait and message passed")
         return
     }
 
