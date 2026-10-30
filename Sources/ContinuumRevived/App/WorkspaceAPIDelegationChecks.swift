@@ -270,6 +270,15 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
 
     if crossHarness {
         supervisor.workspaceToolsPermission = { .free }
+        // Managed mode, the app-wide default, gives a lead tile-less helpers by
+        // design. This leg witnesses Free-mode cross-harness delegation (a child
+        // with its own tile), so it pins Free through a private suite, never
+        // `.standard`. One fixed suite, so runs reuse a single file.
+        let freeSuite = "array.qa.cross-harness-free"
+        let freePolicy = UserDefaults(suiteName: freeSuite)!
+        freePolicy.removePersistentDomain(forName: freeSuite)
+        freePolicy.set(false, forKey: AgentManagedModeConfig.enabledKey)
+        supervisor.configureManagedMode(defaults: freePolicy)
         AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
         AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.codex)
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
