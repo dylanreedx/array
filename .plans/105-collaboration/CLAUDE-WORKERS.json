@@ -1,0 +1,167 @@
+{
+  "date": "2026-10-30",
+  "requestedWorkers": 10,
+  "confirmedClaudeWorkers": 10,
+  "coordinator": "E284CDC7-A065-4B96-B0DD-5C79E302FC42",
+  "integrationLead": "411E45C2-B37D-46FA-A145-31703571FEA3",
+  "workers": [
+    {
+      "number": 1,
+      "cards": [
+        "COL-11",
+        "COL-18"
+      ],
+      "role": "Geometry and voluntary follow",
+      "agentId": "0B75131B-87E2-44E5-90AD-C7298F21796A",
+      "tileId": "988931D2-7492-417A-B02D-55123827959D",
+      "harness": "Claude Code",
+      "observedStatus": "working",
+      "observedAt": "2026-10-30T15:38:13Z",
+      "parentAgentId": "411E45C2-B37D-46FA-A145-31703571FEA3"
+    },
+    {
+      "number": 2,
+      "cards": [
+        "COL-12"
+      ],
+      "role": "Agreements and endorsements",
+      "agentId": "32E6F97B-2419-41CA-BFD7-72F9F0815ABF",
+      "tileId": "CCEA3466-1FAD-412B-98EC-F346FDBA6D12",
+      "harness": "Claude Code",
+      "observedStatus": "working",
+      "observedAt": "2026-10-30T15:39:31Z",
+      "parentAgentId": "411E45C2-B37D-46FA-A145-31703571FEA3"
+    },
+    {
+      "number": 3,
+      "cards": [
+        "COL-19"
+      ],
+      "role": "Compaction and recovery",
+      "agentId": "39A1E531-BDFD-4FAD-B6B8-E593783B54EA",
+      "tileId": "AEA010B4-D368-4C31-8610-3C187F8A545B",
+      "harness": "Claude Code",
+      "observedStatus": "working",
+      "observedAt": "2026-10-30T15:39:30Z",
+      "parentAgentId": "411E45C2-B37D-46FA-A145-31703571FEA3"
+    },
+    {
+      "number": 4,
+      "cards": [
+        "COL-13",
+        "COL-17"
+      ],
+      "role": "Handoff and usage accounting",
+      "agentId": "D4915E0C-1350-4F98-A710-EEE117688858",
+      "tileId": "B7BDD9EF-6E94-41BB-974D-BC9B22E4EF8A",
+      "harness": "Claude Code",
+      "observedStatus": "working",
+      "observedAt": "2026-10-30T15:39:58Z",
+      "parentAgentId": "411E45C2-B37D-46FA-A145-31703571FEA3"
+    },
+    {
+      "number": 5,
+      "cards": [
+        "COL-06"
+      ],
+      "role": "Host liveness",
+      "agentId": "6B5C446C-34A1-4629-A2A1-EAC3F7B40B2C",
+      "tileId": "6CEAB204-B876-4B6B-BC32-6012B28ECACF",
+      "harness": "Claude Code",
+      "observedStatus": "working",
+      "observedAt": "2026-10-30T15:39:48Z",
+      "parentAgentId": "E284CDC7-A065-4B96-B0DD-5C79E302FC42"
+    },
+    {
+      "number": 6,
+      "cards": [
+        "COL-16",
+        "COL-07"
+      ],
+      "role": "Artifact storage and publication",
+      "agentId": "E06E8F11-DA07-4C4B-B015-F21CB4363EC2",
+      "tileId": "C7FD0680-3570-4E56-9236-CFCABA4746D7",
+      "harness": "Claude Code",
+      "observedStatus": "working",
+      "observedAt": "2026-10-30T15:39:35Z",
+      "parentAgentId": "E284CDC7-A065-4B96-B0DD-5C79E302FC42"
+    },
+    {
+      "number": 7,
+      "cards": [
+        "COL-15"
+      ],
+      "role": "Live agent projections",
+      "agentId": "B7624240-9165-4103-A51A-093A146AEBF7",
+      "tileId": "D1188D25-FF7A-477E-8102-EC11766ED29D",
+      "harness": "Claude Code",
+      "observedStatus": "working",
+      "observedAt": "2026-10-30T15:40:01Z",
+      "parentAgentId": "E284CDC7-A065-4B96-B0DD-5C79E302FC42"
+    },
+    {
+      "number": 8,
+      "cards": [
+        "COL-14"
+      ],
+      "role": "Context freshness and provenance",
+      "agentId": "DE92D619-0EB0-467D-866C-14B6077C9E02",
+      "tileId": "56FB1756-8611-40D1-AB0E-D87FB7510D6E",
+      "harness": "Claude Code",
+      "observedStatus": "working",
+      "observedAt": "2026-10-30T15:39:54Z",
+      "parentAgentId": "E284CDC7-A065-4B96-B0DD-5C79E302FC42"
+    },
+    {
+      "number": 9,
+      "cards": [
+        "COL-20"
+      ],
+      "role": "Security boundary witnesses",
+      "agentId": "50B885E3-10DE-41BC-8910-25DF8CCFBB7F",
+      "tileId": "9FD623E2-B59F-4D4D-B44C-C27CE3AC0B48",
+      "harness": "Claude Code",
+      "observedStatus": "working",
+      "observedAt": "2026-10-30T15:39:55Z",
+      "parentAgentId": "E284CDC7-A065-4B96-B0DD-5C79E302FC42"
+    },
+    {
+      "number": 10,
+      "cards": [
+        "COL-21",
+        "COL-22"
+      ],
+      "role": "Acceptance and non-deploy operations preparation",
+      "agentId": "896A0BA8-F412-4D37-BDE1-572700179E60",
+      "tileId": "03C1951F-6414-4F3C-8ADB-EA31F4A1E31E",
+      "harness": "Claude Code",
+      "observedStatus": "working",
+      "observedAt": "2026-10-30T15:39:55Z",
+      "parentAgentId": "E284CDC7-A065-4B96-B0DD-5C79E302FC42"
+    }
+  ],
+  "boardId": "F54D4170-AB61-4595-A4D4-A400B76364A5",
+  "boardRevision": 148,
+  "rules": {
+    "oneIntegrationLead": true,
+    "noMatrixPerWorker": true,
+    "oneAppBuildAtATime": true,
+    "noProductionDeploy": true,
+    "noPush": true,
+    "noLiveApps": true,
+    "physicalIsolatedTmux": true,
+    "otherBoardUntouched": true
+  },
+  "completionPolicy": "Start/assignment is not completion; close cards only against their complete original acceptance and direct evidence.",
+  "needsDylan": [
+    "real relay deployment authorization",
+    "real two-person/two-Mac trial",
+    "real Keychain/operator recovery"
+  ],
+  "laterScope": [
+    "COL-23",
+    "COL-24",
+    "COL-25",
+    "COL-26"
+  ]
+}

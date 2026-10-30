@@ -1,46 +1,143 @@
 {
   "date": "2026-10-30",
   "board": {
-    "tileId": "CA73963B-1486-413C-9913-7B336742354D",
     "boardId": "F54D4170-AB61-4595-A4D4-A400B76364A5",
+    "tileId": "CA73963B-1486-413C-9913-7B336742354D",
+    "title": "Array feats",
+    "revision": 148,
     "columns": [
       {
-        "cardCount": 15,
+        "cardCount": 4,
         "name": "To Do",
         "columnId": "01DE61A9-AECF-4EB1-91BE-EF1242EB3CAF"
       },
       {
-        "cardCount": 9,
+        "cardCount": 14,
         "name": "Doing",
         "columnId": "E97F008C-12F2-4D04-A7E2-2835694DA2ED"
       },
       {
-        "cardCount": 2,
+        "cardCount": 8,
         "name": "Done",
         "columnId": "5D3C4E2B-BB9F-489C-9AD5-80E917EEECA4"
       }
-    ],
-    "revision": 65,
-    "title": "Array feats"
+    ]
   },
   "completed": [
     "COL-01",
-    "COL-03"
-  ],
-  "inProgress": [
     "COL-02",
+    "COL-03",
     "COL-04",
     "COL-05",
-    "COL-06",
-    "COL-07",
     "COL-08",
     "COL-09",
-    "COL-10",
-    "COL-12"
+    "COL-10"
+  ],
+  "inProgress": [
+    "COL-06",
+    "COL-07",
+    "COL-11",
+    "COL-12",
+    "COL-13",
+    "COL-14",
+    "COL-15",
+    "COL-16",
+    "COL-17",
+    "COL-18",
+    "COL-19",
+    "COL-20",
+    "COL-21",
+    "COL-22"
   ],
   "otherBoardWriteCalls": 0,
-  "nativeMultiplayerVerified": false,
+  "nativeMultiplayerVerified": true,
   "deployed": false,
-  "latestEvidence": "validation/capture-20261030/README.md",
-  "latestNativeCaptureVerified": true
+  "latestEvidence": "validation/merged-cc168bed",
+  "checkpoint": "cc168bed",
+  "implementationOwner": "Claude",
+  "acceptanceAudit": [
+    {
+      "card": "COL-02",
+      "status": "Done",
+      "evidenceOrGap": "Acceptance complete on cc168bed: the registered collaboration gate passes 10/10; actual isolated native peers complete all 15 behaviours in 3/3 local-relay runs, each replaying 552 events without snapshot substitution, source mutation, recipient execution or focus violation. A/B/C auth/byte-exclusion fixtures, injected store failures, mounted frames and original-supervisor outcomes also pass. Default check invocations now include subprocess SIGKILL/relaunch before send, after commit, after host claim and inside the provider call, plus real relay SIGKILL, 1,500-event paged replay and bounded device/global overload. These are local scripted-provider witnesses; real two-Mac/operator/Keychain rehearsal belongs to COL-22. The earlier failing pair/cap2 blocker is resolved."
+    },
+    {
+      "card": "COL-06",
+      "status": "Doing",
+      "evidenceOrGap": "The former cap2/HTTP429 blocker is resolved: current service uses updateDeviceLimit=4/updateGlobalLimit=1024. The 10/10 gate, native pair 3/3 (552 events), relay SIGKILL/restart, 1,500-event paging and overload/catch-up status witnesses pass. No pending subscription/replay regression remains from the handoff audit. This card stays Doing only for its broader explicit independent execution-host-liveness expiration/projection requirement and direct witness, alongside COL-15; pointer TTL and access-removal tests already pass."
+    },
+    {
+      "card": "COL-07",
+      "status": "Doing",
+      "evidenceOrGap": "Merged gate and actual pair now verify authenticated source binding, current membership/control admission, source-byte preservation, exclusive original-host dispatch and no recipient executor. The full card still requires attachment/nested-artifact lookup boundary coverage associated with COL-16/20; those paths are not supplied by the passing text/reference handoff flow. Keep Doing for that named remaining acceptance."
+    },
+    {
+      "card": "COL-09",
+      "status": "Done",
+      "evidenceOrGap": "The actual end-to-end capture acknowledgement now also passes on cc168bed: source-zone review publishes through local live HTTP with exact layout/source binding and zero recipient executor creation. The old third-subscription/429 blocker is fixed (cap4) and no longer a limitation of this completed capture card. Source capture/manifest acceptance remains Done."
+    },
+    {
+      "card": "COL-11",
+      "status": "Doing",
+      "evidenceOrGap": "Actual peer flow now passes both people's drag/Undo/Redo, conflicting moves, protection against stale Undo, private cameras and crash/relaunch inverse restoration, in 3/3 runs. Existing native/Core group geometry and causal-ABA teeth remain GREEN after restoration. Keep Doing only for direct mounted mid-group-gesture permission-removal and failed-save schedules required by this card; the passing pair does not exercise permission revocation during the live gesture."
+    },
+    {
+      "card": "COL-12",
+      "status": "Doing",
+      "evidenceOrGap": "Both actual peers edit and receive immutable agreement revisions; ordinary discussion/replay does not cause runner work, and accepted content survives source/relay restarts in the merged gate. Keep Doing for the card's direct concurrent-agreement/draft-preservation and revision-linked endorsement acceptance evidence; sequential peer edits do not establish all those cases."
+    },
+    {
+      "card": "COL-13",
+      "status": "Doing",
+      "evidenceOrGap": "The real pair now proves exclusive teammate handoff, refusal of the old owner's ordinary send, source-view rebind, one attributed current-context dispatch through the original supervisor, recipient relaunch receipt restoration and no redispatch. Four real child-process SIGKILL boundaries prove accepted recovery versus honest in-provider uncertainty. Native draft/UI/deferred-input/lifetime checks and light/dark restyling pass. Keep Doing for the explicit all-managed-harness handoff transport-seam witness (Claude, Codex and Pi); the native pair's source runner is the Codex scripted seam."
+    },
+    {
+      "card": "COL-17",
+      "status": "Doing",
+      "evidenceOrGap": "Real source events now produce durable 200 input/40 output, visible only during teammate inspection; republishing and recipient relaunch do not double-count in the actual pair. The merged 10/10 gate includes the existing translator/high-water/UTC/coverage fixtures. Keep Doing for the original provider-specific fork inheritance, subagent overlap, counter-reset and Claude request/run overlap cases not covered by those fixtures."
+    },
+    {
+      "card": "COL-18",
+      "status": "Doing",
+      "evidenceOrGap": "The merged gate and 3/3 actual pair verify contextual cursor usage, no resting usage overlay, stable 200/40 accounting, expiry/exit/camera/peer movement, accessibility inspection and light/dark rendering. Keep Doing for voluntary camera following and exit-on-local-navigation/no-feedback-loop plus its bounded-work witnesses; this merge did not implement follow."
+    },
+    {
+      "card": "COL-19",
+      "status": "Doing",
+      "evidenceOrGap": "Merged recovery proof now includes SIGKILL/relaunch at four durable boundaries, relay SIGKILL/restart, exact uncertain-request identity, 552-event native replay and 1,500-event live/cold paging with monotonic catch-up and no false connected prefix. Do not retain the old 'native crash/replay unverified' blocker. Keep Doing for post-compaction/retention/ancient-client restore with membership epochs, receipts and tombstones intact; no compaction/retention implementation was added by this merge."
+    },
+    {
+      "card": "COL-21",
+      "status": "Doing",
+      "evidenceOrGap": "Current implemented four-feature milestone is verified on cc168bed: 10/10 collaboration gate; native pair 3/3, 15 behaviours and 552 replayed events per run; 1,500-event scale/restart and four kill/relaunch boundaries; native handoff light/dark and action-title fit checks. The subscription-capacity blocker is resolved. This broader original card stays Doing because its own acceptance also includes pinned review artifacts, live agent observations/context freshness and the remaining follow/accessibility/performance requirements under COL-14/15/16/18/20. Do not equate a passing implemented-feature gate with all original roadmap acceptance."
+    },
+    {
+      "card": "COL-22",
+      "status": "To Do",
+      "evidenceOrGap": "Needs Dylan explicitly: authorize/deploy the real relay with cap4, perform a real two-person/two-Mac test using two human accounts, and exercise real Keychain plus operator account recovery. All merged tests use local relay, disposable vaults and scripted provider/operator seams. No production deployment, push or real Keychain recovery is claimed. Inventory growth remains uncommitted by instruction. Wider staged backup/restore/Linux/current compatibility/operating-budget acceptance still applies."
+    }
+  ],
+  "priorCheckpoint": "88c183c0",
+  "pairedJourneyPassed": true,
+  "finishGatePassed": true,
+  "finishGateLegs": 10,
+  "pairedPassingRuns": 3,
+  "pairedBehaviorsPerRun": 15,
+  "pairedReplayEventsPerRun": 552,
+  "fullRoadmapVerified": false,
+  "verificationScope": "Implemented local two-process four-feature workflow with scripted providers; broader roadmap acceptance and real-human operations remain open.",
+  "remainingBlocker": "No cap2/pair blocker. Nine cards retain their own broader acceptance gaps; real deployment, two-human/two-Mac trial and Keychain/operator recovery remain.",
+  "needsDylan": [
+    "real relay deployment",
+    "real two-person/two-Mac trial",
+    "real Keychain and operator recovery"
+  ],
+  "orchestration": {
+    "confirmedClaudeWorkers": 10,
+    "roster": "CLAUDE-WORKERS.json",
+    "integrationLead": "411E45C2-B37D-46FA-A145-31703571FEA3",
+    "coordinator": "E284CDC7-A065-4B96-B0DD-5C79E302FC42",
+    "allObservedWorking": true,
+    "completionStillRequiresAcceptance": true
+  }
 }

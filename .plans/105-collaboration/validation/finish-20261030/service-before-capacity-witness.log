@@ -1,0 +1,195 @@
+PASS: operator enrollment process uses isolated configuration
+PASS: operator entry point issues redeemable person enrollment
+PASS: independent person identities
+PASS: one person has separately authenticated devices
+PASS: consumed enrollment status
+PASS: consumed enrollment excludes content bytes
+PASS: excluded C status
+PASS: excluded C excludes content bytes
+PASS: unknown and excluded areas have identical response bytes
+PASS: forwarded invitation status
+PASS: forwarded invitation excludes content bytes
+PASS: invitation race recovers same membership
+PASS: authenticated durable area command
+PASS: network retry returns original receipt
+PASS: invited B receives shared history
+PASS: forged authorship status
+PASS: forged authorship excludes content bytes
+PASS: publishing another host status
+PASS: publishing another host excludes content bytes
+PASS: same person cannot claim another device host status
+PASS: same person cannot claim another device host excludes content bytes
+PASS: transaction failure status
+PASS: transaction failure excludes content bytes
+PASS: storage failure rolls back snapshot and receipt
+PASS: retry after rollback commits once
+PASS: operation identity bound to actor status
+PASS: operation identity bound to actor excludes content bytes
+PASS: cross-area command status
+PASS: cross-area command excludes content bytes
+PASS: viewer cannot edit status
+PASS: viewer cannot edit excludes content bytes
+PASS: expired invitation under injected clock status
+PASS: expired invitation under injected clock excludes content bytes
+PASS: owner removes teammate
+PASS: stale membership removal cannot affect a later generation
+PASS: removed B loses history access status
+PASS: removed B loses history access excludes content bytes
+PASS: removed B cannot recover old receipt status
+PASS: removed B cannot recover old receipt excludes content bytes
+PASS: old invitation cannot restore removed B status
+PASS: old invitation cannot restore removed B excludes content bytes
+PASS: membership change invalidates queued epoch status
+PASS: membership change invalidates queued epoch excludes content bytes
+PASS: epoch changes without altering document history
+PASS: device revocation reauthenticates cached bearer status
+PASS: device revocation reauthenticates cached bearer excludes content bytes
+PASS: SQLite restart restores exact document and membership
+PASS: removal survives restart
+PASS: database/journal excludes plaintext content and credentials
+PASS: companion v2 remains functional
+PASS: companion credential is not collaboration identity status
+PASS: companion credential is not collaboration identity excludes content bytes
+PASS: reconstructed HTTP service preserves discussion and layout
+PASS: reconstructed service preserves removal status
+PASS: reconstructed service preserves removal excludes content bytes
+Collaboration service checks passed: real localhost HTTP, isolated SQLite and A/B/C; no native scene/host-execution claims.
+PASS updates: more than 500 operations replay completely through the production client
+PASS updates: catch-up page is bounded
+PASS updates: concurrent commit cannot change a paged high-water mark
+PASS updates: snapshot/catch-up-to-live handoff loses no concurrent commit
+PASS updates: held HTTP subscription wakes on a committed operation
+PASS updates: refuses HTTP 404
+PASS updates: refuses HTTP 409
+PASS updates: cursor identity comes from authentication
+PASS updates: presence burst retains its final cursor
+PASS updates: late presence packets cannot move cursor backward
+PASS updates: presence produces zero durable document mutations
+PASS updates: presence expires independently of document/host state
+PASS updates: refuses HTTP 400
+PASS updates: refuses HTTP 404
+PASS updates: active removal purges presence and updates membership epoch
+PASS updates: refuses HTTP 429
+PASS updates: cancellation releases held requests without waiting for timeout
+PASS updates: replica refuses a sequence gap
+PASS updates: malformed page cannot partially mutate the replica
+PASS updates: native-facing session owns snapshot-to-live updates
+PASS updates: session close cancels its live request
+PASS updates: large operations page by bytes before hitting the event count limit
+PASS updates: byte-bounded replay loses no large operation
+PASS updates: network interruption preserves last accepted revision
+PASS updates: automatic reconnect resumes missed commits after service reconstruction
+PASS updates: device revocation ends the native-facing session
+PASS updates: wrong-key migration refuses
+PASS updates: failed head migration rolls back its schema change
+PASS updates: head migration preserves identity records
+PASS updates: v1 encrypted snapshots backfill exact durable heads
+Collaboration updates checks passed: paged catch-up, live wakeup, coalesced expiring presence, active revocation and cancellation through real HTTP/client.
+PASS client boundary: service redirects deliver zero requests/credentials to the target
+PASS client boundary: future-schema snapshot terminates without a retry loop
+PASS client boundary: incompatible accepted command terminates without retaining stale authority
+PASS database key: invalid key or marker refuses before writes
+PASS database key: wrong-key reopen preserves snapshots, operations and heads
+PASS database key: correct-key reopen preserves exact document
+PASS database key: correct-key reopen preserves exact document
+PASS database key: invalid key or marker refuses before writes
+PASS database key: wrong-key v2 adoption leaves no marker or migration record
+PASS database key: failed v2 adoption rolls back without ciphertext changes
+PASS database key: correct key adopts an unmarked v2 database
+PASS database key: adoption does not reencrypt or rewrite stored state
+PASS database key: adopted key reads original shared content
+PASS database key: adopted key reads original shared content
+PASS database key: invalid key or marker refuses before writes
+PASS database key: a damaged later snapshot blocks key adoption
+PASS database key: failed snapshot validation preserves damaged evidence
+PASS database key: invalid key or marker refuses before writes
+PASS database key: a damaged later operation blocks key adoption
+PASS database key: failed operation validation preserves damaged evidence
+PASS database key: restored records adopt without a ciphertext rewrite
+PASS database key: invalid key or marker refuses before writes
+PASS database key: corrupt marker is preserved rather than healed
+PASS database key: corrupt marker refusal leaves all encrypted state unchanged
+PASS database key: invalid key or marker refuses before writes
+PASS database key: marker authentication precedes even a pending migration
+PASS database key: invalid key or marker refuses before writes
+Collaboration database key checks passed: every-open marker authentication, atomic v2 adoption, all-record validation and corruption preservation.
+PASS capability: owner can view
+PASS capability: owner does not grant promptAgent
+PASS capability: owner does not grant stopAgent
+PASS capability: owner does not grant approveProviderRequest
+PASS capability: owner does not grant writeTerminal
+PASS capability: editor can view
+PASS capability: editor does not grant promptAgent
+PASS capability: editor does not grant stopAgent
+PASS capability: editor does not grant approveProviderRequest
+PASS capability: editor does not grant writeTerminal
+PASS capability: viewer can view
+PASS capability: viewer does not grant promptAgent
+PASS capability: viewer does not grant stopAgent
+PASS capability: viewer does not grant approveProviderRequest
+PASS capability: viewer does not grant writeTerminal
+PASS capability: editor collaboration capabilities exclude membership management
+PASS capability: agent observation without an explicit source refuses
+PASS capability: agent observation without an explicit source refuses has no content bytes
+PASS capability: source binding cannot masquerade as shared discussion
+PASS capability: source binding cannot masquerade as shared discussion has no content bytes
+PASS capability: fixture injects unsupported fields into the selected source
+PASS capability: explicit source publication is admitted
+PASS capability: invited editor receives selected snapshot
+PASS capability: snapshot excludes unsupported host metadata and caller-supplied grants
+PASS capability: invited editor receives selected replay
+PASS capability: replay excludes unsupported host metadata and caller-supplied grants
+PASS capability: excluded C cannot fetch a known area
+PASS capability: excluded C cannot fetch a known area has no content bytes
+PASS capability: excluded C cannot replay publication
+PASS capability: excluded C cannot replay publication has no content bytes
+PASS capability: presentation classifier permits editor layout
+PASS capability: editor arranges another owner's observation without owning its source
+PASS capability: forged grant cannot remove a teammate's source
+PASS capability: forged grant cannot remove a teammate's source has no content bytes
+PASS capability: mixed authorized and forbidden edits leave the entire document unchanged
+PASS capability: editor cannot expand sharing
+PASS capability: editor cannot expand sharing has no content bytes
+PASS capability: area editor does not create a promptAgent endpoint
+PASS capability: area editor does not create a promptAgent endpoint has no content bytes
+PASS capability: area editor does not create a stopAgent endpoint
+PASS capability: area editor does not create a stopAgent endpoint has no content bytes
+PASS capability: area editor does not create a approveProviderRequest endpoint
+PASS capability: area editor does not create a approveProviderRequest endpoint has no content bytes
+PASS capability: area editor does not create a writeTerminal endpoint
+PASS capability: area editor does not create a writeTerminal endpoint has no content bytes
+PASS capability: publication owner removal retries without resurrecting a source
+PASS capability: area ownership does not override another person's source ownership
+PASS capability: area ownership does not override another person's source ownership has no content bytes
+PASS capability: current owner can revoke membership
+PASS capability: queued mutation loses admission when collaborator is removed
+PASS capability: queued mutation loses admission when collaborator is removed has no content bytes
+PASS capability: removed collaborator creates no later durable effect
+PASS handoff HTTP: only the original device registers its published source generation
+PASS handoff HTTP: an editor cannot register another host's agent
+PASS handoff HTTP: area editor permission does not grant source control
+PASS handoff HTTP: excluded C learns no source-control state
+PASS handoff HTTP: only the invited recipient accepts the offered control revision
+PASS handoff HTTP: source A cannot also prompt while B controls the shared agent
+PASS handoff HTTP: duplicate prompt returns the original attributed immutable command
+PASS handoff HTTP: a changed prompt cannot reuse an accepted command ID
+PASS handoff HTTP: recipient cannot impersonate the source host's claim
+PASS handoff HTTP: host rechecks the latest agreement immediately before effect
+PASS handoff HTTP: current target and context produce a durable admission before any provider call
+PASS handoff HTTP: host outcome preserves the actual authenticated human attribution
+PASS handoff HTTP: service reconstruction retains accepted handoff receipts
+PASS handoff HTTP: old acceptance receipt cannot take control back after the owner reclaimed it
+PASS handoff HTTP: removed teammate's queued work is refused before host dispatch
+PASS handoff HTTP: removed teammate cannot recover receipt content
+PASS handoff HTTP: membership epoch change requires renewed handoff consent
+PASS handoff HTTP: new source generation cannot inherit a retired control grant
+PASS handoff HTTP: unpublishing atomically resolves queued/claimed receipts and cannot admit provider work without another host poll
+PASS handoff HTTP: unpublishing preserves an already admitted attempt's honest unresolved outcome
+PASS handoff HTTP: original host can report interruption uncertainty after its source was unpublished
+Collaboration handoff HTTP checks passed: A/B/C, explicit offer/accept, exclusive control, immutable context, current admission, retries, revocation and service restart; no provider execution.
+PASS usage authority: teammate receives authenticated human label and latest host accounting without double counting old reports
+PASS usage authority: teammate cannot forge publishing-host totals
+PASS usage authority: excluded person cannot read cursor or usage
+PASS usage authority: relay restart retains authenticated durable totals while cursors start a new ephemeral session
+PASS usage authority: multiple registered hosts on one device aggregate independent totals instead of choosing the largest sequence
+PASS usage authority: source unpublication revokes future accounting projection in the document transaction

@@ -1,0 +1,27 @@
+{
+  "focusObservations": 639,
+  "noFocusViolation": true,
+  "passed": true,
+  "recipientExecutors": 0,
+  "replayEvents": 552,
+  "replayPages": 10,
+  "snapshotSubstitutionPreventedDuringReplay": true,
+  "sourceRunnerCalls": 2,
+  "steps": [
+    "two real background Array processes use different human/device accounts, source roots, app support, vaults and physical tmux sockets",
+    "production-mounted source-zone review publishes real HTTP portable content/layout and exact host binding, with zero recipient executor creation",
+    "both people edit immutable agreement revisions through their native shared scenes",
+    "shared drag, Undo and Redo preserve exact portable frames on both mounted native replicas",
+    "a teammate's conflicting move cancels stale preview and semantic Undo cannot overwrite the newer placement",
+    "the second person's own Undo and Redo replicate to both peers, and their stale Undo cannot overwrite the first person's newer move",
+    "the same shared arrangement retains independent private cameras",
+    "abrupt pre-send process death retains exact command and geometry history; cold relaunch submits once and Undo still works",
+    "post-commit/lost-ack process death recovers the authenticated original receipt without replaying a remote effect, and retains Undo",
+    "a live disconnected follower catches up more than 500 ordered retained events in bounded pages, without snapshot substitution, gaps or duplicated messages",
+    "both live native peers reconnect after the same local relay/database restarts without replaying mutations",
+    "explicit teammate handoff blocks ordinary old-owner sending, survives source view rebind, and dispatches one attributed current-context prompt through the original supervisor",
+    "recipient abrupt relaunch restores the exact accepted handoff receipt without executing or redispatching its command",
+    "real source token events persist as 200 input/40 output and render only while the teammate cursor is inspected; republishing and a recipient relaunch never double-count",
+    "all sharing, edits, crashes, replay and handoff preserve separate source files/WORLD membership and never create a recipient executor"
+  ]
+}

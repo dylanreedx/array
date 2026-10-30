@@ -632,3 +632,243 @@ native run. The gate still reported the other eight legs, including appearance,
 menu contracts, provider telemetry and both existing relay suites. No baseline
 was updated. Light/dark cursor renders were inspected; handoff renders remain
 pending because the earlier native failure stopped that stage.
+
+
+## Claude handoff audit — 30 October 2026
+
+Dylan confirmed the implementation handoff to Claude. Live board **Array feats**
+(`F54D4170-AB61-4595-A4D4-A400B76364A5`) was audited and updated through revision
+**86**: 2 Done, 15 Doing, 9 To Do. Updated COL-02/06/09/11/13/17/18/19/21;
+no other board was changed. The finish bench is `array/collaboration-finish` at
+WIP checkpoint `88c183c0`, following foundation `3bef5505` on release base
+`d49c0cbe`. This audit changes handoff documentation and board state only.
+
+Native geometry, usage/provider adapters, hover lifecycle, handoff controls,
+private drafts, deferred input admission and final delayed-stop generation checks
+passed in the restored native run. The always-visible hover mutation was RED;
+restored source/build/native checks GREEN. Its report contains 52 actual frontmost
+observations, zero focus theft, and a verified isolated physical tmux socket.
+Core/service negative tests and restoration receipts remain in
+`validation/finish-20261030/teeth/`. This supersedes the earlier pending-native
+status above; it does not make the complete integration gate green.
+
+The latest actual pair report is **FAILED**, after both peers started and the
+source-zone publication committed once at revision 1. A had one source binding,
+B none. The independent review was the third live subscription; the service's
+limit of two returned HTTP 429. Old client handling retired the review's generation
+as accessDenied, so a valid committed request appeared uncertain. Choices/source
+review were valid (2 rows, 2 ready, no pending choice or source drift).
+
+Current source inspection: client retry-on-429 is present in checkpoint `88c183c0`;
+service limit is still **2** while the new concurrency witness requires **4**.
+Claude must finish that bounded budget/retry witness, rebuild Array and the LOCAL
+relay, and complete the real paired sequence (conflicts, Undo, handoff, abrupt
+relaunch, relay reconnect, 550 events with snapshot fallback prevented). Those
+later pair steps and a final passing matrix report are still unverified. Leave
+related cards Doing. Broader artifact/follow/compaction/operational tickets remain
+open. No deployment, push, production relay request or real provider validation
+was performed. Keep Dylan's live apps untouched.
+
+
+## Doing-card acceptance audit — 30 October 2026
+
+Dylan challenged the large Doing count. Re-read all 15 cards' acceptance criteria,
+current source and retained Core/service/native results. The previous board state
+was too conservative: five cards were held for the whole multiplayer integration
+even though their own acceptance criteria were witnessed. Moved COL-04/05/08/09/10
+to Done and recorded evidence and scope on each card. The shared finish bench and
+release/integration gate are still open. The capture transport-capacity issue is
+still explicitly tracked in COL-06/21; closing the capture-manifest card does not
+claim that the complete live sharing journey passed.
+
+Board revision **107**: **7 Done / 10 Doing / 9 To Do**. Each remaining Doing
+card now names its particular missing behavior or direct witness. Neither board
+was renamed/closed, and the other board received no changes. Existing-account
+operator recovery and real Keychain trials remain recorded under the operational
+alpha handoff (COL-22). This supersedes the earlier blanket 'leave related cards
+Doing' guidance.
+
+| Card | Status | Acceptance audit |
+| --- | --- | --- |
+| COL-04 | Done | Identity, targeted invitations, removal and epoch enforcement witnessed on actual HTTP routes. |
+| COL-05 | Done | Atomic scoped storage/idempotency, rollback, migrations, restart and companion isolation witnessed. |
+| COL-08 | Done | Scoped bindings, private replica/drafts, recovery bytes and source/executor preservation witnessed. |
+| COL-09 | Done | Reviewed capture/manifest selection, fresh source reads, WORLD layout and below-tier coverage witnessed; transport capacity tracked in COL-06/21. |
+| COL-10 | Done | Two production-mounted shared scenes, private cameras, zero recipient construction and source command isolation witnessed. |
+| COL-02 | Doing | Complete combined native/HTTP/host journey has not passed. |
+| COL-06 | Doing | Subscription budget/client429 integration and host-liveness proof remain. |
+| COL-07 | Doing | Attachment/nested-artifact boundary paths and their end-to-end byte/revocation witnesses remain. |
+| COL-11 | Doing | Explicit mounted mid-gesture revocation and failed-save schedules still need direct evidence. |
+| COL-12 | Doing | Revision-linked endorsements and complete concurrency/host-sleep cases need direct evidence. |
+| COL-13 | Doing | Actual paired handoff/relaunch and all three managed-harness transport seams still need proof. |
+| COL-17 | Doing | Fork/subagent/counter-reset/Claude request-run overlap accounting cases remain unproved. |
+| COL-18 | Doing | Voluntary follow and exit-on-navigation behavior plus bounded-work cases remain. |
+| COL-19 | Doing | Compaction, retention, ancient-client/operational restore and complete native crash sequence remain. |
+| COL-21 | Doing | Final combined workflow/matrix, live observations/freshness and pinned artifacts/native budgets remain. |
+
+Audit evidence: `validation/finish-20261030/teeth/05-restored-checks.log`,
+`10-native-hover-restored-green.log`, the prior complete native matrix summary,
+and the real A/B/C service results retained as
+`validation/finish-20261030/service-before-capacity-witness.log`. The latter
+predates the new four-reader witness; it does not claim that the current cap2
+passes that new test. Only board and documentation changed; no test suite was
+rerun and no Git operation or deployment was performed for this audit.
+
+## Merged
+
+30 October 2026. Pieces A (`array/mp-gate`), B (`array/mp-pair`) and C
+(`array/mp-recovery`) are cherry-picked in that order onto
+`array/collaboration-finish`. The tip is **`cc168bed`**: 16 commits on top of
+`88c183c0`. Nothing is pushed.
+
+How the overlaps were resolved:
+
+- Held-read cap: C's named `updateDeviceLimit = 4` / `updateGlobalLimit = 1024`
+  are kept. A's literal `4` is superseded. The overload check (`1...4`) and the
+  recovery/scale check (which reads the constants) both pass with it.
+- Scope/State `Equatable`: the two sides were identical. A's version is kept,
+  and C's `26e033ea` was dropped because it was empty after the merge.
+- Overload check: B's field-by-field scope comparison (`c76e867b`) plus C's
+  "refuses writes" assertions (`912d6a66`) applied cleanly on top of each other.
+- `CollaborationSession.swift`: C's version is kept. It does everything A's
+  `7d1fe618` did (a short probe read after a failure that still goes through
+  admission control). The differences: the probe holds 1 ms rather than 1 s,
+  and every failure sets `recovering`. It also adds that a partial catch-up
+  page reports `reconnecting`. C's teeth receipts `c-partial` and
+  `d-recovery-hold` pin both behaviours.
+- `SharedAreaPeerRuntime.swift`: B's 40 s wait-out loop, with A's richer
+  failure message (it includes the persistence error).
+
+Results, all on `cc168bed`, background-only, isolated `TMUX_TMPDIR`:
+
+- `scripts/run-matrix.sh --collaboration`: **passed, 10 legs, 0 failures**.
+  This includes C's 15 `recovery/scale` PASS lines and the `kill/relaunch`
+  legs, which run inside the default invocations.
+- `scripts/check-collaboration-pair.py` (local relay): **3/3 passed**, each run
+  15 behaviours, 552 replayed events, no activation.
+- `ContinuumRevivedCollaborationServiceChecks --recovery-scale-only` passed:
+  relay SIGKILL/relaunch, 1,500-event replay, bounded overload.
+- `ContinuumRevivedCollaborationChecks --kill-relaunch-only` passed: SIGKILL
+  before send, after commit, after host claim, and inside the provider call.
+- Release-line legs: `--ui-probe-check` (with `CONTINUUM_SKIP_UI_BASELINES=1`),
+  `--choice-geometry-check` and `--workspace-chrome-polish-check` all passed.
+  The skip variable hides exactly the theme surface-cache witness that
+  `8a2e5542` changed, so `--ui-probe-check` was also run once without it. It
+  passed, and that witness uses offscreen windows only. The `73834bac` title
+  witness passed in the matrix (`every handoff action title fits its label`).
+
+Still needs Dylan:
+
+- Deploying the real relay with the four-reader cap. Every run above used a
+  local relay only.
+- A real two-person test on two Macs with two human accounts.
+- Recovery with the real Keychain and real operator steps. The witnesses use
+  disposable vaults and a scripted operator.
+- The matrix inventory still reports the collaboration legs as "grew". It was
+  deliberately not committed.
+
+
+## Merged-evidence board reconciliation — 30 October 2026
+
+Read the `Merged` section and confirmed current tip `cc168bed`, its 16 commits
+above `88c183c0`, production cap4/global1024, default witness registration and the
+latest three actual passing pair reports. Retained copies and readback metadata
+are in `validation/merged-cc168bed/`: 15 behaviours and 552 events in every run,
+zero recipient executors and no focus violation. The Merged record reports the
+10/10 gate, four SIGKILL boundaries, relay restart and 1,500-event scale witnesses.
+No test suite was rerun for this board reconciliation.
+
+Moved COL-02 to Done: the isolated complete harness acceptance is now proved.
+Updated COL-06/07/09/11/12/13/17/18/19/21/22 with the merged results and resolved
+the obsolete cap2/failing-pair notes. Board revision **120** now has
+**8 Done / 9 Doing / 9 To Do**. The other board was not changed.
+
+Remaining Doing is based on each original card's broader acceptance: explicit
+host-liveness expiry (06), nested-artifact boundaries (07), mounted mid-gesture
+revocation/fault schedules (11), concurrency/endorsement cases (12), all three
+managed-harness dispatch seams (13), fork/subagent/reset accounting (17), voluntary
+follow and bounded-work cases (18), compaction/retention restore (19), and the full
+roadmap workflow including pinned artifacts/live freshness/native budgets (21).
+The passing current four-feature milestone does not prove these missing parts.
+
+Dylan's remaining actions are explicit on COL-22: real relay deployment, a real
+two-person/two-Mac test, and real Keychain/operator recovery. Production is not
+deployed, nothing is pushed, and matrix inventory growth remains uncommitted.
+Only the selected board and handoff documentation/evidence changed in this audit.
+
+## Lead plan — remaining cards, 30 October 2026
+
+The lead (Claude) took over the board at revision 120. COL-02 is Done. The
+Codex audit appended a "Merged evidence audit" section to the Doing cards and
+moved COL-02; this plan does not repeat it. The plan below is in dependency
+order. Each helper works on its own bench off `array/collaboration-finish` and
+owns distinct files.
+
+Wave 1 (running):
+
+| Bench | Branch | Cards | Owns |
+| --- | --- | --- | --- |
+| `.worktrees/mp-gate` (reused) | `array/col-scene-gestures` | COL-11 mid-gesture revoke and failed save; COL-18 voluntary follow | scene view, presence overlay/publisher |
+| `.worktrees/mp-pair` (reused) | `array/col-agreements` | COL-12 endorsements, agreement conflicts, discussion after host sleep | protocol document, controller, new agreement view |
+| `.worktrees/mp-recovery` (reused) | `array/col-compaction` | COL-19 compaction, retention, ancient client, operational restore | service store/updates, client session/replica |
+| `.worktrees/col-provider-seams` | `array/col-provider-seams` | COL-13 Claude/Codex/Pi handoff seams; COL-17 fork/reset/overlap accounting | host session, handoff, usage ledger/collector |
+
+The three `mp-*` benches had already landed (their commits are matched by
+subject on this branch) and were clean, so they were repointed to new branches
+rather than rebuilt from nothing.
+
+Wave 2: COL-06 host liveness; COL-16 artifacts together with COL-07 nested
+artifact boundaries; COL-15 live agent snapshots; COL-14 per-agent freshness.
+Wave 3: COL-20 adversarial audit; COL-21 final gate; COL-22 handoff steps
+written but not executed. COL-22 deployment and COL-23–26 ("Later") stay out of
+scope without Dylan.
+
+## Worker roster (coordinator E284CDC7, 30 Oct; Dylan asked for at least 10 Claude workers)
+
+Integration lead: 411E45C2-B37D-46FA-A145-31703571FEA3 (owns SharedAreaDocument, Controller, Store/Updates, Supervisor, Scene and the main/script registrations; merges every branch onto array/collaboration-finish).
+Workers 1-4 (the lead's wave 1): COL-11+18 scene, COL-12 agreement, COL-19 recovery/compaction, COL-13+17 provider. IDs are in the lead's own notes.
+Workers 5-10 (started by the coordinator; each reports to the lead and writes .plans/105-collaboration/workers/<slug>.md on its bench):
+- 5 COL-06 host liveness: 6B5C446C-34A1-4629-A2A1-EAC3F7B40B2C, array/mp-w5-liveness
+- 6 COL-16+07 artifacts (owns the artifact DTO/API): E06E8F11-DA07-4C4B-B015-F21CB4363EC2, array/mp-w6-artifacts
+- 7 COL-15 live agent views: B7624240-9165-4103-A51A-093A146AEBF7, array/mp-w7-live
+- 8 COL-14 freshness/provenance: DE92D619-0EB0-467D-866C-14B6077C9E02, array/mp-w8-freshness
+- 9 COL-20 security boundaries (owns new check files): 50B885E3-10DE-41BC-8910-25DF8CCFBB7F, array/mp-w9-security
+- 10 COL-21 + non-deploy COL-22 acceptance/release prep: 896A0BA8-F412-4D37-BDE1-572700179E60, array/mp-w10-acceptance
+Builds: at most one Array/App build at a time; no full matrix per worker.
+
+
+## Ten Claude workers confirmed — 30 October 2026
+
+Dylan explicitly requested at least ten Claude workers, replacing the earlier
+three-agent limit. Root routed creation through Claude coordinator E284CDC7
+because Array delegation inherits the caller's harness. Six new Claude workers
+were added to the four existing Claude workers; each of all ten was read back as
+`Claude Code` and `working`, with a separate registered bench. Coordinators and
+unrelated sidebar/auto-layout agents are excluded from that count. Integration
+remains with 411E45C2-B37D-46FA-A145-31703571FEA3.
+
+| Worker | Scope | Cards | Agent ID |
+| --- | --- | --- | --- |
+| 1 | Geometry and voluntary follow | COL-11, COL-18 | `0B75131B-87E2-44E5-90AD-C7298F21796A` |
+| 2 | Agreements and endorsements | COL-12 | `32E6F97B-2419-41CA-BFD7-72F9F0815ABF` |
+| 3 | Compaction and recovery | COL-19 | `39A1E531-BDFD-4FAD-B6B8-E593783B54EA` |
+| 4 | Handoff and usage accounting | COL-13, COL-17 | `D4915E0C-1350-4F98-A710-EEE117688858` |
+| 5 | Host liveness | COL-06 | `6B5C446C-34A1-4629-A2A1-EAC3F7B40B2C` |
+| 6 | Artifact storage and publication | COL-16, COL-07 | `E06E8F11-DA07-4C4B-B015-F21CB4363EC2` |
+| 7 | Live agent projections | COL-15 | `B7624240-9165-4103-A51A-093A146AEBF7` |
+| 8 | Context freshness and provenance | COL-14 | `DE92D619-0EB0-467D-866C-14B6077C9E02` |
+| 9 | Security boundary witnesses | COL-20 | `50B885E3-10DE-41BC-8910-25DF8CCFBB7F` |
+| 10 | Acceptance and non-deploy operations preparation | COL-21, COL-22 | `896A0BA8-F412-4D37-BDE1-572700179E60` |
+
+Machine-readable roster: `CLAUDE-WORKERS.json`. All fourteen remaining alpha
+cards are assigned to their actual workers. Board revision **148**:
+**8 Done / 14 Doing / 4 To Do**; only later COL-23–26 remain To Do. Assignment and
+starting work do not establish completion. The other board was not modified.
+
+Shared-file ownership and interface dependencies are coordinated by the lead;
+workers use distinct benches and scoped changes. No full matrix per worker, and
+at most one Array/App build at a time. Final integration must wire production
+paths and report deterministic behavior/RED witnesses, with batched verification.
+No production relay, push, live app, default tmux, real Keychain or deployment
+step was authorized by this expansion. The existing Dylan-only operational
+checks remain explicit.

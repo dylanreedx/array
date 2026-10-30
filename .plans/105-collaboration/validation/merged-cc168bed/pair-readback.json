@@ -1,0 +1,27 @@
+{
+  "sourceTip": "cc168bed",
+  "runs": [
+    {
+      "source": "qa-runs/collaboration-pair/report.json",
+      "retained": ".plans/105-collaboration/validation/merged-cc168bed/pair-run-1.json",
+      "passed": true,
+      "behaviors": 15,
+      "replayedEvents": 552
+    },
+    {
+      "source": "qa-runs/collaboration-pair/report-1793373280460149000.json",
+      "retained": ".plans/105-collaboration/validation/merged-cc168bed/pair-run-2.json",
+      "passed": true,
+      "behaviors": 15,
+      "replayedEvents": 552
+    },
+    {
+      "source": "qa-runs/collaboration-pair/report-1793373206871365000.json",
+      "retained": ".plans/105-collaboration/validation/merged-cc168bed/pair-run-3.json",
+      "passed": true,
+      "behaviors": 15,
+      "replayedEvents": 552
+    }
+  ],
+  "scope": "local relay and two isolated Array processes with scripted providers; real humans/Keychain/operator recovery not verified"
+}
