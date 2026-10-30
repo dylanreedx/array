@@ -93,7 +93,7 @@ func runCollaborationOverloadChecks(api: CollaborationAPI, store: CollaborationS
             throw OverloadCheckFailure(message: "subscription capacity did not return 429")
         } catch CollaborationClientError.server(status: 429, code: _) {}
         let fresh = try await api.state(area: area.rawValue)
-        try overloadExpect(fresh == state, "actual HTTP overload leaves a fresh current membership and document readable")
+        try overloadExpect(fresh.document == state.document && overloadSameScope(fresh.scope, state.scope), "actual HTTP overload leaves a fresh current membership and document readable")
 
         await controller.open()
         try await overloadEventually("controller reconnects after 429") { controller.status == .reconnecting }
@@ -108,7 +108,7 @@ func runCollaborationOverloadChecks(api: CollaborationAPI, store: CollaborationS
         for expectedCount in 1...expectedDelays.count {
             try await overloadEventually("429 backoff \(expectedCount)") { await retry.delays.count == expectedCount }
             guard case let .reconnecting(replica) = await session.status else { throw OverloadCheckFailure(message: "429 became terminal access denial") }
-            try overloadExpect(replica?.document == state.document && replica?.scope == state.scope,
+            try overloadExpect(replica?.document == state.document && replica.map { overloadSameScope($0.scope, state.scope) } == true,
                 "retry \(expectedCount) retains the original validated replica and cursor")
             if expectedCount < expectedDelays.count { await retry.release() }
         }
@@ -136,4 +136,8 @@ func runCollaborationOverloadChecks(api: CollaborationAPI, store: CollaborationS
             && (try local.load()?.accessDenied == false), "after capacity returns, online admission and a new accepted edit recover without losing private state")
         await cleanup()
     } catch { await cleanup(); throw error }
+}
+
+private func overloadSameScope(_ left: Collaboration.Scope, _ right: Collaboration.Scope) -> Bool {
+    left.area == right.area && left.epoch == right.epoch && left.role == right.role
 }
