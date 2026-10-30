@@ -1685,7 +1685,8 @@ enum UIProbeGeometry {
         let hiddenChildIDs: [UUID]
         let hiddenDescendantIDs: [UUID]
 
-        var title: String { "\(hiddenChildIDs.count) more" }
+        // Plan 106: every hidden child in this corpus is finished.
+        var title: String { "\(hiddenChildIDs.count) more, all done" }
     }
 
     private struct IndependentFanoutExpectation {
@@ -1765,9 +1766,10 @@ enum UIProbeGeometry {
     /// either under-materialize the expanded state or hide a bad cap behind slack.
     private static func sidebarProbeHeight(for rows: [AgentInboxRow]) -> CGFloat {
         let sorted = InboxSort.sortForInbox(rows: rows)
-        let defaultBounded = InboxSort.boundedForInbox(rows: sorted)
+        let defaultBounded = InboxSort.boundedForInbox(rows: sorted, now: LabFixtures.inboxNow)
         let expandedBounded = InboxSort.boundedForInbox(
-            rows: sorted, expandedParents: Set(InboxSort.parentIds(in: sorted)))
+            rows: sorted, expandedParents: Set(InboxSort.parentIds(in: sorted)),
+            now: LabFixtures.inboxNow)
         func tableRows(for bounded: BoundedInbox) -> Int {
             let parts = InboxSort.partition(rows: bounded.rows, now: LabFixtures.inboxNow)
             let shelf = parts.shelfCount > 0 ? 1 : 0
@@ -1879,7 +1881,10 @@ enum UIProbeGeometry {
         }
         let rows = [root] + direct + grandchildren
         let sorted = InboxSort.sortForInbox(rows: rows)
-        let bounded = InboxSort.boundedForInbox(rows: sorted)
+        // Plan 106: every child finished within the last 30 minutes, so only
+        // the eight-row cap folds anything.
+        let now = epoch.addingTimeInterval(2_000)
+        let bounded = InboxSort.boundedForInbox(rows: sorted, now: now)
         guard bounded.remainders.count == 2,
               bounded.rows.last?.id == bounded.remainders[0].afterRowID,
               bounded.remainders[0].afterRowID == bounded.remainders[1].afterRowID else {
@@ -1896,6 +1901,7 @@ enum UIProbeGeometry {
                 + AgentInboxView.scopeControlHeight + 160).rounded(.up))
         let probe = try makeSidebarProbeHost(
             width: width, height: height, appearanceName: appearanceName)
+        probe.inbox.clock = { now }
         probe.host.layoutSubtreeIfNeeded()
         probe.inbox.reload(rows: rows)
         probe.inbox.layoutForQA()
@@ -1912,7 +1918,7 @@ enum UIProbeGeometry {
         guard initialRemainders.map(\.parentId) == [directIDs[7], rootID],
               initialRemainders[0].hiddenChildIDs == [grandchildIDs[8]],
               initialRemainders[1].hiddenChildIDs == [directIDs[8]],
-              probe.inbox.fanoutRemainderTitlesForQA == ["1 more", "1 more"] else {
+              probe.inbox.fanoutRemainderTitlesForQA == ["1 more, all done", "1 more, all done"] else {
             throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): live remainder rows had the wrong parent, count or title")
         }
 
@@ -1940,15 +1946,16 @@ enum UIProbeGeometry {
         probe.host.layoutSubtreeIfNeeded()
         probe.inbox.layoutForQA()
         let rootExpanded = InboxSort.boundedForInbox(
-            rows: sorted, expandedParents: [rootID])
+            rows: sorted, expandedParents: [rootID], now: now)
         let collapsedRootExpandedRows = InboxSort.visibleRows(
             rootExpanded.rows, collapsed: [directIDs[7]])
         guard probe.inbox.expandedFanoutParentsForQA == Set([rootID]),
               probe.inbox.rowIdsForQA == collapsedRootExpandedRows.map(\.id),
               probe.inbox.rowIdsForQA.contains(directIDs[8]),
-              probe.inbox.fanoutRemainderRowsForQA.isEmpty,
-              probe.inbox.tableRowCountForQA == collapsedRootExpandedRows.count,
-              probe.inbox.nonAgentTableRowCountForQA == 0 else {
+              probe.inbox.fanoutRemainderRowsForQA.map(\.parentId) == [rootID],
+              probe.inbox.fanoutRemainderTitlesForQA == ["Show fewer"],
+              probe.inbox.tableRowCountForQA == collapsedRootExpandedRows.count + 1,
+              probe.inbox.nonAgentTableRowCountForQA == 1 else {
             throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): re-anchored root expansion did not materialize its ninth child while preserving the nested fold")
         }
 
@@ -1960,9 +1967,9 @@ enum UIProbeGeometry {
         probe.inbox.layoutForQA()
         guard !probe.inbox.collapsedParentsForQA.contains(directIDs[7]),
               probe.inbox.rowIdsForQA == rootExpanded.rows.map(\.id),
-              probe.inbox.fanoutRemainderRowsForQA.map(\.parentId) == [directIDs[7]],
+              probe.inbox.fanoutRemainderRowsForQA.map(\.parentId) == [directIDs[7], rootID],
               probe.inbox.fanoutRemainderRowsForQA.first?.hiddenChildIDs == [grandchildIDs[8]],
-              probe.inbox.tableRowCountForQA == rootExpanded.rows.count + 1 else {
+              probe.inbox.tableRowCountForQA == rootExpanded.rows.count + 2 else {
             throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): reopening the nested child did not restore its own remainder")
         }
 
@@ -1973,13 +1980,13 @@ enum UIProbeGeometry {
         probe.host.layoutSubtreeIfNeeded()
         probe.inbox.layoutForQA()
         let bothExpanded = InboxSort.boundedForInbox(
-            rows: sorted, expandedParents: [rootID, directIDs[7]])
+            rows: sorted, expandedParents: [rootID, directIDs[7]], now: now)
         guard probe.inbox.expandedFanoutParentsForQA == Set([rootID, directIDs[7]]),
-              probe.inbox.fanoutRemainderRowsForQA.isEmpty,
-              probe.inbox.fanoutRemainderParentIDsForQA.isEmpty,
+              probe.inbox.fanoutRemainderTitlesForQA == ["Show fewer", "Show fewer"],
+              probe.inbox.fanoutRemainderParentIDsForQA == Set([rootID, directIDs[7]]),
               probe.inbox.rowIdsForQA == sorted.map(\.id),
               probe.inbox.qaMaterializedRowCellCount == rows.count,
-              probe.inbox.tableRowCountForQA == bothExpanded.rows.count,
+              probe.inbox.tableRowCountForQA == bothExpanded.rows.count + 2,
               Set(probe.inbox.rowIdsForQA) == Set(rows.map(\.id)) else {
             throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): expanding both levels lost, duplicated or mis-targeted an agent")
         }
@@ -2077,7 +2084,7 @@ enum UIProbeGeometry {
         let expandedIDs = probe.inbox.rowIdsForQA
         guard expandedIDs == sortedRows.map(\.id),
               probe.inbox.qaMaterializedRowCellCount == rows.count,
-              probe.inbox.fanoutRemainderParentIDsForQA.isEmpty,
+              probe.inbox.fanoutRemainderParentIDsForQA == Set([fanoutParent]),
               probe.inbox.expandedFanoutParentsForQA.contains(fanoutParent) else {
             throw fail("\(label): expanded fan-out did not materialize every corpus agent id")
         }
@@ -3219,7 +3226,7 @@ enum UIProbeGeometry {
             }
             let cappedRollupRows = [rollupParent] + rollupChildren
             let cappedRollupSorted = InboxSort.sortForInbox(rows: cappedRollupRows)
-            let cappedRollupDefault = InboxSort.boundedForInbox(rows: cappedRollupSorted)
+            let cappedRollupDefault = InboxSort.boundedForInbox(rows: cappedRollupSorted, now: epoch)
             guard cappedRollupDefault.rows.count == 1 + InboxSort.maxVisibleChildren,
                   cappedRollupDefault.remainders.count == 1,
                   cappedRollupDefault.remainders.first?.parentId == rollupParentID,
@@ -3274,11 +3281,11 @@ enum UIProbeGeometry {
                         throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): cached remainder height or table accounting was stale at \(phase)")
                     }
                 } else {
-                    guard transitionProbe.inbox.fanoutRemainderHeightForQA(parentId: rollupParentID) == nil,
-                          transitionProbe.inbox.fanoutRemainderRowsForQA.isEmpty,
+                    // Plan 106: an expanded group keeps the row that folds it back.
+                    guard transitionProbe.inbox.fanoutRemainderTitlesForQA == ["Show fewer"],
                           transitionProbe.inbox.tableRowCountForQA
-                            == transitionProbe.inbox.qaMaterializedRowCellCount else {
-                        throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): expanded remainder row remained in the live table at \(phase)")
+                            == transitionProbe.inbox.qaMaterializedRowCellCount + 1 else {
+                        throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): expanded group lost the row that folds it back at \(phase)")
                     }
                 }
             }
@@ -6074,7 +6081,7 @@ enum UIProbeGeometry {
                 let geometries = probe.inbox.qaRowGeometriesForQA
                 guard geometries.count == rows.count,
                       probe.inbox.rowIdsForQA == InboxSort.sortForInbox(rows: rows).map(\.id),
-                      probe.inbox.fanoutRemainderParentIDsForQA.isEmpty else {
+                      probe.inbox.fanoutRemainderParentIDsForQA == Set([fanoutParentID]) else {
                     throw fail("ui-geometry-check: sidebar gate materialized \(geometries.count) rows of \(rows.count) at \(gate.name) after expansion")
                 }
                 for geometry in geometries {

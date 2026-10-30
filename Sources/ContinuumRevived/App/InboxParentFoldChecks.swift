@@ -33,15 +33,17 @@ enum InboxParentFoldChecks {
     static let threeChildren = [id(21), id(22), id(23)]
     static let askingChildren = [id(31), id(32)]
 
-    static func rows(askingChildState: InboxState = .approval) -> [AgentInboxRow] {
+    static func rows(askingChildState: InboxState = .approval, failureOpened: Bool = false) -> [AgentInboxRow] {
         func root(_ id: UUID, _ title: String, _ age: Double) -> AgentInboxRow {
             AgentInboxRow(id: id, title: title, state: .ready,
                           lastActiveAt: epoch.addingTimeInterval(-age), createdAt: epoch.addingTimeInterval(-age))
         }
+        // A fresh failure carries its unread mark until you open it (plan 106).
         func child(_ id: UUID, of parent: UUID, _ title: String, state: InboxState = .ready, _ age: Double) -> AgentInboxRow {
             AgentInboxRow(id: id, title: title, state: state,
                           lastActiveAt: epoch.addingTimeInterval(-age), depth: 1,
-                          createdAt: epoch.addingTimeInterval(-age), parentId: parent)
+                          createdAt: epoch.addingTimeInterval(-age), parentId: parent,
+                          terminalIsUnread: state == .failed && !failureOpened)
         }
         return [
             root(oneChildParent, "One-child parent", 100),
@@ -653,6 +655,9 @@ enum InboxParentFoldChecks {
         quiet.reload(rows: rows(askingChildState: .failed))
         quiet.layoutForQA()
         try expect(quiet.rowIdsForQA.contains(askingChildren[0]), "…and so must a failed child")
+        let opened = makeInbox(rows(askingChildState: .failed, failureOpened: true), appearance: .darkAqua, windows: &windows)
+        try expect(!opened.rowIdsForQA.contains(askingChildren[0]),
+                   "a failure you already opened must not open the group again")
         // …and never one you folded.
         try expect(quiet.clickDisclosureForQA(id: askingParent), "the asking parent's triangle could not be clicked")
         quiet.layoutForQA()
@@ -669,7 +674,7 @@ enum InboxParentFoldChecks {
         try expect(quiet.tuckedCardsForQA(id: askingParent)?.count == 2,
                    "the folded asking parent shows its two children as tucked cards")
         }
-        return "auto-expand: approval and failed children open an untouched group; a folded one stays folded"
+        return "auto-expand: approval and unopened failed children open an untouched group; an opened failure does not; a folded one stays folded"
     }
 
     // MARK: - The app's own wiring
@@ -688,6 +693,9 @@ enum InboxParentFoldChecks {
         try expect(inbox.foldsUntouchedGroups, "the app's sidebar must start untouched groups folded")
         try expect(inbox.parentFoldChoicesForQA == [oneChildParent: true],
                    "the app's sidebar did not restore the stored fold choices — \(inbox.parentFoldChoicesForQA)")
+        // The fixture's children finished just before `epoch`; read them from
+        // there, or every one is old enough to fold into "N more" (plan 106).
+        inbox.clock = { epoch }
         inbox.reload(rows: rows())
         inbox.layoutForQA()
         try expect(!inbox.rowIdsForQA.contains(threeChildren[0]) && inbox.rowIdsForQA.contains(onlyChild),

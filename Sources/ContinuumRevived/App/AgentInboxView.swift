@@ -784,13 +784,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     /// Whether a parent is drawn folded: your own choice when you made one;
-    /// otherwise folded, unless a child needs you or failed — a group you never
-    /// touched must not bury an approval behind a default.
+    /// otherwise folded, unless a child needs you or failed and you have not
+    /// opened it — a group you never touched must not bury an approval behind a
+    /// default, and an opened failure folds inside its card (plan 106).
     private func isFolded(_ parentId: UUID) -> Bool {
         if let open = foldChoices[parentId] { return !open }
         guard foldsUntouchedGroups else { return false }
         guard let rollup = rollupsByParent[parentId] else { return true }
-        return rollup.needsYou == 0 && rollup.failed == 0
+        return rollup.needsYou == 0 && rollup.unopenedFailed == 0
     }
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
     /// Parents whose remainder affordance has been opened. This is view-local
@@ -1996,9 +1997,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func scheduleWakeRerender() {
         cancelWakeRerender()
         let now = clock()
+        // Plan 106: a finished subagent folds out of its lead's card 30 minutes
+        // after it ended, on this same one timer.
         let earliest = allRows.compactMap { row -> Date? in
-            guard case .snoozed(let until) = row.lifecycle, until > now else { return nil }
-            return until
+            if case .snoozed(let until) = row.lifecycle, until > now { return until }
+            return InboxSort.subagentFoldsAt(row).flatMap { $0 > now ? $0 : nil }
         }.min()
         guard let earliest else { return }
         let delay = min(
@@ -2180,6 +2183,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // the parent's row and everything about its triangle, so the rows whose
         // control appeared or vanished are stale too. (Found in cross-review.)
         let previousParents = parentsWithChildren
+        let previousRollups = rollupsByParent
         let next = display(from: newRows)
         // P4.7: the identity sequence is compared over the DRAWN items, not over the
         // agent rows — the shelf header is a row in this table, and a snooze that
@@ -2205,6 +2209,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let indexes = IndexSet(rows.indices.filter {
             changed.touched.contains(rows[$0].id) || !rows[$0].matchesIgnoringLiveElapsed(previous[$0])
                 || disclosureMoved.contains(rows[$0].id)
+                || previousRollups[rows[$0].id] != rollupsByParent[rows[$0].id]
         }.compactMap(tableRow(forRowIndex:)))
         guard !indexes.isEmpty else { return }
         // P3.7: a lifecycle move changes the row's VARIANT, and a variant is a
@@ -2270,13 +2275,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         ownershipAskByLead = Self.asksByLead(in: sorted)
         var fullRollups = InboxSort.rollups(in: sorted)
         let bounded = InboxSort.boundedForInbox(
-            rows: sorted, expandedParents: expandedFanoutParents)
+            rows: sorted, expandedParents: expandedFanoutParents, now: clock())
         fanoutRemaindersByParent = bounded.remainderByParent
         // The capped fields are a presentation-only overlay on the full rollup.
         // `holdsParentOpen` and the lifecycle/action policy continue to read the
         // uncapped descendant tallies above, so a remainder cannot change resource
         // or settlement bookkeeping.
-        for remainder in bounded.remainders {
+        for remainder in bounded.remainders where !remainder.isExpanded {
             guard var rollup = fullRollups[remainder.parentId] else { continue }
             let hidden = remainder.hiddenDescendantCount
             rollup = ChildRollup(
@@ -2284,6 +2289,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 working: rollup.working,
                 needsYou: rollup.needsYou,
                 failed: rollup.failed,
+                unopenedFailed: rollup.unopenedFailed,
                 cappedChildren: remainder.hiddenChildCount,
                 cappedDescendants: hidden,
                 cappedWorking: remainder.hiddenWorking,
@@ -2901,13 +2907,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
-    /// Open one parent's explicit remainder. This is the only path that removes
-    /// the cap: the hidden children are never silently discarded or inferred from
-    /// a row count, and the selection/focus reset follows every other list-shape
-    /// change because the table's index space changes.
-    func expandFanout(parentId: UUID) {
+    /// Open one parent's explicit remainder, or fold an open one back. This is
+    /// the only path that shows folded children: they are never silently
+    /// discarded or inferred from a row count, and the selection/focus reset
+    /// follows every other list-shape change because the table's index space
+    /// changes.
+    func toggleFanout(parentId: UUID) {
         guard fanoutRemaindersByParent[parentId] != nil else { return }
-        expandedFanoutParents.insert(parentId)
+        if expandedFanoutParents.remove(parentId) == nil { expandedFanoutParents.insert(parentId) }
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         hoveredAgentId = nil
@@ -3578,7 +3585,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 let cell = fanoutRemainderCellsByParent[remainder.parentId] ?? AgentInboxRemainderView()
                 cell.identifier = NSUserInterfaceItemIdentifier(
                     "agent-inbox-fanout-\(remainder.parentId.uuidString)")
-                cell.onExpand = { [weak self] in self?.expandFanout(parentId: remainder.parentId) }
+                cell.onExpand = { [weak self] in self?.toggleFanout(parentId: remainder.parentId) }
                 cell.setNesting(nesting(atTableRow: row))
                 if ownsSubagents { cell.setOwnership(ownership(atTableRow: row)) }
                 cell.apply(remainder: remainder)
@@ -7781,15 +7788,27 @@ final class AgentInboxRemainderView: NSTableCellView {
     func apply(remainder: FanoutRemainder) {
         self.remainder = remainder
         label.stringValue = remainder.title
-        button.setAccessibilityLabel("Show \(remainder.accessibilityTitle)")
+        button.setAccessibilityLabel(remainder.isExpanded
+            ? "Hide \(remainder.hiddenChildCount) \(remainder.hiddenChildCount == 1 ? "agent" : "agents")"
+            : "Show \(remainder.accessibilityTitle)")
+        button.setAccessibilityHelp(remainder.isExpanded
+            ? "Folds the extra child agents back" : "Shows the hidden child agents")
         button.setAccessibilityValue(remainder.accessibilityTitle)
         button.setAccessibilityEnabled(true)
         setAccessibilityChildren([button])
         applyTokens()
     }
 
+    /// Quiet secondary ink; only "N failed" takes the failed red.
     private func applyTokens() {
-        label.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        let secondary = TextToken.textSecondary.color.nsColor(in: self)
+        label.textColor = secondary
+        guard let remainder, !remainder.isExpanded, remainder.hiddenFailed > 0 else { return }
+        let text = NSMutableAttributedString(string: remainder.title, attributes: [
+            .font: label.font ?? .token(.label), .foregroundColor: secondary])
+        let failed = (remainder.title as NSString).range(of: "\(remainder.hiddenFailed) failed")
+        text.addAttribute(.foregroundColor, value: AccentToken.accentFailed.color.nsColor(in: self), range: failed)
+        label.attributedStringValue = text
     }
 
     override func viewDidChangeEffectiveAppearance() {

@@ -87,12 +87,13 @@ enum SidebarOwnershipChecks {
             let asking = n == asker
             add(n, i < named.count ? named[i] : helpers[i % helpers.count] + " #\(i)",
                 state: asking ? .approval : (i == 2 ? .working : .ready), codex: i == 3,
-                elapsed: i == 2 ? 380 : nil, parent: quality, minutes: 32 + Double(i),
+                // The first six finished recently; the rest fold into "N more".
+                elapsed: i == 2 ? 380 : nil, parent: quality, minutes: (i < 6 ? 8 : 32) + Double(i),
                 report: asking ? InboxSelfReport(needsYou: "allow git push")
                     : n == reporter ? InboxSelfReport(checksPassed: 5, checksFailed: 1) : nil,
                 hasTile: n == pinnedOut ? true : false, pinned: n == pinnedOut)
             if i == 0 {
-                add(0x480, "Read the status line diff", parent: n, minutes: 33)
+                add(0x480, "Read the status line diff", parent: n, minutes: 9)
                 add(0x481, "Measure lane width", state: .working, elapsed: 95, parent: n, minutes: 0,
                     report: InboxSelfReport(now: "iOS build"))
             }
@@ -110,9 +111,11 @@ enum SidebarOwnershipChecks {
     }
 
     static func build(dark: Bool, width: CGFloat = 380, height: CGFloat = 1400,
+                      rows fixture: [AgentInboxRow]? = nil, folds: [UUID: Bool]? = nil,
+                      clock: @escaping () -> Date = { now },
                       record: @escaping (InboxRowAction, [UUID]) -> Void) -> (AgentInboxView, NSWindow) {
         let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        inbox.clock = { now }
+        inbox.clock = clock
         inbox.foldsUntouchedGroups = true
         inbox.prefersReducedMotion = { false }
         inbox.onRevealRow = { _ in }
@@ -128,8 +131,8 @@ enum SidebarOwnershipChecks {
         inbox.currentWorkspaceId = workspaceId
         inbox.currentWorkspaceName = "personal"
         inbox.setScope(.all)
-        inbox.restoreParentFolds([uuid(quality): true, uuid(verify): true, uuid(quality + 1): true])
-        inbox.reload(rows: rows())
+        inbox.restoreParentFolds(folds ?? [uuid(quality): true, uuid(verify): true, uuid(quality + 1): true])
+        inbox.reload(rows: fixture ?? rows())
         inbox.layoutForQA()
         inbox.scrollToTopForQA()
         inbox.layoutForQA()
@@ -296,6 +299,9 @@ enum SidebarOwnershipChecks {
                 + "line 2 per state, light/shimmer/dots, stem lanes, hover Pop out + Stop, right-click verbs")
         }
         for dark in [true, false] {
+            report.append(try checkHelperPriority(dark: dark, outputDirectory: outputDirectory))
+        }
+        for dark in [true, false] {
             for width in [260, 380] as [CGFloat] {
                 report.append(try checkIndent(dark: dark, width: width, outputDirectory: outputDirectory))
             }
@@ -362,6 +368,185 @@ enum SidebarOwnershipChecks {
                 "indent-\(dark ? "dark" : "light")-\(Int(width)).png"))
         }
         return "\(label): subagents \(first - lane)pt right of the stem under every lead, helpers +\(step)pt, foot short of the row, hover clear"
+    }
+
+    // MARK: Helper priority
+
+    static let busyLead = 0x900
+    static let needsYou = 0x901, working = 0x902, recentDone = 0x903, laterDone = 0x904
+    static let oldDone = 0x905, olderDone = 0x906, recentFailed = 0x907, oldFailed = 0x908
+    static let quietLead = 0x920
+
+    /// Two leads. The busy one has a subagent of every kind; the quiet one, one
+    /// recent and two old finished subagents. Spawn order deliberately disagrees
+    /// with the order the card must show.
+    static func priorityRows(recentFailedRead: Bool = false) -> [AgentInboxRow] {
+        func ago(_ minutes: Double) -> Date { now.addingTimeInterval(-minutes * 60) }
+        func row(_ n: Int, _ title: String, state: InboxState, parent: Int? = nil, spawned: Double,
+                 ended: Double? = nil, outcome: AgentTerminalOutcome = .succeeded, unread: Bool = false,
+                 report: InboxSelfReport? = nil) -> AgentInboxRow {
+            AgentInboxRow(
+                id: uuid(n), title: title, projectName: "Array", projectId: uuid(0x805),
+                workspaceName: "personal", workspaceId: workspaceId, state: state, lifecycle: .active,
+                model: "claude-opus-5-5", branch: "array/integration",
+                elapsed: state == .working ? 300 : nil,
+                elapsedStartedAt: state == .working ? ago(5) : nil,
+                lastActiveAt: ago(ended ?? 0), depth: 0, createdAt: ago(spawned),
+                parentId: parent.map(uuid), harness: "Claude Code",
+                terminalEvent: ended.map {
+                    AgentTerminalEvent(sequence: 1, turnID: nil, outcome: outcome, endedAt: ago($0))
+                },
+                terminalIsUnread: unread, identityColor: parent == nil ? "blue" : nil, selfReport: report,
+                hasTile: parent == nil, isPinned: false)
+        }
+        return [
+            row(busyLead, "Ship the multiplayer release", state: .working, spawned: 210),
+            row(needsYou, "Push the release branch", state: .approval, parent: busyLead, spawned: 200,
+                report: InboxSelfReport(needsYou: "allow git push")),
+            row(working, "Run the iOS build", state: .working, parent: busyLead, spawned: 190),
+            row(recentDone, "Read the relay diff", state: .ready, parent: busyLead, spawned: 180, ended: 5),
+            row(laterDone, "Map the pairing seam", state: .ready, parent: busyLead, spawned: 50, ended: 12),
+            row(oldDone, "List stale benches", state: .ready, parent: busyLead, spawned: 60, ended: 45),
+            row(olderDone, "Draft the release notes", state: .ready, parent: busyLead, spawned: 150, ended: 90),
+            row(recentFailed, "Run the relay tests", state: .failed, parent: busyLead, spawned: 100,
+                ended: 10, outcome: .failed, unread: !recentFailedRead),
+            row(oldFailed, "Probe the phone pairing", state: .failed, parent: busyLead, spawned: 170,
+                ended: 120, outcome: .failed),
+            row(quietLead, "Audit the sidebar copy", state: .ready, spawned: 300, ended: 2),
+            row(quietLead + 1, "Read the board", state: .ready, parent: quietLead, spawned: 280, ended: 3),
+            row(quietLead + 2, "Read the plan", state: .ready, parent: quietLead, spawned: 260, ended: 50),
+            row(quietLead + 3, "Read the tickets", state: .ready, parent: quietLead, spawned: 240, ended: 70),
+        ]
+    }
+
+    /// Inside a lead's card: needs you, then working, then finished in the last
+    /// 30 minutes newest first; the rest folds into one quiet row that opens and
+    /// closes in place. A failed subagent shows once, then folds when it ages
+    /// out (on the list's own timer) or when you open it, and its lead keeps
+    /// saying "1 failed" until you open it.
+    static func checkHelperPriority(dark: Bool, outputDirectory: URL?) throws -> String {
+        let label = "\(dark ? "dark" : "light") helper priority"
+        var current = now
+        var pushed = priorityRows()
+        let (inbox, window) = build(dark: dark, height: 900, rows: pushed,
+                                    folds: [uuid(busyLead): true, uuid(quietLead): true],
+                                    clock: { current }) { _, _ in }
+        defer { window.orderOut(nil) }
+        var scheduled: [TimeInterval] = []
+        var fire: (() -> Void)?
+        inbox.wakeRerenderScheduler = { delay, action in
+            scheduled.append(delay)
+            fire = action
+            return { fire = nil }
+        }
+        // The host re-derives its rows when the timer fires; these rows carry no clock.
+        inbox.onWakeRerender = { inbox.apply(rows: pushed, changed: .empty) }
+        func push(_ rows: [AgentInboxRow], updated: [Int] = []) {
+            pushed = rows
+            inbox.apply(rows: rows, changed: AgentsBoardChangeSet(
+                added: [], updated: Set(updated.map(uuid)), removed: []))
+            inbox.layoutForQA()
+        }
+        push(pushed)
+        func name(_ id: UUID) -> String {
+            pushed.first { $0.id == id }?.title ?? id.uuidString
+        }
+        func expectRows(_ expected: [Int], _ step: String) throws {
+            let ids = inbox.rowIdsForQA
+            guard ids == expected.map(uuid) else {
+                throw Failure(description: "\(label), \(step): rows read \(ids.map(name)), wanted \(expected.map { name(uuid($0)) })")
+            }
+        }
+        func fold(_ lead: Int) -> AgentInboxRemainderView? {
+            inbox.ownershipRemaindersForQA.first { $0.qaParentID == uuid(lead) }
+        }
+        func expectFold(_ lead: Int, _ text: String, _ step: String) throws {
+            guard let row = fold(lead), row.qaTitle == text else {
+                throw Failure(description: "\(label), \(step): \(name(uuid(lead)))'s fold row reads \(fold(lead)?.qaTitle ?? "nothing"), wanted \"\(text)\"")
+            }
+        }
+        func leadTail(_ step: String) throws -> String {
+            guard let lead = inbox.ownershipCellForQA(id: uuid(busyLead)) else {
+                throw Failure(description: "\(label), \(step): no lead row")
+            }
+            lead.layoutSubtreeIfNeeded()
+            return lead.tailTextForQA ?? ""
+        }
+        // Through the window, the way a click arrives.
+        func click(_ lead: Int, _ step: String) throws {
+            guard let row = fold(lead) else {
+                throw Failure(description: "\(label), \(step): no fold row to click")
+            }
+            let point = row.convert(NSPoint(x: row.bounds.midX, y: row.bounds.midY), to: nil)
+            NSApp.postEvent(try mouse(.leftMouseUp, at: point, window: window), atStart: false)
+            NSApp.sendEvent(try mouse(.leftMouseDown, at: point, window: window))
+            while let pending = NSApp.nextEvent(matching: [.leftMouseUp], until: Date(), inMode: .default, dequeue: true) {
+                NSApp.sendEvent(pending)
+            }
+            inbox.layoutForQA()
+        }
+        let visible = [busyLead, needsYou, working, recentDone, recentFailed, laterDone,
+                       quietLead, quietLead + 1]
+
+        // 1. Needs you, working, then finished in the last 30 minutes, newest first.
+        try expectRows(visible, "at rest")
+        try expectFold(busyLead, "3 more · 1 failed", "at rest")
+        try expectFold(quietLead, "2 more, all done", "at rest")
+        let restTail = try leadTail("at rest")
+        guard restTail.contains("1 failed") else {
+            throw Failure(description: "\(label): the lead does not say its subagent failed: \(restTail)")
+        }
+        if let outputDirectory {
+            try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+            try write(inbox, to: outputDirectory.appendingPathComponent("helper-priority-\(dark ? "dark" : "light").png"))
+        }
+
+        // 2. The fold row opens the whole list in place, and closes it the same way.
+        try click(busyLead, "expanding")
+        try expectRows([busyLead, needsYou, working, recentDone, recentFailed, laterDone,
+                        oldDone, olderDone, oldFailed, quietLead, quietLead + 1], "expanded")
+        try expectFold(busyLead, "Show fewer", "expanded")
+        if let outputDirectory {
+            try write(inbox, to: outputDirectory.appendingPathComponent("helper-priority-open-\(dark ? "dark" : "light").png"))
+        }
+        try click(busyLead, "collapsing")
+        try expectRows(visible, "collapsed again")
+        try expectFold(busyLead, "3 more · 1 failed", "collapsed again")
+
+        // 3. Ageing out runs on one timer, set for the first finished subagent to
+        // pass 30 minutes (12 minutes ago, so 18 from now).
+        guard let delay = scheduled.last, abs(delay - 18 * 60) <= 1, fire != nil else {
+            throw Failure(description: "\(label): the list set no timer for the first subagent to age out (scheduled \(scheduled))")
+        }
+        current = now.addingTimeInterval(21 * 60)
+        fire?()
+        inbox.layoutForQA()
+        try expectRows([busyLead, needsYou, working, recentDone, quietLead, quietLead + 1], "after 21 minutes")
+        try expectFold(busyLead, "5 more · 2 failed", "after 21 minutes")
+        let agedTail = try leadTail("aged")
+        guard agedTail.contains("1 failed") else {
+            throw Failure(description: "\(label): the failed subagent aged out and its lead stopped saying so: \(agedTail)")
+        }
+        guard let next = scheduled.last, abs(next - 4 * 60) <= 1 else {
+            throw Failure(description: "\(label): after firing, the timer was not reset for the next subagent (scheduled \(scheduled))")
+        }
+
+        // 4. Opening the failed subagent clears its lead's count.
+        push(priorityRows(recentFailedRead: true), updated: [recentFailed])
+        let openedTail = try leadTail("opened")
+        guard !openedTail.contains("failed") else {
+            throw Failure(description: "\(label): the lead still says failed after the subagent was opened: \(openedTail)")
+        }
+
+        // 5. Opened while still recent, it folds at once.
+        current = now
+        push(priorityRows(recentFailedRead: true))
+        try expectRows([busyLead, needsYou, working, recentDone, laterDone, quietLead, quietLead + 1],
+                       "opened while recent")
+        try expectFold(busyLead, "4 more · 2 failed", "opened while recent")
+        return "\(label): needs you, working, recent newest first; fold row \"3 more · 1 failed\" / "
+            + "\"2 more, all done\" opens and closes in place; one timer ages out the failed subagent "
+            + "while its lead keeps \"1 failed\"; opening clears it"
     }
 
     /// The view as composited, sublayers and masks included.
