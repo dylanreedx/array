@@ -66,9 +66,10 @@ shared window opens any more. `qaSharedAreaWindows` is gone; use `qaSharedAreaZo
   or on the owner's own canvas ("open its own tile to prompt it"); see `footerMode`.
   `openSharedArea` sets `session.prompter = host.handoff.model`, and every zone agent
   view's `live.prompter` follows it.
-- "Hand agent off…" is not wired in the zone. The brief retires the handoff window from
-  the user path, and part 4's note asks to keep it as an explicit action. These two
-  conflict, so it's left to the coordinator.
+- Hand over is in the zone (follow-ups round). A lent agent's own ⋯ menu offers
+  "Hand over…", which opens the area's people as an in-canvas `ChoiceListView`, never the
+  handoff window. Choosing someone offers the agent through the area host's handoff
+  controller (`session.prompter`). After that the same menu offers "Take back".
 
 ## Receipt
 
@@ -198,13 +199,48 @@ zone-only paths (identity draw camera, canvas-driven follow, dock, agent views) 
     `--retired-flat-write-check`, `--multi-zone-render-check`
   - CoreChecks: `--workspace-api-exposure-check`
 
+## Follow-ups round (branch `array/mp-zone-followups`, off collaboration-finish cfbbe5a1)
+
+What changed, and the witness for each. All are in `--shared-area-zone-check`, which now
+has 49 assertions. Each one went RED under the mutation listed, then was reverted.
+
+| follow-up | what it does now | RED under |
+|---|---|---|
+| Hand over… | the lent agent's ⋯ menu → in-canvas teammate list → `offer(to:)`; Take back on the same menu → `reclaim()` | the menu provider offering nothing |
+| relaunch | `mountWorkspaceSceneAtBoot` → `installSharedAreaLifecycle` reopens the workspace's areas at their saved anchors, no camera move, and lends published tiles back from the area's source bindings | skipping the reopen at mount |
+| resize | an edge drag on a lent tile resizes it in the area and shares a `.resize` through the geometry ledger | the TileNSView route for lent resizes |
+| switch | `onSceneWillChange` closes every open area (presence ends, controller closes); `onSceneChanged` reopens the arriving workspace's areas and lends tiles back | no close on switch; no reopen on switch-back; no re-lend |
+| plain refusals | `SharedZoneError` is a `LocalizedError`: "Select the tiles you want to share first.", "Terminals stay private…", "…already in a shared area.", and so on. `ShareLinkSession.message(for:)` shows them | `errorDescription` returning nil |
+| placement (coordinator's B) | a new shared zone takes free space: if it would cover any zone (shared ones included) or tile, it goes past the rightmost, the rule stranded-tile recovery uses | the dodge disabled |
+
+The relaunch and switch witnesses use the workspace API fixture with a real agent tile and a
+real collaboration account (the share-link checks' scripted relay). The relaunch is a second
+mount of the same Mac's account whose workspace carries the area's zone.
+
+Two production bugs came out of the witnesses:
+
+- **A crash on Hand over.** `#selector(SharedAreaMenuAction.perform(_:))` resolved to
+  NSObject's `perform(_:)`, which is `performSelector:`. A click would have sent the menu
+  item as a selector and crashed the app. Renamed to `fire(_:)`.
+- **Lifecycle not installed on a normal launch.** The persisted-workspace branch of
+  `mountWorkspaceSceneAtBoot` returns early, so nothing installed the shared-area lifecycle
+  on a normal launch. It is installed on both paths now.
+
+Runs: every app leg ran the way `run_app_check` runs one (a temp `CONTINUUM_PROJECT_ROOT`
+and `CONTINUUM_APP_SUPPORT`, tmux disabled by argument, an isolated `TMUX_TMPDIR`), and
+never under lldb.
+
+Gate at 78b0aed4, one run under the lock with an isolated TMUX_TMPDIR and UI baselines
+skipped:
+- `scripts/run-matrix.sh --collaboration` passed, 14 legs. `--shared-area-zone-check` ran
+  and printed PASS with its 49 assertions; ui-probe made one note (its display-dependent
+  theme cache was skipped).
+- The 14 zone and canvas legs and CoreChecks `--workspace-api-exposure-check` all exited 0.
+
 ### Open
 
-- **Hand agent off… in the zone**: not wired. The brief retires the handoff window, and
-  part 4 asks to keep it as an explicit action. Coordinator's call.
-- **Reopening at launch**: a shared zone's anchor survives a relaunch, but its body appears
-  only when the area is opened again (hub, link or share). Lent tiles are back home by then.
-- **Resizing a lent tile** in the area is not shared; moving is.
-- **Workspace switch**: lent tiles go home first. The departing workspace's area body
-  leaves the canvas, but its session is not yet closed on switch.
+- A shared zone that grows to take more lent tiles can grow into a neighbour. A new zone
+  never lands on one.
+- Notes published as discussion have no source binding, so a note doesn't come back to
+  the zone at launch; agents and snapshots do.
 - **My own avatar** is drawn with the initial of "You".
