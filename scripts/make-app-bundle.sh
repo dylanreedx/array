@@ -188,6 +188,8 @@ if [[ "$CHANNEL" == "dev" ]]; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier dev.arrayapp.macos.dev' "$OUTPUT/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleName "Array Dev"' "$OUTPUT/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName "Array Dev"' "$OUTPUT/Contents/Info.plist"
+  # Share links: only Prod answers array://; Dev answers array-dev://.
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 array-dev' "$OUTPUT/Contents/Info.plist"
 fi
 # The film bundle's own identity, stamped BEFORE signing so the signature seals
 # the id it runs under.
@@ -195,12 +197,14 @@ if [[ "$FILM" == 1 ]]; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier dev.arrayapp.macos.film' "$OUTPUT/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleName "Array Film"' "$OUTPUT/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName "Array Film"' "$OUTPUT/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Delete :CFBundleURLTypes' "$OUTPUT/Contents/Info.plist" 2>/dev/null || true
 fi
 
 if [[ -n "$BUNDLE_ID" ]]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$OUTPUT/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c "Set :CFBundleName \"$BUNDLE_NAME\"" "$OUTPUT/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName \"$BUNDLE_NAME\"" "$OUTPUT/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Delete :CFBundleURLTypes' "$OUTPUT/Contents/Info.plist" 2>/dev/null || true
 fi
 
 # Sparkle: SwiftPM links the executable against @rpath/Sparkle.framework/… but

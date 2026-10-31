@@ -133,6 +133,13 @@ assert_eq "Array" "$bundle_executable" "CFBundleExecutable"
 assert_eq "$EXPECTED_APP_NAME" "$bundle_name" "CFBundleName"
 assert_eq "$EXPECTED_APP_NAME" "$bundle_display" "CFBundleDisplayName"
 assert_eq "APPL" "$bundle_package" "CFBundlePackageType"
+# Share links: Prod alone answers array://, Dev answers array-dev://.
+url_scheme=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$PLIST" 2>/dev/null || true)
+if [[ "$CHANNEL" == "prod" ]]; then
+  assert_eq "array" "$url_scheme" "share-link URL scheme"
+else
+  assert_eq "array-dev" "$url_scheme" "share-link URL scheme"
+fi
 # Composer dictation: without a usage string macOS terminates the app the
 # first time it touches the microphone.
 for usage_key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription; do
