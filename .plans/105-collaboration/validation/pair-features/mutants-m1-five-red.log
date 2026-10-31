@@ -1,0 +1,30 @@
+app-build lock acquired after 66s
+apply liveness
+apply artifacts
+apply liveViews
+apply freshness
+apply freshness2
+apply freshness3
+apply endorsements
+apply follow
+apply compaction
+revert liveness
+revert artifacts
+revert liveViews
+revert freshness
+revert freshness2
+revert freshness3
+revert endorsements
+revert follow
+revert compaction
+PASS pair: two isolated background peers share one zone through the local relay
+FAIL pair-features: liveness: deadline: B reads A's host offline after it stops
+FAIL pair-features: artifacts: the artifact head never reached B; A heads [], A review said 'Shared. Each teammate views this arrangement and its snapshots without access to your files or checkout.'
+FAIL pair-features: liveViews: deadline: B's live view tails A's agent; last seen {'controls': 'Nothing from this agent is shown until its host publishes it.', 'object': '87AC197B-23F5-4E56-BE52-70B159081303', 'polling': True, 'reads': 0, 'status': 'Live view unavailable', 'transcript': ''}; A projection {'delivered': 3, 'errors': [], 'projectors': 1}, A bindings ['22BED697-348C-42CE-B69A-270488C89D1E', 'none']
+FAIL pair-features: freshness: deadline: B reads the delivered revision as current
+PASS pair: endorsements: an endorsement names the exact agreement revision; a concurrent stale edit keeps B's draft as a conflict and never overwrites A's revision
+FAIL pair-features: follow: local navigation did not end following
+PASS pair: compaction: B, offline while the relay compacted past its cursor, relaunches and resnapshots to an identical document
+PASS pair: no feature stage wrote B's checkout or created a recipient executor
+Collaboration pair features: 2 passed, 0 pending [] 5 failed ['liveness', 'artifacts', 'liveViews', 'freshness', 'follow']
+exit 1

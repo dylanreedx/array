@@ -58,3 +58,10 @@ Branch `array/mp-w10-acceptance`, bench `.worktrees/mp-w10-acceptance`, off `cc1
    the backup audit to any new sealed tables (retention/compaction from COL-19).
 4. After worker 1 lands: the native budget/accessibility witnesses listed in
    `ACCEPTANCE.md` ("Native budgets and accessibility still owed").
+
+## Pair features (31 October 2026, branch array/col-pair-features)
+
+Every feature stage runs between two real processes and gates the
+collaboration matrix (12/12). Receipt: `validation/pair-features/README.md`.
+Peer fixes: transport forwarding, transcript store, one host attach path,
+proxy PUT; product: artifact upload errors are now kept.

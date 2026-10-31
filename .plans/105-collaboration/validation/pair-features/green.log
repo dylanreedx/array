@@ -1,0 +1,13 @@
+app-build lock acquired after 352s
+PASS pair: two isolated background peers share one zone through the local relay
+PASS pair: liveness: B reads A's host online, offline the moment it stops (agreement still editable), and online again when it restarts
+PASS pair: artifacts: A's shared file arrives at B on the live update stream; B's panel shows A's exact bytes and the same content digest, and B's checkout is untouched
+PASS pair: liveViews: B's live view tails A's running agent with no executor of its own, and turns to history when A's host stops
+PASS pair: freshness: after B's handoff is accepted B's panel reads Current; A's later edit turns it to Changed since sent, with no second dispatch
+PASS pair: endorsements: an endorsement names the exact agreement revision; a concurrent stale edit keeps B's draft as a conflict and never overwrites A's revision
+PASS pair: follow: B voluntarily follows A's view through two moves; B's own navigation ends following, B stays put afterwards and A never follows back
+PASS pair: compaction: B, offline while the relay compacted past its cursor, relaunches and resnapshots to an identical document
+PASS pair: harnesses: a teammate's handoff reaches the Claude, Codex and Pi production runners' CLIs exactly once each
+PASS pair: no feature stage wrote B's checkout or created a recipient executor
+Collaboration pair features: 8 passed, 0 pending [] 0 failed []
+exit 0

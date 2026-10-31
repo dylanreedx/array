@@ -1,0 +1,7 @@
+---- Collaboration matrix (targeted): 12 leg(s) run ----
+NOTES (1):
+  - --ui-probe-check: App theme surface-cache witness skipped with display-dependent checks; native theme persistence and token checks still run.
+
+Collaboration matrix (targeted) passed.
+gate exit 0
+exit 0

@@ -170,3 +170,14 @@ these names. Names can change; change them here and in the script together.
 | follow | COL-18 | B `follow {device}` | B `following`: device or null |
 | compaction | COL-19 | A `compact` (drives the service's compaction) | — |
 | harnesses | COL-13 | A `handoffReclaim`; config `sourceHarness` | ready/status `sourceHarness` |
+
+
+## Two-process feature journey — 31 October 2026
+
+All eight `features` stages now run for real between two background Array
+processes and the journey is a `--collaboration` gate leg (12/12 passed on
+`82dca8ea`). Each stage has a product mutation that turns it RED. Receipt:
+`validation/pair-features/README.md`. This closes the pair witness for the
+liveness (COL-06), artifact (COL-16), live view (COL-15), freshness (COL-14),
+endorsement (COL-12), follow (COL-18), compaction/history-on-join (COL-19) and
+per-harness handoff (COL-13, recording fake CLIs) rows above.
