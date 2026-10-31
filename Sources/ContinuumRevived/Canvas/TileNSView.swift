@@ -222,6 +222,13 @@ class TileNSView: NSView, TokenThemed {
         titleBar?.setSessionAction(state)
     }
 
+    /// The band's quiet Share button (`.plans/105-collaboration`, round 2).
+    func setTitleBarShareAction(_ shown: Bool) {
+        titleBar?.setShareAction(shown)
+    }
+    var onShareRequested: ((TileNSView) -> Void)?
+    var qaTitleBarShareControl: NSView? { titleBar?.qaShareControl }
+
     /// The band's session action was pressed. Terminal tiles route it.
     func sessionActionRequested() {}
 
@@ -717,6 +724,10 @@ class TileNSView: NSView, TokenThemed {
         bar.onCloseRequested = { [weak self] in self?.handleCloseRequest() }
         bar.onFaceTogglePressed = { [weak self] face in self?.faceSwitchRequested(face) }
         bar.onSessionActionPressed = { [weak self] in self?.sessionActionRequested() }
+        bar.onSharePressed = { [weak self] in
+            guard let self else { return }
+            self.onShareRequested?(self)
+        }
         bar.onStopRunRequested = { [weak self] in self?.onStopRun?() }
         bar.additionalMenuItemsProvider = { [weak self] in self?.makeAdditionalTitleBarMenuItems() ?? [] }
         bar.onActionsMenuPresentationChange = { [weak self] presented in
@@ -1787,7 +1798,7 @@ private final class FaceToggleControl: NSControl {
 @MainActor
 private final class BandActionControl: NSControl {
     private var title = ""
-    private let symbolName = "square.grid.2x2"
+    private var symbolName = "square.grid.2x2"
     private var labelled = true
     private var chromeScale: CGFloat = 1
     private var isPressed = false
@@ -1802,9 +1813,10 @@ private final class BandActionControl: NSControl {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    func apply(title: String) {
-        guard title != self.title else { return }
+    func apply(title: String, symbol: String = "square.grid.2x2") {
+        guard title != self.title || symbol != symbolName else { return }
         self.title = title
+        symbolName = symbol
         toolTip = title
         setAccessibilityLabel(title)
         needsDisplay = true
@@ -1923,7 +1935,7 @@ private final class TitleBarView: NSView, TokenThemed {
             semanticStatusLabel = nil
             invalidateChrome()
             // The pill's width is part of the switch's budget.
-            if faceSwitchState != nil { needsLayout = true }
+            if faceSwitchState != nil || shareControl != nil { needsLayout = true }
         }
     }
     var semanticStatusLabel: String? {
@@ -1997,7 +2009,7 @@ private final class TitleBarView: NSView, TokenThemed {
 
     /// In the order they were first added, which is their z-order when live.
     private var inlineControls: [NSView] {
-        [providerMarkView, closeButton, actionsButton, faceToggle, sessionActionControl]
+        [providerMarkView, closeButton, actionsButton, faceToggle, sessionActionControl, shareControl]
             .compactMap { $0 }
     }
 
@@ -2271,7 +2283,8 @@ private final class TitleBarView: NSView, TokenThemed {
 
     /// The leftmost band control on screen — what the pill and title stop at.
     private var leadingBandControlX: CGFloat {
-        (qaVisibleControls.map(\.frame.minX) + [sessionLabelRect?.minX].compactMap { $0 }).min() ?? bounds.width
+        (qaVisibleControls.filter { $0.name != "share" }.map(\.frame.minX)
+            + [sessionLabelRect?.minX].compactMap { $0 }).min() ?? bounds.width
     }
 
     /// QA: the band's controls that are on screen, by name.
@@ -2284,7 +2297,57 @@ private final class TitleBarView: NSView, TokenThemed {
         if let sessionActionControl, !sessionActionControl.isHidden {
             controls.append(("sessionAction", sessionActionControl.frame))
         }
+        if let shareControl, !shareControl.isHidden {
+            controls.append(("share", shareControl.frame))
+        }
         return controls
+    }
+
+    // MARK: - Share (.plans/105-collaboration/IN-CANVAS.md, round 2 panel 1)
+    //
+    // A quiet Share button left of the status pill, framed like the session
+    // action with its own `hitTest` branch. It is the first thing the band gives
+    // up when narrow; the sidebar row still offers Share.
+
+    private var shareControl: BandActionControl?
+    var onSharePressed: (() -> Void)?
+    var qaShareControl: NSView? { shareControl.flatMap { $0.isHidden ? nil : $0 } }
+
+    func setShareAction(_ shown: Bool) {
+        guard shown != (shareControl != nil) else { return }
+        if shown {
+            let control = BandActionControl(frame: .zero)
+            control.target = self
+            control.action = #selector(handleShare(_:))
+            control.apply(title: "Share", symbol: "square.and.arrow.up")
+            control.setAccessibilityHelp("Share this agent by link")
+            addSubview(control)
+            shareControl = control
+        } else {
+            shareControl?.removeFromSuperview()
+            shareControl = nil
+        }
+        needsLayout = true
+        invalidateChrome()
+    }
+
+    @objc private func handleShare(_ sender: BandActionControl) { onSharePressed?() }
+
+    /// Left of the pill when there is one, else left of the band controls,
+    /// and only while the title keeps its floor.
+    private func layoutShare(theme: TokenTheme) {
+        guard let control = shareControl else { return }
+        let scale = chromeScale
+        let gap = CGFloat(Space.s) * scale
+        let height = closeButtonWorldSize
+        let width = control.preferredWidth(labelled: true, scale: scale, minimum: height)
+        let edge = agentStatus.flatMap { statusPillRect(for: $0, theme: theme)?.minX }
+            ?? min(qaDragHandleLeadingX, leadingBandControlX)
+        let x = edge - gap - width
+        control.isHidden = x - gap < titleLeadingX + Self.titleMinimumWidth * scale
+        guard !control.isHidden else { return }
+        control.configure(labelled: true, chromeScale: scale)
+        control.frame = NSRect(x: x, y: (bounds.height - height) / 2, width: width, height: height)
     }
 
     private let closeButton: TileCloseControl
@@ -2415,6 +2478,7 @@ private final class TitleBarView: NSView, TokenThemed {
         let switchEdge = faceToggle.flatMap { $0.isHidden ? nil : $0.frame.minX }
         layoutSessionAction(trailingEdge: switchEdge
             ?? (actionsButton == nil ? min(trailingEdge, qaDragHandleLeadingX) : trailingEdge))
+        layoutShare(theme: effectiveTokenTheme)
         // A control added while drawn (⋯, the face switch) joins the drawn set.
         if drawsControlsInline { detachInlineControls() }
     }
@@ -2536,6 +2600,9 @@ private final class TitleBarView: NSView, TokenThemed {
         // "Open as agent tile", for the same reason.
         if let sessionActionControl, !sessionActionControl.isHidden, sessionActionControl.frame.contains(point) {
             return sessionActionControl
+        }
+        if let shareControl, !shareControl.isHidden, shareControl.frame.contains(point) {
+            return shareControl
         }
         if let accessoryView, accessoryView.frame.contains(point) {
             // NSStackView reports itself for this hierarchy. Return its native
@@ -2751,8 +2818,9 @@ private final class TitleBarView: NSView, TokenThemed {
         let scale = chromeScale
         // `+ Space.s`: the gap ⋯ has always kept from the drag dots, so a band
         // whose ⋯ did not move keeps its title rect exactly.
-        let blockedFrom = agentStatus.flatMap { statusPillRect(for: $0, theme: theme)?.minX }
-            ?? min(qaDragHandleLeadingX, leadingBandControlX + CGFloat(Space.s))
+        let blockedFrom = min(agentStatus.flatMap { statusPillRect(for: $0, theme: theme)?.minX }
+            ?? min(qaDragHandleLeadingX, leadingBandControlX + CGFloat(Space.s)),
+            shareControl.flatMap { $0.isHidden ? nil : $0.frame.minX } ?? .greatestFiniteMagnitude)
         let limit = max(0, blockedFrom - CGFloat(Space.s) * scale)
         let leading = min(titleLeadingX, limit)
         let available = max(0, limit - leading)

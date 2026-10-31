@@ -3742,7 +3742,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // Keep the quick snooze behavior while presenting its actual action.
             // External sessions retain a separate Hide control.
             let hide: (() -> Void)? = canHide(model) ? { [weak self] in self?.hideRows([id]) } : nil
-            card.configureHoverActions(snooze: hide ?? action(.snooze), settle: action(.settle))
+            card.configureHoverActions(snooze: hide ?? action(.snooze), settle: action(.settle), share: action(.share))
             card.configureExternalActions(moveHere: nil, copy: nil, hide: nil)
             // Plan 106: a subagent row offers Pop out and Stop on hover.
             card.configureSubagentActions(popOut: action(.popOut), stop: action(.stopAgent))
@@ -4741,6 +4741,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             guard let first = targets.first, let tableRow = tableRow(forAgentId: first.id) else { return }
             presentIdentityColorOptions(
                 for: targets.map(\.id), anchor: tableView.rect(ofRow: tableRow), relativeTo: tableView)
+        case .share:
+            // The share popover is the host's; no lifecycle moves, so no undo.
+            onRowAction?(action, targets.map(\.id))
         case .settle, .unsettle, .snooze, .wake, .markUnread, .generateName, .stopAgent,
              .archive, .delete, .popOut, .foldBack, .pin, .unpin:
             // P4.10: armed before the host runs, for the reason `performBulkAction`
@@ -4768,7 +4771,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // Inline rename is a row-local production path; it does not require the
             // lifecycle callback used by the remaining host-owned actions.
             return true
-        case .settle, .unsettle, .snooze, .wake, .markUnread, .generateName, .color, .stopAgent,
+        case .share, .settle, .unsettle, .snooze, .wake, .markUnread, .generateName, .color, .stopAgent,
              .archive, .delete, .popOut, .foldBack, .pin, .unpin:
             return onRowAction != nil && wiredRowActions.contains(action)
         }
@@ -4814,7 +4817,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     static func advancesSelection(_ action: InboxRowAction) -> Bool {
         switch action {
         case .settle, .snooze, .archive, .delete: return true
-        case .openInTile, .unsettle, .wake, .markUnread, .rename, .generateName, .color, .stopAgent,
+        case .openInTile, .share, .unsettle, .wake, .markUnread, .rename, .generateName, .color, .stopAgent,
              .popOut, .foldBack, .pin, .unpin:
             return false
         }
@@ -8378,6 +8381,10 @@ enum InboxBulkAction: String, CaseIterable, Equatable {
 /// NOTHING HERE PERFORMS ANYTHING, same as P3.11: the lifecycle is P4.1's, the rename is
 /// P3.13's, the stop is `AgentSupervisor.stop`'s and the reveal is P3.9's.
 enum InboxRowAction: String, CaseIterable, Equatable {
+    /// Share this agent by link (`.plans/105-collaboration`, round 2 panel 2):
+    /// the same popover as the tile's header, anchored to its tile. First, as
+    /// the sheet draws the menu.
+    case share
     case openInTile
     // Plan: .plans/106-sidebar-ownership — a subagent's tile, from its row.
     case popOut
@@ -8405,6 +8412,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     var baseTitle: String {
         switch self {
         case .openInTile: return "Open in Tile"
+        case .share: return "Share…"
         case .popOut: return "Pop Out"
         case .foldBack: return "Fold Back"
         case .pin: return "Pin"
@@ -8426,6 +8434,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     var icon: ChoiceIcon {
         switch self {
         case .openInTile: return .system("rectangle.on.rectangle")
+        case .share: return .system("square.and.arrow.up")
         case .popOut: return .system("arrow.up.forward.app")
         case .foldBack: return .system("arrow.down.right.and.arrow.up.left")
         case .pin: return .system("pin")
@@ -8472,7 +8481,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         case .wake: return InboxUndoToast.wokenVerb
         case .archive: return InboxUndoToast.archivedVerb
         case .delete: return InboxUndoToast.deletedVerb
-        case .openInTile, .markUnread, .rename, .generateName, .color, .stopAgent,
+        case .openInTile, .share, .markUnread, .rename, .generateName, .color, .stopAgent,
              .popOut, .foldBack, .pin, .unpin: return nil
         }
     }
@@ -8498,6 +8507,8 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         // that has none — so there is no row this cannot be asked of. What it cannot take
         // is a SET, which `disabledReason` handles: "open" has no plural.
         case .openInTile: return true
+        // A link shares a managed agent; a session from another app is not one.
+        case .share: return !InboxBulkAction.isArchived(row) && row.externalSession == nil
         case .popOut: return row.parentId != nil && !row.hasTile
         case .foldBack: return row.parentId != nil && row.hasTile
         case .pin: return row.parentId != nil && row.hasTile && !row.isPinned
@@ -8553,7 +8564,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         case .foldBack: return rows.allSatisfy { $0.parentId != nil && $0.hasTile }
         case .pin: return rows.allSatisfy { $0.parentId != nil && $0.hasTile } && !rows.allSatisfy(\.isPinned)
         case .unpin: return rows.allSatisfy { $0.parentId != nil && $0.hasTile && $0.isPinned }
-        case .openInTile, .snooze, .wake, .markUnread, .rename, .generateName, .color, .stopAgent,
+        case .openInTile, .share, .snooze, .wake, .markUnread, .rename, .generateName, .color, .stopAgent,
              .archive, .delete:
             return true
         }
@@ -8573,6 +8584,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         guard !rows.isEmpty else { return InboxRowAction.noTargetReason }
         guard isWired else { return InboxRowAction.notWiredReason }
         if self == .openInTile, rows.count > 1 { return InboxRowAction.oneAtATimeReason }
+        if self == .share, rows.count > 1 { return InboxRowAction.shareOneAtATimeReason }
         guard let offender = rows.first(where: { !isAvailable(for: $0, rollups: rollups) })
         else { return nil }
         return "\(offender.title) \(clauseWhenUnavailable(offender, rollups: rollups))"
@@ -8583,6 +8595,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     /// as no host performs them — the packet's watch-out, discharged in the tooltip.
     static let notWiredReason = "Not available yet."
     static let oneAtATimeReason = "Open one agent at a time."
+    static let shareOneAtATimeReason = "Share one agent at a time, or drag the Share tool over several tiles."
 
     /// Why this one agent blocks this action, as the tail of a sentence starting with its
     /// name. Every clause is the rule it comes from, stated the way the rule is stated —
@@ -8595,6 +8608,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         // answered above. Present because the switch is total, which is what makes a new
         // action a compile error here.
         case .openInTile: return "cannot be opened."
+        case .share: return InboxBulkAction.isArchived(row) ? "is archived." : "runs in another app."
         case .popOut: return row.parentId == nil ? "is not a subagent." : "already has a tile."
         case .foldBack: return row.parentId == nil ? "is not a subagent." : "has no tile to fold."
         case .pin: return row.isPinned ? "is already pinned." : "has no tile to pin."

@@ -40,6 +40,7 @@ final class CanvasTileSelection {
 
     func selectOnly(_ id: UUID?) {
         guard gesture == nil else { return }
+        marquee = false
         ids = id.map { [$0] } ?? []
         refresh()
     }
@@ -48,6 +49,18 @@ final class CanvasTileSelection {
         cancel()
         consumedHeaderClick = false
         ids.removeAll()
+        marquee = false
+        refresh()
+    }
+
+    /// The Share tool's live selection: exactly the tiles its marquee fully
+    /// covers. A marquee rings even one tile, since the focus ants mark the
+    /// focused tile, not what the drag has taken.
+    private(set) var marquee = false
+    func selectByMarquee(_ next: Set<UUID>) {
+        guard gesture == nil, next != ids || !marquee else { return }
+        ids = next
+        marquee = true
         refresh()
     }
 
@@ -286,7 +299,7 @@ final class CanvasTileSelection {
         // the focus/attention overlays must recover their ordinary clearance.
         let resolved = canvas.resolveTileOutlineGeometry(selected: presented.count > 1 ? presented : [])
         // One tile draws nothing: the focus ants already mark it.
-        guard worldFrames.count > 1 else {
+        guard worldFrames.count > (marquee ? 0 : 1) else {
             overlay?.isHidden = true
             return
         }
@@ -302,6 +315,7 @@ final class CanvasTileSelection {
         overlay.ringed = worldFrames.map { !canvas.tileWearsRing($0.id) }
         overlay.style = canvas.focusRingStyle
         overlay.tileScale = CGFloat(canvas.viewport.zoom)
+        overlay.ringsOnly = marquee
         overlay.isHidden = false
         overlay.needsDisplay = true
         // Invalidating cursor rects makes AppKit walk the WHOLE window's view tree
@@ -347,12 +361,15 @@ final class TileSelectionOverlay: NSView {
         setAccessibilityElement(false)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    /// The Share tool's marquee: a ring on each covered tile, even one, and no
+    /// group box or handles, since the marquee is choosing, not resizing.
+    var ringsOnly = false
     var groupRect: CGRect {
         rects.reduce(CGRect.null) { $0.union($1) }.insetBy(dx: -(style.gap + Self.groupInset), dy: -(style.gap + Self.groupInset))
     }
     var handles: [(ResizeEdge, CGRect)] {
         let r = groupRect
-        guard rects.count > 1, !r.isNull, !r.isInfinite else { return [] }
+        guard !ringsOnly, rects.count > 1, !r.isNull, !r.isInfinite else { return [] }
         let positions: [(ResizeEdge, CGPoint)] = [(.topLeft, CGPoint(x: r.minX, y: r.minY)),
                 (.top, CGPoint(x: r.midX, y: r.minY)),
                 (.topRight, CGPoint(x: r.maxX, y: r.minY)),
@@ -393,7 +410,7 @@ final class TileSelectionOverlay: NSView {
     }
 
     /// QA: how many member rings the overlay draws right now.
-    var qaDrawnRingCount: Int { isHidden || rects.count < 2 ? 0 : ringed.filter { $0 }.count }
+    var qaDrawnRingCount: Int { isHidden || rects.count < (ringsOnly ? 1 : 2) ? 0 : ringed.filter { $0 }.count }
     func edge(at point: NSPoint) -> ResizeEdge? {
         handles.first { $0.1.insetBy(dx: -3, dy: -3).contains(point) }?.0
     }
@@ -404,7 +421,7 @@ final class TileSelectionOverlay: NSView {
         return edge(at: local) == nil ? nil : self
     }
     override func draw(_ dirtyRect: NSRect) {
-        guard rects.count > 1 else { return }
+        guard rects.count > (ringsOnly ? 0 : 1) else { return }
         let lineWidth = FocusBorderOverlayView.lineWidth
         let dash = FocusBorderOverlayView.dashPattern.map { CGFloat($0.doubleValue) }
         let ringRadius = FocusBorderOverlayView.ringRadius(tileScale: tileScale, gap: style.gap)
@@ -421,6 +438,7 @@ final class TileSelectionOverlay: NSView {
             path.stroke()
             context.restoreGState()
         }
+        guard !ringsOnly else { return }
         let groupRadius = ringRadius == 0 ? 0 : ringRadius + Self.groupInset
         let group = NSBezierPath(roundedRect: groupRect.insetBy(dx: 0.5, dy: 0.5), xRadius: groupRadius, yRadius: groupRadius)
         group.lineWidth = 1

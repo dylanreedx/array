@@ -16,6 +16,9 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case openFile
     case openFileTree
     case newDiffReview
+    /// Share by link (`.plans/105-collaboration`, round 2): the selected tiles
+    /// when there are some, otherwise the Share tool's marquee.
+    case shareArea
     case fitCanvasToAll
     case tidyCanvas
     /// Reveal the already-current tile for work — the searchable twin of
@@ -82,6 +85,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Open File Tree..."
         case .newDiffReview:
             return "New Diff Review"
+        case .shareArea:
+            return "Share…"
         case .fitCanvasToAll:
             return "Fit Canvas to All"
         case .tidyCanvas:
@@ -161,6 +166,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["open", "file", "tree"]
         case .newDiffReview:
             return ["new", "diff", "review", "git"]
+        case .shareArea:
+            return ["share", "link", "invite", "collaborate", "area", "selection"]
         case .fitCanvasToAll:
             return ["fit", "zoom", "all", "canvas"]
         case .tidyCanvas:
@@ -862,6 +869,7 @@ public enum LaunchPaletteModel {
         case .openFile: return item(row, .create, "Editor", "Open a project file to edit", "doc", ["open file", "text editor", "code editor"], true, true, "action:open-file")
         case .openFileTree: return item(row, .create, "File tree", "Browse project files", "list.bullet.indent", ["open"], true, true, "action:file-tree")
         case .newDiffReview: return item(row, .create, "Diff review", "Review working changes", "plusminus", ["git", "new"], true, true, "action:diff-review")
+        case .shareArea: return item(row, .actions, "Share…", "Share the selected tiles, or drag over what to share", "square.and.arrow.up", ["link", "invite", "collaborate"], false, false, "action:share")
         case .fitCanvasToAll: return item(row, .actions, "Show entire canvas", "Fit every tile and zone", "arrow.up.left.and.arrow.down.right", ["fit", "zoom", "all"], true, true, "action:fit-canvas")
         case .focusCurrentTile: return item(row, .actions, "Focus current tile", "Reveal the highlighted tile for work", "scope", ["reveal", "work", "activate"], false, true, "action:focus-current-tile")
         case .previousView: return item(row, .actions, "Previous view", "Return to the last canvas view", "arrow.uturn.backward", ["back"], false, true, "action:previous-view")

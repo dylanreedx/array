@@ -67,6 +67,19 @@ public enum CommandRegistry {
             definition("tile.openFile", .openFile, aliases: ["document"]),
             definition("tile.openFileTree", .openFileTree, aliases: ["directory", "folder"]),
             definition("tile.newDiffReview", .newDiffReview, aliases: ["git diff", "review"]),
+            // The Share tool, drawn beside Zone on the toolbar: drag over tiles to share them by
+            // link. S arms it while the canvas has the keyboard.
+            CommandDefinition(
+                id: "share.area",
+                title: LaunchPaletteAction.shareArea.displayName,
+                aliases: ["share", "share link", "invite"],
+                paletteAction: .shareArea,
+                floatingToolbarItem: FloatingToolbarItem(title: "Share", symbolName: "square.and.arrow.up", action: .palette(.shareArea)),
+                shortcuts: [ShortcutDefinition(
+                    id: "canvas.shareTool", commandID: "share.area", contexts: [.canvas],
+                    defaultGestures: [ShortcutGesture(keyCode: 1, modifiers: [])],
+                    editability: .fixedSystem, conflictDomain: .contexts([.canvas]), presentationPriority: .canvasRail)]
+            ),
             definition("view.fitCanvasToAll", .fitCanvasToAll, aliases: ["zoom all"]),
             definition("view.tidyCanvas", .tidyCanvas, aliases: ["auto layout", "arrange"]),
             // The searchable path to hold-⌥ Return: reveal the already-current

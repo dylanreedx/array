@@ -7086,8 +7086,18 @@ final class CanvasNSView: NSView, TokenThemed {
             }
             return
         }
+        // S arms the Share tool (`share.area`'s fixed canvas shortcut). Like
+        // Space, only while the canvas itself has the keyboard.
+        if event.keyCode == 1, event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock).isEmpty,
+           let onShareToolKey {
+            onShareToolKey()
+            return
+        }
         super.keyDown(with: event)
     }
+
+    /// The S key on the canvas: the app arms the Share tool.
+    var onShareToolKey: (() -> Void)?
 
     override func keyUp(with event: NSEvent) {
         if event.keyCode == 49, spaceHeld {

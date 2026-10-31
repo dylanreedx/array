@@ -1045,6 +1045,8 @@ final class ChoiceAccessoryButton: NSControl {
     let accessory: ChoiceAccessory
     var onPress: ((String) -> Void)?
     var pageZoom: AgentPageZoom = .default { didSet { needsDisplay = true } }
+    /// Ink in the app's destructive colour: the share popover's Revoke.
+    var isDestructive = false { didSet { needsDisplay = true } }
     private var hovered = false
     private var trackingArea: NSTrackingArea?
 
@@ -1088,7 +1090,7 @@ final class ChoiceAccessoryButton: NSControl {
             fill.setFill()
             NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
         }
-        let ink = TextToken.textPrimary.color.nsColor(for: theme)
+        let ink = (isDestructive ? AccentToken.accentFailed.color : TextToken.textPrimary.color).nsColor(for: theme)
         if let title = accessory.title {
             let text = NSAttributedString(string: title, attributes: [
                 .font: NSFont.token(.caption, zoom: pageZoom), .foregroundColor: ink])

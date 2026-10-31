@@ -44,6 +44,8 @@ func profile(
 let builtInActionNames = [
     "New Agent…", "New Agent Without a Tile…", "Fan Out Selected Tickets…",
     "New Note", "New Board", "Open Board…", "New Browser", "New iOS Preview", "Open File...", "Open File Tree...", "New Diff Review",
+    // .plans/105-collaboration round 2: share by link.
+    "Share…",
     "Fit Canvas to All", "Tidy Canvas", "Focus Current Tile", "Back to Previous View",
     "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "Show Processes",
     "Replay Getting Started", "New Workspace…",

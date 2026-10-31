@@ -1710,6 +1710,10 @@ enum ContinuumApp {
                     try await CollaborationAccessibilityChecks.run(delegate: delegate)
                     print("STAGE collaboration native: presence, follow and remote work budgets")
                     try await CollaborationBudgetChecks.run(delegate: delegate)
+                    // Last: it makes every view accept the first mouse for the
+                    // rest of the process, as a user's active app does.
+                    print("STAGE collaboration native: share entry points and popover")
+                    try await ShareEntryChecks.run()
                     print("STAGE collaboration native: collaboration appearance census")
                     try CollaborationAppearanceSurfaces.runCensus()
                     print("ContinuumRevivedCollaborationNativeChecks passed")
@@ -12262,6 +12266,137 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     var qaCaptureSetupTask: Task<Void, Never>? { captureSetupTask }
     var qaCaptureSelectionView: SharedAreaCaptureSelectionView? { captureSelectionView }
 
+    // MARK: - Share by link (.plans/105-collaboration/IN-CANVAS.md, round 2)
+    //
+    // Every Share entry point builds `.tiles` from what is actually selected
+    // and opens the in-canvas popover. Nothing here waits on the Collaboration
+    // window: that wait is why a share used to do nothing.
+
+    /// Part 2 plugs in here when it merges; until then Share says so.
+    var sharedZoneCreator: SharedZoneCreating?
+    private let pendingSharedZones = PendingSharedZones()
+    private var shareEntryStorage: ShareEntryCoordinator?
+    private var shareToolView: SharedAreaCaptureSelectionView?
+
+    var shareEntry: ShareEntryCoordinator {
+        if let shareEntryStorage { return shareEntryStorage }
+        let entry = ShareEntryCoordinator(
+            links: { [unowned self] in self.shareLinks },
+            zones: { [unowned self] in self.sharedZoneCreator ?? self.pendingSharedZones })
+        configureShareEntry(entry)
+        return entry
+    }
+
+    /// Checks only: recorders for parts 1 and 2 and a private pasteboard.
+    func qaInstallShareEntry(links: ShareLinkServing, zones: SharedZoneCreating, pasteboard: NSPasteboard) {
+        shareEntryStorage?.dismiss()
+        configureShareEntry(ShareEntryCoordinator(links: { links }, zones: { zones }, pasteboard: pasteboard))
+    }
+
+    private func configureShareEntry(_ entry: ShareEntryCoordinator) {
+        entry.onClose = { [weak self] in
+            guard let selection = self?.canvasView?.tileSelection, selection.marquee else { return }
+            selection.clear()
+        }
+        shareEntryStorage = entry
+    }
+
+    var qaShareToolView: SharedAreaCaptureSelectionView? { shareToolView }
+
+    /// The shareable tiles among `tileIds`, keyed by their owning project.
+    /// Terminals stay private, so they are never part of a share.
+    func shareTarget(tileIds: [UUID], origin: ShareTarget.Origin) -> ShareTarget? {
+        guard let canvasView, let runtime = workspaceRuntime else { return nil }
+        var items: [ShareTarget.Item] = []
+        // Reading order on the canvas: the popover lists the tiles, and the
+        // first one names the link.
+        let world = Dictionary(uniqueKeysWithValues: canvasView.allTilesInWorldFrames().map { ($0.id, $0.frame) })
+        let ordered = tileIds.sorted {
+            let a = world[$0], b = world[$1]
+            return (a?.y ?? 0, a?.x ?? 0, $0.uuidString) < (b?.y ?? 0, b?.x ?? 0, $1.uuidString)
+        }
+        for id in ordered {
+            guard let tile = canvasView.tileRecord(for: id), tile.kind != .terminal,
+                  let zone = tile.zoneId, let project = canvasView.projectId(forZone: zone) else { continue }
+            var title = tile.title
+            if tile.kind == .managedAgent, let agent = agentSupervisor.agent(forTile: id),
+               let name = agentSupervisor.records[agent]?.displayName, !name.isEmpty { title = name }
+            items.append(.init(key: .init(projectID: project, tileID: id),
+                               title: title.isEmpty ? tile.kind.displayName : title, kind: tile.kind))
+        }
+        guard !items.isEmpty else { return nil }
+        return ShareTarget(workspaceID: runtime.workspaceId, origin: origin, items: items)
+    }
+
+    /// The header's Share, anchored to the button that was pressed.
+    func shareAgentTile(_ tile: TileNSView) {
+        guard let target = shareTarget(tileIds: [tile.tile.id], origin: .agent) else { return }
+        let anchor = tile.qaTitleBarShareControl ?? tile
+        shareEntry.present(target, anchor: anchor.bounds, in: anchor)
+    }
+
+    /// The sidebar row's Share: bring the agent's tile into view, then open the
+    /// same popover on it.
+    @discardableResult
+    func shareAgentFromInbox(_ rowId: UUID) -> Bool {
+        guard revealAgentFromInbox(rowId), let canvasView,
+              let tileId = agentSupervisor.records[AgentID(rawValue: rowId)]?.tileId ?? (canvasView.tileRecord(for: rowId) != nil ? rowId : nil),
+              let tile = canvasView.tileView(for: tileId),
+              let target = shareTarget(tileIds: [tileId], origin: .agent) else { return false }
+        let band = NSRect(x: 0, y: tile.isFlipped ? 0 : tile.bounds.height - TileNSView.titleBarHeight,
+                          width: tile.bounds.width, height: TileNSView.titleBarHeight)
+        shareEntry.present(target, anchor: band, in: tile)
+        return true
+    }
+
+    /// The toolbar's Share, the palette's Share… and S: share the selected
+    /// tiles if there is a selection, otherwise arm the Share tool.
+    func beginShare() {
+        guard let canvasView else { return }
+        let selected = canvasView.tileSelection.ids
+        if selected.count > 1, let target = shareTarget(tileIds: Array(selected), origin: .area) {
+            presentAreaShare(target)
+        } else {
+            armShareTool()
+        }
+    }
+
+    func armShareTool() {
+        guard !CollaborationWindow.owns(userCommandWindow), let canvasView else { return }
+        shareToolView?.removeFromSuperview()
+        let overlay = SharedAreaCaptureSelectionView(shareToolOn: canvasView)
+        shareToolView = overlay
+        overlay.onCoveredChange = { [weak canvasView] ids in canvasView?.tileSelection.selectByMarquee(ids) }
+        overlay.onCancel = { [weak self, weak overlay, weak canvasView] in
+            overlay?.removeFromSuperview(); self?.shareToolView = nil
+            canvasView?.tileSelection.clear()
+            canvasView?.window?.makeFirstResponder(canvasView)
+        }
+        overlay.onShare = { [weak self, weak overlay, weak canvasView] ids, _ in
+            guard let self, let canvasView else { return }
+            guard let target = self.shareTarget(tileIds: Array(ids), origin: .area) else {
+                overlay?.showRefusal("Terminals stay private · drag over agents, notes, diffs or files · esc")
+                return
+            }
+            overlay?.removeFromSuperview(); self.shareToolView = nil
+            canvasView.window?.makeFirstResponder(canvasView)
+            self.presentAreaShare(target)
+        }
+        canvasView.addSubview(overlay)
+        canvasView.window?.makeFirstResponder(overlay)
+    }
+
+    /// The popover on an area, anchored to the union of its tiles on screen.
+    private func presentAreaShare(_ target: ShareTarget) {
+        guard let canvasView else { return }
+        let ids = Set(target.items.map(\.key.tileID))
+        canvasView.tileSelection.selectByMarquee(ids)
+        let union = canvasView.allTilesInWorldFrames().filter { ids.contains($0.id) }
+            .map { CanvasEngine.tileScreenFrame($0.frame, viewport: canvasView.viewport) }
+            .reduce(NSRect.null) { $0.union($1) }
+        shareEntry.present(target, anchor: union.isNull ? canvasView.bounds : union, in: canvasView)
+    }
+
     @objc func openSettingsFromMenu(_ sender: Any?) {
         openSettings()
     }
@@ -14214,7 +14349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     static let wiredInboxRowActions: Set<InboxRowAction> = [
         .settle, .unsettle, .snooze, .wake, .markUnread,
         .stopAgent, .archive, .delete, .generateName, .color,
-        .popOut, .foldBack, .pin, .unpin,
+        .popOut, .foldBack, .pin, .unpin, .share,
     ]
     /// The bulk bar's half. No `.stopAgent` — the bar has no such action (`P3.11`'s five
     /// are settle / snooze / mark-unread / archive / delete).
@@ -14234,6 +14369,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @discardableResult
     func performInboxRowAction(_ action: InboxRowAction, on rowIds: [UUID]) -> Bool {
         switch action {
+        case .share:
+            guard rowIds.count == 1, let id = rowIds.first else { return false }
+            return shareAgentFromInbox(id)
         case .popOut, .foldBack, .pin, .unpin:
             return helperTileActionFromInbox(action, rowIds)
         case .stopAgent:
@@ -18534,6 +18672,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialLaunchSelection: AgentLaunchSelection? = nil) {
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
+        view.onShareRequested = { [weak self] tile in self?.shareAgentTile(tile) }
+        view.setTitleBarShareAction(true)
         let supervisor = agentSupervisor
         let agentId: AgentID
         if let agentID {
@@ -19451,6 +19591,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let before = tileCount()
             spawnDiffReviewFromPalette()
             return tileCount() > before
+        case .shareArea:
+            beginShare()
+            return false
         case .fitCanvasToAll:
             guard let canvasView, let viewport = canvasView.fitAllToViewport() else { return false }
             canvasView.navigateViewport(to: viewport)
@@ -21910,6 +22053,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func wireCanvasCallbacks(_ canvasView: CanvasNSView) {
         canvasView.delegate = self
         canvasView.tileRevealURLProvider = { [weak self] tileId in self?.revealInFinderURL(forTile: tileId) }
+        canvasView.onShareToolKey = { [weak self] in self?.beginShare() }
         canvasView.onTileCloseRequested = { [weak self] tileId in
             self?.deleteTile(id: tileId)
         }

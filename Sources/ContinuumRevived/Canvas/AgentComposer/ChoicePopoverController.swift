@@ -637,6 +637,99 @@ final class ChoicePopoverController {
             userInfo: [.announcement: announcement])
     }
 
+    /// A popover that is not a list: the share popover. Same panel, shadow,
+    /// placement and dismissal as a menu. A ChoiceButton inside it opens its
+    /// own panel as a child of this one, and that child's focus and clicks
+    /// count as this popover's own rather than as leaving it.
+    func presentContent(
+        _ content: NSView,
+        size: NSSize,
+        anchor: NSRect,
+        relativeTo view: NSView,
+        placementFrame: NSRect? = nil,
+        takesFocus: Bool = true,
+        initialFirstResponder: NSView? = nil,
+        accessibilityLabel: String,
+        focusReturnView: NSView? = nil,
+        onClose: (() -> Void)? = nil
+    ) {
+        dismiss()
+        qaLastSelfDismissal = nil
+        lastAccessibilityAnnouncementForQA = nil
+        guard let window = view.window else { return }
+        let screenFrame = window.screen?.visibleFrame ?? placementFrame ?? NSScreen.main?.visibleFrame ?? window.frame
+        let requested = placementFrame.map { $0.intersection(screenFrame) }
+        let visibleFrame = requested.flatMap { $0.isNull || $0.isEmpty ? nil : $0 } ?? screenFrame
+        let obstacles = placementFrame == nil ? [] : Self.obstacleScreenFrames(in: window)
+        let region = Self.region(visibleFrame.insetBy(dx: 8, dy: 8), clearOf: obstacles, zoom: pageZoom)
+        content.frame = NSRect(origin: .zero, size: size)
+        let panel = ChoicePanel(contentRect: NSRect(origin: .zero, size: size),
+                                styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.appearance = window.effectiveAppearance
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.level = .popUpMenu
+        panel.collectionBehavior = [.transient, .moveToActiveSpace]
+        let chrome = ChoicePanelShadowView(surface: content)
+        panel.contentView = chrome
+        let margin = ChoicePanelShadowView.margin
+        let zoom = pageZoom
+        panel.setFrame(Self.panelFrame(contentSize: size, anchor: anchor, relativeTo: view, visibleFrame: region, zoom: zoom)
+            .insetBy(dx: -margin, dy: -margin), display: false)
+        reframeIntrinsicPanel = { [weak view] size in
+            guard let view else { return .zero }
+            return Self.panelFrame(contentSize: size, anchor: anchor, relativeTo: view, visibleFrame: region, zoom: zoom)
+        }
+        chrome.layoutSubtreeIfNeeded()
+        self.panel = panel
+        hostsContent = true
+        surfaceView = content
+        anchorView = view
+        self.focusReturnView = focusReturnView
+        cancellationHandler = nil
+        closeHandler = onClose
+        parentWindow = window
+        anchorWasPostingFrameChanges = view.postsFrameChangedNotifications
+        content.setAccessibilityLabel(accessibilityLabel)
+        panel.setAccessibilityLabel(accessibilityLabel)
+        window.addChildWindow(panel, ordered: .above)
+        installDismissalObservers(for: window, anchor: view, takesFocus: takesFocus)
+        panel.orderFront(nil)
+        if takesFocus {
+            panel.makeKey()
+            panel.makeFirstResponder(initialFirstResponder ?? content)
+        }
+        lastAccessibilityAnnouncementForQA = accessibilityLabel
+        NSAccessibility.post(element: content, notification: .announcementRequested,
+                             userInfo: [.announcement: accessibilityLabel])
+    }
+
+    /// The hosted content changed height: keep the panel on its anchor.
+    func resizeContent(to size: NSSize) {
+        guard isPresented, hostsContent, let panel, let reframeIntrinsicPanel else { return }
+        let margin = ChoicePanelShadowView.margin
+        let frame = reframeIntrinsicPanel(size).insetBy(dx: -margin, dy: -margin)
+        guard frame != panel.frame else { return }
+        surfaceView?.setFrameSize(size)
+        panel.setFrame(frame, display: true)
+        panel.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    /// True while a hosted content popover is showing: its child panels belong
+    /// to it.
+    private var hostsContent = false
+
+    private func ownsChildWindow(_ candidate: NSWindow?) -> Bool {
+        guard hostsContent, let panel else { return false }
+        var window = candidate
+        while let current = window {
+            if current === panel { return true }
+            window = current.parent
+        }
+        return false
+    }
+
     /// Return keyboard navigation to this level after closing a child.
     func focus() {
         guard let panel, let listView else { return }
@@ -702,6 +795,7 @@ final class ChoicePopoverController {
         let returnView = focusReturnView
         let window = parentWindow
         panel = nil
+        hostsContent = false
         listView = nil
         surfaceView = nil
         completionContentView = nil
@@ -869,6 +963,12 @@ final class ChoicePopoverController {
                             self.dismissItself("resignKey")
                         }
                     }
+                } else if self.hostsContent {
+                    // The resignation comes before the child panel is key.
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.isPresented, !self.ownsChildWindow(NSApp.keyWindow) else { return }
+                        self.dismissItself("resignKey")
+                    }
                 } else { self.dismissItself("resignKey") }
             } })
         }
@@ -921,7 +1021,7 @@ final class ChoicePopoverController {
 
     /// The local monitor and deterministic event witness share this dispatch path.
     func filterPointerEvent(_ event: NSEvent, originatingWindow: NSWindow?) -> NSEvent? {
-        guard isPresented, originatingWindow !== panel else { return event }
+        guard isPresented, originatingWindow !== panel, !ownsChildWindow(originatingWindow) else { return event }
         if cascadeGroup?.contains(window: originatingWindow) == true { return event }
         let closesTrigger = cascadeGroup?.consumesAnchorClick(event, originatingWindow: originatingWindow)
             ?? isClosingAnchorClick(event, originatingWindow: originatingWindow)

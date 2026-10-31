@@ -789,7 +789,7 @@ final class FloatingToolbarView: NSView, TokenThemed {
 
     static func group(_ item: FloatingToolbarItem) -> Int {
         switch item.action {
-        case .createZone: return 0
+        case .createZone, .palette(.shareArea): return 0
         case .terminalProfiles, .palette(.newManagedAgent): return 1
         default: return 2
         }

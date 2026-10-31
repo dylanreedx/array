@@ -711,6 +711,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private let hoverSettle = InboxRowHoverActionButton(symbol: "tray.and.arrow.down", label: "Settle")
     private var onHoverSnooze: (() -> Void)?
     private var onHoverSettle: (() -> Void)?
+    /// Share by link (`.plans/105-collaboration`, round 2 panel 2).
+    private let hoverShare = InboxRowHoverActionButton(symbol: "square.and.arrow.up", label: "Share")
+    private var onHoverShare: (() -> Void)?
     private var hoverActionsShown = false
     private var hoverActionsHovered = false
     /// .plans/87: a hidden session drawn in place while `Hidden (N)` is open —
@@ -1052,7 +1055,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         settleNudge.setAccessibilityLabel("Settle agent")
         settleNudge.setAccessibilityIdentifier("ContinuumAgentInboxSettleNudge")
         card.addSubview(settleNudge)
-        for button in [hoverSnooze, hoverSettle] {
+        for button in [hoverSnooze, hoverSettle, hoverShare] {
             button.target = self
             button.alphaValue = 0
             button.isHidden = true
@@ -1060,6 +1063,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         hoverSnooze.action = #selector(hoverSnoozeClicked)
         hoverSettle.action = #selector(hoverSettleClicked)
+        hoverShare.action = #selector(hoverShareClicked)
         for button in [hoverPopOut, hoverStop] {
             button.target = self
             button.alphaValue = 0
@@ -2000,9 +2004,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             settleNudge.frame = .zero
         }
         // Hover actions take the mark's place, as they always have.
-        let actionEdge = (hoverActionsShown && (onHoverSnooze != nil || onHoverSettle != nil)) ? right : lineRight + 8
+        let actionEdge = (hoverActionsShown && (onHoverSnooze != nil || onHoverSettle != nil || onHoverShare != nil)) ? right : lineRight + 8
         var actionRight = actionEdge
-        for button in [hoverSettle, hoverSnooze, hoverHide, hoverCopy, hoverMoveHere] where !button.isHidden {
+        for button in [hoverSettle, hoverSnooze, hoverShare, hoverHide, hoverCopy, hoverMoveHere] where !button.isHidden {
             let size = button.intrinsicContentSize
             let top = snapped(l2 - size.height / 2)
             button.opticalCentreY = l2 - top
@@ -2542,6 +2546,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var settleNudgeTitleForQA: String { settleNudge.title }
     @objc private func hoverSnoozeClicked() { onHoverSnooze?() }
     @objc private func hoverSettleClicked() { onHoverSettle?() }
+    @objc private func hoverShareClicked() { onHoverShare?() }
+    var hoverShareButtonForQA: NSView? { hoverShare.isHidden ? nil : hoverShare }
     @objc private func hoverMoveHereClicked() { onHoverMoveHere?() }
     @objc private func hoverCopyClicked() { onHoverCopy?() }
     @objc private func hoverHideClicked() { onHoverHide?() }
@@ -2598,9 +2604,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     /// Which hover actions this row offers; nil hides one. Set by the list, which
     /// owns the action predicates, after every `apply`.
-    func configureHoverActions(snooze: (() -> Void)?, settle: (() -> Void)?) {
+    func configureHoverActions(snooze: (() -> Void)?, settle: (() -> Void)?, share: (() -> Void)? = nil) {
         onHoverSnooze = snooze
         onHoverSettle = settle
+        onHoverShare = share
     }
 
     /// Cross-fade the status slot and the actions over 150ms (instant under Reduce
@@ -2614,7 +2621,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 button.isHidden = !on
                 button.alphaValue = on ? 1 : 0
             }
-            for button in [hoverSnooze, hoverSettle, hoverMoveHere, hoverCopy, hoverHide] {
+            for button in [hoverSnooze, hoverSettle, hoverShare, hoverMoveHere, hoverCopy, hoverHide] {
                 button.isHidden = true
             }
             needsLayout = true
@@ -2625,7 +2632,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // The nudge IS the settle action while it shows; a second one beside it
         // is the duplicate the first version drew.
         let settleOn = shown && onHoverSettle != nil && settleNudge.isHidden
-        let any = snoozeOn || settleOn
+        let shareOn = shown && onHoverShare != nil
+        let any = snoozeOn || settleOn || shareOn
         let moveOn = shown && onHoverMoveHere != nil
         let copyOn = shown && onHoverCopy != nil
         // The × stays on a selected row as well as a hovered one, and a revealed
@@ -2638,15 +2646,17 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             needsLayout = true
         }
         hoverActionsShown = any || moveOn || copyOn || hideOn
-        let wasShown = !hoverSnooze.isHidden || !hoverSettle.isHidden
+        let wasShown = !hoverSnooze.isHidden || !hoverSettle.isHidden || !hoverShare.isHidden
         // Shown before fading in; hidden only once faded out, so a leaving
         // pointer never blinks the corner empty.
         if snoozeOn { hoverSnooze.isHidden = false }
         if settleOn { hoverSettle.isHidden = false }
+        if shareOn { hoverShare.isHidden = false }
         if any != wasShown { needsLayout = true }
         let apply = {
             self.hoverSnooze.alphaValue = snoozeOn ? 1 : 0
             self.hoverSettle.alphaValue = settleOn ? 1 : 0
+            self.hoverShare.alphaValue = shareOn ? 1 : 0
             self.decorations.setMarkVisible(!any, animated: false)
         }
         if prefersReducedMotion() || window == nil {
@@ -2660,6 +2670,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 context.allowsImplicitAnimation = true
                 self.hoverSnooze.animator().alphaValue = snoozeOn ? 1 : 0
                 self.hoverSettle.animator().alphaValue = settleOn ? 1 : 0
+                self.hoverShare.animator().alphaValue = shareOn ? 1 : 0
             }, completionHandler: { [weak self] in
                 MainActor.assumeIsolated { if !any { self?.finishHoverFade() } }
             })
@@ -2670,6 +2681,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private func finishHoverFade() {
         if !(hoverActionsShown && onHoverSnooze != nil) { hoverSnooze.isHidden = true }
         if !(hoverActionsShown && onHoverSettle != nil && settleNudge.isHidden) { hoverSettle.isHidden = true }
+        if !(hoverActionsShown && onHoverShare != nil) { hoverShare.isHidden = true }
         needsLayout = true
     }
 
