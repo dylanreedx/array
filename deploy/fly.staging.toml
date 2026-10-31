@@ -1,0 +1,42 @@
+# Staging copy of ../fly.toml for the multiplayer relay. Differences: the app
+# name, its own volume, and collaboration switched on (the database path here;
+# RELAY_COLLABORATION_MASTER_KEY and RELAY_MASTER_KEY are staging-only Fly
+# secrets, never production's). Deploy from the repo root:
+#   fly deploy . --config deploy/fly.staging.toml --dockerfile Dockerfile
+app = "arrayapp-relay-staging"
+primary_region = "yyz"
+
+[build]
+  dockerfile = "../Dockerfile"
+
+[env]
+  PORT = "8080"
+  RELAY_HOST = "::"
+  RELAY_ADMIN_PORT = "9090"
+  RELAY_DATABASE_PATH = "/data/relay.sqlite"
+  RELAY_COLLABORATION_DATABASE_PATH = "/data/collaboration.sqlite"
+  RELAY_CLIENT_ADDRESS_HEADER = "fly-client-ip"
+
+[[mounts]]
+  source = "relay_staging_data"
+  destination = "/data"
+  initial_size = "1gb"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "15s"
+    method = "GET"
+    timeout = "2s"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
