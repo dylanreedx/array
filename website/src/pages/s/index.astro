@@ -17,6 +17,7 @@ import { MAC_DOWNLOAD_URL } from '../../lib/share-links';
       <div class="share-actions">
         <a class="share-button share-button--primary" href="#" data-open-array hidden>Open in Array</a>
         <a class="share-button share-button--secondary" href={MAC_DOWNLOAD_URL} data-download>Download Array for Mac</a>
+        <a class="share-dev-link" href="#" data-open-array-dev hidden>Open in Array Dev</a>
       </div>
 
       <p class="share-note">The link’s key stays in your browser and is never sent to this website.</p>
@@ -27,14 +28,17 @@ import { MAC_DOWNLOAD_URL } from '../../lib/share-links';
     import { shareLinkDeepLink, shareLinkSlug } from '../../lib/share-links';
 
     const open = document.querySelector<HTMLAnchorElement>('[data-open-array]');
+    const openDev = document.querySelector<HTMLAnchorElement>('[data-open-array-dev]');
     const title = document.querySelector<HTMLElement>('[data-share-title]');
     const copy = document.querySelector<HTMLElement>('[data-share-copy]');
     const slug = shareLinkSlug(window.location.pathname);
-    const deepLink = shareLinkDeepLink(window.location.pathname, window.location.hash);
+    const deepLink = shareLinkDeepLink(window.location.pathname, window.location.search, window.location.hash);
+    const devLink = shareLinkDeepLink(window.location.pathname, window.location.search, window.location.hash, 'array-dev');
 
     if (open && deepLink && slug) {
       open.href = deepLink;
       open.hidden = false;
+      if (openDev && devLink) { openDev.href = devLink; openDev.hidden = false; }
       if (title) title.textContent = `Open “${slug}” in Array.`;
       window.location.href = deepLink;
     } else if (copy) {
@@ -69,6 +73,8 @@ import { MAC_DOWNLOAD_URL } from '../../lib/share-links';
   .share-button[hidden] { display: none; }
   .share-button--primary { color: #f4f6f8; background: #12161d; }
   .share-button--secondary { border-color: var(--line); background: var(--page-raised); }
+  .share-dev-link { padding: 8px; color: var(--ink-2); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; }
+  .share-dev-link[hidden] { display: none; }
   .share-note { margin: 24px 0 0; color: var(--ink-2); font-size: 12px; line-height: 1.45; }
   @media (max-width: 520px) {
     .share-page { padding: 12px; }
