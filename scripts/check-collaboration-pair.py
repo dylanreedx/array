@@ -45,6 +45,7 @@ class Proxy:
             def do_GET(self): self.forward()
             def do_POST(self): self.forward()
             def do_DELETE(self): self.forward()
+            def do_PUT(self): self.forward()  # artifact blob uploads
             def forward(self):
                 body = self.rfile.read(int(self.headers.get("content-length", 0)))
                 updates = self.command == "POST" and self.path.endswith("/updates")

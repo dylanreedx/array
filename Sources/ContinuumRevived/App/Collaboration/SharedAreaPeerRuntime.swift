@@ -21,6 +21,11 @@ enum SharedAreaPeerRuntime {
         let endpoint: String
         let enrollmentCode: String
         let defaultsSuite: String
+        /// Seeds a file tile at this project-relative path for artifact sharing.
+        let artifactFile: String?
+        /// claude, codex or pi: the source agent runs that harness's production
+        /// runner against `AgentSteeringQAFakes` instead of the scripted runner.
+        let sourceHarness: String?
     }
     private final class Vault: CollaborationCredentialVault, @unchecked Sendable {
         private let lock = NSLock()
@@ -66,7 +71,7 @@ enum SharedAreaPeerRuntime {
             }
         }
     }
-    private struct Transport: SharedAreaControllerTransport {
+    private struct Transport: SharedAreaControllerTransport, SharedAreaArtifactTransport {
         let live: SharedAreaAPITransport
         let gate: FaultGate
         func identity() async throws -> Collaboration.Identity { try await live.identity() }
@@ -82,6 +87,22 @@ enum SharedAreaPeerRuntime {
         func publishPresence(_ input: Collaboration.PresenceInput) async throws { try await live.publishPresence(input) }
         func endPresence(_ session: UUID) async throws { try await live.endPresence(session) }
         func reportUsage(_ report: Collaboration.UsageReport) async throws { try await live.reportUsage(report) }
+        // Every capability the live transport has must pass through: the
+        // protocol defaults answer 503, which silently disables live views.
+        func publishAgentProjection(object: UUID, report: Collaboration.AgentProjection.PublishReport) async throws {
+            try await live.publishAgentProjection(object: object, report: report)
+        }
+        func readAgentProjection(object: UUID, cursor: Collaboration.AgentProjection.Cursor?) async throws -> Collaboration.AgentProjection.Read {
+            try await live.readAgentProjection(object: object, cursor: cursor)
+        }
+        func artifactState(object: UUID) async throws -> Collaboration.Artifact.State { try await live.artifactState(object: object) }
+        func readArtifact(object: UUID, revision: UUID?) async throws -> CollaborationArtifactContents { try await live.readArtifact(object: object, revision: revision) }
+        func publishArtifact(epoch: Int64, capture: Collaboration.Artifact.Capture) async throws -> Collaboration.Artifact.PublishReceipt {
+            try await live.publishArtifact(epoch: epoch, capture: capture)
+        }
+        func reviewArtifact(object: UUID, request: Collaboration.Artifact.ReviewRequest) async throws -> Collaboration.Artifact.Review {
+            try await live.reviewArtifact(object: object, request: request)
+        }
     }
     private final class Census { var runners: [ScriptedAgentRunner] = [] }
     private struct Source {
@@ -97,6 +118,8 @@ enum SharedAreaPeerRuntime {
         let census: Census
         let settings: QAIsolatedDefaults
         let sourceFiles: [URL]
+        let project: UUID
+        let fileTile: UUID?
     }
     @MainActor
     private final class Peer {
@@ -116,6 +139,7 @@ enum SharedAreaPeerRuntime {
         var revisions: [UInt64] = []
         var presenceSession: UUID?
         var presenceSequence: UInt64 = 0
+        var lastShareMessage = ""
         init(config: Configuration, account: CollaborationAccountController, source: Source, fault: FaultGate) {
             self.config = config; self.account = account; self.source = source; self.fault = fault
             directory = URL(fileURLWithPath: config.mailboxRoot)
@@ -154,6 +178,53 @@ enum SharedAreaPeerRuntime {
                 result["privateCamera"] = ["x": controller.view.x, "y": controller.view.y, "zoom": controller.view.zoom]
                 result["bindings"] = controller.sourceBindings.count
                 result["presence"] = controller.presence.count
+                result["endorsements"] = controller.document?.endorsements.map { ["revision": $0.revision.rawValue.uuidString, "person": $0.person.rawValue.uuidString] } ?? []
+                // A retained agreement draft whose base is no longer the current
+                // revision is the conflict the scene keeps for the author to rebase.
+                if let document = controller.document,
+                   let stale = controller.drafts.first(where: { draft in
+                       draft.object.flatMap { document.currentRevision(of: $0)?.id }.map { $0 != draft.basedOn } ?? false }) {
+                    result["agreementConflict"] = true; result["agreementDraft"] = stale.text
+                } else { result["agreementConflict"] = false }
+            }
+            result["following"] = presencePublisher?.followedDevice?.uuidString ?? NSNull()
+            result["sourceObjects"] = controller?.sourceBindings.map { $0.object.rawValue.uuidString } ?? []
+            result["sourceBindingAgents"] = controller?.sourceBindings.map { $0.agentID?.rawValue.uuidString ?? "none" } ?? []
+            result["lastShareMessage"] = lastShareMessage
+            if let projections = hostSession?.projections {
+                result["projection"] = ["projectors": projections.projectors.count,
+                    "delivered": projections.projectors.values.reduce(0) { $0 + $1.deliveredBatches },
+                    "errors": ([projections.lastError] + projections.projectors.values.map(\.lastError)).compactMap { $0.map { String(describing: $0) } }] as [String: Any]
+            }
+            if let controller, let document = controller.document {
+                // The same liveness lookup and card copy the scene draws.
+                result["agents"] = document.items.filter { $0.kind == .agentObservation }.map { item -> [String: Any] in
+                    let liveness = SharedAreaHostLivenessCopy.liveness(for: item, in: controller.hostLiveness)
+                    return ["object": item.id.rawValue.uuidString, "owner": item.source?.owner.rawValue.uuidString ?? "",
+                            "hostState": liveness.map { String(describing: $0.state) } ?? "unknown",
+                            "hostLine": SharedAreaHostLivenessCopy.cardLine(liveness)]
+                }
+                result["artifactHeads"] = controller.artifactHeads.map { ["object": $0.object.rawValue.uuidString, "revision": $0.revision.rawValue.uuidString, "sequence": $0.sequence] as [String: Any] }
+            }
+            if let scene {
+                // What the selected object's panels show this person, verbatim.
+                result["selected"] = scene.selectedObject?.rawValue.uuidString ?? NSNull()
+                let live = scene.livePanel
+                result["liveView"] = ["object": live.object?.rawValue.uuidString ?? NSNull(), "status": live.statusText, "controls": live.controlsText,
+                                      "transcript": live.transcriptText, "polling": live.isPolling, "reads": live.reads] as [String: Any]
+                let artifact = scene.artifactPanel
+                result["artifactPanel"] = ["object": artifact.object?.rawValue.uuidString ?? NSNull(), "summary": artifact.summaryText,
+                    "rendered": artifact.renderedText, "latestDigest": artifact.state?.latest?.contentDigest ?? NSNull(), "loads": artifact.loads,
+                    "bytes": (artifact.contents?.bytes ?? [:]).mapValues { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() }] as [String: Any]
+                result["freshness"] = ["status": scene.freshnessPanel.statusText, "notice": scene.freshnessPanel.noticeText]
+            }
+            // The live view, not the private camera: following writes that once,
+            // when it ends. Area point under the canvas centre, as the native
+            // follow witness measures it.
+            if let scene {
+                let frame = scene.areaCanvasView.frame
+                let centre = scene.areaPoint(forScreenPoint: .init(x: frame.midX, y: frame.midY))
+                result["viewCentre"] = ["x": Double(centre.x), "y": Double(centre.y)]
             }
             result["canUndo"] = scene?.canUndoSharedGeometry ?? false
             result["canRedo"] = scene?.canRedoSharedGeometry ?? false
@@ -163,6 +234,11 @@ enum SharedAreaPeerRuntime {
                 return ["name": url.lastPathComponent, "sha256": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()]
             }
             result["sourceWorld"] = source.canvas.allTilesInWorldFrames().sorted { $0.id.uuidString < $1.id.uuidString }.map { ["id": $0.id.uuidString, "x": $0.frame.x, "y": $0.frame.y, "width": $0.frame.width, "height": $0.frame.height] as [String: Any] }
+            if let control = handoff?.model.control {
+                result["handoffControl"] = ["object": control.object.rawValue.uuidString, "controller": control.controller.rawValue.uuidString,
+                                            "offered": control.offer != nil]
+            }
+            result["handoffMessage"] = handoff?.model.message ?? ""
             if let receipt = handoff?.model.receipt {
                 result["handoffPhase"] = receipt.phase.rawValue
                 result["handoffCommand"] = receipt.command.id.uuidString
@@ -201,7 +277,7 @@ enum SharedAreaPeerRuntime {
             if !hasCachedDocument { try view.fitContent() }
             let hostSession = try SharedAreaHostSession(account: account, area: area, supervisor: source.delegate.qaAgentSupervisor)
             self.hostSession = hostSession; handoff = hostSession.handoff
-            hostSession.start()
+            hostSession.start(); hostSession.attach(to: view)
             let publisher = SharedAreaPresencePublisher(scene: view); publisher.start(); presencePublisher = publisher
             changed()
         }
@@ -222,6 +298,54 @@ enum SharedAreaPeerRuntime {
                   scene.updateGeometry(frames: [position.id: rect]) else { throw Failure(description: "native geometry gesture refused") }
             if finish { await scene.finishGeometry() }
         }
+        /// The shipped capture review: explicit per-row choices, then confirm.
+        func share(_ selection: SharedAreaPublication.Selection, fileMode: String) async throws {
+            guard let area = controller?.document?.id.rawValue, let person = account.activeAccount?.identity.person else { throw Failure(description: "share destination missing") }
+            // The shipped review owns its controller. Reusing the mounted
+            // scene controller would replace its legacy onChange callback
+            // and accidentally bypass native refresh after publication.
+            let reviewController = try account.makeSharedAreaController(area: area)
+            await reviewController.open()
+            guard reviewController.status == .connected else { throw Failure(description: "review controller did not connect") }
+            let host = try await account.registerHost()
+            var delivery = "not attempted"
+            let review = try SharedAreaCaptureCoordinator(selection: selection, controller: reviewController, person: person, host: host,
+                inventoryProvider: { [source] in try SharedAreaInventory.capture(runtime: source.runtime, supervisor: source.delegate.qaAgentSupervisor, selection: selection) },
+                submitter: {
+                    let result = await reviewController.submitPublication($0)
+                    switch result {
+                    case .accepted(let receipt): delivery = "accepted revision \(receipt.revision)"
+                    case .rejected(let reason): delivery = "rejected \(reason)"
+                    case .uncertain: delivery = "uncertain"
+                    }
+                    return result
+                })
+            let view = SharedAreaCaptureView(coordinator: review)
+            for row in review.review.rows {
+                guard let choice = view.sourceChoice.items.first(where: { $0.id == "\(row.source.projectID.uuidString)/\(row.source.tileID.uuidString)" }) else { throw Failure(description: "QA review source choice missing") }
+                view.sourceChoice.handleSelection(choice)
+                let mode = row.tileKind == .note ? "agreement" : row.tileKind == .managedAgent ? "agent"
+                    : row.tileKind == .file || row.tileKind == .diffReview ? fileMode : "omit"
+                // An artifact row is offered once its draft resolves off main.
+                let deadline = Date().addingTimeInterval(15)
+                while view.modeChoice.items.first(where: { $0.id == mode && $0.enabled }) == nil, Date() < deadline {
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                guard let choice = view.modeChoice.items.first(where: { $0.id == mode && $0.enabled }), view.modeChoice.isEnabled else { throw Failure(description: "QA review mode \(mode) unavailable") }
+                view.modeChoice.handleSelection(choice)
+            }
+            // Artifact rows capture off main; confirm only once the shipped
+            // review itself says it can.
+            let ready = Date().addingTimeInterval(20)
+            while !review.canConfirm, Date() < ready { try await Task.sleep(for: .milliseconds(50)) }
+            await review.confirm()
+            lastShareMessage = review.message + (reviewController.lastArtifactUploadError.map { " [upload: \(String(describing: $0))]" } ?? "")
+            let persistence = reviewController.lastPersistenceError.map { String(describing: $0) } ?? "none"
+            let diagnostic = "state=\(review.state), rows=\(review.review.rows.count), ready=\(review.readyCount), pending=\(review.pendingCount), refresh=\(review.requiresRefresh), controller=\(reviewController.status), delivery=\(delivery), persistence=\(persistence), message=\(review.message)"
+            view.stop()
+            await reviewController.close()
+            guard review.state == .published else { throw Failure(description: "source-zone publication failed: \(diagnostic)") }
+        }
         func perform(_ request: [String: Any]) async throws -> [String: Any] {
             guard let op = request["op"] as? String else { throw Failure(description: "missing command") }
             switch op {
@@ -233,41 +357,10 @@ enum SharedAreaPeerRuntime {
             case "join":
                 guard let code = request["invitation"] as? String else { throw Failure(description: "invitation missing") }
                 let state = try await account.acceptInvitation(code: code, label: "Pair shared area"); try await open(state.scope.area.rawValue)
-            case "shareZone":
-                guard let area = controller?.document?.id.rawValue, let person = account.activeAccount?.identity.person else { throw Failure(description: "share destination missing") }
-                // The shipped review owns its controller. Reusing the mounted
-                // scene controller would replace its legacy onChange callback
-                // and accidentally bypass native refresh after publication.
-                let reviewController = try account.makeSharedAreaController(area: area)
-                await reviewController.open()
-                guard reviewController.status == .connected else { throw Failure(description: "review controller did not connect") }
-                let host = try await account.registerHost()
-                var delivery = "not attempted"
-                let review = try SharedAreaCaptureCoordinator(selection: .zone(source.zone), controller: reviewController, person: person, host: host,
-                    inventoryProvider: { [source] in try SharedAreaInventory.capture(runtime: source.runtime, supervisor: source.delegate.qaAgentSupervisor, selection: .zone(source.zone)) },
-                    submitter: {
-                        let result = await reviewController.submitPublication($0)
-                        switch result {
-                        case .accepted(let receipt): delivery = "accepted revision \(receipt.revision)"
-                        case .rejected(let reason): delivery = "rejected \(reason)"
-                        case .uncertain: delivery = "uncertain"
-                        }
-                        return result
-                    })
-                let view = SharedAreaCaptureView(coordinator: review)
-                for row in review.review.rows {
-                    guard let choice = view.sourceChoice.items.first(where: { $0.id == "\(row.source.projectID.uuidString)/\(row.source.tileID.uuidString)" }) else { throw Failure(description: "QA review source choice missing") }
-                    view.sourceChoice.handleSelection(choice)
-                    let mode = row.tileKind == .note ? "agreement" : row.tileKind == .managedAgent ? "agent" : "omit"
-                    guard let choice = view.modeChoice.items.first(where: { $0.id == mode && $0.enabled }), view.modeChoice.isEnabled else { throw Failure(description: "QA review mode \(mode) unavailable") }
-                    view.modeChoice.handleSelection(choice)
-                }
-                await review.confirm()
-                let persistence = reviewController.lastPersistenceError.map { String(describing: $0) } ?? "none"
-                let diagnostic = "state=\(review.state), rows=\(review.review.rows.count), ready=\(review.readyCount), pending=\(review.pendingCount), refresh=\(review.requiresRefresh), controller=\(reviewController.status), delivery=\(delivery), persistence=\(persistence), message=\(review.message)"
-                view.stop()
-                await reviewController.close()
-                guard review.state == .published else { throw Failure(description: "source-zone publication failed: \(diagnostic)") }
+            case "shareZone": try await share(.zone(source.zone), fileMode: "omit")
+            case "shareFile":
+                guard let tile = source.fileTile else { throw Failure(description: "no seeded file tile") }
+                try await share(.tiles([.init(projectID: source.project, tileID: tile)]), fileMode: "artifact")
             case "edit":
                 guard let scene else { throw Failure(description: "no shared scene") }
                 try scene.selectObject(try item(request, fallback: .agreement))
@@ -323,7 +416,7 @@ enum SharedAreaPeerRuntime {
             case "handoffSend":
                 guard let model = handoff?.model else { throw Failure(description: "handoff model missing") }
                 await model.refresh(object: try item(request, fallback: .agentObservation))
-                guard let context = model.latestContexts.first?.id else { throw Failure(description: "handoff context missing") }
+                guard let context = model.latestContexts.first?.id else { throw Failure(description: "handoff context missing: \(String(describing: model.message))") }
                 await model.send(text: request["text"] as? String ?? "PAIR HANDOFF", context: context, mode: .send)
             case "handoffRefresh":
                 guard let model = handoff?.model else { throw Failure(description: "handoff model missing") }
@@ -331,6 +424,21 @@ enum SharedAreaPeerRuntime {
             case "presence":
                 guard controller != nil else { throw Failure(description: "presence scope missing") }
                 await presencePublisher?.publishPointer(.init(x: request["x"] as? Double ?? 80, y: request["y"] as? Double ?? 80))
+            case "endorse":
+                guard let controller, let document = controller.document,
+                      let revision = document.currentRevision(of: try item(request, fallback: .agreement))?.id else { throw Failure(description: "no agreement revision to endorse") }
+                guard case .accepted = await controller.endorse(revision) else { throw Failure(description: "endorsement refused") }
+            case "follow":
+                guard let device = (request["device"] as? String).flatMap(UUID.init(uuidString:)) else { throw Failure(description: "follow target missing") }
+                var result = status(); result["followed"] = presencePublisher?.follow(device: device) ?? false
+                return result
+            case "fitView": try scene?.fitContent()
+            case "select":
+                guard let scene else { throw Failure(description: "no shared scene") }
+                let kind = (request["kind"] as? String).flatMap(SharedArea.Kind.init(rawValue:)) ?? .agentObservation
+                try scene.selectObject(try item(request, fallback: kind))
+            case "hostStop": hostSession?.stop()
+            case "hostStart": hostSession?.start()
             case "reopen": if let area = account.activeAccount?.knownAreas.first?.id { try await open(area) }
             case "status": break
             case "quit": presencePublisher?.stop(); hostSession?.stop(); return ["quit": true]
@@ -410,6 +518,12 @@ enum SharedAreaPeerRuntime {
         let workspaceID = UUID(uuidString: "A1D5D1F8-7666-4EF2-BD3F-80E4F8476603")!
         let agentTileID = UUID(uuidString: "A1D5D1F8-7666-4EF2-BD3F-80E4F8476604")!
         let noteTileID = UUID(uuidString: "A1D5D1F8-7666-4EF2-BD3F-80E4F8476605")!
+        let fileTileID = UUID(uuidString: "A1D5D1F8-7666-4EF2-BD3F-80E4F8476606")!
+        let harness = try config.sourceHarness.map { name -> AgentSteeringQAFakes.Harness in
+            guard let value = AgentSteeringQAFakes.Harness(rawValue: name) else { throw Failure(description: "unknown source harness \(name)") }
+            return value
+        }
+        let hostsAgent = config.label == "A" || harness != nil
         let project = Project(id: projectID, name: "QA source \(config.label)", rootPath: root.path, createdAt: Date(timeIntervalSince1970: 1_900_000_000), updatedAt: Date(timeIntervalSince1970: 1_900_000_000),
             defaultLaunchProfileId: "shell", editorPreference: .auto,
             settings: .init(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning))
@@ -418,7 +532,11 @@ enum SharedAreaPeerRuntime {
             try store.saveProject(project)
             var tiles: [Tile] = [.init(id: noteTileID, kind: .note, title: "Shared coordination note", frame: .init(x: -730, y: 310, width: 300, height: 200),
                 zPosition: .fromLegacyRank(1), zoneId: zoneID, runtimeRef: nil, metadata: .init(noteId: noteTileID))]
-            if config.label == "A" { tiles.append(.init(id: agentTileID, kind: .managedAgent, title: "Published source", frame: .init(x: -390, y: 310, width: 320, height: 400),
+            if let file = config.artifactFile {
+                tiles.append(.init(id: fileTileID, kind: .file, title: "Shared file", frame: .init(x: -60, y: 310, width: 300, height: 200),
+                    zPosition: .fromLegacyRank(3), zoneId: zoneID, runtimeRef: nil, metadata: .init(filePath: root.appendingPathComponent(file).path)))
+            }
+            if hostsAgent { tiles.append(.init(id: agentTileID, kind: .managedAgent, title: "Published source", frame: .init(x: -390, y: 310, width: 320, height: 400),
                 zPosition: .fromLegacyRank(2), zoneId: zoneID, runtimeRef: nil, metadata: .init())) }
             try store.saveCanvas(.init(viewport: .init(x: -900, y: 100, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: noteTileID))
             try store.saveNoteBody(id: noteTileID, text: "Coordinate independent changes through this reviewed agreement.")
@@ -442,8 +560,26 @@ enum SharedAreaPeerRuntime {
         settings.set(false, forKey: CanvasAutoLayoutConfig.enabledKey)
         delegate.qaSettingsDefaults = settings
         let agents = AgentStore(applicationSupportDirectory: support.appendingPathComponent("agents"))
-        AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.codex)
-        delegate.agentSupervisor = AgentSupervisor(store: agents, makeRunner: { _ in
+        // A harness peer runs that CLI's real runner against the recording
+        // fake on PATH (as the in-process provider dispatch witness does).
+        var harnessModel: (AgentHarness, String)?
+        if let harness {
+            try AgentSteeringQAFakes.install(harness, in: URL(fileURLWithPath: config.supportRoot).appendingPathComponent("fake-cli", isDirectory: true))
+            setenv("PATH", URL(fileURLWithPath: config.supportRoot).appendingPathComponent("fake-cli").path + ":" + (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"), 1)
+            switch harness {
+            case .claude:
+                AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
+                harnessModel = (.claudeCode, AgentCatalogQAFixture.claude.seedModel ?? "")
+            case .codex:
+                setenv("CONTINUUM_CODEX_TRANSPORT", "app-server", 1)
+                AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.codex)
+                harnessModel = (.codex, "openai-codex/gpt-5.6-sol")
+            case .pi:
+                AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
+                harnessModel = (.pi, AgentCatalogQAFixture.pi[0])
+            }
+        } else { AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.codex) }
+        let scripted: (AgentRunnerLaunch) -> AgentRunning = { _ in
             let sequence = census.runners.count + 1
             let value = ScriptedAgentRunner(script: [
                 .turnStarted(threadId: "qa-pair-source-session", turnId: "qa-pair-turn-\(sequence)"),
@@ -452,11 +588,15 @@ enum SharedAreaPeerRuntime {
                 .turnCompleted(threadId: "qa-pair-source-session", turnId: "qa-pair-turn-\(sequence)", outcome: .completed, errorMessage: nil)
             ])
             census.runners.append(value); return value
-        },
-            nameTitlerCommand: { _ in nil }, claudeSessionTitle: { _, _ in nil }, codexRestoredContextSnapshot: { _ in nil })
+        }
+        delegate.agentSupervisor = AgentSupervisor(store: agents, makeRunner: harness != nil ? AgentSupervisor.productionRunner : scripted,
+            nameTitlerCommand: { _ in nil }, claudeSessionTitle: { _, _ in nil }, codexRestoredContextSnapshot: { _ in nil },
+            // As production does: live agent views snapshot at this boundary.
+            transcriptStore: AgentTranscriptStore(root: support.appendingPathComponent("transcripts", isDirectory: true)))
         _ = delegate.agentSupervisor.restore()
-        if config.label == "A", !delegate.agentSupervisor.records.values.contains(where: { $0.tileId == agentTileID && $0.projectId == projectID }) {
-            _ = delegate.agentSupervisor.spawn(role: nil, prompt: nil, cwd: root, harness: .codex, model: AgentCatalogQAFixture.codex.seedModel!, thinking: "high",
+        if hostsAgent, !delegate.agentSupervisor.records.values.contains(where: { $0.tileId == agentTileID && $0.projectId == projectID }) {
+            _ = delegate.agentSupervisor.spawn(role: nil, prompt: nil, cwd: root, harness: harnessModel?.0 ?? .codex,
+                model: harnessModel?.1 ?? AgentCatalogQAFixture.codex.seedModel!, thinking: harnessModel == nil ? "high" : "low",
                 projectId: projectID, projectRoot: root, tileId: agentTileID, displayName: "Published source")
         }
         delegate.agentSupervisor.workspaceToolsPermission = { .off }
@@ -477,6 +617,7 @@ enum SharedAreaPeerRuntime {
         try runtime.flushMountedWorkspaceState()
         return .init(delegate: delegate, runtime: runtime, canvas: canvas, controller: controller, browser: browser,
             window: window, zone: zoneID, agentTile: agentTileID, noteTile: noteTileID, census: census, settings: settings,
-            sourceFiles: [store.layout.canvasFile, store.layout.noteFile(id: noteTileID)])
+            sourceFiles: [store.layout.canvasFile, store.layout.noteFile(id: noteTileID)],
+            project: projectID, fileTile: config.artifactFile == nil ? nil : fileTileID)
     }
 }

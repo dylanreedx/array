@@ -599,6 +599,8 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --menu-contract-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
   run_leg python3 scripts/check-collaboration-pair.py
+  # Every feature stage between two real processes; a PENDING stage fails.
+  run_leg python3 scripts/check-collaboration-pair-features.py
   run_leg swift run --skip-build ContinuumRevivedRelayCoreChecks
   run_leg swift run --skip-build ContinuumRevivedRelayIntegrationChecks
   # The relay ships on Linux; the Mac legs above cannot see a Linux-only break.

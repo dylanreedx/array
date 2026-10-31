@@ -34,6 +34,16 @@ def field(status, name):
     return status[name]
 
 
+def wait_value(read, accept, label, timeout=30):
+    """wait_for that names the last value seen when the deadline passes."""
+    last = [None]
+    def probe():
+        last[0] = read()
+        return last[0] if accept(last[0]) else None
+    try: return wait_for(probe, label, timeout)
+    except AssertionError: raise AssertionError(f"deadline: {label}; last seen {str(last[0])[:600]}") from None
+
+
 def gate(status, name):
     """A stage that starts with an existing op gates on its new status field."""
     if name not in status: raise Pending(f"peer status has no '{name}' yet")
@@ -41,107 +51,169 @@ def gate(status, name):
 
 
 def stage_liveness(h, a, b):
-    """COL-06: execution-host liveness expires independently of discussion."""
-    op(a, "hostSleep")
-    wait_for(lambda: field(b.call("status"), "hostLiveness") == "unavailable", "B observes the sleeping host as unavailable", 90)
-    before = b.call("status")["posts"]
-    b.call("edit", text="FEATURES discussion while the host sleeps"); h.converge(a, b)
-    assert b.call("status")["posts"] == before and b.call("status")["contexts"][-1]["text"].startswith("FEATURES discussion")
-    op(a, "hostWake")
-    wait_for(lambda: field(b.call("status"), "hostLiveness") == "live", "B observes the host live again", 60)
-    return "a sleeping execution host reads as unavailable to the teammate while discussion stays readable and editable, then returns live"
+    """COL-06: B reads A's execution host online, offline the moment A's host
+    stops (its explicit end), discussion still writable, then online again."""
+    def agent(): return next(x for x in field(b.call("status"), "agents") if x["owner"] == a.ready["person"])
+    wait_for(lambda: agent()["hostState"] == "online", "B reads A's host online", 30)
+    op(a, "hostStop")
+    gone = wait_for(lambda: x if (x := agent())["hostState"] == "offline" else None, "B reads A's host offline after it stops", 20)
+    assert gone["hostLine"].startswith("Host offline"), gone["hostLine"]
+    b.call("edit", text="FEATURES discussion while the host is offline"); h.converge(a, b)
+    assert b.call("status")["contexts"][-1]["text"] == "FEATURES discussion while the host is offline"
+    op(a, "hostStart")
+    back = wait_for(lambda: x if (x := agent())["hostState"] == "online" else None, "B reads A's host online again", 30)
+    assert back["hostLine"] == "Host online."
+    return "B reads A's host online, offline the moment it stops (agreement still editable), and online again when it restarts"
 
 
 def stage_artifacts(h, a, b):
-    """COL-16/07: immutable artifact revisions; recipient checkout untouched."""
+    """COL-16: A shares a file tile through the review; the head reaches B on
+    the update stream and B's panel shows A's exact bytes and digest."""
+    path = a.root / "project" / "pair-artifact.md"
+    expected = pair.hashlib.sha256(path.read_bytes()).hexdigest()
     files_b = b.call("status")["sourceFiles"]
-    first = op(a, "publishArtifact", path="pair-artifact.md", text="first revision")
-    h.converge(a, b)
-    seen = wait_for(lambda: [x for x in field(b.call("status"), "artifacts") if x["digest"] == first["digest"]], "B receives the artifact", 20)
-    op(a, "publishArtifact", path="pair-artifact.md", text="second revision")
-    h.converge(a, b)
-    revisions = field(b.call("status"), "artifacts")
-    assert len({x["digest"] for x in revisions}) == 2, f"revisions collapsed: {revisions}"
-    assert any(x["digest"] == seen[0]["digest"] and not x["latest"] for x in revisions), "the pinned first revision lost its identity"
-    assert b.call("status")["sourceFiles"] == files_b, "artifact delivery wrote the recipient checkout"
-    return "an artifact publishes immutable digested revisions; the earlier revision stays distinct from latest and B's checkout is byte-identical"
+    op(a, "shareFile"); h.converge(a, b)
+    try: head = wait_for(lambda: (x := field(b.call("status"), "artifactHeads")) and x[0], "the artifact head reaches B without B asking", 20)
+    except AssertionError:
+        mine = a.call("status")
+        raise AssertionError(f"the artifact head never reached B; A heads {mine.get('artifactHeads')}, A review said {mine.get('lastShareMessage')!r}") from None
+    b.call("select", kind="artifact", object=head["object"]); a.call("select", kind="artifact", object=head["object"])
+    seen = wait_value(lambda: b.call("status")["artifactPanel"], lambda x: x["bytes"].get("pair-artifact.md") == expected, "B's panel holds A's exact file bytes", 20)
+    own = wait_for(lambda: x if (x := a.call("status")["artifactPanel"])["latestDigest"] else None, "A's own panel names the published digest", 20)
+    assert seen["latestDigest"] == own["latestDigest"], "B was shown a different revision"
+    assert b.call("status")["sourceFiles"] == files_b, "the artifact wrote B's checkout"
+    return "A's shared file arrives at B on the live update stream; B's panel shows A's exact bytes and the same content digest, and B's checkout is untouched"
 
 
 def stage_live_views(h, a, b):
-    """COL-15: sequenced live agent snapshot/tail; late join; no executor."""
-    gate(b.call("status"), "agentView")
+    """COL-15: B's live view tails A's running agent, read-only, and turns to
+    history when A's host goes offline."""
+    gate(b.call("status"), "liveView")
+    calls = a.call("status")["runnerCalls"]
+    b.call("select", kind="agentObservation")
     op(a, "localSend")
-    view = wait_for(lambda: v if (v := field(b.call("status"), "agentView")) and v.get("sequence", 0) > 0 else None, "B receives the live agent view", 20)
-    b.kill_abrupt(); b.start(); h.converge(a, b)
-    rejoined = wait_for(lambda: v if (v := field(b.call("status"), "agentView")) and v.get("sequence", 0) >= view["sequence"] else None, "late join resnapshots", 20)
-    assert rejoined["generation"] == view["generation"] and b.call("status")["runnerConstructions"] == 0
-    return "B sees the source agent's sequenced live view, a late rejoin resnapshots the same generation, and no recipient executor exists"
+    try: wait_value(lambda: b.call("status")["liveView"], lambda x: "QA turn accepted and completed." in x["transcript"], "B's live view tails A's agent", 30)
+    except AssertionError as error:
+        mine = a.call("status")
+        raise AssertionError(f"{error}; A projection {mine.get('projection')}, A bindings {mine.get('sourceBindingAgents')}") from None
+    after = b.call("status")
+    assert after["runnerConstructions"] == 0 and after["runnerCalls"] == 0 and a.call("status")["runnerCalls"] == calls + 1, "the live view executed something"
+    op(a, "hostStop")
+    wait_for(lambda: "host offline" in b.call("status")["liveView"]["status"], "B's live view turns to history when the host stops", 20)
+    op(a, "hostStart")
+    return "B's live view tails A's running agent with no executor of its own, and turns to history when A's host stops"
 
 
 def stage_freshness(h, a, b):
-    """COL-14: per-agent delivered revision and changed-since-sent."""
+    """COL-14: after B's handoff is accepted, B's panel reads Current; a later
+    agreement edit makes it Changed since sent, and nothing is redispatched."""
+    gate(b.call("status"), "freshness")
     calls = a.call("status")["runnerCalls"]
-    op(a, "localSendWithContext")
-    sent = wait_for(lambda: field(a.call("status"), "deliveredRevision"), "A records the delivered revision", 15)
-    b.call("edit", text="FEATURES newer agreement after send"); h.converge(a, b)
-    assert field(b.call("status"), "changedSinceSent") is True and a.call("status")["deliveredRevision"] == sent
+    a.call("handoffOffer", person=b.ready["person"]); b.call("handoffAccept")
+    b.call("handoffSend", text="FEATURES freshness handoff")
+    wait_for(lambda: a.call("hostPoll") is not None and a.call("status")["runnerCalls"] == calls + 1, "A's host runs the handed-off prompt once", 20)
+    wait_for(lambda: b.call("handoffRefresh").get("handoffPhase") == "accepted", "B sees the host accept it", 20)
+    b.call("select", kind="agentObservation")
+    wait_for(lambda: "Current" in b.call("status")["freshness"]["status"] and "Changed" not in b.call("status")["freshness"]["status"], "B reads the delivered revision as current", 30)
+    a.call("edit", text="FEATURES agreement after the handoff"); h.converge(a, b)
+    wait_for(lambda: "Changed since sent" in b.call("status")["freshness"]["status"], "B reads Changed since sent", 30)
     a.call("hostPoll"); assert a.call("status")["runnerCalls"] == calls + 1, "editing the agreement dispatched again"
-    return "the agent's delivered agreement revision is recorded, a later edit marks it changed-since-sent for both people, and nothing is redispatched"
+    return "after B's handoff is accepted B's panel reads Current; A's later edit turns it to Changed since sent, with no second dispatch"
 
 
 def stage_endorsements(h, a, b):
-    """COL-12: revision-bound endorsement and concurrent-edit conflict."""
+    """COL-12: revision-bound endorsement, then a concurrent edit that keeps
+    the losing author's draft as a conflict instead of overwriting."""
     latest = b.call("status")["contexts"][-1]["id"]
     op(b, "endorse")
     h.converge(a, b)
-    assert any(e["revision"] == latest and e["person"] == b.ready["person"] for e in field(a.call("status"), "endorsements"))
-    h.proxies[1].pause()
-    a.call("edit", text="FEATURES concurrent A"); b.send("edit", text="FEATURES concurrent B")
+    assert any(e["revision"] == latest and e["person"] == b.ready["person"] for e in field(a.call("status"), "endorsements")), "endorsement lost its revision"
+    h.proxies[1].pause()  # B keeps its stale view of the agreement
+    a.call("edit", text="FEATURES concurrent A")
+    wait_for(lambda: h.proxies[1].blocked > 0, "B's updates are held")
+    b.call("edit", text="FEATURES concurrent B")
     h.proxies[1].resume()
     status = wait_for(lambda: s if (s := b.call("status")).get("agreementConflict") else None, "B's concurrent edit surfaces a conflict", 30)
-    assert "FEATURES concurrent B" in field(status, "agreementDraft")
-    return "an endorsement names the exact agreement revision, and a concurrent edit surfaces a conflict that keeps the losing draft"
+    assert field(status, "agreementDraft") == "FEATURES concurrent B", "the losing draft was not kept"
+    left, right = h.converge(a, b)
+    assert left["contexts"][-1]["text"] == right["contexts"][-1]["text"] == "FEATURES concurrent A", "the stale edit overwrote the newer revision"
+    return "an endorsement names the exact agreement revision; a concurrent stale edit keeps B's draft as a conflict and never overwrites A's revision"
 
 
 def stage_follow(h, a, b):
-    """COL-18: voluntary follow; local navigation exits without a loop."""
-    op(b, "follow", device=a.ready["device"])
+    """COL-18: voluntary follow; local navigation exits without a loop.
+    Compares live view centres: following never writes B's private camera
+    until it ends, so privateCamera is the wrong witness while following."""
+    gate(b.call("status"), "viewCentre")
+    def centre(peer): return peer.call("status")["viewCentre"]
+    def near(left, right): return abs(left["x"] - right["x"]) < 2 and abs(left["y"] - right["y"]) < 2
     a.call("camera", x=900.0, y=-400.0, zoom=1.0)
-    wait_for(lambda: field(b.call("status"), "following") == a.ready["device"] and abs(b.call("status")["privateCamera"]["x"] - 900.0) < 1, "B follows A's camera", 15)
-    b.call("camera", x=0.0, y=0.0, zoom=1.0)
-    assert field(b.call("status"), "following") is None
-    a.call("camera", x=-900.0, y=400.0, zoom=1.0); time.sleep(0.5)
-    assert b.call("status")["privateCamera"]["x"] == 0.0, "B kept following after local navigation"
-    return "B voluntarily follows A's camera and B's own navigation ends following without feeding back"
+    wait_for(lambda: op(b, "follow", device=a.ready["device"]).get("followed"), "B starts following A's published view", 20)
+    wait_for(lambda: near(centre(b), centre(a)), "B's view centres on A's", 15)
+    assert b.call("status")["following"] == a.ready["device"]
+    a.call("camera", x=-300.0, y=200.0, zoom=1.0)
+    wait_for(lambda: near(centre(b), centre(a)), "B keeps following A's next move", 15)
+    op(b, "fitView")
+    assert b.call("status")["following"] is None, "local navigation did not end following"
+    parked = centre(b)
+    a.call("camera", x=1200.0, y=900.0, zoom=1.0); time.sleep(2.5)
+    assert near(centre(b), parked) and not near(centre(b), centre(a)), "B kept following after local navigation"
+    assert a.call("status")["following"] is None, "A was made to follow back"
+    return "B voluntarily follows A's view through two moves; B's own navigation ends following, B stays put afterwards and A never follows back"
 
 
 def stage_compaction(h, a, b):
-    """COL-19: post-compaction cold rejoin loses nothing and resurrects nothing."""
-    op(a, "compact")  # gate: probe before the slow burst
-    op(a, "burst", count=520, timeout=180)
-    before, _ = h.converge(a, b, timeout=70)
-    op(a, "compact")
-    b.kill_abrupt(); b.start(); after, _ = h.converge(a, b, timeout=70)
-    assert after["documentHash"] == before["documentHash"] and after["posts"] == before["posts"]
-    return "after server compaction a relaunched teammate rejoins over 500 events with an identical document"
+    """COL-19: a teammate offline across compaction rejoins by resnapshot.
+    The relay runs with the retention overrides FeatureHarness sets (tail 16,
+    batch 32, age 0), so 120 posts must move the horizon past B's cursor."""
+    before = b.call("status")["revision"]
+    b.kill_abrupt()
+    op(a, "burst", count=120, timeout=180)
+    backup = h.root / "compaction-probe.sqlite"
+    run = pair.subprocess.run([str(h.relay), "--collaboration-backup", str(backup)], cwd=h.checkout, env=h.env, capture_output=True, text=True, timeout=60)
+    report = pair.json.loads(run.stdout.splitlines()[0]) if run.returncode == 0 else {}
+    assert report.get("compactedAreas", 0) >= 1, f"relay did not compact: {run.stdout} {run.stderr}"
+    assert a.call("status")["revision"] - 16 - 32 > before, "horizon cannot have passed B's cursor"
+    b.start(); left, right = h.converge(a, b, timeout=70)
+    assert left["documentHash"] == right["documentHash"] and right["posts"] == left["posts"]
+    return "B, offline while the relay compacted past its cursor, relaunches and resnapshots to an identical document"
 
 
 def stage_harnesses(h, a, b):
-    """COL-13: the handoff dispatch through each managed harness seam."""
-    if "sourceHarness" not in a.ready: raise Pending("peer does not report sourceHarness; per-harness source runners not wired")
+    """COL-13: one extra peer per harness runs that CLI's production runner on
+    a recording fake; B's handoff reaches the fake's stdin exactly once."""
     results = []
-    for harness in ("claude", "codex", "pi"):
-        a.close(); a.config["sourceHarness"] = harness; a.process = None; a.ready = a.start(); h.converge(a, b)
-        assert a.ready["sourceHarness"] == harness
-        calls = a.call("status")["runnerCalls"]
-        a.call("handoffOffer", person=b.ready["person"]); b.call("handoffAccept")
-        b.call("handoffSend", text=f"FEATURES handoff through {harness}")
-        wait_for(lambda: a.call("hostPoll") is not None and a.call("status")["runnerCalls"] == calls + 1, f"{harness} receives one handoff", 15)
-        receipt = wait_for(lambda: v if (v := b.call("handoffRefresh")).get("handoffPhase") == "accepted" else None, f"{harness} receipt", 15)
-        results.append((harness, receipt["handoffCommand"]))
-        op(a, "handoffReclaim")
+    for name in ("claude", "codex", "pi"):
+        proxy = pair.Proxy(h.port); h.proxies.append(proxy)
+        peer = pair.Peer(h, "H" + name, h.enroll("H" + name), proxy)
+        peer.config["sourceHarness"] = name
+        peer.ready = peer.start()
+        try:
+            peer.call("join", invitation=a.call("invite", person=peer.ready["person"])["invitation"]); h.converge(a, peer)
+            peer.call("shareZone"); h.converge(a, peer); h.converge(a, b)
+            objects = peer.call("status")["sourceObjects"]; assert len(objects) == 1, objects
+            marker = f"FEATURES handoff through {name}"
+            # The new host registers its agent's control on its own poll; an
+            # offer before that has nothing to offer.
+            def control(p, op_name="handoffRefresh"):
+                p.call("hostPoll") if p is peer else None
+                return p.call(op_name, object=objects[0]).get("handoffControl") or {}
+            wait_value(lambda: control(peer), lambda x: x.get("controller") == peer.ready["person"], f"{name} host registers its agent's control", 30)
+            peer.call("handoffOffer", person=b.ready["person"], object=objects[0])
+            wait_value(lambda: control(b), lambda x: x.get("offered"), f"B sees {name}'s offer", 20)
+            b.call("handoffAccept", object=objects[0])
+            wait_value(lambda: control(b), lambda x: x.get("controller") == b.ready["person"], f"B holds {name}'s agent", 20)
+            b.call("handoffSend", text=marker, object=objects[0])
+            frames = peer.root / "support" / "fake-cli" / "stdin.jsonl"
+            def received(): return [line for line in (frames.read_text().splitlines() if frames.exists() else []) if marker in line]
+            wait_for(lambda: peer.call("hostPoll") is not None and received(), f"{name} CLI receives the handed-off prompt", 30)
+            receipt = wait_for(lambda: x if (x := b.call("handoffRefresh", object=objects[0])).get("handoffPhase") == "accepted" else None, f"{name} receipt accepted", 20)
+            peer.call("hostPoll"); time.sleep(1); peer.call("hostPoll")
+            assert len(received()) == 1, f"{name} CLI received the prompt {len(received())} times"
+            results.append((name, receipt["handoffCommand"]))
+        finally: peer.close()
     assert len({command for _, command in results}) == 3
-    return "a teammate handoff dispatches exactly once through the Claude, Codex and Pi source seams"
+    return "a teammate's handoff reaches the Claude, Codex and Pi production runners' CLIs exactly once each"
 
 
 STAGES = [("liveness", stage_liveness), ("artifacts", stage_artifacts), ("liveViews", stage_live_views),
@@ -150,26 +222,46 @@ STAGES = [("liveness", stage_liveness), ("artifacts", stage_artifacts), ("liveVi
 
 
 class FeatureHarness(pair.Harness):
+    def __init__(self, args, root):
+        super().__init__(args, root)
+        # Small retention so the compaction stage can move the horizon.
+        self.env.update(RELAY_COLLABORATION_OPERATION_TAIL="16", RELAY_COLLABORATION_OPERATION_AGE_SECONDS="0",
+                        RELAY_COLLABORATION_COMPACTION_BATCH="32")
+
     def run(self, selected):
         self.start_relay()
         proxy_a, proxy_b = pair.Proxy(self.port), pair.Proxy(self.port); self.proxies = [proxy_a, proxy_b]
         a, b = pair.Peer(self, "A", self.enroll("A"), proxy_a), pair.Peer(self, "B", self.enroll("B"), proxy_b)
+        # A's checkout is a disposable git repository holding the file it will
+        # share; the artifact producer captures only from a repository.
+        a.config["artifactFile"] = "pair-artifact.md"
+        project = a.root / "project"
+        (project / "pair-artifact.md").write_text("# Pair artifact\nShared from A's checkout.\n")
+        git = ["git", "-C", str(project), "-c", "user.name=QA", "-c", "user.email=qa@example.invalid", "-c", "commit.gpgsign=false"]
+        for command in (["init", "-q"], ["add", "pair-artifact.md"], ["commit", "-q", "-m", "qa fixture"]):
+            pair.subprocess.run(git + command, check=True, capture_output=True, timeout=20)
         a.ready, b.ready = a.start(), b.start()
         a.call("create"); b.call("join", invitation=a.call("invite", person=b.ready["person"])["invitation"])
         self.converge(a, b); a.call("shareZone"); self.converge(a, b)
         baseline_b = b.call("status")
         self.pass_step("two isolated background peers share one zone through the local relay")
-        pending, results = [], {}
+        pending, failed, results = [], [], {}
         for name, stage in STAGES:
             if selected and name not in selected: continue
             try:
                 self.pass_step(f"{name}: " + stage(self, a, b)); results[name] = "passed"
             except Pending as reason:
                 print(f"PENDING pair-features: {name}: {reason}", flush=True); pending.append(name); results[name] = f"pending: {reason}"
+            except AssertionError as error:
+                # Keep going so one run shows every stage's own outcome.
+                print(f"FAIL pair-features: {name}: {error}", flush=True); failed.append(name); results[name] = f"failed: {error}"
+                # A failed stage may have left A's host stopped; restore it so
+                # the next stage fails, if at all, for its own reason.
+                with pair.contextlib.suppress(Exception): a.call("hostStart")
         end_b = b.call("status")
         assert end_b["sourceFiles"] == baseline_b["sourceFiles"] and end_b["runnerConstructions"] == 0
         self.pass_step("no feature stage wrote B's checkout or created a recipient executor")
-        return {"passed": not pending, "stages": results, "pending": pending, "steps": self.steps,
+        return {"passed": not pending and not failed, "stages": results, "pending": pending, "failed": failed, "steps": self.steps,
                 "noFocusViolation": self.focus_violation is None, "focusObservations": self.focus_samples}
 
 
@@ -187,7 +279,8 @@ def main():
             report = harness.run(set(args.stage or []))
             pair.atomic_json(harness.artifacts / "report.json", report)
             print("Collaboration pair features:", sum(v == "passed" for v in report["stages"].values()), "passed,",
-                  len(report["pending"]), "pending", report["pending"], flush=True)
+                  len(report["pending"]), "pending", report["pending"], len(report["failed"]), "failed", report["failed"], flush=True)
+            if report["failed"]: return 1
             return 0 if report["passed"] or args.allow_pending else 2
         except Exception as error:
             pair.atomic_json(harness.artifacts / "report.json", {"passed": False, "steps": harness.steps, "error": str(error), "type": type(error).__name__})
