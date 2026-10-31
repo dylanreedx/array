@@ -185,11 +185,20 @@ enum SharedAgentProjectorChecks {
         relaunched.stop()
 
         // 6. Capabilities come from the BOUND runner, for all three production harnesses.
-        let cwd = root
+        // The supervisor's own factory builds them from each record, exactly as a
+        // send would; construction spawns nothing, so no CLI starts here.
+        func productionRunner(_ id: AgentID, _ type: String) throws -> AgentRunning {
+            guard let record = supervisor.records[id] else { throw Failure(description: "missing \(type) record") }
+            let runner = AgentSupervisor.productionRunner(for: AgentRunnerLaunch(record: record, spawnDepth: 0))
+            guard String(describing: Swift.type(of: runner)) == type else {
+                throw Failure(description: "the production factory built \(Swift.type(of: runner)) for \(type)")
+            }
+            return runner
+        }
         let production: [(AgentID, AgentRunning, String)] = [
-            (claude, ClaudeAgentRunner(config: .init(model: "scripted/projection", cwd: cwd, sessionId: UUID().uuidString)), "Claude"),
-            (codex, CodexAgentRunner(config: .init(model: "scripted/projection", cwd: cwd)), "Codex"),
-            (pi, PiRpcAgentRunner(config: .init(model: "scripted/projection", thinking: "none", cwd: cwd, extensionPaths: [])), "Pi RPC"),
+            (claude, try productionRunner(claude, "ClaudeAgentRunner"), "Claude"),
+            (codex, try productionRunner(codex, "CodexAgentRunner"), "Codex"),
+            (pi, try productionRunner(pi, "PiRpcAgentRunner"), "Pi RPC"),
         ]
         for (id, runner, name) in production {
             let idle = SharedAgentProjector.read(supervisor, id).1
