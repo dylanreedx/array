@@ -1403,3 +1403,59 @@ placed in free space.
 Gate: log `qa-runs/coordinator/gate-8f533c1a.log`, **14 legs, all passed**;
 feature journey 8 passed, 0 pending. The run survived Array's 13:37 restart
 for the 0.7.36 update and finished at 13:45 with exit 0.
+
+## 0.7.37 preparation and merges, 31 October 2026
+
+Merged onto `collaboration-finish` since `ce6bcbd4`:
+- `array/mp-share-popover-fixes` (`e5034999`, `01a28473`, `a52d6f95`, `c6467ca5`,
+  `c42fa668`), clean.
+- `origin/main` at `1d846535` (the 0.7.36 release), as merge `aa136edf`, with
+  no conflicts.
+- `array/mp-zone-walkthrough-2` `74e72cf5`.
+- `array/relay-batch-fanout` (`32d54661`, `fc256c4e`, `8f841f2a`), as
+  `47043941`. Its tip was sent to the relay deployer, 384AC1DF.
+- `array/w7-runner-factory` `0db4f430` (fixes `--agent-supervisor-check`).
+
+Own commits:
+- `7af0bdc5`: every Linux check container run is bounded by `timeout`
+  (20 min for service checks, 10 min for the relay suites).
+- `ba27eaba`: the Linux relay leg leaves the `--collaboration` gate. It runs only
+  through `--notifications-linux`, outside the build lock, after a hung
+  container held the lock for about an hour, twice.
+- `69606cad`: `--agent-projection-only` for the service checks.
+- `52dd26ab`: Linux client transfers get their own deadline.
+  - Cause, read from the live hung container: all relay event-loop threads
+    were idle in `epoll_wait`, and the one client socket to the relay was in
+    CLOSE_WAIT with nothing unread. The relay had answered and closed
+    (`connection: close`), but FoundationNetworking never completed the
+    transfer, and the 35 s request timeout never fired.
+  - The production relay does not link the client, and the Mac uses Apple's
+    URLSession, so the fix is Linux-only. Each transfer runs as a data task
+    with our own deadline that cancels it with `.timedOut`; a GET retries once.
+  - Not yet seen rescuing a stuck transfer: 60 projection-only runs and 9 full
+    service-check runs in the Linux image all passed, and the deadline never
+    fired.
+
+Gates:
+- `9faf1156`: failed the header-Share step, with the Linux leg hung.
+- `aa136edf`: header Share failed, plus one Pi full-access failure that
+  passed when rerun, so a flake.
+- `52dd26ab`: header Share only.
+- `47043941`: header Share and one zone-check repaint flake; `--companion-tasks`
+  failed only `--agent-supervisor-check`.
+- `8c94f92d`: `--collaboration` 12/13 (header Share only); **`--companion-tasks`
+  10/10 passed**.
+
+Release-configuration compile of `47043941`: **clean** (900 s). The first
+attempt failed on a ModuleCache copied from the main checkout, which was
+cleared.
+
+`--tile-surface-residency-check` is not a regression. It fails the same way
+here on `856e105e`, on `0c28fc06` (0.7.35) and on `1d846535` (0.7.36, which
+passed in the release matrix). It is display-dependent, so it has to be run
+from a terminal with the display awake before 0.7.37.
+
+Open:
+- Header Share on an already-shared lent agent opens no popover (popover
+  step 4). It passes without the zone follow-ups, so it is an interaction
+  between the two branches. With 875C7105 (popover) and 6FCA201F (zone).
