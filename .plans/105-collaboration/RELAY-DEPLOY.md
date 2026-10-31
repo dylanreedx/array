@@ -96,11 +96,11 @@ machine onto it. This discards every companion write since the snapshot.
 next took 4.3 s. The check failed until **16:38:18 UTC** and has passed
 since.
 
-**Why, most likely.** The new relay worked through a backlog when it started:
-the logs show a burst of notification decisions (all `suppressed`) for one
-event, while the 484 MB companion database had just been migrated. Requests
-queued behind that work. This was not tested beforehand: staging's database
-was empty, so it had no backlog to work through.
+**Why, most likely.** A burst of notification decisions (all `suppressed`) for
+a single event, just after the 484 MB companion database was migrated.
+Requests queued behind that work. Staging couldn't show this beforehand: its
+database was empty. **Corrected below:** this is not only a startup effect. It
+recurs whenever a burst runs (see "Collaboration turned on in production").
 
 **Effect.** For roughly 16:35–16:38 UTC the phone companion may have seen slow
 or failed requests. Nothing was lost, and traffic resumed on its own. No
@@ -117,3 +117,58 @@ key exists only as a Fly secret and nobody holds a copy, so its backups are
 not restorable off the machine. Rotate it before staging holds real work.
 Throwaway people "Staging Owner", "Staging Owner 2", "Staging Owner 3" and
 "Probe 0–9" exist in its collaboration database.
+
+## Collaboration turned on in production
+
+Later on 31 October 2026, Dylan said yes to collaboration on production.
+
+- **Key.** A new 32-byte key, base64, generated locally and piped straight into
+  `fly secrets import --stage`. It was never written to a file, log or commit.
+  The only copy outside Fly went to Dylan's clipboard for his password manager.
+  Without that copy, collaboration backups cannot be restored off the machine.
+- **Variables**, both set as Fly secrets so `fly.toml` stays unchanged:
+  `RELAY_COLLABORATION_MASTER_KEY` and `RELAY_COLLABORATION_DATABASE_PATH`
+  (`/data/collaboration.sqlite`, on `relay_data` next to `relay.sqlite`).
+- **Applied** with `fly secrets deploy`: release **v17**, same image as v16,
+  one restart. All 18 health calls during the restart returned 200.
+- **Turn it off again** (companion unaffected; the collaboration database
+  stays on the volume):
+  `fly secrets unset RELAY_COLLABORATION_MASTER_KEY RELAY_COLLABORATION_DATABASE_PATH -a arrayapp-relay`.
+  Unset both together: the relay refuses to start with only one of them.
+
+### Verification
+
+- Health 200, schema 4.
+- Companion routes: identical status codes to the pre-deploy baseline.
+- `/collaboration/v1/self` → 401 and `/collaboration/v1/links/join` → 400 on an
+  empty body (both were 404 with collaboration off).
+- One throwaway round trip, 11/12. Passed: enroll, redeem, create area, create
+  link, join 201, joiner reads area 200, revoke 200, join after revoke 410.
+  The one "failure" was my cleanup step: revoking the link had already removed
+  the joiner and bumped the epoch (`revokeShareLink` cuts every admission), so
+  removing them again correctly returned 404. Cleanup then revoked both
+  devices, and the owner token answers 401. There is no route to delete an
+  area or a person, so production keeps one inert area
+  (`A0924B21-6E6C-4E6E-B454-80C02E4EE9B8`) and two people with no live
+  device ("Deploy probe (throwaway)", "Deploy probe joiner").
+
+### Open: the relay stalls during notification bursts
+
+**What.** In the 5-minute watch after v17, 3 of 28 health calls timed out at
+5 s and one took 4.4 s, between 17:52:58 and 17:53:42 UTC. Fly's health check
+failed twice, then recovered. This matches the stall right after v16.
+
+**Why, most likely.** The companion notification code in `413e56e0` ("send one
+alert per finished task") does heavy work for every event the Mac publishes.
+Each event writes about 336 decision lines, almost all `T-02` (taskUnknown)
+`suppressed` for the one phone registration: 22,840 lines in 5 minutes. The
+stalls line up with those bursts. Collaboration traffic in that window was
+only the probe. v15 (schema 2) did not have this code.
+
+**Effect.** The phone keeps working (event sequence 91214 → 92328, alerts still
+decided), but its requests can stall for up to about 45 s while a burst runs.
+
+**Not rolled back.** Turning collaboration off would not fix it. Rolling back
+to v15 would also remove the per-task alerts the 0.7.36 app shipped with.
+Decision passed to the orchestrator: fix the per-event fan-out and the
+per-suppression logging, or roll back to v15 with the command at the top.
