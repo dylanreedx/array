@@ -220,11 +220,14 @@ final class SharedAgentLiveView: NSView {
         personName(person)
     }
 
+    private func setText(_ field: NSTextField, _ value: String) { if field.stringValue != value { field.stringValue = value } }
     private func render() {
         let role = controller.scope?.role ?? .viewer
         guard let state = replica.state else {
-            status.stringValue = unavailable ? "Live view unavailable" : "Connecting to the agent's host…"
-            controls.stringValue = "Nothing from this agent is shown until its host publishes it."
+            // Assigned only on change: a poll that learns nothing new must not
+            // repaint (the zone draws these views under a transparent canvas).
+            setText(status, unavailable ? "Live view unavailable" : "Connecting to the agent's host…")
+            setText(controls, "Nothing from this agent is shown until its host publishes it.")
             if transcript.string != "" { transcript.string = "" }
             setComposer(offered: false)
             if !lastPrompt.isHidden { lastPrompt.isHidden = true; needsLayout = true }
@@ -233,11 +236,11 @@ final class SharedAgentLiveView: NSView {
         let offline = hostOnline == false
         let owner = source.map { name($0.owner) ?? "its owner" } ?? "its owner"
         let phase = state.phase == .needsAction ? "Waiting for \(owner) to approve" : Self.phase(state.phase)
-        status.stringValue = phase + (offline ? " · host offline, last confirmed"
-            : unavailable ? " · last confirmed" : confirmed ? " · live" : "")
+        setText(status, phase + (offline ? " · host offline, last confirmed"
+            : unavailable ? " · last confirmed" : confirmed ? " · live" : ""))
         let controls = Collaboration.AgentProjection.RemoteControls(host: state.capabilities, role: role)
-        self.controls.stringValue = offline ? "Its host is offline. Nothing can reach this agent until it returns."
-            : delivery ?? Self.controlsText(state.capabilities, role: role)
+        setText(self.controls, offline ? "Its host is offline. Nothing can reach this agent until it returns."
+            : delivery ?? Self.controlsText(state.capabilities, role: role))
         let author = state.lastPrompt.map { last in
             SharedPromptAuthorship.label(mine: last.person == controller.identity.person, name: name(last.person), at: last.at)
         }

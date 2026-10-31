@@ -121,8 +121,6 @@ enum SharedAreaZoneChecks {
             controller.status == .connected && session.scene.zoneAgentViews.count == 2
                 && session.scene.zoneHeader.members.contains(where: { $0.device == mate.device })
         }
-        // The rig serves no agent projection: hold each live view on its first state.
-        for view in session.scene.zoneAgentViews.values { view.live.stop() }
         mounted.canvas.layoutSubtreeIfNeeded()
         return Scene(fixture: fixture, mounted: mounted, window: window, authority: authority, me: me, mate: mate,
                      mateHost: mateHost, session: session, mateAgent: mateAgent, myAgent: myAgent,
@@ -407,11 +405,16 @@ enum SharedAreaZoneChecks {
             isARepeat: false, keyCode: 53) else { throw Failure(description: "no escape event") }
         NSApp.sendEvent(escape)
         try expect(publisher.followedDevice == nil && canvas.qaFollowIndicator == nil, "esc stops following")
+        // Following moved the camera into Dylan's view; bring the header back first.
+        scene.session.reveal(); canvas.layoutSubtreeIfNeeded()
         try click(headerView, at: NSPoint(x: avatar.midX, y: avatar.midY), in: scene.window)
-        try expect(publisher.followedDevice == scene.mate.device, "following again")
+        try expect(publisher.followedDevice == scene.mate.device,
+            "following again (banner \(String(describing: publisher.overlay.followBanner)), hit \(String(describing: scene.window.contentView?.superview?.hitTest(headerView.convert(NSPoint(x: avatar.midX, y: avatar.midY), to: nil)).map { type(of: $0) })), members \(headerView.members.map { "\($0.name):\($0.device != nil)" }))")
         canvas.cameraDriver.noteScrollPan(dx: 40, dy: 0, location: CGPoint(x: 400, y: 400))
         canvas.cameraDriver.qaFlushPending()
         try expect(publisher.followedDevice == nil && canvas.qaFollowIndicator == nil, "a trackpad pan stops following")
+        // Following moved the camera into Dylan's view; bring the header back first.
+        scene.session.reveal(); canvas.layoutSubtreeIfNeeded()
         try click(headerView, at: NSPoint(x: avatar.midX, y: avatar.midY), in: scene.window)
         guard let pill = canvas.qaFollowIndicator?.pillFrame else { throw Failure(description: "no pill") }
         try click(canvas.qaFollowIndicator!, at: NSPoint(x: pill.midX, y: pill.midY), in: scene.window)
@@ -419,6 +422,13 @@ enum SharedAreaZoneChecks {
 
         print("STAGE shared area zone: presence frames stay inside their budget")
         guard let budgetView = scene.session.scene.zoneAgentViews[scene.mateAgent.id] else { throw Failure(description: "no agent view") }
+        // One warm-up frame settles anything the follow stage left pending;
+        // the budget is what each further frame costs.
+        try await scene.authority.setPresence(.init(identity: scene.mate, cursor: .init(x: 290, y: 260),
+            viewport: .init(x: 200, y: 300, width: 800, height: 500), expiresAt: .distantFuture, label: "Dylan"))
+        try await SharedAreaCheckRig.eventually("the warm-up frame lands") {
+            scene.session.controller.presence.first(where: { $0.identity.device == scene.mate.device })?.cursor?.x == 290
+        }
         canvas.layoutSubtreeIfNeeded(); canvas.displayIfNeeded()
         let headerDraws = headerView.drawCount, agentDraws = budgetView.drawCount
         let cursorDraws = publisher.overlay.drawCount
@@ -432,7 +442,7 @@ enum SharedAreaZoneChecks {
         }
         canvas.displayIfNeeded()
         try expect(headerView.drawCount == headerDraws && budgetView.drawCount == agentDraws,
-            "20 cursor-only presence frames repaint neither the zone header nor an agent view")
+            "20 cursor-only presence frames repaint neither the zone header nor an agent view (header \(headerDraws)→\(headerView.drawCount), agent \(agentDraws)→\(budgetView.drawCount))")
         try expect(publisher.overlay.drawCount > cursorDraws, "the cursor overlay is what repaints for them")
 
         print("STAGE shared area zone: host offline")

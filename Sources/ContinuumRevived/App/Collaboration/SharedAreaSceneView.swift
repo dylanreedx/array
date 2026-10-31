@@ -224,6 +224,10 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             pinnedAgreementLabel.cell?.truncatesLastVisibleLine = true
             addSubview(pinnedAgreementLabel)
             canvas.zoneMode = true
+            canvas.onEscape = { [weak self] in
+                guard let self, followedTeammate != nil else { return false }
+                onFollowTeammate?(nil); return true
+            }
             titleLabel.isHidden = true; statusLabel.isHidden = true; objectNavigator.isHidden = true
             zoneHeader.onFollow = { [weak self] device in self?.onFollowTeammate?(device) }
             zoneHeader.person = person
@@ -1197,6 +1201,9 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
     /// draw as live views under this canvas, and every click that lands on no
     /// card passes through to the canvas behind.
     var zoneMode = false { didSet { needsDisplay = true } }
+    /// Escape in a zone, before keyboard navigation: true when it was used
+    /// (to stop following).
+    var onEscape: (() -> Bool)?
     /// Objects shown by something else on this canvas (a lent tile).
     var hiddenObjects: Set<SharedArea.ID<SharedArea.Object>> = [] {
         didSet { guard oldValue != hiddenObjects else { return }; needsDisplay = true }
@@ -1438,6 +1445,7 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
             onCycleSelection?(event.modifierFlags.contains(.shift))
         } else if event.keyCode == 53 {
             if geometryDrag != nil { cancelGeometryGesture(); onCancelGeometry?() }
+            else if zoneMode, onEscape?() == true {}
             else { CollaborationKeyLoop.move(from: self, forward: true, in: window) }
         } else if (123...126).contains(event.keyCode) && event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
             // Keyboard camera pan, in screen points so every zoom moves alike.

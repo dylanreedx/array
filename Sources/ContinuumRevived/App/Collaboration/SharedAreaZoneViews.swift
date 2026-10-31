@@ -288,7 +288,9 @@ final class SharedAreaZoneAgentView: NSView {
         let changed = colour != ownerColour || selected != isSelected || wasOffline != offline
         ownerColour = colour; isSelected = selected
         live.hostOnline = liveness.map { $0.state == .online ? true : $0.state == .offline ? false : nil } ?? nil
-        live.show(object: item.id, in: document)
+        // The live view polls its own object; re-showing the same one on every
+        // scene refresh would only restart work it is already doing.
+        if live.object != item.id || !live.isPolling { live.show(object: item.id, in: document) }
         let possessive = isMine ? "Yours" : "\(ownerName)'s"
         let chip = isMine ? "Yours · shared" : offline ? "\(possessive) · offline" : "\(possessive) · on \(ownerName)'s Mac"
         let chipChanged = chip != chipText
