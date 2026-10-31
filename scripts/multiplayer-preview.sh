@@ -74,13 +74,15 @@ stop() {
 launch() { # app side
   # `open -n -g`: a new instance, in the background. Never the bare executable,
   # which would die with this shell.
+  # No window restoration: after a killed run macOS would otherwise ask
+  # "reopen its windows?" before the app boots, and the seed would stall.
   env -u TMUX -u TMUX_PANE open -n -g \
     --env "CONTINUUM_PROJECT_ROOT=$STATE/$2/project" \
     --env "CONTINUUM_APP_SUPPORT=$STATE/$2/support" \
     --env "CONTINUUM_MULTIPLAYER_PREVIEW=$STATE/$2/preview.json" \
     --env "TMUX_TMPDIR=$STATE/$2/tmux" \
     --stdout "$STATE/$2/app.log" --stderr "$STATE/$2/app.log" \
-    "$1"
+    "$1" --args -ApplePersistenceIgnoreState YES
 }
 wait_ready() { # sides...
   for _ in $(seq 1 600); do

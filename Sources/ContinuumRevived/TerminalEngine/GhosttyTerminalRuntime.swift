@@ -799,9 +799,14 @@ final class GhosttyRuntimeContext {
             ghostty_config_load_recursive_files(config)
         }
         #else
-        Self.ensureGhosttyXDGConfigBridge()
-        ghostty_config_load_default_files(config)
-        ghostty_config_load_recursive_files(config)
+        // A multiplayer preview never reads the user's Ghostty config: it can
+        // be a symlink into a protected folder (~/Documents), and every rebuilt
+        // ad-hoc preview bundle would then raise a consent dialog at boot.
+        if MultiplayerPreview.current == nil {
+            Self.ensureGhosttyXDGConfigBridge()
+            ghostty_config_load_default_files(config)
+            ghostty_config_load_recursive_files(config)
+        }
         #endif
         ghostty_config_finalize(config)
         themeSnapshot = GhosttyThemeSnapshot.capture(config: config)

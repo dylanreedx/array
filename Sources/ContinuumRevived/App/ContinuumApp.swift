@@ -12127,6 +12127,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func startMultiplayerPreview(_ preview: MultiplayerPreview, window: NSWindow) {
         let ready = preview.rootURL.appendingPathComponent("ready.json")
         let failure = preview.rootURL.appendingPathComponent("error.json")
+        // Links name the loopback relay; without this the receiving window builds
+        // https:// for it and every join fails against the plain-http relay.
+        shareLinks.allowsInsecureLoopback = true
         // The Getting Started list covers the canvas, and its first task offers
         // the real ~/.claude sessions on this Mac. Neither belongs in a preview.
         onboardingProgressStore.update { progress in GettingStartedTask.allCases.forEach { progress.skipTask($0) } }
