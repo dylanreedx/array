@@ -470,6 +470,11 @@ struct SettingsAccountRow: Equatable {
     let switchingDetail: String?
     /// The CLI answered that this account has no login.
     let signedOut: Bool
+    /// Another saved account of this CLI holds the SAME login (organisation):
+    /// its label. A switch between the two would change nothing.
+    var sameLoginAs: String? = nil
+    /// Offer the CLI's own sign-in for this account.
+    var canSignIn: Bool { signedOut || sameLoginAs != nil }
 }
 
 /// Settings ▸ Agents ▸ Accounts: per CLI, the account in use first, then the
@@ -493,7 +498,7 @@ private struct SettingsAccountRows: View {
                                 title: row.title,
                                 status: status(row),
                                 symbol: symbol(row),
-                                tone: row.isActive ? .good : (row.signedOut ? .warning : .neutral),
+                                tone: row.sameLoginAs != nil || row.signedOut ? .warning : (row.isActive ? .good : .neutral),
                                 detail: row.switchingDetail ?? row.detail,
                                 actionTitle: actionTitle(row),
                                 action: { action(row) })
@@ -511,25 +516,27 @@ private struct SettingsAccountRows: View {
     }
 
     private func status(_ row: SettingsAccountRow) -> String {
+        if let other = row.sameLoginAs { return "Same login as \(other)" }
         if row.switchingDetail != nil { return "Switching…" }
         if row.isActive { return "In use" }
         return row.signedOut ? "Not signed in" : "Saved"
     }
 
     private func symbol(_ row: SettingsAccountRow) -> String {
+        if row.sameLoginAs != nil { return "exclamationmark.triangle" }
         if row.switchingDetail != nil { return "arrow.triangle.2.circlepath" }
         if row.isActive { return "checkmark.circle.fill" }
         return row.signedOut ? "person.crop.circle.badge.exclamationmark" : "person.crop.circle"
     }
 
     private func actionTitle(_ row: SettingsAccountRow) -> String? {
-        if row.signedOut { return model.onSignInAccount != nil ? "Sign In…" : nil }
+        if row.canSignIn { return model.onSignInAccount != nil ? "Sign In…" : nil }
         guard !row.isActive, row.switchingDetail == nil, model.onSwitchAccount != nil else { return nil }
         return "Switch to \(row.title)"
     }
 
     private func action(_ row: SettingsAccountRow) {
-        if row.signedOut { model.onSignInAccount?(row.id) } else { model.onSwitchAccount?(row.id) }
+        if row.canSignIn { model.onSignInAccount?(row.id) } else { model.onSwitchAccount?(row.id) }
     }
 }
 

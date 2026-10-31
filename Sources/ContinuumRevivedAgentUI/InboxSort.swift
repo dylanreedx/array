@@ -30,6 +30,8 @@ public struct FanoutRemainder: Equatable, Sendable {
     public let hiddenWorking: Int
     public let hiddenNeedsYou: Int
     public let hiddenFailed: Int
+    /// The parent's folded children are on screen; this row folds them back.
+    public let isExpanded: Bool
 
     public init(
         parentId: UUID,
@@ -38,7 +40,8 @@ public struct FanoutRemainder: Equatable, Sendable {
         afterRowID: UUID,
         hiddenWorking: Int,
         hiddenNeedsYou: Int,
-        hiddenFailed: Int
+        hiddenFailed: Int,
+        isExpanded: Bool = false
     ) {
         self.parentId = parentId
         self.hiddenChildIDs = hiddenChildIDs
@@ -47,11 +50,21 @@ public struct FanoutRemainder: Equatable, Sendable {
         self.hiddenWorking = hiddenWorking
         self.hiddenNeedsYou = hiddenNeedsYou
         self.hiddenFailed = hiddenFailed
+        self.isExpanded = isExpanded
     }
 
     public var hiddenChildCount: Int { hiddenChildIDs.count }
     public var hiddenDescendantCount: Int { hiddenDescendantIDs.count }
-    public var title: String { "\(hiddenChildCount) more" }
+    /// "4 more, all done" when nothing folded is live or failed; otherwise the
+    /// count and what is in it, "4 more · 1 failed". "Show fewer" while open.
+    public var title: String {
+        if isExpanded { return "Show fewer" }
+        var parts = ["\(hiddenChildCount) more"]
+        if hiddenNeedsYou > 0 { parts.append("\(hiddenNeedsYou) needs you") }
+        if hiddenFailed > 0 { parts.append("\(hiddenFailed) failed") }
+        if hiddenWorking > 0 { parts.append("\(hiddenWorking) working") }
+        return parts.count == 1 ? "\(hiddenChildCount) more, all done" : parts.joined(separator: " · ")
+    }
     public var hasAttention: Bool { hiddenNeedsYou > 0 || hiddenFailed > 0 }
 
     /// The accessibility string keeps the visible affordance short while
@@ -70,7 +83,7 @@ public struct FanoutRemainder: Equatable, Sendable {
     /// without changing the parent's hidden-child count.
     public var identity: String {
         let ids = hiddenChildIDs.map(\.uuidString).joined(separator: ",")
-        return "\(parentId.uuidString):\(afterRowID.uuidString):\(ids):\(hiddenWorking):\(hiddenNeedsYou):\(hiddenFailed)"
+        return "\(parentId.uuidString):\(afterRowID.uuidString):\(ids):\(hiddenWorking):\(hiddenNeedsYou):\(hiddenFailed):\(isExpanded)"
     }
 }
 
@@ -162,18 +175,76 @@ public enum InboxSort {
             + nest(history, by: mostRecentlyEndedFirst)
     }
 
-    /// Bound direct children without changing the global frozen root order. A
-    /// parent may opt into the expanded set, in which case every child and every
-    /// nested subtree is emitted. Otherwise the eight survivors are chosen by the
-    /// inline need policy: human-blocked first, failed next, then most recently
-    /// active, with a stable id tie-break.
+    // Plan: .plans/106-sidebar-ownership (helper priority)
+    /// How long a finished subagent stays in its lead's card before it folds into
+    /// the "N more" row.
+    public static let recentSubagentWindow: TimeInterval = 30 * 60
+
+    /// When a finished agent stopped: its last turn's end, else its last
+    /// activity, else its spawn.
+    static func finishedAt(_ row: AgentInboxRow) -> Date {
+        row.terminalEvent?.endedAt ?? row.lastActiveAt ?? row.createdAt
+    }
+
+    /// Whether the agent's last turn broke: the failed state, or a failed end
+    /// on a row whose state has since read ready.
+    static func endedInFailure(_ row: AgentInboxRow) -> Bool {
+        if row.state == .failed { return true }
+        switch row.terminalEvent?.outcome {
+        case .failed?, .runtimeError?: return true
+        default: return false
+        }
+    }
+
+    /// A failed agent you have not opened yet. Opening an agent moves its read
+    /// mark, so this is the one place "seen" is decided.
+    static func isUnopenedFailure(_ row: AgentInboxRow) -> Bool {
+        endedInFailure(row) && (row.terminalIsUnread || row.attention == .unread)
+    }
+
+    /// When this subagent leaves its lead's visible rows by age, or nil for a
+    /// lead or a subagent that is still live. The list sets one timer for the
+    /// earliest of these, so ageing out does not wait for the next push.
+    public static func subagentFoldsAt(_ row: AgentInboxRow) -> Date? {
+        guard row.parentId != nil else { return nil }
+        switch row.state {
+        case .approval, .input, .working: return nil
+        case .ready, .failed: return finishedAt(row).addingTimeInterval(recentSubagentWindow)
+        }
+    }
+
+    /// Where one row stands in its parent's card: 0 needs you, 1 working,
+    /// 2 finished within the window (`at` orders these newest first), 3 folded.
+    /// A failed row stands once: opened, it folds whatever its age.
+    private static func ownStanding(_ row: AgentInboxRow, now: Date) -> (rank: Int, at: Date) {
+        let at = finishedAt(row)
+        switch row.state {
+        case .approval, .input: return (0, at)
+        case .working: return (1, at)
+        case .ready, .failed:
+            if endedInFailure(row), !isUnopenedFailure(row) { return (3, at) }
+            return (now.timeIntervalSince(at) < recentSubagentWindow ? 2 : 3, at)
+        }
+    }
+
+    /// What a lead's card shows. Each parent's children, in this order: those
+    /// that need you, then those working (both in the frozen spawn order), then
+    /// those that finished within `recentSubagentWindow`, newest first, at most
+    /// `maxVisibleChildren` in all. Everything else folds into the parent's one
+    /// remainder row ("N more, all done"). A child stands where the most pressing
+    /// row of its subtree stands, so a finished subagent whose helper still works
+    /// stays in view.
+    ///
+    /// An expanded parent emits its folded children too, after the visible ones
+    /// and newest finished first, and keeps its remainder (`isExpanded`) so the
+    /// same row folds them back.
     ///
     /// `rows` must already be the result of `sortForInbox`, because the depth and
     /// cross-section promotion decisions belong to that function. The result is
     /// still a depth-first agent sequence; remainder rows are metadata for the
     /// AppKit boundary and never enter `AgentInboxRow` or resource bookkeeping.
     public static func boundedForInbox(
-        rows: [AgentInboxRow], expandedParents: Set<UUID> = []
+        rows: [AgentInboxRow], expandedParents: Set<UUID> = [], now: Date
     ) -> BoundedInbox {
         guard !rows.isEmpty else { return BoundedInbox(rows: [], remainders: []) }
 
@@ -190,22 +261,19 @@ public enum InboxSort {
             }
         }
 
-        func needRank(_ row: AgentInboxRow) -> Int {
-            switch row.state {
-            case .approval, .input: return 0
-            case .failed: return 1
-            case .working, .ready: return 2
+        var standings: [UUID: (rank: Int, at: Date)] = [:]
+        func standing(_ row: AgentInboxRow, path: Set<UUID> = []) -> (rank: Int, at: Date) {
+            if let known = standings[row.id] { return known }
+            var best = ownStanding(row, now: now)
+            let path = path.union([row.id])
+            for child in childrenOf[row.id] ?? [] where !path.contains(child.id) {
+                let below = standing(child, path: path)
+                if below.rank < best.rank || (below.rank == best.rank && below.at > best.at) {
+                    best = below
+                }
             }
-        }
-
-        func needFirst(_ lhs: AgentInboxRow, _ rhs: AgentInboxRow) -> Bool {
-            let leftRank = needRank(lhs)
-            let rightRank = needRank(rhs)
-            if leftRank != rightRank { return leftRank < rightRank }
-            let leftActive = lhs.lastActiveAt ?? lhs.createdAt
-            let rightActive = rhs.lastActiveAt ?? rhs.createdAt
-            if leftActive != rightActive { return leftActive > rightActive }
-            return lhs.id.uuidString < rhs.id.uuidString
+            standings[row.id] = best
+            return best
         }
 
         var emitted: [AgentInboxRow] = []
@@ -231,8 +299,7 @@ public enum InboxSort {
                 switch row.state {
                 case .working: result.working += 1
                 case .approval, .input: result.needsYou += 1
-                case .failed: result.failed += 1
-                case .ready: break
+                case .failed, .ready: if endedInFailure(row) { result.failed += 1 }
                 }
             }
         }
@@ -240,32 +307,34 @@ public enum InboxSort {
         func emit(_ row: AgentInboxRow) {
             guard visited.insert(row.id).inserted else { return }
             emitted.append(row)
-            let frozenChildren = childrenOf[row.id] ?? []
-            guard !frozenChildren.isEmpty else { return }
+            let children = childrenOf[row.id] ?? []
+            guard !children.isEmpty else { return }
 
-            let selected: ArraySlice<AgentInboxRow>
-            let hidden: ArraySlice<AgentInboxRow>
-            if expandedParents.contains(row.id) || frozenChildren.count <= maxVisibleChildren {
-                // Need-order is the bounded-survivor exception, not a second
-                // inbox sort. An uncapped or explicitly expanded group keeps the
-                // frozen depth-first order supplied by `sortForInbox`, so activity
-                // cannot shuffle a list whose complete contents are visible.
-                selected = frozenChildren[...]
-                hidden = frozenChildren[frozenChildren.endIndex...]
-            } else {
-                let needOrdered = frozenChildren.sorted(by: needFirst)
-                selected = needOrdered[..<maxVisibleChildren]
-                hidden = needOrdered[maxVisibleChildren...]
+            // The frozen index breaks every tie, so equal standings keep spawn order.
+            let ranked = children.enumerated().map { (row: $1, index: $0, standing: standing($1)) }
+            let shown = ranked.filter { $0.standing.rank < 3 }.sorted {
+                if $0.standing.rank != $1.standing.rank { return $0.standing.rank < $1.standing.rank }
+                if $0.standing.rank == 2, $0.standing.at != $1.standing.at {
+                    return $0.standing.at > $1.standing.at
+                }
+                return $0.index < $1.index
             }
-            for child in selected { emit(child) }
+            let folded = ranked.filter { $0.standing.rank == 3 }.sorted {
+                $0.standing.at != $1.standing.at ? $0.standing.at > $1.standing.at : $0.index < $1.index
+            }
+            let visible = shown.prefix(maxVisibleChildren).map(\.row)
+            let hidden = shown.dropFirst(maxVisibleChildren).map(\.row) + folded.map(\.row)
+            let isExpanded = expandedParents.contains(row.id)
+            for child in visible { emit(child) }
+            if isExpanded { for child in hidden { emit(child) } }
             guard !hidden.isEmpty else { return }
 
             let hiddenChildIDs = hidden.map(\.id)
             let hiddenDescendantIDs = hidden.flatMap { subtreeIDs(start: $0) }
-            // Deferred rows are accounted, but deliberately not emitted. Marking
+            // Folded rows are accounted, but deliberately not emitted. Marking
             // their complete subtrees visited keeps the permutation fallback from
             // appending them after the visible roots.
-            visited.formUnion(hiddenDescendantIDs)
+            if !isExpanded { visited.formUnion(hiddenDescendantIDs) }
             let tally = counts(for: hiddenDescendantIDs)
             remainders.append(FanoutRemainder(
                 parentId: row.id,
@@ -274,12 +343,13 @@ public enum InboxSort {
                 afterRowID: emitted.last?.id ?? row.id,
                 hiddenWorking: tally.working,
                 hiddenNeedsYou: tally.needsYou,
-                hiddenFailed: tally.failed
+                hiddenFailed: tally.failed,
+                isExpanded: isExpanded
             ))
         }
 
         // Root order is already the frozen live/shelf/history order. Only the
-        // sibling selection/order inside a parent uses the fan-out need policy.
+        // sibling selection/order inside a parent uses the standing policy.
         for root in roots { emit(root) }
         // A malformed cycle has no root. Preserve the same permutation guarantee
         // as `sortForInbox`; any cycle survivor is a root for this presentation
@@ -475,7 +545,7 @@ public enum InboxSort {
 
         var rollups: [UUID: ChildRollup] = [:]
         for row in rows where childrenOf[row.id] != nil {
-            var children = 0, working = 0, needsYou = 0, failed = 0
+            var children = 0, working = 0, needsYou = 0, failed = 0, unopenedFailed = 0
             var visited: Set<UUID> = [row.id]
             var queue = childrenOf[row.id] ?? []
             while let descendant = queue.popLast() {
@@ -487,10 +557,12 @@ public enum InboxSort {
                 case .failed: failed += 1
                 case .ready: break
                 }
+                if isUnopenedFailure(descendant) { unopenedFailed += 1 }
                 queue.append(contentsOf: childrenOf[descendant.id] ?? [])
             }
             rollups[row.id] = ChildRollup(
-                children: children, working: working, needsYou: needsYou, failed: failed)
+                children: children, working: working, needsYou: needsYou, failed: failed,
+                unopenedFailed: unopenedFailed)
         }
         return rollups
     }

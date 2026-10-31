@@ -429,3 +429,81 @@ enum AgentAccountSwitchSettingsProbe {
         return delegate.qaMakeSettingsModal(paneID: "agents").model.accountRows?() ?? []
     }
 }
+
+/// 0.7.35 field bug: Personal (Claude's default folder) was signed in to the
+/// SAME Team login as Work — one email, two organisations. "Switch to
+/// Personal" succeeded, every agent restarted in the default folder, and each
+/// turn still hit the Team login's 5-hour limit until Dylan signed Personal in
+/// again in a terminal. A switch is to a LOGIN, not a folder label: Array must
+/// see that two saved accounts hold one login, refuse a switch that changes
+/// nothing, say so in Settings, and offer Sign In there.
+@MainActor
+func runAgentAccountSameLoginChecks() async throws {
+    struct Failure: Error, CustomStringConvertible { let description: String }
+    func require(_ condition: Bool, _ message: @autoclosure () -> String) throws {
+        guard condition else { throw Failure(description: message()) }
+    }
+    func waitFor(_ message: @autoclosure () -> String, _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        throw Failure(description: message())
+    }
+    final class Logins: @unchecked Sendable {
+        private let lock = NSLock()
+        private var byAccount: [String: AgentAccountIdentity] = [:]
+        func set(_ id: String, _ identity: AgentAccountIdentity) { lock.withLock { byAccount[id] = identity } }
+        func read(_ account: AgentAccount) -> AgentAccountUsageProbe.Reading? {
+            .init(identity: lock.withLock { byAccount[account.id] }, quota: nil)
+        }
+    }
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("account-same-login-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root.appendingPathComponent("personal"), withIntermediateDirectories: true)
+    let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("support")))
+    defer { supervisor.stopAll() }
+    supervisor.personalClaudeDirectory = root.appendingPathComponent("personal")
+    let logins = Logins()
+    supervisor.accountUsageReader = { logins.read($0) }
+    let personal = AgentAccount.defaultAccount(for: .claudeCode)
+    let work = try supervisor.addAccount(harness: .claudeCode, label: "Work")
+    let now = Date()
+    let team = AgentAccountIdentity(harness: .claudeCode, email: "dylan@example.com",
+                                    organizationName: "Bannockburn", organizationId: "org-team", plan: "team", observedAt: now)
+    let max = AgentAccountIdentity(harness: .claudeCode, email: "dylan@example.com",
+                                   organizationName: "dylan@example.com's Organization", organizationId: "org-personal",
+                                   plan: "max", observedAt: now)
+
+    // As in the field: on Work, and Personal's folder holds the Team login too.
+    try require(supervisor.switchAccount(to: work.id) == .switched(finishingTurns: 0), "start on Work")
+    logins.set(personal.id, team)
+    logins.set(work.id, team)
+    supervisor.refreshAccountUsage(harness: .claudeCode, minimumInterval: 0)
+    try await waitFor("both logins must be read") {
+        supervisor.accountIdentity(accountId: personal.id) != nil && supervisor.accountIdentity(accountId: work.id) != nil
+    }
+    let outcome = supervisor.switchAccount(to: personal.id)
+    try require(outcome == .refused("Personal is signed in to the same Claude login as Work (Bannockburn). Sign in to Personal with your other account first."),
+                "switching between two folders that hold ONE login must be refused, not reported as a switch; got \(outcome)")
+    try require(supervisor.activeAccount(for: .claudeCode).id == work.id, "a refused switch changes nothing")
+    let rows = supervisor.settingsAccountRows()
+    let personalRow = rows.first { $0.id == personal.id }
+    try require(personalRow?.sameLoginAs == "Work" && personalRow?.canSignIn == true,
+                "Settings must say Personal holds Work's login and offer Sign In, got \(String(describing: personalRow))")
+
+    // Signing Personal in to the personal org makes the switch real.
+    logins.set(personal.id, max)
+    supervisor.refreshAccountUsage(account: personal, minimumInterval: 0, now: now.addingTimeInterval(60))
+    try await waitFor("Personal's new login must be read") {
+        supervisor.accountIdentity(accountId: personal.id)?.organizationId == "org-personal"
+    }
+    try require(supervisor.switchAccount(to: personal.id) == .switched(finishingTurns: 0),
+                "with two different logins the switch goes through")
+    try require(supervisor.settingsAccountRows().allSatisfy { $0.sameLoginAs == nil },
+                "two different logins show no warning")
+
+    print("AgentAccountSameLoginChecks passed: two saved Claude accounts holding one login (same organisation) refuse a switch between them, Settings names the duplicate and offers Sign In, and once Personal holds its own login the switch goes through")
+}

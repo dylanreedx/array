@@ -1750,33 +1750,34 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             text.append(run(says, secondary))
             return text
         }
-        if let ask = ownership.raisedAsk ?? Self.ask(row) {
-            text.append(run("Needs you: \(ask)", AccentToken.accentApproval.color.nsColor(in: self)))
-            return text
-        }
-        switch row.selfReportLine {
-        case .now(let says)?:
-            text.append(run(says, secondary))
-            return text
-        case let .checks(failed, total)? where failed > 0:
-            text.append(run("\(failed) of \(total) \(total == 1 ? "check" : "checks") failed",
-                            AccentToken.accentFailed.color.nsColor(in: self)))
-            return text
-        case let .checks(_, total)?:
-            text.append(run(total == 1 ? "1 check passed" : "all \(total) checks passed", secondary))
-            return text
-        default: break
-        }
-        // A folded lead speaks for the subagents it hides.
-        guard shown?.disclosure == .collapsed, let rollup = shown?.rollup else { return nil }
+        let separator = run("  ·  ", secondary.withAlphaComponent(0.6))
+        let failedInk = AccentToken.accentFailed.color.nsColor(in: self)
         var facts: [NSAttributedString] = []
-        if rollup.working > 0 { facts.append(run("\(rollup.working) working", secondary)) }
-        if rollup.failed > 0 {
-            facts.append(run("\(rollup.failed) failed", AccentToken.accentFailed.color.nsColor(in: self)))
+        if let ask = ownership.raisedAsk ?? Self.ask(row) {
+            facts.append(run("Needs you: \(ask)", AccentToken.accentApproval.color.nsColor(in: self)))
+        } else {
+            switch row.selfReportLine {
+            case .now(let says)?:
+                facts.append(run(says, secondary))
+            case let .checks(failed, total)? where failed > 0:
+                facts.append(run("\(failed) of \(total) \(total == 1 ? "check" : "checks") failed", failedInk))
+            case let .checks(_, total)?:
+                facts.append(run(total == 1 ? "1 check passed" : "all \(total) checks passed", secondary))
+            default:
+                // A folded lead speaks for the subagents it hides.
+                if shown?.disclosure == .collapsed, let working = shown?.rollup?.working, working > 0 {
+                    facts.append(run("\(working) working", secondary))
+                }
+            }
+        }
+        // Open or folded, a lead says "1 failed" until you have opened the
+        // failed subagent, however long ago it folded.
+        if let failed = shown?.rollup?.unopenedFailed, failed > 0 {
+            facts.append(run("\(failed) failed", failedInk))
         }
         guard !facts.isEmpty else { return nil }
         for (index, fact) in facts.enumerated() {
-            if index > 0 { text.append(run("  ·  ", secondary.withAlphaComponent(0.6))) }
+            if index > 0 { text.append(separator) }
             text.append(fact)
         }
         return text

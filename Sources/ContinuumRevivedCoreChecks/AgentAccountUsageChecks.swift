@@ -327,7 +327,7 @@ func runAgentAccountUsageChecks() {
            "account-usage: Work signs in with claude auth login in its own folder")
     expect(AgentAccountSetup.claudeSignInArguments(
             for: AgentAccount.defaultAccount(for: .claudeCode), claudeExecutable: "/opt/bin/claude")
-            == ["/opt/bin/claude", "auth", "login", "--claudeai"],
+            == ["-u", "CLAUDE_CONFIG_DIR", "/opt/bin/claude", "auth", "login", "--claudeai"],
            "account-usage: Personal signs in with no folder override")
 
     print("AgentAccountUsage checks passed: get_usage reads percent windows with ISO resets, ignores extra_usage, and a signed-out answer is no reading; auth status and codex account/read name the login and plan; codex rateLimits/read is weekly-only; the real spawn reads the default and a named dir with CLAUDE_CONFIG_DIR set or removed, HOME untouched, no session left and no usage asked of a signed-out dir; only an answered loggedIn:false reads as signed out; added accounts store an id, label, harness and folder only; the Work folder links settings, CLAUDE.md, agents, skills, commands and projects back to Personal and never login state or history; a switch finds the conversation through the shared projects/ or copies it and its sidecars into a folder with its own; the runner sets CLAUDE_CONFIG_DIR for an added account only and never HOME; readings are filed by account and an old file migrates to the default; sign-in is claude auth login in the account's folder")

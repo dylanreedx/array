@@ -615,6 +615,10 @@ public struct ChildRollup: Equatable, Sendable {
     public let needsYou: Int
     /// Descendants in `InboxState.failed`.
     public let failed: Int
+    /// Failed descendants you have not opened (`InboxSort.isUnopenedFailure`).
+    /// A lead keeps saying "1 failed" until this reaches zero, however long ago
+    /// the subagent folded.
+    public let unopenedFailed: Int
 
     /// True when something down there is yours to deal with. `failed` counts:
     /// broken work under a folded parent is the loudest thing the fold can hide.
@@ -675,6 +679,7 @@ public struct ChildRollup: Equatable, Sendable {
         working: Int,
         needsYou: Int,
         failed: Int,
+        unopenedFailed: Int = 0,
         cappedChildren: Int = 0,
         cappedDescendants: Int = 0,
         cappedWorking: Int = 0,
@@ -685,6 +690,7 @@ public struct ChildRollup: Equatable, Sendable {
         self.working = working
         self.needsYou = needsYou
         self.failed = failed
+        self.unopenedFailed = unopenedFailed
         self.cappedChildren = cappedChildren
         self.cappedDescendants = cappedDescendants
         self.cappedWorking = cappedWorking

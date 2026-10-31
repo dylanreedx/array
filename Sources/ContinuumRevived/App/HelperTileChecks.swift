@@ -126,6 +126,20 @@ enum HelperTileChecks {
     static func cap() async throws {
         let (b, clock) = try bench("helper-tiles-cap"); defer { b.tearDown() }
         let s = b.supervisor
+        // The sidebar row's Pop out, exactly as a click sends it.
+        func popOut(_ id: AgentID, _ what: String) throws {
+            try expect(b.f.delegate.performInboxRowAction(.popOut, on: [id.rawValue]), "\(what): pop-out refused")
+            try expect(b.f.delegate.qaWorkspaceManagementMessage == nil,
+                       "\(what): pop-out showed \(b.f.delegate.qaWorkspaceManagementMessage ?? "")")
+            try expect(s.records[id]?.tileId != nil, "\(what): pop-out opened no tile")
+        }
+        func open(_ ids: [AgentID]) -> [Bool] { ids.map { s.records[$0]?.tileId != nil } }
+        // A child delegated while the lead was free already has its tile; it is
+        // not a pop-out and must not use up the lead's three.
+        try expect(s.setMode(.free, for: b.f.agentId), "free mode refused")
+        let delegated = try await child(b, "delegated before managed"); try await settled(b, delegated)
+        try expect(s.records[delegated]?.tileId != nil, "free delegation opened no tile")
+        try expect(s.setMode(.managed, for: b.f.agentId), "managed mode refused")
         var ids: [AgentID] = []
         for n in 0..<4 {
             let id = try await child(b, "cap \(n)"); try await settled(b, id)
@@ -133,26 +147,31 @@ enum HelperTileChecks {
             ids.append(id)
         }
         ids.swapAt(0, 1) // Oldest pop-out is deliberately not oldest creation.
-        for id in ids.prefix(3) { _ = try s.popOut(id); clock.now += 1 }
-        _ = try s.popOut(ids[3])
-        try expect(s.records[ids[0]]?.tileId == nil && ids.dropFirst().allSatisfy { s.records[$0]?.tileId != nil }, "cap did not fold oldest finished unpinned helper")
+        for (n, id) in ids.prefix(3).enumerated() { try popOut(id, "pop-out \(n + 1)"); clock.now += 1 }
+        try expect(open(Array(ids.prefix(3)) + [delegated]) == [true, true, true, true],
+                   "a tile delegated before managed mode counted toward the three: open \(open(Array(ids.prefix(3)) + [delegated]))")
+        try popOut(ids[3], "fourth pop-out")
+        try expect(open(ids + [delegated]) == [false, true, true, true, true],
+                   "fourth pop-out did not fold the oldest finished unpinned pop-out: open \(open(ids + [delegated]))")
+        clock.now += 1
         try expect(s.setPinned(ids[1], true), "pin failed")
         try await report(b, ids[2], fail: true)
-        _ = try s.popOut(ids[0])
-        try expect(s.records[ids[3]]?.tileId == nil && s.records[ids[1]]?.tileId != nil && s.records[ids[2]]?.tileId != nil,
-                   "cap folded pinned/failed helper instead of eligible one")
+        try popOut(ids[0], "pop-out past pinned and failed")
+        try expect(open(ids) == [true, true, true, false], "cap folded pinned/failed helper instead of eligible one: open \(open(ids))")
+        clock.now += 1
         try expect(s.send("HOLD cap", to: ids[0]), "cannot start cap running helper")
         try await AgentPresenceChecks.eventually("cap runner absent") { s.isRunning(ids[0]) }
-        do { _ = try s.popOut(ids[3]); throw Failure(description: "cap allowed a fourth protected tile") }
-        catch is AgentSupervisor.HelperTileError { }
-        try expect(s.isRunning(ids[0]) && s.records[ids[3]]?.tileId == nil, "refused pop-out changed running helper")
+        // Every open pop-out is running, pinned or failed: the new one opens anyway.
+        try popOut(ids[3], "pop-out with every open helper protected")
+        try expect(s.isRunning(ids[0]) && open(ids + [delegated]) == [true, true, true, true, true],
+                   "pop-out over the cap folded a protected helper: open \(open(ids + [delegated]))")
         // A needs-you report/status is protected even with a successful result.
-        s.stop(ids[0]); try s.foldBack(ids[0]); _ = try s.popOut(ids[3])
+        s.stop(ids[0]); try s.foldBack(ids[0]); clock.now += 1
         let status = AgentDeclaredStatus(now: "Waiting", needsYou: "Choose a path", declaredAt: clock.now)
         try expect(s.declareStatus(status, for: ids[3]), "needs-you refused")
-        do { _ = try s.popOut(ids[0]); throw Failure(description: "cap folded needs-you helper") }
-        catch is AgentSupervisor.HelperTileError { }
-        print("Helper tile cap passed: oldest eligible first; pinned, failed, running and needs-you protected; fourth refused without collateral folds")
+        try popOut(ids[0], "pop-out past needs-you")
+        try expect(open(ids) == [true, true, true, true], "cap folded needs-you helper: open \(open(ids))")
+        print("Helper tile cap passed: sidebar pop-out never refuses; only pop-outs count; oldest finished unpinned folds; pinned, failed, running and needs-you protected")
     }
 
     static func automatic() async throws {
