@@ -399,3 +399,23 @@ with a fresh coordinator:
 | --- | --- |
 | lent tiles left out of navigation | "the sidebar's Share reveals a lent agent rather than refusing" |
 | the resize band beats header controls | "a press on the top of a lent agent's Share, inside the resize band, opens the popover" |
+
+Gate at ff97bc78, once under the lock, with an isolated `TMUX_TMPDIR` and
+`CONTINUUM_APP_SUPPORT` and `CONTINUUM_SKIP_UI_BASELINES=1`.
+
+- **`scripts/run-matrix.sh --collaboration`: 13 of 14 legs passed.** The
+  native check printed 35 `PASS share entry` and 25 `PASS share entry (relay)`
+  lines.
+- **`--shared-area-zone-check` failed once inside the matrix,** at a presence
+  repaint budget: "the cursor overlay is what repaints for them". It passed
+  when run alone later in the same gate, with the same binary. The previous
+  gate failed it at a different stage, host offline, which also passed alone.
+  Both are timing budgets in part 2's zone, not this change.
+- **Exit 0:** `--canvas-pointer-path-check`, `--tile-multiselect-check`,
+  `--agent-native-menu-check`, `--agent-tile-rename-check`,
+  `--shared-area-zone-check` (alone) and `--floating-toolbar-check`.
+- **`--agent-face-switch-check` fails, and the failure is pre-existing on the
+  merged tip.** The message is "keyboard toggle: Ghostty's layer is still in
+  the window's tree after its surface was freed". I built 9faf1156's own
+  sources in this bench, and it failed there twice, identically. It passed at
+  856e105e.
