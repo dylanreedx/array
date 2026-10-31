@@ -349,3 +349,53 @@ Gate at a52d6f95, once under the lock, with an isolated `TMUX_TMPDIR` and
   The message is "flag off must still pay the native cascade — a gesture that
   laid nothing out was not a gesture". I built the base 856e105e's sources in
   this bench, and it fails identically there. It is not on `MATRIX_KNOWN_RED`.
+
+## Share on a lent agent, on the merged tip (branch array/mp-share-lent-header, off 9faf1156)
+
+On `collaboration-finish` 9faf1156, the leg "the header Share opened no
+popover" failed for an already-shared agent. These are the measurements, taken
+before any change, and the two fixes they led to.
+
+- **The failing press never reached a tile.**
+  - The lent agent was at zoom 1, and its Share's centre was 14 points down,
+    not in any resize band (`resizeEdge` nil).
+  - The window's `hitTest` at that point returned nil: the tile was off
+    screen.
+  - `canvas.centerOnTile` had done nothing. `navigationTileSnapshots()` walks
+    project `ZoneLayer`s only, so a lent tile cannot be navigated to.
+  - The same gap made the sidebar's Share and reveal refuse a lent agent in
+    the product (`revealAgentFromInbox` returns false).
+  - On 856e105e the shared zone happened to sit in view, so the gap went
+    unseen.
+  - **Fix:** navigation snapshots now include each shared layer's lent tiles,
+    at the zone origin plus the area frame.
+- **The resize band does cover Share's top**, as the zone builder said. The
+  edge-before-controls ordering predates c8e7679a.
+  - Measured on 360-wide agent tiles: Share starts about 3 to 3.6 points below
+    the top edge, and the band is 8 screen points deep. So Share's top 5 points
+    at zoom 1, and more as the camera pulls out, pressed into a resize. That is
+    a lent resize since c8e7679a, and a selection resize before it.
+  - Share is hidden below zoom 0.85 on these tiles, so "half of Share at 0.5"
+    applies only to wider tiles.
+  - **Fix:** in `TileNSView.hitTest`, a point in an edge band that lies on a
+    band control (anything except ×, which keeps its own rule) goes to the
+    title bar, unless the edge is a corner.
+  - In drawn mode the bar takes the press and hands it on, as it always has.
+    The rest of each edge still resizes.
+
+Witnesses, in the `ShareEntryRelayChecks` leg 3b, through `NSApp.sendEvent`
+with a fresh coordinator:
+
+- The production row action's Share reveals the lent agent and opens its
+  area's popover.
+- At the lowest zoom from 0.5 where Share shows (0.85), a press midway between
+  Share's top and the band's bottom opens the popover. That holds for the lent
+  agent and for a home agent.
+- A right-edge drag on the lent agent at zoom 0.5 still resizes it in the
+  area: 360 to 480.
+- Leg 4's header Share on the lent tile passes again.
+
+| Mutation | RED at |
+| --- | --- |
+| lent tiles left out of navigation | "the sidebar's Share reveals a lent agent rather than refusing" |
+| the resize band beats header controls | "a press on the top of a lent agent's Share, inside the resize band, opens the popover" |
