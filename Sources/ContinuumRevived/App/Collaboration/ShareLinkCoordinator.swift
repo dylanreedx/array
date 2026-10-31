@@ -10,7 +10,7 @@ enum ShareLinkOpenOutcome: Equatable {
 }
 
 enum ShareLinkFailure: Error, Equatable, LocalizedError {
-    case invalidSlug, slugTaken, nothingToShare, notSignedIn, noWorkspace
+    case invalidSlug, slugTaken, nothingToShare, notSignedIn, noWorkspace, unavailableArea
     case publishFailed(String)
     var errorDescription: String? {
         switch self {
@@ -19,24 +19,28 @@ enum ShareLinkFailure: Error, Equatable, LocalizedError {
         case .nothingToShare: return "Nothing in this selection can be shared. Terminals stay private."
         case .notSignedIn: return "Sign in to collaboration to share a link."
         case .noWorkspace: return "Open a workspace before sharing."
+        case .unavailableArea: return "The shared area is not reachable. Reconnect and try again."
         case .publishFailed(let message): return message
         }
     }
 }
 
-/// The share-link controller (IN-CANVAS.md, Round 2). The owner side makes an
-/// area from a selection and mints its link; the receiving side is the one
-/// entry point for array:// and arrayapp.dev/s/ links. The popover (part 3)
-/// and the URL handler both come through here.
+/// The share-link controller (IN-CANVAS.md, Round 2). The owner side mints and
+/// manages links on an area that already exists (part 2's shared zone makes
+/// it); the receiving side is the one entry point for array:// and
+/// arrayapp.dev/s/ links. The popover (part 3) and the URL handler both come
+/// through here.
 @MainActor
 final class ShareLinkCoordinator {
     typealias AccountProvider = @MainActor () throws -> CollaborationAccountController
     typealias SignIn = ShareLinkOpener.SignIn
+    typealias AskName = ShareLinkOpener.AskName
     typealias OpenArea = @MainActor (SharedAreaController, SharedArea.ID<SharedArea.Person>, UUID, CollaborationAccountController) throws -> Void
     typealias InventoryProvider = @MainActor (SharedAreaPublication.Selection) throws -> SharedAreaInventory.Snapshot
 
     private let accountProvider: AccountProvider
     private let signIn: SignIn
+    private let askName: AskName
     private let openArea: OpenArea
     private let inventory: InventoryProvider
     /// Shows a refusal to the person. Production presents it on the canvas window.
@@ -45,9 +49,12 @@ final class ShareLinkCoordinator {
     /// Completed opens, so a caller can tell a repeated outcome from a stale one.
     private(set) var openCount = 0
 
-    init(account: @escaping AccountProvider, signIn: @escaping SignIn, openArea: @escaping OpenArea,
+    /// Local checks reach a loopback relay over plain http.
+    var allowsInsecureLoopback = false
+
+    init(account: @escaping AccountProvider, signIn: @escaping SignIn, askName: @escaping AskName, openArea: @escaping OpenArea,
          inventory: @escaping InventoryProvider, presentRefusal: @escaping @MainActor (String) -> Void) {
-        accountProvider = account; self.signIn = signIn; self.openArea = openArea
+        accountProvider = account; self.signIn = signIn; self.askName = askName; self.openArea = openArea
         self.inventory = inventory; self.presentRefusal = presentRefusal
     }
 
@@ -60,11 +67,11 @@ final class ShareLinkCoordinator {
         let outcome: ShareLinkOpenOutcome
         do {
             let model = try accountProvider()
-            let opener = ShareLinkOpener(account: model, signIn: signIn, open: { [openArea] state, model in
+            let opener = ShareLinkOpener(account: model, signIn: signIn, askName: askName, open: { [openArea] state, model in
                 guard let person = model.activeAccount?.identity.person else { throw CollaborationAccountFailure.notConnected }
                 let area = state.document.id.rawValue
                 try openArea(try model.makeSharedAreaController(area: area), person, area, model)
-            })
+            }, deviceLabel: Host.current().localizedName ?? "This Mac", allowsInsecureLoopback: allowsInsecureLoopback)
             switch await opener.open(url) {
             case .opened(let area): outcome = .opened(area: area)
             case .refused(let message): outcome = .refused(message)
@@ -80,30 +87,15 @@ final class ShareLinkCoordinator {
 
     // MARK: Sharing
 
-    /// Makes a new area named by the slug, publishes the selection into it,
-    /// mints the link and opens the area for the sender. Agents publish as
-    /// live observations, notes as discussion, diffs and files as snapshots.
-    func createShareLink(selection: SharedAreaPublication.Selection, slug: String,
-                         lifetime: Collaboration.ShareLinkLifetime) async throws -> Collaboration.ShareLink {
+    /// Mints a link on an area that already exists. Creating the area,
+    /// publishing into it and opening the zone are the shared zone's job.
+    func createShareLink(area: UUID, slug: String, lifetime: Collaboration.ShareLinkLifetime) async throws -> Collaboration.ShareLink {
         guard ShareLinkURL.isValidSlug(slug) else { throw ShareLinkFailure.invalidSlug }
-        let model = try await signedInAccount()
-        // Read the selection before anything is created on the relay.
-        let snapshot = try inventory(selection)
-        guard snapshot.inventory.sources.contains(where: { Self.mode(for: $0.tile.kind) != nil }) else { throw ShareLinkFailure.nothingToShare }
-        let area = try await model.createArea(label: slug).document.id.rawValue
-        let link = try await mint(model, area: area, slug: slug, lifetime: lifetime)
-        do {
-            try await publish(selection, area: area, model: model)
-            guard let person = model.activeAccount?.identity.person else { throw ShareLinkFailure.notSignedIn }
-            try openArea(try model.makeSharedAreaController(area: area), person, area, model)
-        } catch {
-            try? await model.revokeShareLink(area: area, link: link.id)
-            throw error
-        }
-        return link
+        return try await mint(try await signedInAccount(), area: area, slug: slug, lifetime: lifetime)
     }
 
-    /// "New link" for an area that is already shared.
+    /// "New link" for an area that is already shared. Same as createShareLink;
+    /// kept as its own name for the popover.
     func newLink(area: UUID, slug: String, lifetime: Collaboration.ShareLinkLifetime) async throws -> Collaboration.ShareLink {
         guard ShareLinkURL.isValidSlug(slug) else { throw ShareLinkFailure.invalidSlug }
         return try await mint(try await signedInAccount(), area: area, slug: slug, lifetime: lifetime)
@@ -149,15 +141,24 @@ final class ShareLinkCoordinator {
         }
     }
 
-    /// The selection was chosen explicitly in the popover, so every row the
-    /// review would ask about is decided by its kind instead of by a window.
-    private func publish(_ selection: SharedAreaPublication.Selection, area: UUID, model: CollaborationAccountController) async throws {
+    /// Publish-by-kind, for the shared zone (part 2) to call after it creates
+    /// the area. The selection was chosen explicitly, so every row the review
+    /// would ask about is decided by its kind instead of by a window: agents
+    /// as live observations, notes as discussion, diffs and files as
+    /// snapshots; terminals and other kinds stay private. Returns the source
+    /// tile -> published object for every source-bound item (agents and
+    /// snapshots). Discussion items carry no source binding in the domain.
+    @discardableResult
+    func publish(selection: SharedAreaPublication.Selection, intoArea area: UUID) async throws -> [UUID: SharedArea.ID<SharedArea.Object>] {
+        let model = try await signedInAccount()
+        let snapshot = try inventory(selection)
+        guard snapshot.inventory.sources.contains(where: { Self.mode(for: $0.tile.kind) != nil }) else { throw ShareLinkFailure.nothingToShare }
         guard let person = model.activeAccount?.identity.person else { throw ShareLinkFailure.notSignedIn }
         let host = try await model.registerHost()
         let controller = try model.makeSharedAreaController(area: area)
         await controller.open()
         do {
-            guard controller.canSubmit else { throw SharedAreaCaptureCoordinator.Failure.unavailableArea }
+            guard controller.canSubmit else { throw ShareLinkFailure.unavailableArea }
             let coordinator = try SharedAreaCaptureCoordinator(selection: selection, controller: controller, person: person, host: host,
                 inventoryProvider: { [inventory] in try inventory(selection) },
                 submitter: { await controller.submitPublication($0) })
@@ -172,6 +173,9 @@ final class ShareLinkCoordinator {
             await controller.close()
             throw error
         }
+        var objects: [UUID: SharedArea.ID<SharedArea.Object>] = [:]
+        for binding in controller.sourceBindings { if let tile = binding.tileID { objects[tile] = binding.object } }
         await controller.close()
+        return objects
     }
 }

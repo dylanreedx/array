@@ -38,6 +38,8 @@ enum ShareLinkAppChecks {
             if !admitted.contains(person) { admitted.append(person) }
         }
         func redeem() { redeemed += 1 }
+        var joinedNames: [String] = []
+        func join(_ name: String) { joinedNames.append(name) }
     }
 
     private struct AccountTransport: CollaborationAccountTransport {
@@ -59,6 +61,12 @@ enum ShareLinkAppChecks {
             let token = try await links.mint(request)
             return .init(id: UUID(), area: .init(area), slug: request.slug, token: token, lifetime: request.lifetime, createdAt: Date())
         }
+        func joinShareLink(_ request: Collaboration.JoinShareLink) async throws -> Collaboration.ShareLinkJoin {
+            try await links.accept(slug: request.slug, token: request.token, person: identityValue.person.rawValue)
+            await links.join(request.displayName)
+            return .init(credential: .init(identity: identityValue, token: "scripted-joined-device"),
+                         scope: try await authority.state(identityValue).scope)
+        }
         func acceptShareLink(slug: String, token: String) async throws -> Collaboration.Scope {
             try await links.accept(slug: slug, token: token, person: identityValue.person.rawValue)
             return try await authority.state(identityValue).scope
@@ -78,7 +86,8 @@ enum ShareLinkAppChecks {
         defer { try? FileManager.default.removeItem(at: root) }
         let owner = Collaboration.Identity(person: .init(), device: UUID())
         let receiver = Collaboration.Identity(person: .init(), device: UUID())
-        let authority = SharedAreaCheckRig.Authority(document: .init(), members: [(owner, .owner), (receiver, .editor)])
+        let enrolled = Collaboration.Identity(person: .init(), device: UUID())
+        let authority = SharedAreaCheckRig.Authority(document: .init(), members: [(owner, .owner), (receiver, .editor), (enrolled, .editor)])
         let links = Links()
         let endpoint = try CollaborationServiceEndpoint(URL(string: "https://share-links.example.test")!)
 
@@ -105,79 +114,104 @@ enum ShareLinkAppChecks {
         sender.qaAdoptCollaborationAccount(ownerAccount)
         let selection = SharedAreaPublication.Selection.tiles([.init(projectID: fixture.projectPb, tileID: fixture.agentTileB),
                                                               .init(projectID: fixture.projectPb, tileID: noteID)])
-        let link = try await sender.shareLinks.createShareLink(selection: selection, slug: "checkout-redesign", lifetime: .once)
+        // Part 2 creates the area; publish-by-kind and the link are ours.
+        let area = try await ownerAccount.createArea(label: "Checkout redesign").document.id.rawValue
+        let objects = try await sender.shareLinks.publish(selection: selection, intoArea: area)
         let published = await authority.document
-        try expect(link.url.absoluteString == "https://arrayapp.dev/s/checkout-redesign#\(link.token)" && link.lifetime == .once,
-            "createShareLink returns the arrayapp.dev/s/<slug>#<token> link with its lifetime")
-        try expect(Set(published.items.map(\.kind)) == [.agentObservation, .discussion] && published.positions.count == 2,
-            "the selected agent publishes as a live observation and the note as discussion, without a review window")
-        try expect(sender.qaSharedAreaCaptureWindows.isEmpty && sender.qaSharedAreaWindows.contains { $0.controller.document?.id == published.id },
-            "the sender's area opens through the same path as the hub")
+        try expect(Set(published.items.map(\.kind)) == [.agentObservation, .discussion] && published.positions.count == 2
+            && objects[fixture.agentTileB].map { object in published.items.contains { $0.id == object } } == true,
+            "publish-by-kind shares the agent as a live observation and the note as discussion, without a review window, and maps the agent tile to its object")
+        let link = try await sender.shareLinks.createShareLink(area: area, slug: "checkout-redesign", lifetime: .once)
+        let afterMint = await authority.document
+        try expect(link.url.absoluteString == "https://arrayapp.dev/s/checkout-redesign?r=share-links.example.test#\(link.token)"
+            && link.lifetime == .once && sender.qaSharedAreaWindows.isEmpty && sender.qaSharedAreaCaptureWindows.isEmpty
+            && afterMint == published,
+            "createShareLink(area:) only mints a link carrying the relay; it creates, publishes and opens nothing")
         do {
-            _ = try await sender.shareLinks.newLink(area: published.id.rawValue, slug: "checkout-redesign", lifetime: .untilRevoked)
-            _ = try await sender.shareLinks.newLink(area: published.id.rawValue, slug: "checkout-redesign", lifetime: .untilRevoked)
+            _ = try await sender.shareLinks.newLink(area: area, slug: "checkout-redesign", lifetime: .untilRevoked)
+            _ = try await sender.shareLinks.newLink(area: area, slug: "checkout-redesign", lifetime: .untilRevoked)
             throw Failure(message: "a taken slug was minted")
         } catch ShareLinkFailure.slugTaken {}
         try expect(true, "a relay slug collision surfaces as ShareLinkFailure.slugTaken")
-        for window in sender.qaSharedAreaWindows { window.window.close() }
 
-        // Receiver: AppKit hands the URL to the delegate.
-        let receiving = AppDelegate()
-        let canvasWindow = NSWindow(contentRect: .init(x: 0, y: 0, width: 640, height: 420), styleMask: [.borderless], backing: .buffered, defer: false)
-        canvasWindow.isReleasedWhenClosed = false
-        receiving.qaAttachWindowForOfflineCheck(canvasWindow)
-        canvasWindow.orderFrontOffscreenForChecks()
-        defer { canvasWindow.orderOut(nil) }
-        let receiverAccount = try account(root: root.appendingPathComponent("receiver"), identity: receiver, authority: authority, links: links)
-        receiving.qaAdoptCollaborationAccount(receiverAccount)
-        func deliver(_ url: URL) async throws -> ShareLinkOpenOutcome? {
-            let before = receiving.shareLinks.openCount
-            receiving.application(NSApp, open: [url])
+        // Receivers: AppKit hands the URL to the delegate.
+        func receiverMac(_ identity: Collaboration.Identity, _ name: String) throws -> (AppDelegate, NSWindow, CollaborationAccountController) {
+            let delegate = AppDelegate()
+            let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 640, height: 420), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            delegate.qaAttachWindowForOfflineCheck(window)
+            window.orderFrontOffscreenForChecks()
+            let model = try account(root: root.appendingPathComponent(name), identity: identity, authority: authority, links: links)
+            delegate.qaAdoptCollaborationAccount(model)
+            return (delegate, window, model)
+        }
+        func deliver(_ url: URL, to mac: (AppDelegate, NSWindow, CollaborationAccountController), name: String? = nil) async throws -> ShareLinkOpenOutcome? {
+            let (delegate, window, model) = mac
+            let before = delegate.shareLinks.openCount
+            delegate.application(NSApp, open: [url])
             for _ in 0..<500 {
-                if receiving.shareLinks.openCount > before { return receiving.shareLinks.lastOutcome }
-                if let hub = receiving.qaCollaborationHub, hub.window.title == "Sign in to open the shared link",
-                   receiverAccount.status == .signedOut, !receiverAccount.isBusy {
+                if delegate.shareLinks.openCount > before { return delegate.shareLinks.lastOutcome }
+                if let name, let sheet = window.attachedSheet, let field = textFields(in: sheet.contentView).first(where: { $0.accessibilityLabel() == "Your name" }) {
+                    field.stringValue = name
+                    guard let join = buttons(in: sheet.contentView).first(where: { $0.title == "Join" }) else { throw Failure(message: "name sheet has no Join") }
+                    join.performClick(nil)
+                }
+                if let hub = delegate.qaCollaborationHub, hub.window.title == "Sign in to open the shared link", model.status == .signedOut, !model.isBusy {
                     try fill(hub.content, endpoint: "https://share-links.example.test", code: "scripted-receiver-enrollment")
                 }
                 try await Task.sleep(for: .milliseconds(10))
             }
             return nil
         }
-        let area = published.id.rawValue
 
+        // A brand-new person, no account anywhere: the link alone.
+        let newcomer = try receiverMac(receiver, "receiver")
+        defer { newcomer.1.orderOut(nil) }
         let redeemedBefore = await links.redeemed
-        let signedIn = try await deliver(link.url), redeemed = await links.redeemed
-        try expect(signedIn == .opened(area: area) && receiverAccount.status == .ready && redeemed == redeemedBefore + 1
-            && receiving.qaCollaborationHub?.window.title == "Collaboration",
-            "an https://arrayapp.dev/s/ link on a signed-out Mac signs in inline through the hub's enrollment, then admits")
+        let joined = try await deliver(link.url, to: newcomer, name: "Sam")
+        let redeemed = await links.redeemed, names = await links.joinedNames
+        try expect(joined == .opened(area: area) && newcomer.2.status == .ready && newcomer.2.activeAccount?.label == "Sam"
+            && names == ["Sam"] && redeemed == redeemedBefore && newcomer.0.qaCollaborationHub == nil,
+            "a signed-out Mac joins from an https://arrayapp.dev/s/ link alone: one name sheet, no hub, no enrollment code")
         try await SharedAreaCheckRig.eventually("receiver area open") {
-            receiving.qaSharedAreaWindows.contains { $0.controller.document?.id.rawValue == area }
+            newcomer.0.qaSharedAreaWindows.contains { $0.controller.document?.id.rawValue == area }
         }
-        try expect(receiving.qaSharedAreaWindows.count == 1, "the URL handler opens the admitted area")
-        let admitted = await links.admitted
-        try expect(admitted == [receiver.person.rawValue], "the receiver was admitted through the link exactly once")
-        for window in receiving.qaSharedAreaWindows { window.window.close() }
+        try expect(newcomer.0.qaSharedAreaWindows.count == 1, "the URL handler opens the admitted area")
+        for window in newcomer.0.qaSharedAreaWindows { window.window.close() }
 
-        let appForm = try await deliver(link.appURL)
+        let appForm = try await deliver(link.appURL, to: newcomer)
         try await SharedAreaCheckRig.eventually("receiver area reopen") {
-            receiving.qaSharedAreaWindows.contains { $0.controller.document?.id.rawValue == area }
+            newcomer.0.qaSharedAreaWindows.contains { $0.controller.document?.id.rawValue == area }
         }
-        try expect(appForm == .opened(area: area),
-            "array://s/<slug>#<token> reaches the same entry point and reopens the area")
-        for window in receiving.qaSharedAreaWindows { window.window.close() }
+        let devForm = try await deliver(ShareLinkURL.app(slug: link.slug, token: link.token, relay: link.relay, scheme: ShareLinkURL.devAppScheme), to: newcomer)
+        let namesAfter = await links.joinedNames
+        try expect(appForm == .opened(area: area) && devForm == .opened(area: area) && namesAfter == ["Sam"],
+            "array:// and array-dev:// reach the same entry point and reopen with the saved account")
+        for window in newcomer.0.qaSharedAreaWindows { window.window.close() }
 
-        let wrong = try await deliver(URL(string: "array://s/checkout-redesign#\(String(repeating: "x", count: 43))")!)
-        let sheet = canvasWindow.attachedSheet
-        let shown = sheet.flatMap { allText(in: $0.contentView) } ?? []
+        let wrong = try await deliver(URL(string: "array://s/checkout-redesign?r=share-links.example.test#\(String(repeating: "x", count: 43))")!, to: newcomer)
+        let sheet = newcomer.1.attachedSheet
+        let shown = sheet.map { textFields(in: $0.contentView).map(\.stringValue) } ?? []
         try expect(wrong == .refused(ShareLinkOpener.refusedMessage) && shown.contains(ShareLinkOpener.refusedMessage)
-            && receiving.qaSharedAreaWindows.isEmpty, "a wrong token is refused and the refusal is shown on the canvas window")
-        if let sheet { canvasWindow.endSheet(sheet) }
+            && newcomer.0.qaSharedAreaWindows.isEmpty, "a wrong token is refused and the refusal is shown on the canvas window")
+        if let sheet { newcomer.1.endSheet(sheet) }
 
-        let before = receiving.shareLinks.openCount
-        receiving.application(NSApp, open: [URL(string: "array://pair#not-a-share-link")!, URL(string: "https://arrayapp.dev/docs")!])
+        let before = newcomer.0.shareLinks.openCount
+        newcomer.0.application(NSApp, open: [URL(string: "array://pair#not-a-share-link")!, URL(string: "https://arrayapp.dev/docs")!])
         try await Task.sleep(for: .milliseconds(100))
-        try expect(receiving.shareLinks.openCount == before, "other array:// and arrayapp.dev URLs are not routed as share links")
-        receiving.qaCollaborationHub?.window.close()
+        try expect(newcomer.0.shareLinks.openCount == before, "other array:// and arrayapp.dev URLs are not routed as share links")
+
+        // A link without a relay still signs in through the hub's Connect.
+        let reusable = try await sender.shareLinks.newLink(area: area, slug: "checkout-team", lifetime: .untilRevoked)
+        let legacyMac = try receiverMac(enrolled, "enrolled")
+        defer { legacyMac.1.orderOut(nil) }
+        let legacy = try await deliver(ShareLinkURL.web(slug: reusable.slug, token: reusable.token), to: legacyMac)
+        let redeemedAfter = await links.redeemed
+        try expect(legacy == .opened(area: area) && legacyMac.2.status == .ready && redeemedAfter == redeemedBefore + 1
+            && legacyMac.0.qaCollaborationHub?.window.title == "Collaboration",
+            "a link without a relay on a signed-out Mac signs in inline through the hub's Connect, then admits")
+        for window in legacyMac.0.qaSharedAreaWindows { window.window.close() }
+        legacyMac.0.qaCollaborationHub?.window.close()
     }
 
     private static func fill(_ view: CollaborationHubView, endpoint: String, code: String) throws {
@@ -193,9 +227,12 @@ enum ShareLinkAppChecks {
         guard connect.isEnabled, connect.sendAction(connect.action, to: connect.target) else { throw Failure(message: "inline Connect not wired") }
     }
 
-    private static func allText(in view: NSView?) -> [String] {
+    private static func textFields(in view: NSView?) -> [NSTextField] {
         guard let view else { return [] }
-        let own = (view as? NSTextField).map { [$0.stringValue] } ?? []
-        return own + view.subviews.flatMap { allText(in: $0) }
+        return ((view as? NSTextField).map { [$0] } ?? []) + view.subviews.flatMap { textFields(in: $0) }
+    }
+    private static func buttons(in view: NSView?) -> [NSButton] {
+        guard let view else { return [] }
+        return ((view as? NSButton).map { [$0] } ?? []) + view.subviews.flatMap { buttons(in: $0) }
     }
 }

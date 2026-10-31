@@ -11965,7 +11965,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
     static func isShareLink(_ url: URL) -> Bool {
         switch url.scheme?.lowercased() {
-        case ShareLinkURL.appScheme?: return url.host?.lowercased() == "s"
+        case ShareLinkURL.appScheme?, ShareLinkURL.devAppScheme?: return url.host?.lowercased() == "s"
         case "https"?: return url.host?.lowercased() == ShareLinkURL.webHost && url.path.hasPrefix("/s/")
         default: return false
         }
@@ -11975,6 +11975,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         ShareLinkCoordinator(account: { [unowned self] in try collaborationAccountModel() }, signIn: { [weak self] model in
             guard let self else { return false }
             return await signInForShareLink(model)
+        }, askName: { [weak self] relay, slug in
+            await self?.askShareLinkName(relay: relay, slug: slug)
         }, openArea: { [weak self] controller, person, area, model in
             self?.openSharedArea(controller: controller, person: person, area: area, model: model)
         }, inventory: { [weak self] selection in
@@ -12005,6 +12007,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 finish(false)
             }
         }
+    }
+
+    /// A newcomer joining through a link only picks the name teammates see.
+    /// The link's token is the enrollment; no password, code or key is asked for.
+    private func askShareLinkName(relay: String, slug: String) async -> String? {
+        guard let window = window ?? collaborationHub?.window, window.attachedSheet == nil else { return nil }
+        let alert = NSAlert()
+        alert.messageText = "Join “\(slug)”"
+        alert.informativeText = "Choose the name your teammates see. You join through \(relay)."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = NSFullUserName(); field.placeholderString = "Your name"
+        field.setAccessibilityLabel("Your name")
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Join")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard await alert.beginSheetModal(for: window) == .alertFirstButtonReturn else { return nil }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
     }
 
     private func presentShareLinkRefusal(_ message: String) {
