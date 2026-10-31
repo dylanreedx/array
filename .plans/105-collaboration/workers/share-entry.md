@@ -291,3 +291,39 @@ Mutations, each RED at its own leg:
 | place against the window, not the canvas | "near the canvas's bottom edge the popover flips above the tile and stays inside the canvas" |
 | `URLError` mapping disabled | "a link whose relay answers without TLS says the secure connection failed", which got "Array could not open this share link. Try it again." |
 | anchor to the detachable Share button | "the popover stays open when the tile's chrome rests" |
+
+### Walkthrough round 2 (same branch)
+
+5. **Share did nothing on an agent that was already shared.**
+   - Cause: `shareTarget` skipped every tile whose zone has no project, and a
+     shared zone has none.
+   - Fix: a tile lent to a shared zone (`CanvasNSView.lentTile`) now resolves
+     to that zone's `sharedAreaId`, and Share opens the area.
+     - If the session that shared it is still alive, the popover shows its link.
+     - Otherwise, for example after a relaunch, a fresh session opens in the
+       new `.existing(area:)` phase. Only creation returns a token, so it shows
+       the area's live links by slug, everyone admitted, New link, and a Revoke
+       that ends every link on the area.
+   - The Revoke for a link in hand now also ends the area's other links, so
+     "Revoke everyone's access" means everyone.
+   - Witness (`ShareEntryRelayChecks` leg 4): after the real share and a fresh
+     coordinator, as after a relaunch, A's header Share on the lent tile opens
+     the area's popover. It shows the live link and "Revoke link", and Copy
+     reads "New link".
+6. **An open popover never noticed a join.**
+   - Fix: while open, it re-reads `listAccess(area:)` every two seconds
+     (`ShareEntryCoordinator.accessRefreshInterval`). The refresh is
+     area-wide: people across every link, deduplicated, inactive ones dropped.
+   - Witness (leg 5), with the popover open:
+     - Sam opens the Works-once link through the production opener.
+     - Without reopening, the popover lists Sam with Remove and offers
+       "Revoke everyone's access".
+     - Priya is refused as spent.
+     - New link mints a second link on the area.
+     - Revoke everyone's access leaves every link revoked and Sam inactive on
+       the relay.
+
+| Mutation | RED at |
+| --- | --- |
+| `shareTarget` ignores lent tiles | "the header Share opened no popover" (the walkthrough's bug) |
+| the open popover reads access once | timeout: "the open popover sees Sam join" |
