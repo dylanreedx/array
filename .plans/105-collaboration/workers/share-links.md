@@ -335,6 +335,11 @@ The script and the light and dark screenshots are in
 theme, so both captures look the same, the same as `/pair`. The real Vercel
 rewrite is still unproven until a preview deploy.
 
+**Gate run (round 3):** `scripts/run-matrix.sh --collaboration`, once, under the
+lock, isolated as before. Result: "Collaboration matrix (targeted) passed", 11
+legs. It shows 30 `PASS share links:` lines, 9 `PASS share links (app)` lines,
+and the boundary audit's 26 routes. The Linux relay leg is green.
+
 ### Open, for the lead
 
 - **Universal link: later, per your decision.** `https://arrayapp.dev/s/...`
