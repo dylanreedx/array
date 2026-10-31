@@ -198,6 +198,7 @@ func runCollaborationBoundaryAuditChecks() async throws {
         let presenceBody = try auditEncoder.encode(Collaboration.PresenceInput(session: presenceA.id, sequence: 9, cursor: .init(x: 1, y: 1)))
         let inviteBody = try auditEncoder.encode(Collaboration.InviteRequest(person: c.identity.person, role: .editor))
         let usageBody = try auditEncoder.encode(usage)
+        let linkBody = try auditEncoder.encode(Collaboration.ShareLinkRequest(slug: "audit-\(UUID().uuidString.prefix(8).lowercased())", lifetime: .untilRevoked))
         let hostBody = try auditEncoder.encode(Collaboration.AgentHostRegistration(epoch: 1, object: agent.id, generation: UUID()))
         let ifMatch: (String, String)? = ("if-match", "1")
         let probes: [(String, Route, Data?, (String, String)?)] = [
@@ -209,6 +210,10 @@ func runCollaborationBoundaryAuditChecks() async throws {
             ("DELETE", { a, _, _, _ in "areas/\(a)/presence-sessions/\(presenceA.id)" }, nil, nil),
             ("POST", { a, _, _, _ in "areas/\(a)/invitations" }, inviteBody, nil),
             ("POST", { a, _, _, _ in "areas/\(a)/commands" }, mutation, nil),
+            ("POST", { a, _, _, _ in "areas/\(a)/links" }, linkBody, nil),
+            ("GET", { a, _, _, _ in "areas/\(a)/links" }, nil, nil),
+            ("DELETE", { a, o, _, _ in "areas/\(a)/links/\(o)" }, nil, nil),
+            ("DELETE", { a, o, _, h in "areas/\(a)/links/\(o)/people/\(h)" }, nil, nil),
             ("DELETE", { a, _, _, _ in "areas/\(a)/members/\(b.identity.person.rawValue)" }, nil, ifMatch),
             ("POST", { a, _, _, _ in "areas/\(a)/usage" }, usageBody, nil),
             ("POST", { a, _, _, _ in "areas/\(a)/agent-hosts" }, hostBody, nil),

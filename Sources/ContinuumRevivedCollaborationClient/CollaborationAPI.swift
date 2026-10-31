@@ -36,6 +36,19 @@ public struct CollaborationAPI: Sendable {
         try await request("POST", "areas/\(area)/invitations", body: value)
     }
     public func accept(code: String) async throws -> Collaboration.Scope { try await request("POST", "invitations/accept", body: Collaboration.AcceptInvitation(code: code)) }
+    public func createShareLink(area: UUID, request value: Collaboration.ShareLinkRequest) async throws -> Collaboration.ShareLink {
+        try await request("POST", "areas/\(area)/links", body: value)
+    }
+    public func acceptShareLink(slug: String, token: String) async throws -> Collaboration.Scope {
+        try await request("POST", "links/accept", body: Collaboration.AcceptShareLink(slug: slug, token: token))
+    }
+    public func shareLinks(area: UUID) async throws -> [Collaboration.ShareLinkAccess] { try await request("GET", "areas/\(area)/links", body: Optional<Int>.none) }
+    public func revokeShareLink(area: UUID, link: UUID) async throws {
+        let _: Collaboration.ErrorBody = try await request("DELETE", "areas/\(area)/links/\(link)", body: Optional<Int>.none)
+    }
+    public func removeShareLinkPerson(area: UUID, link: UUID, person: UUID) async throws {
+        let _: Collaboration.ErrorBody = try await request("DELETE", "areas/\(area)/links/\(link)/people/\(person)", body: Optional<Int>.none)
+    }
     public func apply(area: UUID, mutation: Collaboration.Mutation) async throws -> Collaboration.Receipt { try await request("POST", "areas/\(area)/commands", body: mutation) }
     public func updates(area: UUID, request value: Collaboration.UpdateRequest) async throws -> Collaboration.Updates {
         try await withTaskCancellationHandler {

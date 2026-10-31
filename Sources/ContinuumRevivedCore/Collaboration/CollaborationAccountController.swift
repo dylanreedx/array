@@ -10,6 +10,20 @@ public protocol CollaborationAccountTransport: Sendable {
     func accept(code: String) async throws -> Collaboration.Scope
     func invite(area: UUID, person: SharedArea.ID<SharedArea.Person>, role: Collaboration.Role) async throws -> Collaboration.Invitation
     func registerHost() async throws -> Collaboration.Host
+    func createShareLink(area: UUID, request: Collaboration.ShareLinkRequest) async throws -> Collaboration.ShareLink
+    func acceptShareLink(slug: String, token: String) async throws -> Collaboration.Scope
+    func shareLinks(area: UUID) async throws -> [Collaboration.ShareLinkAccess]
+    func revokeShareLink(area: UUID, link: UUID) async throws
+    func removeShareLinkPerson(area: UUID, link: UUID, person: UUID) async throws
+}
+
+/// Fakes written before share links existed refuse them like an old relay.
+public extension CollaborationAccountTransport {
+    func createShareLink(area: UUID, request: Collaboration.ShareLinkRequest) async throws -> Collaboration.ShareLink { throw CollaborationClientError.server(status: 404, code: "notFound") }
+    func acceptShareLink(slug: String, token: String) async throws -> Collaboration.Scope { throw CollaborationClientError.server(status: 404, code: "notFound") }
+    func shareLinks(area: UUID) async throws -> [Collaboration.ShareLinkAccess] { throw CollaborationClientError.server(status: 404, code: "notFound") }
+    func revokeShareLink(area: UUID, link: UUID) async throws { throw CollaborationClientError.server(status: 404, code: "notFound") }
+    func removeShareLinkPerson(area: UUID, link: UUID, person: UUID) async throws { throw CollaborationClientError.server(status: 404, code: "notFound") }
 }
 
 public struct CollaborationAccountAPITransport: CollaborationAccountTransport {
@@ -27,6 +41,15 @@ public struct CollaborationAccountAPITransport: CollaborationAccountTransport {
         try await api.invite(area: area, request: .init(person: person, role: role))
     }
     public func registerHost() async throws -> Collaboration.Host { try await api.registerHost() }
+    public func createShareLink(area: UUID, request: Collaboration.ShareLinkRequest) async throws -> Collaboration.ShareLink {
+        try await api.createShareLink(area: area, request: request)
+    }
+    public func acceptShareLink(slug: String, token: String) async throws -> Collaboration.Scope { try await api.acceptShareLink(slug: slug, token: token) }
+    public func shareLinks(area: UUID) async throws -> [Collaboration.ShareLinkAccess] { try await api.shareLinks(area: area) }
+    public func revokeShareLink(area: UUID, link: UUID) async throws { try await api.revokeShareLink(area: area, link: link) }
+    public func removeShareLinkPerson(area: UUID, link: UUID, person: UUID) async throws {
+        try await api.removeShareLinkPerson(area: area, link: link, person: person)
+    }
 }
 
 public enum CollaborationAccountFailure: Error, Sendable, Equatable, LocalizedError {
@@ -229,6 +252,57 @@ public final class CollaborationAccountController {
             let result = try await active.transport.invite(area: area, person: person, role: role)
             try self.current(ticket)
             return result
+        }
+    }
+    /// Owner side of a bearer link. The service refuses a slug that a live
+    /// link on the relay already uses.
+    public func createShareLink(area: UUID, slug: String, lifetime: Collaboration.ShareLinkLifetime) async throws -> Collaboration.ShareLink {
+        try await withAccount { active, ticket in
+            guard ShareLinkURL.isValidSlug(slug) else { throw CollaborationAccountFailure.invalidInput }
+            let link = try await active.transport.createShareLink(area: area, request: .init(slug: slug, lifetime: lifetime))
+            try self.current(ticket)
+            guard link.area.rawValue == area, link.slug == slug, ShareLinkURL.isValidToken(link.token) else { throw CollaborationAccountFailure.invalidState }
+            return link
+        }
+    }
+    /// Admits this account through a link, loads the area and remembers it
+    /// under the link's slug, the same way an accepted invitation is kept.
+    public func acceptShareLink(slug: String, token: String) async throws -> Collaboration.State {
+        try await withAccount { active, ticket in
+            guard ShareLinkURL.isValidSlug(slug), ShareLinkURL.isValidToken(token) else { throw CollaborationAccountFailure.invalidInput }
+            let scope = try await active.transport.acceptShareLink(slug: slug, token: token)
+            try self.current(ticket)
+            let state: Collaboration.State
+            do { state = try await active.transport.state(area: scope.area.rawValue) }
+            catch {
+                try self.current(ticket)
+                if self.isCredentialFailure(error) { self.active = nil; self.status = .unavailable }
+                throw CollaborationAccountFailure.invitationAcceptedStateUnavailable(scope.area.rawValue)
+            }
+            try self.current(ticket)
+            try self.validate(state, expected: scope.area.rawValue)
+            let known = active.account.knownAreas.first(where: { $0.id == scope.area.rawValue })?.label
+            try self.rememberAdmittedArea(scope.area.rawValue, label: known ?? slug, account: active.account.id)
+            return state
+        }
+    }
+    public func shareLinks(area: UUID) async throws -> [Collaboration.ShareLinkAccess] {
+        try await withAccount { active, ticket in
+            let links = try await active.transport.shareLinks(area: area)
+            try self.current(ticket)
+            return links
+        }
+    }
+    public func revokeShareLink(area: UUID, link: UUID) async throws {
+        try await withAccount { active, ticket in
+            try await active.transport.revokeShareLink(area: area, link: link)
+            try self.current(ticket)
+        }
+    }
+    public func removeShareLinkPerson(area: UUID, link: UUID, person: SharedArea.ID<SharedArea.Person>) async throws {
+        try await withAccount { active, ticket in
+            try await active.transport.removeShareLinkPerson(area: area, link: link, person: person.rawValue)
+            try self.current(ticket)
         }
     }
     public func registerHost() async throws -> SharedArea.ID<SharedArea.Host> {

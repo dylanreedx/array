@@ -31,6 +31,9 @@ enum CollaborationRoutes {
             }
             if head.method == .POST, head.uri == "/collaboration/v1/hosts" { return .json(.created, try await store.registerHost(token: token)) }
             if head.method == .POST, head.uri == "/collaboration/v1/areas" { return .json(.created, try await store.createArea(token: token)) }
+            if head.method == .POST, head.uri == "/collaboration/v1/links/accept" {
+                return .json(.ok, try await store.acceptShareLink(token: token, request: decoder.decode(Collaboration.AcceptShareLink.self, from: body)))
+            }
             if head.method == .POST, head.uri == "/collaboration/v1/invitations/accept" {
                 return .json(.ok, try await store.accept(token: token, code: decoder.decode(Collaboration.AcceptInvitation.self, from: body).code))
             }
@@ -61,6 +64,21 @@ enum CollaborationRoutes {
                 if parts.count == 5, parts[4] == "invitations", head.method == .POST {
                     return .json(.created, try await store.invite(token: token, area: area, request: decoder.decode(Collaboration.InviteRequest.self, from: body)))
                 }
+                if parts.count == 5, parts[4] == "links", head.method == .POST {
+                    return .json(.created, try await store.createShareLink(token: token, area: area, request: decoder.decode(Collaboration.ShareLinkRequest.self, from: body)))
+                }
+                if parts.count == 5, parts[4] == "links", head.method == .GET {
+                    return .json(.ok, try await store.shareLinks(token: token, area: area))
+                }
+                if parts.count == 6, parts[4] == "links", head.method == .DELETE, let link = UUID(uuidString: parts[5]) {
+                    try await store.revokeShareLink(token: token, area: area, link: link)
+                    return .json(.ok, Collaboration.ErrorBody(code: "revoked"))
+                }
+                if parts.count == 8, parts[4] == "links", parts[6] == "people", head.method == .DELETE,
+                   let link = UUID(uuidString: parts[5]), let person = UUID(uuidString: parts[7]) {
+                    try await store.removeShareLinkPerson(token: token, area: area, link: link, person: person)
+                    return .json(.ok, Collaboration.ErrorBody(code: "removed"))
+                }
                 if parts.count == 5, parts[4] == "commands", head.method == .POST {
                     return .json(.ok, try await store.apply(token: token, area: area, request: decoder.decode(Collaboration.Mutation.self, from: body)))
                 }
@@ -77,6 +95,7 @@ enum CollaborationRoutes {
         catch CollaborationStoreError.unavailable { return .error(.notFound, "notFound") }
         catch CollaborationStoreError.forbidden { return .error(.forbidden, "forbidden") }
         catch CollaborationStoreError.invalidInvitation { return .error(.gone, "invalidInvitation") }
+        catch CollaborationStoreError.slugTaken { return .error(.conflict, "slugTaken") }
         catch CollaborationStoreError.invalidCursor { return .error(.conflict, "resyncRequired") }
         catch CollaborationStoreError.compacted { return .error(.conflict, "snapshotRequired") }
         catch CollaborationStoreError.tooManySubscriptions { return .error(.tooManyRequests, "subscriptionLimit") }

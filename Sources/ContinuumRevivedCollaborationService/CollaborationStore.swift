@@ -9,6 +9,8 @@ public enum CollaborationStoreError: Error, Equatable {
     case compacted
     /// Stored snapshot, horizon and operation tail do not reconstruct each other.
     case integrityFailure
+    /// A live share link on this relay already uses the slug.
+    case slugTaken
 }
 
 /// Separate database, credentials and namespace from companion v2. Every request
@@ -86,6 +88,7 @@ public actor CollaborationStore {
         Self.registerArtifactMigration(&migrator)
         Self.registerHostLivenessMigration(&migrator)
         Self.registerAgentProjectionMigration(&migrator)
+        Self.registerShareLinkMigration(&migrator)
         try migrator.migrate(database)
         try Self.preflightDatabaseKey(database, keyData: normalizedKeyData)
     }
@@ -252,6 +255,7 @@ public actor CollaborationStore {
             guard caller.person.rawValue != person else { throw CollaborationStoreError.forbidden }
             guard try Int.fetchOne(db, sql: "SELECT active FROM members WHERE area=? AND person=?", arguments: [area.uuidString, person.uuidString]) == 1 else { throw CollaborationStoreError.unavailable }
             try db.execute(sql: "UPDATE members SET active=0 WHERE area=? AND person=?", arguments: [area.uuidString, person.uuidString])
+            try closeShareLinkAdmissions(db, area: area, person: person)
             try db.execute(sql: "UPDATE areas SET epoch=epoch+1 WHERE id=?", arguments: [area.uuidString])
         }
         invalidateMember(area: area, person: person)
