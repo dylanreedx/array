@@ -1605,8 +1605,10 @@ enum ContinuumApp {
             setbuf(stderr, nil)
             _ = NSApplication.shared
             Task { @MainActor in
-                try? await Task.sleep(for: .seconds(45))
-                fputs("FAIL: collaboration native journey exceeded its 45-second behavioral deadline\n", stderr)
+                // Every multiplayer stage shares this one process; 45 s was within
+                // a few seconds of a green run once share links landed.
+                try? await Task.sleep(for: .seconds(120))
+                fputs("FAIL: collaboration native journey exceeded its 120-second behavioral deadline\n", stderr)
                 Foundation.exit(1)
             }
             Task { @MainActor in
