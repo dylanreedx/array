@@ -1179,3 +1179,56 @@ owner's input is refused while the agent is handed over, and a prompt that
 the reclaim overtook reads refused with no write.
 
 Remaining: `array/col-native-budgets`.
+
+## Integrator gate — native budgets on `9d1a3b90`, 30–31 October 2026
+
+Merged: `array/col-native-budgets` (`4bdfca62`..`89dd2e11`, five commits).
+Conflicts:
+- `SharedAreaSceneView`: the keyboard work's focus hold now wraps the w6/w7
+  panel logic in `refreshReader`. `setText(statusLabel…)` keeps w6's
+  `artifactPanel.headsChanged`.
+- `ContinuumApp` native stages: the host-liveness stage and the three new
+  stages are all registered, with the census last.
+
+Integrator additions, as the coordinator asked:
+- `6d5137ae` adds two census surfaces, an agent selected (freshness panel and
+  live view) and an artifact selected (artifact panel). The class census also
+  counts `SharedAgent*` views: `SharedAgentLiveView` matched neither
+  "SharedArea" nor "Collaboration", so the census could not see it. It now
+  reports 12 classes on 9 surfaces. w5's liveness has no view of its own: it
+  is a line on the scene's agent cards, which the scene surface already
+  covers. Teeth: dropping the agent surface → RED naming exactly
+  `SharedAgentLiveView` and `SharedAreaAgentFreshnessView`; restored by `cmp`.
+- `9b5837a2` adds the live view row budget (ACCEPTANCE item 5). One
+  projection delta over 10, 100 and 1,000 produced rows renders 10, 32 and 32
+  rows (`maxRows`), creates no Array view, and costs 1 Array layout pass and
+  10, 12 and 12 TextKit fragment layouts (visible rows only). Teeth:
+  remounting the text view per delta → RED at "no Array view created";
+  restored by `cmp`.
+- `9d1a3b90` fixes a real defect the token census then found:
+  `SharedAreaArtifactView` left its text view's `textColor` at AppKit black,
+  so plain messages ("No included content in this revision") were black in
+  dark mode. It now takes `TextToken.textPrimary`.
+
+Gate: the first run on `9b5837a2` failed only `--ui-probe-check`, on that
+colour. The run on `9d1a3b90` (log `qa-runs/coordinator/gate-9d1a3b90.log`):
+**11 legs run, all passed.**
+
+Board (revision 164): **COL-18 → Done**. Keyboard parity, Reduce Motion and
+bounded follow work are witnessed, and follow itself already was.
+
+**COL-21 stays Doing, for one named gap.** Its acceptance asks for two
+participants working through discussion, agreement, own-agent delivery *and
+pinned review artifacts*, and for the matrix to report the new legs. The core
+pair passes. But `scripts/check-collaboration-pair-features.py` (run once,
+`--allow-pending`, log `qa-runs/coordinator/pair-features.log`) reports all
+eight feature stages PENDING: liveness, artifacts, liveViews, freshness,
+endorsements, follow, compaction and harnesses. The peer runtime
+(`SharedAreaPeerRuntime.swift`) lacks their mailbox ops, listed in
+ACCEPTANCE.md "Pair feature journey contract". The features are witnessed
+natively and over HTTP, but not in the real two-process journey, and that
+journey is not registered in the gate. Closing COL-21 means adding those
+peer ops and then registering the journey as a `--collaboration` leg.
+
+Board counts: To Do 4 (COL-23–26, later phase), Doing 2 (COL-21, COL-22),
+Done 20.
