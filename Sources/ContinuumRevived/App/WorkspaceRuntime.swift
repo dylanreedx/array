@@ -2278,13 +2278,29 @@ final class WorkspaceRuntime {
         let areaFrames: [UUID: SharedArea.Rect]
     }
 
-    enum SharedZoneError: Error, Equatable {
+    enum SharedZoneError: Error, Equatable, LocalizedError {
         case noTiles
         case tileNotInstalled(UUID)
         case terminalStaysPrivate(UUID)
         case alreadyShared(UUID)
         case noCanvas
+
+        /// What a refused share says, in the person's words: why, not that it failed.
+        var errorDescription: String? {
+            switch self {
+            case .noTiles: return "Select the tiles you want to share first."
+            case .tileNotInstalled: return "One of these tiles isn't open on this canvas, so it can't be shared from here."
+            case .terminalStaysPrivate: return "Terminals stay private, so a terminal can't be shared. Leave it out and share the rest."
+            case .alreadyShared: return "One of these tiles is already in a shared area."
+            case .noCanvas: return "Open a workspace before sharing."
+            }
+        }
     }
+
+    /// The scene is about to change (a workspace switch): open shared areas close.
+    var onSceneWillChange: (() -> Void)?
+    /// The scene changed: shared areas of the arriving workspace reopen.
+    var onSceneChanged: (() -> Void)?
 
     /// Fired after a shared zone is created, bound, cancelled or closed, with its id.
     var onSharedZoneChanged: ((UUID) -> Void)? {
@@ -2426,6 +2442,7 @@ final class WorkspaceRuntime {
         guard !isSwitching else { throw WorkspaceSwitchError.switchInProgress }
         isSwitching = true
         defer { isSwitching = false }
+        onSceneWillChange?()
         returnLentTilesBeforeSceneChange()
         hydrationReconcileTimer?.invalidate()
         hydrationReconcileTimer = nil
@@ -2448,6 +2465,7 @@ final class WorkspaceRuntime {
         lastSwitchReport = report
         classifyStrandedTiles()
         lifecycleObserver?(.switchCompleted(targetWorkspaceId))
+        onSceneChanged?()
         // CX-01: a switch is newer intent for every pending presentation, and a
         // structural change for every issued context.
         noteUserInteraction()

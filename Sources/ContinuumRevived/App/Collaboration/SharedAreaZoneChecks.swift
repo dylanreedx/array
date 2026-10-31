@@ -422,6 +422,8 @@ enum SharedAreaZoneChecks {
 
         print("STAGE shared area zone: presence frames stay inside their budget")
         guard let budgetView = scene.session.scene.zoneAgentViews[scene.mateAgent.id] else { throw Failure(description: "no agent view") }
+        // Look at the area, cursors in view: follow left the camera on Dylan's.
+        scene.session.reveal(); canvas.layoutSubtreeIfNeeded(); canvas.displayIfNeeded()
         // One warm-up frame settles anything the follow stage left pending;
         // the budget is what each further frame costs.
         try await scene.authority.setPresence(.init(identity: scene.mate, cursor: .init(x: 290, y: 260),
@@ -466,6 +468,7 @@ enum SharedAreaZoneChecks {
         try await render(scene, "offline")
         try await scene.authority.setHosts([liveness(scene.mateHost, .online)])
         try await SharedAreaCheckRig.eventually("back online") { scene.session.scene.zoneAgentViews[scene.mateAgent.id]?.offline == false }
+        canvas.layoutSubtreeIfNeeded()
         try expect(canvas.zoneChromeSnapshot(for: scene.session.zoneId)?.outlineDashed == false, "back online, the edge is solid again")
     }
 
@@ -487,5 +490,211 @@ enum SharedAreaZoneChecks {
             try rep.representation(using: .png, properties: [:])?
                 .write(to: directory.appendingPathComponent("\(name)-\(appearance == .aqua ? "light" : "dark").png"))
         }
+    }
+}
+
+// MARK: - Follow-ups: hand over, resize, switch, relaunch, refusals
+
+extension SharedAreaZoneChecks {
+    /// A scripted control authority for one shared agent: who drives it, any
+    /// offer, and what Hand over and Take back asked for.
+    actor HandOverAuthority: SharedAgentHandoffTransport {
+        let area: Collaboration.State
+        var current: Collaboration.AgentControlState
+        private(set) var offers: [SharedArea.ID<SharedArea.Person>] = []
+        private(set) var reclaims = 0
+        init(area: Collaboration.State, object: SharedArea.ID<SharedArea.Object>, source: SharedArea.Source, owner: SharedArea.ID<SharedArea.Person>) {
+            self.area = area
+            current = .init(area: area.document.id, object: object, source: source, hostGeneration: UUID(), epoch: 1, revision: 1, controller: owner)
+        }
+        func state() async throws -> Collaboration.State { area }
+        func register(_ request: Collaboration.AgentHostRegistration) async throws -> Collaboration.AgentControlState { current }
+        func control(object: UUID) async throws -> Collaboration.AgentControlState { current }
+        func change(object: UUID, request: Collaboration.AgentControlMutation) async throws -> Collaboration.AgentControlState {
+            switch request.action {
+            case .offer(let offer): offers.append(offer.recipient); current.offer = offer
+            case .reclaim: reclaims += 1; current.offer = nil
+            default: break
+            }
+            current.revision += 1
+            return current
+        }
+        func send(object: UUID, request: Collaboration.AgentPromptRequest) async throws -> Collaboration.AgentDispatchReceipt { throw Failure(description: "no prompts here") }
+        func receipt(id: UUID) async throws -> Collaboration.AgentDispatchReceipt { throw Failure(description: "no receipts here") }
+        func pending(host: UUID) async throws -> [Collaboration.AgentDispatchReceipt] { [] }
+        func claim(id: UUID, request: Collaboration.AgentHostClaim) async throws -> Collaboration.AgentDispatchReceipt { throw Failure(description: "no host") }
+        func admit(id: UUID, request: Collaboration.AgentHostClaim) async throws -> Collaboration.AgentDispatchReceipt { throw Failure(description: "no host") }
+        func finish(id: UUID, outcome: Collaboration.AgentHostOutcome) async throws -> Collaboration.AgentDispatchReceipt { throw Failure(description: "no host") }
+    }
+
+    /// One Mac, launched twice. The first launch shares a real agent tile,
+    /// hands it over and takes it back, resizes it, refuses bad shares in plain
+    /// words, and switches workspace away and back. The second launch, on the
+    /// same collaboration account, finds the area's zone in its workspace.
+    static func runFollowUps() async throws {
+        acceptFirstMouseEverywhere()
+        let root = try SharedAreaCheckRig.root("zone-follow-ups")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let owner = Collaboration.Identity(person: .init(), device: UUID())
+        let mate = Collaboration.Identity(person: .init(), device: UUID())
+        let authority = SharedAreaCheckRig.Authority(document: .init(), members: [(owner, .owner), (mate, .editor)])
+        let links = ShareLinkAppChecks.Links()
+        let endpoint = try CollaborationServiceEndpoint(URL(string: "https://share-links.example.test")!)
+        let account = try ShareLinkAppChecks.account(root: root.appendingPathComponent("owner"), identity: owner, authority: authority, links: links)
+        _ = try await account.enroll(endpoint: endpoint, code: "scripted-owner-enrollment", deviceLabel: "Dylan's Mac", accountLabel: "Dylan")
+
+        func launch(seedAnchor anchor: ZonePlacement?) throws -> WorkspaceAPIChecks.Fixture {
+            try WorkspaceAPIChecks.makeFixture(configureRuntime: { runtime in
+                // The workspace this launch opens carries the area's zone.
+                guard let anchor else { return }
+                var document = runtime.document
+                document.zones.append(anchor)
+                runtime.replaceDocument(document, for: runtime.workspaceId)
+            }, beforeMount: { delegate, directory in
+                let source = ProjectStore(projectRoot: directory.appendingPathComponent("Pb"))
+                var canvas = try source.loadCanvas()
+                let record = delegate.qaAgentSupervisor.records.values.first(where: { $0.projectRoot == directory.appendingPathComponent("Pb").path && $0.tileId != nil })
+                guard let index = canvas.tiles.firstIndex(where: { $0.id == record?.tileId }) else { throw Failure(description: "source agent tile absent") }
+                canvas.tiles[index].kind = .managedAgent; canvas.tiles[index].title = "Map the checkout state machine"
+                try source.saveCanvas(canvas)
+                delegate.qaAdoptCollaborationAccount(account)
+            })
+        }
+        func host(_ fixture: WorkspaceAPIChecks.Fixture) -> NSWindow {
+            fixture.canvas.frame = CGRect(x: 0, y: 0, width: 2000, height: 1200)
+            let window = KeyWindow(contentRect: fixture.canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = fixture.canvas
+            window.orderFrontOffscreenForChecks(); window.makeKey()
+            fixture.canvas.layoutSubtreeIfNeeded()
+            return window
+        }
+        func world(_ view: NSView, _ fixture: WorkspaceAPIChecks.Fixture) -> NSRect { view.convert(view.bounds, to: fixture.canvas.worldPlane) }
+
+        // First launch.
+        let first = try launch(seedAnchor: nil)
+        let firstWindow = host(first)
+        let delegate = first.delegate, canvas = first.canvas, runtime = first.runtime
+        guard let agentView = canvas.tileView(for: first.agentTileB) else { throw Failure(description: "agent tile has no view") }
+
+        print("STAGE shared area zone: a refused share says why")
+        for (tiles, words) in [([UUID](), "Select the tiles you want to share first."),
+                               ([UUID()], "One of these tiles isn't open on this canvas, so it can't be shared from here.")] {
+            do { _ = try await delegate.createSharedZone(fromTiles: tiles, name: "Nothing"); throw Failure(description: "a bad share was accepted") }
+            catch let error as WorkspaceRuntime.SharedZoneError {
+                try expect(ShareLinkSession.message(for: error) == words, "a refused share reads \"\(words)\"")
+            }
+        }
+        try expect(ShareLinkSession.message(for: WorkspaceRuntime.SharedZoneError.terminalStaysPrivate(UUID()))
+            == "Terminals stay private, so a terminal can't be shared. Leave it out and share the rest.",
+            "a terminal in the selection is refused with the reason, not \"Sharing could not finish\"")
+
+        let share = try await delegate.createSharedZone(fromTiles: [first.agentTileB], name: "Checkout redesign")
+        guard let object = share.objects[first.agentTileB],
+              let session = delegate.qaSharedAreaZoneSessions.first(where: { $0.areaId == share.areaId && !$0.isClosed }) else {
+            throw Failure(description: "the share opened no zone")
+        }
+        do { _ = try await delegate.createSharedZone(fromTiles: [first.agentTileB], name: "Again"); throw Failure(description: "shared twice") }
+        catch let error as WorkspaceRuntime.SharedZoneError {
+            try expect(ShareLinkSession.message(for: error) == "One of these tiles is already in a shared area.",
+                "sharing a tile twice says it is already shared")
+        }
+        let anchor = runtime.sharedAreaZone(for: share.areaId)!
+
+        print("STAGE shared area zone: hand over from the tile's ⋯ menu")
+        try await authority.setPresence(.init(identity: mate, cursor: nil, viewport: nil, expiresAt: .distantFuture, label: "Sam"))
+        try await SharedAreaCheckRig.eventually("Sam is in the area") {
+            session.scene.zoneHeader.members.contains(where: { $0.person == mate.person })
+        }
+        guard let item = session.controller.document?.items.first(where: { $0.id == object }), let source = item.source,
+              let state = session.controller.scope.map({ Collaboration.State(scope: $0, document: session.controller.document!) }) else {
+            throw Failure(description: "the published agent has no source")
+        }
+        let control = HandOverAuthority(area: state, object: object, source: source, owner: owner.person)
+        session.prompter = try SharedAgentHandoffController(identity: owner, transport: control,
+                                                            directory: root.appendingPathComponent("handoff"))
+        func tileMenu() -> [NSMenuItem] { agentView.qaTileContextMenu()?.items ?? [] }
+        guard let handOver = tileMenu().first(where: { $0.identifier?.rawValue == "sharedArea.handOver" }) else {
+            throw Failure(description: "the lent agent's ⋯ menu offers no Hand over… (\(tileMenu().map(\.title)))")
+        }
+        try expect(handOver.title == "Hand over…", "the lent agent's own ⋯ menu offers Hand over…")
+        NSApp.sendAction(handOver.action!, to: handOver.target, from: handOver)
+        guard let list = session.handOverPopover.listView, session.handOverPopover.isPresented else {
+            throw Failure(description: "Hand over… opened no teammate list")
+        }
+        try expect(session.handOverPopover.panel?.parent === firstWindow
+            && list.items.map(\.title) == ["Hand over to Sam"],
+            "Hand over… opens the teammate list on the canvas's own window, not a handoff window")
+        list.choose(id: mate.person.rawValue.uuidString)
+        await session.handOverTask?.value
+        let offered = await control.offers
+        try expect(offered == [mate.person], "choosing Sam offers him the agent through the area's handoff controller")
+        guard let takeBack = tileMenu().first(where: { $0.identifier?.rawValue == "sharedArea.takeBack" }) else {
+            throw Failure(description: "after the offer the tile offers no Take back (\(tileMenu().map(\.title)))")
+        }
+        NSApp.sendAction(takeBack.action!, to: takeBack.target, from: takeBack)
+        await session.handOverTask?.value
+        let reclaimed = await control.reclaims
+        try expect(reclaimed == 1 && tileMenu().contains(where: { $0.identifier?.rawValue == "sharedArea.handOver" }),
+            "Take back on the tile reclaims it, and Hand over… returns")
+
+        print("STAGE shared area zone: resizing a lent tile is shared")
+        session.reveal(); canvas.layoutSubtreeIfNeeded()
+        let before = world(agentView, first)
+        let corner = CGPoint(x: before.maxX - 3, y: before.maxY - 3)
+        try send(.leftMouseDown, at: canvas.worldPlane.convert(corner, to: nil), in: firstWindow)
+        try send(.leftMouseDragged, at: canvas.worldPlane.convert(CGPoint(x: corner.x + 30, y: corner.y + 20), to: nil), in: firstWindow)
+        try send(.leftMouseDragged, at: canvas.worldPlane.convert(CGPoint(x: corner.x + 60, y: corner.y + 40), to: nil), in: firstWindow)
+        try send(.leftMouseUp, at: canvas.worldPlane.convert(CGPoint(x: corner.x + 60, y: corner.y + 40), to: nil), in: firstWindow)
+        await session.waitForLentMove()
+        try await SharedAreaCheckRig.eventually("the resize reaches the area") {
+            guard let rect = await authority.document.positions.last(where: { $0.object == object })?.rect else { return false }
+            return rect.width >= Double(before.width) + 59 && rect.height >= Double(before.height) + 39
+        }
+        try expect(canvas.zoneId(containing: first.agentTileB) == nil && canvas.lentTile(first.agentTileB) != nil,
+            "an edge drag on a lent tile resizes it in the area and shares a .resize; it stays lent")
+
+        print("STAGE shared area zone: a workspace switch closes the area and reopens it")
+        guard delegate.qaSwitchWorkspaceFromSidebar(first.workspaceWB) else { throw Failure(description: "switch to B refused") }
+        try expect(session.isClosed && !delegate.qaSharedAreaZoneSessions.contains(where: { !$0.isClosed })
+            && canvas.lentTile(first.agentTileB) == nil && canvas.sharedAreaZonePlacement(anchor.zoneId) == nil
+            && session.scene.superview == nil,
+            "switching away closes the area's session and its zone leaves the canvas; the tile went home (closed \(session.isClosed), open \(delegate.qaSharedAreaZoneSessions.filter { !$0.isClosed }.count), lent \(canvas.lentTile(first.agentTileB) != nil), zone \(canvas.sharedAreaZonePlacement(anchor.zoneId) != nil), body \(session.scene.superview != nil), workspace \(runtime.workspaceId == first.workspaceWB))")
+        try await SharedAreaCheckRig.eventually("the departing controller closes") { session.controller.status == .closed }
+        guard delegate.qaSwitchWorkspaceFromSidebar(first.workspaceWA) else { throw Failure(description: "switch back refused") }
+        await delegate.sharedAreaReopenTask?.value
+        guard let reopened = delegate.qaSharedAreaZoneSessions.first(where: { $0.areaId == share.areaId && !$0.isClosed }) else {
+            throw Failure(description: "switching back did not reopen the area")
+        }
+        canvas.layoutSubtreeIfNeeded()
+        let position = reopened.controller.document?.positions.last(where: { $0.object == object })?.rect
+        let zone = canvas.sharedAreaZonePlacement(anchor.zoneId)
+        try expect(reopened !== session && reopened.zoneId == anchor.zoneId && zone?.origin == anchor.origin
+            && canvas.lentTile(first.agentTileB)?.tile.object == object.rawValue && canvas.tileView(for: first.agentTileB) === agentView
+            && position.map { close(world(agentView, first), TileFrame(x: zone!.origin.x + $0.x, y: zone!.origin.y + $0.y, width: $0.width, height: $0.height)) } == true,
+            "switching back reopens the area in its zone at its saved place, and lends its agent tile back where the area has it")
+        let viewport = canvas.viewport
+
+        // Second launch of the same Mac: the same account, a workspace whose
+        // document carries the area's zone.
+        firstWindow.orderOut(nil); delegate.closeSharedAreaSessions()
+        first.runtime.closeAll(); first.tearDown()
+
+        print("STAGE shared area zone: at launch, areas reopen as zones")
+        let second = try launch(seedAnchor: anchor)
+        defer { second.delegate.closeSharedAreaSessions(); second.runtime.closeAll(); second.tearDown() }
+        let secondWindow = host(second)
+        defer { secondWindow.orderOut(nil) }
+        let cameraAtLaunch = second.canvas.viewport
+        await second.delegate.sharedAreaReopenTask?.value
+        guard let relaunched = second.delegate.qaSharedAreaZoneSessions.first(where: { $0.areaId == share.areaId && !$0.isClosed }) else {
+            throw Failure(description: "launch did not reopen the area (document shared zones \(second.runtime.document.zones.filter(\.isSharedArea).count), account \(account.status), known \(account.activeAccount?.knownAreas.map(\.id) ?? []) wants \(share.areaId), task \(second.delegate.sharedAreaReopenTask != nil), sessions \(second.delegate.qaSharedAreaZoneSessions.count))")
+        }
+        try expect(relaunched.zoneId == anchor.zoneId && second.canvas.sharedAreaZonePlacement(anchor.zoneId)?.origin == anchor.origin
+            && relaunched.scene.superview === second.canvas.worldPlane && second.canvas.viewport == cameraAtLaunch,
+            "launch reopens the area in its zone at the saved local anchor, without moving the camera")
+        try expect(second.canvas.lentTile(second.agentTileB)?.tile.object == object.rawValue,
+            "and the agent tile this Mac shared is lent to it again")
+        _ = viewport
     }
 }

@@ -17,7 +17,7 @@ enum ShareLinkAppChecks {
         print("PASS share links (app): \(label)")
     }
 
-    private actor Links {
+    actor Links {
         var minted: [(slug: String, lifetime: Collaboration.ShareLinkLifetime, token: String)] = []
         var admitted: [UUID] = []
         var redeemed = 0
@@ -42,7 +42,7 @@ enum ShareLinkAppChecks {
         func join(_ name: String) { joinedNames.append(name) }
     }
 
-    private struct AccountTransport: CollaborationAccountTransport {
+    struct AccountTransport: CollaborationAccountTransport {
         let identityValue: Collaboration.Identity
         let authority: SharedAreaCheckRig.Authority
         let links: Links
@@ -73,7 +73,7 @@ enum ShareLinkAppChecks {
         }
     }
 
-    private static func account(root: URL, identity: Collaboration.Identity, authority: SharedAreaCheckRig.Authority,
+    static func account(root: URL, identity: Collaboration.Identity, authority: SharedAreaCheckRig.Authority,
                                 links: Links) throws -> CollaborationAccountController {
         try CollaborationAccountController(store: .init(applicationSupportRoot: root, bundleIdentifier: nil),
             credentialStore: .init(vault: SharedAreaCheckRig.MemoryVault(), bundleIdentifier: nil), bundleIdentifier: nil,

@@ -7585,13 +7585,26 @@ final class CanvasNSView: NSView, TokenThemed {
         return nil
     }
 
-    // A lent tile's header drag. TileNSView routes here instead of the project
-    // geometry edit: the tile belongs to no project layer while it is lent.
+    // A lent tile's header drag or edge resize. TileNSView routes here instead
+    // of the project geometry edit: the tile belongs to no project layer while
+    // it is lent, and the area shares the result.
     private var lentDrag: (tileId: UUID, zoneId: UUID, start: TileFrame)?
     func beginLentTileDrag(_ tileId: UUID) -> Bool {
         guard let (zoneId, lent) = lentTile(tileId) else { return false }
         lentDrag = (tileId, zoneId, lent.areaFrame)
         return true
+    }
+    /// The area's items for a tile's ⋯ menu (Hand over…, Take back) while it is lent.
+    var sharedAreaMenuItemsProvider: ((UUID) -> [NSMenuItem])?
+    private var lentResizeFree: TileFrame?
+    func resizeLentTile(_ tileId: UUID, screenDelta delta: CGSize, edge: ResizeEdge) {
+        guard let drag = lentDrag, drag.tileId == tileId, let (_, lent) = lentTile(tileId) else { return }
+        var free = lent.view.tile
+        free.frame = lentResizeFree ?? lent.areaFrame
+        let resized = CanvasEngine.tile(free, resizedByScreenDelta: delta, edge: edge, viewport: viewport).frame
+        lentResizeFree = resized
+        setLentTileAreaFrame(tileId, resized, zoneId: drag.zoneId)
+        onLentTileMoved?(drag.zoneId, tileId, resized, false)
     }
     func dragLentTile(_ tileId: UUID, screenDelta delta: CGSize) {
         guard let drag = lentDrag, drag.tileId == tileId, let (_, lent) = lentTile(tileId) else { return }
@@ -7603,7 +7616,7 @@ final class CanvasNSView: NSView, TokenThemed {
     }
     func endLentTileDrag(_ tileId: UUID) {
         guard let drag = lentDrag, drag.tileId == tileId else { return }
-        lentDrag = nil
+        lentDrag = nil; lentResizeFree = nil
         guard let (_, lent) = lentTile(tileId), lent.areaFrame != drag.start else { return }
         onLentTileMoved?(drag.zoneId, tileId, lent.areaFrame, true)
     }

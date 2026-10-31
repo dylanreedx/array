@@ -1594,8 +1594,8 @@ enum ContinuumApp {
             setbuf(stdout, nil); setbuf(stderr, nil)
             _ = NSApplication.shared
             Task { @MainActor in
-                try? await Task.sleep(for: .seconds(90))
-                fputs("FAIL: shared area zone check exceeded its 90-second deadline\n", stderr)
+                try? await Task.sleep(for: .seconds(180))
+                fputs("FAIL: shared area zone check exceeded its 180-second deadline\n", stderr)
                 Foundation.exit(1)
             }
             Task { @MainActor in
@@ -1605,6 +1605,7 @@ enum ContinuumApp {
                     }
                     try await SharedAreaZoneChecks.run()
                     try await SharedAreaZoneChecks.runFollowAndOffline()
+                    try await SharedAreaZoneChecks.runFollowUps()
                     print("PASS shared area zone")
                     Foundation.exit(0)
                 } catch { fputs("FAIL shared area zone: \(error)\n", stderr); Foundation.exit(1) }
@@ -6581,6 +6582,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var collaborationHub: CollaborationHubWindowController?
     /// Open shared areas, each in its zone on the canvas, by account and area.
     var sharedAreaZoneSessions: [String: SharedAreaZoneSession] = [:]
+    /// The launch or switch-back reopen of this workspace's shared areas.
+    var sharedAreaReopenTask: Task<Void, Never>?
     /// The mounted runtime, for the shared area zone wiring in its own file.
     var sharedAreaRuntime: WorkspaceRuntime? { workspaceRuntime }
     /// One account model for the hub and share links, built on first use so
@@ -12119,11 +12122,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// share link and `createSharedZone(fromTiles:name:)` all come through here.
     @discardableResult
     func openSharedArea(controller: SharedAreaController, person: SharedArea.ID<SharedArea.Person>, area: UUID,
-                        model: CollaborationAccountController) -> SharedAreaZoneSession? {
+                        model: CollaborationAccountController, reveal: Bool = true) -> SharedAreaZoneSession? {
         guard let accountID = model.activeAccount?.id else { return nil }
         let label = model.activeAccount?.knownAreas.first(where: { $0.id == area })?.label ?? "Shared area"
         let shared: SharedAreaZoneSession
-        do { shared = try openSharedAreaZone(controller: controller, person: person, area: area, accountID: accountID, name: label) }
+        do { shared = try openSharedAreaZone(controller: controller, person: person, area: area, accountID: accountID, name: label, reveal: reveal) }
         catch {
             presentShareLinkRefusal("The shared area could not open on this canvas. Array kept your canvas as it was.")
             return nil
@@ -22287,6 +22290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if runtime.lifecycleSnapshotObserver != nil { canvasView.layoutSubtreeIfNeeded() }
             runtime.lifecycleObserver?(.settled)
             runtime.lifecycleSnapshotObserver?(.settled, canvasView)
+            installSharedAreaLifecycle()
             return
         }
 
@@ -22352,6 +22356,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.refreshDocumentRelationships()
 
         try projectStore.saveCanvas(canvasView.flatCanvasStateForPersistence())
+        // Shared areas this workspace shows reopen at their saved anchors, and a
+        // workspace switch closes and reopens them (IN-CANVAS option A).
+        installSharedAreaLifecycle()
     }
 
     private func installContextCatalogNotices() {

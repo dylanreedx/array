@@ -302,6 +302,8 @@ class TileNSView: NSView, TokenThemed {
     }
 
     func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] { [] }
+    /// QA: the ⋯ menu exactly as the title bar builds it.
+    func qaTileContextMenu() -> NSMenu? { titleBar?.makeTileContextMenu() }
 
     // MARK: Title rename
 
@@ -729,7 +731,11 @@ class TileNSView: NSView, TokenThemed {
             self.onShareRequested?(self)
         }
         bar.onStopRunRequested = { [weak self] in self?.onStopRun?() }
-        bar.additionalMenuItemsProvider = { [weak self] in self?.makeAdditionalTitleBarMenuItems() ?? [] }
+        bar.additionalMenuItemsProvider = { [weak self] in
+            guard let self else { return [] }
+            // A tile lent to a shared area also offers the area's actions.
+            return makeAdditionalTitleBarMenuItems() + (canvas?.sharedAreaMenuItemsProvider?(tile.id) ?? [])
+        }
         bar.onActionsMenuPresentationChange = { [weak self] presented in
             self?.titleBarActionsPresentationChanged(presented)
         }
@@ -1152,9 +1158,13 @@ class TileNSView: NSView, TokenThemed {
             return
         }
         // A tile lent to a shared area belongs to no project layer: its header
-        // drag moves it in the area, and the area shares the move.
-        if local.y < grabHeightInLocalCoordinates, resizeEdge(at: local) == nil,
-           canvas?.beginLentTileDrag(tile.id) == true {
+        // drag moves it in the area and its edges resize it there, and the area
+        // shares the result.
+        if let edge = resizeEdge(at: local), canvas?.beginLentTileDrag(tile.id) == true {
+            dragKind = .sharedAreaResize(edge)
+            return
+        }
+        if local.y < grabHeightInLocalCoordinates, canvas?.beginLentTileDrag(tile.id) == true {
             dragKind = .sharedAreaMove
             return
         }
@@ -1198,6 +1208,8 @@ class TileNSView: NSView, TokenThemed {
             canvas.continuePointerPan(with: event)
         case .sharedAreaMove:
             canvas.dragLentTile(tile.id, screenDelta: delta)
+        case .sharedAreaResize(let edge):
+            canvas.resizeLentTile(tile.id, screenDelta: delta, edge: edge)
         case .move:
             var freeTile = tile
             freeTile.frame = moveFreeWorldFrame ?? canvas.worldFrame(forTileFrame: tile.frame, tileId: tile.id)
@@ -1288,7 +1300,7 @@ class TileNSView: NSView, TokenThemed {
         let completedDragKind = dragKind
         let wasClick = !mouseDraggedSinceDown
         dragKind = .none
-        if case .sharedAreaMove = completedDragKind {
+        if completedDragKind.isSharedArea {
             mouseDraggedSinceDown = false
             canvas?.endLentTileDrag(tile.id)
             if wasClick { canvas?.focusBroker?.enterScope(.tile(tile.id), reason: .userClick) }
@@ -1602,6 +1614,10 @@ class TileNSView: NSView, TokenThemed {
         case move
         case resize(ResizeEdge)
         case sharedAreaMove
+        case sharedAreaResize(ResizeEdge)
+        var isSharedArea: Bool {
+            switch self { case .sharedAreaMove, .sharedAreaResize: return true; default: return false }
+        }
     }
 }
 
