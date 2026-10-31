@@ -14,6 +14,10 @@ enum CollaborationRoutes {
             if head.method == .POST, head.uri == "/collaboration/v1/enrollments/redeem" {
                 return .json(.created, try await store.redeem(decoder.decode(Collaboration.RedeemEnrollment.self, from: body)))
             }
+            // A share link's token is its own admission, as an enrollment code is.
+            if head.method == .POST, head.uri == "/collaboration/v1/links/join" {
+                return .json(.created, try await store.joinShareLink(decoder.decode(Collaboration.JoinShareLink.self, from: body)))
+            }
             guard let header = head.headers.first(name: "authorization"), header.hasPrefix("Bearer ") else { return .error(.unauthorized, "unauthorized") }
             let token = String(header.dropFirst(7))
             if let handoff = try await CollaborationHandoffRoutes.route(head: head, body: body, token: token, store: store) { return handoff }

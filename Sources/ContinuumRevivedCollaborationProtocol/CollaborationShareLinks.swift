@@ -16,7 +16,9 @@ extension Collaboration {
         public init(slug: String, lifetime: ShareLinkLifetime) { self.slug = slug; self.lifetime = lifetime }
     }
     /// Returned once, when the link is created. It is the only value that holds
-    /// the token; the service keeps only its hash.
+    /// the token; the service keeps only its hash. `relay` is filled in by the
+    /// creating client from its own endpoint, since a relay does not know the
+    /// origin it is reached through.
     public struct ShareLink: Codable, Equatable, Sendable {
         public let id: UUID
         public let area: SharedArea.ID<SharedArea.Area>
@@ -24,14 +26,34 @@ extension Collaboration {
         public let token: String
         public let lifetime: ShareLinkLifetime
         public let createdAt: Date
+        public let relay: String?
         public init(id: UUID, area: SharedArea.ID<SharedArea.Area>, slug: String, token: String,
-                    lifetime: ShareLinkLifetime, createdAt: Date) {
+                    lifetime: ShareLinkLifetime, createdAt: Date, relay: String? = nil) {
             self.id = id; self.area = area; self.slug = slug; self.token = token
-            self.lifetime = lifetime; self.createdAt = createdAt
+            self.lifetime = lifetime; self.createdAt = createdAt; self.relay = relay
+        }
+        public func with(relay: String) -> ShareLink {
+            .init(id: id, area: area, slug: slug, token: token, lifetime: lifetime, createdAt: createdAt, relay: relay)
         }
         /// What Copy link copies.
-        public var url: URL { ShareLinkURL.web(slug: slug, token: token) }
-        public var appURL: URL { ShareLinkURL.app(slug: slug, token: token) }
+        public var url: URL { ShareLinkURL.web(slug: slug, token: token, relay: relay) }
+        public var appURL: URL { ShareLinkURL.app(slug: slug, token: token, relay: relay) }
+    }
+    /// A valid link token doubles as an enrollment: a person with no account
+    /// on the relay joins with a display name and gets a device credential.
+    public struct JoinShareLink: Codable, Sendable {
+        public let slug: String
+        public let token: String
+        public let displayName: String
+        public let deviceLabel: String
+        public init(slug: String, token: String, displayName: String, deviceLabel: String) {
+            self.slug = slug; self.token = token; self.displayName = displayName; self.deviceLabel = deviceLabel
+        }
+    }
+    public struct ShareLinkJoin: Codable, Sendable {
+        public let credential: Credential
+        public let scope: Scope
+        public init(credential: Credential, scope: Scope) { self.credential = credential; self.scope = scope }
     }
     public struct AcceptShareLink: Codable, Sendable {
         public let slug: String
@@ -66,10 +88,15 @@ extension Collaboration {
     }
 }
 
-/// `https://arrayapp.dev/s/<slug>#<token>` and `array://s/<slug>#<token>`.
+/// `https://arrayapp.dev/s/<slug>?r=<relay>#<token>` and
+/// `array://s/<slug>?r=<relay>#<token>`. `r` is the relay's host (and port or
+/// path, if any) without its scheme; a link without it falls back to the
+/// receiver's own relay account.
 public enum ShareLinkURL {
     public static let webHost = "arrayapp.dev"
+    /// Prod answers `array://`; Dev builds register `array-dev://` instead.
     public static let appScheme = "array"
+    public static let devAppScheme = "array-dev"
     /// The fixed part of the popover's link field.
     public static let webPrefix = "arrayapp.dev/s/"
 
@@ -96,28 +123,46 @@ public enum ShareLinkURL {
             ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || $0 == "-" || $0 == "_"
         }
     }
-    public static func web(slug: String, token: String) -> URL {
-        URL(string: "https://\(webHost)/s/\(slug)#\(token)")!
+    /// A relay host with an optional port and path. The client still builds a
+    /// checked endpoint from it before any request.
+    public static func isValidRelay(_ value: String) -> Bool {
+        (1...300).contains(value.utf8.count) && value.first != "/" && value.unicodeScalars.allSatisfy {
+            ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || ".-:/_[]".unicodeScalars.contains($0)
+        }
     }
-    public static func app(slug: String, token: String) -> URL {
-        URL(string: "\(appScheme)://s/\(slug)#\(token)")!
+    public static func web(slug: String, token: String, relay: String? = nil) -> URL {
+        build(scheme: "https", host: webHost, path: "/s/\(slug)", relay: relay, token: token)
     }
-    /// Both forms, nothing else. Returns nil for a link without a usable slug
-    /// or token rather than guessing.
-    public static func parse(_ url: URL) -> (slug: String, token: String)? {
+    public static func app(slug: String, token: String, relay: String? = nil, scheme: String = appScheme) -> URL {
+        build(scheme: scheme, host: "s", path: "/\(slug)", relay: relay, token: token)
+    }
+    private static func build(scheme: String, host: String, path: String, relay: String?, token: String) -> URL {
+        var parts = URLComponents()
+        parts.scheme = scheme; parts.host = host; parts.path = path
+        if let relay { parts.queryItems = [URLQueryItem(name: "r", value: relay)] }
+        parts.fragment = token
+        return parts.url!
+    }
+    /// Both forms, both app schemes, nothing else. Returns nil for a link
+    /// without a usable slug or token rather than guessing.
+    public static func parse(_ url: URL) -> (slug: String, token: String, relay: String?)? {
+        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
         let path: [String]
-        switch url.scheme?.lowercased() {
-        case appScheme?:
-            guard url.host?.lowercased() == "s" else { return nil }
-            path = url.path.split(separator: "/").map(String.init)
+        switch parts.scheme?.lowercased() {
+        case appScheme?, devAppScheme?:
+            guard parts.host?.lowercased() == "s" else { return nil }
+            path = parts.path.split(separator: "/").map(String.init)
         case "https"?:
-            guard let host = url.host?.lowercased(), host == webHost || host == "www." + webHost else { return nil }
-            let parts = url.path.split(separator: "/").map(String.init)
-            guard parts.first == "s" else { return nil }
-            path = Array(parts.dropFirst())
+            guard let host = parts.host?.lowercased(), host == webHost || host == "www." + webHost else { return nil }
+            let segments = parts.path.split(separator: "/").map(String.init)
+            guard segments.first == "s" else { return nil }
+            path = Array(segments.dropFirst())
         default: return nil
         }
-        guard path.count == 1, let token = url.fragment, isValidSlug(path[0]), isValidToken(token) else { return nil }
-        return (path[0], token)
+        let relays = (parts.queryItems ?? []).filter { $0.name == "r" }
+        guard path.count == 1, let token = parts.fragment, isValidSlug(path[0]), isValidToken(token), relays.count <= 1 else { return nil }
+        let relay = relays.first?.value
+        if let relay, !isValidRelay(relay) { return nil }
+        return (path[0], token, relay)
     }
 }

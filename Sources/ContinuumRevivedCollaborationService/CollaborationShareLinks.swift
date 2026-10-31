@@ -43,29 +43,59 @@ extension CollaborationStore {
         guard ShareLinkURL.isValidSlug(request.slug), ShareLinkURL.isValidToken(request.token) else { throw CollaborationStoreError.invalidInvitation }
         return try database.write { db in
             let caller = try authenticate(db, token), person = caller.person.rawValue.uuidString
-            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM share_links WHERE slug=? AND token_hash=?",
-                                             arguments: [request.slug, Self.hash(request.token)]),
-                  row["revoked"] as Int == 0 else { throw CollaborationStoreError.invalidInvitation }
-            let link: String = row["id"], area = UUID(uuidString: row["area"])!, issuer: String = row["issuer"]
-            // The link speaks for its creator only while they may still share.
-            guard let issuerRow = try Row.fetchOne(db, sql: "SELECT person FROM devices WHERE id=? AND revoked=0", arguments: [issuer]),
-                  let authority = try? scope(db, .init(person: SharedArea.ID(UUID(uuidString: issuerRow["person"])!), device: UUID(uuidString: issuer)!), area),
-                  authority.allows(.manageSharing) else { throw CollaborationStoreError.invalidInvitation }
-            if let removed = try Int.fetchOne(db, sql: "SELECT removed FROM share_link_admissions WHERE link=? AND person=?", arguments: [link, person]) {
-                guard removed == 0, let current = try? scope(db, caller, area) else { throw CollaborationStoreError.invalidInvitation }
+            let link = try liveLink(db, slug: request.slug, token: request.token)
+            if let removed = try Int.fetchOne(db, sql: "SELECT removed FROM share_link_admissions WHERE link=? AND person=?", arguments: [link.id, person]) {
+                guard removed == 0, let current = try? scope(db, caller, link.area) else { throw CollaborationStoreError.invalidInvitation }
                 return current
             }
             // Already in the area another way: nothing to grant, nothing spent.
-            if let current = try? scope(db, caller, area) { return current }
-            guard row["spent"] as Int == 0 else { throw CollaborationStoreError.invalidInvitation }
-            try db.execute(sql: "INSERT INTO members(area,person,role,active) VALUES (?,?,?,1) ON CONFLICT(area,person) DO UPDATE SET role=excluded.role,active=1",
-                arguments: [area.uuidString, person, row["role"] as String])
-            try db.execute(sql: "INSERT INTO share_link_admissions(link,person,admitted) VALUES (?,?,?)",
-                arguments: [link, person, clock().timeIntervalSince1970])
-            if row["lifetime"] as String == Collaboration.ShareLinkLifetime.once.rawValue {
-                try db.execute(sql: "UPDATE share_links SET spent=1 WHERE id=?", arguments: [link])
-            }
-            return try scope(db, caller, area)
+            if let current = try? scope(db, caller, link.area) { return current }
+            try admit(db, link: link, person: person)
+            return try scope(db, caller, link.area)
+        }
+    }
+
+    /// The link's token doubles as an enrollment for someone with no account
+    /// on this relay: it creates the person and their first device, admitted
+    /// to this one area. Nothing else on the relay is granted.
+    public func joinShareLink(_ request: Collaboration.JoinShareLink) throws -> Collaboration.ShareLinkJoin {
+        guard ShareLinkURL.isValidSlug(request.slug), ShareLinkURL.isValidToken(request.token) else { throw CollaborationStoreError.invalidInvitation }
+        for label in [request.displayName, request.deviceLabel] {
+            guard !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, label.utf8.count <= 120 else { throw CollaborationStoreError.invalidRequest }
+        }
+        let secret = Self.secret(), device = UUID(), person = SharedArea.ID<SharedArea.Person>()
+        return try database.write { db in
+            let link = try liveLink(db, slug: request.slug, token: request.token)
+            try db.execute(sql: "INSERT INTO people(id,label) VALUES (?,?)", arguments: [person.rawValue.uuidString, request.displayName])
+            try db.execute(sql: "INSERT INTO devices(id,person,label,token_hash) VALUES (?,?,?,?)",
+                arguments: [device.uuidString, person.rawValue.uuidString, request.deviceLabel, Self.hash(secret)])
+            try admit(db, link: link, person: person.rawValue.uuidString)
+            let identity = Collaboration.Identity(person: person, device: device)
+            return .init(credential: .init(identity: identity, token: secret), scope: try scope(db, identity, link.area))
+        }
+    }
+
+    private struct LiveLink { let id: String; let area: UUID; let role: String; let lifetime: String; let spent: Bool }
+    /// A link that exists with this exact token, is not revoked, and still
+    /// speaks for a creator who may share the area.
+    private func liveLink(_ db: Database, slug: String, token: String) throws -> LiveLink {
+        guard let row = try Row.fetchOne(db, sql: "SELECT * FROM share_links WHERE slug=? AND token_hash=?",
+                                         arguments: [slug, Self.hash(token)]),
+              row["revoked"] as Int == 0 else { throw CollaborationStoreError.invalidInvitation }
+        let area = UUID(uuidString: row["area"])!, issuer: String = row["issuer"]
+        guard let issuerRow = try Row.fetchOne(db, sql: "SELECT person FROM devices WHERE id=? AND revoked=0", arguments: [issuer]),
+              let authority = try? scope(db, .init(person: SharedArea.ID(UUID(uuidString: issuerRow["person"])!), device: UUID(uuidString: issuer)!), area),
+              authority.allows(.manageSharing) else { throw CollaborationStoreError.invalidInvitation }
+        return .init(id: row["id"], area: area, role: row["role"], lifetime: row["lifetime"], spent: row["spent"] as Int == 1)
+    }
+    private func admit(_ db: Database, link: LiveLink, person: String) throws {
+        guard !link.spent else { throw CollaborationStoreError.invalidInvitation }
+        try db.execute(sql: "INSERT INTO members(area,person,role,active) VALUES (?,?,?,1) ON CONFLICT(area,person) DO UPDATE SET role=excluded.role,active=1",
+            arguments: [link.area.uuidString, person, link.role])
+        try db.execute(sql: "INSERT INTO share_link_admissions(link,person,admitted) VALUES (?,?,?)",
+            arguments: [link.id, person, clock().timeIntervalSince1970])
+        if link.lifetime == Collaboration.ShareLinkLifetime.once.rawValue {
+            try db.execute(sql: "UPDATE share_links SET spent=1 WHERE id=?", arguments: [link.id])
         }
     }
 

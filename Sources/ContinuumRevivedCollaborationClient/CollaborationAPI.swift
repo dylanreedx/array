@@ -42,6 +42,9 @@ public struct CollaborationAPI: Sendable {
     public func acceptShareLink(slug: String, token: String) async throws -> Collaboration.Scope {
         try await request("POST", "links/accept", body: Collaboration.AcceptShareLink(slug: slug, token: token))
     }
+    public func joinShareLink(_ value: Collaboration.JoinShareLink) async throws -> Collaboration.ShareLinkJoin {
+        try await request("POST", "links/join", body: value)
+    }
     public func shareLinks(area: UUID) async throws -> [Collaboration.ShareLinkAccess] { try await request("GET", "areas/\(area)/links", body: Optional<Int>.none) }
     public func revokeShareLink(area: UUID, link: UUID) async throws {
         let _: Collaboration.ErrorBody = try await request("DELETE", "areas/\(area)/links/\(link)", body: Optional<Int>.none)

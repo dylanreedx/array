@@ -51,8 +51,10 @@ func runShareLinkChecks() async throws {
             let model = try signedOut(); try await enroll(model, label); return model
         }
         var opened: [UUID] = []
-        func opener(_ model: CollaborationAccountController, signIn: @escaping ShareLinkOpener.SignIn = { _ in false }) -> ShareLinkOpener {
-            ShareLinkOpener(account: model, signIn: signIn, open: { state, _ in opened.append(state.document.id.rawValue) })
+        func opener(_ model: CollaborationAccountController, signIn: @escaping ShareLinkOpener.SignIn = { _ in false },
+                    askName: @escaping ShareLinkOpener.AskName = { _, _ in nil }) -> ShareLinkOpener {
+            ShareLinkOpener(account: model, signIn: signIn, askName: askName, open: { state, _ in opened.append(state.document.id.rawValue) },
+                            deviceLabel: "Check Mac", allowsInsecureLoopback: true)
         }
         func canRead(_ model: CollaborationAccountController, _ area: UUID) async -> Bool {
             (try? await model.openArea(id: area)) != nil
@@ -64,9 +66,11 @@ func runShareLinkChecks() async throws {
 
         // Works once: the first accept spends it.
         let once = try await owner.createShareLink(area: area, slug: "checkout-redesign", lifetime: .once)
-        try shareLinkCheck(once.url.absoluteString == "https://arrayapp.dev/s/checkout-redesign#\(once.token)"
-            && ShareLinkURL.parse(once.url)?.token == once.token && ShareLinkURL.parse(once.appURL)?.slug == "checkout-redesign",
-            "the link is arrayapp.dev/s/<slug>#<token> and parses in both forms")
+        let relay = endpoint.shareLinkRelay
+        try shareLinkCheck(once.url.absoluteString == "https://arrayapp.dev/s/checkout-redesign?r=\(relay)#\(once.token)"
+            && ShareLinkURL.parse(once.url)?.token == once.token && ShareLinkURL.parse(once.appURL)?.slug == "checkout-redesign"
+            && ShareLinkURL.parse(once.appURL)?.relay == relay,
+            "the link is arrayapp.dev/s/<slug>?r=<relay>#<token>, carries its relay, and parses in both forms")
         let samOutcome = await opener(sam).open(once.url), samReads = await canRead(sam, area)
         try shareLinkCheck(samOutcome == .opened(area: area) && opened.last == area && samReads,
             "a valid token admits whoever holds it and the area opens")
@@ -142,19 +146,54 @@ func runShareLinkChecks() async throws {
             "a removed person loses access and cannot reopen the same link")
         try shareLinkCheck(await opener(quinn).open(team.url) == .opened(area: area), "removing one person leaves the link working for others")
 
-        // Inline sign-in: a Mac with no collaboration account signs in first.
+        // A brand-new person joins from the link alone: no account, no operator
+        // code, no key. The link names the relay; they only give a name.
+        let fresh = try signedOut()
+        var asked: [(String, String)] = []
+        let joined = await opener(fresh, askName: { relay, slug in asked.append((relay, slug)); return "Newcomer" }).open(team.url)
+        let freshReads = await canRead(fresh, area)
+        try shareLinkCheck(joined == .opened(area: area) && freshReads && asked.count == 1 && asked[0] == (relay, "team")
+            && fresh.status == .ready && fresh.accounts.count == 1 && fresh.activeAccount?.label == "Newcomer"
+            && fresh.activeAccount?.endpoint == endpoint.canonicalString
+            && fresh.activeAccount?.knownAreas.contains(where: { $0.id == area && $0.label == "team" }) == true,
+            "a fresh client with no account joins through the link alone, picking only a display name")
+        let freshRole = try await fresh.openArea(id: area).scope.role
+        access = try await owner.shareLinks(area: area)
+        try shareLinkCheck(freshRole == .editor && access.first(where: { $0.id == team.id })?.people.contains(where: { $0.label == "Newcomer" && $0.active }) == true,
+            "the joined newcomer is an editor and listed on the link")
+        try shareLinkCheck(await opener(fresh).open(team.url) == .opened(area: area) && asked.count == 1,
+            "reopening the link uses the newcomer's saved device instead of joining again")
+        try await owner.revokeShareLink(area: area, link: team.id)
+        let freshCut = await canRead(fresh, area)
+        try shareLinkCheck(!freshCut, "revoking the link cuts a person who joined through it")
+
+        let lateOnce = try await owner.createShareLink(area: area, slug: "late-once", lifetime: .once)
+        let firstJoiner = try signedOut(), lateJoiner = try signedOut()
+        _ = await opener(firstJoiner, askName: { _, _ in "First" }).open(lateOnce.url)
+        let lateOutcome = await opener(lateJoiner, askName: { _, _ in "Late" }).open(lateOnce.url)
+        try shareLinkCheck(lateOutcome == .refused(ShareLinkOpener.refusedMessage) && lateJoiner.accounts.isEmpty && lateJoiner.status != .ready,
+            "joining through a spent single-use link is refused and saves no account")
+        let liveTeam = try await owner.createShareLink(area: area, slug: "team-two", lifetime: .untilRevoked)
+        let forger = try signedOut()
+        let forgedJoin = await opener(forger, askName: { _, _ in "Forger" }).open(
+            ShareLinkURL.app(slug: "team-two", token: String(liveTeam.token.reversed()), relay: relay))
+        try shareLinkCheck(forgedJoin == .refused(ShareLinkOpener.refusedMessage) && forger.accounts.isEmpty,
+            "joining with a wrong token is refused and saves no account")
+        let shy = try signedOut()
+        let shyOutcome = await opener(shy).open(liveTeam.url)
+        try shareLinkCheck(shyOutcome == .cancelled && shy.accounts.isEmpty && shy.status == .signedOut,
+            "dismissing the name prompt joins nothing")
+
+        // A link without a relay still works for a Mac signed in elsewhere first.
+        let legacy = ShareLinkURL.web(slug: "team-two", token: liveTeam.token)
         let newcomer = try signedOut()
         var signIns = 0
         let invited = await opener(newcomer, signIn: { model in
-            signIns += 1; try await enroll(model, "Newcomer"); return true
-        }).open(team.url)
+            signIns += 1; try await enroll(model, "Enrolled newcomer"); return true
+        }).open(legacy)
         let newcomerReads = await canRead(newcomer, area)
         try shareLinkCheck(invited == .opened(area: area) && signIns == 1 && newcomerReads,
-            "a first-time receiver signs in inline through the relay enrollment path, then is admitted")
-        let declined = try signedOut()
-        let declinedOutcome = await opener(declined).open(team.url)
-        try shareLinkCheck(declinedOutcome == .cancelled && declined.status == .signedOut,
-            "dismissing sign-in admits nothing")
+            "a link without a relay falls back to the existing relay sign-in, then admits")
 
         try await server.stop()
     } catch {

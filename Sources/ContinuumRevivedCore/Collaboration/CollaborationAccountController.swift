@@ -15,6 +15,7 @@ public protocol CollaborationAccountTransport: Sendable {
     func shareLinks(area: UUID) async throws -> [Collaboration.ShareLinkAccess]
     func revokeShareLink(area: UUID, link: UUID) async throws
     func removeShareLinkPerson(area: UUID, link: UUID, person: UUID) async throws
+    func joinShareLink(_ request: Collaboration.JoinShareLink) async throws -> Collaboration.ShareLinkJoin
 }
 
 /// Fakes written before share links existed refuse them like an old relay.
@@ -24,6 +25,7 @@ public extension CollaborationAccountTransport {
     func shareLinks(area: UUID) async throws -> [Collaboration.ShareLinkAccess] { throw CollaborationClientError.server(status: 404, code: "notFound") }
     func revokeShareLink(area: UUID, link: UUID) async throws { throw CollaborationClientError.server(status: 404, code: "notFound") }
     func removeShareLinkPerson(area: UUID, link: UUID, person: UUID) async throws { throw CollaborationClientError.server(status: 404, code: "notFound") }
+    func joinShareLink(_ request: Collaboration.JoinShareLink) async throws -> Collaboration.ShareLinkJoin { throw CollaborationClientError.server(status: 404, code: "notFound") }
 }
 
 public struct CollaborationAccountAPITransport: CollaborationAccountTransport {
@@ -50,6 +52,7 @@ public struct CollaborationAccountAPITransport: CollaborationAccountTransport {
     public func removeShareLinkPerson(area: UUID, link: UUID, person: UUID) async throws {
         try await api.removeShareLinkPerson(area: area, link: link, person: person)
     }
+    public func joinShareLink(_ request: Collaboration.JoinShareLink) async throws -> Collaboration.ShareLinkJoin { try await api.joinShareLink(request) }
 }
 
 public enum CollaborationAccountFailure: Error, Sendable, Equatable, LocalizedError {
@@ -262,7 +265,7 @@ public final class CollaborationAccountController {
             let link = try await active.transport.createShareLink(area: area, request: .init(slug: slug, lifetime: lifetime))
             try self.current(ticket)
             guard link.area.rawValue == area, link.slug == slug, ShareLinkURL.isValidToken(link.token) else { throw CollaborationAccountFailure.invalidState }
-            return link
+            return link.with(relay: try active.account.endpointValue.shareLinkRelay)
         }
     }
     /// Admits this account through a link, loads the area and remembers it
@@ -284,6 +287,52 @@ public final class CollaborationAccountController {
             let known = active.account.knownAreas.first(where: { $0.id == scope.area.rawValue })?.label
             try self.rememberAdmittedArea(scope.area.rawValue, label: known ?? slug, account: active.account.id)
             return state
+        }
+    }
+    /// Joins through a link on a relay this Mac has no account on: the link's
+    /// token is the enrollment, so the person only gives a display name. The
+    /// new device credential is saved and the account selected, as `enroll`
+    /// does, then the area is loaded and remembered under the slug.
+    public func joinShareLink(endpoint: CollaborationServiceEndpoint, slug: String, token: String,
+                              displayName: String, deviceLabel: String) async throws -> Collaboration.State {
+        let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ShareLinkURL.isValidSlug(slug), ShareLinkURL.isValidToken(token), CollaborationLocalAccount.validLabel(name),
+              name.utf8.count <= 120, CollaborationLocalAccount.validLabel(deviceLabel), deviceLabel.utf8.count <= 120 else {
+            throw CollaborationAccountFailure.invalidInput
+        }
+        let ticket = try begin(selecting: true)
+        defer { finish(ticket) }
+        do {
+            let joined = try await transportFactory(endpoint, nil).joinShareLink(.init(slug: slug, token: token, displayName: name, deviceLabel: deviceLabel))
+            let credential = joined.credential
+            // The relay has committed the person; keep the credential before
+            // anything else can fail, exactly as enrollment does.
+            let account = CollaborationLocalAccount(endpoint: endpoint, identity: credential.identity, label: name)
+            do { try credentials.save(credential, for: .init(endpoint: endpoint, identity: credential.identity)) }
+            catch { lastError = error; throw CollaborationAccountFailure.credentialPersistenceFailed }
+            if !pendingAccounts.contains(where: { $0.id == account.id }) { pendingAccounts.append(account) }
+            try current(ticket)
+            let authenticated = try transportFactory(endpoint, credential)
+            let identity: Collaboration.Identity
+            do { identity = try await authenticated.identity() }
+            catch { throw CollaborationAccountFailure.credentialRetainedVerificationFailure }
+            try current(ticket)
+            guard identity == credential.identity else { throw CollaborationAccountFailure.identityMismatch }
+            do { try remember(account, selected: true) }
+            catch { lastError = error; throw CollaborationAccountFailure.credentialRetainedMetadataFailure }
+            pendingAccounts.removeAll { $0.id == account.id }
+            active = .init(account: account, transport: authenticated); status = .ready; lastError = nil; changed()
+            let area = joined.scope.area.rawValue
+            let state: Collaboration.State
+            do { state = try await authenticated.state(area: area) }
+            catch { throw CollaborationAccountFailure.invitationAcceptedStateUnavailable(area) }
+            try current(ticket)
+            try validate(state, expected: area)
+            try rememberAdmittedArea(area, label: slug, account: account.id)
+            return state
+        } catch {
+            if operation == ticket, status != .ready { active = nil; status = .unavailable; lastError = error; changed() }
+            throw error
         }
     }
     public func shareLinks(area: UUID) async throws -> [Collaboration.ShareLinkAccess] {

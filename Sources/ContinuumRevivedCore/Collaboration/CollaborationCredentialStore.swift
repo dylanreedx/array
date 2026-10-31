@@ -15,6 +15,25 @@ public enum CollaborationCredentialStoreError: Error, Equatable {
 public struct CollaborationServiceEndpoint: Hashable, Sendable {
     public let canonicalURL: URL
     public var canonicalString: String { canonicalURL.absoluteString }
+    /// The relay as a share link carries it: host, port and path, no scheme.
+    public var shareLinkRelay: String {
+        var value = canonicalString
+        for prefix in ["https://", "http://"] where value.hasPrefix(prefix) { value.removeFirst(prefix.count) }
+        while value.hasSuffix("/") { value.removeLast() }
+        return value
+    }
+    /// The endpoint a share link's relay names. Plain http only for loopback,
+    /// and only where the caller allows it (local checks).
+    public init(shareLinkRelay relay: String, allowsInsecureLoopback: Bool = false) throws {
+        guard ShareLinkURL.isValidRelay(relay) else { throw CollaborationCredentialStoreError.invalidEndpoint }
+        let host = relay.split(separator: "/", maxSplits: 1).first.map(String.init) ?? relay
+        let bare = host.hasPrefix("[") ? String(host.prefix { $0 != "]" }.dropFirst()) : String(host.split(separator: ":").first ?? "")
+        let loopback = ["localhost", "127.0.0.1", "::1"].contains(bare.lowercased())
+        guard let url = URL(string: (loopback && allowsInsecureLoopback ? "http://" : "https://") + relay) else {
+            throw CollaborationCredentialStoreError.invalidEndpoint
+        }
+        try self.init(url, allowsInsecureLoopback: allowsInsecureLoopback)
+    }
 
     public init(_ url: URL, allowsInsecureLoopback: Bool = false) throws {
         guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
