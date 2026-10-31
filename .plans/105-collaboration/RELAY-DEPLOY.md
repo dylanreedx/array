@@ -272,3 +272,40 @@ burst replay sends one. Remove all four before staging ever needs real pushes:
 - If production is ever rolled back to v17, the old code leaves `task_keys`
   untouched. A later redeploy trusts those keys, so a task that changed and
   changed back during the rollback is skipped once.
+
+## Merge tip deployed: zone round 2 plus the batch fixes (v19)
+
+31 October 2026. Source: `array/collaboration-finish` at `47043941`. That tip
+holds zone round 2 (`00ade2da`, member records on update pages, so offline
+teammates keep their names) plus the batch fixes cherry-picked as `f9563ef2`,
+`b7c3b2ef` and `47043941`. Relay schema unchanged at 5.
+
+- **Linux gate** on `47043941`, under the build lock: exit 0, 474 PASS, 0 FAIL,
+  including `task batch load` and `task batch capacity`.
+- **Staging v6:** health 200, schema 5. Companion routes match the baseline.
+  Collaboration probe 15/15. Burst replay (336 tasks × 40 events): publish p50
+  0.49 s; health p50 0.22 s, max 0.31 s, 0 timeouts. The only log error was a
+  health miss one second before boot finished.
+- **Production v19:**
+  - Snapshot first: `vs_kZz2o2B8XlO9tJxj8a0VqvQ`.
+  - Rollback target: v18 image
+    `registry.fly.io/arrayapp-relay:deployment-01M69KJAJSFK0P6K065H8HX4SF`.
+  - Pre-deploy baseline on v18: every route answered, with zero timeouts (v17
+    had two).
+  - After deploy: health 200, schema 5; every route, collaboration included,
+    identical to that baseline. Collaboration stays on.
+  - 10-minute watch: 115/115 health calls 200, zero timeouts, mean 0.16 s. One
+    call took 1.52 s (22:44:20 UTC), cause not identified: no batch delivery
+    logged next to it, only a batch commit three seconds earlier. The next
+    slowest was 0.85 s. Fly check passing throughout.
+  - Live traffic: Mac events 96029 → 96165, 68 batch lines, zero per-task
+    lines from the new process.
+  - The connection-refused and lease errors are the 22:33:45 restart.
+
+```sh
+fly deploy --app arrayapp-relay --config fly.toml \
+  --image registry.fly.io/arrayapp-relay:deployment-01M69KJAJSFK0P6K065H8HX4SF
+```
+
+The Mac-side batch retention (`47043941`'s ledger change) ships with the next
+app build, not with this relay deploy.
