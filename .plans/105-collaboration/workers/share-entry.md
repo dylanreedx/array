@@ -121,13 +121,51 @@ private named pasteboard. Every press is `NSApp.sendEvent`:
 - Reopened over a used link, the popover shows Used, Sam, Remove and New link.
   Remove calls `removeAccess`, and New link mints on the same area.
 
-Mutations, each RED at its own leg (results below).
+Mutations: each one breaks production code, rebuilds and runs the stage. Each
+went RED at its own leg:
 
-MUTATIONS_PLACEHOLDER
+| Mutation (production code) | RED at |
+| --- | --- |
+| header Share not shown | "agent A's header shows no Share button" |
+| row hover offers no Share | "hovering the row shows no Share" |
+| Share left out of the row menu | "the row menu leads with Share…" |
+| S not wired to the canvas | "S on the canvas did not arm the Share tool" |
+| marquee takes intersecting tiles | "the marquee rings only what it fully covers" |
+| covered set not fed to the rings | "mid-drag, the one tile … already wears a ring" |
+| Copy skips the pasteboard | "Copy writes the link to the pasteboard and the button reads Copied" |
+| lifetime change skips the controller | timeout: lifetime reissue |
+| Revoke skips `revokeLink` | timeout: revoke |
+| a refused link leaves the zone | "a slug the relay refuses is shown …, the zone is undone and nothing is copied" |
 
-Stills: STILLS_PLACEHOLDER
+The last row was run on the earlier call shape, `cancelSharedZone(zoneId)`.
+It was renamed to `cancelSharedZone(areaId:)` after part 2 published its
+final signature. The re-run was stopped at its time limit while waiting on the
+shared lock behind a release build, so it was not repeated. The rename does
+not change the leg it trips.
 
-Gate: GATE_PLACEHOLDER
+Stills, light and dark, from the gate run:
+`.worktrees/multiplayer-share-button-tool-an-cb2e24e6/qa-runs/share-entry-stills/`
+(gitignored). They cover the header button (1), the agent popover as a draft
+(2), refused for a taken slug (2b), copied (3) and revoked (4), the marquee
+with rings, count pill and hint (5), the area popover alone and anchored to its
+tiles (6), and a used link with Sam, Remove and Revoke everyone's access (7).
+The canvas stills composite the popover's panel where it sits.
+
+Gate, run once under `.worktrees/.locks/app-build.sh` at the tip below, with an
+isolated `TMUX_TMPDIR` and `CONTINUUM_APP_SUPPORT` and
+`CONTINUUM_SKIP_UI_BASELINES=1`:
+
+- `scripts/run-matrix.sh --collaboration`: 12 legs, passed. The native check
+  printed 26 `PASS share entry` lines.
+- `--sidebar-ownership-check`, `--agent-inbox-check`, `--floating-toolbar-check`,
+  `--canvas-pointer-path-check`, `--tile-multiselect-check`,
+  `--agent-face-switch-check`, `--workspace-sidebar-actions-check` and
+  `--external-sessions-sidebar-check`: all exit 0.
+- `ContinuumRevivedPaletteChecks`: exit 0, with Share… added to the expected
+  rows.
+- `ContinuumRevivedCoreChecks --onboarding-foundation-check` (the product
+  registry, including the new `share.area` command and its fixed canvas `S`):
+  exit 0.
 
 Defects the witness caught while it was being written:
 
