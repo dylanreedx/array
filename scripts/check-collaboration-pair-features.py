@@ -204,7 +204,9 @@ def stage_harnesses(h, a, b):
         try:
             peer.call("join", invitation=a.call("invite", person=peer.ready["person"])["invitation"]); h.converge(a, peer)
             peer.call("shareZone"); h.converge(a, peer); h.converge(a, b)
-            objects = peer.call("status")["sourceObjects"]; assert len(objects) == 1, objects
+            # The share lands before the peer's controller lists its source
+            # binding; after a long run that gap is visible, so wait for it.
+            objects = wait_value(lambda: peer.call("status")["sourceObjects"], lambda x: len(x) == 1, f"{name} lists its shared agent", 30)
             marker = f"FEATURES handoff through {name}"
             # The new host registers its agent's control on its own poll; an
             # offer before that has nothing to offer.
