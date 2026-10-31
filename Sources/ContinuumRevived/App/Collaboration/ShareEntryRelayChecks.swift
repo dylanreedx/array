@@ -241,6 +241,36 @@ enum ShareEntryRelayChecks {
         try expect(pasteboard.string(forType: .string) == linkA.url.absoluteString,
             "a refused share copies nothing")
         _ = window
-        print("Share entry relay checks passed: a header Share and Copy against a local continuum-relay make the real shared zone and link, and a slug collision puts the tile back.")
+
+        // 3. Opening a link: each way it can fail says why, in plain words.
+        //    The production opener, a newcomer's own account, the same relay.
+        var opened: [UUID] = []
+        func open(_ url: URL, as name: String, insecureLoopback: Bool) async throws -> ShareLinkOpener.Outcome {
+            let newcomer = try CollaborationAccountController(
+                store: .init(applicationSupportRoot: root.appendingPathComponent("newcomer-\(UUID().uuidString)"), bundleIdentifier: nil),
+                credentialStore: .init(vault: SharedAreaCheckRig.MemoryVault(), bundleIdentifier: nil), bundleIdentifier: nil)
+            let opener = ShareLinkOpener(account: newcomer, signIn: { _ in false }, askName: { _, _ in name },
+                                         open: { state, _ in opened.append(state.document.id.rawValue) },
+                                         deviceLabel: "QA \(name)'s Mac", allowsInsecureLoopback: insecureLoopback)
+            return await opener.open(url)
+        }
+        let secure = try await open(linkA.url, as: "Sam", insecureLoopback: false)
+        try expect(secure == .refused(ShareLinkOpener.message(for: URLError(.secureConnectionFailed), relay: "127.0.0.1:\(relay.port)"))
+            && "\(secure)".contains("secure connection"),
+            "a link whose relay answers without TLS says the secure connection failed (\(secure))")
+        let silent = try Relay.freePort()
+        let unreachable = try await open(ShareLinkURL.web(slug: linkA.slug, token: linkA.token, relay: "127.0.0.1:\(silent)"),
+                                         as: "Sam", insecureLoopback: true)
+        try expect("\(unreachable)".contains("could not reach the relay at 127.0.0.1:\(silent)"),
+            "a link whose relay is not running says the relay could not be reached (\(unreachable))")
+        let first = try await open(linkA.url, as: "Sam", insecureLoopback: true)
+        try expect(first == .opened(area: areaA) && opened == [areaA], "the Works once link admits its first newcomer")
+        let spent = try await open(linkA.url, as: "Priya", insecureLoopback: true)
+        try expect(spent == .refused(ShareLinkOpener.refusedMessage), "a spent Works once link says it was already used or revoked")
+        let revokable = try await app.shareLinks.createShareLink(area: areaA, slug: "revoked-checkout-link", lifetime: .untilRevoked)
+        try await app.shareLinks.revokeLink(area: areaA, link: revokable.id)
+        let revoked = try await open(revokable.url, as: "Priya", insecureLoopback: true)
+        try expect(revoked == .refused(ShareLinkOpener.refusedMessage), "a revoked link says it was already used or revoked")
+        print("Share entry relay checks passed: a header Share and Copy against a local continuum-relay make the real shared zone and link, a slug collision puts the tile back, and a link that cannot open says why.")
     }
 }

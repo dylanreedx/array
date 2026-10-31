@@ -122,6 +122,8 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
         titleLabel.wantsLayer = true
         addSubview(titleLabel)
         addSubview(chevronView)
+        // A cell-less NSControl is not an accessibility element by default.
+        setAccessibilityElement(true)
         setAccessibilityRole(.popUpButton)
         setAccessibilityLabel(title)
         setAccessibilityHelp("Opens a list of choices")

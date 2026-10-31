@@ -12338,8 +12338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// The header's Share, anchored to the button that was pressed.
     func shareAgentTile(_ tile: TileNSView) {
         guard let target = shareTarget(tileIds: [tile.tile.id], origin: .agent) else { return }
-        let anchor = tile.qaTitleBarShareControl ?? tile
-        shareEntry.present(target, anchor: anchor.bounds, in: anchor)
+        shareEntry.present(target, anchor: tile.titleBarShareAnchor ?? tile.bounds, in: tile)
     }
 
     /// The sidebar row's Share: bring the agent's tile into view, then open the
@@ -12352,7 +12351,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               let target = shareTarget(tileIds: [tileId], origin: .agent) else { return false }
         let band = NSRect(x: 0, y: tile.isFlipped ? 0 : tile.bounds.height - TileNSView.titleBarHeight,
                           width: tile.bounds.width, height: TileNSView.titleBarHeight)
-        shareEntry.present(target, anchor: band, in: tile)
+        // The reveal moves the camera. Anchoring before it lands hung the
+        // popover from where the tile was, off the canvas's edge.
+        Task { @MainActor [weak self, weak canvasView, weak tile] in
+            for _ in 0..<150 where canvasView?.isCameraInMotion == true {
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            guard let self, let tile, tile.window != nil else { return }
+            shareEntry.present(target, anchor: band, in: tile)
+        }
         return true
     }
 

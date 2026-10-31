@@ -25,6 +25,8 @@ final class ShareEntryCoordinator {
     var presentsOffscreenForQA = false
     var isPresented: Bool { popover.isPresented }
     var qaPanel: NSPanel? { popover.panel }
+    /// Why the popover last closed itself, for a check that finds it closed.
+    var qaLastSelfDismissal: String? { popover.qaLastSelfDismissal }
 
     func present(_ target: ShareTarget, anchor: NSRect, in view: NSView) {
         let session = sessions[target.keys] ?? ShareLinkSession(target: target, links: links(), zones: zones(), pasteboard: pasteboard)
@@ -34,7 +36,7 @@ final class ShareEntryCoordinator {
         content.onResize = { [weak self] size in self?.popover.resizeContent(to: size) }
         content.onDismiss = { [weak self] in self?.popover.dismiss() }
         popover.presentContent(content, size: content.preferredSize, anchor: anchor, relativeTo: view,
-                               placementFrame: presentsOffscreenForQA ? view.window?.frame : nil,
+                               placementFrame: Self.placementFrame(for: view) ?? (presentsOffscreenForQA ? view.window?.frame : nil),
                                takesFocus: !presentsOffscreenForQA,
                                accessibilityLabel: target.origin == .agent ? "Share this agent" : "Share area",
                                onClose: { [weak self] in self?.onClose?() })
@@ -43,4 +45,14 @@ final class ShareEntryCoordinator {
     }
 
     func dismiss() { popover.dismiss() }
+
+    /// The visible canvas on screen: the popover slides and flips inside it, so
+    /// it never sits over the sidebar or off the canvas, however far off the
+    /// edge the tile it shares is.
+    static func placementFrame(for view: NSView) -> NSRect? {
+        var ancestor: NSView? = view
+        while let current = ancestor, !(current is CanvasNSView) { ancestor = current.superview }
+        guard let canvas = ancestor, let window = canvas.window else { return nil }
+        return window.convertToScreen(canvas.convert(canvas.visibleRect, to: nil))
+    }
 }

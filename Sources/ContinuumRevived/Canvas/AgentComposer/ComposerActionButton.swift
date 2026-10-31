@@ -55,6 +55,9 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
         titleLabel.alignment = .center
         addSubview(iconView)
         addSubview(titleLabel)
+        // A cell-less NSControl is not an accessibility element by default:
+        // without this VoiceOver never reaches the button at all.
+        setAccessibilityElement(true)
         setAccessibilityRole(.button)
         applyPresentation()
     }
@@ -63,6 +66,11 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override var acceptsFirstResponder: Bool { isEnabled }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
+        return sendAction(action, to: target)
+    }
 
     /// The raw string width plus the label cell's own horizontal padding, which
     /// `NSString.size` does not include — without it the cell truncates the title.

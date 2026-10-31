@@ -80,17 +80,37 @@ public final class ShareLinkOpener {
             try await openArea(state, account)
             return .opened(area: state.document.id.rawValue)
         } catch {
-            return .refused(Self.message(for: error))
+            return .refused(Self.message(for: error, relay: link.relay))
         }
     }
 
-    public static func message(for error: any Error) -> String {
+    /// Why a link could not open, in words a person can act on. A transport
+    /// failure is never "try it again": it says whether the relay could not be
+    /// reached, or answered without a secure connection.
+    public static func message(for error: any Error, relay: String? = nil) -> String {
+        let place = relay.map { "the relay at \($0)" } ?? "the collaboration relay"
+        if let transport = error as? URLError {
+            switch transport.code {
+            case .notConnectedToInternet:
+                return "This Mac is offline, so the link could not open. Reconnect and open it again."
+            case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate,
+                 .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid, .clientCertificateRejected,
+                 .clientCertificateRequired, .appTransportSecurityRequiresSecureConnection:
+                return "Array could not make a secure connection to \(place). The link may point at a relay that is not set up for secure links. Ask whoever shared it for a new link."
+            case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .networkConnectionLost, .timedOut,
+                 .resourceUnavailable, .internationalRoamingOff, .dataNotAllowed, .callIsActive:
+                return "Array could not reach \(place). It may be offline or stopped. Ask whoever shared the link whether it is running."
+            default:
+                return "The connection to \(place) failed. Check this Mac's network, then open the link again."
+            }
+        }
         if let client = error as? CollaborationClientError, case let .server(status, _) = client {
             switch status {
             case 410: return refusedMessage
             case 429: return rateLimitedMessage
             case 401: return "This Mac is no longer signed in to collaboration. Sign in again, then open the link."
-            default: return "Array could not reach the shared workspace. Try the link again."
+            case 404: return "This link does not exist on \(place). Ask for a new link."
+            default: return "Array could not open the link: \(place) answered with an error (\(status)). Try it again later."
             }
         }
         if let failure = error as? CollaborationAccountFailure {

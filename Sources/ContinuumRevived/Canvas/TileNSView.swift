@@ -228,6 +228,14 @@ class TileNSView: NSView, TokenThemed {
     }
     var onShareRequested: ((TileNSView) -> Void)?
     var qaTitleBarShareControl: NSView? { titleBar?.qaShareControl }
+    /// Where the band's Share button sits, in this tile's coordinates. A
+    /// popover hangs from this rect on the tile itself, never from the button:
+    /// a resting tile detaches its band controls, and a popover anchored to a
+    /// detached view closes.
+    var titleBarShareAnchor: NSRect? {
+        guard let titleBar, let control = titleBar.qaShareControl else { return nil }
+        return convert(control.frame, from: titleBar)
+    }
 
     /// The band's session action was pressed. Terminal tiles route it.
     func sessionActionRequested() {}

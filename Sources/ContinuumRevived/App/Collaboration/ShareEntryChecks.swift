@@ -239,11 +239,20 @@ enum ShareEntryChecks {
             "a click on the header's Share opens the popover for that one agent, as .tiles of its own tile")
         try expect(links.created.isEmpty && zones.calls.isEmpty,
             "opening the popover shares nothing: no area, no link, no tile moved")
-        if let panel = app.shareEntry.qaPanel {
-            let button = window.convertToScreen(shareA.convert(shareA.bounds, to: nil))
+        if let panel = app.shareEntry.qaPanel, let anchor = tileA.titleBarShareAnchor {
+            let button = window.convertToScreen(tileA.convert(anchor, to: nil))
             try expect(abs(panel.frame.minX + ChoicePanelShadowView.margin - button.minX) < 2
                 && panel.frame.maxY - ChoicePanelShadowView.margin <= button.minY,
                 "the popover hangs from the Share button it was opened by")
+        }
+        // The pointer leaving the tile rests its chrome, which takes the band's
+        // controls out of the window. The popover must not go with them.
+        if let managed = tileA as? ManagedAgentTileNSView {
+            ManagedAgentTileNSView.qaPointerInside = { _ in false }
+            defer { ManagedAgentTileNSView.qaPointerInside = nil }
+            _ = managed.restChromeIfIdle()
+            try expect(managed.titleBarControlsAreDrawn && shareA.window == nil && app.shareEntry.isPresented,
+                "the popover stays open when the tile's chrome rests and its Share button leaves the window")
         }
         try expect(agentPopover.slugField.stringValue == "map-the-checkout-state-machine",
             "the slug starts from the agent's name")
@@ -288,7 +297,8 @@ enum ShareEntryChecks {
             && links.created[1].area == firstLink?.area.rawValue && agentPopover.session.link?.lifetime == .untilRevoked
             && agentPopover.lifetimeChoice.selectedID == Collaboration.ShareLinkLifetime.untilRevoked.rawValue,
             "choosing Until revoked revokes the unopened link and mints its replacement through the controller")
-        try expect(app.shareEntry.isPresented, "the share popover stays open after the lifetime pick")
+        try expect(app.shareEntry.isPresented,
+            "the share popover stays open after the lifetime pick (closed by \(app.shareEntry.qaLastSelfDismissal ?? "nothing"))")
 
         // 5. Revoke, pressed in the popover's panel.
         let revoked = agentPopover.session.link!.id
@@ -330,6 +340,7 @@ enum ShareEntryChecks {
         inbox.layoutForQA(); rowB.layoutSubtreeIfNeeded()
         guard let hoverShare = rowB.hoverShareButtonForQA else { throw Failure(description: "hovering the row shows no Share") }
         try click(hoverShare)
+        try await eventually("the sidebar's popover opens once the reveal lands") { app.shareEntry.isPresented }
         let sidebarPopover = try popover
         try expect(sidebarPopover.session.target.keys == [key(for: agentB)] && sidebarPopover.session.target.origin == .agent,
             "a click on the row's hover Share opens the popover for that agent")
@@ -348,6 +359,7 @@ enum ShareEntryChecks {
         try expect(inbox.rowMenuTitlesForQA.first == "Share…", "the row menu leads with Share…")
         guard let list = inbox.rowMenuListForQA else { throw Failure(description: "the row menu has no list") }
         list.choose(id: InboxRowAction.share.rawValue)
+        try await eventually("the row menu's popover opens") { app.shareEntry.presentedView?.session.target.keys == [key(for: agentD)] }
         try expect(app.shareEntry.presentedView?.session.target.keys == [key(for: agentD)],
             "the row menu's Share… opens the same popover for that agent")
         app.shareEntry.dismiss()
@@ -420,7 +432,105 @@ enum ShareEntryChecks {
         try expect(links.created.last?.area == spent.area.rawValue && reopened.session.link != spent,
             "New link mints a fresh link on the same area")
         app.shareEntry.dismiss()
-        print("Share entry checks passed: header, sidebar hover and menu, S and palette, marquee with live rings, Copy on a private pasteboard, lifetime, Remove, Revoke and New link through the controller. Parts 1 and 2 recorded by fakes.")
+
+        // 9. VoiceOver: Copy link and the lifetime are in the popover's real
+        //    accessibility tree, and pressing Copy there copies.
+        canvas.setViewport(CanvasViewport(x: 300, y: 250, zoom: 1))
+        canvas.layoutSubtreeIfNeeded()
+        guard let tileD = canvas.tileView(for: agentD), let shareD = tileD.qaTitleBarShareControl else {
+            throw Failure(description: "agent D's header shows no Share button")
+        }
+        try click(shareD, drawnIn: tileD.qaTitleBarView)
+        let spoken = try popover
+        guard let panel = app.shareEntry.qaPanel else { throw Failure(description: "the share popover has no panel") }
+        let tree = accessibilityTree(panel)
+        func element(_ role: NSAccessibility.Role, _ label: String) -> NSAccessibilityProtocol? {
+            tree.first { $0.accessibilityRole() == role && $0.accessibilityLabel() == label }
+        }
+        guard let copyElement = element(.button, "Copy link") else {
+            throw Failure(description: "Copy link is not in the accessibility tree: \(tree.map { "\($0.accessibilityRole()?.rawValue ?? "?") \($0.accessibilityLabel() ?? "")" })")
+        }
+        let lifetimeElement = element(.popUpButton, "Link lifetime")
+        try expect((lifetimeElement?.accessibilityValue() as? String) == "Works once",
+            "VoiceOver finds the lifetime as a pop-up button reading Works once")
+        let mintedBeforeSpoken = links.created.count
+        try expect(copyElement.accessibilityPerformPress(), "VoiceOver can press Copy link")
+        try await eventually("an accessibility Copy finishes") { spoken.session.copied }
+        try expect(links.created.count == mintedBeforeSpoken + 1 && pasteboard.string(forType: .string) == spoken.session.link?.url.absoluteString,
+            "pressing Copy link through accessibility shares and copies the link")
+        try expect(lifetimeElement?.accessibilityPerformPress() == true && spoken.lifetimeChoice.qaIsPopoverPresented,
+            "pressing the lifetime through accessibility opens its list")
+        app.shareEntry.dismiss()
+
+        // 10. Placement. The canvas gets a sidebar rail to its left and a strip
+        //     below it, as in the window. First, agent B is off the canvas's
+        //     left edge: Share from its row flies the camera to B, as a visible
+        //     window does, and the popover must hang from B's title bar once
+        //     the flight lands, wholly inside the visible canvas.
+        let host = NSView(frame: canvas.frame)
+        window.contentView = host
+        let rail = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: host.bounds.height))
+        let strip = NSView(frame: NSRect(x: 320, y: 0, width: host.bounds.width - 320, height: 240))
+        host.addSubview(rail); host.addSubview(strip)
+        canvas.frame = NSRect(x: 320, y: 240, width: host.bounds.width - 320, height: host.bounds.height - 240)
+        host.addSubview(canvas)
+        canvas.navigationFlightOverrideForQA = true
+        defer { canvas.navigationFlightOverrideForQA = nil }
+        canvas.setViewport(CanvasViewport(x: 2400, y: 250, zoom: 1))
+        canvas.layoutSubtreeIfNeeded()
+        let offEdge = canvas.allTilesInWorldFrames().first { $0.id == agentB }
+            .map { CanvasEngine.tileScreenFrame($0.frame, viewport: canvas.viewport) }
+        try expect((offEdge?.maxX ?? 1) < 0, "fixture: agent B starts off the canvas's left edge")
+        inbox.mouseExited(with: try mouse(.mouseMoved, .zero, in: sidebarWindow))
+        inbox.layoutForQA()
+        guard let rowBAgain = inbox.ownershipCellForQA(id: agents[1].rawValue) else { throw Failure(description: "no sidebar row for agent B") }
+        rowBAgain.layoutSubtreeIfNeeded()
+        inbox.mouseMoved(with: try mouse(.mouseMoved, rowBAgain.convert(NSPoint(x: rowBAgain.bounds.midX, y: rowBAgain.bounds.midY), to: nil), in: sidebarWindow))
+        inbox.layoutForQA(); rowBAgain.layoutSubtreeIfNeeded()
+        guard let hoverShareB = rowBAgain.hoverShareButtonForQA else { throw Failure(description: "hovering the row again shows no Share") }
+        try click(hoverShareB)
+        try await eventually("the revealed agent's popover opens") { app.shareEntry.isPresented }
+        guard let placed = app.shareEntry.qaPanel, let tileB = canvas.tileView(for: agentB) else {
+            throw Failure(description: "the placement popover has no panel")
+        }
+        let surface = placed.frame.insetBy(dx: ChoicePanelShadowView.margin, dy: ChoicePanelShadowView.margin)
+        let visibleCanvas = window.convertToScreen(canvas.convert(canvas.visibleRect, to: nil))
+        let band = window.convertToScreen(tileB.convert(NSRect(x: 0, y: 0, width: tileB.bounds.width, height: TileNSView.titleBarHeight), to: nil))
+        try expect(visibleCanvas.insetBy(dx: -0.5, dy: -0.5).contains(surface),
+            "the popover sits wholly inside the visible canvas, never over the sidebar (\(surface) in \(visibleCanvas))")
+        try expect(band.minX >= visibleCanvas.minX && abs(surface.minX - band.minX) < 2
+            && (abs(surface.maxY - band.minY) < 12 || abs(surface.minY - band.maxY) < 12),
+            "the popover hangs from the revealed tile's title bar, not from where the tile was (\(surface) at \(band))")
+        app.shareEntry.dismiss()
+
+        //     Then agent A's title bar sits just above the canvas's bottom
+        //     edge, the rest of the tile below it. Its header Share must flip
+        //     the popover above the tile, inside the canvas, never over the
+        //     strip below.
+        canvas.navigationFlightOverrideForQA = nil
+        let canvasHeight = Double(canvas.bounds.height)
+        canvas.setViewport(CanvasViewport(x: 300, y: 520 - (canvasHeight - 80), zoom: 1))
+        canvas.layoutSubtreeIfNeeded()
+        guard let tileA = canvas.tileView(for: agentA), let shareA = tileA.qaTitleBarShareControl else {
+            throw Failure(description: "agent A's header shows no Share button near the canvas's edge")
+        }
+        try click(shareA, drawnIn: tileA.qaTitleBarView)
+        try await eventually("the edge popover opens") { app.shareEntry.isPresented }
+        guard let flipped = app.shareEntry.qaPanel else { throw Failure(description: "the edge popover has no panel") }
+        let edgeSurface = flipped.frame.insetBy(dx: ChoicePanelShadowView.margin, dy: ChoicePanelShadowView.margin)
+        let edgeCanvas = window.convertToScreen(canvas.convert(canvas.visibleRect, to: nil))
+        let bandA = window.convertToScreen(tileA.convert(NSRect(x: 0, y: 0, width: tileA.bounds.width, height: TileNSView.titleBarHeight), to: nil))
+        try expect(edgeCanvas.insetBy(dx: -0.5, dy: -0.5).contains(edgeSurface) && edgeSurface.minY >= bandA.maxY - 0.5,
+            "near the canvas's bottom edge the popover flips above the tile and stays inside the canvas (\(edgeSurface) in \(edgeCanvas), band \(bandA))")
+        app.shareEntry.dismiss()
+        print("Share entry checks passed: header, sidebar hover and menu, S and palette, marquee with live rings, Copy on a private pasteboard, lifetime, Remove, Revoke and New link through the controller, VoiceOver's Copy and lifetime, and placement inside the visible canvas. Parts 1 and 2 recorded by fakes.")
+    }
+
+    /// What VoiceOver can reach: every accessibility element under `root`.
+    static func accessibilityTree(_ root: NSAccessibilityProtocol) -> [NSAccessibilityProtocol] {
+        (root.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityProtocol }.flatMap { child in
+            (child.isAccessibilityElement() ? [child] : []) + accessibilityTree(child)
+        }
     }
 
     // MARK: Stills
