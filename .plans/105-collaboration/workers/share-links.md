@@ -267,6 +267,74 @@ shows all 27 `PASS share links:` lines, all 9 `PASS share links (app)` lines,
 and the boundary audit's 26 routes. The Linux relay leg is green, including the
 new join route. The one note is the existing `--ui-probe-check` display skip.
 
+### Round 3 (31 October)
+
+**Join rate limit** (cb1b3732):
+- `POST /links/join` allows 10 joins per link and 30 per client address in a
+  rolling hour. Over either limit the relay returns 429 `rateLimited` and
+  creates nothing, because the check runs inside the join's transaction before
+  any insert.
+- Only joins that would succeed count.
+- Each join is logged in `share_link_joins`, keyed by link and by a hash of the
+  address. Rows older than the window are pruned on every join. The log is
+  durable, so a relay restart does not reset the counts.
+- Overrides: `RELAY_COLLABORATION_LINK_JOINS_PER_LINK`,
+  `RELAY_COLLABORATION_LINK_JOINS_PER_ADDRESS` and
+  `RELAY_COLLABORATION_LINK_JOIN_WINDOW_SECONDS`. A malformed value fails
+  startup, the same rule as the existing retention overrides.
+- The address is the socket peer, unless `RELAY_CLIENT_ADDRESS_HEADER` names a
+  trusted proxy header. `fly.toml` now sets `fly-client-ip`: behind Fly's proxy
+  every socket peer is the proxy, so without it the per-address limit would be
+  one global limit. This is a config edit only; nothing was deployed.
+- The app shows a refused link's 429 in plain words: "Too many people joined
+  through this link recently…".
+- Documented in `docs/internals/collaboration.md`.
+
+Witness: 3 more checks in `runShareLinkChecks`, over real HTTP against a second
+relay with limits of 3 per link and 5 per address, behind a test header that
+stands in for `fly-client-ip`.
+- The 4th join through a link returns 429 from any address, and adds no person
+  and no admission. People are counted with `operatorPeople()`.
+- An address's limit spans links and leaves other addresses alone.
+- A rate-limited newcomer through the production `ShareLinkOpener` sees the
+  message, and no account is saved.
+
+| Mutation | Red check |
+|---|---|
+| No per-link limit | "a link's join limit answers 429…" |
+| No per-address limit | "an address's join limit spans links…" |
+| Proxy header ignored, so the socket peer is used | "an address's join limit spans links…" |
+
+**The /s page, rendered headless.** Steps:
+1. `astro build`.
+2. Serve `dist/` from a throwaway local server that applies the `vercel.json`
+   rule through `path-to-regexp`, the same matcher family Vercel uses.
+3. Drive headless Chromium. No visible window, no focus taken.
+
+Every response from the local server has its
+`window.location.href =` rewritten to record the hand-off instead of following
+it, so no `array://` link was ever opened. The first two attempts did not
+rewrite the page's inlined script. The hand-off ran and the navigation stalled.
+No installed build registers `array://` yet, and `/Applications/Array.app` kept
+its pid, so nothing was opened.
+
+19 checks PASSED:
+- The rule `/s/:slug` → `/s` matches `/s/checkout-redesign` and `/s/team-2`.
+  It does not match `/s/a/b`, `/s/`, `/s`, `/share/x` or `/docs/s/x`.
+- `/s/<slug>?r=<relay>#<token>` is served through the rewrite and hands off
+  to exactly `array://s/<slug>?r=<relay>#<token>`.
+- "Open in Array" is shown first and links to `array://`. "Download Array for
+  Mac" is second and points at the latest `Array.dmg`. "Open in Array Dev"
+  links to `array-dev://`.
+- The title names the slug.
+- No request carries the token.
+- A link without its token hands off nothing, says so, and still offers the DMG.
+
+The script and the light and dark screenshots are in
+`qa-runs/share-page/` on the bench (ignored, not committed). The site has no dark
+theme, so both captures look the same, the same as `/pair`. The real Vercel
+rewrite is still unproven until a preview deploy.
+
 ### Open, for the lead
 
 - **Universal link: later, per your decision.** `https://arrayapp.dev/s/...`
