@@ -1390,3 +1390,16 @@ this branch by another agent.
 
 Gate: log `qa-runs/coordinator/gate-15877f73.log`, **14 legs, all passed**;
 feature journey 8 passed, 0 pending.
+
+## Shared zone follow-ups on `8f533c1a`, 31 October 2026
+
+Merged `array/mp-zone-followups` (`6d0eefc9`, `78b0aed4`, `75562d36`;
+receipt "Follow-ups round" in `workers/canvas-zone.md`), clean. It adds the
+Hand over popover, reopening a zone on relaunch, resize sync, close and reopen
+on workspace switch, `LocalizedError` for refused shares (this closes the
+generic "Sharing could not finish" gap recorded at `7c008471`), and new zones
+placed in free space.
+
+Gate: log `qa-runs/coordinator/gate-8f533c1a.log`, **14 legs, all passed**;
+feature journey 8 passed, 0 pending. It finished before Array restarted for
+the 0.7.36 update.
