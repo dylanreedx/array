@@ -239,6 +239,21 @@ enum SharedAreaZoneChecks {
             && scene.session.scene.zoneHeader.members.map(\.name).contains("Dylan"),
             "the header says the area is live, who hosts it, and who is in it")
 
+        print("STAGE shared area zone: a second shared zone takes free space")
+        let second = try runtime.ensureSharedAreaZone(areaId: UUID(), name: "Second area")
+        let third = try runtime.ensureSharedAreaZone(areaId: UUID(), name: "Third area", origin: scene.zone.origin)
+        func rect(_ zone: ZonePlacement) -> NSRect {
+            let frame = CanvasEngine.zoneWorldFrame(zone)
+            return NSRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+        }
+        let everyZone = runtime.document.zones.filter { !$0.collapsed }
+        for added in [second, third] {
+            let overlapping = everyZone.filter { $0.zoneId != added.zoneId && rect($0).intersects(rect(added)) }.map(\.name)
+            try expect(overlapping.isEmpty,
+                "a new shared zone (\(added.name)) covers no other zone's frame, even when asked for an existing one's (overlaps \(overlapping))")
+        }
+        try runtime.cancelSharedZone(second.zoneId); try runtime.cancelSharedZone(third.zoneId)
+
         print("STAGE shared area zone: the zone never arms creation")
         let armedBefore = canvas.armedZoneId, lastActive = runtime.document.lastActiveZoneId
         try expect(runtime.setActiveZone(zoneId, reason: .click) == false && canvas.armedZoneId == armedBefore

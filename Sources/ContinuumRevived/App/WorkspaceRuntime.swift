@@ -2321,12 +2321,12 @@ final class WorkspaceRuntime {
             canvasView?.addSharedAreaZone(existing)
             return existing
         }
-        let others = document.zones.filter { !foreignZoneIds.contains($0.zoneId) && !$0.isSharedArea }
+        let others = document.zones.filter { !foreignZoneIds.contains($0.zoneId) }
         let fallback = ZonePoint(
             x: (others.map { $0.origin.x + $0.size.width }.max() ?? document.viewport.x + 80) + 80,
             y: others.map(\.origin.y).min() ?? document.viewport.y + 80)
         var placement = ZonePlacement(
-            zoneId: UUID(), projectId: nil, origin: origin ?? fallback, size: size, color: "teal",
+            zoneId: UUID(), projectId: nil, origin: freeZoneOrigin(origin ?? fallback, size: size), size: size, color: "teal",
             collapsed: false, hydrationPolicy: .automatic, autoLayoutMode: .disabled,
             name: name, sharedAreaId: areaId)
         let previous = document
@@ -2337,6 +2337,20 @@ final class WorkspaceRuntime {
         canvasView?.addSharedAreaZone(placement)
         sharedZoneChangeObserver?(placement.zoneId)
         return placement
+    }
+
+    /// Where a new zone of `size` may go: `wanted`, or, if that would cover any
+    /// zone (shared ones included) or any tile, past the rightmost of them. The
+    /// same rule stranded-tile recovery uses, so a new zone never lands on
+    /// another one's frame and two headers never draw over each other.
+    private func freeZoneOrigin(_ wanted: ZonePoint, size: ZoneSize) -> ZonePoint {
+        let obstacles = document.zones.map(CanvasEngine.zoneWorldFrame) + (canvasView?.allTilesInWorldFrames().map(\.frame) ?? [])
+        let rect = TileFrame(x: wanted.x, y: wanted.y, width: size.width, height: size.height)
+        func overlaps(_ a: TileFrame, _ b: TileFrame) -> Bool {
+            a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+        }
+        guard obstacles.contains(where: { overlaps(rect, $0) }) else { return wanted }
+        return ZonePoint(x: (obstacles.map { $0.x + $0.width }.max() ?? wanted.x) + 120, y: wanted.y)
     }
 
     /// Moves `tileIds` out of their project zones into the shared zone for
