@@ -1261,3 +1261,23 @@ Open, from the receipt:
 - `--collaboration-native-check` ran in 34–42 s against its own 45 s limit.
   Parts 2–4 add stages, so the limit needs raising, or the 13 s hover-usage
   stage needs to be faster, before they land.
+
+## In-canvas round — share links round 2 and the 120 s native deadline on `63a79ce0`, 31 October 2026
+
+- `5b8abb49` raises the `--collaboration-native-check` deadline from 45 s to
+  120 s. Measured: a green run takes about 40 s. The slow stages are the
+  per-harness handoff and provider-dispatch checks (12.4 s of real runner
+  startup, including fixed 300–400 ms no-late-write waits), artifacts (8.5 s)
+  and live projections (6 s). The hover stage itself takes 1.2 s. No
+  assertion was shortened.
+- Merged `array/mp-share-links` round 2 (`f44c629f`..`0f658511`, five
+  commits): mint-only `createShareLink(area:)`, `publish(selection:intoArea:)`
+  for part 2, newcomer enrollment from the link alone, `array-dev://` for Dev
+  bundles, and the website passing the link's relay. Its 90 s deadline
+  conflicted with `5b8abb49`; 120 s was kept, as the coordinator asked. The
+  bundle commit touches only `make-app-bundle.sh`/`check-app-bundle.sh` URL
+  schemes, with no version change.
+
+Gate: `--collaboration`, under the lock, isolated. Log:
+`qa-runs/coordinator/gate-63a79ce0.log`. **11 legs run, all passed**, with
+36 `PASS share links` lines.
