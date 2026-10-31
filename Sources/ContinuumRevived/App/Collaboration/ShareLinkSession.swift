@@ -18,6 +18,9 @@ struct ShareTarget: Equatable {
     let workspaceID: UUID
     let origin: Origin
     let items: [Item]
+    /// The area these tiles are already lent to, when they are: Share then
+    /// opens that area's links and people instead of starting a new share.
+    var area: UUID? = nil
 
     var keys: Set<SharedAreaPublication.SourceKey> { Set(items.map(\.key)) }
     var tileIDs: [UUID] { items.map(\.key.tileID) }
@@ -69,6 +72,9 @@ final class ShareLinkSession {
         /// A "Works once" link someone has opened.
         case used(Collaboration.ShareLink)
         case revoked(area: UUID)
+        /// Already shared, but this Mac does not hold a link's token (only its
+        /// creation returns one): the area's links and people, Revoke and New link.
+        case existing(area: UUID)
     }
 
     let target: ShareTarget
@@ -80,6 +86,10 @@ final class ShareLinkSession {
     private(set) var slug: String
     private(set) var lifetime: Collaboration.ShareLinkLifetime = .once
     private(set) var people: [Collaboration.ShareLinkPerson] = []
+    /// Every link on the area, as the relay last listed them.
+    private(set) var accessRows: [Collaboration.ShareLinkAccess] = []
+    /// The area's links that still admit someone.
+    var liveRows: [Collaboration.ShareLinkAccess] { accessRows.filter { $0.status == .active } }
     /// The link on the pasteboard is the current one.
     private(set) var copied = false
     private(set) var failure: String?
@@ -88,6 +98,7 @@ final class ShareLinkSession {
     init(target: ShareTarget, links: ShareLinkServing, zones: SharedZoneCreating, pasteboard: NSPasteboard) {
         self.target = target; self.links = links; self.zones = zones; self.pasteboard = pasteboard
         slug = ShareLinkURL.suggestedSlug(from: target.origin == .agent ? target.name : target.items.first?.title ?? "shared area")
+        if let area = target.area { phase = .existing(area: area) }
     }
 
     var link: Collaboration.ShareLink? {
@@ -99,7 +110,7 @@ final class ShareLinkSession {
     var area: UUID? {
         switch phase {
         case .live(let link), .used(let link): return link.area.rawValue
-        case .revoked(let area): return area
+        case .revoked(let area), .existing(let area): return area
         default: return nil
         }
     }
@@ -163,7 +174,7 @@ final class ShareLinkSession {
     func newLink() async {
         let spent: Bool
         switch phase {
-        case .used, .revoked: spent = true
+        case .used, .revoked, .existing: spent = true
         default: spent = false
         }
         guard spent, let area else { return }
@@ -174,35 +185,47 @@ final class ShareLinkSession {
         }
     }
 
-    /// Ends the link and everyone's access through it.
+    /// Ends the link in hand and every other link on the area that still
+    /// admits or holds someone, and everyone's access through them.
     func revoke() async {
-        guard let link else { return }
+        guard let area else { return }
+        var ids = accessRows.filter { $0.status != .revoked }.map(\.id)
+        if let link, !ids.contains(link.id) { ids.append(link.id) }
+        guard !ids.isEmpty else { return }
         await run {
-            try await self.links.revokeLink(area: link.area.rawValue, link: link.id)
+            for id in ids { try await self.links.revokeLink(area: area, link: id) }
             self.people = []
-            self.phase = .revoked(area: link.area.rawValue)
+            self.phase = .revoked(area: area)
             self.copied = false
         }
     }
 
     func remove(_ person: Collaboration.ShareLinkPerson) async {
-        guard let link else { return }
+        guard let area, let link = link?.id ?? accessRows.first(where: { $0.people.contains { $0.person == person.person } })?.id else { return }
         await run {
-            try await self.links.removeAccess(area: link.area.rawValue, link: link.id, person: person.person)
+            try await self.links.removeAccess(area: area, link: link, person: person.person)
             self.people.removeAll { $0.person == person.person }
         }
     }
 
-    /// Who the link has admitted. A spent single-use link reads as Used.
+    /// Who the area's links have admitted, as the relay lists them now. A
+    /// spent single-use link reads as Used. The open popover calls this on a
+    /// short interval, so a join shows without reopening it.
     func refreshAccess() async {
-        guard let link, !isWorking else { return }
+        guard let area, !isWorking else { return }
         do {
-            guard let row = try await links.listAccess(area: link.area.rawValue).first(where: { $0.id == link.id }) else { return }
-            people = row.people.filter(\.active)
-            switch row.status {
-            case .used: phase = .used(link); copied = false
-            case .revoked: phase = .revoked(area: link.area.rawValue); copied = false
-            case .active: break
+            let rows = try await links.listAccess(area: area)
+            guard !isWorking, self.area == area else { return }
+            accessRows = rows
+            var seen = Set<SharedArea.ID<SharedArea.Person>>()
+            people = rows.filter { $0.status != .revoked }.flatMap(\.people)
+                .filter { $0.active && seen.insert($0.person).inserted }
+            if let link, let row = rows.first(where: { $0.id == link.id }) {
+                switch row.status {
+                case .used: phase = .used(link); copied = false
+                case .revoked: phase = .revoked(area: area); copied = false
+                case .active: break
+                }
             }
             onChange?()
         } catch {

@@ -28,9 +28,17 @@ final class ShareEntryCoordinator {
     /// Why the popover last closed itself, for a check that finds it closed.
     var qaLastSelfDismissal: String? { popover.qaLastSelfDismissal }
 
+    /// How often an open popover re-reads who has access.
+    static let accessRefreshInterval: Duration = .seconds(2)
+    private var accessRefresh: Task<Void, Never>?
+
     func present(_ target: ShareTarget, anchor: NSRect, in view: NSView) {
-        let session = sessions[target.keys] ?? ShareLinkSession(target: target, links: links(), zones: zones(), pasteboard: pasteboard)
-        sessions[target.keys] = session
+        // Tiles already lent to an area open that area's session: the one that
+        // shared them, holding its link, or after a relaunch a fresh one.
+        let session = target.area.flatMap { area in sessions.values.first { $0.area == area } }
+            ?? sessions[target.keys]
+            ?? ShareLinkSession(target: target, links: links(), zones: zones(), pasteboard: pasteboard)
+        if target.area == nil { sessions[target.keys] = session }
         let content = ShareLinkPopoverView(session: session)
         content.lifetimeChoice.presentsOffscreenForQA = presentsOffscreenForQA
         content.onResize = { [weak self] size in self?.popover.resizeContent(to: size) }
@@ -39,9 +47,20 @@ final class ShareEntryCoordinator {
                                placementFrame: Self.placementFrame(for: view) ?? (presentsOffscreenForQA ? view.window?.frame : nil),
                                takesFocus: !presentsOffscreenForQA,
                                accessibilityLabel: target.origin == .agent ? "Share this agent" : "Share area",
-                               onClose: { [weak self] in self?.onClose?() })
+                               onClose: { [weak self] in
+                                   self?.accessRefresh?.cancel(); self?.accessRefresh = nil
+                                   self?.onClose?()
+                               })
         presentedView = content
-        Task { await session.refreshAccess() }
+        // Live: someone joining shows while the popover is open.
+        accessRefresh?.cancel()
+        accessRefresh = Task { [weak self, weak session] in
+            while !Task.isCancelled, let session {
+                await session.refreshAccess()
+                try? await Task.sleep(for: Self.accessRefreshInterval)
+                guard self?.isPresented == true else { return }
+            }
+        }
     }
 
     func dismiss() { popover.dismiss() }

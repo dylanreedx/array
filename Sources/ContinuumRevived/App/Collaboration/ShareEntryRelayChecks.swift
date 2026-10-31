@@ -263,10 +263,42 @@ enum ShareEntryRelayChecks {
                                          as: "Sam", insecureLoopback: true)
         try expect("\(unreachable)".contains("could not reach the relay at 127.0.0.1:\(silent)"),
             "a link whose relay is not running says the relay could not be reached (\(unreachable))")
+        // 4. A's tile is already lent to its shared zone. After a relaunch (a
+        //    fresh share coordinator: no session holds the link's token), its
+        //    header Share opens that area's popover rather than doing nothing.
+        canvas.centerOnTile(agentA)
+        canvas.layoutSubtreeIfNeeded()
+        app.qaInstallShareEntry(pasteboard: pasteboard)
+        app.shareEntry.presentsOffscreenForQA = true
+        let existing = try share(agentA)
+        try expect(existing.session.target.area == areaA && existing.session.phase == .existing(area: areaA)
+            && existing.copyButton.presentation.title == "New link",
+            "an already-shared agent's header Share opens its area's popover, offering New link")
+        try await eventually("the area's links are read") { existing.session.liveRows.map(\.id) == [linkA.id] }
+        existing.layoutSubtreeIfNeeded()
+        try expect(!existing.revokeButton.isHidden && existing.session.people.isEmpty,
+            "with nobody admitted yet it lists the live link and offers Revoke link")
+
+        // 5. Live: Sam opens the link while the popover is open.
         let first = try await open(linkA.url, as: "Sam", insecureLoopback: true)
         try expect(first == .opened(area: areaA) && opened == [areaA], "the Works once link admits its first newcomer")
         let spent = try await open(linkA.url, as: "Priya", insecureLoopback: true)
         try expect(spent == .refused(ShareLinkOpener.refusedMessage), "a spent Works once link says it was already used or revoked")
+        try await eventually("the open popover sees Sam join") { existing.session.people.map(\.label) == ["Sam"] }
+        existing.layoutSubtreeIfNeeded()
+        try expect(existing.revokeButton.isHidden && !existing.revokeEveryoneButton.isHidden && existing.removeButtons.count == 1,
+            "without reopening, the popover lists Sam with Remove and offers Revoke everyone's access")
+        try ShareEntryChecks.click(existing.copyButton)
+        try await eventually("New link on the shared area") { !existing.session.isWorking && existing.session.link != nil }
+        let fresh = existing.session.link
+        try expect(fresh?.area.rawValue == areaA && fresh?.id != linkA.id && pasteboard.string(forType: .string) == linkA.url.absoluteString,
+            "New link mints a second link on the same area (\(existing.session.failure ?? ""))")
+        try ShareEntryChecks.click(existing.currentRevokeButton)
+        try await eventually("revoke everyone") { !existing.session.isWorking && existing.session.phase == .revoked(area: areaA) }
+        let afterRevoke = try await app.shareLinks.listAccess(area: areaA)
+        try expect(afterRevoke.allSatisfy { $0.status == .revoked } && afterRevoke.flatMap(\.people).allSatisfy { !$0.active },
+            "Revoke everyone's access ends every link on the area and Sam's access")
+        app.shareEntry.dismiss()
         let revokable = try await app.shareLinks.createShareLink(area: areaA, slug: "revoked-checkout-link", lifetime: .untilRevoked)
         try await app.shareLinks.revokeLink(area: areaA, link: revokable.id)
         let revoked = try await open(revokable.url, as: "Priya", insecureLoopback: true)

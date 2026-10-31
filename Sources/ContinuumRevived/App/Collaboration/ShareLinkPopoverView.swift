@@ -125,7 +125,7 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
             copyButton.presentation = Self.copyPresentation(title: "New link", symbol: "plus", enabled: true)
         case .working:
             copyButton.presentation = Self.copyPresentation(title: "Sharing…", symbol: "hourglass", enabled: false, loading: true)
-        case .revoked:
+        case .revoked, .existing:
             copyButton.presentation = Self.copyPresentation(title: "New link", symbol: "plus", enabled: true)
         default:
             copyButton.presentation = session.copied
@@ -137,12 +137,21 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
         lifetimeDetail.stringValue = session.lifetime.detail
         buildPeople()
         peopleHeader.isHidden = session.people.isEmpty
-        revokeButton.isHidden = session.link == nil || !session.people.isEmpty
-        revokeEveryoneButton.isHidden = session.link == nil || session.people.isEmpty
+        // A link in hand, or on an already-shared area any link that still
+        // admits or holds someone.
+        let revocable = session.link != nil
+            || { if case .existing = phase { return session.accessRows.contains { $0.status != .revoked } }; return false }()
+        revokeButton.isHidden = !revocable || !session.people.isEmpty
+        revokeEveryoneButton.isHidden = !revocable || session.people.isEmpty
         if let failure = session.failure {
             messageLabel.stringValue = failure
         } else if case .revoked = phase {
             messageLabel.stringValue = "The link no longer works, and nobody it let in has access."
+        } else if case .existing = phase {
+            let live = session.liveRows.map { ShareLinkURL.webPrefix + $0.slug }
+            messageLabel.stringValue = live.isEmpty
+                ? "Already shared. No link is live; New link makes one."
+                : "Already shared. Live: \(live.joined(separator: ", ")). Its secret stays with whoever copied it; New link makes another."
         } else if case .used = phase {
             let name = session.people.first?.label ?? "The person who opened it"
             messageLabel.stringValue = "The link was used, so it no longer works. \(name) keeps full access until you remove them."
@@ -364,7 +373,7 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
         commitSlug()
         Task {
             switch session.phase {
-            case .used, .revoked: await session.newLink()
+            case .used, .revoked, .existing: await session.newLink()
             default: await session.copy()
             }
         }

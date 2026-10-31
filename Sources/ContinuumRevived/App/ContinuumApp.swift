@@ -12322,14 +12322,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let a = world[$0], b = world[$1]
             return (a?.y ?? 0, a?.x ?? 0, $0.uuidString) < (b?.y ?? 0, b?.x ?? 0, $1.uuidString)
         }
+        func title(of tile: Tile) -> String {
+            var title = tile.title
+            if tile.kind == .managedAgent, let agent = agentSupervisor.agent(forTile: tile.id),
+               let name = agentSupervisor.records[agent]?.displayName, !name.isEmpty { title = name }
+            return title.isEmpty ? tile.kind.displayName : title
+        }
+        // A tile already lent to a shared zone has no project zone. Share on it
+        // opens the area it is in, not a new share.
+        var lentArea: UUID?, lent: [ShareTarget.Item] = []
         for id in ordered {
+            if let loan = canvasView.lentTile(id),
+               let area = runtime.document.zones.first(where: { $0.zoneId == loan.zoneId })?.sharedAreaId {
+                guard lentArea == nil || lentArea == area else { continue }
+                lentArea = area
+                lent.append(.init(key: .init(projectID: loan.tile.projectId, tileID: id),
+                                  title: title(of: loan.tile.home), kind: loan.tile.home.kind))
+                continue
+            }
             guard let tile = canvasView.tileRecord(for: id), tile.kind != .terminal,
                   let zone = tile.zoneId, let project = canvasView.projectId(forZone: zone) else { continue }
-            var title = tile.title
-            if tile.kind == .managedAgent, let agent = agentSupervisor.agent(forTile: id),
-               let name = agentSupervisor.records[agent]?.displayName, !name.isEmpty { title = name }
-            items.append(.init(key: .init(projectID: project, tileID: id),
-                               title: title.isEmpty ? tile.kind.displayName : title, kind: tile.kind))
+            items.append(.init(key: .init(projectID: project, tileID: id), title: title(of: tile), kind: tile.kind))
+        }
+        if let lentArea {
+            return ShareTarget(workspaceID: runtime.workspaceId, origin: origin, items: lent, area: lentArea)
         }
         guard !items.isEmpty else { return nil }
         return ShareTarget(workspaceID: runtime.workspaceId, origin: origin, items: items)
