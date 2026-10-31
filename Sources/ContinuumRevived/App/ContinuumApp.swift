@@ -5691,8 +5691,12 @@ enum ContinuumApp {
         // PATH augmentation must precede the first ProcessInfo.environment
         // read (NSProcessInfo caches on first access) — AppDelegate's
         // initializers already read it. See ToolEnvironment.
+        // A multiplayer preview runs the check fakes, never a real CLI: they lead
+        // PATH, and the login-shell PATH (where a real claude lives) never merges.
+        let multiplayerPreview = MultiplayerPreview.current
+        multiplayerPreview?.installFakeCLIs()
         ToolEnvironment.shared.bootstrap()
-        ToolEnvironment.shared.startLoginShellUpgrade()
+        if multiplayerPreview == nil { ToolEnvironment.shared.startLoginShellUpgrade() }
         #if ARRAY_FILM
         // Film build: `--film` stages its scene on disk BEFORE `AppDelegate` reads
         // any store, and freezes the catalogue to the scene's. No provider is
@@ -5716,15 +5720,18 @@ enum ContinuumApp {
         // Live model catalogue: opt in to bounded `pi --list-models` probes
         // (startup + throttled re-probes on picker open / onboarding
         // re-check) so the picker offers whatever providers the user has
-        // authed in pi. QA never enables this and keeps the frozen fallback.
-        AgentModelCatalog.shared.enableLiveRefresh()
-        AgentHookSurfaceCatalog.shared.startRefresh()
-        // Session titles: each harness titles with its own CLI. Same opt-in rule
-        // as the catalogue, so no check can ever spend a real provider call.
-        AgentSupervisor.enableLiveNameTitling()
-        // .plans/101: account identity and 5h/weekly limits, read from each
-        // CLI on demand. Same opt-in rule: no check ever asks a real login.
-        AgentSupervisor.enableLiveAccountUsage()
+        // authed in pi. QA never enables this and keeps the frozen fallback,
+        // and neither does a multiplayer preview, whose CLIs are the fakes.
+        if multiplayerPreview == nil {
+            AgentModelCatalog.shared.enableLiveRefresh()
+            AgentHookSurfaceCatalog.shared.startRefresh()
+            // Session titles: each harness titles with its own CLI. Same opt-in rule
+            // as the catalogue, so no check can ever spend a real provider call.
+            AgentSupervisor.enableLiveNameTitling()
+            // .plans/101: account identity and 5h/weekly limits, read from each
+            // CLI on demand. Same opt-in rule: no check ever asks a real login.
+            AgentSupervisor.enableLiveAccountUsage()
+        }
         #endif
 
         // Every `--*-check` flag is handled above and exits. Reaching here with
@@ -6789,7 +6796,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         #else
         let isFilmRun = false
         #endif
-        if !isFilmRun { Task.detached {
+        // A multiplayer preview likewise leaves ~/.pi alone and never takes focus.
+        let isMultiplayerPreview = MultiplayerPreview.current != nil
+        if !isFilmRun, !isMultiplayerPreview { Task.detached {
             let result = PiExtensionInstaller.install()
             if case .leftUserModifiedCopy = result {
                 FileHandle.standardError.write(Data(
@@ -7057,7 +7066,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // a non-nil ghostty to forward set_focus into the surface.
             // A film run (film build only) works behind the user's windows and
             // never takes focus.
-            if !isFilmRun { NSApp.activate(ignoringOtherApps: true) }
+            if !isFilmRun, !isMultiplayerPreview { NSApp.activate(ignoringOtherApps: true) }
 
             // P5.5 boot regression probe (display-dependent; belongs to the
             // supervised surface legs, never the headless matrix). Offscreen
@@ -7099,6 +7108,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 #endif
             } else if smokeTestEnabled {
                 runSmokeTest(window: window, runtime: liveControllers.flatMap(\.runtimes).first)
+            } else if let preview = MultiplayerPreview.current {
+                startMultiplayerPreview(preview, window: window)
             } else {
                 startDesktopCompanionSyncService()
                 presentOnboardingIfFirstRun(
@@ -12041,7 +12052,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let parent = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
             .map { $0.appendingPathComponent("collaboration-support", isDirectory: true) }
             ?? RegistryStore.defaultApplicationSupportDirectory().deletingLastPathComponent()
-        let credentials = CollaborationCredentialStore(vault: KeychainCollaborationCredentialVault())
+        // A multiplayer preview keeps its credential in a file, never the Keychain.
+        let vault: any CollaborationCredentialVault = try MultiplayerPreview.current
+            .map { try MultiplayerPreviewCredentialVault($0.rootURL.appendingPathComponent("vault", isDirectory: true)) }
+            ?? KeychainCollaborationCredentialVault()
+        let credentials = CollaborationCredentialStore(vault: vault)
         let model = try CollaborationAccountController(store: CollaborationAccountStore(applicationSupportRoot: parent),
             credentialStore: credentials)
         collaborationAccount = model
@@ -12101,6 +12116,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             hub.onClose = { [weak hub] in
                 previousClose?(); hub?.content.onConnected = nil
                 finish(false)
+            }
+        }
+    }
+
+    /// `scripts/multiplayer-preview.sh`: sign this person in on the local relay,
+    /// give person A two agents on the check fakes, have A create a shared
+    /// workspace and invite B, have B accept, then open it in both windows.
+    /// Progress lands in `<root>/ready.json` or `<root>/error.json`.
+    private func startMultiplayerPreview(_ preview: MultiplayerPreview, window: NSWindow) {
+        let ready = preview.rootURL.appendingPathComponent("ready.json")
+        let failure = preview.rootURL.appendingPathComponent("error.json")
+        // The Getting Started list covers the canvas, and its first task offers
+        // the real ~/.claude sessions on this Mac. Neither belongs in a preview.
+        onboardingProgressStore.update { progress in GettingStartedTask.allCases.forEach { progress.skipTask($0) } }
+        refreshGettingStartedTasks()
+        if let screen = (window.screen ?? NSScreen.main)?.visibleFrame {
+            let column = NSRect(x: preview.side == "left" ? screen.minX : screen.midX, y: screen.minY,
+                                width: screen.width / 2, height: screen.height)
+            window.setFrame(column, display: true)
+        }
+        if preview.role == "host", agentSupervisor.records.isEmpty, let canvasView {
+            for (harness, prompt) in [(AgentHarness.claudeCode, "TOOL Read the shared plan and note the next step."),
+                                      (AgentHarness.codex, "Summarise what this preview is for in one line.")] {
+                let before = Set(canvasView.allWorkspaceTiles().map(\.id))
+                guard spawnManagedAgentForHarness(harness),
+                      let tile = canvasView.allWorkspaceTiles().map(\.id).first(where: { !before.contains($0) }),
+                      let agent = agentSupervisor.agent(forTile: tile) else { continue }
+                Task { _ = await agentSupervisor.accept(.sendPrompt(AgentPrompt(prompt)), for: agent) }
+            }
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let model = try collaborationAccountModel()
+                let endpoint = try CollaborationServiceEndpoint(URL(string: preview.endpoint)!, allowsInsecureLoopback: true)
+                let account: CollaborationLocalAccount
+                if let remembered = model.accounts.first { account = try await model.select(accountID: remembered.id) }
+                else { account = try await model.enroll(endpoint: endpoint, code: preview.enrollmentCode,
+                                                        deviceLabel: "Preview Mac \(preview.label)", accountLabel: "Person \(preview.label)") }
+                let person = account.identity.person.rawValue.uuidString
+                let invitationFile = preview.exchangeURL.appendingPathComponent("invitation.json")
+                let state: Collaboration.State
+                if preview.role == "host" {
+                    if let known = model.activeAccount?.knownAreas.first { state = try await model.openArea(id: known.id) }
+                    else { state = try await model.createArea(label: preview.areaLabel) }
+                    if preview.read(invitationFile) == nil {
+                        let guest = try await preview.waitFor(preview.exchangeURL.appendingPathComponent("guest.json"))
+                        guard let id = guest["person"].flatMap(UUID.init(uuidString:)) else { throw CocoaError(.fileReadCorruptFile) }
+                        let invitation = try await model.invite(area: state.document.id.rawValue, person: .init(id), role: .editor)
+                        try preview.write(["code": invitation.code], to: invitationFile)
+                    }
+                } else {
+                    try preview.write(["person": person], to: preview.exchangeURL.appendingPathComponent("guest.json"))
+                    if let known = model.activeAccount?.knownAreas.first { state = try await model.openArea(id: known.id) }
+                    else {
+                        let invitation = try await preview.waitFor(invitationFile)
+                        state = try await model.acceptInvitation(code: invitation["code"] ?? "", label: preview.areaLabel)
+                    }
+                }
+                let area = state.document.id.rawValue
+                let hub = presentCollaborationHub(model: model)
+                hub.content.setOpenArea(area, role: state.scope.role)
+                hub.content.onOpenArea?(try model.makeSharedAreaController(area: area), account.identity.person, area)
+                try preview.write(["label": preview.label, "person": person, "area": area.uuidString], to: ready)
+            } catch {
+                fputs("multiplayer preview: \(error)\n", stderr)
+                try? preview.write(["label": preview.label, "error": String(describing: error)], to: failure)
             }
         }
     }
