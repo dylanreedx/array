@@ -1594,8 +1594,8 @@ enum ContinuumApp {
             setbuf(stdout, nil); setbuf(stderr, nil)
             _ = NSApplication.shared
             Task { @MainActor in
-                try? await Task.sleep(for: .seconds(180))
-                fputs("FAIL: shared area zone check exceeded its 180-second deadline\n", stderr)
+                try? await Task.sleep(for: .seconds(240))
+                fputs("FAIL: shared area zone check exceeded its 240-second deadline\n", stderr)
                 Foundation.exit(1)
             }
             Task { @MainActor in
@@ -1606,6 +1606,7 @@ enum ContinuumApp {
                     try await SharedAreaZoneChecks.run()
                     try await SharedAreaZoneChecks.runFollowAndOffline()
                     try await SharedAreaZoneChecks.runFollowUps()
+                    try await SharedAreaZoneChecks.runEndings()
                     print("PASS shared area zone")
                     Foundation.exit(0)
                 } catch { fputs("FAIL shared area zone: \(error)\n", stderr); Foundation.exit(1) }

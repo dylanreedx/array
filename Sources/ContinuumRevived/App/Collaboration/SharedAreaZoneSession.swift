@@ -274,6 +274,8 @@ extension AppDelegate {
         let zone = try runtime.ensureSharedAreaZone(areaId: area, name: name)
         wireSharedAreaZoneCallbacks(canvas: canvas, runtime: runtime)
         let session = SharedAreaZoneSession(controller: controller, person: person, zoneId: zone.zoneId, areaId: area, canvas: canvas)
+        // An ended area is taken off the canvas from its own card.
+        session.scene.onRemoveFromCanvas = { [weak self] in self?.closeSharedAreaZone(zone.zoneId) }
         sharedAreaZoneSessions[key] = session
         session.onClose = { [weak self, weak session] in
             guard let self, let session, sharedAreaZoneSessions[key] === session else { return }

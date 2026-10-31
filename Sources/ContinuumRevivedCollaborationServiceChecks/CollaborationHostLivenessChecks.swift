@@ -77,6 +77,12 @@ func runCollaborationHostLivenessChecks() async throws {
         }
 
         try await livenessCheck(try await view(bb).hosts == [], "a host that never beat is absent, not online")
+        // Names come from the relay's records, so a teammate with no presence
+        // (their Mac offline) is still named.
+        let members = try await view(bb).members ?? []
+        try await livenessCheck(Set(members.map { "\($0.person.rawValue) \($0.label)" })
+            == ["\(a.identity.person.rawValue) Host owner A", "\(b.identity.person.rawValue) Teammate B"],
+            "every update page names the area's members by their recorded labels, with no presence, and nobody outside it")
 
         // Authentication and scope.
         let g1 = UUID()

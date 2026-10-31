@@ -28,7 +28,8 @@ enum CollaborationAppearanceSurfaces {
             .init(id: "collaborationHandoff", size: .init(width: 780, height: 820), view: try SharedAreaHandoffViewChecks.makeAppearanceFixture()),
             .init(id: "sharedAreaZone", size: .init(width: 1440, height: 900), view: try sharedZone(offline: false, following: false)),
             .init(id: "sharedAreaZoneOffline", size: .init(width: 1440, height: 900), view: try sharedZone(offline: true, following: false)),
-            .init(id: "sharedAreaZoneFollow", size: .init(width: 1440, height: 900), view: try sharedZone(offline: false, following: true))
+            .init(id: "sharedAreaZoneFollow", size: .init(width: 1440, height: 900), view: try sharedZone(offline: false, following: true)),
+            .init(id: "sharedAreaZoneEnded", size: .init(width: 1440, height: 900), view: try sharedZone(offline: false, following: false, ended: true))
         ]
     }
 
@@ -36,7 +37,7 @@ enum CollaborationAppearanceSurfaces {
     /// header, a teammate's live agent with its chip and read-only footer, my
     /// own shared agent, and the docked agreement and thread. Offline dims and
     /// dashes the host's agent and the zone; following draws the frame and pill.
-    private static func sharedZone(offline: Bool, following: Bool) throws -> NSView {
+    private static func sharedZone(offline: Bool, following: Bool, ended: Bool = false) throws -> NSView {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-zone-appearance-\(UUID())")
         let me = Collaboration.Identity(person: .init(), device: UUID()), mate = Collaboration.Identity(person: .init(), device: UUID())
         let mateHost = SharedArea.ID<SharedArea.Host>()
@@ -78,6 +79,7 @@ enum CollaborationAppearanceSurfaces {
             viewport: .init(x: 0, y: 0, width: 800, height: 500), expiresAt: .distantFuture, label: "Dylan")])
         canvas.setSharedAreaHostOffline(offline, zoneId: zone.zoneId)
         for view in scene.zoneAgentViews.values { view.live.stop() }
+        if ended { scene.qaApplyZoneEnding(.accessRemoved(host: "Dylan")) }
         if following {
             canvas.showFollowIndicator(name: "Dylan", color: SharedAreaPersonColour.color(for: mate.person, host: mate.person))
             scene.zoneHeader.followedDevice = mate.device

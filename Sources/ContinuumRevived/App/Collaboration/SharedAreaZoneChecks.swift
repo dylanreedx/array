@@ -187,6 +187,17 @@ enum SharedAreaZoneChecks {
         }
         throw Failure(description: "no empty stretch of \(view.tile.title)'s title strip takes the press (hits \(seen), tile at \(world), window \(scene.window.frame))")
     }
+    /// A press on a real control, through the window. A control's tracking
+    /// loop reads its mouse-up from the queue, so the up is queued first; a
+    /// directly sent up would never reach it and the down would never return.
+    static func press(_ control: NSControl, in window: NSWindow) throws {
+        let point = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: nil)
+        guard let up = NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 0) else { throw Failure(description: "could not synthesize a mouse-up") }
+        NSApp.postEvent(up, atStart: false)
+        try send(.leftMouseDown, at: point, in: window)
+    }
     static func click(_ view: NSView, at local: NSPoint, in window: NSWindow) throws {
         let point = view.convert(local, to: nil)
         try send(.leftMouseDown, at: point, in: window)
@@ -466,8 +477,10 @@ enum SharedAreaZoneChecks {
         try await render(scene, "online")
         let fourMinutesAgo = Date().addingTimeInterval(-4 * 60 - 5)
         try await scene.authority.setHosts([liveness(scene.mateHost, .offline, lastSeen: fourMinutesAgo)])
-        try await SharedAreaCheckRig.eventually("the host goes offline") {
-            scene.session.scene.zoneAgentViews[scene.mateAgent.id]?.offline == true
+        try await SharedAreaCheckRig.eventually("the host goes offline", attempts: 2000) {
+            scene.session.controller.hostLiveness.first(where: { $0.host == scene.mateHost })?.state == .offline
+                && scene.session.scene.zoneAgentViews[scene.mateAgent.id]?.offline == true
+                && canvas.zoneChromeSnapshot(for: scene.session.zoneId)?.sharedHostOffline == true
         }
         canvas.layoutSubtreeIfNeeded()
         guard let mateView = scene.session.scene.zoneAgentViews[scene.mateAgent.id] else { throw Failure(description: "no agent view") }
@@ -482,9 +495,17 @@ enum SharedAreaZoneChecks {
             "the zone dims with a dashed edge and his avatar greys out")
         try await render(scene, "offline")
         try await scene.authority.setHosts([liveness(scene.mateHost, .online)])
-        try await SharedAreaCheckRig.eventually("back online") { scene.session.scene.zoneAgentViews[scene.mateAgent.id]?.offline == false }
+        // Wait on the liveness change itself, through to the zone's state, never
+        // on a delay: the controller sees the host online, the card and the
+        // zone both drop offline. Only then is the edge read.
+        try await SharedAreaCheckRig.eventually("back online", attempts: 2000) {
+            scene.session.controller.hostLiveness.first(where: { $0.host == scene.mateHost })?.state == .online
+                && scene.session.scene.zoneAgentViews[scene.mateAgent.id]?.offline == false
+                && canvas.zoneChromeSnapshot(for: scene.session.zoneId)?.sharedHostOffline == false
+        }
         canvas.layoutSubtreeIfNeeded()
-        try expect(canvas.zoneChromeSnapshot(for: scene.session.zoneId)?.outlineDashed == false, "back online, the edge is solid again")
+        let solid = canvas.zoneChromeSnapshot(for: scene.session.zoneId)
+        try expect(solid?.outlineDashed == false, "back online, the edge is solid again (offline \(String(describing: solid?.sharedHostOffline)), dashed \(String(describing: solid?.outlineDashed)))")
     }
 
     /// Light and dark pictures for a person to look at.
@@ -700,6 +721,17 @@ extension SharedAreaZoneChecks {
         defer { second.delegate.closeSharedAreaSessions(); second.runtime.closeAll(); second.tearDown() }
         let secondWindow = host(second)
         defer { secondWindow.orderOut(nil) }
+        // As in the walkthrough: the camera sits close on the shared zone, so the
+        // agent's home tile is far away and its body is parked before the reopen
+        // lends it. Nothing moves the camera afterwards.
+        let zoneRect = CanvasEngine.zoneWorldFrame(anchor), size = second.canvas.bounds.size, zoom = 6.0
+        second.canvas.setViewport(CanvasViewport(x: zoneRect.x + zoneRect.width / 2 - Double(size.width) / zoom / 2,
+                                                 y: zoneRect.y + zoneRect.height / 2 - Double(size.height) / zoom / 2, zoom: zoom))
+        second.canvas.layoutSubtreeIfNeeded()
+        second.canvas.qaRunFarParkingPass()
+        guard second.canvas.tileView(for: second.agentTileB)?.isFarParked == true else {
+            throw Failure(description: "precondition: the agent's home tile was not far-parked before the reopen")
+        }
         let cameraAtLaunch = second.canvas.viewport
         await second.delegate.sharedAreaReopenTask?.value
         guard let relaunched = second.delegate.qaSharedAreaZoneSessions.first(where: { $0.areaId == share.areaId && !$0.isClosed }) else {
@@ -710,6 +742,71 @@ extension SharedAreaZoneChecks {
             "launch reopens the area in its zone at the saved local anchor, without moving the camera")
         try expect(second.canvas.lentTile(second.agentTileB)?.tile.object == object.rawValue,
             "and the agent tile this Mac shared is lent to it again")
+        // The walkthrough's relaunch drew only its header: no body, no runner.
+        second.canvas.layoutSubtreeIfNeeded(); second.canvas.displayIfNeeded()
+        guard let relent = second.canvas.tileView(for: second.agentTileB) as? ManagedAgentTileNSView else {
+            throw Failure(description: "the relaunched shared agent tile is not an agent tile view (\(String(describing: second.canvas.tileView(for: second.agentTileB).map { type(of: $0) })))")
+        }
+        let record = second.delegate.qaAgentSupervisor.records.values.first(where: { $0.tileId == second.agentTileB })
+        try expect(record != nil && relent.attachedAgentID == record?.id && relent.qaComposerForChecks?.window != nil
+            && !relent.isFarParked && relent.surfaceResidency == .native && relent.window === secondWindow
+            && second.canvas.viewport == cameraAtLaunch,
+            "after relaunch the shared agent tile is whole: bound to its agent, with its body and composer in the window (attached \(String(describing: relent.attachedAgentID)) record \(String(describing: record?.id)) composer \(relent.qaComposerForChecks != nil)/\(relent.qaComposerForChecks?.window != nil) parked \(relent.isFarParked) residency \(relent.surfaceResidency))")
         _ = viewport
+    }
+}
+
+// MARK: - Walkthrough round 2: names that outlive presence, and access that ends
+
+extension SharedAreaZoneChecks {
+    static func runEndings() async throws {
+        let scene = try await mount()
+        defer { scene.session.close(); scene.window.orderOut(nil); scene.fixture.dispose() }
+        let canvas = scene.canvas, runtime = scene.mounted.runtime, header = scene.session.scene.zoneHeader
+
+        print("STAGE shared area zone: a teammate keeps their name when their Mac goes offline")
+        // The relay records Dylan as "Dylan Reed"; his presence said "Dylan".
+        try await scene.authority.setMemberLabel(scene.mate.person, "Dylan Reed")
+        try await scene.authority.end(scene.mate)
+        try await scene.authority.setHosts([liveness(scene.mateHost, .offline, lastSeen: Date().addingTimeInterval(-300))])
+        try await SharedAreaCheckRig.eventually("Dylan's presence is gone and his Mac is offline") {
+            !scene.session.controller.presence.contains(where: { $0.identity.person == scene.mate.person })
+                && scene.session.scene.zoneAgentViews[scene.mateAgent.id]?.offline == true
+        }
+        guard let mateView = scene.session.scene.zoneAgentViews[scene.mateAgent.id] else { throw Failure(description: "no agent view") }
+        try expect(header.members.first(where: { $0.person == scene.mate.person })?.name == "Dylan Reed"
+            && header.statusText == "Dylan Reed's Mac is offline" && mateView.chipText == "Dylan Reed's · offline"
+            && mateView.footerText.contains("Dylan Reed's Mac is offline"),
+            "offline, he is still named by the relay's member record, never \"Teammate\" (header \(header.members.map(\.name)), \(header.statusText), chip \(mateView.chipText))")
+
+        print("STAGE shared area zone: the host stops sharing")
+        let hostItems = scene.session.controller.document?.items.filter { $0.source?.owner == scene.mate.person }.map(\.id) ?? []
+        try await scene.authority.remote(hostItems.map { .remove($0) })
+        try await SharedAreaCheckRig.eventually("Dylan's items leave the zone") { scene.session.scene.zoneAgentViews[scene.mateAgent.id] == nil }
+        try expect(scene.session.scene.zoneEnding == nil && scene.session.scene.zoneAgentViews[scene.myAgent.id] != nil && !scene.session.scene.zoneDock.isHidden,
+            "while this Mac's own agent is still in the area, the zone stays live (ending \(String(describing: scene.session.scene.zoneEnding)))")
+        let rest = scene.session.controller.document?.items.map(\.id) ?? []
+        try await scene.authority.remote(rest.map { .remove($0) })
+        let ended = scene.session.scene.zoneEnded
+        try await SharedAreaCheckRig.eventually("the zone says the host stopped sharing") { scene.session.scene.zoneEnding != nil }
+        canvas.layoutSubtreeIfNeeded()
+        try expect(scene.session.scene.zoneEnding == .stoppedSharing(host: "Dylan Reed") && !ended.isHidden
+            && ended.titleLabel.stringValue == "Dylan Reed stopped sharing" && header.statusText == "Dylan Reed stopped sharing"
+            && scene.session.scene.zoneDock.isHidden && scene.session.scene.zoneAgentViews.isEmpty,
+            "when everything is taken back, the zone says who stopped sharing and keeps no empty dock or cards (ending \(String(describing: scene.session.scene.zoneEnding)), hidden \(ended.isHidden), title \(ended.titleLabel.stringValue), status \(header.statusText), dock hidden \(scene.session.scene.zoneDock.isHidden), cards \(scene.session.scene.zoneAgentViews.count))")
+
+        print("STAGE shared area zone: access removed, and the zone taken off the canvas")
+        await scene.authority.endAccess(scene.me)
+        try await SharedAreaCheckRig.eventually("access ends") { scene.session.controller.status == .unavailable(.accessDenied) }
+        canvas.layoutSubtreeIfNeeded()
+        try expect(scene.session.scene.zoneEnding == .accessRemoved(host: "Dylan Reed") && ended.titleLabel.stringValue == "Your access was removed"
+            && ended.detailLabel.stringValue.hasPrefix("Dylan Reed stopped sharing this area with you"),
+            "when access is removed the zone says so, and who stopped sharing")
+        let zoneId = scene.session.zoneId
+        scene.session.reveal(); canvas.layoutSubtreeIfNeeded()
+        try press(ended.removeButton, in: scene.window)
+        try expect(runtime.sharedAreaZone(for: scene.authority.area.rawValue) == nil && canvas.sharedAreaZonePlacement(zoneId) == nil
+            && scene.session.isClosed && scene.session.scene.superview == nil,
+            "Remove from canvas, through the window, takes the zone and its session away")
     }
 }

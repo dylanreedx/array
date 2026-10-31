@@ -105,6 +105,10 @@ public final class SharedAreaController {
     public private(set) var presence: [Collaboration.Presence] = []
     /// Execution-host liveness from the relay; empty means no host has proved it is alive.
     public private(set) var hostLiveness: [Collaboration.HostLiveness] = []
+    /// What each person in the area is called. The relay's member record wins;
+    /// a presence label fills in for a relay that sends none. Never cleared on
+    /// disconnect or loss of access: a name is what explains who left.
+    public private(set) var memberNames: [SharedArea.ID<SharedArea.Person>: String] = [:]
     /// Latest revision per artifact from the last authority frame (COL-16).
     public private(set) var artifactHeads: [Collaboration.Artifact.Head] = []
     /// Artifact routes ride the admitted transport; nil until identity and
@@ -642,6 +646,10 @@ public final class SharedAreaController {
         document = localState?.accessDenied == true ? nil : localState?.document
         if scope == nil || replica.scope.epoch >= scope!.epoch { scope = replica.scope }
         if !preservingPresence { presence = replica.presence; hostLiveness = replica.hosts ?? []; artifactHeads = replica.artifactHeads }
+        for member in replica.members ?? [] { memberNames[member.person] = member.label }
+        for peer in replica.presence where replica.members?.contains(where: { $0.person == peer.identity.person }) != true {
+            if let label = peer.label, memberNames[peer.identity.person] == nil { memberNames[peer.identity.person] = label }
+        }
         return document != nil && (admittedRevision ?? 0) >= (localState?.appliedRevision ?? 0)
             && (admittedEpoch ?? 0) >= (localState?.observedMembershipEpoch ?? 0)
     }

@@ -7539,7 +7539,17 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         layoutAllTiles()
         reorderTileSubviewsByZIndex()
+        returnLentBodies()
         delegate?.canvasSidebarLabelsDidChange(self)
+    }
+
+    /// A lent tile moves without the camera moving: it can arrive on screen
+    /// from where its body was far-parked (relaunch lends a tile from a zone the
+    /// camera is nowhere near). Only a camera step returns parked bodies, so a
+    /// lend or a shared move does it too, or the tile stays a header-only shell.
+    private func returnLentBodies() {
+        guard sharedAreaLayers.values.contains(where: { $0.lent.contains { $0.view.isFarParked } }) else { return }
+        returnFarParkedTiles(offscreenBudget: .max)
     }
 
     /// Every lent tile back into its home layer, with its view and its pre-share
@@ -7576,6 +7586,7 @@ final class CanvasNSView: NSView, TokenThemed {
               shared.lent[index].areaFrame != frame else { return }
         shared.lent[index].areaFrame = frame
         layoutSharedAreaLayers()
+        returnLentBodies()
     }
 
     func lentTile(_ tileId: UUID) -> (zoneId: UUID, tile: SharedAreaLayer.LentTile)? {

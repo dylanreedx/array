@@ -219,6 +219,8 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             addSubview(zoneDock, positioned: .below, relativeTo: nil)
             addSubview(zoneAgentLayer, positioned: .below, relativeTo: canvas)
             addSubview(zoneHeader)
+            addSubview(zoneEnded)
+            zoneEnded.onRemove = { [weak self] in self?.onRemoveFromCanvas?() }
             pinnedAgreementLabel.font = .token(.body); pinnedAgreementLabel.maximumNumberOfLines = 4
             pinnedAgreementLabel.lineBreakMode = .byWordWrapping
             pinnedAgreementLabel.cell?.truncatesLastVisibleLine = true
@@ -341,6 +343,9 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         setFrame(history, .zero); history.isHidden = true
         setFrame(livePanel, .zero); setFrame(freshnessPanel, .zero)
         layoutZoneAgents()
+        let card = NSSize(width: min(520, max(0, bounds.width - 48)), height: 170)
+        setFrame(zoneEnded, .init(x: (bounds.width - card.width) / 2, y: header + max(24, (bounds.height - header - card.height) / 2),
+                                  width: card.width, height: card.height))
     }
 
     func applyTokens() {
@@ -856,11 +861,63 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     private var defaultDockObject: SharedArea.ID<SharedArea.Object>? {
         knownDocument?.items.first(where: { $0.kind == .discussion })?.id ?? pinnedAgreement
     }
-    /// A person as the dock names them.
+    /// A person as the zone names them: the relay's member record, which
+    /// outlives presence, then a presence label, then "Teammate".
     func displayName(of other: SharedArea.ID<SharedArea.Person>) -> String {
         if other == person { return "You" }
-        return (qaPresence ?? controller.presence).first(where: { $0.identity.person == other })?.label.map { String($0.prefix(28)) } ?? "Teammate"
+        let label = controller.memberNames[other]
+            ?? (qaPresence ?? controller.presence).first(where: { $0.identity.person == other })?.label
+        return label.map { String($0.prefix(28)) } ?? "Teammate"
     }
+
+    // MARK: Zone ending
+
+    /// Shown when the area has ended for this person (zone only).
+    private(set) lazy var zoneEnded = SharedAreaZoneEndedView()
+    /// Takes the zone off the canvas, from the ended card.
+    var onRemoveFromCanvas: (() -> Void)?
+    private var lastHostPerson: SharedArea.ID<SharedArea.Person>?
+    private var hadHostItems = false
+    var zoneEnding: SharedAreaZoneEndedView.Ending? { zoneEnded.ending }
+    /// Why the area ended, if it has: access removed, everything taken back
+    /// after the host had shared, or unreachable. A live area answers nil.
+    private func currentEnding() -> SharedAreaZoneEndedView.Ending? {
+        if let host = SharedAreaPersonColour.host(of: knownDocument, me: person, role: controller.scope?.role), host != person {
+            lastHostPerson = host
+            if knownDocument?.items.contains(where: { $0.source?.owner == host }) == true { hadHostItems = true }
+        }
+        let hostName = lastHostPerson.map(displayName(of:))
+        switch controller.status {
+        case .unavailable(.accessDenied): return .accessRemoved(host: hostName)
+        case .unavailable(let reason): return .unreachable(reason)
+        default:
+            // Ended only once nothing is left: while anyone's item is still
+            // here the zone is live, not a shell.
+            guard hadHostItems, lastHostPerson != nil, let document = knownDocument, document.items.isEmpty else { return nil }
+            return .stoppedSharing(host: hostName ?? "The host")
+        }
+    }
+    private func applyZoneEnding(_ ending: SharedAreaZoneEndedView.Ending?) {
+        guard isZone else { return }
+        zoneEnded.show(ending)
+        if zoneHeader.endingText != ending?.title {
+            zoneHeader.endingText = ending?.title
+            zoneHeader.refresh(document: knownDocument, hosts: knownHosts)
+        }
+        // An ended area keeps no live parts: no shell of a dock, composer or cards.
+        let live: [NSView] = [canvas, zoneAgentLayer, zoneDock, detailLabel, entryLabel, actions, pinnedAgreementLabel,
+                              agreementPanel, readerScroll, editorScroll, postButton, messageLabel, artifactPanel]
+        for view in live where ending != nil { view.isHidden = true }
+        if ending == nil, zoneDock.isHidden {
+            for view in [canvas, zoneAgentLayer, zoneDock, detailLabel, entryLabel, actions, readerScroll, editorScroll, postButton, messageLabel] as [NSView] {
+                view.isHidden = false
+            }
+            lastControlsKey = nil; refreshReader(); refreshControls()
+        }
+        needsLayout = true
+    }
+    /// QA (appearance census): draw the zone as ended for this reason.
+    func qaApplyZoneEnding(_ ending: SharedAreaZoneEndedView.Ending?) { applyZoneEnding(ending) }
     private var qaPresence: [Collaboration.Presence]?
     /// QA (appearance census): draw the zone as a connected area with this
     /// presence and host liveness, without a connection.
@@ -926,6 +983,8 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             }
         }
         refreshControls()
+        // Last, so nothing above can put a live part of an ended area back.
+        if isZone { applyZoneEnding(currentEnding()) }
     }
     private var statusText: String {
         switch controller.status {

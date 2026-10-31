@@ -10,6 +10,8 @@ public struct CollaborationReplica: Sendable {
     public private(set) var hosts: [Collaboration.HostLiveness]?
     public private(set) var serverTime: Date?
     public private(set) var artifactHeads: [Collaboration.Artifact.Head] = []
+    /// The relay's recorded members; nil until a relay that sends them answers.
+    public private(set) var members: [Collaboration.Member]?
     public init(state: Collaboration.State) throws {
         guard state.document.id == state.scope.area else { throw CollaborationClientError.invalidSequence }
         document = state.document; scope = state.scope
@@ -28,6 +30,7 @@ public struct CollaborationReplica: Sendable {
         document = next; scope = page.scope; presenceVersion = page.presenceVersion
         presence = page.presence; serverTime = page.serverTime; hosts = page.hosts
         if let heads = page.artifactHeads { artifactHeads = heads }
+        if let members = page.members { self.members = members }
     }
     /// Catch up to one fixed high-water mark, then resume live polling.
     public mutating func catchUp(using api: CollaborationAPI) async throws {

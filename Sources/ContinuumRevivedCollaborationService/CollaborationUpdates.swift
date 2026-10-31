@@ -108,6 +108,11 @@ extension CollaborationStore {
             // that closure and refuses any later use of it.
             let hosts = try hostLiveness(db, area: area)
             let heads = try artifactHeads(db, area: area)
+            let members = try Row.fetchAll(db, sql: "SELECT m.person, p.label FROM members m JOIN people p ON p.id=m.person WHERE m.area=? ORDER BY m.person",
+                arguments: [area.uuidString]).compactMap { row -> Collaboration.Member? in
+                    guard let person = UUID(uuidString: row["person"]) else { return nil }
+                    return Collaboration.Member(person: .init(person), label: row["label"])
+                }
             let presence = try presenceEntries.filter { $0.key.area == area }.values.compactMap(\.value)
                 .sorted { $0.identity.device.uuidString < $1.identity.device.uuidString }
                 .map { value in
@@ -118,7 +123,8 @@ extension CollaborationStore {
             let version = presenceVersions[area] ?? UUID()
             presenceVersions[area] = version
             return .init(scope: scope, after: request.after, through: through, events: events, nextCursor: next,
-                presenceVersion: version, presence: presence, serverTime: clock(), hosts: hosts, artifactHeads: heads)
+                presenceVersion: version, presence: presence, serverTime: clock(), hosts: hosts, artifactHeads: heads,
+                members: members)
         }
     }
 

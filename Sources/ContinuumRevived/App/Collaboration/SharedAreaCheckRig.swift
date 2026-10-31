@@ -74,15 +74,27 @@ enum SharedAreaCheckRig {
         func reported() { usageReports += 1 }
         /// Host liveness as the service relays it with every frame.
         private var hosts: [Collaboration.HostLiveness] = []
+        /// Members' recorded names, relayed with every frame as the relay does.
+        private var memberLabels: [SharedArea.ID<SharedArea.Person>: String] = [:]
+        func setMemberLabel(_ person: SharedArea.ID<SharedArea.Person>, _ label: String) async throws {
+            memberLabels[person] = label; try await broadcast()
+        }
+        /// Removes someone from the area: their subscription is told access ended.
+        func endAccess(_ identity: Collaboration.Identity) async {
+            roles.removeValue(forKey: identity.device)
+            for (member, connection) in connections where member == identity { await connection.revoke() }
+            connections.removeAll { $0.0 == identity }
+        }
         func setHosts(_ value: [Collaboration.HostLiveness]) async throws { hosts = value; try await broadcast() }
         private func broadcast() async throws {
             let everyone = Array(presence.values)
+            let members = memberLabels.isEmpty ? nil : memberLabels.map { Collaboration.Member(person: $0.key, label: $0.value) }
             for (identity, connection) in connections {
                 let scope = try scope(identity)
                 var replica = try CollaborationReplica(state: .init(scope: scope, document: document))
                 try replica.receive(.init(scope: scope, after: document.revision, through: document.revision, events: [],
                     nextCursor: document.revision, presenceVersion: UUID(), presence: everyone, serverTime: Date(),
-                    hosts: hosts.isEmpty ? nil : hosts))
+                    hosts: hosts.isEmpty ? nil : hosts, members: members))
                 await connection.emit(replica)
             }
         }
@@ -93,6 +105,7 @@ enum SharedAreaCheckRig {
         func start() async -> AsyncStream<CollaborationSession.Status> { pair.stream }
         func stop() async { pair.continuation.finish() }
         func emit(_ replica: CollaborationReplica) { pair.continuation.yield(.connected(replica)) }
+        func revoke() { pair.continuation.yield(.unavailable) }
     }
 
     struct Transport: SharedAreaControllerTransport {

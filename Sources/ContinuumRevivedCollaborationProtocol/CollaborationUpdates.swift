@@ -50,6 +50,14 @@ extension Collaboration {
             self.label = label; self.usage = usage
         }
     }
+    /// A member of an area as the relay records them: the name they chose when
+    /// they joined. It outlives their presence, so a teammate whose Mac is
+    /// offline is still named.
+    public struct Member: Codable, Sendable, Equatable {
+        public let person: SharedArea.ID<SharedArea.Person>
+        public let label: String
+        public init(person: SharedArea.ID<SharedArea.Person>, label: String) { self.person = person; self.label = label }
+    }
     public struct Updates: Codable, Sendable {
         public let scope: Scope
         public let after: UInt64
@@ -66,12 +74,16 @@ extension Collaboration {
         /// Latest revision of each admitted artifact. Bytes never ride here;
         /// a changed head tells a view to refetch that artifact's state.
         public let artifactHeads: [Artifact.Head]?
+        /// Everyone admitted to the area, by their recorded name, including people
+        /// who have since left (their posts still need a name). Absent from a relay
+        /// that predates it.
+        public let members: [Member]?
         public init(scope: Scope, after: UInt64, through: UInt64, events: [Event], nextCursor: UInt64,
                     presenceVersion: UUID, presence: [Presence], serverTime: Date, hosts: [HostLiveness]? = nil,
-                    artifactHeads: [Artifact.Head]? = nil) {
+                    artifactHeads: [Artifact.Head]? = nil, members: [Member]? = nil) {
             self.scope = scope; self.after = after; self.through = through; self.events = events; self.nextCursor = nextCursor
             self.presenceVersion = presenceVersion; self.presence = presence; self.serverTime = serverTime; self.hosts = hosts
-            self.artifactHeads = artifactHeads
+            self.artifactHeads = artifactHeads; self.members = members
         }
     }
 }

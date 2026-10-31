@@ -81,6 +81,8 @@ final class SharedAreaZoneHeaderView: NSView {
     private(set) var statusText = ""
     private(set) var hostOffline = false
     private(set) var host: SharedArea.ID<SharedArea.Person>?
+    /// Why the area ended for this person, shown in place of the live status.
+    var endingText: String?
     /// The device currently followed: its avatar carries a ring.
     var followedDevice: UUID? { didSet { if oldValue != followedDevice { needsDisplay = true } } }
     private(set) var drawCount = 0
@@ -109,7 +111,9 @@ final class SharedAreaZoneHeaderView: NSView {
         var next: [Member] = []
         func add(_ person: SharedArea.ID<SharedArea.Person>, device: UUID?, label: String?, online: Bool) {
             guard seen.insert(person).inserted else { return }
-            let name = person == me ? (label ?? "You") : (label.map { String($0.prefix(28)) } ?? "Teammate")
+            // The relay's member record names people; presence only says who is here.
+            let recorded = controller.memberNames[person] ?? label
+            let name = person == me ? (recorded ?? "You") : (recorded.map { String($0.prefix(28)) } ?? "Teammate")
             next.append(.init(person: person, device: person == me ? nil : device, name: name,
                               colour: SharedAreaPersonColour.name(for: person, host: host), online: online))
         }
@@ -142,8 +146,9 @@ final class SharedAreaZoneHeaderView: NSView {
         case .unavailable: status = "Shared area unavailable"
         case .closed: status = "Closed"
         }
-        guard next != members || status != statusText || offline != hostOffline || host != self.host else { return }
-        members = next; statusText = status; hostOffline = offline; self.host = host
+        let shown = endingText ?? status
+        guard next != members || shown != statusText || offline != hostOffline || host != self.host else { return }
+        members = next; statusText = shown; hostOffline = offline; self.host = host
         setAccessibilityValue(([status] + members.map(\.name)).joined(separator: ", "))
         needsDisplay = true
     }
@@ -396,4 +401,92 @@ final class SharedAreaZoneAgentView: NSView {
 
 private extension NSBezierPath {
     func fill(with colour: NSColor) { colour.setFill(); fill() }
+}
+
+/// What a zone says when the area has ended for this person: their access was
+/// removed, the host took everything back, or it can't be reached. Never an
+/// empty shell left silently on the canvas: one action takes the zone away.
+@MainActor
+final class SharedAreaZoneEndedView: NSView {
+    enum Ending: Equatable {
+        case accessRemoved(host: String?)
+        case stoppedSharing(host: String)
+        case unreachable(SharedAreaController.Unavailability)
+
+        var title: String {
+            switch self {
+            case .accessRemoved: return "Your access was removed"
+            case .stoppedSharing(let host): return "\(host) stopped sharing"
+            case .unreachable: return "This shared area can't be reached"
+            }
+        }
+        var detail: String {
+            switch self {
+            case .accessRemoved(let host):
+                return "\(host ?? "The host") stopped sharing this area with you. Nothing here reaches their Mac any more."
+            case .stoppedSharing:
+                return "Everything that was shared here has been taken back."
+            case .unreachable(let reason):
+                switch reason {
+                case .credentialsUnavailable: return "This Mac isn't signed in to the area any more."
+                case .identityMismatch: return "This Mac's sign-in doesn't match the area."
+                case .incompatibleState: return "This area needs a newer version of Array."
+                case .localPersistence: return "Array couldn't read what this Mac saved for the area."
+                case .connectionEnded, .accessDenied: return "The connection to the area ended."
+                }
+            }
+        }
+    }
+    var onRemove: (() -> Void)?
+    private(set) var ending: Ending?
+    let titleLabel = NSTextField(labelWithString: "")
+    let detailLabel = NSTextField(wrappingLabelWithString: "")
+    let removeButton = ComposerActionButton(presentation: CollaborationHubView.action("Remove from canvas", symbol: "xmark.circle"))
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isHidden = true
+        titleLabel.font = .token(.title); titleLabel.lineBreakMode = .byTruncatingTail
+        detailLabel.font = .token(.body); detailLabel.maximumNumberOfLines = 3
+        removeButton.target = self; removeButton.action = #selector(removePressed(_:))
+        removeButton.setAccessibilityLabel("Remove this shared area from the canvas")
+        for view in [titleLabel, detailLabel, removeButton] as [NSView] { addSubview(view) }
+        setAccessibilityElement(true); setAccessibilityRole(.group)
+        applyAppearance()
+    }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func show(_ next: Ending?) {
+        guard next != ending else { return }
+        ending = next
+        isHidden = next == nil
+        titleLabel.stringValue = next?.title ?? ""
+        detailLabel.stringValue = next?.detail ?? ""
+        setAccessibilityLabel(next.map { "\($0.title). \($0.detail)" })
+        needsLayout = true; needsDisplay = true
+    }
+    @objc private func removePressed(_ sender: Any?) { onRemove?() }
+
+    override func layout() {
+        super.layout()
+        let width = bounds.width - 48
+        titleLabel.frame = .init(x: 24, y: 22, width: width, height: 26)
+        detailLabel.frame = .init(x: 24, y: 54, width: width, height: 60)
+        let size = removeButton.fittingSize
+        removeButton.frame = .init(x: 24, y: bounds.height - size.height - 20, width: size.width, height: size.height)
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyAppearance() }
+    private func applyAppearance() {
+        titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        detailLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        let radius = CGFloat(CornerRole.card.radius)
+        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius)
+        SurfaceToken.panel.color.nsColor(in: self).setFill(); shape.fill()
+        LineToken.border.color.nsColor(in: self).setStroke(); shape.lineWidth = 1; shape.stroke()
+    }
 }
