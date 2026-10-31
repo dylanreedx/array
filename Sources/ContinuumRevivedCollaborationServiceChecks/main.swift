@@ -193,6 +193,8 @@ do {
     } else if CommandLine.arguments.contains("--backup-restore-only") {
         try await runCollaborationBackupRestoreChecks()
         try await runCollaborationOperatorRecoveryChecks()
+    } else if CommandLine.arguments.contains("--agent-projection-only") {
+        try await runCollaborationAgentProjectionChecks()
     } else if CommandLine.arguments.contains("--recovery-scale-only") {
         try await runCollaborationRecoveryScaleChecks()
     } else if CommandLine.arguments.contains("--host-liveness-only") {
