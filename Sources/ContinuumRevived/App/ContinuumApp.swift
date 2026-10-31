@@ -1714,6 +1714,8 @@ enum ContinuumApp {
                     // rest of the process, as a user's active app does.
                     print("STAGE collaboration native: share entry points and popover")
                     try await ShareEntryChecks.run()
+                    print("STAGE collaboration native: a real Share against a local relay")
+                    try await ShareEntryRelayChecks.run()
                     print("STAGE collaboration native: collaboration appearance census")
                     try CollaborationAppearanceSurfaces.runCensus()
                     print("ContinuumRevivedCollaborationNativeChecks passed")
@@ -12287,9 +12289,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     /// Checks only: recorders for parts 1 and 2 and a private pasteboard.
-    func qaInstallShareEntry(links: ShareLinkServing, zones: SharedZoneCreating, pasteboard: NSPasteboard) {
+    /// Omitted services stay production: `shareLinks` and this delegate's zones.
+    func qaInstallShareEntry(links: ShareLinkServing? = nil, zones: SharedZoneCreating? = nil, pasteboard: NSPasteboard) {
         shareEntryStorage?.dismiss()
-        configureShareEntry(ShareEntryCoordinator(links: { links }, zones: { zones }, pasteboard: pasteboard))
+        configureShareEntry(ShareEntryCoordinator(
+            links: { [unowned self] in links ?? self.shareLinks },
+            zones: { [unowned self] in zones ?? self.sharedZoneCreator ?? self }, pasteboard: pasteboard))
     }
 
     private func configureShareEntry(_ entry: ShareEntryCoordinator) {

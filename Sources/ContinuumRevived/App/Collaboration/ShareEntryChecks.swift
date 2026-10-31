@@ -78,12 +78,29 @@ enum ShareEntryChecks {
 
     // MARK: Run
 
-    static func run() async throws {
+    /// The production mount both stages share: three managed agents and a
+    /// note in one zone, on an off-display window that says it is key.
+    @MainActor struct Scene {
+        let fixture: WorkspaceInvariantsFixture
+        let canvas: CanvasNSView
+        let app: AppDelegate
+        let window: NSWindow
+        let agents: [AgentID]
+        /// Runners the supervisor has built, so a share can be shown to keep them.
+        let runnerConstructions: () -> Int
+        func close() {
+            app.shareEntry.dismiss()
+            app.userCommandWindowProvider = { NSApp.keyWindow }
+            window.orderOut(nil)
+            fixture.dispose()
+        }
+    }
+
+    static func mountScene(_ label: String) throws -> Scene {
         acceptFirstMouseEverywhere()
         let agentA = TileInsertSlideChecks.tileA, agentB = TileInsertSlideChecks.tileB
         let noteC = TileInsertSlideChecks.tileC, agentD = TileInsertSlideChecks.tileD
-        let fixture = try TileInsertSlideChecks.makeFixture("share-entry")
-        defer { fixture.dispose() }
+        let fixture = try TileInsertSlideChecks.makeFixture(label)
         let workspaceStore = WorkspaceStore(workspaceId: WorkspaceInvariantsFixture.workspaceA,
                                             applicationSupportDirectory: fixture.appSupport)
         var document = try workspaceStore.load()
@@ -109,11 +126,12 @@ enum ShareEntryChecks {
         }
         try projectStore.saveCanvas(state)
         var agents: [AgentID] = []
+        var constructions = 0
         let appSupport = fixture.appSupport
         fixture.configureMount = { delegate, _ in
             delegate.agentSupervisor = AgentSupervisor(
                 store: AgentStore(applicationSupportDirectory: appSupport),
-                makeRunner: { _ in ScriptedAgentRunner(script: [], holdUntilStopped: true) })
+                makeRunner: { _ in constructions += 1; return ScriptedAgentRunner(script: [], holdUntilStopped: true) })
             for (id, name) in [(agentA, "Map the checkout state machine"), (agentB, "Audit the receipt email path"),
                                (agentD, "Fix the saved-card toggle")] {
                 agents.append(delegate.agentSupervisor.spawn(
@@ -124,7 +142,7 @@ enum ShareEntryChecks {
             }
         }
         try fixture.mount()
-        let mounted = try fixture.requireMounted("share entry")
+        let mounted = try fixture.requireMounted(label)
         let canvas = mounted.canvas
         let app = mounted.delegate
         TileInsertSlideChecks.pin(canvas, autoLayout: false)
@@ -134,43 +152,52 @@ enum ShareEntryChecks {
         window.contentView = canvas
         window.orderFrontOffscreenForChecks()
         window.makeKey()
-        defer { window.orderOut(nil) }
         app.userCommandWindowProvider = { [weak window] in window }
-        defer { app.userCommandWindowProvider = { NSApp.keyWindow } }
         for (tile, agent) in zip([agentA, agentB, agentD], agents) { app.wireManagedAgentTile(tile, agentID: agent) }
         canvas.layoutSubtreeIfNeeded()
+        return Scene(fixture: fixture, canvas: canvas, app: app, window: window, agents: agents,
+                     runnerConstructions: { constructions })
+    }
+
+    static func mouse(_ type: NSEvent.EventType, _ point: NSPoint, in target: NSWindow) throws -> NSEvent {
+        guard let event = NSEvent.mouseEvent(
+            with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: target.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+            pressure: type == .leftMouseUp || type == .rightMouseUp ? 0 : 1)
+        else { throw Failure(description: "could not synthesise \(type)") }
+        return event
+    }
+
+    /// A click on `view` where the user would click: the release is queued
+    /// first so a control that tracks the press in its own loop finds it.
+    static func click(_ view: NSView, drawnIn host: NSView? = nil) throws {
+        // A resting tile draws its band controls itself, detached: the press
+        // lands on the band, which wakes them and passes it on.
+        let anchor = view.window == nil ? host : view
+        guard let anchor, let target = anchor.window else { throw Failure(description: "\(type(of: view)) is not in a window") }
+        let centre = NSPoint(x: view.frame.midX, y: view.frame.midY)
+        let point = anchor === view ? view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
+            : anchor.convert(centre, to: nil)
+        NSApp.postEvent(try mouse(.leftMouseUp, point, in: target), atStart: false)
+        NSApp.sendEvent(try mouse(.leftMouseDown, point, in: target))
+        while let pending = NSApp.nextEvent(matching: [.leftMouseUp], until: Date(), inMode: .default, dequeue: true) {
+            NSApp.sendEvent(pending)
+        }
+    }
+
+    static func run() async throws {
+        let scene = try mountScene("share-entry")
+        defer { scene.close() }
+        let agentA = TileInsertSlideChecks.tileA, agentB = TileInsertSlideChecks.tileB
+        let agentD = TileInsertSlideChecks.tileD
+        let canvas = scene.canvas, app = scene.app, window = scene.window, agents = scene.agents
 
         let links = FakeLinks(), zones = FakeZones()
         let pasteboard = NSPasteboard(name: NSPasteboard.Name("dev.arrayapp.share-entry-check.\(UUID().uuidString)"))
         defer { pasteboard.releaseGlobally() }
         app.qaInstallShareEntry(links: links, zones: zones, pasteboard: pasteboard)
         app.shareEntry.presentsOffscreenForQA = true
-        defer { app.shareEntry.dismiss() }
 
-        func mouse(_ type: NSEvent.EventType, _ point: NSPoint, in target: NSWindow) throws -> NSEvent {
-            guard let event = NSEvent.mouseEvent(
-                with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: target.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
-                pressure: type == .leftMouseUp || type == .rightMouseUp ? 0 : 1)
-            else { throw Failure(description: "could not synthesise \(type)") }
-            return event
-        }
-        /// A click on `view` where the user would click: the release is queued
-        /// first so a control that tracks the press in its own loop finds it.
-        func click(_ view: NSView, drawnIn host: NSView? = nil) throws {
-            // A resting tile draws its band controls itself, detached: the
-            // press lands on the band, which wakes them and passes it on.
-            let anchor = view.window == nil ? host : view
-            guard let anchor, let target = anchor.window else { throw Failure(description: "\(type(of: view)) is not in a window") }
-            let centre = NSPoint(x: view.frame.midX, y: view.frame.midY)
-            let point = anchor === view ? view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
-                : anchor.convert(centre, to: nil)
-            NSApp.postEvent(try mouse(.leftMouseUp, point, in: target), atStart: false)
-            NSApp.sendEvent(try mouse(.leftMouseDown, point, in: target))
-            while let pending = NSApp.nextEvent(matching: [.leftMouseUp], until: Date(), inMode: .default, dequeue: true) {
-                NSApp.sendEvent(pending)
-            }
-        }
         func key(_ characters: String, keyCode: UInt16) throws {
             guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,

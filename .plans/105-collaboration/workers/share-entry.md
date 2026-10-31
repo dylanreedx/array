@@ -174,3 +174,43 @@ Defects the witness caught while it was being written:
 - A marquee over one tile drew no ring, because the overlay only drew for 2+
   tiles. The first assertion checked a hidden flag and passed. Marquee mode now
   draws rings only, for any count, and the witness counts drawn rings.
+
+## A real Share against a local relay (after parts 2 and 3 merged)
+
+`ShareEntryChecks` drives the popover against recorders for parts 1 and 2.
+`ShareEntryRelayChecks`, the next stage of `--collaboration-native-check`,
+drives the real thing. On branch `array/mp-share-real-witness`, off
+`array/collaboration-finish` cfbbe5a1:
+
+- **The relay.** It starts `continuum-relay` from beside the Array binary on
+  loopback, with its own databases and keys, as
+  `scripts/check-collaboration-pair.py` does. It enrolls the sender with
+  `continuum-relay --collaboration-enroll`.
+- **The account.** The production `CollaborationAccountController` enrolls
+  over HTTP. Only its credential vault is in memory.
+- **The production services.** The check installs them as is:
+  `AppDelegate.shareLinks` and the delegate's own `SharedZoneCreating`. Copy
+  goes to a private pasteboard.
+- **A real header Share click, then Copy, through `NSApp.sendEvent`.** It
+  asserts that:
+  - the agent's tile becomes a projectless shared zone with its own view;
+  - no runner is built, and the record stays bound to its tile;
+  - the relay's area holds the agent as an observation;
+  - the relay's link, with its slug and token, is on the pasteboard (it now
+    carries the relay, `…?r=127.0.0.1:<port>#<token>`);
+  - the relay lists the link as active.
+- **A slug collision.** A second agent's share uses the first link's slug. It
+  asserts that:
+  - the relay refuses with 409, and the popover shows `slugTaken`;
+  - the tile is back in its home zone with the same view and the same world
+    frame;
+  - no shared zone is left behind, and the first share is untouched;
+  - the pasteboard still holds the first link.
+- **Mutations, both RED at "the refused share puts the tile back in its home
+  zone, same view, same frame":**
+  - the session skips `cancelSharedZone` after a refused mint;
+  - `AppDelegate.cancelSharedZone` skips `closeSharedAreaZone`.
+
+`ShareEntryChecks.mountScene` is now shared by both stages.
+`qaInstallShareEntry` takes optional services, and an omitted one stays
+production.
