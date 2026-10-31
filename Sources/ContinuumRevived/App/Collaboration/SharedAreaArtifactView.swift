@@ -251,5 +251,8 @@ final class SharedAreaArtifactView: NSView {
         summary.textColor = TextToken.textPrimary.color.nsColor(in: self)
         for label in [applicability, coverage] { label.textColor = TextToken.textSecondary.color.nsColor(in: self) }
         text.backgroundColor = SurfaceToken.tileBody.color.nsColor(in: self)
+        // Plain messages ("Loading", "No included content") take the view's own colour;
+        // render() re-applies the diff colours after an appearance change.
+        text.textColor = TextToken.textPrimary.color.nsColor(in: self)
     }
 }
