@@ -216,7 +216,7 @@ private func checkOutboxV2Migration(_ log: OutboxLog) async throws {
                        arguments: [registration.uuidString, "v2-accepted-decision", UUID().uuidString, 1000, 1000])
     }
     let upgraded = try RelayStore(path: path, masterKey: key, outboxTrace: log.append)
-    try verify(try await upgraded.health().schemaVersion == 4, "v2 migrates additively to outbox schema")
+    try verify(try await upgraded.health().schemaVersion == 5, "v2 migrates additively to outbox schema")
     try verify(try await upgraded.authenticate("v2-phone-credential").deviceID == device, "upgrade preserves credential authority")
     try verify(try await upgraded.pushRegistrations(instanceID: instance).first?.token == token, "upgrade preserves encrypted registration")
     try verify(try await upgraded.claimPushDecision(registrationID: registration, decisionKey: "v2-accepted-decision") == nil, "upgrade cannot re-alert accepted v2 identity")

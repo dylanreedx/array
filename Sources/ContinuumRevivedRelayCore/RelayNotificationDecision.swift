@@ -50,3 +50,18 @@ public struct RelayNotificationTrace: Codable, Sendable, Equatable {
         print("relay.notification \(line)")
     }
 }
+
+/// One line per delivered task batch: how many tasks it carried and how many
+/// landed on each T-path. Per-alert outcomes stay in the outbox traces.
+public struct RelayTaskBatchTrace: Codable, Sendable, Equatable {
+    public let instanceID: UUID
+    public let eventSequence: Int64
+    public let tasks: Int
+    public let paths: [String: Int]
+
+    public func log() {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(self), let line = String(data: data, encoding: .utf8) else { return }
+        print("relay.notification.batch \(line)")
+    }
+}

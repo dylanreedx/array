@@ -85,15 +85,18 @@ public actor RelayAPNSService<Transport: RelayAPNSTransport>: RelayEventPushDeli
     private let signingKey: P256.Signing.PrivateKey
     private var cachedAuthorization: (value: String, createdAt: Date)?
     private let trace: @Sendable (RelayNotificationTrace) -> Void
+    private let batchTrace: @Sendable (RelayTaskBatchTrace) -> Void
     private let clock: @Sendable () -> Date
 
     public init(store: RelayStore, configuration: RelayAPNSConfiguration, transport: Transport,
                 trace: @escaping @Sendable (RelayNotificationTrace) -> Void = RelayNotificationTrace.log,
+                batchTrace: @escaping @Sendable (RelayTaskBatchTrace) -> Void = { $0.log() },
                 clock: @escaping @Sendable () -> Date = { Date() }) throws {
         self.store = store
         self.configuration = configuration
         self.transport = transport
         self.trace = trace
+        self.batchTrace = batchTrace
         self.clock = clock
         signingKey = try P256.Signing.PrivateKey(pemRepresentation: configuration.privateKeyPEM)
     }
@@ -107,7 +110,7 @@ public actor RelayAPNSService<Transport: RelayAPNSTransport>: RelayEventPushDeli
         await deliver(event: event, instanceID: instanceID, committed: true)
     }
 
-    private func deliver(event: RelayEvent, instanceID: UUID, committed: Bool, alertOnly: Bool = false) async {
+    private func deliver(event: RelayEvent, instanceID: UUID, committed: Bool) async {
         let decision = RelaySystemSurfaceProjection.evaluate(event: event, instanceID: instanceID)
         func record(_ outcome: RelayNotificationTrace.Outcome, registration: RelayStoredPushRegistration? = nil, code: Int? = nil) {
             trace(.init(path: decision.path, instanceID: instanceID, eventSequence: event.sequence,
@@ -131,7 +134,7 @@ public actor RelayAPNSService<Transport: RelayAPNSTransport>: RelayEventPushDeli
         guard let projection = decision.projection else { record(.unprojectable); return }
         do {
             if !committed { try await store.supersedeAlerts(projection: projection, now: clock()) }
-            let registrations = try await store.pushRegistrations(instanceID: instanceID).filter { !alertOnly || $0.kind == .apns }
+            let registrations = try await store.pushRegistrations(instanceID: instanceID)
             guard !registrations.isEmpty else { record(.noRecipients); return }
             let authorization = try authorizationHeader(now: clock())
             for registration in registrations {
@@ -185,12 +188,18 @@ public actor RelayAPNSService<Transport: RelayAPNSTransport>: RelayEventPushDeli
             let batch = try JSONDecoder().decode(RelayTaskBatch.self, from: event.payload)
             guard let owner = try await store.taskNotificationOwner(instanceID: instanceID),
                   owner.publisherID == batch.publisherID, owner.revision == batch.revision else { RelayNotificationOwnershipPath.stale.log(); return }
+            // Publication already decided every task and queued any alert in its
+            // transaction. Delivery drains once and logs one line per batch, not
+            // a read, a drain and a trace for every task the Mac still knows.
             var projections: [RelaySystemSurfaceProjection] = []
+            var paths: [String: Int] = [:]
             for task in batch.tasks {
-                let payload = try JSONEncoder().encode(task)
-                if let projection = RelaySystemSurfaceProjection.project(event: .init(kind: "task.state.v1", payload: payload), instanceID: instanceID) { projections.append(projection) }
-                await deliver(event: .init(sequence: event.sequence, kind: "task.state.v1", payload: payload), instanceID: instanceID, committed: true, alertOnly: true)
+                let decision = RelaySystemSurfaceProjection.evaluate(event: .init(kind: "task.state.v1", payload: try JSONEncoder().encode(task)), instanceID: instanceID)
+                paths[decision.path.rawValue, default: 0] += 1
+                if let projection = decision.projection { projections.append(projection) }
             }
+            let registrations = try await store.pushRegistrations(instanceID: instanceID)
+            if registrations.contains(where: { $0.kind == .apns }) { await drainAlerts(instanceID: instanceID) }
             let running = projections.reduce(0) { $0 + $1.runningCount }, attention = projections.reduce(0) { $0 + $1.attentionCount }
             let terminal = !projections.isEmpty && projections.allSatisfy(\.terminal)
             let failed = projections.contains { $0.terminalOutcome == "failed" }
@@ -200,9 +209,11 @@ public actor RelayAPNSService<Transport: RelayAPNSTransport>: RelayEventPushDeli
                 runningCount: running, attentionCount: attention, terminal: terminal, notification: nil,
                 terminalOutcome: terminal ? (failed ? "failed" : (cancelled ? "cancelled" : "succeeded")) : nil,
                 notificationIdentity: "task-batch-\(batch.publisherID)-\(batch.revision)")
-            guard let latest = try await store.taskNotificationOwner(instanceID: instanceID), latest == owner else { return }
+            guard let latest = try await store.taskNotificationOwner(instanceID: instanceID), latest == owner else {
+                batchTrace(.init(instanceID: instanceID, eventSequence: event.sequence, tasks: batch.tasks.count, paths: paths)); return
+            }
             let authorization = try authorizationHeader(now: clock())
-            for registration in try await store.pushRegistrations(instanceID: instanceID) where registration.kind != .apns {
+            for registration in registrations where registration.kind != .apns {
                 // Task ownership never repeatedly creates Live Activities. Existing
                 // update tokens and background refresh still receive one aggregate.
                 guard registration.kind != .liveActivityStart,
@@ -213,6 +224,8 @@ public actor RelayAPNSService<Transport: RelayAPNSTransport>: RelayEventPushDeli
                     decisionID: aggregate.notificationIdentity, registrationKind: registration.kind.rawValue, registrationID: registration.id,
                     deviceID: registration.deviceID, outcome: response.statusCode == 200 ? .acceptedByApple : .rejectedByApple, statusCode: response.statusCode))
             }
+            // Last, so the line also marks this batch's delivery as finished.
+            batchTrace(.init(instanceID: instanceID, eventSequence: event.sequence, tasks: batch.tasks.count, paths: paths))
         } catch { RelayNotificationOwnershipPath.deliveryFailure.log() }
     }
 

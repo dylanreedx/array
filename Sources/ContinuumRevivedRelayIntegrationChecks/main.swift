@@ -8,3 +8,5 @@ do { try await runRelayHTTPOutboxChecks() }
 catch { print("FAIL relay HTTP outbox behavior: \(error)"); exit(1) }
 do { try await runRelayTaskOwnershipChecks() }
 catch { print("FAIL relay task ownership: \(error)"); exit(1) }
+do { try await runRelayTaskBatchLoadChecks() }
+catch { print("FAIL relay task batch load: \(error)"); exit(1) }

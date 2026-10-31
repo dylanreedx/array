@@ -48,10 +48,12 @@ extension RelayStore {
                 guard old == hash else { RelayNotificationOwnershipPath.revisionConflict.log(); throw RelayStoreError.notificationRevisionConflict }
             }
         }
-        try db.execute(sql: """
-            INSERT INTO notification_ownership(instance_id,publisher_id,revision,payload_hash) VALUES (?,?,?,?)
-            ON CONFLICT(instance_id) DO UPDATE SET revision=excluded.revision,payload_hash=excluded.payload_hash
-            """, arguments: [instanceID.uuidString, batch.publisherID.uuidString, Int64(batch.revision), hash])
+        // A task whose decision identity matches the one this owner last decided
+        // has nothing new to supersede, record or enqueue. Skipping it keeps a
+        // full-batch publication proportional to what changed (T-02..T-07).
+        let decided: [UUID: String] = try previous == nil ? [:] : (Data.fetchOne(db, sql: "SELECT task_keys FROM notification_ownership WHERE instance_id=?",
+            arguments: [instanceID.uuidString]).flatMap { try? JSONDecoder().decode([UUID: String].self, from: $0) } ?? [:])
+        var keys: [UUID: String] = [:]
         // Switching owners and dropping outstanding legacy intents are one commit.
         // The first full task snapshot is a quiet baseline, not a replay of history.
         var traces: [RelayOutboxTrace] = []
@@ -68,6 +70,7 @@ extension RelayStore {
             """, arguments: [instanceID.uuidString]).compactMap { UUID(uuidString: $0["id"]) }
         for (task, decision) in zip(batch.tasks, decisions) {
             let projection = decision.projection!
+            if decided[task.taskID] == projection.notificationIdentity { keys[task.taskID] = projection.notificationIdentity; continue }
             traces += try supersedeOutbox(db, projection: projection, now: now, authoritativeRevision: true)
             // A recipient cohort belongs to the decision identity forever, not
             // merely until another state is selected. Otherwise unknown/recovery
@@ -82,12 +85,20 @@ extension RelayStore {
                 INSERT INTO notification_task_decisions(instance_id,task_id,decision_key,recipients) VALUES (?,?,?,?)
                 ON CONFLICT(instance_id,task_id,decision_key) DO NOTHING
                 """, arguments: [instanceID.uuidString, task.taskID.uuidString, projection.notificationIdentity, try JSONEncoder().encode(recipients)])
-            guard let intent = try RelayOutboxIntent(projection: projection) else { continue }
+            guard let intent = try RelayOutboxIntent(projection: projection) else { keys[task.taskID] = projection.notificationIdentity; continue }
+            var rejected = false
             for registration in recipients where registrations.contains(registration) {
-                traces.append(try enqueueOutbox(db, instanceID: instanceID, registrationID: registration, intent: intent,
-                                               eventSequence: event.sequence, key: key, now: now).1)
+                let (result, trace) = try enqueueOutbox(db, instanceID: instanceID, registrationID: registration, intent: intent,
+                                                        eventSequence: event.sequence, key: key, now: now)
+                traces.append(trace); rejected = rejected || result == .capacityRejected
             }
+            // A capacity-rejected intent stays undecided so the next batch retries it.
+            if !rejected { keys[task.taskID] = projection.notificationIdentity }
         }
+        try db.execute(sql: """
+            INSERT INTO notification_ownership(instance_id,publisher_id,revision,payload_hash,task_keys) VALUES (?,?,?,?,?)
+            ON CONFLICT(instance_id) DO UPDATE SET revision=excluded.revision,payload_hash=excluded.payload_hash,task_keys=excluded.task_keys
+            """, arguments: [instanceID.uuidString, batch.publisherID.uuidString, Int64(batch.revision), hash, try JSONEncoder().encode(keys)])
         return traces
     }
 }

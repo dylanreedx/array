@@ -22,17 +22,23 @@ public struct RelayStoredPushRegistration: Sendable, Equatable {
 /// Durable, per-Mac relay state. All mutations are transactions and all externally
 /// supplied secrets are reduced to SHA-256 digests before storage.
 public actor RelayStore {
-    public static let schemaVersion = 4
+    public static let schemaVersion = 5
     // Module-owned helpers implement the outbox transaction in a separate file.
     let database: DatabaseQueue
     let encryptionKey: SymmetricKey
     let outboxTrace: @Sendable (RelayOutboxTrace) -> Void
     private let eventTailLimit: Int
 
+    /// `statementObserver` sees every executed SQL statement. Checks use it to
+    /// count the database work one publication costs; production passes nil.
     public init(path: String, masterKey: Data, eventTailLimit: Int = 2_000,
-                outboxTrace: @escaping @Sendable (RelayOutboxTrace) -> Void = RelayOutboxTrace.log) throws {
+                outboxTrace: @escaping @Sendable (RelayOutboxTrace) -> Void = RelayOutboxTrace.log,
+                statementObserver: (@Sendable () -> Void)? = nil) throws {
         guard masterKey.count >= 32 else { throw RelayStoreError.unauthorized }
         var configuration = Configuration()
+        if let statementObserver {
+            configuration.prepareDatabase { db in db.trace(options: .statement) { _ in statementObserver() } }
+        }
         // Old/new workers can overlap briefly during recovery. GRDB otherwise
         // fails immediately on another connection's writer lock; bound the wait
         // rather than losing a valid publication or notification preparation.
@@ -144,6 +150,14 @@ public actor RelayStore {
                   PRIMARY KEY(instance_id,task_id,decision_key)
                 );
                 UPDATE relay_metadata SET value='4' WHERE key='schema_version';
+                """)
+        }
+        migrator.registerMigration("relay-task-decision-keys") { db in
+            // Each task's last decided identity, so an unchanged task in the
+            // next full batch costs no queries. NULL means "decide every task".
+            try db.execute(sql: """
+                ALTER TABLE notification_ownership ADD COLUMN task_keys BLOB;
+                UPDATE relay_metadata SET value='5' WHERE key='schema_version';
                 """)
         }
         return migrator

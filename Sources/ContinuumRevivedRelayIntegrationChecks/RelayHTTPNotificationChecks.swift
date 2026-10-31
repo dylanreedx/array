@@ -75,8 +75,8 @@ private actor RecordingAPNs: RelayAPNSTransport {
     func count() -> Int { requests.count }
 }
 
-private func nextTrace(_ stream: AsyncStream<RelayNotificationTrace>) async throws -> RelayNotificationTrace {
-    try await withThrowingTaskGroup(of: RelayNotificationTrace.self) { group in
+private func nextTrace<Trace: Sendable>(_ stream: AsyncStream<Trace>) async throws -> Trace {
+    try await withThrowingTaskGroup(of: Trace.self) { group in
         group.addTask {
             for await trace in stream { return trace }
             throw IntegrationFailure(description: "notification trace ended")
@@ -105,10 +105,11 @@ func runRelayHTTPNotificationChecks() async throws {
     try await store.savePushToken(auth: phoneAuth, kind: .apns, token: Data("fixture-only-token".utf8))
     let transport = RecordingAPNs()
     let traces = AsyncStream<RelayNotificationTrace>.makeStream(bufferingPolicy: .bufferingNewest(16))
-    defer { traces.continuation.finish() }
+    let batches = AsyncStream<RelayTaskBatchTrace>.makeStream(bufferingPolicy: .bufferingNewest(16))
+    defer { traces.continuation.finish(); batches.continuation.finish() }
     let delivery = try RelayAPNSService(store: store,
         configuration: .init(keyID: "fixture", teamID: "fixture", privateKeyPEM: P256.Signing.PrivateKey().pemRepresentation),
-        transport: transport, trace: { _ = traces.continuation.yield($0) })
+        transport: transport, trace: { _ = traces.continuation.yield($0) }, batchTrace: { _ = batches.continuation.yield($0) })
     let server = RelayServer(store: store, configuration: .init(host: "127.0.0.1", publicPort: 0, adminPort: 0), pushDelivery: delivery)
     try await server.start()
     do {
@@ -186,7 +187,7 @@ func runRelayHTTPNotificationChecks() async throws {
         }
         try require(try await request("GET", "/health") == 200, "relay remains healthy after oversized ingress")
         try await store.savePushToken(auth: try await store.authenticate(replayPhone.credential), kind: .apns, token: Data("task-fixture-token".utf8))
-        try await runHTTPTaskPolicyChecks(port: port, credential: desktop.credential, transport: transport, traces: traces.stream)
+        try await runHTTPTaskPolicyChecks(port: port, credential: desktop.credential, transport: transport, traces: traces.stream, batches: batches.stream)
         var ownerRequest = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v2/notification-owner")!)
         ownerRequest.setValue("Bearer \(desktop.credential)", forHTTPHeaderField: "authorization")
         let (ownerData, ownerResponse) = try await URLSession.shared.data(for: ownerRequest)
@@ -205,7 +206,8 @@ func runRelayHTTPNotificationChecks() async throws {
 }
 
 @inline(never)
-private func runHTTPTaskPolicyChecks(port: Int, credential: String, transport: RecordingAPNs, traces: AsyncStream<RelayNotificationTrace>) async throws {
+private func runHTTPTaskPolicyChecks(port: Int, credential: String, transport: RecordingAPNs, traces: AsyncStream<RelayNotificationTrace>,
+                                     batches: AsyncStream<RelayTaskBatchTrace>) async throws {
     func publishRequest(_ body: Data) async throws -> Int {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v2/events")!)
         request.httpMethod = "POST"; request.httpBody = body; request.timeoutInterval = 30
@@ -219,7 +221,10 @@ private func runHTTPTaskPolicyChecks(port: Int, credential: String, transport: R
     var revision: UInt64 = 1
     let baseline = try JSONEncoder().encode(RelayPublishRequest(kind: "task.batch.v1", payload: JSONEncoder().encode(RelayTaskBatch(publisherID: publisherID, revision: revision, tasks: []))))
     try require(try await publishRequest(baseline) == 201, "task owner baseline must commit")
-    func publishTask(child: RelayTaskState.State) async throws -> RelayNotificationTrace {
+    _ = try await nextTrace(batches)
+    // One batch line per delivered batch; it lands after the drain, so the
+    // transport count read next is final for that publication.
+    func publishTask(child: RelayTaskState.State) async throws -> RelayTaskBatchTrace {
         let value = RelayTaskState(taskID: taskID, rootRunID: rootRun, membershipComplete: true, members: [
             .init(agentID: taskRoot, runID: rootRun, state: .succeeded),
             .init(agentID: taskChild, runID: childRun, parentRunID: rootRun, state: child),
@@ -228,23 +233,24 @@ private func runHTTPTaskPolicyChecks(port: Int, credential: String, transport: R
         let batch = RelayTaskBatch(publisherID: publisherID, revision: revision, tasks: [value])
         let body = try JSONEncoder().encode(RelayPublishRequest(kind: "task.batch.v1", payload: try JSONEncoder().encode(batch)))
         try require(try await publishRequest(body) == 201, "HTTP task publication must persist")
-        // Discard bounded fixture traces from preceding payload-limit checks.
-        for _ in 0..<32 {
-            let trace = try await nextTrace(traces)
-            if trace.path.rawValue.hasPrefix("T-") { return trace }
-        }
-        throw IntegrationFailure(description: "no task decision trace")
+        return try await nextTrace(batches)
     }
     let blocked = try await publishTask(child: .running)
     let blockedCount = await transport.count()
-    try require(blocked.path == .taskActive && blocked.outcome == .suppressed && blockedCount == 1,
+    try require(blocked.paths == ["T-03": 1] && blockedCount == 1,
                 "HTTP parent completion while child runs must produce no alert")
     let settled = try await publishTask(child: .succeeded)
     let settledCount = await transport.count()
-    try require(settled.path == .taskCompletion && settled.outcome == .acceptedByApple && settledCount == 2,
+    // Discard bounded fixture traces from preceding payload-limit checks.
+    var accepted: RelayNotificationTrace?
+    for _ in 0..<32 {
+        let trace = try await nextTrace(traces)
+        if trace.path == .taskCompletion { accepted = trace; break }
+    }
+    try require(settled.paths == ["T-06": 1] && accepted?.outcome == .acceptedByApple && settledCount == 2,
                 "HTTP task settlement must send exactly one root completion")
     let replayed = try await publishTask(child: .succeeded)
     let replayedCount = await transport.count()
-    try require(replayed.outcome == .deduplicated && replayedCount == 2,
+    try require(replayed.paths == ["T-06": 1] && replayedCount == 2,
                 "HTTP task snapshot replay must not send another completion")
 }

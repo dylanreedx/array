@@ -123,6 +123,28 @@ Apple failure handling and deep links. Terminal collapse is per task rather than
 instance; terminal identity is stable across snapshot reorder/replay and distinct
 for a new task using the same agents. Existing DEL/SUR delivery paths still apply;
 Task mode suppresses push-to-start and publishes one workspace aggregate to existing update tokens/widgets; simultaneous attention fanout remains outstanding.
+Cost and logging of a task batch. A `task.batch.v1` publication carries every
+task the Mac still knows (336 in production on 31 October 2026). The relay
+re-decides only a task whose decision identity differs from the one it last
+recorded for that owner (`notification_ownership.task_keys`, relay schema 5).
+An unchanged task costs no query, no outbox work and no log line. A task whose
+alert the outbox refused for capacity stays undecided, so the next batch queues
+it. Delivery drains the outbox once per batch and logs one
+`relay.notification.batch` line: the event, the task count and the count per
+T-path. Per-alert outcomes (queued, superseded, acceptedByApple,
+deduplicated...) remain in the outbox and delivery traces. What changed:
+T-02/T-03/T-07 no longer log a per-task `suppressed` trace on every batch, and
+a republished terminal no longer logs a per-task `deduplicated` trace. The
+republish still sends nothing. Before this, every batch re-decided, re-queried,
+drained and logged every task: 5,318 SQL statements and 401 log lines per
+event at 400 tasks, which stalled the production relay's health endpoint for up
+to ~45 s. Witnesses (RelayIntegrationChecks, reported by the matrix and
+`scripts/check-relay-linux.sh`): `task batch load` asserts that per-event
+statements and log lines are the same at 40 and 400 known tasks (30 and 0), and
+that a completion alerts once; `task batch capacity` asserts that a
+capacity-refused completion is queued by the next batch. The HTTP task policy
+check reads T-paths from the batch line. Each was RED under its mutation.
+
 The alert outbox below now applies in source; no settle window has been added. Host lifecycle and ownership have offline checks; physical phone receipt/display and exact-task navigation remain unverified. Matrix evidence is recorded in the slice handoff.
 
 Evaluate top to bottom against the selected object. Conditions overlap; order
