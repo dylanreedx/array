@@ -124,7 +124,9 @@ def stage_freshness(h, a, b):
 def stage_endorsements(h, a, b):
     """COL-12: revision-bound endorsement, then a concurrent edit that keeps
     the losing author's draft as a conflict instead of overwriting."""
-    latest = b.call("status")["contexts"][-1]["id"]
+    # At least two revisions, so endorsing the wrong one is distinguishable.
+    a.call("edit", text="FEATURES revision before the endorsement"); h.converge(a, b)
+    latest = field(b.call("status"), "currentAgreement")
     op(b, "endorse")
     h.converge(a, b)
     assert any(e["revision"] == latest and e["person"] == b.ready["person"] for e in field(a.call("status"), "endorsements")), "endorsement lost its revision"
@@ -163,20 +165,31 @@ def stage_follow(h, a, b):
 
 
 def stage_compaction(h, a, b):
-    """COL-19: a teammate offline across compaction rejoins by resnapshot.
-    The relay runs with the retention overrides FeatureHarness sets (tail 16,
-    batch 32, age 0), so 120 posts must move the horizon past B's cursor."""
+    """COL-19: the relay compacts past a live teammate's cursor while B's
+    update requests are held; released, B must resnapshot, not stall on the
+    retired cursor. A newcomer joining after compaction gets all history.
+    The relay runs with FeatureHarness's retention (tail 16, batch 32, age 0)."""
     before = b.call("status")["revision"]
-    b.kill_abrupt()
+    h.proxies[1].pause()
+    a.call("edit", text="FEATURES compaction barrier")
+    wait_for(lambda: h.proxies[1].blocked > 0, "B's update requests are held")
     op(a, "burst", count=120, timeout=180)
     backup = h.root / "compaction-probe.sqlite"
     run = pair.subprocess.run([str(h.relay), "--collaboration-backup", str(backup)], cwd=h.checkout, env=h.env, capture_output=True, text=True, timeout=60)
     report = pair.json.loads(run.stdout.splitlines()[0]) if run.returncode == 0 else {}
     assert report.get("compactedAreas", 0) >= 1, f"relay did not compact: {run.stdout} {run.stderr}"
     assert a.call("status")["revision"] - 16 - 32 > before, "horizon cannot have passed B's cursor"
-    b.start(); left, right = h.converge(a, b, timeout=70)
+    h.proxies[1].resume()
+    left, right = h.converge(a, b, timeout=70)
     assert left["documentHash"] == right["documentHash"] and right["posts"] == left["posts"]
-    return "B, offline while the relay compacted past its cursor, relaunches and resnapshots to an identical document"
+    proxy = pair.Proxy(h.port); h.proxies.append(proxy)
+    late = pair.Peer(h, "C", h.enroll("C"), proxy); late.ready = late.start()
+    try:
+        late.call("join", invitation=a.call("invite", person=late.ready["person"])["invitation"])
+        joined, mine = h.converge(late, a, timeout=70)
+        assert joined["posts"] == mine["posts"] and set(joined["postIDs"]) == set(mine["postIDs"]), "a late joiner lost compacted history"
+    finally: late.close()
+    return "B, held behind the relay's compaction horizon while live, resnapshots to an identical document; a teammate joining after compaction receives every post"
 
 
 def stage_harnesses(h, a, b):

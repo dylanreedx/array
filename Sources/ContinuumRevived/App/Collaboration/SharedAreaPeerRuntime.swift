@@ -204,6 +204,8 @@ enum SharedAreaPeerRuntime {
                             "hostState": liveness.map { String(describing: $0.state) } ?? "unknown",
                             "hostLine": SharedAreaHostLivenessCopy.cardLine(liveness)]
                 }
+                result["currentAgreement"] = document.items.first(where: { $0.kind == .agreement })
+                    .flatMap { document.currentRevision(of: $0.id)?.id.rawValue.uuidString } ?? NSNull()
                 result["artifactHeads"] = controller.artifactHeads.map { ["object": $0.object.rawValue.uuidString, "revision": $0.revision.rawValue.uuidString, "sequence": $0.sequence] as [String: Any] }
             }
             if let scene {
