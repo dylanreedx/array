@@ -4,6 +4,12 @@ import ContinuumRevivedCollaborationProtocol
 
 /// Artifact routes for one admitted area (COL-16). Reads return verified bytes
 /// in memory; nothing here accepts a path on the reading machine.
+/// An upload pass that could not run: not connected, or no artifact transport.
+public struct SharedAreaArtifactUploadDeferral: Error, Equatable {
+    public let status: SharedAreaController.Status
+    public let hasTransport: Bool
+}
+
 public protocol SharedAreaArtifactTransport: Sendable {
     func artifactState(object: UUID) async throws -> Collaboration.Artifact.State
     func readArtifact(object: UUID, revision: UUID?) async throws -> CollaborationArtifactContents

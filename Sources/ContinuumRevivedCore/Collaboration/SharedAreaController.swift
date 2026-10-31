@@ -400,9 +400,14 @@ public final class SharedAreaController {
         guard uploadPass == nil, localStore.hasStagedUploads else { return }
         Task { [weak self] in await self?.uploadStagedArtifacts() }
     }
+    /// Why the most recent staged upload did not land; nil after a clean pass.
+    public private(set) var lastArtifactUploadError: (any Error)?
     private func runUploadPass() async {
+        lastArtifactUploadError = nil
         for upload in localStore.stagedUploads() {
-            guard status == .connected, let transport = artifactTransport, let epoch = scope?.epoch, let document else { return }
+            guard status == .connected, let transport = artifactTransport, let epoch = scope?.epoch, let document else {
+                lastArtifactUploadError = SharedAreaArtifactUploadDeferral(status: status, hasTransport: artifactTransport != nil); return
+            }
             let object = upload.manifest.object
             guard document.items.contains(where: { $0.id == object && $0.kind == .artifact }) else {
                 // Never admitted (refused, or never sent) or since removed.
@@ -416,7 +421,7 @@ public final class SharedAreaController {
                     _ = try await transport.publishArtifact(epoch: epoch, capture: upload.capture)
                 }
                 localStore.removeStagedUpload(revision: upload.manifest.id)
-            } catch { continue }
+            } catch { lastArtifactUploadError = error; continue }
         }
     }
 
