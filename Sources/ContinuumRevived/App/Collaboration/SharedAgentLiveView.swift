@@ -147,6 +147,7 @@ final class SharedAgentLiveView: NSView {
     @discardableResult
     func poll(_ selected: SharedArea.ID<SharedArea.Object>, ticket: UUID) async -> Bool {
         let cursor = replica.cursor
+        var more = false
         do {
             let value = try await read(selected, cursor)
             guard generation == ticket else { return false }
@@ -160,15 +161,18 @@ final class SharedAgentLiveView: NSView {
             case .applied:
                 confirmed = true; unavailable = false
             }
-            render()
-            if case .frames(_, _, true) = value { return true }
+            if case .frames(_, _, true) = value { more = true }
         } catch {
             guard generation == ticket else { return false }
             unavailable = true
-            render()
         }
+        // The receipt is read before anything is drawn, so one render is one
+        // moment: "Waiting for Dylan to approve" never sits beside a "Queued"
+        // the host has already moved past.
         await followDelivery()
-        return false
+        guard generation == ticket else { return false }
+        render()
+        return more
     }
 
     // MARK: - Full access
@@ -196,13 +200,14 @@ final class SharedAgentLiveView: NSView {
     }
 
     /// A queued prompt is followed to its outcome on the projection's beat.
+    /// Updates what the controls line will say; the poll draws it.
     private func followDelivery() async {
         guard let prompter, !sending, delivery != nil else { return }
         if prompter.pending != nil { await prompter.checkDelivery() }
         await prompter.refreshReceipt()
         let next = prompter.message.hasPrefix("Refused") && prompter.receipt?.phase == .refused
             ? prompter.message : Self.deliveryText(prompter.receipt?.phase)
-        if next != delivery { delivery = next; render() }
+        delivery = next
     }
 
     static func deliveryText(_ phase: Collaboration.AgentDispatchPhase?) -> String? {

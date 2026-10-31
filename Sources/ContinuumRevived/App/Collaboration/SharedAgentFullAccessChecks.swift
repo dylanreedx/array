@@ -246,29 +246,47 @@ enum SharedAgentFullAccessChecks {
                    "\(kind): two concurrent prompts both run once each, in arrival order (Sam, then Priya)")
 
         // 4. The agent stops to ask: only the owner's Mac shows the approval.
+        //    Receipts answer at a relay's pace here, so a view that renders the
+        //    projection before it has read its receipt is caught every time.
+        await service.setReceiptDelay(.milliseconds(300))
         let asking = "SLOW Sam's prompt that needs an approval."
         type(asking, into: samView); samView.qaPressSend()
         try await eventually("\(kind): the approval prompt never queued: \(samModel.message)") {
             samModel.receipt.map { $0.command.text == asking } == true
         }
         await coordinator.pollOnce()
-        try await eventually("\(kind): the approval prompt never started") { supervisor.isRunning(agent) && written(asking) == 1 }
+        // The agent asks in the same main-actor turn the host accepted Sam's
+        // prompt, before Sam's view has read that acceptance: the moment the
+        // gate once caught it showing "Waiting for Dylan" beside a stale
+        // "Queued". The host binds the runner before the poll returns.
+        guard supervisor.isRunning(agent) else { throw Failure(description: "full access: \(kind): the approval prompt never started") }
         supervisor.qaDeliver(.requestOpened(threadId: AgentSupervisor.threadId(for: agent), requestId: "full-access-approve-1",
                                             kind: .commandExecutionApproval), to: agent)
-        var ownerSees = false
-        if case .needsAction(let request)? = supervisor.turnSnapshot(for: agent)?.state { ownerSees = request.kind == .approval }
+        func ownerHoldsApproval() -> Bool {
+            if case .needsAction(let request)? = supervisor.turnSnapshot(for: agent)?.state { return request.kind == .approval }
+            return false
+        }
+        try await eventually("\(kind): the owner's supervisor never showed the approval (\(String(describing: supervisor.turnSnapshot(for: agent)?.state)))") {
+            ownerHoldsApproval()
+        }
+        let ownerSees = ownerHoldsApproval()
+        try await eventually("\(kind): the approval prompt never reached the runner: \(prompts)") { written(asking) == 1 }
         try await eventually("\(kind): Sam's view never said it is waiting on Dylan (\(samView.statusText))") {
             samView.statusText.hasPrefix("Waiting for Dylan to approve")
         }
         let wire = String(decoding: sink.batches.reduce(Data(), +), as: UTF8.self)
-        try expect(ownerSees && !wire.contains("full-access-approve-1") && !wire.contains("commandExecutionApproval")
-                   && !P.RemoteControls(host: projector.log.head.capabilities, role: .editor).approveProviderRequest
-                   && !Collaboration.Role.editor.allows(.approveProviderRequest)
+        let crossed = wire.contains("full-access-approve-1") || wire.contains("commandExecutionApproval")
+        let remoteRoute = P.RemoteControls(host: projector.log.head.capabilities, role: .editor).approveProviderRequest
+            || Collaboration.Role.editor.allows(.approveProviderRequest)
+        try expect(ownerSees && !crossed && !remoteRoute
                    && samView.offersComposer && samView.controlsText.contains("Approvals stay with its owner"),
-                   "\(kind): an approval opens on the owner's supervisor only; the teammate reads \"Waiting for Dylan to approve\", no request crosses and no approve route exists")
+                   "\(kind): an approval opens on the owner's supervisor only; the teammate reads \"Waiting for Dylan to approve\", no request crosses and no approve route exists"
+                   + " (owner sees \(ownerSees), crossed \(crossed), remote route \(remoteRoute), composer \(samView.offersComposer),"
+                   + " status \(samView.statusText.debugDescription), controls \(samView.controlsText.debugDescription))")
         supervisor.qaDeliver(.requestResolved(threadId: AgentSupervisor.threadId(for: agent), requestId: "full-access-approve-1", decision: "accept"), to: agent)
         _ = await supervisor.accept(.stop, for: agent)
         try await idle()
+        await service.setReceiptDelay(.zero)
         await coordinator.pollOnce()
 
         // 5. Removing Priya stops her prompting at once. A prompt she sent
@@ -378,6 +396,9 @@ enum SharedAgentFullAccessChecks {
         private var item: SharedArea.Item { document.items.first { $0.kind == .agentObservation }! }
         private func error(_ status: Int, _ code: String) -> CollaborationClientError { .server(status: status, code: code) }
         func phase(_ id: UUID) -> Collaboration.AgentDispatchPhase? { receipts[id]?.phase }
+        /// How long a requester's receipt read takes, as over a real relay.
+        var receiptDelay: Duration = .zero
+        func setReceiptDelay(_ value: Duration) { receiptDelay = value }
         func remove(_ person: SharedArea.ID<SharedArea.Person>) { members[person] = nil; epoch += 1 }
         private func scope(_ caller: Collaboration.Identity) throws -> Collaboration.Scope {
             guard let role = members[caller.person] else { throw error(404, "unavailable") }
@@ -413,7 +434,8 @@ enum SharedAgentFullAccessChecks {
             let receipt = Collaboration.AgentDispatchReceipt(command: command, phase: .queued)
             receipts[request.id] = receipt; order.append(request.id); return receipt
         }
-        func receipt(_ caller: Collaboration.Identity, _ id: UUID) throws -> Collaboration.AgentDispatchReceipt {
+        func receipt(_ caller: Collaboration.Identity, _ id: UUID) async throws -> Collaboration.AgentDispatchReceipt {
+            if receiptDelay > .zero, caller != owner { try await Task.sleep(for: receiptDelay) }
             _ = try scope(caller)
             guard let receipt = receipts[id], receipt.command.requester.person == caller.person || caller.person == owner.person else { throw error(403, "forbidden") }
             return receipt
