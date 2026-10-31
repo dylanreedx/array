@@ -342,6 +342,12 @@ public struct ZonePlacement: Equatable, Sendable {
     /// key here; the WorkspaceDocument decoder stamps positions from the
     /// legacy `zoneZOrder` array.
     public var zPosition: FracIndex
+    /// Set only on a shared area's zone: the area this person's canvas shows
+    /// here. Such a zone has no project, holds no project tiles and never arms
+    /// creation. Its origin is this person's own; the area's contents are
+    /// placed by the area's shared geometry, never written to a project's
+    /// `canvas.json` (`.plans/105-collaboration/IN-CANVAS.md`, option A).
+    public var sharedAreaId: UUID?
 
     public init(
         zoneId: UUID,
@@ -355,7 +361,8 @@ public struct ZonePlacement: Equatable, Sendable {
         autoLayoutMode: ZoneAutoLayoutMode = .inherit,
         name: String = "",
         navKey: String? = nil,
-        zPosition: FracIndex = .first
+        zPosition: FracIndex = .first,
+        sharedAreaId: UUID? = nil
     ) {
         self.zoneId = zoneId
         self.projectId = projectId
@@ -369,7 +376,11 @@ public struct ZonePlacement: Equatable, Sendable {
         self.name = name
         self.navKey = navKey
         self.zPosition = zPosition
+        self.sharedAreaId = sharedAreaId
     }
+
+    /// A shared area's zone (see `sharedAreaId`).
+    public var isSharedArea: Bool { sharedAreaId != nil }
 
     public var scope: ZoneScope {
         get { ZoneScope(projectId: projectId, homeRelativePath: homeRelativePath) }
@@ -398,6 +409,7 @@ public struct ZoneScope: Codable, Equatable, Sendable {
 extension ZonePlacement: Codable {
     enum CodingKeys: String, CodingKey, CaseIterable {
         case zoneId, projectId, homeRelativePath, origin, size, color, collapsed, hydrationPolicy, autoLayoutMode, name, navKey, zPosition
+        case sharedAreaId
     }
 
     public init(from decoder: Decoder) throws {
@@ -416,6 +428,12 @@ extension ZonePlacement: Codable {
         // Pre-v4 placeholder; the WorkspaceDocument decoder overwrites it from
         // the legacy zoneZOrder ranks so relative order is never collapsed.
         zPosition = try container.decodeIfPresent(FracIndex.self, forKey: .zPosition) ?? .first
+        sharedAreaId = try container.decodeIfPresent(UUID.self, forKey: .sharedAreaId)
+        // A shared area's zone is never a project zone.
+        if sharedAreaId != nil, projectId != nil {
+            throw DecodingError.dataCorruptedError(forKey: .sharedAreaId, in: container,
+                debugDescription: "a shared area zone cannot carry a project")
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -432,6 +450,7 @@ extension ZonePlacement: Codable {
         try container.encode(name, forKey: .name)
         try container.encodeIfPresent(navKey, forKey: .navKey)
         try container.encode(zPosition, forKey: .zPosition)
+        try container.encodeIfPresent(sharedAreaId, forKey: .sharedAreaId)
     }
 }
 

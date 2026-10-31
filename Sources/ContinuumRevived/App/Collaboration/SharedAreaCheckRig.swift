@@ -72,13 +72,17 @@ enum SharedAreaCheckRig {
             presence.removeValue(forKey: identity.device); try await broadcast()
         }
         func reported() { usageReports += 1 }
+        /// Host liveness as the service relays it with every frame.
+        private var hosts: [Collaboration.HostLiveness] = []
+        func setHosts(_ value: [Collaboration.HostLiveness]) async throws { hosts = value; try await broadcast() }
         private func broadcast() async throws {
             let everyone = Array(presence.values)
             for (identity, connection) in connections {
                 let scope = try scope(identity)
                 var replica = try CollaborationReplica(state: .init(scope: scope, document: document))
                 try replica.receive(.init(scope: scope, after: document.revision, through: document.revision, events: [],
-                    nextCursor: document.revision, presenceVersion: UUID(), presence: everyone, serverTime: Date()))
+                    nextCursor: document.revision, presenceVersion: UUID(), presence: everyone, serverTime: Date(),
+                    hosts: hosts.isEmpty ? nil : hosts))
                 await connection.emit(replica)
             }
         }

@@ -114,17 +114,40 @@ enum ShareLinkAppChecks {
         sender.qaAdoptCollaborationAccount(ownerAccount)
         let selection = SharedAreaPublication.Selection.tiles([.init(projectID: fixture.projectPb, tileID: fixture.agentTileB),
                                                               .init(projectID: fixture.projectPb, tileID: noteID)])
-        // Part 2 creates the area; publish-by-kind and the link are ours.
-        let area = try await ownerAccount.createArea(label: "Checkout redesign").document.id.rawValue
-        let objects = try await sender.shareLinks.publish(selection: selection, intoArea: area)
+        _ = selection
+        // The whole sender side in one call (part 2): create the area, publish
+        // by kind, open its zone here, lend the tiles to it and bind them.
+        let agentView = fixture.canvas.tileView(for: fixture.agentTileB), noteView = fixture.canvas.tileView(for: noteID)
+        let sourceFile = ProjectStore(projectRoot: fixture.tempRoot.appendingPathComponent("Pb")).layout.canvasFile
+        try fixture.runtime.flushMountedWorkspaceState()
+        let sourceBytes = try Data(contentsOf: sourceFile)
+        let share = try await sender.createSharedZone(fromTiles: [fixture.agentTileB, noteID], name: "Checkout redesign")
+        let area = share.areaId, objects = share.objects
         let published = await authority.document
+        let zone = fixture.runtime.sharedAreaZone(for: area)
+        guard let session = sender.qaSharedAreaZoneSessions.first(where: { $0.areaId == area }), let zone else {
+            throw Failure(message: "createSharedZone opened no zone")
+        }
+        let agentLent = fixture.canvas.lentTile(fixture.agentTileB)?.tile
+        try expect(zone.projectId == nil && zone.zoneId == share.zoneId && session.scene.isZone
+            && fixture.canvas.tileView(for: fixture.agentTileB) === agentView && fixture.canvas.tileView(for: noteID) === noteView
+            && agentLent?.object == objects[fixture.agentTileB]?.rawValue && fixture.canvas.lentTile(noteID) != nil
+            && objects[fixture.agentTileB].map { session.scene.locallyShownObjects.contains($0) } == true,
+            "createSharedZone opens a projectless zone and lends both tiles to it, same views, the agent bound to its object")
+        try expect(objects[fixture.agentTileB].flatMap { object in published.positions.last(where: { $0.object == object })?.rect }
+            == agentLent.map { SharedArea.Rect(x: $0.areaFrame.x, y: $0.areaFrame.y, width: $0.areaFrame.width, height: $0.areaFrame.height) },
+            "the agent's shared position is where its tile now sits in the zone")
+        try fixture.runtime.flushMountedWorkspaceState()
+        try expect(try Data(contentsOf: sourceFile) == sourceBytes,
+            "lending the tiles to the area writes nothing to their project's canvas.json")
+        let sessionsAfterShare = sender.qaSharedAreaZoneSessions.count
         try expect(Set(published.items.map(\.kind)) == [.agentObservation, .discussion] && published.positions.count == 2
             && objects[fixture.agentTileB].map { object in published.items.contains { $0.id == object } } == true,
             "publish-by-kind shares the agent as a live observation and the note as discussion, without a review window, and maps the agent tile to its object")
         let link = try await sender.shareLinks.createShareLink(area: area, slug: "checkout-redesign", lifetime: .once)
         let afterMint = await authority.document
         try expect(link.url.absoluteString == "https://arrayapp.dev/s/checkout-redesign?r=share-links.example.test#\(link.token)"
-            && link.lifetime == .once && sender.qaSharedAreaWindows.isEmpty && sender.qaSharedAreaCaptureWindows.isEmpty
+            && link.lifetime == .once && sender.qaSharedAreaZoneSessions.count == sessionsAfterShare && sender.qaSharedAreaCaptureWindows.isEmpty
             && afterMint == published,
             "createShareLink(area:) only mints a link carrying the relay; it creates, publishes and opens nothing")
         do {
@@ -135,18 +158,29 @@ enum ShareLinkAppChecks {
         try expect(true, "a relay slug collision surfaces as ShareLinkFailure.slugTaken")
 
         // Receivers: AppKit hands the URL to the delegate.
-        func receiverMac(_ identity: Collaboration.Identity, _ name: String) throws -> (AppDelegate, NSWindow, CollaborationAccountController) {
-            let delegate = AppDelegate()
-            let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 640, height: 420), styleMask: [.borderless], backing: .buffered, defer: false)
+        // A receiver is a Mac with a workspace open: the link lands the area
+        // as a zone on that canvas.
+        typealias Receiver = (AppDelegate, NSWindow, CollaborationAccountController, WorkspaceInvariantsFixture)
+        func receiverMac(_ identity: Collaboration.Identity, _ name: String) throws -> Receiver {
+            let workspace = try WorkspaceInvariantsFixture(label: "share-link-\(name)")
+            try workspace.mount()
+            let mounted = try workspace.requireMounted("share-link receiver")
+            let delegate = mounted.delegate
+            mounted.canvas.frame = .init(x: 0, y: 0, width: 1400, height: 900)
+            let window = NSWindow(contentRect: mounted.canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
+            window.contentView = mounted.canvas
             delegate.qaAttachWindowForOfflineCheck(window)
             window.orderFrontOffscreenForChecks()
             let model = try account(root: root.appendingPathComponent(name), identity: identity, authority: authority, links: links)
             delegate.qaAdoptCollaborationAccount(model)
-            return (delegate, window, model)
+            return (delegate, window, model, workspace)
         }
-        func deliver(_ url: URL, to mac: (AppDelegate, NSWindow, CollaborationAccountController), name: String? = nil) async throws -> ShareLinkOpenOutcome? {
-            let (delegate, window, model) = mac
+        func openZones(_ mac: Receiver) -> [SharedAreaZoneSession] {
+            mac.0.qaSharedAreaZoneSessions.filter { !$0.isClosed && $0.controller.document?.id.rawValue == area }
+        }
+        func deliver(_ url: URL, to mac: Receiver, name: String? = nil) async throws -> ShareLinkOpenOutcome? {
+            let (delegate, window, model, _) = mac
             let before = delegate.shareLinks.openCount
             delegate.application(NSApp, open: [url])
             for _ in 0..<500 {
@@ -166,34 +200,35 @@ enum ShareLinkAppChecks {
 
         // A brand-new person, no account anywhere: the link alone.
         let newcomer = try receiverMac(receiver, "receiver")
-        defer { newcomer.1.orderOut(nil) }
+        defer { newcomer.1.orderOut(nil); newcomer.3.dispose() }
         let redeemedBefore = await links.redeemed
         let joined = try await deliver(link.url, to: newcomer, name: "Sam")
         let redeemed = await links.redeemed, names = await links.joinedNames
         try expect(joined == .opened(area: area) && newcomer.2.status == .ready && newcomer.2.activeAccount?.label == "Sam"
             && names == ["Sam"] && redeemed == redeemedBefore && newcomer.0.qaCollaborationHub == nil,
             "a signed-out Mac joins from an https://arrayapp.dev/s/ link alone: one name sheet, no hub, no enrollment code")
-        try await SharedAreaCheckRig.eventually("receiver area open") {
-            newcomer.0.qaSharedAreaWindows.contains { $0.controller.document?.id.rawValue == area }
-        }
-        try expect(newcomer.0.qaSharedAreaWindows.count == 1, "the URL handler opens the admitted area")
-        for window in newcomer.0.qaSharedAreaWindows { window.window.close() }
+        try await SharedAreaCheckRig.eventually("receiver area open") { !openZones(newcomer).isEmpty }
+        let landed = newcomer.3.mounted?.runtime.sharedAreaZone(for: area)
+        try expect(openZones(newcomer).count == 1 && landed?.projectId == nil
+            && openZones(newcomer).first?.scene.superview === newcomer.3.mounted?.canvas.worldPlane,
+            "the URL handler opens the admitted area as a zone on the receiver's canvas")
+        for session in openZones(newcomer) { session.close() }
 
         let appForm = try await deliver(link.appURL, to: newcomer)
-        try await SharedAreaCheckRig.eventually("receiver area reopen") {
-            newcomer.0.qaSharedAreaWindows.contains { $0.controller.document?.id.rawValue == area }
-        }
+        try await SharedAreaCheckRig.eventually("receiver area reopen") { !openZones(newcomer).isEmpty }
+        try expect(newcomer.3.mounted?.runtime.sharedAreaZone(for: area)?.zoneId == landed?.zoneId,
+            "reopening lands the area in the same zone, at the receiver's own place for it")
         let devForm = try await deliver(ShareLinkURL.app(slug: link.slug, token: link.token, relay: link.relay, scheme: ShareLinkURL.devAppScheme), to: newcomer)
         let namesAfter = await links.joinedNames
         try expect(appForm == .opened(area: area) && devForm == .opened(area: area) && namesAfter == ["Sam"],
             "array:// and array-dev:// reach the same entry point and reopen with the saved account")
-        for window in newcomer.0.qaSharedAreaWindows { window.window.close() }
+        for session in openZones(newcomer) { session.close() }
 
         let wrong = try await deliver(URL(string: "array://s/checkout-redesign?r=share-links.example.test#\(String(repeating: "x", count: 43))")!, to: newcomer)
         let sheet = newcomer.1.attachedSheet
         let shown = sheet.map { textFields(in: $0.contentView).map(\.stringValue) } ?? []
         try expect(wrong == .refused(ShareLinkOpener.refusedMessage) && shown.contains(ShareLinkOpener.refusedMessage)
-            && newcomer.0.qaSharedAreaWindows.isEmpty, "a wrong token is refused and the refusal is shown on the canvas window")
+            && openZones(newcomer).isEmpty, "a wrong token is refused and the refusal is shown on the canvas window")
         if let sheet { newcomer.1.endSheet(sheet) }
 
         let before = newcomer.0.shareLinks.openCount
@@ -204,14 +239,26 @@ enum ShareLinkAppChecks {
         // A link without a relay still signs in through the hub's Connect.
         let reusable = try await sender.shareLinks.newLink(area: area, slug: "checkout-team", lifetime: .untilRevoked)
         let legacyMac = try receiverMac(enrolled, "enrolled")
-        defer { legacyMac.1.orderOut(nil) }
+        defer { legacyMac.1.orderOut(nil); legacyMac.3.dispose() }
         let legacy = try await deliver(ShareLinkURL.web(slug: reusable.slug, token: reusable.token), to: legacyMac)
         let redeemedAfter = await links.redeemed
         try expect(legacy == .opened(area: area) && legacyMac.2.status == .ready && redeemedAfter == redeemedBefore + 1
             && legacyMac.0.qaCollaborationHub?.window.title == "Collaboration",
             "a link without a relay on a signed-out Mac signs in inline through the hub's Connect, then admits")
-        for window in legacyMac.0.qaSharedAreaWindows { window.window.close() }
+        for session in openZones(legacyMac) { session.close() }
         legacyMac.0.qaCollaborationHub?.window.close()
+
+        // Undo the share: what it published leaves the area, the tiles go home
+        // with their own views, and the zone leaves the sender's canvas.
+        await sender.cancelSharedZone(areaId: area)
+        let afterCancel = await authority.document
+        try expect(fixture.canvas.lentTile(fixture.agentTileB) == nil && fixture.canvas.lentTile(noteID) == nil
+            && fixture.canvas.tileView(for: fixture.agentTileB) === agentView && fixture.canvas.tileView(for: noteID) === noteView
+            && fixture.canvas.zoneId(containing: fixture.agentTileB) != nil && fixture.runtime.sharedAreaZone(for: area) == nil
+            && objects.values.allSatisfy { object in !afterCancel.items.contains { $0.id == object } },
+            "cancelSharedZone takes the published items back out, returns the tiles home with their views and removes the zone")
+        try fixture.runtime.flushMountedWorkspaceState()
+        try expect(try Data(contentsOf: sourceFile) == sourceBytes, "after the undo, the project's canvas.json is as it was")
     }
 
     private static func fill(_ view: CollaborationHubView, endpoint: String, code: String) throws {

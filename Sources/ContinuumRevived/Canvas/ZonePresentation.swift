@@ -25,6 +25,10 @@ struct ZonePresentation: Equatable {
     var isProvisional: Bool
     var agentStatusRollup: CanvasNSView.AgentStatusRollup
     var qaVerdict: QARunManifestSnapshot?
+    /// A shared area's zone: its chrome takes the shared variant.
+    var isSharedArea = false
+    /// A shared area whose host is offline: dimmed, with a dashed edge.
+    var sharedHostOffline = false
 
     /// - Parameters:
     ///   - project: how the placement's project resolved; nil when unknown.
@@ -37,7 +41,8 @@ struct ZonePresentation: Equatable {
         isProvisional: Bool = false,
         rollup: CanvasNSView.AgentStatusRollup = .empty,
         qaVerdict: QARunManifestSnapshot? = nil,
-        fallbackTitle: String = ""
+        fallbackTitle: String = "",
+        sharedHostOffline: Bool = false
     ) -> ZonePresentation {
         let registered: ProjectEntry?
         if placement.projectId != nil, case let .registered(entry)? = project { registered = entry } else { registered = nil }
@@ -51,11 +56,14 @@ struct ZonePresentation: Equatable {
         } else if !fallbackTitle.isEmpty {
             title = fallbackTitle
         } else {
-            title = placement.projectId == nil ? "Group" : "Zone"
+            title = placement.isSharedArea ? "Shared area" : placement.projectId == nil ? "Group" : "Zone"
         }
 
         let homeLabel: String?
-        if isProvisional {
+        if placement.isSharedArea {
+            // A shared area has no Home: who hosts it is the area's own header.
+            homeLabel = nil
+        } else if isProvisional {
             homeLabel = "Choose a project to finish"
         } else if placement.projectId == nil {
             homeLabel = "Needs Project"
@@ -72,6 +80,7 @@ struct ZonePresentation: Equatable {
         }
         return ZonePresentation(
             title: title, homeLabel: homeLabel, isProvisional: isProvisional,
-            agentStatusRollup: rollup, qaVerdict: qaVerdict)
+            agentStatusRollup: rollup, qaVerdict: qaVerdict,
+            isSharedArea: placement.isSharedArea, sharedHostOffline: placement.isSharedArea && sharedHostOffline)
     }
 }

@@ -453,6 +453,9 @@ final class CanvasNSView: NSView, TokenThemed {
     /// CX-01: fired from `setViewport` when the writer is the user (camera driver
     /// or pointer pan). `WorkspaceRuntime.noteUserInteraction` listens.
     var onUserCameraChange: (() -> Void)?
+    /// Every applied camera, and whether the user moved it. A shared area's
+    /// zone publishes the part of the area in view, and a user move ends follow.
+    var onCameraApplied: ((CanvasViewport, Bool) -> Void)?
 
     /// Fired after a zone is renamed (inline edit committed) so the caller can
     /// persist the new name. Carries (zoneId, newName).
@@ -1939,7 +1942,7 @@ final class CanvasNSView: NSView, TokenThemed {
             let cy = tile.frame.y + tile.frame.height / 2
             guard let zone = liveZones.reversed().first(where: { placement in
                 let f = CanvasEngine.zoneWorldFrame(placement)
-                return cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height
+                return !placement.isSharedArea && cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height
             }) else { continue }
             setTileZone(tile.id, zoneId: zone.zoneId)
         }
@@ -1958,6 +1961,7 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     private func layoutZoneChromeViews() {
+        layoutSharedAreaLayers()
         guard showsZoneChrome else { return }
         // zone-unify P3: a zone renders at its STORED frame (placement), not an
         // adaptive hug. This keeps the size the user drew (room for more tiles),
@@ -2089,9 +2093,10 @@ final class CanvasNSView: NSView, TokenThemed {
         let cx = tile.frame.x + tile.frame.width / 2
         let cy = tile.frame.y + tile.frame.height / 2
         let current = tileZoneMembership[tileId]
+        // A drop never publishes: a shared area's zone adopts no tile by geometry.
         var containing = liveZones.reversed().first { z in
             let f = CanvasEngine.zoneWorldFrame(z)
-            return cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height
+            return !z.isSharedArea && cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height
         }
         if containing == nil, isAutoLayoutEnabled {
             // Attach-adoption: dropping a tile gap-flush against a zone member
@@ -2100,7 +2105,7 @@ final class CanvasNSView: NSView, TokenThemed {
             let gap = TileGapResolver.resolvedGap(defaults: autoLayoutDefaults)
             let sceneTiles = autoLayoutScene().tiles
             containing = liveZones.reversed().first { z in
-                sceneTiles.contains { member in
+                !z.isSharedArea && sceneTiles.contains { member in
                     member.zoneId == z.zoneId && member.id != tileId
                         && CanvasAutoLayoutEngine.isGapAdjacent(tile.frame, member.frame, gap: gap, tolerance: 6)
                 }
@@ -2395,7 +2400,7 @@ final class CanvasNSView: NSView, TokenThemed {
         for layer in zoneLayers {
             if let v = layer.tileViews[tileId] { return v }
         }
-        return nil
+        return lentTile(tileId)?.tile.view
     }
 
     /// Shows one contextual direct edge. Convenience for the common single-edge
@@ -4031,7 +4036,8 @@ final class CanvasNSView: NSView, TokenThemed {
 
     func setViewport(_ viewport: CanvasViewport) {
         let cameraStepStart = ProcessInfo.processInfo.systemUptime
-        defer { qaOnViewportApplied?(viewport) }
+        let userCamera = (cameraDriver.isApplying && !cameraDriver.isFlying) || pointerPanActive
+        defer { qaOnViewportApplied?(viewport); onCameraApplied?(viewport, userCamera) }
         if let last = lastViewportCommitAt {
             gestureCommitGapsMs.append((cameraStepStart - last) * 1_000)
         }
@@ -5909,7 +5915,8 @@ final class CanvasNSView: NSView, TokenThemed {
             isProvisional: provisionalZoneIds.contains(placement.zoneId),
             rollup: zoneAgentRollups[placement.zoneId] ?? .empty,
             qaVerdict: zoneQAVerdicts[placement.zoneId],
-            fallbackTitle: zoneFallbackTitles[placement.zoneId] ?? "")
+            fallbackTitle: zoneFallbackTitles[placement.zoneId] ?? "",
+            sharedHostOffline: sharedAreaHostOfflineZones.contains(placement.zoneId))
     }
 
     /// What a live zone's header says now.
@@ -6216,7 +6223,13 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         for (rank, entry) in backgroundOrder.enumerated() {
             let id = ObjectIdentifier(entry.view)
-            keys[id] = .init(tier: 0, rank: rank, originalIndex: originals[id] ?? rank)
+            keys[id] = .init(tier: 0, rank: rank * 2, originalIndex: originals[id] ?? rank)
+            // A shared area's body sits on its own zone's background, under
+            // every tile, and over the zones behind it.
+            if let body = sharedAreaLayers[entry.zoneId]?.body {
+                let bodyId = ObjectIdentifier(body)
+                keys[bodyId] = .init(tier: 0, rank: rank * 2 + 1, originalIndex: originals[bodyId] ?? rank)
+            }
         }
 
         keys[ObjectIdentifier(documentRelationshipOverlay)] = .init(
@@ -6231,6 +6244,10 @@ final class CanvasNSView: NSView, TokenThemed {
         for layer in zoneLayers {
             let zoneRank = (zoneLayerOrder.firstIndex(of: layer.placement.zoneId) ?? 0) + 1
             tileEntries += layer.tileViews.values.map { ($0, zoneRank, $0.tile.zPosition.value, $0.tile.id.uuidString) }
+        }
+        // Lent tiles sit in their area, above the project layers.
+        for layer in sharedAreaLayers.values {
+            tileEntries += layer.lent.map { ($0.view, zoneLayerOrder.count + 1, $0.view.tile.zPosition.value, $0.view.tile.id.uuidString) }
         }
         tileEntries.sort {
             if $0.zoneRank != $1.zoneRank { return $0.zoneRank < $1.zoneRank }
@@ -7163,6 +7180,17 @@ final class CanvasNSView: NSView, TokenThemed {
             layers.flatMap { layer in layer.tiles.map { ($0.id, layer.placement.zoneId) } },
             uniquingKeysWith: { first, _ in first })
         installZoneChromeViews()
+        // A shared area's body survives a zone set that still has its zone. Its
+        // lent tiles do not: their home layers were just retired, and their
+        // records never left their projects' files.
+        for (zoneId, layer) in sharedAreaLayers {
+            for lent in layer.lent { retireTileView(lent.view) }
+            layer.lent = []
+            if !liveZones.contains(where: { $0.zoneId == zoneId && $0.isSharedArea }) {
+                layer.body?.removeFromSuperview()
+                sharedAreaLayers.removeValue(forKey: zoneId)
+            }
+        }
 
         // Install the new layers back-to-front by zone zPosition.
         let orderedLayers = layers.enumerated().sorted { lhs, rhs in
@@ -7323,6 +7351,274 @@ final class CanvasNSView: NSView, TokenThemed {
         if activeProjectZoneId == zoneId { activeProjectZoneId = nil }
         reorderTileSubviewsByZIndex()
     }
+
+    // MARK: - Shared area layers (.plans/105-collaboration/IN-CANVAS.md, option A)
+
+    /// One shared area's contents on this canvas.
+    ///
+    /// The area's zone is an ordinary Model B zone with no project
+    /// (`ZonePlacement.sharedAreaId`): `liveZones`/`zoneChromeViews` own its
+    /// geometry, chrome and gestures exactly as they own every other zone's. This
+    /// layer owns only what sits inside it, and none of it is a project tile of
+    /// that zone:
+    ///
+    /// - `body`, the area's own view, framed at the zone's WORLD rect. It places
+    ///   the area's items at their AREA-LOCAL `SharedArea.Position` rects, which
+    ///   is the zone-local convention (world = zone origin + local).
+    /// - `lent`, project tiles lent to the area by `lendTilesToSharedArea`. Their
+    ///   views move here unretired, so a lent agent keeps its runner. Each keeps
+    ///   its pre-share record as the return address, and persistence keeps
+    ///   writing THAT record (`tilesInWorldFrames(forProjectId:)`): nothing the
+    ///   area does to a lent tile reaches its project's `canvas.json`.
+    @MainActor
+    final class SharedAreaLayer {
+        struct LentTile {
+            /// The pre-share record in its home layer's ZONE-LOCAL frame.
+            let home: Tile
+            let homeZoneId: UUID
+            let projectId: UUID
+            /// Where the area shows it, AREA-LOCAL.
+            var areaFrame: TileFrame
+            let view: TileNSView
+            /// The shared object the tile was published as, once bound.
+            var object: UUID?
+        }
+        let zoneId: UUID
+        /// Nil until the area's session mounts (tiles can be lent before).
+        fileprivate(set) var body: NSView?
+        fileprivate(set) var lent: [LentTile] = []
+        init(zoneId: UUID, body: NSView?) { self.zoneId = zoneId; self.body = body }
+    }
+
+    private var sharedAreaLayers: [UUID: SharedAreaLayer] = [:]
+    /// Shared zones whose host is offline: their chrome dims and dashes its edge.
+    private var sharedAreaHostOfflineZones: Set<UUID> = []
+
+    /// A lent tile's header drag, reported as AREA-LOCAL frames. The owner turns
+    /// the final frame into a shared `.place`; `committed` is false while dragging.
+    var onLentTileMoved: ((_ zoneId: UUID, _ tileId: UUID, _ areaFrame: TileFrame, _ committed: Bool) -> Void)?
+
+    var sharedAreaZoneIds: [UUID] { liveZones.filter(\.isSharedArea).map(\.zoneId) }
+
+    func sharedAreaLayer(for zoneId: UUID) -> SharedAreaLayer? { sharedAreaLayers[zoneId] }
+    func sharedAreaZonePlacement(_ zoneId: UUID) -> ZonePlacement? {
+        liveZones.first { $0.zoneId == zoneId && $0.isSharedArea }
+    }
+
+    /// Register a shared area's zone in Model B without a ZoneLayer: it holds no
+    /// project or workspace tiles. Chrome, move, resize, rename and close then
+    /// work through the same code as every zone.
+    func addSharedAreaZone(_ placement: ZonePlacement) {
+        guard placement.isSharedArea, placement.projectId == nil else { return }
+        if let index = liveZones.firstIndex(where: { $0.zoneId == placement.zoneId }) {
+            liveZones[index] = placement
+        } else {
+            liveZones.append(placement)
+        }
+        seedZoneInputs(ZoneRenderModel(placement: placement, displayName: placement.name))
+        if showsZoneChrome {
+            if zoneChromeViews[placement.zoneId] != nil {
+                refreshZoneChrome(placement.zoneId)
+            } else if let chrome = makeZoneChrome(placement.zoneId) {
+                zoneChromeViews[placement.zoneId] = chrome
+                worldPlane.addSubview(chrome, positioned: .below, relativeTo: nil)
+            }
+        }
+        layoutZoneChromeViews()
+        reorderTileSubviewsByZIndex()
+    }
+
+    /// Put an area's body into its zone. Replaces an earlier body; keeps lent tiles.
+    @discardableResult
+    func installSharedAreaLayer(zoneId: UUID, body: NSView?) -> Bool {
+        guard liveZones.contains(where: { $0.zoneId == zoneId && $0.isSharedArea }) else { return false }
+        let layer = sharedAreaLayers[zoneId] ?? SharedAreaLayer(zoneId: zoneId, body: nil)
+        sharedAreaLayers[zoneId] = layer
+        if layer.body !== body {
+            layer.body?.removeFromSuperview()
+            layer.body = body
+            if let body { worldPlane.addSubview(body) }
+        }
+        layoutSharedAreaLayers()
+        reorderTileSubviewsByZIndex()
+        return true
+    }
+
+    /// Take an area's body off the canvas. Lent tiles go home first.
+    func removeSharedAreaLayer(zoneId: UUID) {
+        guard let layer = sharedAreaLayers[zoneId] else { return }
+        returnLentTiles(zoneId: zoneId)
+        layer.body?.removeFromSuperview()
+        sharedAreaLayers.removeValue(forKey: zoneId)
+    }
+
+    /// The zone leaves the canvas: its layer, its chrome, its Model B entry.
+    /// No close callback: the caller owns the document.
+    func removeSharedAreaZone(_ zoneId: UUID) {
+        guard liveZones.contains(where: { $0.zoneId == zoneId && $0.isSharedArea }) else { return }
+        removeSharedAreaLayer(zoneId: zoneId)
+        if activeZone?.zoneId == zoneId { activeZone = nil }
+        liveZones.removeAll { $0.zoneId == zoneId }
+        forgetZoneInputs(zoneId)
+        sharedAreaHostOfflineZones.remove(zoneId)
+        zoneChromeViews.removeValue(forKey: zoneId)?.removeFromSuperview()
+        reorderTileSubviewsByZIndex()
+    }
+
+    func setSharedAreaHostOffline(_ offline: Bool, zoneId: UUID) {
+        let changed = offline ? sharedAreaHostOfflineZones.insert(zoneId).inserted
+            : sharedAreaHostOfflineZones.remove(zoneId) != nil
+        if changed { refreshZoneChrome(zoneId) }
+    }
+
+    /// Frames every body and lent tile from its zone's current placement. WORLD
+    /// rects in the plane, so a camera step never reaches here.
+    private func layoutSharedAreaLayers() {
+        for (zoneId, layer) in sharedAreaLayers {
+            guard let placement = liveZones.first(where: { $0.zoneId == zoneId }) else { continue }
+            let world = Self.worldRect(CanvasEngine.zoneWorldFrame(placement))
+            if let body = layer.body {
+                if body.frame != world { body.frame = world }
+                if body.isHidden != placement.collapsed { body.isHidden = placement.collapsed }
+            }
+            for lent in layer.lent {
+                let frame = CanvasEngine.zoneLocalToWorld(lent.areaFrame, zoneOrigin: placement.origin)
+                if lent.view.isHidden != placement.collapsed { lent.view.isHidden = placement.collapsed }
+                applyTileGeometry(lent.view, screenFrame: Self.worldRect(frame), logicalSize: lent.areaFrame)
+            }
+        }
+    }
+
+    enum SharedAreaLendError: Error, Equatable {
+        case noSharedLayer(UUID)
+        case tileNotInstalled(UUID)
+        case terminalStaysPrivate(UUID)
+        case alreadyLent(UUID)
+    }
+
+    /// A tile that could be lent: its home layer's placement and its WORLD frame.
+    func lendableTile(_ tileId: UUID) throws -> (tile: Tile, world: TileFrame, zone: ZonePlacement) {
+        if sharedAreaLayers.values.contains(where: { $0.lent.contains { $0.home.id == tileId } }) {
+            throw SharedAreaLendError.alreadyLent(tileId)
+        }
+        guard let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) }),
+              layer.placement.projectId != nil,
+              let tile = layer.tiles.first(where: { $0.id == tileId }),
+              layer.tileViews[tileId] != nil else { throw SharedAreaLendError.tileNotInstalled(tileId) }
+        guard tile.kind != .terminal else { throw SharedAreaLendError.terminalStaysPrivate(tileId) }
+        return (tile, CanvasEngine.worldFrame(tile: tile, in: layer.placement), layer.placement)
+    }
+
+    /// Moves tiles out of their project layers into a shared area's layer, at the
+    /// given AREA-LOCAL frames. Views move unretired. All or nothing.
+    func lendTilesToSharedArea(_ areaFrames: [UUID: TileFrame], zoneId: UUID) throws {
+        guard liveZones.contains(where: { $0.zoneId == zoneId && $0.isSharedArea }) else { throw SharedAreaLendError.noSharedLayer(zoneId) }
+        let shared = sharedAreaLayers[zoneId] ?? SharedAreaLayer(zoneId: zoneId, body: nil)
+        sharedAreaLayers[zoneId] = shared
+        for tileId in areaFrames.keys { _ = try lendableTile(tileId) }
+        for (tileId, areaFrame) in areaFrames.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+            guard let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) }),
+                  let index = layer.tiles.firstIndex(where: { $0.id == tileId }),
+                  let projectId = layer.placement.projectId,
+                  let view = layer.tileViews.removeValue(forKey: tileId) else { continue }
+            let home = layer.tiles.remove(at: index)
+            tileZoneMembership.removeValue(forKey: tileId)
+            tileSelection.clear()
+            shared.lent.append(.init(home: home, homeZoneId: layer.placement.zoneId, projectId: projectId,
+                                     areaFrame: areaFrame, view: view))
+        }
+        layoutAllTiles()
+        reorderTileSubviewsByZIndex()
+        delegate?.canvasSidebarLabelsDidChange(self)
+    }
+
+    /// Every lent tile back into its home layer, with its view and its pre-share
+    /// record. A tile whose home layer is not installed is retired: its record
+    /// was never removed from its project's file.
+    func returnLentTiles(zoneId: UUID) {
+        guard let shared = sharedAreaLayers[zoneId], !shared.lent.isEmpty else { return }
+        let lent = shared.lent
+        shared.lent = []
+        for tile in lent {
+            if let home = zoneLayers.first(where: { $0.placement.zoneId == tile.homeZoneId }) {
+                home.tiles.append(tile.home)
+                home.tileViews[tile.home.id] = tile.view
+                tileZoneMembership[tile.home.id] = tile.homeZoneId
+            } else {
+                retireTileView(tile.view)
+            }
+        }
+        layoutAllTiles()
+        reorderTileSubviewsByZIndex()
+        delegate?.canvasSidebarLabelsDidChange(self)
+    }
+
+    func bindLentTile(_ tileId: UUID, to object: UUID, zoneId: UUID) {
+        guard let shared = sharedAreaLayers[zoneId],
+              let index = shared.lent.firstIndex(where: { $0.home.id == tileId }) else { return }
+        shared.lent[index].object = object
+    }
+
+    /// The area moved a lent tile (a shared `.place`, mine or a teammate's).
+    func setLentTileAreaFrame(_ tileId: UUID, _ frame: TileFrame, zoneId: UUID) {
+        guard let shared = sharedAreaLayers[zoneId],
+              let index = shared.lent.firstIndex(where: { $0.home.id == tileId }),
+              shared.lent[index].areaFrame != frame else { return }
+        shared.lent[index].areaFrame = frame
+        layoutSharedAreaLayers()
+    }
+
+    func lentTile(_ tileId: UUID) -> (zoneId: UUID, tile: SharedAreaLayer.LentTile)? {
+        for (zoneId, layer) in sharedAreaLayers {
+            if let lent = layer.lent.first(where: { $0.home.id == tileId }) { return (zoneId, lent) }
+        }
+        return nil
+    }
+
+    // A lent tile's header drag. TileNSView routes here instead of the project
+    // geometry edit: the tile belongs to no project layer while it is lent.
+    private var lentDrag: (tileId: UUID, zoneId: UUID, start: TileFrame)?
+    func beginLentTileDrag(_ tileId: UUID) -> Bool {
+        guard let (zoneId, lent) = lentTile(tileId) else { return false }
+        lentDrag = (tileId, zoneId, lent.areaFrame)
+        return true
+    }
+    func dragLentTile(_ tileId: UUID, screenDelta delta: CGSize) {
+        guard let drag = lentDrag, drag.tileId == tileId, let (_, lent) = lentTile(tileId) else { return }
+        let zoom = max(0.01, viewport.zoom)
+        var frame = lent.areaFrame
+        frame.x += Double(delta.width) / zoom; frame.y += Double(delta.height) / zoom
+        setLentTileAreaFrame(tileId, frame, zoneId: drag.zoneId)
+        onLentTileMoved?(drag.zoneId, tileId, frame, false)
+    }
+    func endLentTileDrag(_ tileId: UUID) {
+        guard let drag = lentDrag, drag.tileId == tileId else { return }
+        lentDrag = nil
+        guard let (_, lent) = lentTile(tileId), lent.areaFrame != drag.start else { return }
+        onLentTileMoved?(drag.zoneId, tileId, lent.areaFrame, true)
+    }
+
+    // MARK: Follow indicator (screen-fixed)
+
+    private var followIndicator: SharedAreaFollowIndicatorView?
+    /// The Stop control on the follow pill.
+    var onFollowStopRequested: (() -> Void)?
+
+    /// Shows the coloured frame and "Following …" pill over the viewport.
+    func showFollowIndicator(name: String, color: NSColor) {
+        let indicator = followIndicator ?? SharedAreaFollowIndicatorView()
+        indicator.onStop = { [weak self] in self?.onFollowStopRequested?() }
+        indicator.configure(name: name, color: color)
+        if indicator.superview !== self { addSubview(indicator, positioned: .above, relativeTo: nil) }
+        indicator.frame = bounds
+        indicator.autoresizingMask = [.width, .height]
+        followIndicator = indicator
+    }
+    func hideFollowIndicator() {
+        followIndicator?.removeFromSuperview()
+        followIndicator = nil
+    }
+    var qaFollowIndicator: SharedAreaFollowIndicatorView? { followIndicator }
 
     /// Update only a layer's placement in place; relays its tiles + chrome.
     func setZonePlacement(_ placement: ZonePlacement) {
@@ -7533,7 +7829,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// builds a layer's `memberTiles`.
     func tilesInWorldFrames(forProjectId projectId: UUID) -> [Tile] {
         var seen = Set<UUID>()
-        return zoneLayers
+        let installed = zoneLayers
             .filter { $0.placement.projectId == projectId }
             .flatMap { layer in
                 layer.tiles.map { tile -> Tile in
@@ -7542,7 +7838,16 @@ final class CanvasNSView: NSView, TokenThemed {
                     return world
                 }
             }
-            .filter { seen.insert($0.id).inserted }
+        // A tile lent to a shared area is still this project's: its pre-share
+        // record is persisted unchanged, never its place in the area.
+        let lent = sharedAreaLayers.values.flatMap(\.lent).filter { $0.projectId == projectId }.compactMap { lent -> Tile? in
+            guard let home = zoneLayers.first(where: { $0.placement.zoneId == lent.homeZoneId })?.placement
+                ?? liveZones.first(where: { $0.zoneId == lent.homeZoneId }) else { return nil }
+            var world = lent.home
+            world.frame = CanvasEngine.zoneLocalToWorld(lent.home.frame, zoneOrigin: home.origin)
+            return world
+        }
+        return (installed + lent).filter { seen.insert($0.id).inserted }
     }
 
     /// QA/persistence observation of one installed layer, including ambient
@@ -13981,6 +14286,9 @@ final class ZoneChromeNSView: NSView {
         var qaVerdictTooltip: String?
         /// T5 (`.plans/47`): the zone new tiles land in.
         var isArmed: Bool = false
+        var isSharedArea: Bool = false
+        var sharedHostOffline: Bool = false
+        var outlineDashed: Bool = false
     }
 
     /// Exposed for `zoneBounds` callers that need the header height without
@@ -14024,15 +14332,18 @@ final class ZoneChromeNSView: NSView {
         let accent = Self.color(named: placement.color)
         backgroundShape.frame = bounds
         backgroundShape.path = path
-        backgroundShape.fillColor = accent.withAlphaComponent(placement.collapsed ? 0.20 : 0.10).cgColor
+        // A shared area whose host is offline keeps its place, dimmed, with a
+        // dashed edge (IN-CANVAS panel 6). Nothing falls back to this Mac.
+        let offline = presentation.sharedHostOffline
+        backgroundShape.fillColor = accent.withAlphaComponent(placement.collapsed ? 0.20 : offline ? 0.05 : 0.10).cgColor
         outlineShape.frame = bounds
         outlineShape.path = path
         outlineShape.fillColor = nil
-        outlineShape.strokeColor = accent.withAlphaComponent(isArmed ? 1.0 : 0.6).cgColor
+        outlineShape.strokeColor = accent.withAlphaComponent(isArmed ? 1.0 : offline ? 0.45 : 0.6).cgColor
         // The zone's edge is a hairline like every other border; being armed is
         // carried by the stroke's opacity, not by a 3pt line.
         outlineShape.lineWidth = CGFloat(LineWidth.hairline)
-        outlineShape.lineDashPattern = presentation.isProvisional ? [6, 4] : nil
+        outlineShape.lineDashPattern = presentation.isProvisional || offline ? [6, 4] : nil
         if headerDrawingView.frame != headerRect { headerDrawingView.frame = headerRect }
         CATransaction.commit()
     }
@@ -14096,7 +14407,10 @@ final class ZoneChromeNSView: NSView {
             agentRollupText: presentation.agentStatusRollup.displayText,
             qaVerdictGlyph: presentation.qaVerdict?.verdict.glyph,
             qaVerdictTooltip: presentation.qaVerdict?.tooltip,
-            isArmed: isArmed
+            isArmed: isArmed,
+            isSharedArea: presentation.isSharedArea,
+            sharedHostOffline: presentation.sharedHostOffline,
+            outlineDashed: outlineShape.lineDashPattern != nil
         )
     }
 

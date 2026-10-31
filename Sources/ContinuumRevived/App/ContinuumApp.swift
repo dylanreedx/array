@@ -1590,6 +1590,28 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--shared-area-zone-check") {
+            setbuf(stdout, nil); setbuf(stderr, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(90))
+                fputs("FAIL: shared area zone check exceeded its 90-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do {
+                    guard ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] != nil else {
+                        throw SelfCheckError("the shared area zone check requires isolated app support")
+                    }
+                    try await SharedAreaZoneChecks.run()
+                    try await SharedAreaZoneChecks.runFollowAndOffline()
+                    print("PASS shared area zone")
+                    Foundation.exit(0)
+                } catch { fputs("FAIL shared area zone: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+            return
+        }
         if CommandLine.arguments.contains("--collaboration-peer-check") {
             setbuf(stdout, nil); setbuf(stderr, nil)
             _ = NSApplication.shared
@@ -6551,13 +6573,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var explicitCreationScopeOverride: CreationScope?
     private var componentLabPanel: ComponentLabPanel?
     private var collaborationHub: CollaborationHubWindowController?
+    /// Open shared areas, each in its zone on the canvas, by account and area.
+    var sharedAreaZoneSessions: [String: SharedAreaZoneSession] = [:]
+    /// The mounted runtime, for the shared area zone wiring in its own file.
+    var sharedAreaRuntime: WorkspaceRuntime? { workspaceRuntime }
     /// One account model for the hub and share links, built on first use so
     /// starting Array still reads no collaboration credential.
     private var collaborationAccount: CollaborationAccountController?
     /// The share-link controller (IN-CANVAS.md, Round 2): the popover's API and
     /// the one entry point for array:// and arrayapp.dev/s/ links.
     private(set) lazy var shareLinks = makeShareLinkCoordinator()
-    private var sharedAreaWindows: [String: SharedAreaWindowController] = [:]
     private var sharedAreaHostSessions: [String: SharedAreaHostSession] = [:]
     private var pendingSharedAreaCapture: SharedAreaCaptureRequest?
     private var captureSelectionView: SharedAreaCaptureSelectionView?
@@ -12083,44 +12108,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return hub
     }
 
-    /// Opens an area this account is admitted to and starts its publishing
-    /// host. The hub's Open and a share link both come through here.
+    /// Opens an area this account is admitted to, in its zone on this canvas
+    /// (never a window), and starts its publishing host. The hub's Open, a
+    /// share link and `createSharedZone(fromTiles:name:)` all come through here.
     @discardableResult
     func openSharedArea(controller: SharedAreaController, person: SharedArea.ID<SharedArea.Person>, area: UUID,
-                        model: CollaborationAccountController) -> SharedAreaWindowController? {
+                        model: CollaborationAccountController) -> SharedAreaZoneSession? {
         guard let accountID = model.activeAccount?.id else { return nil }
-        let shared = showSharedArea(controller: controller, person: person, area: area, accountID: accountID)
+        let label = model.activeAccount?.knownAreas.first(where: { $0.id == area })?.label ?? "Shared area"
+        let shared: SharedAreaZoneSession
+        do { shared = try openSharedAreaZone(controller: controller, person: person, area: area, accountID: accountID, name: label) }
+        catch {
+            presentShareLinkRefusal("The shared area could not open on this canvas. Array kept your canvas as it was.")
+            return nil
+        }
+        shared.account = model
+        shared.onRequestInvite = { [weak self] in
+            guard let self else { return }
+            openCollaborationFromMenu(nil)
+            collaborationHub?.content.focusAccount(accountID, area: area)
+        }
         // Generic offline fixtures supply no host-service transport. The
         // paired-process witness explicitly supplies a local live service.
         if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) || CommandLine.arguments.contains("--collaboration-peer-check") {
             let key = accountID + "/" + area.uuidString
             do {
+                // The host keeps publishing this Mac's shared agents. The
+                // handoff window is no longer on the user path.
                 let host = try sharedAreaHostSessions[key] ?? SharedAreaHostSession(account: model, area: area, supervisor: agentSupervisor)
                 sharedAreaHostSessions[key] = host; host.start()
+                // Teammates prompt this area's agents through the host's
+                // handoff controller (part 4); the zone's live views send with it.
+                // attach(to:) is the one wiring the paired-process peer shares.
                 host.attach(to: shared.scene)
+                shared.prompter = host.handoff.model
             } catch {
                 let alert = NSAlert()
                 alert.messageText = "The publishing host is unavailable"
-                alert.informativeText = "The shared workspace is open. Reconnect the account before handing an agent over."
-                alert.beginSheetModal(for: shared.window, completionHandler: nil)
+                alert.informativeText = "The shared area is open. Reconnect the account so teammates can see this Mac's shared agents."
+                if let window = canvasView?.window { alert.beginSheetModal(for: window, completionHandler: nil) }
             }
         }
-        return shared
-    }
-
-    @discardableResult
-    private func showSharedArea(controller: SharedAreaController, person: SharedArea.ID<SharedArea.Person>, area: UUID, accountID: String) -> SharedAreaWindowController {
-        let key = accountID + "/" + area.uuidString
-        if let existing = sharedAreaWindows[key] { existing.show(); return existing }
-        let shared = SharedAreaWindowController(controller: controller, person: person, delegate: self)
-        sharedAreaWindows[key] = shared
-        shared.onClose = { [weak self] in self?.sharedAreaWindows.removeValue(forKey: key) }
-        shared.scene.onRequestInvite = { [weak self] in
-            guard let self else { return }
-            openCollaborationFromMenu(nil)
-            collaborationHub?.content.focusAccount(accountID, area: area)
-        }
-        shared.show()
         return shared
     }
 
@@ -12157,7 +12185,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func requestSharedAreaCapture(_ selection: SharedAreaPublication.Selection) {
         guard !CollaborationWindow.owns(userCommandWindow), let runtime = workspaceRuntime, captureSetupTask == nil else { return }
         guard !revealPendingSharedAreaDelivery() else { return }
-        pendingSharedAreaCapture = .init(runtime: runtime, workspaceID: runtime.workspaceId, selection: selection)
+        let request = SharedAreaCaptureRequest(runtime: runtime, workspaceID: runtime.workspaceId, selection: selection)
+        // An area already open on this canvas is the destination: reveal its
+        // zone and review straight into it. Only with none open does Array ask
+        // which area, through account sign-in.
+        if let (key, open) = sharedAreaZoneSessions.first(where: { !$0.value.isClosed && runtime.sharedAreaZone(for: $0.value.areaId) != nil }),
+           let model = open.account, let accountID = model.activeAccount?.id, key.hasPrefix(accountID + "/") {
+            open.reveal()
+            finishSharedAreaCapture(request, in: open, account: model, accountID: accountID, person: open.scene.person)
+            return
+        }
+        pendingSharedAreaCapture = request
         openCollaborationFromMenu(nil)
         collaborationHub?.window.title = "Share selection · Choose or create a shared workspace"
     }
@@ -12168,7 +12206,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return true
     }
 
-    private func finishSharedAreaCapture(_ request: SharedAreaCaptureRequest, in shared: SharedAreaWindowController,
+    private func finishSharedAreaCapture(_ request: SharedAreaCaptureRequest, in shared: SharedAreaZoneSession,
                                         account: CollaborationAccountController, accountID: String,
                                         person: SharedArea.ID<SharedArea.Person>) {
         guard captureSetupTask == nil else { return }
@@ -12213,13 +12251,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 let alert = NSAlert()
                 alert.messageText = "Sharing needs another review"
                 alert.informativeText = SharedAreaCaptureCoordinator.message(for: error)
-                if let host = collaborationHub?.window { alert.beginSheetModal(for: host, completionHandler: nil) }
+                if let host = collaborationHub?.window ?? canvasView?.window { alert.beginSheetModal(for: host, completionHandler: nil) }
             }
         }
     }
 
     var qaSharedAreaCaptureWindows: [SharedAreaCaptureWindowController] { Array(sharedAreaCaptureWindows.values) }
-    var qaSharedAreaWindows: [SharedAreaWindowController] { Array(sharedAreaWindows.values) }
+    var qaSharedAreaZoneSessions: [SharedAreaZoneSession] { Array(sharedAreaZoneSessions.values) }
     var qaSharedAreaHostSessions: [SharedAreaHostSession] { Array(sharedAreaHostSessions.values) }
     var qaCaptureSetupTask: Task<Void, Never>? { captureSetupTask }
     var qaCaptureSelectionView: SharedAreaCaptureSelectionView? { captureSelectionView }
@@ -19789,6 +19827,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     var qaZoneCloseResponse: ((UUID) -> NSApplication.ModalResponse)?
 
     private func presentZoneCloseConfirm(_ zoneId: UUID) {
+        // A shared area's zone holds no tiles of its own: closing it takes the
+        // area off this canvas and sends any lent tiles home.
+        if workspaceRuntime?.document.zones.first(where: { $0.zoneId == zoneId })?.isSharedArea == true {
+            closeSharedAreaZone(zoneId); return
+        }
         let response: NSApplication.ModalResponse
         if let answer = qaZoneCloseResponse?(zoneId) {
             response = answer

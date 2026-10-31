@@ -8,75 +8,64 @@ design bench as 5fb4315e).
 Status: IN PROGRESS. This file is the coordination point for parts 1, 3 and 4.
 The API section below is the contract. It will not change shape without a note here.
 
-## API for part 3: `createSharedZone(fromTiles:)`
+## API for part 3: `createSharedZone(fromTiles:name:)` (the one call)
 
-It lives on `WorkspaceRuntime`, which owns the workspace document and the mounted
-canvas. File: `Sources/ContinuumRevived/App/WorkspaceRuntime+SharedZone.swift`.
+Coordinator decision, 31 October: part 2 owns the whole sender side in one call.
+It is on `AppDelegate`, in `Sources/ContinuumRevived/App/Collaboration/SharedAreaZoneSession.swift`:
 
 ```swift
-struct SharedZoneConversion: Equatable {
-    let zoneId: UUID                       // the new shared zone (a projectless ZonePlacement)
-    let areaId: UUID                       // SharedArea.Document.id.rawValue
-    /// Each lent tile's frame inside the area. Pass it straight to
-    /// SharedArea.Position(rect:) when you admit the tile's item.
-    let areaFrames: [UUID: SharedArea.Rect]
+struct SharedZoneShare: Equatable {
+    let areaId: UUID                                      // the new area
+    let zoneId: UUID                                      // its zone on this canvas
+    let objects: [UUID: SharedArea.ID<SharedArea.Object>] // tile -> object, source-bound tiles only
 }
 
-enum SharedZoneError: Error, Equatable {
-    case noTiles
-    case tileNotInstalled(UUID)     // not in an installed project ZoneLayer of this workspace
-    case terminalStaysPrivate(UUID) // terminals are never shared
-    case alreadyShared(UUID)        // the tile is already lent to a shared zone
-    case areaAlreadyOpen(UUID)      // this workspace already has a zone for the area
-}
+extension AppDelegate {
+    /// Creates the area, publishes the tiles by kind (part 1's
+    /// shareLinks.publish(selection:intoArea:)), opens the area's zone here,
+    /// moves the tiles into it (same views, runners kept), binds each published
+    /// tile to its object and lays the objects out where the tiles now sit.
+    func createSharedZone(fromTiles tileIds: [UUID], name: String) async throws -> SharedZoneShare
 
-extension WorkspaceRuntime {
-    /// Moves the tiles out of their project zone into a new shared zone's layer.
-    /// The views are moved, not rebuilt, so agent runners and subscriptions keep running.
-    @discardableResult
-    func createSharedZone(fromTiles tileIds: [UUID], areaId: UUID, name: String) throws -> SharedZoneConversion
-
-    /// After you admit a lent tile as an item, bind them. Moves of the tile then
-    /// send `.place` for that object, and the zone draws no second projection of it.
-    func bindSharedTile(_ tileId: UUID, to object: SharedArea.ID<SharedArea.Object>, inZone zoneId: UUID)
-
-    /// Reverses the conversion: every lent tile goes back to its home zone at its
-    /// pre-share frame, with the same view. The shared zone and its anchor leave
-    /// the workspace document. Use it when the share is cancelled or stopped.
-    func cancelSharedZone(_ zoneId: UUID) throws
+    /// Undo: what it published leaves the area (when reachable), the tiles go
+    /// home at their pre-share frames with their own views, the zone is removed.
+    func cancelSharedZone(areaId: UUID) async
 }
 ```
 
-### What it does
+Then mint the link with part 1's `shareLinks.createShareLink(area: share.areaId, slug:lifetime:)`.
 
-- The shared zone is a `ZonePlacement` with `projectId == nil` and
-  `sharedAreaId == areaId`, stored in the workspace document. It sits to the right of
-  the tiles' source zone. `setActiveZone` refuses it, because it has no project.
-- Every tile keeps its relative arrangement inside the new zone.
-- **The project keeps its pre-share record.** While a tile is lent, the project's
-  `canvas.json` keeps the record it had before the share, and nothing the share does
-  is written there: moves and resizes in the area are shared operations only. That
-  record is the return address. It is also why a crash or quit mid-share loses
-  nothing: at the next launch the tile is simply back in its home zone.
-- Terminals are refused, because terminals stay private.
+- It refuses before anything leaves the Mac. Errors are
+  `WorkspaceRuntime.SharedZoneError`: `.noTiles`, `.tileNotInstalled(id)`,
+  `.terminalStaysPrivate(id)` (terminals stay private), `.alreadyShared(id)`, `.noCanvas`.
+  Sign-in and publish errors come through as part 1's `ShareLinkFailure`.
+- Notes are lent into the zone too. They publish as discussion, which has no source
+  binding, so they are not in `objects`; the zone's dock shows the discussion.
+- The project keeps each lent tile's pre-share record in its `canvas.json`. Nothing the
+  area does to a lent tile is written there, and after a crash or quit the tile is simply
+  back in its home zone.
 
-### What it does not do
+Lower level, if you need it: `WorkspaceRuntime.createSharedZone(fromTiles:areaId:name:)`
+(lend into an area's zone, no network), `bindSharedTile(_:to:inZone:)`,
+`cancelSharedZone(_ zoneId:)`, in `WorkspaceRuntime.swift`, "Shared area zones".
 
-It does not create an area, publish items or make a link. That is your flow: create
-or open the area, call `createSharedZone`, admit one item per tile at
-`areaFrames[tile]`, then call `bindSharedTile` for each. If the publication fails, call
-`cancelSharedZone`.
+## Opening an area (parts 1 and 4)
 
-## Opening an existing area on the canvas (parts 1 and 4)
-
-`AppDelegate.openSharedAreaZone(controller:person:area:accountID:)` replaces the old
-`showSharedArea(...)` window. It reuses this workspace's zone for the area, or creates
-one beside the viewport, and reveals it. A link handler (part 1) should call it once the
-area is admitted.
+Every open goes through `AppDelegate.openSharedArea(controller:person:area:model:)`, as
+on `array/collaboration-finish`. It now returns `SharedAreaZoneSession?` and opens the area
+in its zone on the canvas: this workspace's zone for the area, or a new one to the right of
+everything else. It reveals the zone, never arms it, and starts the publishing host. No
+shared window opens any more. `qaSharedAreaWindows` is gone; use `qaSharedAreaZoneSessions`.
 
 ## Notes for the other parts
 
-- Part 4 (full access): the zone's teammate agent view shows the read-only footer and
-  Ask for control today. When the `promptAgent` capability lands, the footer should
-  become a composer. The footer's single switch point is
-  `SharedAreaZoneAgentView.footerMode`.
+- Part 4 (full access) is integrated. A teammate's agent in the zone is
+  `SharedAreaZoneAgentView`. Its `SharedAgentLiveView` (with part 4's composer) fills
+  the tile, and there is no read-only footer and no Ask for control. A footer shows
+  only when the host is offline ("Dylan's Mac is offline · showing the last update…")
+  or on the owner's own canvas ("open its own tile to prompt it"); see `footerMode`.
+  `openSharedArea` sets `session.prompter = host.handoff.model`, and every zone agent
+  view's `live.prompter` follows it.
+- "Hand agent off…" is not wired in the zone. The brief retires the handoff window from
+  the user path, and part 4's note asks to keep it as an explicit action. These two
+  conflict, so it's left to the coordinator.

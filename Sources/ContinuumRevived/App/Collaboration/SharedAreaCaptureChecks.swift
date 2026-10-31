@@ -340,9 +340,15 @@ enum SharedAreaCaptureChecks {
               create.isEnabled, create.sendAction(create.action, to: create.target) else { throw Failure(message: "root hub Create workspace action missing") }
         try await eventually("root capture setup") { app.qaSharedAreaCaptureWindows.count == 1 }
         await app.qaCaptureSetupTask?.value
-        guard let review = app.qaSharedAreaCaptureWindows.first, let destination = app.qaSharedAreaWindows.first else {
-            throw Failure(message: "root did not mount destination and review windows")
+        guard let review = app.qaSharedAreaCaptureWindows.first, let destination = app.qaSharedAreaZoneSessions.first else {
+            throw Failure(message: "root did not mount the destination zone and review")
         }
+        // The destination is the area's zone on this canvas, never a window.
+        try expect(destination.scene.isZone && destination.scene.superview === fixture.canvas.worldPlane
+            && fixture.runtime.sharedAreaZone(for: authority.area.rawValue)?.zoneId == destination.zoneId
+            && fixture.runtime.sharedAreaZone(for: authority.area.rawValue)?.projectId == nil
+            && !NSApp.windows.contains(where: { $0.contentView?.subviews.contains(where: { $0 is SharedAreaSceneView }) == true }),
+            "the hub's destination opens as a projectless zone on the source canvas, with no shared window")
         defer { review.window.close() }
         try expect(review.content.coordinator.controller !== destination.controller && review.content.coordinator.workspaceID == fixture.workspaceWA,
             "shipping destination callback constructs a separate review controller bound to the original source workspace")
@@ -351,7 +357,7 @@ enum SharedAreaCaptureChecks {
                 && abs(rect.width - captureBounds.width) < 0.001 && abs(rect.height - captureBounds.height) < 0.001,
                 "production-mounted pointer selection preserves its exact WORLD rectangle through hub and review")
         } else { throw Failure(message: "root pointer capture lost its enclosed selection") }
-        destination.window.performClose(nil)
+        destination.close()
         try await eventually("destination closed independently") { destination.controller.status == .closed }
         try expect(review.content.coordinator.controller.status == .connected,
             "closing the destination scene leaves its independent publication review connected")
@@ -375,11 +381,19 @@ enum SharedAreaCaptureChecks {
                 "captured native layout preserves \(tile.kind.displayName) size and relative WORLD frame exactly once")
         }
         try expect((try sourceFiles.map { try Data(contentsOf: $0) }) == originalBytes
-            && fixture.canvas.allTilesInWorldFrames() == originalTiles && fixture.runtime.document == originalDocument
+            && fixture.canvas.allTilesInWorldFrames() == originalTiles && withoutSharedZones(fixture.runtime.document) == originalDocument
             && app.qaAgentSupervisor.records == originalAgents && executorConstructions == beforeExecutors,
             "the complete native sharing route preserves source files, WORLD models, workspace ownership and executor census")
         try expect(await authority.hostRegistrations == 1, "root capture registers the owning collaboration host once")
         await review.content.coordinator.controller.close()
+    }
+
+    /// The workspace document as the source owned it: the destination's own
+    /// projectless zone is the one thing opening an area adds.
+    private static func withoutSharedZones(_ document: WorkspaceDocument) -> WorkspaceDocument {
+        var copy = document
+        copy.zones.removeAll(where: \.isSharedArea)
+        return copy
     }
 
     static func makeAppearanceFixture() throws -> NSView {

@@ -1,6 +1,7 @@
 import AppKit
 import OSLog
 import ContinuumRevivedCore
+import ContinuumRevivedCollaborationProtocol
 import Foundation
 
 /// Owns the current workspace's live zone set: its `WorkspaceDocument`, the
@@ -55,6 +56,7 @@ final class WorkspaceRuntime {
 
     // Retains the installed ZoneLayers so the check (and T09 swap) can read back placements.
     private var installedLayers: [CanvasNSView.ZoneLayer] = []
+    private var sharedZoneChangeObserver: ((UUID) -> Void)?
 
     // The document's legacy foreign placements: zones naming a project another
     // workspace owns. The document keeps them; the mount excludes them. Written
@@ -112,7 +114,7 @@ final class WorkspaceRuntime {
     /// install a layer, persist a membership repair or arm a source zone.
     var collaborationCanvas: CanvasNSView? { canvasView }
     var collaborationZones: [ZonePlacement] {
-        document.zones.filter { !foreignZoneIds.contains($0.zoneId) }
+        document.zones.filter { !foreignZoneIds.contains($0.zoneId) && !$0.isSharedArea }
     }
     func collaborationOwnsProject(_ projectId: UUID) throws -> Bool {
         let current = try registryStore.loadOrEmpty()
@@ -926,6 +928,9 @@ final class WorkspaceRuntime {
 
         for zone in mountableZones {
             guard let projectId = zone.projectId else {
+                // A shared area's zone holds no workspace or project tiles; its
+                // contents are the area's own layer (`installSharedAreaLayer`).
+                if zone.isSharedArea { continue }
                 // Ambient (group) zone: no project, no controller. Its tiles live on
                 // the workspace document itself and membership is each tile's
                 // `zoneId` register (ticket 03) — render straight from it.
@@ -2261,6 +2266,152 @@ final class WorkspaceRuntime {
     /// to the warm set. The departing scene is parked warm rather than torn
     /// down; beyond `warmSceneCapacity` the least recent is released through
     /// the ordinary path (`ZoneRuntimeRegistry.release` → `close()`).
+    // MARK: - Shared area zones (.plans/105-collaboration/IN-CANVAS.md, option A)
+
+    /// A shared area lives on this canvas as a projectless zone carrying its
+    /// `sharedAreaId`. The zone (its personal origin and size) is this
+    /// workspace's document; the area's contents are never a project's.
+    struct SharedZoneConversion: Equatable {
+        let zoneId: UUID
+        let areaId: UUID
+        /// Each lent tile's frame inside the area, for `SharedArea.Position`.
+        let areaFrames: [UUID: SharedArea.Rect]
+    }
+
+    enum SharedZoneError: Error, Equatable {
+        case noTiles
+        case tileNotInstalled(UUID)
+        case terminalStaysPrivate(UUID)
+        case alreadyShared(UUID)
+        case noCanvas
+    }
+
+    /// Fired after a shared zone is created, bound, cancelled or closed, with its id.
+    var onSharedZoneChanged: ((UUID) -> Void)? {
+        get { sharedZoneChangeObserver }
+        set { sharedZoneChangeObserver = newValue }
+    }
+
+    func sharedAreaZone(for areaId: UUID) -> ZonePlacement? {
+        document.zones.first { $0.sharedAreaId == areaId }
+    }
+
+    /// The zone a shared area shows in on this canvas: this workspace's existing
+    /// one, or a new projectless zone to the right of everything else. Never armed.
+    @discardableResult
+    func ensureSharedAreaZone(areaId: UUID, name: String, origin: ZonePoint? = nil,
+                              size: ZoneSize = ZoneSize(width: 1340, height: 820)) throws -> ZonePlacement {
+        if let existing = sharedAreaZone(for: areaId) {
+            canvasView?.addSharedAreaZone(existing)
+            return existing
+        }
+        let others = document.zones.filter { !foreignZoneIds.contains($0.zoneId) && !$0.isSharedArea }
+        let fallback = ZonePoint(
+            x: (others.map { $0.origin.x + $0.size.width }.max() ?? document.viewport.x + 80) + 80,
+            y: others.map(\.origin.y).min() ?? document.viewport.y + 80)
+        var placement = ZonePlacement(
+            zoneId: UUID(), projectId: nil, origin: origin ?? fallback, size: size, color: "teal",
+            collapsed: false, hydrationPolicy: .automatic, autoLayoutMode: .disabled,
+            name: name, sharedAreaId: areaId)
+        let previous = document
+        document.zones.append(placement)
+        document.bringZoneToFront(placement.zoneId)
+        placement = document.zones.first { $0.zoneId == placement.zoneId } ?? placement
+        do { try persistWorkspaceDocument() } catch { document = previous; throw error }
+        canvasView?.addSharedAreaZone(placement)
+        sharedZoneChangeObserver?(placement.zoneId)
+        return placement
+    }
+
+    /// Moves `tileIds` out of their project zones into the shared zone for
+    /// `areaId` (this workspace's, or a new one), keeping their views and so
+    /// their runners. Into an area that already holds lent tiles they land to
+    /// the right of them. Their projects keep each tile's pre-share record,
+    /// which `cancelSharedZone` restores.
+    @discardableResult
+    func createSharedZone(fromTiles tileIds: [UUID], areaId: UUID, name: String) throws -> SharedZoneConversion {
+        guard let canvas = canvasView else { throw SharedZoneError.noCanvas }
+        var seen = Set<UUID>()
+        let ids = tileIds.filter { seen.insert($0).inserted }
+        guard !ids.isEmpty else { throw SharedZoneError.noTiles }
+        var sources: [(id: UUID, world: TileFrame, zone: ZonePlacement)] = []
+        for id in ids {
+            do {
+                let lendable = try canvas.lendableTile(id)
+                sources.append((id, lendable.world, lendable.zone))
+            } catch let error as CanvasNSView.SharedAreaLendError {
+                switch error {
+                case .tileNotInstalled(let tile), .noSharedLayer(let tile): throw SharedZoneError.tileNotInstalled(tile)
+                case .terminalStaysPrivate(let tile): throw SharedZoneError.terminalStaysPrivate(tile)
+                case .alreadyLent(let tile): throw SharedZoneError.alreadyShared(tile)
+                }
+            }
+        }
+        // The tiles keep their arrangement, inset under the zone header, with
+        // room on the right for the discussion dock.
+        let minX = sources.map(\.world.x).min()!, minY = sources.map(\.world.y).min()!
+        let maxX = sources.map { $0.world.x + $0.world.width }.max()!
+        let maxY = sources.map { $0.world.y + $0.world.height }.max()!
+        let pad = 24.0, header = ZoneChromeNSView.headerHeight, dock = Double(SharedAreaSceneView.zoneDockWidth) + 24
+        let existing = sharedAreaZone(for: areaId)
+        let after = existing.flatMap { zone in
+            canvas.sharedAreaLayer(for: zone.zoneId)?.lent.map { $0.areaFrame.x + $0.areaFrame.width }.max()
+        }.map { $0 - pad + 24 } ?? 0
+        var areaFrames: [UUID: TileFrame] = [:]
+        for source in sources {
+            areaFrames[source.id] = TileFrame(x: after + source.world.x - minX + pad, y: source.world.y - minY + header + pad,
+                                              width: source.world.width, height: source.world.height)
+        }
+        let homes = sources.map(\.zone)
+        let origin = ZonePoint(x: (homes.map { $0.origin.x + $0.size.width }.max() ?? maxX) + 60,
+                               y: homes.map(\.origin.y).min() ?? minY)
+        let size = ZoneSize(width: after + (maxX - minX) + pad * 2 + dock, height: max((maxY - minY) + header + pad * 2, 560))
+        var placement = try ensureSharedAreaZone(areaId: areaId, name: name, origin: origin, size: size)
+        if existing != nil, placement.size.width < size.width || placement.size.height < size.height {
+            // An open area grows to take what is added; it never shrinks.
+            let grown = ZoneSize(width: max(placement.size.width, size.width), height: max(placement.size.height, size.height))
+            let previous = document
+            if let index = document.zones.firstIndex(where: { $0.zoneId == placement.zoneId }) { document.zones[index].size = grown }
+            do { try persistWorkspaceDocument() } catch { document = previous; throw error }
+            placement.size = grown
+            canvas.addSharedAreaZone(placement)
+        }
+        do { try canvas.lendTilesToSharedArea(areaFrames, zoneId: placement.zoneId) } catch {
+            if existing == nil { try? cancelSharedZone(placement.zoneId) }
+            throw error
+        }
+        sharedZoneChangeObserver?(placement.zoneId)
+        return SharedZoneConversion(zoneId: placement.zoneId, areaId: areaId, areaFrames: areaFrames.mapValues {
+            SharedArea.Rect(x: $0.x, y: $0.y, width: $0.width, height: $0.height)
+        })
+    }
+
+    func bindSharedTile(_ tileId: UUID, to object: SharedArea.ID<SharedArea.Object>, inZone zoneId: UUID) {
+        canvasView?.bindLentTile(tileId, to: object.rawValue, zoneId: zoneId)
+        sharedZoneChangeObserver?(zoneId)
+    }
+
+    /// Reverses `createSharedZone`, and is also how a shared zone is closed:
+    /// every lent tile goes home at its pre-share frame with its own view, and
+    /// the zone leaves the canvas and the workspace document.
+    func cancelSharedZone(_ zoneId: UUID) throws {
+        guard let zone = document.zones.first(where: { $0.zoneId == zoneId }), zone.isSharedArea else { return }
+        canvasView?.returnLentTiles(zoneId: zoneId)
+        canvasView?.removeSharedAreaZone(zoneId)
+        let previous = document
+        document.zones.removeAll { $0.zoneId == zoneId }
+        if document.lastActiveZoneId == zoneId { document.lastActiveZoneId = nil }
+        do { try persistWorkspaceDocument() } catch { document = previous; throw error }
+        sharedZoneChangeObserver?(zoneId)
+    }
+
+    /// Before the scene changes, lent tiles go home, so the departing projects'
+    /// layers hold every one of their tiles.
+    private func returnLentTilesBeforeSceneChange() {
+        guard let canvas = canvasView else { return }
+        for zoneId in canvas.sharedAreaZoneIds { canvas.returnLentTiles(zoneId: zoneId) }
+    }
+
     func switchWorkspace(to targetWorkspaceId: UUID) throws {
         reportedUnreadableProjectIds = []
         // M1.10: the defect this milestone exists to fix was that EVERY canvas call
@@ -2275,6 +2426,7 @@ final class WorkspaceRuntime {
         guard !isSwitching else { throw WorkspaceSwitchError.switchInProgress }
         isSwitching = true
         defer { isSwitching = false }
+        returnLentTilesBeforeSceneChange()
         hydrationReconcileTimer?.invalidate()
         hydrationReconcileTimer = nil
 
@@ -2513,6 +2665,7 @@ final class WorkspaceRuntime {
         var membershipCache: [UUID: [UUID: [Tile]]] = [:]
         for zone in zones {
             guard let projectId = zone.projectId else {
+                if zone.isSharedArea { continue }
                 // Ambient zone: rendered from the workspace document's ambientTiles
                 // register, same as install (ticket 03).
                 layers.append(Self.makeAmbientZoneLayer(zone: zone, document: document))

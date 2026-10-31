@@ -110,6 +110,10 @@ final class ShareLinkCoordinator {
         try await signedInAccount().shareLinks(area: area)
     }
 
+    /// The signed-in account, signing in first if needed. The shared zone
+    /// (part 2) creates its area with it before publishing.
+    func readyAccount() async throws -> CollaborationAccountController { try await signedInAccount() }
+
     // MARK: Internals
 
     private func signedInAccount() async throws -> CollaborationAccountController {

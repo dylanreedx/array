@@ -61,8 +61,13 @@ final class SharedAreaPresenceOverlay: NSView {
         guard followButtonFrame != nil else { return nil }
         return inspectedDevice == followedDevice ? "Stop following" : "Follow view"
     }
+    /// False in a canvas zone: the canvas draws follow state over the whole
+    /// viewport (`SharedAreaFollowIndicatorView`), not inside the area.
+    /// Each teammate's own colour, in a zone; nil keeps the working accent.
+    var cursorColour: ((Collaboration.Presence) -> NSColor?)?
+    var showsBanner = true { didSet { if oldValue != showsBanner { refreshGeometry() } } }
     private var bannerFrame: NSRect? {
-        guard followBanner != nil else { return nil }
+        guard showsBanner, followBanner != nil else { return nil }
         let width = min(bounds.width - 24, bannerTextWidth + 28)
         return NSRect(x: (bounds.width - width) / 2, y: 12, width: max(0, width), height: 28)
     }
@@ -132,7 +137,7 @@ final class SharedAreaPresenceOverlay: NSView {
             let cursor = NSBezierPath()
             cursor.move(to: point); cursor.line(to: .init(x: point.x + 5, y: point.y + 17))
             cursor.line(to: .init(x: point.x + 10, y: point.y + 11)); cursor.line(to: .init(x: point.x + 17, y: point.y + 10)); cursor.close()
-            AccentToken.accentWorking.color.nsColor(in: self).setFill(); cursor.fill()
+            (cursorColour?(peer) ?? AccentToken.accentWorking.color.nsColor(in: self)).setFill(); cursor.fill()
             drawText(label(peer), at: .init(x: point.x + 20, y: point.y - 4), primary: true)
         }
         if let banner = followBanner, let frame = bannerFrame {

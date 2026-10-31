@@ -44,8 +44,10 @@ final class SharedAreaHostSession {
     /// scene. The app's shared window and the paired-process witness both use
     /// this one path, so the witness cannot mount a scene production would not.
     func attach(to scene: SharedAreaSceneView) {
-        scene.onRequestHandoff = { [weak self] object in self?.handoff.show(object: object) }
+        // The handoff window is no longer on the user path: teammates prompt
+        // from the zone's agent views and the live panel.
         scene.livePanel.prompter = handoff.model
+        scene.zonePrompter = handoff.model
         scene.agentFreshness = try? SharedAgentFreshnessModel(handoff: handoff.model)
     }
     func start() {

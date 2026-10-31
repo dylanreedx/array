@@ -127,6 +127,7 @@ public enum WorkspaceAPIExposure {
         "zone.name": .notExposed("Zone renaming is native UI only."),
         "zone.navKey": .notExposed("Navigation-key assignment is native UI only."),
         "zone.zPosition": .notExposed("Zone stacking is native UI only."),
+        "zone.sharedAreaId": .internal, // Host-owned anchor of a shared area's zone.
     ]
 
     public static func violations(

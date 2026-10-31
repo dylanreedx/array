@@ -25,8 +25,67 @@ enum CollaborationAppearanceSurfaces {
             .init(id: "collaborationHub", size: .init(width: 680, height: 720), view: try CollaborationHubChecks.makeAppearanceFixture()),
             .init(id: "collaborationCapture", size: .init(width: 780, height: 800), view: try SharedAreaCaptureChecks.makeAppearanceFixture()),
             .init(id: "collaborationCaptureArea", size: .init(width: 800, height: 500), view: captureArea()),
-            .init(id: "collaborationHandoff", size: .init(width: 780, height: 820), view: try SharedAreaHandoffViewChecks.makeAppearanceFixture())
+            .init(id: "collaborationHandoff", size: .init(width: 780, height: 820), view: try SharedAreaHandoffViewChecks.makeAppearanceFixture()),
+            .init(id: "sharedAreaZone", size: .init(width: 1440, height: 900), view: try sharedZone(offline: false, following: false)),
+            .init(id: "sharedAreaZoneOffline", size: .init(width: 1440, height: 900), view: try sharedZone(offline: true, following: false)),
+            .init(id: "sharedAreaZoneFollow", size: .init(width: 1440, height: 900), view: try sharedZone(offline: false, following: true))
         ]
+    }
+
+    /// A shared area as a zone on a canvas (IN-CANVAS option A): the shared
+    /// header, a teammate's live agent with its chip and read-only footer, my
+    /// own shared agent, and the docked agreement and thread. Offline dims and
+    /// dashes the host's agent and the zone; following draws the frame and pill.
+    private static func sharedZone(offline: Bool, following: Bool) throws -> NSView {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-zone-appearance-\(UUID())")
+        let me = Collaboration.Identity(person: .init(), device: UUID()), mate = Collaboration.Identity(person: .init(), device: UUID())
+        let mateHost = SharedArea.ID<SharedArea.Host>()
+        let mateAgent = SharedArea.Item(id: .init(), kind: .agentObservation, source: .init(owner: mate.person, host: mateHost, binding: .init()))
+        let spec = SharedArea.Item(id: .init(), kind: .artifact, source: .init(owner: mate.person, host: mateHost, binding: .init()))
+        let mine = SharedArea.Item(id: .init(), kind: .agentObservation, source: .init(owner: me.person, host: .init(), binding: .init()))
+        let discussion = SharedArea.Item(id: .init(), kind: .discussion), agreement = SharedArea.Item(id: .init(), kind: .agreement)
+        let revision = SharedArea.Context(id: .init(), object: agreement.id, parent: nil, author: mate.person,
+            text: "Retry a failed payment at most twice, 4 s then 12 s. Never retry a declined card.")
+        var document = SharedArea.Document()
+        try document.apply(.init(area: document.id, expectedRevision: 0, edits: [
+            .admit(mateAgent, .init(id: .init(), object: mateAgent.id, rect: .init(x: 24, y: 58, width: 380, height: 460), z: 1)),
+            .admit(mine, .init(id: .init(), object: mine.id, rect: .init(x: 430, y: 58, width: 380, height: 460), z: 2)),
+            .admit(spec, .init(id: .init(), object: spec.id, rect: .init(x: 24, y: 540, width: 380, height: 130), z: 3)),
+            .admit(discussion, .init(id: .init(), object: discussion.id, rect: .init(x: 840, y: 58, width: 300, height: 200), z: 4)),
+            .admit(agreement, .init(id: .init(), object: agreement.id, rect: .init(x: 840, y: 300, width: 300, height: 200), z: 5)),
+            .context(revision), .endorse(.init(revision: revision.id, person: mate.person)),
+            .post(.init(id: .init(), object: discussion.id, author: mate.person, text: "I'll send the agreement to my agent."))]))
+        let authority = SharedAreaCheckRig.Authority(document: document, members: [(me, .editor), (mate, .owner)])
+        let model = try SharedAreaCheckRig.controller(root: root, identity: me, label: "You", authority: authority, seed: (document, .editor))
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        canvas.frame = .init(x: 0, y: 0, width: 1440, height: 900)
+        let zone = ZonePlacement(zoneId: UUID(), projectId: nil, origin: .init(x: 40, y: 40), size: .init(width: 1360, height: 720),
+            color: "teal", collapsed: false, hydrationPolicy: .automatic, autoLayoutMode: .disabled, name: "Checkout redesign",
+            sharedAreaId: document.id.rawValue)
+        canvas.addSharedAreaZone(zone)
+        let scene = SharedAreaSceneView(controller: model, person: me.person, presentation: .zone)
+        scene.outerViewportSize = canvas.bounds.size
+        canvas.installSharedAreaLayer(zoneId: zone.zoneId, body: scene)
+        scene.mount()
+        let now = Date()
+        let hostState: Collaboration.HostLiveness = .init(host: mateHost, generation: UUID(), state: offline ? .offline : .online,
+            lastSeen: now.addingTimeInterval(offline ? -245 : 0), staleAt: now.addingTimeInterval(30), offlineAt: now.addingTimeInterval(90),
+            reason: offline ? .expired : nil)
+        // The cached document paints at once; the header reads the connected
+        // presence and liveness the rig would relay.
+        scene.zoneHeader.person = me.person
+        scene.qaApplyZoneState(hosts: [hostState], presence: [.init(identity: mate, cursor: .init(x: 300, y: 260),
+            viewport: .init(x: 0, y: 0, width: 800, height: 500), expiresAt: .distantFuture, label: "Dylan")])
+        canvas.setSharedAreaHostOffline(offline, zoneId: zone.zoneId)
+        for view in scene.zoneAgentViews.values { view.live.stop() }
+        if following {
+            canvas.showFollowIndicator(name: "Dylan", color: SharedAreaPersonColour.color(for: mate.person, host: mate.person))
+            scene.zoneHeader.followedDevice = mate.device
+        }
+        let host = OwnedRootHost(root: root, size: canvas.frame.size)
+        host.addSubview(canvas)
+        host.layoutSubtreeIfNeeded()
+        return host
     }
 
     /// A scene with a working agreement selected (endorsement panel visible),

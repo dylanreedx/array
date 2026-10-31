@@ -5,8 +5,19 @@ import ContinuumRevivedCollaborationProtocol
 
 /// A dedicated portable scene. Nothing here knows how to construct a local tile,
 /// acquire a project, arm its creation scope, or start/stop an agent executor.
+///
+/// Two presentations. `.window` is the original scene with its own camera.
+/// `.zone` is the body of a shared area's zone on the person's own canvas
+/// (`.plans/105-collaboration/IN-CANVAS.md`, option A): it sits in the canvas's
+/// world plane at the zone's rect, so the canvas camera does all panning and
+/// zooming, and it draws the area's items at their area-local positions with an
+/// identity camera. Its `localViewCamera` is then the part of the area the
+/// canvas shows, which presence publishes and follow drives.
 @MainActor
 final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
+    enum Presentation { case window, zone }
+    let presentation: Presentation
+    var isZone: Bool { presentation == .zone }
     let controller: SharedAreaController
     let person: SharedArea.ID<SharedArea.Person>
     var onRequestInvite: (() -> Void)?
@@ -117,8 +128,41 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
 
     override var isFlipped: Bool { true }
 
-    init(controller: SharedAreaController, person: SharedArea.ID<SharedArea.Person>) {
-        self.controller = controller; self.person = person
+    // MARK: Zone presentation
+    /// The canvas viewport, in points. The follow fit and the published
+    /// viewport use it in a zone; the window uses its own canvas bounds.
+    var outerViewportSize: CGSize = .zero
+    var cameraViewportSize: CGSize { isZone ? outerViewportSize : areaCanvasView.bounds.size }
+    /// Follow frames in a zone move the canvas camera, never this view's.
+    var onDriveCanvasCamera: ((SharedAreaLocalView) -> Void)?
+    /// The area's header strip over the zone's own header (zone only).
+    private(set) lazy var zoneHeader = SharedAreaZoneHeaderView(controller: controller)
+    /// The discussion dock's surface at the zone's right edge (zone only).
+    private(set) lazy var zoneDock = SharedAreaZoneDockView()
+    private let pinnedAgreementLabel = NSTextField(wrappingLabelWithString: "")
+    /// Read-only live views of published agents, at their area positions.
+    private let zoneAgentLayer = SharedAreaZoneAgentLayer()
+    private(set) var zoneAgentViews: [SharedArea.ID<SharedArea.Object>: SharedAreaZoneAgentView] = [:]
+    /// Objects a real lent tile stands for on this canvas: no projection is drawn.
+    var locallyShownObjects: Set<SharedArea.ID<SharedArea.Object>> = [] {
+        didSet { if oldValue != locallyShownObjects { canvas.hiddenObjects = isZone ? locallyShownObjects : []; refreshZoneAgents() } }
+    }
+    /// How a teammate prompts the area's agents (part 4's full access): every
+    /// zone agent view's composer sends through it. Nil offers no composer.
+    var zonePrompter: SharedAgentHandoffController? {
+        didSet { for view in zoneAgentViews.values where view.live.prompter !== zonePrompter { view.live.prompter = zonePrompter } }
+    }
+    /// A shared position changed (any author): lent tiles follow it.
+    var onPositionsChanged: (([SharedArea.Position]) -> Void)?
+    static let zoneDockWidth: CGFloat = 340
+    static let zoneHeaderHeight: CGFloat = 34
+
+    convenience init(controller: SharedAreaController, person: SharedArea.ID<SharedArea.Person>) {
+        self.init(controller: controller, person: person, presentation: .window)
+    }
+
+    init(controller: SharedAreaController, person: SharedArea.ID<SharedArea.Person>, presentation: Presentation) {
+        self.controller = controller; self.person = person; self.presentation = presentation
         super.init(frame: .zero)
         wantsLayer = true
         titleLabel.font = .token(.title)
@@ -169,6 +213,21 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         addSubview(freshnessPanel)
         addSubview(artifactPanel)
         addSubview(livePanel)
+        if isZone {
+            // Behind everything: the dock's surface; under the shared canvas:
+            // the agents' live views, so the canvas can draw selection over them.
+            addSubview(zoneDock, positioned: .below, relativeTo: nil)
+            addSubview(zoneAgentLayer, positioned: .below, relativeTo: canvas)
+            addSubview(zoneHeader)
+            pinnedAgreementLabel.font = .token(.body); pinnedAgreementLabel.maximumNumberOfLines = 4
+            pinnedAgreementLabel.lineBreakMode = .byWordWrapping
+            pinnedAgreementLabel.cell?.truncatesLastVisibleLine = true
+            addSubview(pinnedAgreementLabel)
+            canvas.zoneMode = true
+            titleLabel.isHidden = true; statusLabel.isHidden = true; objectNavigator.isHidden = true
+            zoneHeader.onFollow = { [weak self] device in self?.onFollowTeammate?(device) }
+            zoneHeader.person = person
+        }
         agreementPanel.onRebaseDraft = { [weak self] in self?.rebaseAgreementDraft() }
         reader.delegate = self
         // Reading order: canvas, header menus, the selected entry, then compose.
@@ -199,6 +258,8 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         isMounted = false
         controller.onChange = nil
         livePanel.stop()
+        for view in zoneAgentViews.values { view.stop(); view.removeFromSuperview() }
+        zoneAgentViews.removeAll()
         cameraTimer?.invalidate(); cameraTimer = nil
         draftTimer?.invalidate(); draftTimer = nil
         actionTask?.cancel(); actionTask = nil
@@ -207,13 +268,14 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         if uncertainCommand == nil { pendingCreatedObject = nil }
         knownDocument = nil
         artifactPanel.show(object: nil, in: nil)
-        canvas.install(document: nil, camera: localCamera, selected: nil)
+        canvas.install(document: nil, camera: drawCamera, selected: nil)
         reader.string = ""; entryLabel.stringValue = ""; detailLabel.stringValue = "Closed shared workspace"
         editor.isEditable = false; postButton.isEnabled = false
     }
 
     override func layout() {
         super.layout()
+        if isZone { layoutZone(); onCanvasTransformChange?(); return }
         let margin = CGFloat(Space.l), header: CGFloat = 66
         let inspector = min(340, max(270, bounds.width * 0.34))
         let split = max(180, bounds.width - inspector)
@@ -241,8 +303,50 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         onCanvasTransformChange?()
     }
 
+    /// The zone body: the whole zone rect, area-local. The area's items keep
+    /// their positions; the dock sits inside the right edge, under the header.
+    private func layoutZone() {
+        let header = Self.zoneHeaderHeight, inset: CGFloat = 12
+        setFrame(canvas, bounds)
+        setFrame(zoneAgentLayer, bounds)
+        let headerWidth = min(bounds.width - 220, 460)
+        setFrame(zoneHeader, .init(x: bounds.width - headerWidth - 70, y: 0, width: max(0, headerWidth), height: header))
+        let dockWidth = min(Self.zoneDockWidth, max(0, bounds.width * 0.4))
+        let dock = NSRect(x: bounds.width - dockWidth - inset, y: header + inset, width: dockWidth, height: max(0, bounds.height - header - inset * 2))
+        setFrame(zoneDock, dock)
+        let x = dock.minX + 14, width = max(1, dock.width - 28)
+        // Dock order: the discussion's actions, the pinned agreement, the
+        // thread, then the reply field.
+        setFrame(detailLabel, .init(x: x, y: dock.minY + 12, width: width - 140, height: 22))
+        setFrame(actions, .init(x: dock.maxX - 14 - 130, y: dock.minY + 10, width: 130, height: ChoiceButton.controlHeight))
+        setFrame(entryLabel, .init(x: x, y: dock.minY + 40, width: width, height: 18))
+        var y = dock.minY + 64
+        if !pinnedAgreementLabel.isHidden {
+            setFrame(pinnedAgreementLabel, .init(x: x, y: y, width: width, height: 64)); y += 70
+        }
+        if !agreementPanel.isHidden {
+            setFrame(agreementPanel, .init(x: x, y: y, width: width, height: SharedAreaAgreementView.height)); y += SharedAreaAgreementView.height + 8
+        }
+        let composer: CGFloat = 96 + ComposerActionButton.controlHeight + 40
+        let editorTop = max(y + 60, dock.maxY - composer)
+        setFrame(readerScroll, .init(x: x, y: y, width: width, height: max(40, editorTop - y - 8)))
+        setFrame(artifactPanel, .init(x: x, y: dock.minY + 64, width: width, height: max(120, dock.maxY - dock.minY - 76)))
+        setFrame(editorScroll, .init(x: x, y: editorTop, width: width, height: 96))
+        setFrame(postButton, .init(x: x, y: editorTop + 104, width: min(width, 160), height: ComposerActionButton.controlHeight))
+        setFrame(messageLabel, .init(x: x, y: editorTop + 104 + ComposerActionButton.controlHeight + 6, width: width, height: 17))
+        setFrame(history, .zero); history.isHidden = true
+        setFrame(livePanel, .zero); setFrame(freshnessPanel, .zero)
+        layoutZoneAgents()
+    }
+
     func applyTokens() {
-        layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
+        if isZone {
+            // The zone's own chrome paints the background; the body adds none.
+            layer?.backgroundColor = nil
+            pinnedAgreementLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        } else {
+            layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
+        }
         titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         detailLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         for label in [statusLabel, entryLabel, messageLabel] { label.textColor = TextToken.textSecondary.color.nsColor(in: self) }
@@ -275,7 +379,74 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         privateViewWrites += 1
         try controller.setView(value)
         cameraDirty = false
-        canvas.setCamera(value)
+        canvas.setCamera(drawCamera)
+        // A zone's view of the area IS the canvas camera.
+        if isZone { onDriveCanvasCamera?(value) }
+        onCanvasTransformChange?()
+    }
+    /// In a zone the body passes every click that no control, card or agent
+    /// takes through to the canvas: panning, marquee and zone gestures.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return isZone && hit === self ? nil : hit
+    }
+    /// The area host is offline (zone): its chrome dims and dashes.
+    var onHostOfflineChange: ((Bool) -> Void)?
+    private(set) var hostOffline = false
+    /// One live view per published agent, at its area position (zone only).
+    private func refreshZoneAgents() {
+        guard isZone else { return }
+        let document = knownDocument
+        let host = SharedAreaPersonColour.host(of: document, me: person, role: controller.scope?.role)
+        let agents = (document?.items ?? []).filter { $0.kind == .agentObservation && !locallyShownObjects.contains($0.id) }
+        let wanted = Set(agents.map(\.id))
+        for (id, view) in zoneAgentViews where !wanted.contains(id) {
+            view.stop(); view.removeFromSuperview(); zoneAgentViews.removeValue(forKey: id)
+        }
+        for item in agents {
+            let view: SharedAreaZoneAgentView
+            if let existing = zoneAgentViews[item.id] { view = existing } else {
+                view = SharedAreaZoneAgentView(controller: controller)
+                view.live.prompter = zonePrompter
+                zoneAgentLayer.addSubview(view)
+                zoneAgentViews[item.id] = view
+            }
+            let owner = item.source?.owner
+            view.show(item: item, in: document, liveness: SharedAreaHostLivenessCopy.liveness(for: item, in: knownHosts),
+                      ownerName: owner.map { displayName(of: $0) == "You" ? "you" : displayName(of: $0) } ?? "a teammate",
+                      isMine: owner == person,
+                      colour: owner.map { SharedAreaPersonColour.color(for: $0, host: host) } ?? LineToken.border.color.nsColor(in: self),
+                      selected: zoneSelectedAgent == item.id)
+        }
+        let offline = zoneHeader.hostOffline
+        if offline != hostOffline { hostOffline = offline; onHostOfflineChange?(offline) }
+        layoutZoneAgents()
+    }
+    private func layoutZoneAgents() {
+        guard isZone, let document = knownDocument else { return }
+        for (id, view) in zoneAgentViews {
+            guard let position = document.positions.last(where: { $0.object == id }),
+                  let rect = canvas.displayedFrame(for: position) else { view.isHidden = true; continue }
+            if view.isHidden { view.isHidden = false }
+            setFrame(view, rect)
+        }
+    }
+
+    /// What the inner canvas draws with: the private camera in a window, the
+    /// identity in a zone, where the canvas's world plane carries the camera.
+    private var drawCamera: SharedAreaLocalView { isZone ? .init() : localCamera }
+    /// Zone only: the canvas camera moved and now shows `value` of the area.
+    /// A user move ends follow; any move updates what presence publishes. It is
+    /// never saved per frame: the canvas owns and persists its camera.
+    func canvasCameraChanged(_ value: SharedAreaLocalView, user: Bool) {
+        guard isZone, isMounted, [value.x, value.y, value.zoom].allSatisfy(\.isFinite), value.zoom > 0 else { return }
+        var next = value; next.focusedObject = selectedObject
+        if user {
+            followGlide?.invalidate(); followGlide = nil; glide = nil
+            onLocalCameraNavigation?()
+        }
+        guard next != localCamera else { return }
+        localCamera = next
         onCanvasTransformChange?()
     }
     /// Follow drives the private camera from a teammate's published viewport.
@@ -319,9 +490,10 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     var isFollowGliding: Bool { followGlide != nil }
     private var followTarget: SharedAreaLocalView?
     private func showFollowedCamera(_ frame: SharedAreaLocalView) {
-        localCamera = frame; cameraDirty = true
+        localCamera = frame; cameraDirty = !isZone
         followCameraFrames += 1
-        canvas.setCamera(localCamera)
+        canvas.setCamera(drawCamera)
+        if isZone { onDriveCanvasCamera?(frame) }
         onCanvasTransformChange?()
     }
     /// The publisher reports who can be followed; the Workspace menu offers them.
@@ -337,6 +509,15 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         if cameraDirty { try setCamera(localCamera) }
     }
     func selectObject(_ object: SharedArea.ID<SharedArea.Object>?) throws {
+        // In a zone an agent is read in place, in its own live view: selecting
+        // it marks it on the canvas and leaves the dock on its discussion.
+        if isZone, let object, controller.document?.items.first(where: { $0.id == object })?.kind == .agentObservation {
+            zoneSelectedAgent = object
+            canvas.setSelection(object)
+            refreshZoneAgents()
+            return
+        }
+        zoneSelectedAgent = nil
         try prepareToClose()
         var candidate = localCamera
         candidate.focusedObject = object
@@ -369,13 +550,13 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     /// Points are scene-relative screen points, including the canvas header
     /// offset, and portable area points independent of each person's camera.
     func screenPoint(forAreaPoint point: CGPoint) -> CGPoint {
-        canvas.convert(.init(x: (point.x - localCamera.x) * localCamera.zoom,
-                             y: (point.y - localCamera.y) * localCamera.zoom), to: self)
+        canvas.convert(.init(x: (point.x - drawCamera.x) * drawCamera.zoom,
+                             y: (point.y - drawCamera.y) * drawCamera.zoom), to: self)
     }
     func areaPoint(forScreenPoint point: CGPoint) -> CGPoint {
         let local = canvas.convert(point, from: self)
-        return .init(x: localCamera.x + local.x / localCamera.zoom,
-                     y: localCamera.y + local.y / localCamera.zoom)
+        return .init(x: drawCamera.x + local.x / drawCamera.zoom,
+                     y: drawCamera.y + local.y / drawCamera.zoom)
     }
     var canUndoSharedGeometry: Bool {
         guard isMounted, !geometryUnavailable, controller.canSubmit, !controller.isSubmitting, pendingGeometry == nil,
@@ -413,6 +594,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
               frames.values.allSatisfy(\.valid) else { return false }
         gesture.frames = frames; geometryGesture = gesture
         canvas.setPreview(frames)
+        layoutZoneAgents()
         return true
     }
     func cancelGeometry() {
@@ -420,6 +602,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         canvas.cancelGeometryGesture()
         canvas.setPreview([:])
         lastControlsKey = nil
+        layoutZoneAgents()
     }
     func finishGeometry() async {
         guard let gesture = geometryGesture else { return }
@@ -596,10 +779,11 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         onLocalCameraNavigation?()
         var rect = NSRect(x: first.rect.x, y: first.rect.y, width: first.rect.width, height: first.rect.height)
         for position in positions.dropFirst() { rect = rect.union(.init(x: position.rect.x, y: position.rect.y, width: position.rect.width, height: position.rect.height)) }
-        let width = max(1, canvas.bounds.width - 64), height = max(1, canvas.bounds.height - 64)
+        let size = cameraViewportSize
+        let width = max(1, size.width - 64), height = max(1, size.height - 64)
         let zoom = max(0.1, min(2, min(width / rect.width, height / rect.height)))
-        try setCamera(.init(x: rect.midX - canvas.bounds.width / zoom / 2,
-            y: rect.midY - canvas.bounds.height / zoom / 2, zoom: zoom, focusedObject: selectedObject))
+        try setCamera(.init(x: rect.midX - size.width / zoom / 2,
+            y: rect.midY - size.height / zoom / 2, zoom: zoom, focusedObject: selectedObject))
     }
 
     func createObject(kind: SharedArea.Kind) async {
@@ -658,11 +842,37 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         refreshControls()
     }
 
+    private var selectingDockDefault = false
+    /// The agent selected on the zone's canvas (zone only).
+    private(set) var zoneSelectedAgent: SharedArea.ID<SharedArea.Object>?
+    /// The agreement the dock pins: the area's latest.
+    var pinnedAgreement: SharedArea.ID<SharedArea.Object>? {
+        knownDocument?.items.last(where: { $0.kind == .agreement })?.id
+    }
+    private var defaultDockObject: SharedArea.ID<SharedArea.Object>? {
+        knownDocument?.items.first(where: { $0.kind == .discussion })?.id ?? pinnedAgreement
+    }
+    /// A person as the dock names them.
+    func displayName(of other: SharedArea.ID<SharedArea.Person>) -> String {
+        if other == person { return "You" }
+        return (qaPresence ?? controller.presence).first(where: { $0.identity.person == other })?.label.map { String($0.prefix(28)) } ?? "Teammate"
+    }
+    private var qaPresence: [Collaboration.Presence]?
+    /// QA (appearance census): draw the zone as a connected area with this
+    /// presence and host liveness, without a connection.
+    func qaApplyZoneState(hosts: [Collaboration.HostLiveness], presence: [Collaboration.Presence]) {
+        guard isZone else { return }
+        qaPresence = presence
+        knownHosts = hosts
+        zoneHeader.refresh(document: knownDocument, hosts: hosts, presence: presence, status: .connected)
+        refreshZoneAgents()
+        lastControlsKey = nil; refreshReader(); refreshControls()
+    }
     private func refresh() {
         guard isMounted else { return }
         if let area = controller.document?.id { loadGeometryLedger(area: area) }
         reconcileDeliveredOperations()
-        if !cameraDirty { localCamera = controller.view }
+        if !cameraDirty && !isZone { localCamera = controller.view }
         let current = controller.document
         let changed = current?.id != knownDocument?.id || current?.revision != knownDocument?.revision
         if let gesture = geometryGesture, current?.revision != gesture.document.revision {
@@ -674,7 +884,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         }
         if changed {
             knownDocument = current; knownHosts = controller.hostLiveness
-            canvas.install(document: current, hosts: knownHosts, camera: localCamera, selected: selectedObject)
+            canvas.install(document: current, hosts: knownHosts, camera: drawCamera, selected: selectedObject)
             if activeDraft == nil, let object = selectedObject {
                 activeDraft = controller.drafts.last(where: { $0.object == object })
                 editor.string = activeDraft?.text ?? ""
@@ -683,10 +893,22 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         } else if controller.hostLiveness != knownHosts {
             // Host liveness changes without a document revision.
             knownHosts = controller.hostLiveness
-            canvas.install(document: current, hosts: knownHosts, camera: localCamera, selected: selectedObject)
+            canvas.install(document: current, hosts: knownHosts, camera: drawCamera, selected: selectedObject)
             refreshReader()
-        } else { canvas.setCamera(localCamera) }
+        } else { canvas.setCamera(drawCamera) }
         setText(statusLabel, statusText)
+        if isZone {
+            // Selecting saves the private view, which refreshes again before
+            // the selection is set; the flag keeps that from recursing.
+            if selectedObject == nil, !selectingDockDefault, let target = defaultDockObject {
+                selectingDockDefault = true
+                defer { selectingDockDefault = false }
+                try? selectObject(target)
+            }
+            zoneHeader.refresh(document: knownDocument, hosts: knownHosts)
+            refreshZoneAgents()
+            if changed, let positions = knownDocument?.positions { onPositionsChanged?(positions) }
+        }
         artifactPanel.headsChanged(controller.artifactHeads)
         canvas.geometryEnabled = !geometryUnavailable && geometryLedger != nil && controller.canSubmit && !controller.isSubmitting && pendingGeometry == nil && uncertainCommand == nil
         if controller.status != .connected { attemptedGeometryRecovery = false }
@@ -714,9 +936,16 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     private func refreshControls() {
         let heldFocus = CollaborationKeyLoop.holdFocus(in: window)
         defer { CollaborationKeyLoop.restoreFocus(heldFocus, in: window) }
-        agreementPanel.show(agreement: selectedObject, in: knownDocument, draft: activeDraft)
-        freshnessPanel.show(agent: selectedObject, in: knownDocument, model: agentFreshness)
-        livePanel.show(object: selectedObject, in: knownDocument)
+        // A zone's dock always pins the area's agreement; its agents are read
+        // in place, so neither the freshness panel nor the single live view shows.
+        agreementPanel.show(agreement: isZone ? pinnedAgreement : selectedObject, in: knownDocument, draft: activeDraft)
+        freshnessPanel.show(agent: isZone ? nil : selectedObject, in: knownDocument, model: agentFreshness)
+        livePanel.show(object: isZone ? nil : selectedObject, in: knownDocument)
+        if isZone {
+            let pinnedText = pinnedAgreement.flatMap { pinned in knownDocument?.contexts.last(where: { $0.object == pinned })?.text }
+            setText(pinnedAgreementLabel, pinnedText ?? "")
+            if pinnedAgreementLabel.isHidden != (pinnedText == nil) { pinnedAgreementLabel.isHidden = pinnedText == nil; needsLayout = true }
+        }
         // Stale is not offline: it may still be running, so only offline turns the view into history.
         livePanel.hostOnline = knownDocument?.items.first(where: { $0.id == selectedObject })
             .flatMap { SharedAreaHostLivenessCopy.liveness(for: $0, in: knownHosts) }
@@ -749,6 +978,11 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             .init(id: "delivery", title: "Check pending delivery (\(pendingDeliveryCount))", icon: .system("arrow.clockwise"), enabled: !controller.isSubmitting && (pendingDeliveryCount > 0 || geometryUnavailable)),
             .init(id: "handoff", title: "Hand over…", icon: .system("person.2"), enabled: writable && selectedObject.flatMap { selected in controller.document?.items.first(where: { $0.id == selected && $0.kind == .agentObservation }) } != nil && onRequestHandoff != nil),
             .init(id: "fit", title: "Fit shared content", icon: .system("arrow.up.left.and.arrow.down.right"), enabled: controller.document?.positions.isEmpty == false),
+        ] + (!isZone ? [] : [
+            .init(id: "dock:discussion", title: "Reply in the discussion", icon: .system("bubble.left"),
+                  enabled: knownDocument?.items.contains(where: { $0.kind == .discussion }) == true),
+            .init(id: "dock:agreement", title: "Propose an agreement change", icon: .system("doc.text"), enabled: pinnedAgreement != nil),
+        ]) + [
             .init(id: "invite", title: "Invite collaborator…", icon: .system("person.badge.plus"), enabled: controller.status == .connected && controller.scope?.allows(.manageSharing) == true)
         ] + followTargets.map { target in
             target.device == followedTeammate
@@ -782,7 +1016,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         // A selected agent's live view takes the reader's place, entry navigation included.
         livePanel.show(object: selectedObject, in: knownDocument)
         if !livePanel.isHidden { readerScroll.isHidden = true }
-        entryLabel.isHidden = !livePanel.isHidden; history.isHidden = !livePanel.isHidden
+        entryLabel.isHidden = !livePanel.isHidden; history.isHidden = isZone || !livePanel.isHidden
         guard let document = knownDocument, let object = selectedObject,
               let item = document.items.first(where: { $0.id == object }) else {
             setText(detailLabel, activeDraft == nil ? "Select an object" : "Private draft")
@@ -790,8 +1024,19 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             return
         }
         setText(detailLabel, Self.title(for: item.kind))
+        if isZone {
+            // The dock reads a discussion as one thread, every post with its author.
+            let people = Set(document.items.compactMap { $0.source?.owner } + controller.presence.map(\.identity.person) + [person]).count
+            let agreements = document.items.filter { $0.kind == .agreement }.count
+            setText(entryLabel, "\(people) \(people == 1 ? "person" : "people") · \(agreements) \(agreements == 1 ? "agreement" : "agreements")")
+        }
         let entries: [String]
         switch item.kind {
+        case .discussion where isZone:
+            let thread = document.posts.filter { $0.object == object }.map {
+                displayName(of: $0.author) + "\n" + SharedAreaExcerptPresentation.entry(for: $0, in: document, model: agentFreshness)
+            }
+            entries = thread.isEmpty ? [] : [thread.joined(separator: "\n\n")]
         case .discussion:
             entries = document.posts.filter { $0.object == object }.map { SharedAreaExcerptPresentation.entry(for: $0, in: document, model: agentFreshness) }
         case .agreement: entries = document.contexts.filter { $0.object == object }.map(\.text)
@@ -808,7 +1053,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         displayedContextRevision = revisions.indices.contains(readerIndex) ? revisions[readerIndex] : nil
         let text = entries.isEmpty ? (item.kind == .agreement ? "No agreement revision yet." : "No discussion messages yet.") : entries[readerIndex]
         if reader.string != text { reader.string = text; reader.scrollRangeToVisible(.init(location: 0, length: 0)) }
-        setText(entryLabel, entries.isEmpty ? "" : "Entry \(readerIndex + 1) of \(entries.count) · full entry")
+        if !isZone { setText(entryLabel, entries.isEmpty ? "" : "Entry \(readerIndex + 1) of \(entries.count) · full entry") }
         setHistory([
             .init(id: "earlier", title: "Earlier entry", enabled: readerIndex > 0),
             .init(id: "later", title: "Later entry", enabled: readerIndex + 1 < entries.count),
@@ -837,6 +1082,12 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         case "fit": do { try fitContent() } catch { showPrivateSaveFailure() }
         case "invite": onRequestInvite?()
         case "unfollow": onFollowTeammate?(nil)
+        case "dock:discussion":
+            if let target = knownDocument?.items.first(where: { $0.kind == .discussion })?.id {
+                do { try selectObject(target) } catch { showPrivateSaveFailure() }
+            }
+        case "dock:agreement":
+            if let target = pinnedAgreement { do { try selectObject(target) } catch { showPrivateSaveFailure() } }
         case let id where id.hasPrefix("follow:"):
             if let device = UUID(uuidString: String(id.dropFirst("follow:".count))) { onFollowTeammate?(device) }
         default: break
@@ -884,6 +1135,13 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     }
     private func navigate(_ value: SharedAreaLocalView, complete: Bool) {
         onLocalCameraNavigation?()
+        // Keyboard panning in a zone moves the canvas camera.
+        if isZone {
+            if geometryGesture != nil { cancelGeometry() }
+            var next = localCamera
+            next.x = value.x; next.y = value.y; next.zoom = value.zoom
+            onDriveCanvasCamera?(next); return
+        }
         if geometryGesture != nil { cancelGeometry() }
         localCamera = value; localCamera.focusedObject = selectedObject; cameraDirty = true
         canvas.setCamera(localCamera)
@@ -932,6 +1190,16 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
         let position: SharedArea.Position
         let title: String
         let preview: String
+        var kind: SharedArea.Kind = .discussion
+    }
+    /// A zone body (`SharedAreaSceneView.Presentation.zone`): no background, the
+    /// discussion and agreement live in the dock rather than as cards, agents
+    /// draw as live views under this canvas, and every click that lands on no
+    /// card passes through to the canvas behind.
+    var zoneMode = false { didSet { needsDisplay = true } }
+    /// Objects shown by something else on this canvas (a lent tile).
+    var hiddenObjects: Set<SharedArea.ID<SharedArea.Object>> = [] {
+        didSet { guard oldValue != hiddenObjects else { return }; needsDisplay = true }
     }
     var onSelect: ((SharedArea.ID<SharedArea.Object>?) -> Void)?
     var onCamera: ((SharedAreaLocalView, Bool) -> Void)?
@@ -987,7 +1255,7 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
             case .discussion: body = posts[item.id]?.last?.text ?? "No messages yet."
             case .agreement: body = contexts[item.id]?.last?.text ?? "No agreement revision yet."
             }
-            return Card(position: position, title: SharedAreaSceneView.title(for: item.kind), preview: String(body.prefix(800)))
+            return Card(position: position, title: SharedAreaSceneView.title(for: item.kind), preview: String(body.prefix(800)), kind: item.kind)
         }
         selectedPlacements.formIntersection(Set(cards.map { $0.position.id }))
         if selectedPlacements.isEmpty, let selected,
@@ -1026,6 +1294,7 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
         var result: [(card: Card, frame: NSRect)] = []
         var omitted = false
         for card in cards.reversed() {
+            if zoneMode, card.kind == .discussion || card.kind == .agreement || hiddenObjects.contains(card.position.object) { continue }
             guard let frame = screenFrame(previewFrames[card.position.id] ?? card.position.rect), frame.intersects(bounds) else { continue }
             if result.count == 128 { omitted = true; break }
             result.append((card, frame))
@@ -1034,6 +1303,29 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
     }
     func renderedFrame(for object: SharedArea.ID<SharedArea.Object>) -> NSRect? {
         visibleCards().cards.first(where: { $0.card.position.object == object })?.frame
+    }
+    /// Where a position is drawn now, its preview frame included.
+    func displayedFrame(for position: SharedArea.Position) -> NSRect? {
+        screenFrame(previewFrames[position.id] ?? position.rect)
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard zoneMode else { return super.hitTest(point) }
+        let local = convert(point, from: superview)
+        if geometryEnabled, let group = selectedGroupFrame(),
+           NSRect(x: group.maxX - 10, y: group.maxY - 10, width: 20, height: 20).contains(local) { return self }
+        guard let entry = visibleCards().cards.reversed().first(where: { $0.frame.contains(local) }) else { return nil }
+        // An agent's live view below takes its body; its header is the handle.
+        if entry.card.kind == .agentObservation, local.y >= entry.frame.minY + SharedAreaZoneAgentView.headerHeight { return nil }
+        return self
+    }
+    override func scrollWheel(with event: NSEvent) {
+        // The canvas camera pans and zooms a zone.
+        if zoneMode { nextResponder?.scrollWheel(with: event); return }
+        scrollWheelInWindow(with: event)
+    }
+    override func magnify(with event: NSEvent) {
+        if zoneMode { nextResponder?.magnify(with: event); return }
+        magnifyInWindow(with: event)
     }
     func renderedPreview(for object: SharedArea.ID<SharedArea.Object>) -> String? {
         guard camera.zoom >= 0.35 else { return nil }
@@ -1045,6 +1337,7 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
     private(set) var drawCount = 0
     override func draw(_ dirtyRect: NSRect) {
         drawCount += 1
+        if zoneMode { drawZone(); return }
         SurfaceToken.canvas.color.nsColor(in: self).setFill(); bounds.fill()
         if cards.isEmpty {
             draw(hasDocument ? "A shared place for your work" : "Shared content unavailable", rect: bounds.insetBy(dx: 28, dy: 28), role: .title, color: .textPrimary)
@@ -1081,6 +1374,35 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
         }
         if visible.omitted { draw("Showing up to 128 visible objects · zoom in to inspect", rect: .init(x: 16, y: bounds.height - 30, width: bounds.width - 32, height: 18), role: .label, color: .textSecondary) }
     }
+    /// A zone: transparent, artifact cards drawn here, agents drawn by their own
+    /// live views below, and the selection ring and handle over both.
+    private func drawZone() {
+        let visible = visibleCards()
+        if visible.cards.isEmpty {
+            draw(hasDocument ? "Nothing shared here yet" : "Shared content unavailable",
+                 rect: .init(x: 28, y: 52, width: max(0, bounds.width - SharedAreaSceneView.zoneDockWidth - 70), height: 22), role: .title, color: .textSecondary)
+        }
+        for (card, frame) in visible.cards where card.kind == .artifact {
+            let radius = CGFloat(CornerRole.card.radius)
+            let path = NSBezierPath(roundedRect: frame.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius)
+            SurfaceToken.tileBody.color.nsColor(in: self).setFill(); path.fill()
+            LineToken.border.color.nsColor(in: self).setStroke(); path.lineWidth = 1; path.stroke()
+            NSGraphicsContext.saveGraphicsState(); NSBezierPath(rect: frame.insetBy(dx: 10, dy: 10)).addClip()
+            draw(card.title, rect: .init(x: frame.minX + 14, y: frame.minY + 13, width: max(0, frame.width - 28), height: 22), role: .title, color: .textPrimary)
+            draw("Select it to read its revision in the dock.", rect: .init(x: frame.minX + 14, y: frame.minY + 47, width: max(0, frame.width - 28), height: 18), role: .label, color: .textSecondary)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        for (card, frame) in visible.cards where selectedPlacements.contains(card.position.id) {
+            let radius = CGFloat(CornerRole.card.radius) + 3
+            let ring = NSBezierPath(roundedRect: frame.insetBy(dx: -3, dy: -3), xRadius: radius, yRadius: radius)
+            LineToken.borderStrong.color.nsColor(in: self).setStroke(); ring.lineWidth = 2; ring.stroke()
+        }
+        if geometryEnabled, let frame = selectedGroupFrame() {
+            let handle = NSRect(x: frame.maxX - 4, y: frame.maxY - 4, width: 8, height: 8)
+            SurfaceToken.tileBody.color.nsColor(in: self).setFill(); handle.fill()
+            LineToken.borderStrong.color.nsColor(in: self).setStroke(); NSBezierPath(rect: handle).stroke()
+        }
+    }
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
@@ -1097,10 +1419,10 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
                 : cards.last(where: { selectedPlacements.contains($0.position.id) })?.position.object
             onSelect?(active)
             if geometryEnabled && selectedPlacements.contains(id) { startGeometry(at: point, kind: .move) }
-        } else { selectedPlacements.removeAll(); onSelect?(nil); panStart = (point, camera) }
+        } else if !zoneMode { selectedPlacements.removeAll(); onSelect?(nil); panStart = (point, camera) }
     }
     private func startGeometry(at point: NSPoint, kind: SharedAreaGeometryHistory.Kind) {
-        let positions = cards.filter { selectedPlacements.contains($0.position.id) }.map(\.position)
+        let positions = cards.filter { selectedPlacements.contains($0.position.id) && isGrabbable($0) }.map(\.position)
         guard !positions.isEmpty, onBeginGeometry?(Set(positions.map(\.id)), kind) == true else { return }
         geometryDrag = .init(point: point, camera: camera, positions: positions, kind: kind)
     }
@@ -1185,12 +1507,12 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
         }
         if panStart != nil { panStart = nil; onCamera?(camera, true) }
     }
-    override func scrollWheel(with event: NSEvent) {
+    private func scrollWheelInWindow(with event: NSEvent) {
         var moved = camera
         moved.x += event.scrollingDeltaX / moved.zoom; moved.y += event.scrollingDeltaY / moved.zoom
         onCamera?(moved, event.phase == .ended || event.phase == .cancelled || event.momentumPhase == .ended)
     }
-    override func magnify(with event: NSEvent) {
+    private func magnifyInWindow(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         var moved = camera
         let areaX = moved.x + point.x / moved.zoom, areaY = moved.y + point.y / moved.zoom
@@ -1203,8 +1525,13 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
         guard values.allSatisfy(\.isFinite), (values[0] + values[2]).isFinite, (values[1] + values[3]).isFinite else { return nil }
         return .init(x: values[0], y: values[1], width: values[2], height: values[3])
     }
+    /// A zone draws no card for the dock's discussion and agreement, or for an
+    /// object a lent tile shows; none of them can be grabbed there.
+    private func isGrabbable(_ card: Card) -> Bool {
+        !zoneMode || !(card.kind == .discussion || card.kind == .agreement || hiddenObjects.contains(card.position.object))
+    }
     private func selectedGroupFrame() -> NSRect? {
-        let frames = cards.filter { selectedPlacements.contains($0.position.id) }
+        let frames = cards.filter { selectedPlacements.contains($0.position.id) && isGrabbable($0) }
             .compactMap { screenFrame(previewFrames[$0.position.id] ?? $0.position.rect) }
         guard let first = frames.first else { return nil }
         return frames.dropFirst().reduce(first) { $0.union($1) }

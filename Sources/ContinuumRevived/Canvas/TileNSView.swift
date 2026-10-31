@@ -1140,6 +1140,13 @@ class TileNSView: NSView, TokenThemed {
             dragKind = .none
             return
         }
+        // A tile lent to a shared area belongs to no project layer: its header
+        // drag moves it in the area, and the area shares the move.
+        if local.y < grabHeightInLocalCoordinates, resizeEdge(at: local) == nil,
+           canvas?.beginLentTileDrag(tile.id) == true {
+            dragKind = .sharedAreaMove
+            return
+        }
         if canvas?.tileSelection.mouseDown(on: self, event: event,
                                           isHeader: local.y < grabHeightInLocalCoordinates,
                                           isResize: resizeEdge(at: local) != nil) == true {
@@ -1178,6 +1185,8 @@ class TileNSView: NSView, TokenThemed {
         switch dragKind {
         case .canvasPan:
             canvas.continuePointerPan(with: event)
+        case .sharedAreaMove:
+            canvas.dragLentTile(tile.id, screenDelta: delta)
         case .move:
             var freeTile = tile
             freeTile.frame = moveFreeWorldFrame ?? canvas.worldFrame(forTileFrame: tile.frame, tileId: tile.id)
@@ -1268,6 +1277,12 @@ class TileNSView: NSView, TokenThemed {
         let completedDragKind = dragKind
         let wasClick = !mouseDraggedSinceDown
         dragKind = .none
+        if case .sharedAreaMove = completedDragKind {
+            mouseDraggedSinceDown = false
+            canvas?.endLentTileDrag(tile.id)
+            if wasClick { canvas?.focusBroker?.enterScope(.tile(tile.id), reason: .userClick) }
+            return
+        }
         mouseDraggedSinceDown = false
         resizeFreeFrame = nil
         // Tear down the live resize readout (no-op if it was never shown).
@@ -1575,6 +1590,7 @@ class TileNSView: NSView, TokenThemed {
         case canvasPan
         case move
         case resize(ResizeEdge)
+        case sharedAreaMove
     }
 }
 

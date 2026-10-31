@@ -27,6 +27,9 @@ final class SharedAreaPresencePublisher {
     private var followedLabel = ""
     /// Camera frames actually applied from a followed viewport.
     private(set) var followCameraApplies = 0
+    /// Follow started (device, name) or ended (nil). A zone shows it over the canvas.
+    var onFollowChange: ((UUID?, String) -> Void)?
+    var followedLabelText: String { followedLabel }
 
     init(scene: SharedAreaSceneView) {
         self.scene = scene; controller = scene.controller
@@ -35,6 +38,7 @@ final class SharedAreaPresencePublisher {
     func start() {
         guard stopped else { return }; stopped = false
         overlay.frame = scene.areaCanvasView.bounds
+        overlay.showsBanner = !scene.isZone
         scene.areaCanvasView.addSubview(overlay)
         scene.onCanvasTransformChange = { [weak self] in self?.refreshPointerGeometry() }
         overlay.onPointerExit = { [weak self] in
@@ -76,6 +80,7 @@ final class SharedAreaPresencePublisher {
         scene.onCanvasTransformChange = nil; overlay.onPointerExit = nil
         scene.onLocalCameraNavigation = nil; overlay.onFollow = nil; overlay.onStopFollowing = nil
         scene.onFollowTeammate = nil; scene.setFollowTargets([], followed: nil)
+        if followedDevice != nil { onFollowChange?(nil, "") }
         followedDevice = nil; overlay.followedDevice = nil; overlay.followBanner = nil
         cursor = nil; screenCursor = nil; lastStatus = nil
         overlay.peers = []; overlay.inspect(device: nil); overlay.removeFromSuperview()
@@ -112,6 +117,7 @@ final class SharedAreaPresencePublisher {
         overlay.followBanner = "Following \(name) · pan, scroll or zoom to stop"
         applyFollow(viewport)
         publishFollowTargets()
+        onFollowChange?(device, name)
         // Publish at once that this view is now borrowed, so nobody follows it back.
         send(force: true)
         return true
@@ -123,6 +129,7 @@ final class SharedAreaPresencePublisher {
         // One private camera write when following ends, never one per frame.
         try? scene.persistFollowedCamera()
         publishFollowTargets()
+        onFollowChange?(nil, "")
         send(force: true)
     }
     /// Teammates currently sharing a view, for the keyboard path in the
@@ -157,7 +164,7 @@ final class SharedAreaPresencePublisher {
     /// Fits the teammate's whole area-local viewport, centred, into this
     /// person's canvas. Different window sizes and zooms see the same content.
     private func applyFollow(_ viewport: SharedArea.Rect) {
-        let bounds = scene.areaCanvasView.bounds
+        let bounds = scene.cameraViewportSize
         guard bounds.width > 0, bounds.height > 0, viewport.width > 0, viewport.height > 0 else { return }
         let zoom = min(8, max(0.1, min(Double(bounds.width) / viewport.width, Double(bounds.height) / viewport.height)))
         let camera = SharedAreaLocalView(x: viewport.x + viewport.width / 2 - Double(bounds.width) / zoom / 2,
@@ -195,7 +202,7 @@ final class SharedAreaPresencePublisher {
                 }
                 guard let session, sequence < UInt64.max else { return }
                 sequence += 1
-                let camera = scene.localViewCamera, bounds = scene.areaCanvasView.bounds
+                let camera = scene.localViewCamera, bounds = scene.cameraViewportSize
                 // A follower publishes no viewport: following a follower would
                 // otherwise let two cameras chase each other.
                 let viewport = followedDevice != nil ? nil : SharedArea.Rect(x: camera.x, y: camera.y,
