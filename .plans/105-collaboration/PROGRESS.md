@@ -1313,3 +1313,34 @@ Done 21.
 Still to merge in this round: part 4's display-name follow-up (not landed),
 part 2 `mp-canvas-zone`, then part 3 `mp-share-entry`. The pair-features
 receipt is an uncommitted `green.log` on its bench.
+
+## In-canvas round — part 4 display names, pair-feature hardening, share-link round 3 receipts, 31 October 2026
+
+Merged since `46d34d8a`:
+- `array/mp-share-links` round 3 receipts (`c59b61dc`, `50114945`). Its
+  `49d2bb8d` reverts the native deadline to 45 s and was deliberately not
+  taken, so 120 s stays. The `fly.toml` `fly-client-ip` setting came with
+  `cb1b3732`. It is repo config only; nothing was deployed.
+- `array/col-pair-features` `82dca8ea` (endorsement and compaction stages
+  that catch breakage; compaction now holds B live behind the horizon and adds
+  a late joiner) and its receipt `230ea13b`.
+- `array/mp-full-access` `c25a91b2`: a teammate's prompt is attributed by
+  name, not by ID.
+
+The first gate on `2db68e2f` failed only at the feature journey's harnesses
+stage: the Codex peer listed no shared agent. Run alone, the stage passed,
+because the script read `sourceObjects` once, straight after `shareZone`.
+After the heavier compaction stage, the peer had not listed its binding yet.
+`7cde655f` waits up to 30 s for exactly one binding; the assertion is
+unchanged.
+
+Gate on `7cde655f` (after the 0.7.36 release build released the lock): log
+`qa-runs/coordinator/gate-7cde655f.log`, **13 legs, all passed**; feature
+journey 8 passed, 0 pending.
+
+Next: part 2 (`mp-canvas-zone`, receipt pending), then part 3
+(`mp-share-entry`, ready at `4d5e7ab4`), in one batch. Part 3 runs on a
+stand-in for part 2 (`PendingSharedZones`). When it merges after part 2:
+remove part 3's duplicate `SharedZoneShare`, add
+`extension AppDelegate: SharedZoneCreating {}`, and set
+`sharedZoneCreator = self`.
