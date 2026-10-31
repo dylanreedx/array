@@ -3,6 +3,7 @@ import ContinuumRevivedAgentUI
 import CoreImage
 import CryptoKit
 import ContinuumRevivedCore
+import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedSync
 import Foundation
 import GhosttyKit
@@ -1657,6 +1658,8 @@ enum ContinuumApp {
                     }
                     print("STAGE collaboration native: account hub")
                     try await CollaborationHubChecks.run(delegate: delegate)
+                    print("STAGE collaboration native: share links")
+                    try await ShareLinkAppChecks.run()
                     print("STAGE collaboration native: mixed-window commands")
                     try await CollaborationWindowCommandChecks.run()
                     print("STAGE collaboration native: capture workflow")
@@ -6522,6 +6525,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var explicitCreationScopeOverride: CreationScope?
     private var componentLabPanel: ComponentLabPanel?
     private var collaborationHub: CollaborationHubWindowController?
+    /// One account model for the hub and share links, built on first use so
+    /// starting Array still reads no collaboration credential.
+    private var collaborationAccount: CollaborationAccountController?
+    /// The share-link controller (IN-CANVAS.md, Round 2): the popover's API and
+    /// the one entry point for array:// and arrayapp.dev/s/ links.
+    private(set) lazy var shareLinks = makeShareLinkCoordinator()
     private var sharedAreaWindows: [String: SharedAreaWindowController] = [:]
     private var sharedAreaHostSessions: [String: SharedAreaHostSession] = [:]
     private var pendingSharedAreaCapture: SharedAreaCaptureRequest?
@@ -11923,21 +11932,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @objc func openCollaborationFromMenu(_ sender: Any?) {
         if let collaborationHub { collaborationHub.show(); return }
         do {
-            // Store constructors add their channel directory. A QA override is
-            // already isolated app support, so nest a parent under that root.
-            let parent = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
-                .map { $0.appendingPathComponent("collaboration-support", isDirectory: true) }
-                ?? RegistryStore.defaultApplicationSupportDirectory().deletingLastPathComponent()
-            let credentials = CollaborationCredentialStore(vault: KeychainCollaborationCredentialVault())
-            let model = try CollaborationAccountController(store: CollaborationAccountStore(applicationSupportRoot: parent),
-                credentialStore: credentials)
-            presentCollaborationHub(model: model).show()
+            presentCollaborationHub(model: try collaborationAccountModel()).show()
         } catch {
             let alert = NSAlert()
             alert.messageText = "Collaboration could not open"
             alert.informativeText = "Array preserved the existing collaboration records. Check that your local app data is available and try again."
             alert.runModal()
         }
+    }
+
+    func collaborationAccountModel() throws -> CollaborationAccountController {
+        if let collaborationHub { return collaborationHub.content.model }
+        if let collaborationAccount { return collaborationAccount }
+        // Store constructors add their channel directory. A QA override is
+        // already isolated app support, so nest a parent under that root.
+        let parent = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
+            .map { $0.appendingPathComponent("collaboration-support", isDirectory: true) }
+            ?? RegistryStore.defaultApplicationSupportDirectory().deletingLastPathComponent()
+        let credentials = CollaborationCredentialStore(vault: KeychainCollaborationCredentialVault())
+        let model = try CollaborationAccountController(store: CollaborationAccountStore(applicationSupportRoot: parent),
+            credentialStore: credentials)
+        collaborationAccount = model
+        return model
+    }
+
+    /// array://s/<slug>#<token> and https://arrayapp.dev/s/<slug>#<token> both
+    /// land in the share-link controller. Other URLs are not Array's to open.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where Self.isShareLink(url) { Task { @MainActor in await shareLinks.open(url) } }
+    }
+    static func isShareLink(_ url: URL) -> Bool {
+        switch url.scheme?.lowercased() {
+        case ShareLinkURL.appScheme?: return url.host?.lowercased() == "s"
+        case "https"?: return url.host?.lowercased() == ShareLinkURL.webHost && url.path.hasPrefix("/s/")
+        default: return false
+        }
+    }
+
+    private func makeShareLinkCoordinator() -> ShareLinkCoordinator {
+        ShareLinkCoordinator(account: { [unowned self] in try collaborationAccountModel() }, signIn: { [weak self] model in
+            guard let self else { return false }
+            return await signInForShareLink(model)
+        }, openArea: { [weak self] controller, person, area, model in
+            self?.openSharedArea(controller: controller, person: person, area: area, model: model)
+        }, inventory: { [weak self] selection in
+            guard let self, let runtime = workspaceRuntime else { throw ShareLinkFailure.noWorkspace }
+            return try SharedAreaInventory.capture(runtime: runtime, supervisor: agentSupervisor, selection: selection)
+        }, presentRefusal: { [weak self] message in
+            self?.presentShareLinkRefusal(message)
+        })
+    }
+
+    /// Inline sign-in through the hub's own Connect: a remembered device login
+    /// or a collaboration enrollment code. Never a provider CLI login or key.
+    private func signInForShareLink(_ model: CollaborationAccountController) async -> Bool {
+        let hub = presentCollaborationHub(model: model)
+        hub.window.title = "Sign in to open the shared link"
+        hub.show()
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            var resumed = false
+            func finish(_ value: Bool) { if !resumed { resumed = true; continuation.resume(returning: value) } }
+            let previousClose = hub.onClose
+            hub.content.onConnected = { [weak hub] in
+                hub?.content.onConnected = nil; hub?.onClose = previousClose
+                hub?.window.title = "Collaboration"
+                finish(true)
+            }
+            hub.onClose = { [weak hub] in
+                previousClose?(); hub?.content.onConnected = nil
+                finish(false)
+            }
+        }
+    }
+
+    private func presentShareLinkRefusal(_ message: String) {
+        guard let window = window ?? collaborationHub?.window, window.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        alert.messageText = "This link can't be opened"
+        alert.informativeText = message
+        alert.beginSheetModal(for: window, completionHandler: nil)
     }
 
     /// Used by the menu and isolated native witnesses; construction alone makes
@@ -11953,30 +12026,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.captureSetupTask?.cancel()
         }
         hub.content.onOpenArea = { [weak self, weak model] controller, person, area in
-            guard let self, let model, let accountID = model.activeAccount?.id else { return }
-            let shared = showSharedArea(controller: controller, person: person, area: area, accountID: accountID)
-            // Generic offline fixtures supply no host-service transport. The
-            // paired-process witness explicitly supplies a local live service.
-            if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) || CommandLine.arguments.contains("--collaboration-peer-check") {
-                let key = accountID + "/" + area.uuidString
-                do {
-                    let host = try sharedAreaHostSessions[key] ?? SharedAreaHostSession(account: model, area: area, supervisor: agentSupervisor)
-                    sharedAreaHostSessions[key] = host; host.start()
-                    shared.scene.onRequestHandoff = { [weak host] object in host?.handoff.show(object: object) }
-                    shared.scene.agentFreshness = try? SharedAgentFreshnessModel(handoff: host.handoff.model)
-                } catch {
-                    let alert = NSAlert()
-                    alert.messageText = "The publishing host is unavailable"
-                    alert.informativeText = "The shared workspace is open. Reconnect the account before handing an agent over."
-                    alert.beginSheetModal(for: shared.window, completionHandler: nil)
-                }
-            }
+            guard let self, let model, let accountID = model.activeAccount?.id,
+                  let shared = openSharedArea(controller: controller, person: person, area: area, model: model) else { return }
             if let request = pendingSharedAreaCapture {
                 pendingSharedAreaCapture = nil
                 finishSharedAreaCapture(request, in: shared, account: model, accountID: accountID, person: person)
             }
         }
         return hub
+    }
+
+    /// Opens an area this account is admitted to and starts its publishing
+    /// host. The hub's Open and a share link both come through here.
+    @discardableResult
+    func openSharedArea(controller: SharedAreaController, person: SharedArea.ID<SharedArea.Person>, area: UUID,
+                        model: CollaborationAccountController) -> SharedAreaWindowController? {
+        guard let accountID = model.activeAccount?.id else { return nil }
+        let shared = showSharedArea(controller: controller, person: person, area: area, accountID: accountID)
+        // Generic offline fixtures supply no host-service transport. The
+        // paired-process witness explicitly supplies a local live service.
+        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) || CommandLine.arguments.contains("--collaboration-peer-check") {
+            let key = accountID + "/" + area.uuidString
+            do {
+                let host = try sharedAreaHostSessions[key] ?? SharedAreaHostSession(account: model, area: area, supervisor: agentSupervisor)
+                sharedAreaHostSessions[key] = host; host.start()
+                shared.scene.onRequestHandoff = { [weak host] object in host?.handoff.show(object: object) }
+                shared.scene.agentFreshness = try? SharedAgentFreshnessModel(handoff: host.handoff.model)
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "The publishing host is unavailable"
+                alert.informativeText = "The shared workspace is open. Reconnect the account before handing an agent over."
+                alert.beginSheetModal(for: shared.window, completionHandler: nil)
+            }
+        }
+        return shared
     }
 
     @discardableResult
@@ -21640,6 +21723,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA (M1.11): `openProfilePalette` needs a host window. Borderless and never
     /// ordered front, so a check cannot take the screen.
     func qaAttachWindowForOfflineCheck(_ window: NSWindow) { self.window = window }
+    func qaAdoptCollaborationAccount(_ model: CollaborationAccountController) { collaborationAccount = model }
+    var qaCollaborationHub: CollaborationHubWindowController? { collaborationHub }
 
     /// The motion benchmark runs an experienced workspace in a disposable defaults suite.
     func qaSetMotionDefaults(_ defaults: UserDefaults) {

@@ -31,6 +31,8 @@ final class CollaborationHubWindowController: NSObject, NSWindowDelegate {
 final class CollaborationHubView: NSView, TokenThemed {
     let model: CollaborationAccountController
     var onOpenArea: ((SharedAreaController, SharedArea.ID<SharedArea.Person>, UUID) -> Void)?
+    /// Fires after Connect signs this Mac in; a share link waiting on sign-in resumes.
+    var onConnected: (() -> Void)?
     private let title = NSTextField(labelWithString: "Work together in a shared workspace")
     private let subtitle = NSTextField(wrappingLabelWithString: "Share context and discussion while keeping your own checkout and agents.")
     private let accountLabel = NSTextField(labelWithString: "Account")
@@ -203,6 +205,7 @@ final class CollaborationHubView: NSView, TokenThemed {
             else { throw CollaborationAccountFailure.accountMissing }
             accountChoice.selectedID = account.id
             setOpenArea(nil); status.stringValue = "Connected. Create a shared workspace or join an invitation."
+            onConnected?()
         }
     }
     func focusAccount(_ accountID: String, area: UUID) {
