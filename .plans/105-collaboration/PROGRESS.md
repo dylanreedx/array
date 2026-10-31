@@ -1232,3 +1232,32 @@ peer ops and then registering the journey as a `--collaboration` leg.
 
 Board counts: To Do 4 (COL-23–26, later phase), Doing 2 (COL-21, COL-22),
 Done 20.
+
+## In-canvas round — part 1 share links on `e231be9d`, 31 October 2026
+
+Design: `.plans/105-collaboration/IN-CANVAS.md` on the design bench
+(`5fb4315e`). Builders work off `c7131f8f`. Merge order: pair-features and
+part 1, then part 4 (full access), then part 2 (canvas zone), then part 3
+(share entry) last.
+
+Merged: `array/mp-share-links` (`84ad76ca`..`728326bc`, five commits,
+clean). Receipt `workers/share-links.md`. It includes a website page
+(`website/src/pages/s/`, `vercel.json` rewrite) that hands
+`arrayapp.dev/s/<slug>` to the app. It is only on this local branch; nothing
+was deployed.
+
+Gate: `--collaboration`, under the lock, isolated. Log:
+`qa-runs/coordinator/gate-e231be9d.log`. **11 legs run, all passed**, with
+31 `PASS share links` lines.
+
+Open, from the receipt:
+- A brand-new person cannot onboard from a link alone. The link carries no
+  relay address, and enrollment needs an operator code. This is a relay
+  decision.
+- A slug collision leaves an empty owned area behind.
+- Prod and Dev both claim `array://`.
+- There is no universal link yet: the AASA file covers only `/pair`.
+- The website hand-off was not opened in a browser.
+- `--collaboration-native-check` ran in 34–42 s against its own 45 s limit.
+  Parts 2–4 add stages, so the limit needs raising, or the 13 s hover-usage
+  stage needs to be faster, before they land.
