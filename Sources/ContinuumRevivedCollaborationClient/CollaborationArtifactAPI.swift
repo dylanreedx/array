@@ -77,7 +77,7 @@ extension CollaborationAPI {
         request.cachePolicy = .reloadIgnoringLocalCacheData; request.httpShouldHandleCookies = false
         if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "authorization") }
         if let body { request.httpBody = body; request.setValue("application/octet-stream", forHTTPHeaderField: "content-type") }
-        let (bytes, response) = try await session.data(for: request)
+        let (bytes, response) = try await boundedData(for: request)
         guard bytes.count <= Artifact.Limits.blobBytes + 65_536 else { throw CollaborationClientError.responseTooLarge }
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard (200..<300).contains(http.statusCode) else {

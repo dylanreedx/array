@@ -79,7 +79,7 @@ public struct CollaborationAPI: Sendable {
         if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "authorization") }
         if let epoch { request.setValue(String(epoch), forHTTPHeaderField: "if-match") }
         if let body { let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601; request.httpBody = try encoder.encode(body); request.setValue("application/json", forHTTPHeaderField: "content-type") }
-        let (bytes, response) = try await session.data(for: request)
+        let (bytes, response) = try await boundedData(for: request)
         guard bytes.count <= 8_388_608 else { throw CollaborationClientError.responseTooLarge }
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
@@ -90,6 +90,74 @@ public struct CollaborationAPI: Sendable {
         return try decoder.decode(Response.self, from: bytes)
     }
 }
+
+extension CollaborationAPI {
+    /// One request's bytes, bounded on every platform by the request's own
+    /// timeout. On Linux, FoundationNetworking can read a complete
+    /// `connection: close` response and still never finish the transfer: the
+    /// socket sits in CLOSE_WAIT with nothing unread, the request timeout never
+    /// fires, and the awaiting task hangs forever at 0% CPU. There the transfer
+    /// runs as a plain data task with our own deadline that cancels it and
+    /// throws `.timedOut`; an idempotent GET is retried once. Swift task
+    /// cancellation still cancels the transfer (held update reads rely on it).
+    func boundedData(for request: URLRequest) async throws -> (Data, URLResponse) {
+        #if canImport(FoundationNetworking)
+        do { return try await deadlineData(for: request) }
+        catch let error as URLError where error.code == .timedOut && request.httpMethod == "GET" && !Task.isCancelled {
+            return try await deadlineData(for: request)
+        }
+        #else
+        return try await session.data(for: request)
+        #endif
+    }
+
+    #if canImport(FoundationNetworking)
+    private func deadlineData(for request: URLRequest) async throws -> (Data, URLResponse) {
+        let state = DeadlineTransfer()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let task = session.dataTask(with: request) { data, response, error in
+                    if let error { state.finish(continuation, .failure(error)) }
+                    else if let data, let response { state.finish(continuation, .success((data, response))) }
+                    else { state.finish(continuation, .failure(URLError(.badServerResponse))) }
+                }
+                state.start(task)
+                DispatchQueue.global().asyncAfter(deadline: .now() + request.timeoutInterval + 5) {
+                    task.cancel()
+                    if state.finish(continuation, .failure(URLError(.timedOut))) {
+                        FileHandle.standardError.write(Data("collaboration client: \(request.httpMethod ?? "GET") transfer passed its deadline and was cancelled\n".utf8))
+                    }
+                }
+            }
+        } onCancel: { state.cancel() }
+    }
+    #endif
+}
+
+#if canImport(FoundationNetworking)
+/// Resumes its continuation exactly once, whichever of completion, deadline
+/// or cancellation comes first.
+private final class DeadlineTransfer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: URLSessionTask?
+    private var finished = false
+    private var cancelled = false
+    func start(_ value: URLSessionTask) {
+        lock.lock(); task = value; let cancelNow = cancelled; lock.unlock()
+        if cancelNow { value.cancel() } else { value.resume() }
+    }
+    func cancel() {
+        lock.lock(); cancelled = true; let value = task; lock.unlock()
+        value?.cancel()
+    }
+    @discardableResult
+    func finish(_ continuation: CheckedContinuation<(Data, URLResponse), any Error>, _ result: Result<(Data, URLResponse), any Error>) -> Bool {
+        lock.lock(); let first = !finished; finished = true; lock.unlock()
+        if first { continuation.resume(with: result) }
+        return first
+    }
+}
+#endif
 
 /// Endpoint scope is an authority boundary. Refuse redirects before a second
 /// origin/scheme can receive a request; callers must configure a new endpoint.
