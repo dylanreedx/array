@@ -79,17 +79,26 @@ extension Collaboration {
         public let context: SharedArea.Context?
         public let text: String
         public let mode: AgentPromptMode
+        /// The requester's display name as the service knows it, stamped at
+        /// admission. `requester` stays the identity every check matches on.
+        public let requesterName: String?
         public init(id: UUID, area: SharedArea.ID<SharedArea.Area>, object: SharedArea.ID<SharedArea.Object>, source: SharedArea.Source,
                     requester: Identity, epoch: Int64, controlRevision: UInt64, hostGeneration: UUID, context: SharedArea.Context?, text: String,
-                    mode: AgentPromptMode = .send) {
+                    mode: AgentPromptMode = .send, requesterName: String? = nil) {
             self.id = id; self.area = area; self.object = object; self.source = source; self.requester = requester; self.epoch = epoch
             self.controlRevision = controlRevision; self.hostGeneration = hostGeneration; self.context = context; self.text = text; self.mode = mode
+            self.requesterName = requesterName
+        }
+        /// Who sent it, as a person reads it: their name on one line, never an id.
+        public var attribution: String {
+            let name = (requesterName ?? "").split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            return "From " + (name.isEmpty ? "a teammate" : String(name.prefix(120)))
         }
         /// Deliberate, immutable context plus authenticated human attribution.
         /// No local path, provider credential or hidden history is synthesized.
         public var promptText: String {
-            guard let context else { return "From collaboration participant \(requester.person.rawValue.uuidString)\n\n---\n\(text)" }
-            return "Shared context revision \(context.id.rawValue.uuidString)\nFrom collaboration participant \(requester.person.rawValue.uuidString)\n\n\(context.text)\n\n---\n\(text)"
+            guard let context else { return "\(attribution)\n\n---\n\(text)" }
+            return "Shared context revision \(context.id.rawValue.uuidString)\n\(attribution)\n\n\(context.text)\n\n---\n\(text)"
         }
     }
     public struct AgentDispatchReceipt: Codable, Equatable, Sendable {

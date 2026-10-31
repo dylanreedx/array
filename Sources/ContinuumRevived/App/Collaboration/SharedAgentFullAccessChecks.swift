@@ -116,7 +116,8 @@ enum SharedAgentFullAccessChecks {
         ]))
         let binding = SharedAreaLocalSourceBinding(object: item.id, binding: item.source!.binding, host: host,
             projectID: project, agentID: agent)
-        let service = Service(document: document, owner: dylan, members: [dylan.person: .owner, sam.person: .editor, priya.person: .editor])
+        let service = Service(document: document, owner: dylan, members: [dylan.person: .owner, sam.person: .editor, priya.person: .editor],
+                              names: [dylan.person: "Dylan", sam.person: "Sam", priya.person: "Priya"])
         let ownerModel = try SharedAgentHandoffController(identity: dylan, transport: service.view(dylan),
             directory: root.appendingPathComponent("dylan-area", isDirectory: true))
         let samModel = try SharedAgentHandoffController(identity: sam, transport: service.view(sam),
@@ -188,6 +189,16 @@ enum SharedAgentFullAccessChecks {
         let firstPhase = await phase(samModel.receipt?.command.id)
         try expect(written(first) == 1 && firstPhase == .accepted,
                    "\(kind): Sam's prompt reaches the owner's runner exactly once and reads accepted")
+        // Attribution reads as a person, on the wire and as the agent's name.
+        let delivered = prompts.first { $0.hasSuffix(first) } ?? ""
+        let title = supervisor.records[agent]?.displayName ?? ""
+        try expect(delivered.hasPrefix("From Sam\n") && !delivered.contains(sam.person.rawValue.uuidString)
+                   && !delivered.contains("participant"),
+                   "\(kind): the owner's agent reads the prompt as \"From Sam\", with no person id in the text (got \(delivered.debugDescription))")
+        try expect(supervisor.records[agent]?.displayNameSource == .prompt && title != AgentRecord.defaultAgentName
+                   && !title.contains("From") && !title.contains("participant") && !title.contains(sam.person.rawValue.uuidString.prefix(8))
+                   && title.lowercased().contains("first prompt"),
+                   "\(kind): an unnamed agent takes its name from what Sam typed, never the attribution (got \(title.debugDescription))")
 
         // 2. Who sent the last prompt, on both Macs.
         try await eventually("\(kind): the last-prompt label never reached either side (Sam: \(samView.lastPromptText), owner: \(ownerTile.qaLastPromptText ?? "none"))") {
@@ -351,14 +362,17 @@ enum SharedAgentFullAccessChecks {
         let document: SharedArea.Document
         let owner: Collaboration.Identity
         var members: [SharedArea.ID<SharedArea.Person>: Collaboration.Role]
+        /// `people.label`, which the store stamps into each command.
+        let names: [SharedArea.ID<SharedArea.Person>: String]
         var epoch: Int64 = 1
         var controlEpoch: Int64 = 1
         var generation: UUID?
         var revision: UInt64 = 0
         var receipts: [UUID: Collaboration.AgentDispatchReceipt] = [:]
         var order: [UUID] = []
-        init(document: SharedArea.Document, owner: Collaboration.Identity, members: [SharedArea.ID<SharedArea.Person>: Collaboration.Role]) {
-            self.document = document; self.owner = owner; self.members = members
+        init(document: SharedArea.Document, owner: Collaboration.Identity, members: [SharedArea.ID<SharedArea.Person>: Collaboration.Role],
+             names: [SharedArea.ID<SharedArea.Person>: String]) {
+            self.document = document; self.owner = owner; self.members = members; self.names = names
         }
         nonisolated func view(_ caller: Collaboration.Identity) -> View { View(service: self, caller: caller) }
         private var item: SharedArea.Item { document.items.first { $0.kind == .agentObservation }! }
@@ -395,7 +409,7 @@ enum SharedAgentFullAccessChecks {
             guard let generation, request.hostGeneration == generation, request.contextRevision == nil else { throw error(409, "conflict") }
             let command = Collaboration.AgentDispatchCommand(id: request.id, area: document.id, object: item.id, source: item.source!,
                 requester: caller, epoch: epoch, controlRevision: revision, hostGeneration: generation, context: nil,
-                text: request.text, mode: request.mode)
+                text: request.text, mode: request.mode, requesterName: names[caller.person])
             let receipt = Collaboration.AgentDispatchReceipt(command: command, phase: .queued)
             receipts[request.id] = receipt; order.append(request.id); return receipt
         }

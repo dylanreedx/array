@@ -165,9 +165,10 @@ extension CollaborationStore {
                       document.contexts.last(where: { $0.object == chosen.object })?.id == chosen.id else { throw SharedArea.Failure.conflict }
                 context = chosen
             }
+            let name = try String.fetchOne(db, sql: "SELECT label FROM people WHERE id=?", arguments: [caller.person.rawValue.uuidString])
             let command = Collaboration.AgentDispatchCommand(id: request.id, area: .init(area), object: object, source: source,
                 requester: caller, epoch: current.epoch, controlRevision: state.revision, hostGeneration: state.hostGeneration,
-                context: context, text: request.text, mode: request.mode)
+                context: context, text: request.text, mode: request.mode, requesterName: name)
             try db.execute(sql: "INSERT INTO agent_dispatches(area,id,object,host,actor,digest,command,phase,created) VALUES (?,?,?,?,?,?,?,'queued',?)",
                 arguments: [area.uuidString, request.id.uuidString, object.rawValue.uuidString, source.host.rawValue.uuidString,
                             caller.device.uuidString, digest, try seal(command), clock().timeIntervalSince1970])

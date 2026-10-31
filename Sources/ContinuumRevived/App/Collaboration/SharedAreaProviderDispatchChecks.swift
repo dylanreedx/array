@@ -122,7 +122,8 @@ enum SharedAreaProviderDispatchChecks {
         }
         func make(_ text: String, _ mode: Collaboration.AgentPromptMode = .send, generation stale: UUID? = nil) -> Collaboration.AgentDispatchCommand {
             .init(id: UUID(), area: document.id, object: item.id, source: item.source!, requester: teammate, epoch: 1,
-                  controlRevision: 1, hostGeneration: stale ?? generation, context: context, text: text, mode: mode)
+                  controlRevision: 1, hostGeneration: stale ?? generation, context: context, text: text, mode: mode,
+                  requesterName: "Teammate Tam")
         }
         var frames: [[String: Any]] { AgentSteeringQAFakes.receivedFrames(in: bin) }
         var prompts: [(text: String, attachments: Int)] { frames.compactMap { promptFrame($0) } }
@@ -143,7 +144,8 @@ enum SharedAreaProviderDispatchChecks {
         await coordinator.pollOnce()
         try expect(await phase(reviewed) == .accepted, "\(kind): the owning host must accept the reviewed prompt, got \(String(describing: await phase(reviewed)))")
         try await eventually("\(kind): the runner never received the reviewed prompt: \(prompts.map(\.text))") { written(reviewed) == 1 }
-        try expect(reviewed.promptText.contains(context.text) && reviewed.promptText.contains(teammate.person.rawValue.uuidString)
+        try expect(reviewed.promptText.contains(context.text) && reviewed.promptText.contains("\nFrom Teammate Tam\n")
+                   && !reviewed.promptText.contains(teammate.person.rawValue.uuidString)
                    && prompts.count == 1 && prompts[0].text == reviewed.promptText && prompts[0].attachments == 0,
                    "\(kind): the transport must carry exactly the frozen context and attribution as text, got \(prompts)")
         try await idle()

@@ -1155,6 +1155,9 @@ final class AgentSupervisor {
         /// The collaboration participant a shared prompt came from; nil is the
         /// owner typing on this Mac.
         var requester: SharedArea.ID<SharedArea.Person>? = nil
+        /// What that person typed, without the attribution envelope. An
+        /// unnamed agent takes its name from these words.
+        var namingText: String? = nil
     }
     /// Who sent the prompt each agent last started, for "Sam sent the last
     /// prompt". A nil requester is the owner, on this Mac.
@@ -3334,8 +3337,11 @@ final class AgentSupervisor {
             companionAcceptedStarts.insert(id)
             if companionQueueHydrationPending.contains(id), let run = companionRunBindings[id] { try ledger.markIncomplete(run) }
         }
+        // A teammate's prompt is named by what they typed, never by the
+        // "From Sam" envelope it travels in.
+        let namingPrompt = sharedInputPermit?.namingText.map { AgentPrompt($0) } ?? prompt
         let firstPromptText = Self.visibleNamingText(
-            from: prompt,
+            from: namingPrompt,
             model: record.model,
             role: record.role,
             id: record.id.rawValue
@@ -3347,7 +3353,7 @@ final class AgentSupervisor {
         // 8000-character bound — NOT `firstPromptText`, which is a stored label
         // already cut to 240 characters, so the titler only ever saw that much.
         let capturesFirstPrompt = firstPromptByAgent[id] == nil && firstPromptText != nil
-        if capturesFirstPrompt, let titlerMaterial = Self.titlerMaterial(from: prompt) {
+        if capturesFirstPrompt, let titlerMaterial = Self.titlerMaterial(from: namingPrompt) {
             firstPromptByAgent[id] = titlerMaterial
         }
         // This is the ONE automatic naming funnel. The shared resolver applies
@@ -7682,7 +7688,7 @@ final class AgentSupervisor {
                 }
             }
             guard await permitsSharedAgentInput(agentID, admission: admission) else { return nil }
-            return .init(agentID: agentID, requester: admission?.command.requester.person)
+            return .init(agentID: agentID, requester: admission?.command.requester.person, namingText: admission?.command.text)
         } catch { return nil }
     }
     private func accept(_ intent: AgentComposerIntent, for agentID: AgentID, sharedAdmission: SharedAgentControlAdmission?) async -> IntentAcceptance {
@@ -7711,7 +7717,7 @@ final class AgentSupervisor {
             if sharedAdmission != nil && isStillStarting(agentID) { return .refused(.harnessNotReady) }
             if let held = holdOrRefuseForReadiness(prepared, for: agentID) { return held }
             guard sendPrepared(prepared, to: agentID, sharedInputPermit: .init(agentID: agentID,
-                requester: sharedAdmission?.command.requester.person)) else { return .refused(.turnNotReady) }
+                requester: sharedAdmission?.command.requester.person, namingText: sharedAdmission?.command.text)) else { return .refused(.turnNotReady) }
             // B4: an explicit Send releases a queue this agent's last turn left
             // paused after an interrupt — the user looked, and is choosing to act.
             pausedQueues.remove(agentID)
@@ -7743,7 +7749,7 @@ final class AgentSupervisor {
                 if sharedAdmission != nil && isStillStarting(agentID) { return .refused(.harnessNotReady) }
                 if let held = holdOrRefuseForReadiness(prepared, for: agentID) { return held }
                 guard sendPrepared(prepared, to: agentID, sharedInputPermit: .init(agentID: agentID,
-                    requester: sharedAdmission?.command.requester.person)) else {
+                    requester: sharedAdmission?.command.requester.person, namingText: sharedAdmission?.command.text)) else {
                     return .refused(.turnNotReady)
                 }
             } catch {

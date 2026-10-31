@@ -91,6 +91,9 @@ func runCollaborationHandoffChecks() async throws {
         try handoffCheck(unhanded.command.context == nil && unhanded.command.requester == b.identity
             && ordered.map(\.command.id) == [unhanded.command.id, ownerNext.command.id],
             "an editor prompts with no handoff or agreement revision, and two prompts queue in arrival order")
+        try handoffCheck(unhanded.command.requesterName == "Teammate B" && unhanded.command.promptText.hasPrefix("From Teammate B\n")
+            && !unhanded.command.promptText.contains(b.identity.person.rawValue.uuidString),
+            "the service stamps the requester's display name: the prompt reads \"From Teammate B\", with no person id in the text")
         let settledUnhanded = try await settle(unhanded), settledOwner = try await settle(ownerNext)
         try handoffCheck(settledUnhanded.phase == .accepted && settledOwner.phase == .accepted,
             "both queued prompts are admitted; neither is dropped")
