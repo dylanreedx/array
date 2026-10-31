@@ -103,9 +103,10 @@ task carries version 1, taskID, rootRunID, membershipComplete and members
 (agentID, runID, parentRunID, state, optional requestID). `task.state.v1` remains
 the pure classifier's input; standalone network publication is rejected.
 The source Mac supervisor supplies explicit accepted-turn/delegation/queue
-provenance independently of tile ingestion. Neither Mac nor relay source has
-been rolled out: installed Mac + production Fly v15/schema 2 retain the legacy
-activity classifier below. No production consolidation claim follows from these
+provenance independently of tile ingestion. Rollout: production Fly runs this
+relay policy since v16 (31 October 2026, schema 4) and the batch-cost change
+below since v18 (schema 5). The installed Mac publishes `task.batch.v1`, as
+seen in production logs that day. No production consolidation claim follows from these
 source changes. OWN/HOST paths describe the handover and producers.
 
 | ID | Trigger / policy | Outcome / recipient / tap |

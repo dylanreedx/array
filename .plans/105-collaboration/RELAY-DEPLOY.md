@@ -172,3 +172,90 @@ decided), but its requests can stall for up to about 45 s while a burst runs.
 to v15 would also remove the per-task alerts the 0.7.36 app shipped with.
 Decision passed to the orchestrator: fix the per-event fan-out and the
 per-suppression logging, or roll back to v15 with the command at the top.
+
+**Resolved in v18.** See the next section.
+
+## Fix deployed: decide only changed tasks (v18)
+
+Commit `32d54661`, `perf(relay): decide only changed tasks in a task batch`, on
+`array/relay-batch-fanout` (branched from `array/collaboration-finish` at
+`05206dc9`).
+
+**What changed.** The ownership row keeps each task's last decided identity
+(`notification_ownership.task_keys`, migration `relay-task-decision-keys`,
+schema 5). A task whose decision hasn't changed is skipped. An alert the outbox
+refused for capacity stays undecided, so the next batch retries it. Delivery
+drains once per batch and logs one `relay.notification.batch` line (task count
+per T-path), instead of a registrations read, a drain and a `suppressed` line
+for every task. `docs/internals/notification-paths.md` records this.
+
+**Measured, local fixture, per event:**
+
+| Known tasks | Before: SQL statements / log lines | After |
+| --- | --- | --- |
+| 40 | 566 / 41 | 30 / 0 |
+| 400 | 5,318 / 401 | 30 / 0 |
+
+**Gates.**
+- Linux gate (`check-relay-linux.sh`, under the build lock): exit 0, 473 PASS,
+  0 FAIL.
+- New witnesses: `task batch load` and `task batch capacity`.
+- Mutations, each RED: deciding every task again (1,634 statements/event at
+  400 tasks), draining per task (1,233), and recording a capacity-refused task
+  as decided (256 alerts instead of 257).
+- One existing check changed: the HTTP task-policy check asserted the removed
+  per-task `suppressed`/`deduplicated` lines. It now reads T-paths from the
+  batch line. Its alert-count assertions are unchanged.
+
+**Staging.** `arrayapp-relay-staging` v5 is on `32d54661`. Staging now has a
+throwaway, locally generated APNs key
+(`APNS_KEY_ID`/`APNS_TEAM_ID`=`STAGINGFAKE`, sandbox), so the delivery half
+runs there. Nothing in the burst contacts Apple. Burst replay: a throwaway Mac
+and phone, a 336-task baseline, then 40 batches back to back that each change
+one task.
+
+| | Publish p50 / max | Health p50 / max | Health timeouts |
+| --- | --- | --- | --- |
+| Before (old code) | 0.71 / 0.79 s | 0.45 / 0.52 s | 0 |
+| After | 0.49 / 0.86 s | 0.22 / 0.49 s | 0 |
+
+Staging could not reproduce the 45 s stall: its database is nearly empty, while
+production's is 484 MB. Production is the real test, below.
+
+**Production v18.**
+- Snapshot first: `vs_o7xVGVmzo6MLFnlxN0N0bAk1`.
+- Rollback target: v17 image
+  `registry.fly.io/arrayapp-relay:deployment-01M69D1CAYQDHNZ2E48W955GCZ`. The
+  old code opens schema 5, because the new column is additive.
+- The pre-deploy route probe on v17 itself hit two 5 s timeouts (`/`,
+  `/v2/notification-owner`): the stall, live.
+- After deploy:
+  - Health 200, schema 5; migration recorded in `/data/relay.sqlite`.
+  - Every companion route identical to this morning's baseline; collaboration
+    routes answer (401/400).
+  - 10-minute watch: 116/116 health calls 200, slowest 0.45 s, none over 1 s,
+    zero timeouts. Fly check passing.
+  - Live traffic: Mac events 93000 → 93217, 115 batches of 347–349 tasks, one
+    batch line each; zero per-task lines from the new process. The remaining
+    `relay.notification` lines are one `taskOwnerSuppressed` per legacy activity
+    event, the same as before.
+  - The deploy-window errors (machine lease held, connection refused) are the
+    18:29 restart. The two `DecodingError`s are my probe's empty bodies.
+
+```sh
+fly deploy --app arrayapp-relay --config fly.toml \
+  --image registry.fly.io/arrayapp-relay:deployment-01M69D1CAYQDHNZ2E48W955GCZ
+```
+
+**Still open.**
+- The Mac's batch grows with every task it knows (349 now), and the relay
+  rejects a batch over 512 tasks (`invalidNotificationBatch`). At this rate the
+  Mac will hit that cap and task alerts will stop. Pruning settled tasks on the
+  Mac side is the fix; not done here.
+- Every publish still decodes and evaluates the whole batch: CPU, not database
+  work. Measured only end to end: the Linux-gate fixture's 400-task burst takes
+  0.73 s for 6 events (about 0.12 s each, release build under amd64
+  emulation).
+- If production is ever rolled back to v17, the old code leaves `task_keys`
+  untouched. A later redeploy trusts those keys, so a task that changed and
+  changed back during the rollback is skipped once.
