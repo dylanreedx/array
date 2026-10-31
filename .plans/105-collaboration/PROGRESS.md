@@ -1281,3 +1281,35 @@ Open, from the receipt:
 Gate: `--collaboration`, under the lock, isolated. Log:
 `qa-runs/coordinator/gate-63a79ce0.log`. **11 legs run, all passed**, with
 36 `PASS share links` lines.
+
+## In-canvas round — part 4 full access, pair features, share-link round 3, 31 October 2026
+
+**Part 4 on `2f95fd77`.** Merged `array/mp-full-access` (`30c641a3`,
+`cba2a710`, `2d209e7a`). `30c641a3` was applied without its regenerated
+`matrix-inventory.txt`; the "grew" records stay uncommitted. Conflict: part 1
+had moved the hub's open-area body into `openSharedArea(...)`, so part 4's
+`livePanel.prompter` line went there. The branch registers
+`--collaboration-full-access-check`. Gate log
+`qa-runs/coordinator/gate-2f95fd77.log`: **12 legs, all passed**.
+
+**Pair features + share-link round 3 on `46d34d8a`.** Merged
+`array/col-pair-features` (`5ac82811`, `65a1995b`, `492cf178`) and
+`array/mp-share-links` `cb1b3732` (join rate limit per link and address).
+`5ac82811` moves scene wiring into `SharedAreaHostSession.attach(to:)`, so the
+app and the paired-process peer mount one path. Part 4's
+`livePanel.prompter` line was moved into `attach(to:)` so the peer gets it too.
+`492cf178` adds the peer ops and registers
+`check-collaboration-pair-features.py` as a `--collaboration` leg that fails on
+any pending stage. Gate log `qa-runs/coordinator/gate-46d34d8a.log`: **13 legs,
+all passed**. Feature journey: "8 passed, 0 pending, 0 failed": liveness,
+artifacts, live views, freshness, endorsements, follow, compaction, and the
+handoff reaching the Claude, Codex and Pi CLIs once each.
+
+Board (revision 165): **COL-21 → Done.** Its last gap, pinned review artifacts
+and the other features between two real processes, reported as a gate leg, is
+closed. Counts: To Do 4 (COL-23–26), Doing 1 (COL-22, operations, Dylan's),
+Done 21.
+
+Still to merge in this round: part 4's display-name follow-up (not landed),
+part 2 `mp-canvas-zone`, then part 3 `mp-share-entry`. The pair-features
+receipt is an uncommitted `green.log` on its bench.
