@@ -28,14 +28,16 @@ if ! build_image; then
     exit 1
   fi
 fi
+# Every container run is bounded (timeout exits 124), so a hung check fails
+# this leg instead of holding the gate's lock.
 # BuildKit may reuse successful RUN layers. Execute witnesses again on every
 # gate invocation so the matrix reports a witnessed run of the rebuilt image.
 docker run --rm --platform linux/amd64 --network none \
-  --entrypoint /src/.build/release/ContinuumRevivedRelayCoreChecks \
-  array-relay-review:notification-checks
+  --entrypoint /usr/bin/timeout array-relay-review:notification-checks \
+  --kill-after=30 600 /src/.build/release/ContinuumRevivedRelayCoreChecks
 docker run --rm --platform linux/amd64 --network none \
-  --entrypoint /src/.build/release/ContinuumRevivedRelayIntegrationChecks \
-  array-relay-review:notification-checks
+  --entrypoint /usr/bin/timeout array-relay-review:notification-checks \
+  --kill-after=30 600 /src/.build/release/ContinuumRevivedRelayIntegrationChecks
 docker run --rm --platform linux/amd64 --network none \
-  --entrypoint /src/.build/release/ContinuumRevivedCollaborationServiceChecks \
-  array-relay-review:notification-checks
+  --entrypoint /usr/bin/timeout array-relay-review:notification-checks \
+  --kill-after=30 1200 /src/.build/release/ContinuumRevivedCollaborationServiceChecks

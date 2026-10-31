@@ -14,9 +14,11 @@ RUN swift build -c release --product ContinuumRevivedRelayIntegrationChecks
 # emulation this module peaked at 7.2 GB of the 7.75 GB VM and was killed.
 # Two threads peak at 3.7 GB. Checks stage only; the shipped relay is unchanged.
 RUN swift build -c release -Xswiftc -num-threads -Xswiftc 2 --product ContinuumRevivedCollaborationServiceChecks
-RUN .build/release/ContinuumRevivedCollaborationServiceChecks
-RUN .build/release/ContinuumRevivedRelayCoreChecks
-RUN .build/release/ContinuumRevivedRelayIntegrationChecks
+# A hung check must fail the build, not hold the gate's lock: each run is
+# bounded, and timeout exits 124 when it trips.
+RUN timeout --kill-after=30 1200 .build/release/ContinuumRevivedCollaborationServiceChecks
+RUN timeout --kill-after=30 600 .build/release/ContinuumRevivedRelayCoreChecks
+RUN timeout --kill-after=30 600 .build/release/ContinuumRevivedRelayIntegrationChecks
 
 FROM swift:6.1-jammy-slim
 RUN apt-get update && apt-get install -y --no-install-recommends libsqlite3-0 && rm -rf /var/lib/apt/lists/* \
