@@ -7,5 +7,8 @@
         { "key": "Cache-Control", "value": "public, max-age=300" }
       ]
     }
+  ],
+  "rewrites": [
+    { "source": "/s/:slug", "destination": "/s" }
   ]
 }

@@ -1,0 +1,77 @@
+---
+import Logo from '../../components/Logo.astro';
+import ProductionLayout from '../../layouts/ProductionLayout.astro';
+import { MAC_DOWNLOAD_URL } from '../../lib/share-links';
+---
+
+<ProductionLayout title="Open a shared area in Array" description="Someone shared work with you in Array." canonicalPath="/s">
+  <main class="share-page">
+    <section class="share-card" aria-labelledby="share-title">
+      <Logo />
+      <p class="share-eyebrow">Shared with you</p>
+      <h1 id="share-title" data-share-title>Open this in Array.</h1>
+      <p class="share-copy" data-share-copy>
+        Array opens the shared area next to your own work. If you don’t have Array yet, download it and open this link again.
+      </p>
+
+      <div class="share-actions">
+        <a class="share-button share-button--primary" href="#" data-open-array hidden>Open in Array</a>
+        <a class="share-button share-button--secondary" href={MAC_DOWNLOAD_URL} data-download>Download Array for Mac</a>
+      </div>
+
+      <p class="share-note">The link’s key stays in your browser and is never sent to this website.</p>
+    </section>
+  </main>
+
+  <script>
+    import { shareLinkDeepLink, shareLinkSlug } from '../../lib/share-links';
+
+    const open = document.querySelector<HTMLAnchorElement>('[data-open-array]');
+    const title = document.querySelector<HTMLElement>('[data-share-title]');
+    const copy = document.querySelector<HTMLElement>('[data-share-copy]');
+    const slug = shareLinkSlug(window.location.pathname);
+    const deepLink = shareLinkDeepLink(window.location.pathname, window.location.hash);
+
+    if (open && deepLink && slug) {
+      open.href = deepLink;
+      open.hidden = false;
+      if (title) title.textContent = `Open “${slug}” in Array.`;
+      window.location.href = deepLink;
+    } else if (copy) {
+      copy.textContent = 'This share link is missing or incomplete. Ask the person who shared it for a new link.';
+    }
+  </script>
+</ProductionLayout>
+
+<style>
+  .share-page {
+    min-height: 100svh;
+    display: grid;
+    place-items: center;
+    padding: 32px 20px;
+    background: radial-gradient(circle at 50% 28%, color-mix(in srgb, var(--accent) 28%, transparent), transparent 34rem), var(--page);
+  }
+  .share-card {
+    width: min(100%, 520px);
+    padding: clamp(28px, 7vw, 52px);
+    border: .5px solid var(--line);
+    border-radius: 30px;
+    text-align: center;
+    background: color-mix(in srgb, var(--page-raised) 94%, transparent);
+    box-shadow: 0 28px 80px rgb(0 0 0 / 12%);
+  }
+  .share-card :global(.brand) { justify-content: center; }
+  .share-eyebrow { margin: 38px 0 12px; color: var(--ink-2); font-size: 12px; font-weight: 720; letter-spacing: .12em; text-transform: uppercase; }
+  h1 { margin: 0; font-size: clamp(34px, 8vw, 52px); line-height: 1; letter-spacing: -.05em; overflow-wrap: anywhere; }
+  .share-copy { margin: 22px auto 0; color: var(--ink-2); font-size: 16px; line-height: 1.55; }
+  .share-actions { display: grid; gap: 11px; margin-top: 30px; }
+  .share-button { min-height: 52px; display: grid; place-items: center; padding: 0 20px; border: 1px solid transparent; border-radius: 15px; font-weight: 680; }
+  .share-button[hidden] { display: none; }
+  .share-button--primary { color: #f4f6f8; background: #12161d; }
+  .share-button--secondary { border-color: var(--line); background: var(--page-raised); }
+  .share-note { margin: 24px 0 0; color: var(--ink-2); font-size: 12px; line-height: 1.45; }
+  @media (max-width: 520px) {
+    .share-page { padding: 12px; }
+    .share-card { padding: 28px 22px; border-radius: 24px; }
+  }
+</style>
