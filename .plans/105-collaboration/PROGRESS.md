@@ -1378,3 +1378,15 @@ Open:
 - `WorkspaceRuntime.SharedZoneError` is not a `LocalizedError`, so a refused
   share (a terminal, an already-shared tile) shows the popover's general "Sharing
   could not finish" rather than the reason. It is never silent. Owner: part 2.
+
+## Real Share witness on `15877f73`, 31 October 2026
+
+Merged `array/mp-share-real-witness` (`77b307c6`, `2769123d`), clean. It
+closes the gap recorded at `7c008471`. A real Share click now drives
+production `createSharedZone(fromTiles:)` and `createShareLink(area:)`
+against a local relay, and a slug collision undoes the zone. The tip also
+carries `1d832ac2` (docs: staging and production relay deploy), committed on
+this branch by another agent.
+
+Gate: log `qa-runs/coordinator/gate-15877f73.log`, **14 legs, all passed**;
+feature journey 8 passed, 0 pending.
