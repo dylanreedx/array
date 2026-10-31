@@ -220,3 +220,74 @@ Gate at 77b307c6, once under `.worktrees/.locks/app-build.sh`, with an isolated
 `scripts/run-matrix.sh --collaboration` ran 14 legs and passed. The native
 check printed 11 `PASS share entry (relay)` lines and 26 `PASS share entry`
 lines.
+
+## Walkthrough defects fixed (branch array/mp-share-popover-fixes)
+
+The real-flow walkthrough (`.worktrees/mp-preview/.plans/105-collaboration/WALKTHROUGH.md`)
+found three popover defects. A fourth showed up while witnessing them.
+
+1. **VoiceOver could not reach Copy link or the lifetime.**
+   - Cause: `ComposerActionButton` and `ChoiceButton` are cell-less NSControls.
+     Setting a role does not make such a view an accessibility element, so the
+     tree showed their inner labels but never the buttons.
+   - Fix: both components now call `setAccessibilityElement(true)`, and
+     `ComposerActionButton` answers `accessibilityPerformPress`.
+   - This is a fix in the shared components, so the composer's buttons are
+     exposed too.
+   - Witness: `ShareEntryChecks` leg 9 walks the popover panel's
+     accessibility tree. It finds "Copy link" as a button and "Link lifetime"
+     as a pop-up button reading "Works once". Pressing Copy through
+     accessibility shares and copies, and pressing the lifetime opens its list.
+2. **The popover hung off the canvas.**
+   - Cause: a visible window *flies* its camera to a revealed tile
+     (`navigateViewport`). The sidebar's Share presented immediately, so the
+     popover hung from where the tile was. Placement used the whole screen, so
+     the component clamped it to the screen edge, over the sidebar.
+   - Fix: the popover now waits for the camera to settle. It is placed within
+     the canvas's visible rect, through `ChoicePopoverController`'s own
+     slide-and-flip region, so the toolbar is avoided too.
+   - Witness, leg 10: the canvas sits beside a 320 pt rail, above a 240 pt
+     strip.
+     - Agent B starts off the canvas's left edge, and the reveal is forced to
+       fly as in a visible window (`navigationFlightOverrideForQA`). The
+       popover lies wholly inside the canvas and hangs from B's title bar.
+     - Agent A's title bar sits just above the canvas's bottom edge. Its header
+       Share flips the popover above the tile, inside the canvas.
+3. **A TLS or transport failure said "Try it again".**
+   - Fix: `ShareLinkOpener.message(for:relay:)` now maps `URLError` causes to
+     plain words that name the relay:
+     - offline;
+     - a secure connection could not be made;
+     - the relay could not be reached;
+     - any other network failure.
+   - Also: 404 means the link does not exist there, and other statuses name
+     the relay and the code.
+   - A spent and a revoked link share the relay's deliberate 410, so both say
+     "already used, revoked or not valid".
+   - Witness: `ShareEntryRelayChecks` drives the production opener with a
+     newcomer's own account against the local relay.
+     - TLS against the plain-HTTP relay gives the secure-connection message.
+     - A closed port gives "could not reach the relay at 127.0.0.1:<port>".
+     - The Works-once link admits its first newcomer.
+     - A second newcomer gets the spent message, and a revoked link gets the
+       same.
+4. **The header popover closed when the tile's chrome rested.**
+   - Cause: the popover was anchored to the band's Share button. When the
+     pointer leaves a tile, its chrome rests and the drawn renderer detaches
+     the band controls. A popover whose anchor leaves the window closes, so
+     moving onto the popover closed it.
+   - Fix: it now hangs from the tile itself, at the button's rect
+     (`TileNSView.titleBarShareAnchor`).
+   - Witness: with the popover open, `restChromeIfIdle()` with the pointer
+     outside. The controls are drawn, the button is out of the window, and the
+     popover is still open.
+
+Mutations, each RED at its own leg:
+
+| Mutation | RED at |
+| --- | --- |
+| Copy button not an accessibility element | "Copy link is not in the accessibility tree" (the tree lists only static text) |
+| present before the reveal lands | "the popover hangs from the revealed tile's title bar, not from where the tile was" |
+| place against the window, not the canvas | "near the canvas's bottom edge the popover flips above the tile and stays inside the canvas" |
+| `URLError` mapping disabled | "a link whose relay answers without TLS says the secure connection failed", which got "Array could not open this share link. Try it again." |
+| anchor to the detachable Share button | "the popover stays open when the tile's chrome rests" |
