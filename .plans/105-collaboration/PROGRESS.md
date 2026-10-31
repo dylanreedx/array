@@ -1401,5 +1401,5 @@ generic "Sharing could not finish" gap recorded at `7c008471`), and new zones
 placed in free space.
 
 Gate: log `qa-runs/coordinator/gate-8f533c1a.log`, **14 legs, all passed**;
-feature journey 8 passed, 0 pending. It finished before Array restarted for
-the 0.7.36 update.
+feature journey 8 passed, 0 pending. The run survived Array's 13:37 restart
+for the 0.7.36 update and finished at 13:45 with exit 0.
