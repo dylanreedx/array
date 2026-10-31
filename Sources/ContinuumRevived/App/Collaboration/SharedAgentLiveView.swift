@@ -44,7 +44,7 @@ final class SharedAgentLiveView: NSView {
     var lastPromptText: String { lastPrompt.stringValue }
     var statusColor: NSColor? { status.textColor }
     var isPolling: Bool { task != nil }
-    var offersComposer: Bool { !composer.isHidden }
+    var offersComposer: Bool { composer.superview === self && !composer.isHidden }
     let composer = AgentComposerView(frame: .zero, variant: .compactFreeform)
 
     private let status = NSTextField(labelWithString: "")
@@ -77,7 +77,9 @@ final class SharedAgentLiveView: NSView {
         composer.onSubmitPrompt = { [weak self] text in self?.submit(text) }
         composer.setAccessibilityLabel("Prompt the shared agent")
         send.target = self; send.action = #selector(sendPressed)
-        for view in [status, controls, scroll, lastPrompt, composer, send] { addSubview(view) }
+        // The composer joins the view the first time it is offered, so a view
+        // with no route to its host carries no composer subtree at all.
+        for view in [status, controls, scroll, lastPrompt] { addSubview(view) }
         setAccessibilityRole(.group)
         setAccessibilityLabel("Live agent view")
         applyAppearance()
@@ -92,15 +94,18 @@ final class SharedAgentLiveView: NSView {
         // Transcript above, then the composer row: who sent the last prompt,
         // the editor, and Send, the way a local agent tile stacks them.
         var bottom = bounds.height
-        if !composer.isHidden {
+        if offersComposer {
             let sendSize = send.intrinsicContentSize
             let width = max(1, bounds.width - sendSize.width - CGFloat(Space.s))
-            composer.frame = .init(x: 0, y: bottom - max(composer.frame.height, 44), width: width, height: max(composer.frame.height, 44))
-            composer.layoutSubtreeIfNeeded()
+            // One assignment, and only on change: a projection delta must not
+            // resize the composer.
+            if composer.frame.width != width { composer.setFrameSize(.init(width: width, height: max(composer.frame.height, 44))); composer.layoutSubtreeIfNeeded() }
             let height = max(composer.intrinsicContentSize.height, 36)
-            composer.frame = .init(x: 0, y: bottom - height, width: width, height: height)
-            send.frame = .init(x: bounds.width - sendSize.width, y: (bottom - height / 2 - sendSize.height / 2).rounded(),
-                               width: sendSize.width, height: sendSize.height)
+            let frame = NSRect(x: 0, y: bottom - height, width: width, height: height)
+            if composer.frame != frame { composer.frame = frame }
+            let sendFrame = NSRect(x: bounds.width - sendSize.width, y: (bottom - height / 2 - sendSize.height / 2).rounded(),
+                                   width: sendSize.width, height: sendSize.height)
+            if send.frame != sendFrame { send.frame = sendFrame }
             bottom -= height + CGFloat(Space.xs)
         }
         if !lastPrompt.isHidden {
@@ -221,7 +226,8 @@ final class SharedAgentLiveView: NSView {
             status.stringValue = unavailable ? "Live view unavailable" : "Connecting to the agent's host…"
             controls.stringValue = "Nothing from this agent is shown until its host publishes it."
             if transcript.string != "" { transcript.string = "" }
-            setComposer(offered: false); lastPrompt.isHidden = true
+            setComposer(offered: false)
+            if !lastPrompt.isHidden { lastPrompt.isHidden = true; needsLayout = true }
             return
         }
         let offline = hostOnline == false
@@ -232,11 +238,11 @@ final class SharedAgentLiveView: NSView {
         let controls = Collaboration.AgentProjection.RemoteControls(host: state.capabilities, role: role)
         self.controls.stringValue = offline ? "Its host is offline. Nothing can reach this agent until it returns."
             : delivery ?? Self.controlsText(state.capabilities, role: role)
-        if let last = state.lastPrompt {
-            lastPrompt.stringValue = SharedPromptAuthorship.label(mine: last.person == controller.identity.person,
-                                                                  name: name(last.person), at: last.at)
-            lastPrompt.isHidden = false
-        } else { lastPrompt.isHidden = true }
+        let author = state.lastPrompt.map { last in
+            SharedPromptAuthorship.label(mine: last.person == controller.identity.person, name: name(last.person), at: last.at)
+        }
+        if let author, lastPrompt.stringValue != author { lastPrompt.stringValue = author }
+        if lastPrompt.isHidden != (author == nil) { lastPrompt.isHidden = author == nil; needsLayout = true }
         // Full access: anyone who may prompt gets the composer, busy or not. A
         // prompt sent mid-turn waits on the host, in order, and is never dropped.
         setComposer(offered: prompter != nil && !offline && controls.queue, sending: sending)
@@ -267,11 +273,14 @@ final class SharedAgentLiveView: NSView {
     }
 
     private func setComposer(offered: Bool, sending: Bool = false) {
-        if composer.isHidden == offered {
+        if offered, composer.superview == nil { addSubview(composer); addSubview(send); composer.isHidden = true; send.isHidden = true }
+        if composer.superview != nil, composer.isHidden == offered {
             composer.isHidden = !offered; send.isHidden = !offered
             needsLayout = true
         }
-        send.presentation = CollaborationHubView.action("Send", symbol: "arrow.up", enabled: !sending, loading: sending)
+        // Only on change: a projection delta must not lay the button out again.
+        let presentation = CollaborationHubView.action("Send", symbol: "arrow.up", enabled: !sending, loading: sending)
+        if send.presentation != presentation { send.presentation = presentation }
     }
 
     static func transcriptText(_ state: Projection.Snapshot) -> String {

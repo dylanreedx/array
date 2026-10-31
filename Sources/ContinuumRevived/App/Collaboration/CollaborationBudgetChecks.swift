@@ -298,6 +298,21 @@ enum CollaborationBudgetChecks {
         print("Collaboration budgets passed: presence flood, follow, agreement edits, remote operations and live agent rows counted on the production mount.")
     }
 
+    /// A prompter that is never asked to send: the budget is the view's.
+    private struct NoRoute: SharedAgentHandoffTransport {
+        struct Unused: Error {}
+        func state() async throws -> Collaboration.State { throw Unused() }
+        func register(_ request: Collaboration.AgentHostRegistration) async throws -> Collaboration.AgentControlState { throw Unused() }
+        func control(object: UUID) async throws -> Collaboration.AgentControlState { throw Unused() }
+        func change(object: UUID, request: Collaboration.AgentControlMutation) async throws -> Collaboration.AgentControlState { throw Unused() }
+        func send(object: UUID, request: Collaboration.AgentPromptRequest) async throws -> Collaboration.AgentDispatchReceipt { throw Unused() }
+        func receipt(id: UUID) async throws -> Collaboration.AgentDispatchReceipt { throw Unused() }
+        func pending(host: UUID) async throws -> [Collaboration.AgentDispatchReceipt] { throw Unused() }
+        func claim(id: UUID, request: Collaboration.AgentHostClaim) async throws -> Collaboration.AgentDispatchReceipt { throw Unused() }
+        func admit(id: UUID, request: Collaboration.AgentHostClaim) async throws -> Collaboration.AgentDispatchReceipt { throw Unused() }
+        func finish(id: UUID, outcome: Collaboration.AgentHostOutcome) async throws -> Collaboration.AgentDispatchReceipt { throw Unused() }
+    }
+
     private final class ScriptedReads {
         var queue: [Collaboration.AgentProjection.Read]
         init(_ queue: [Collaboration.AgentProjection.Read]) { self.queue = queue }
@@ -322,6 +337,11 @@ enum CollaborationBudgetChecks {
         let me = Collaboration.Identity(person: .init(), device: UUID())
         let model = try Rig.controller(root: root, identity: me, label: "You",
             authority: Rig.Authority(document: document, members: [(me, .editor)]), seed: (document, .editor))
+        // Watching, and with full access: the composer a teammate prompts from
+        // must not make a projection delta cost more.
+        for prompts in [false, true] {
+        // A role is what offers the composer; the watch-only pass never asks.
+        if prompts { await model.open() }
         var measured: [(rows: Int, layouts: Int, appKit: Int, rendered: Int, omitted: Int)] = []
         for count in [10, 100, 1_000] {
             func frame(_ sequence: Int, _ payload: P.Payload) -> P.Frame {
@@ -333,10 +353,26 @@ enum CollaborationBudgetChecks {
             let view = SharedAgentLiveView(controller: model, read: { _, _ in reads.next() })
             let window = NSView(frame: .init(x: 0, y: 0, width: 520, height: 420))
             view.frame = window.bounds; window.addSubview(view)
-            defer { view.stop() }
+            // The composer is Auto Layout inside; a real (never shown) window
+            // keeps one engine, as on the canvas. A bare view tree builds a
+            // temporary engine per pass and re-lays out every constrained view.
+            let host = NSWindow(contentRect: window.frame, styleMask: .borderless, backing: .buffered, defer: true)
+            if prompts { host.contentView = window }
+            defer { view.stop(); host.contentView = nil }
+            if prompts {
+                view.prompter = try SharedAgentHandoffController(identity: me, transport: NoRoute(),
+                    directory: root.appendingPathComponent("prompter-\(count)", isDirectory: true))
+            }
             view.show(object: item.id, in: document)
             try await Rig.eventually("live view takes the \(count)-row snapshot", attempts: 1_000) { view.replica.state?.through == UInt64(count) }
             window.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            try expect(view.offersComposer == prompts, "the live view offers its composer exactly when it has a route (\(prompts))")
+            if prompts {
+                // The composer's own setup (draft restore, first measurement)
+                // finishes on later turns; the budget is one delta, not that.
+                try await Task.sleep(for: .milliseconds(100))
+                window.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            }
             CollaborationWorkCensus.watch([window])
             reads.queue.append(.frames(generation: 1, frames: [frame(count + 1, .assistantText(row: "r\(count)", turn: "t", delta: " More."))], more: false))
             try await Rig.eventually("live view applies one delta over \(count) rows", attempts: 1_000) { view.replica.state?.through == UInt64(count + 1) }
@@ -353,7 +389,8 @@ enum CollaborationBudgetChecks {
         try expect(rendered[0] == 10 && rendered[1] == P.maxRows && rendered[2] == P.maxRows
             && measured[2].omitted == 1_000 - P.maxRows && layouts.max()! <= layouts.min()! + 1 && layouts.max()! <= layoutPassesPerEvent
             && appKit[1] == appKit[2] && appKit.max()! <= P.maxRows,
-            "live view delta is flat across 10 / 100 / 1,000 rows: renders \(rendered) rows (≤ \(P.maxRows) retained), \(layouts) Array layout passes, \(appKit) TextKit fragment layouts (visible rows only)")
+            "live view delta\(prompts ? " with the composer" : "") is flat across 10 / 100 / 1,000 rows: renders \(rendered) rows (≤ \(P.maxRows) retained), \(layouts) Array layout passes, \(appKit) TextKit fragment layouts (visible rows only)")
+        }
     }
 
     /// Runs `work` to completion off the main thread while the main thread
