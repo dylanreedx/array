@@ -3,10 +3,15 @@
 Bench `.worktrees/mp-share-links`, branch `array/mp-share-links`, base
 `array/collaboration-finish` c7131f8f. Design: `IN-CANVAS.md`, "Round 2".
 
-## The API for part 3 (share entry points and popover)
+## The API for parts 2 and 3
 
 Code against this. It is the contract; the receipt below says what is built
 and witnessed.
+
+Round 2 (lead decision, 31 October): part 2 owns the sender side.
+`createSharedZone(fromTiles:name:)` creates the area, publishes and binds the
+tiles, and opens the zone. Share links only mint and manage links on an area
+that already exists.
 
 The app owns one `ShareLinkCoordinator`, `AppDelegate.shareLinks`, on the main
 actor. It is created on first use, so starting Array still reads no
@@ -16,15 +21,12 @@ collaboration credential.
 // Sources/ContinuumRevived/App/Collaboration/ShareLinkCoordinator.swift
 @MainActor
 final class ShareLinkCoordinator {
-    /// Creates a new area named by the slug, publishes the selection into it
-    /// (agents as live observations, notes as discussion, diffs/files as
-    /// snapshots, terminals and other kinds left out), mints the link and opens
-    /// the area for the sender. Signs in inline first when needed.
-    /// Throws ShareLinkFailure.slugTaken when the slug is live elsewhere on the relay.
-    func createShareLink(selection: SharedAreaPublication.Selection, slug: String,
-                         lifetime: Collaboration.ShareLinkLifetime) async throws -> Collaboration.ShareLink
+    /// Mints a link on an existing area. Creates, publishes and opens nothing.
+    /// The link carries the sender's relay. Throws ShareLinkFailure.slugTaken
+    /// when a live link on the relay already uses the slug.
+    func createShareLink(area: UUID, slug: String, lifetime: Collaboration.ShareLinkLifetime) async throws -> Collaboration.ShareLink
 
-    /// "New link" for an area that is already shared (panel 5).
+    /// "New link" for an area that is already shared (panel 5). Same as createShareLink.
     func newLink(area: UUID, slug: String, lifetime: Collaboration.ShareLinkLifetime) async throws -> Collaboration.ShareLink
 
     /// Revokes the link and removes everyone it admitted.
@@ -36,17 +38,25 @@ final class ShareLinkCoordinator {
     /// Every link on the area with its status and the people it admitted.
     func listAccess(area: UUID) async throws -> [Collaboration.ShareLinkAccess]
 
-    /// The one entry point for array://s/<slug>#<token> and
-    /// https://arrayapp.dev/s/<slug>#<token>: parse, sign in inline when needed,
-    /// admit, then open the area. A refusal is presented, never silent.
+    /// The one entry point for array://, array-dev:// and https://arrayapp.dev/s/
+    /// links. A refusal is presented, never silent.
     @discardableResult
     func open(_ url: URL) async -> ShareLinkOpenOutcome
+
+    /// Publish-by-kind, handed to part 2 to call after it creates the area:
+    /// agents as live observations, notes as discussion, diffs and files as
+    /// snapshots; terminals and other kinds stay private. No review window.
+    /// Returns source tile id -> published object for every source-bound item
+    /// (agents and snapshots). Note items have no source binding in the domain,
+    /// so they are not in the map.
+    @discardableResult
+    func publish(selection: SharedAreaPublication.Selection, intoArea area: UUID) async throws -> [UUID: SharedArea.ID<SharedArea.Object>]
 }
 
 enum ShareLinkOpenOutcome: Equatable {
     case opened(area: UUID)
     case refused(String)     // user-facing sentence, also shown in the app
-    case cancelled           // sign-in was dismissed
+    case cancelled           // sign-in or the name prompt was dismissed
 }
 ```
 
@@ -58,8 +68,9 @@ extension Collaboration {
     struct ShareLink {            // returned once, at creation; the only value holding the token
         let id: UUID; let area: SharedArea.ID<SharedArea.Area>; let slug: String
         let token: String; let lifetime: ShareLinkLifetime; let createdAt: Date
-        var url: URL      // https://arrayapp.dev/s/<slug>#<token>  (what Copy link copies)
-        var appURL: URL   // array://s/<slug>#<token>
+        let relay: String?        // filled by the creating client from its endpoint
+        var url: URL      // https://arrayapp.dev/s/<slug>?r=<relay>#<token>  (what Copy link copies)
+        var appURL: URL   // array://s/<slug>?r=<relay>#<token>
     }
     struct ShareLinkAccess {      // listAccess rows; never carries the token
         enum Status: String { case active, used, revoked }
@@ -68,12 +79,13 @@ extension Collaboration {
         let people: [ShareLinkPerson]
     }
     struct ShareLinkPerson { let person: SharedArea.ID<SharedArea.Person>; let label: String; let admittedAt: Date; let active: Bool }
-    enum ShareLinkURL {
-        static let webPrefix: String               // "arrayapp.dev/s/", the fixed part of the field
-        static func isValidSlug(_: String) -> Bool  // a-z 0-9 and single hyphens, 1-64
-        static func suggestedSlug(from title: String) -> String
-        static func parse(_ url: URL) -> (slug: String, token: String)?
-    }
+}
+enum ShareLinkURL {
+    static let webPrefix: String               // "arrayapp.dev/s/", the fixed part of the field
+    static let appScheme = "array", devAppScheme = "array-dev"
+    static func isValidSlug(_: String) -> Bool  // a-z 0-9 and single hyphens, 1-64
+    static func suggestedSlug(from title: String) -> String
+    static func parse(_ url: URL) -> (slug: String, token: String, relay: String?)?
 }
 ```
 
@@ -82,8 +94,11 @@ Rules the service enforces:
   frees its slug.
 - The token is 32 random bytes, base64url, and is stored only as a hash.
 - Whoever opens a valid link gets the `editor` role. Prompting is part 4.
-- "Works once" is spent by the first accept. The person it admitted can open it
-  again to get back in; nobody else can.
+- A valid token doubles as an enrollment. Someone with no account on the relay
+  joins with only a display name, and gets a person and a device admitted to
+  that one area. Nothing else on the relay is granted.
+- "Works once" is spent by the first accept or join. The person it admitted can
+  open it again to get back in; nobody else can.
 - "Until revoked" admits any number of people.
 - Revoke works on both kinds and removes everyone admitted through the link.
 - A person removed from a link cannot rejoin through that link.
@@ -91,7 +106,7 @@ Rules the service enforces:
 
 ## Receipt
 
-31 October 2026.
+31 October 2026. Round 2 follows the lead's five decisions.
 
 ### What is built
 
@@ -100,91 +115,127 @@ Service (`ContinuumRevivedCollaborationService/CollaborationShareLinks.swift`):
   and `share_link_admissions`.
 - A partial unique index keeps slugs unique among live links.
 - `CollaborationStoreError.slugTaken` maps to HTTP 409 `slugTaken`.
-- `removeMember` now also closes that person's link admissions on the area, so
-  a person removed by any route cannot walk back in through an until-revoked
-  link.
+- Accept and join share one validity check (`liveLink`) and one admission
+  (`admit`).
+- `joinShareLink` creates the person (with the display name as label), their
+  first device and credential, and the admission, all in one transaction.
+- `removeMember` also closes that person's link admissions on the area, so a
+  person removed by any route cannot walk back in through an until-revoked link.
 - Revoke and remove both bump the area epoch, as `removeMember` does.
 
-Routes (`CollaborationRoutes.swift`), all behind the device bearer:
-- `POST /collaboration/v1/areas/{area}/links` creates a link.
-- `GET /collaboration/v1/areas/{area}/links` lists links and their people.
-  Owner only.
-- `DELETE /collaboration/v1/areas/{area}/links/{link}` revokes it.
-- `DELETE /collaboration/v1/areas/{area}/links/{link}/people/{person}` removes
-  one person.
-- `POST /collaboration/v1/links/accept` admits through a link.
+Routes (`CollaborationRoutes.swift`):
+- `POST /collaboration/v1/links/join` is unauthenticated. The link token is the
+  admission, the same way an enrollment code is for `enrollments/redeem`.
+- These are behind the device bearer:
+  - `POST /collaboration/v1/areas/{area}/links` creates a link.
+  - `GET /collaboration/v1/areas/{area}/links` lists links. Owner only.
+  - `DELETE /collaboration/v1/areas/{area}/links/{link}` revokes one.
+  - `DELETE /collaboration/v1/areas/{area}/links/{link}/people/{person}`
+    removes one person.
+  - `POST /collaboration/v1/links/accept` admits through a link.
 
-Client: `CollaborationAPI` has the five calls.
+Client: `CollaborationAPI` has the six calls.
 
 Core:
-- `CollaborationAccountTransport` gains the five calls. Default implementations
+- `CollaborationAccountTransport` gains the six calls. Default implementations
   refuse with 404, so existing fakes compile unchanged.
-- `CollaborationAccountController` gains `createShareLink`, `acceptShareLink`
-  (it remembers the area under the slug), `shareLinks`, `revokeShareLink` and
-  `removeShareLinkPerson`.
-- `ShareLinkOpener` runs the receiving flow: parse, then sign in (a remembered
-  account first, else the injected inline sign-in), then admit, then open.
+- `CollaborationAccountController`:
+  - `createShareLink` stamps the link with the account's relay
+    (`CollaborationServiceEndpoint.shareLinkRelay`: host, port and path, no
+    scheme).
+  - `joinShareLink(endpoint:slug:token:displayName:deviceLabel:)` saves the new
+    device credential and selects the account exactly as `enroll` does, then
+    loads the area and remembers it under the slug.
+  - `acceptShareLink`, `shareLinks`, `revokeShareLink` and
+    `removeShareLinkPerson`.
+- `CollaborationServiceEndpoint(shareLinkRelay:)` builds an https endpoint from
+  a link's relay. Plain http is allowed only for loopback, and only where the
+  caller allows it, which is local checks.
+- `ShareLinkOpener` runs the receiving flow. For a link with a relay:
+  1. Use this Mac's account on that relay, if it has one.
+  2. Otherwise ask for a display name and join through the token.
+  For a link without a relay, the old flow stays: a remembered account, or the
+  hub's sign-in. Either way it then admits and opens.
 
 App:
-- `Packaging/Info.plist` registers `CFBundleURLTypes` for `array`.
-- `AppDelegate.application(_:open:)` routes `array://s/...` and
-  `https://arrayapp.dev/s/...` to `shareLinks.open`. Other URLs are ignored.
-- `ShareLinkCoordinator` holds the API above.
-- Inline sign-in presents the hub's existing Connect, retitled "Sign in to open
-  the shared link". It resumes on the hub's new `onConnected` callback, and
-  closing the hub cancels.
+- `Packaging/Info.plist` registers `array`.
+- `scripts/make-app-bundle.sh` stamps Dev bundles to `array-dev`. Film and
+  custom-id bundles get no URL type at all.
+- `scripts/check-app-bundle.sh` asserts the scheme: `array` for prod,
+  `array-dev` for dev.
+- `AppDelegate.application(_:open:)` routes `array://s/...`, `array-dev://s/...`
+  and `https://arrayapp.dev/s/...` to `shareLinks.open`. Other URLs are ignored.
+- The newcomer's name prompt is an `NSAlert` sheet on the canvas window with
+  one field, "Your name", prefilled with the macOS full name. Its buttons are
+  Join and Cancel, and it says which relay you join through. Nothing else is
+  asked: no code, no password, no key.
+- Inline hub sign-in remains only for links without a relay.
 - A refusal shows as an `NSAlert` sheet on the main window.
 - `AppDelegate.collaborationAccountModel()` keeps one account model for the hub
   and share links.
-- The hub's open-area callback body moved, unchanged, into
-  `openSharedArea(controller:person:area:model:)`, the single open path. Part 2
-  replaces what that opens: a window today, the in-canvas zone later.
+- `openSharedArea(controller:person:area:model:)` is the single open path, used
+  by the hub and by a received link. Part 2 swaps what it opens from a window
+  to the zone.
+- `--collaboration-native-check` deadline raised from 45s to 90s. The journey
+  runs in 34-42s.
 
 Website:
 - `website/src/pages/s/index.astro`, plus a Vercel rewrite from `/s/:slug` to
   `/s`.
-- The page reads the slug from the path and the token from the fragment, opens
-  `array://s/<slug>#<token>`, and offers the Mac DMG.
-- Unit tests are in `src/lib/share-links.test.ts`.
+- The page reads the slug from the path, the relay from `?r=`, and the token
+  from the fragment, which the site never receives.
+- It opens `array://` at once and as its primary button. It also offers the
+  Mac DMG and a smaller "Open in Array Dev" link (`array-dev://`).
+- 4 unit tests are in `src/lib/share-links.test.ts`.
 - Committed locally, not pushed.
 
 ### Witnesses
 
 All of them run inside existing legs. No inventory records were added.
 
-`ContinuumRevivedCollaborationChecks`, `runShareLinkChecks`: 21 checks. They use
+`ContinuumRevivedCollaborationChecks`, `runShareLinkChecks`: 27 checks. They use
 production account controllers, the production `ShareLinkOpener` and the real
 NIO routes over HTTP. They cover:
-- single-use is spent after one accept
-- the person a single-use link admitted can reopen it
+- the link carries its relay, and parses in both forms
+- single-use is spent after one accept, and its person can reopen it
 - an until-revoked link admits two people
 - revoke cuts both, and only them
-- a revoked link refuses newcomers and does not readmit the people it admitted
+- a revoked link refuses newcomers and does not readmit
 - a wrong token is refused and shows as refused
 - a link without its token is refused as incomplete
 - a slug collision is refused across owners
 - a spent link's slug is free again
 - an editor cannot mint a link
 - removing one person blocks only them
-- inline sign-in for a first-time receiver, and dismissing it admits nothing
-- `listAccess` status and people
+- **a fresh client with no account joins through the link alone, picking only a
+  display name**: it becomes an editor, is listed on the link, reopens with its
+  saved device, and is cut by revoke
+- joining through a spent link, with a wrong token, or after dismissing the
+  name prompt saves no account and admits nothing
+- a link without a relay falls back to the existing sign-in
 
 `ContinuumRevivedCollaborationServiceChecks`: the boundary audit probes the 4
 new area routes. A non-member gets the same answer for a real area as for a
 random one, 26 routes in all.
 
-`Array --collaboration-native-check`, new stage "share links", `ShareLinkAppChecks`:
-- `shareLinks.createShareLink` from a mounted workspace selection publishes the
-  agent as an observation and the note as discussion, with no review window,
-  and opens the sender's area.
+`Array --collaboration-native-check`, stage "share links", `ShareLinkAppChecks`:
+9 checks.
+- `publish(selection:intoArea:)` from a mounted workspace selection publishes
+  the agent as an observation and the note as discussion, with no review
+  window, and maps the agent tile to its object.
+- `createShareLink(area:)` only mints. It creates, publishes and opens nothing,
+  and the link carries the relay.
 - A slug collision comes back as `ShareLinkFailure.slugTaken`.
-- AppKit `application(_:open:)` with an https link on a signed-out Mac signs in
-  inline through the hub's Connect, admits, and opens the area.
-- An `array://` link reaches the same entry point.
+- A signed-out Mac given an https link through AppKit `application(_:open:)`
+  sees one name sheet (no hub, no enrollment code), then joins, admits and
+  opens the area.
+- `array://` and `array-dev://` reach the same entry point and reuse the saved
+  account.
 - A wrong token puts a refusal sheet on the canvas window.
-- Unrelated `array://` and `arrayapp.dev` URLs are not routed.
+- Unrelated URLs are not routed.
+- A link without a relay signs in through the hub's Connect.
 
-Mutations. Each was applied, rebuilt and run, and each went RED:
+Mutations. Each was applied, rebuilt and run, and each went RED. Round 1:
 
 | Mutation | Red check |
 |---|---|
@@ -193,39 +244,44 @@ Mutations. Each was applied, rebuilt and run, and each went RED:
 | Revoke without cutting admissions | "revoke cuts both people…" |
 | Accept by slug without the token | "a wrong token is refused…" |
 | Skip the slug check | the collision returned 500 `storageFailure` instead of 409, and the run threw |
-| URL handler routes nothing | "…signs in inline…, then admits" |
-| The coordinator's open does nothing | "the sender's area opens through the same path as the hub" (the same closure the receiver uses) |
-| Refusal presenter does nothing | "a wrong token is refused and the refusal is shown on the canvas window" |
+| URL handler routes nothing | the inline sign-in check |
+| The coordinator's open does nothing | an area-open check |
+| Refusal presenter does nothing | "the refusal is shown on the canvas window" |
 
-Gate run: `scripts/run-matrix.sh --collaboration`, once, under
+Round 2:
+
+| Mutation | Red check |
+|---|---|
+| Opener ignores the link's relay | "a fresh client with no account joins through the link alone…" |
+| Join creates the person without admitting them | "a fresh client with no account joins through the link alone…" |
+| Minted link carries no relay | "the link is arrayapp.dev/s/<slug>?r=<relay>#<token>…" |
+| The app never asks for the name | "a signed-out Mac joins from an https://arrayapp.dev/s/ link alone…" |
+| `array-dev://` not routed | "array:// and array-dev:// reach the same entry point…" |
+
+Gate run (round 2): `scripts/run-matrix.sh --collaboration`, once, under
 `.worktrees/.locks/app-build.sh`, with an isolated `TMUX_TMPDIR` and
 `CONTINUUM_APP_SUPPORT`, `TMUX`/`TMUX_PANE` unset, and
 `CONTINUUM_SKIP_UI_BASELINES=1`. Result: "Collaboration matrix (targeted)
-passed", 11 legs. The log shows all 21 `PASS share links:` lines, all 10
-`PASS share links (app)` lines, and the boundary audit's 26 routes. The Linux
-relay leg (`check-relay-linux.sh`) is green. The one note is the existing
-`--ui-probe-check` display skip.
+passed", 11 legs, at ca489a8d plus the bundle and website commits. The log
+shows all 27 `PASS share links:` lines, all 9 `PASS share links (app)` lines,
+and the boundary audit's 26 routes. The Linux relay leg is green, including the
+new join route. The one note is the existing `--ui-probe-check` display skip.
 
 ### Open, for the lead
 
-- **A brand-new person cannot onboard from a link alone.** The link carries no
-  relay address, and the existing sign-in needs a relay URL plus an enrollment
-  code from `provisionPerson`, which is an operator seam with no public route.
-  So "sign in inline" works only for someone already enrolled, or someone who
-  has been handed a code. Self-serve enrollment from a link is a relay
-  decision, not built here.
-- **A slug collision leaves an empty area.** `createShareLink` creates the area
-  before it mints the link, so a taken slug leaves an empty owned area behind,
-  remembered under that slug. A failed publish revokes the link but also keeps
-  the area.
-- **Prod and Dev both claim `array://`.** LaunchServices picks one installed
-  copy. On a Mac with both, a click may open the other one.
-- **No universal link.** `https://arrayapp.dev/s/...` reaches the app only
-  through the website's hand-off. Associated Domains and an AASA `/s/*` entry
-  are the later step; the AASA file today covers only `/pair`.
-- **The website page was not opened in a browser.** It was built and its hand-off
-  logic unit-tested. The Vercel rewrite is untested locally, because
+- **Universal link: later, per your decision.** `https://arrayapp.dev/s/...`
+  reaches the app only through the website's hand-off. The later step is
+  Associated Domains on the Mac, plus an AASA `/s/*` entry; the AASA file today
+  covers only `/pair`.
+- **A link can point a newcomer at any relay.** That is inherent in carrying
+  `r=`. The name sheet says which relay it is, and credentials are scoped per
+  endpoint, so nothing from another relay is exposed. A malicious link could
+  still enroll someone on a stranger's relay.
+- **An until-revoked link can mint unlimited people.** The relay has no rate
+  limit on joins. Revoking stops it.
+- **The website page was not opened in a browser.** It was built and its
+  hand-off logic unit-tested. The Vercel rewrite is untested locally, because
   `astro preview` does not apply `vercel.json`.
-- **The native check is close to its deadline.** `--collaboration-native-check`
-  ran in 34-42s against its own 45s limit. The share-link stage takes about 1s;
-  the hover-usage stage alone takes about 13s.
+- **`check-app-bundle.sh` was not run here.** Its new scheme assertion runs in
+  the full matrix's bundle leg, not in `--collaboration`. The PlistBuddy stamping
+  was checked on a copy of `Info.plist`.
