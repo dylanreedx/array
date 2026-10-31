@@ -66,6 +66,17 @@ enum SharedAreaPersonColour {
 /// follows their view; that is the only thing it takes clicks for.
 @MainActor
 final class SharedAreaZoneHeaderView: NSView {
+    /// QA (presence budget): while set, who asked this view to repaint, so a
+    /// repaint the budget catches names its cause. Nil, and free, otherwise.
+    static var qaRepaintTrace: [String]?
+    override func setNeedsDisplay(_ invalidRect: NSRect) {
+        super.setNeedsDisplay(invalidRect)
+        if Self.qaRepaintTrace != nil { Self.qaRepaintTrace!.append(SharedAreaRepaintTrace.line(for: self)) }
+    }
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        if Self.qaRepaintTrace != nil { Self.qaRepaintTrace!.append("\(type(of: self)) backing changed") }
+    }
     struct Member: Equatable {
         let person: SharedArea.ID<SharedArea.Person>
         /// Set while the person is present with a device that can be followed.
@@ -250,6 +261,17 @@ final class SharedAreaZoneAgentLayer: NSView {
 /// canvas the footer points at the agent's real tile instead.
 @MainActor
 final class SharedAreaZoneAgentView: NSView {
+    /// QA (presence budget): while set, who asked this view to repaint, so a
+    /// repaint the budget catches names its cause. Nil, and free, otherwise.
+    static var qaRepaintTrace: [String]?
+    override func setNeedsDisplay(_ invalidRect: NSRect) {
+        super.setNeedsDisplay(invalidRect)
+        if Self.qaRepaintTrace != nil { Self.qaRepaintTrace!.append(SharedAreaRepaintTrace.line(for: self)) }
+    }
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        if Self.qaRepaintTrace != nil { Self.qaRepaintTrace!.append("\(type(of: self)) backing changed") }
+    }
     /// What sits under the live view: its composer, or a line saying why not.
     enum FooterMode: Equatable { case composer, offline, mine }
     static let headerHeight: CGFloat = 34
@@ -488,5 +510,15 @@ final class SharedAreaZoneEndedView: NSView {
         let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius)
         SurfaceToken.panel.color.nsColor(in: self).setFill(); shape.fill()
         LineToken.border.color.nsColor(in: self).setStroke(); shape.lineWidth = 1; shape.stroke()
+    }
+}
+
+/// One line per repaint request, for the presence budget witness.
+enum SharedAreaRepaintTrace {
+    static func line(for view: NSView) -> String {
+        let frames = Thread.callStackSymbols.dropFirst(2).prefix(7).map {
+            String($0.split(separator: " ", omittingEmptySubsequences: true).dropFirst(3).joined(separator: " ").prefix(140))
+        }
+        return "\(type(of: view)) " + frames.joined(separator: " <- ")
     }
 }

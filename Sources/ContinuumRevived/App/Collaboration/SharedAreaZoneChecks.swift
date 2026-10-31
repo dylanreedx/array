@@ -457,9 +457,24 @@ enum SharedAreaZoneChecks {
         try await SharedAreaCheckRig.eventually("the warm-up frame lands") {
             scene.session.controller.presence.first(where: { $0.identity.device == scene.mate.device })?.cursor?.x == 290
         }
-        canvas.layoutSubtreeIfNeeded(); canvas.displayIfNeeded()
+        // What each view shows, so a repaint names its cause.
+        func shown() -> String {
+            "header \(headerView.members.map { "\($0.name):\($0.online):\($0.device != nil)" }) \(headerView.statusText) offline \(headerView.hostOffline) "
+                + "followed \(String(describing: headerView.followedDevice)) frame \(headerView.frame) appearance \(headerView.effectiveAppearance.name.rawValue); "
+                + "agent \(budgetView.chipText) | \(budgetView.footerText) offline \(budgetView.offline) frame \(budgetView.frame); "
+                + "camera \(canvas.viewport) key \(scene.window.isKeyWindow) main \(scene.window.isMainWindow) scale \(scene.window.backingScaleFactor)"
+        }
+        // A layer-backed view paints when Core Animation commits, not in
+        // displayIfNeeded (the check window is off screen). Commit before the
+        // counts are read, so a paint that reveal() or the warm-up left pending
+        // cannot land inside the window, and commit after the frames, so a paint
+        // they asked for is counted.
+        canvas.layoutSubtreeIfNeeded(); canvas.displayIfNeeded(); CATransaction.flush()
         let headerDraws = headerView.drawCount, agentDraws = budgetView.drawCount
         let cursorDraws = publisher.overlay.drawCount
+        let before = shown()
+        SharedAreaZoneHeaderView.qaRepaintTrace = []; SharedAreaZoneAgentView.qaRepaintTrace = []
+        defer { SharedAreaZoneHeaderView.qaRepaintTrace = nil; SharedAreaZoneAgentView.qaRepaintTrace = nil }
         for step in 0..<20 {
             try await scene.authority.setPresence(.init(identity: scene.mate, cursor: .init(x: 300 + Double(step) * 7, y: 260),
                 viewport: .init(x: 200, y: 300, width: 800, height: 500), expiresAt: .distantFuture, label: "Dylan"))
@@ -468,9 +483,12 @@ enum SharedAreaZoneChecks {
         try await SharedAreaCheckRig.eventually("the last cursor frame lands") {
             scene.session.controller.presence.first(where: { $0.identity.device == scene.mate.device })?.cursor?.x == 300 + 19 * 7
         }
-        canvas.displayIfNeeded()
-        try expect(headerView.drawCount == headerDraws && budgetView.drawCount == agentDraws,
-            "20 cursor-only presence frames repaint neither the zone header nor an agent view (header \(headerDraws)→\(headerView.drawCount), agent \(agentDraws)→\(budgetView.drawCount))")
+        canvas.layoutSubtreeIfNeeded(); canvas.displayIfNeeded(); CATransaction.flush()
+        let clean = headerView.drawCount == headerDraws && budgetView.drawCount == agentDraws
+        let requests = (SharedAreaZoneHeaderView.qaRepaintTrace ?? []) + (SharedAreaZoneAgentView.qaRepaintTrace ?? [])
+        try expect(clean,
+            "20 cursor-only presence frames repaint neither the zone header nor an agent view (header \(headerDraws)→\(headerView.drawCount), agent \(agentDraws)→\(budgetView.drawCount))"
+            + (clean ? "" : "\n  before: \(before)\n  after:  \(shown())\n  requests:\n    " + requests.joined(separator: "\n    ")))
         try expect(publisher.overlay.drawCount > cursorDraws, "the cursor overlay is what repaints for them")
 
         print("STAGE shared area zone: host offline")
