@@ -6022,6 +6022,17 @@ final class CanvasNSView: NSView, TokenThemed {
                 ))
             }
         }
+        // Tiles lent to a shared zone are on the canvas too, in that zone: a
+        // jump, a reveal from the sidebar and Share's reveal must reach them.
+        for (zoneId, layer) in sharedAreaLayers.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+            guard let placement = liveZones.first(where: { $0.zoneId == zoneId }), !placement.collapsed else { continue }
+            for lent in layer.lent where seen.insert(lent.home.id).inserted {
+                snapshots.append(NavigationTileSnapshot(
+                    tileId: lent.home.id, title: lent.home.title, kind: lent.home.kind,
+                    worldFrame: CanvasEngine.zoneLocalToWorld(lent.areaFrame, zoneOrigin: placement.origin),
+                    zoneId: zoneId))
+            }
+        }
         return snapshots
     }
 

@@ -1109,7 +1109,14 @@ class TileNSView: NSView, TokenThemed {
            qaCloseButtonFrame.contains(local), let titleBar {
             return titleBar.hitTest(convert(local, to: titleBar))
         }
-        if bounds.contains(local), resizeEdge(at: local) != nil {
+        if bounds.contains(local), let edge = resizeEdge(at: local) {
+            // Below zoom 1 the top band reaches into the title bar. A control
+            // under it (Share, ⋯, the face switch) wins, except at a corner, so
+            // a press on it is a press and the rest of the edge still resizes.
+            let corner = edge == .topLeft || edge == .topRight || edge == .bottomLeft || edge == .bottomRight
+            if !corner, let titleBar, titleBar.bandControlFrames.contains(where: { $0.contains(convert(local, to: titleBar)) }) {
+                return titleBar.hitTest(convert(local, to: titleBar))
+            }
             return self
         }
         // Floored move-grab strip. At low zoom the title bar is visually enlarged,
@@ -2310,6 +2317,10 @@ private final class TitleBarView: NSView, TokenThemed {
         (qaVisibleControls.filter { $0.name != "share" }.map(\.frame.minX)
             + [sessionLabelRect?.minX].compactMap { $0 }).min() ?? bounds.width
     }
+
+    /// Where the band's controls sit, drawn or live: the tile's resize band
+    /// yields to them. Not ×, which keeps its own rule (the outer edge wins).
+    var bandControlFrames: [NSRect] { qaVisibleControls.filter { $0.name != "close" }.map(\.frame) }
 
     /// QA: the band's controls that are on screen, by name.
     var qaVisibleControls: [(name: String, frame: NSRect)] {

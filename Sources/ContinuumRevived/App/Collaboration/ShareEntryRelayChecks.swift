@@ -263,6 +263,75 @@ enum ShareEntryRelayChecks {
                                          as: "Sam", insecureLoopback: true)
         try expect("\(unreachable)".contains("could not reach the relay at 127.0.0.1:\(silent)"),
             "a link whose relay is not running says the relay could not be reached (\(unreachable))")
+        // 3b. A lent agent is reachable, and the band's controls beat its
+        //     resize edge. A fresh coordinator, as after a relaunch.
+        app.qaInstallShareEntry(pasteboard: pasteboard)
+        app.shareEntry.presentsOffscreenForQA = true
+        try expect(app.performInboxRowAction(.share, on: [scene.agents[0].rawValue]),
+            "the sidebar's Share reveals a lent agent rather than refusing")
+        try await eventually("the sidebar's popover for the lent agent") { app.shareEntry.presentedView?.session.target.area == areaA }
+        app.shareEntry.dismiss()
+        /// A press at a point of the Share button, given in the title bar, the
+        /// way a pointer reaches it: through the window.
+        /// The top resize band is 8 screen points deep, and Share starts about 3
+        /// below the tile's top edge: its top few points sit inside the band at
+        /// every zoom up to 1, more as the camera pulls out (measured on these
+        /// 360-wide tiles: Share shows from 0.85, top 3.6 vs band 9.4). The
+        /// press goes midway between Share's top and the band's bottom, at the
+        /// lowest zoom from 0.5 up where Share shows.
+        func press(_ tile: UUID) throws -> (zoom: Double, presented: Bool) {
+            guard let frame = canvas.navigationTileSnapshot(for: tile)?.worldFrame else {
+                throw Failure(description: "share entry (relay): \(tile) is not navigable")
+            }
+            var found: (zoom: Double, view: TileNSView, bar: NSView, point: NSPoint)?
+            for step in 0..<10 where found == nil {
+                let zoom = 0.5 + Double(step) * 0.05
+                canvas.setViewport(CanvasViewport(x: frame.x - 200, y: frame.y - 200, zoom: zoom))
+                canvas.layoutSubtreeIfNeeded()
+                guard let view = canvas.tileView(for: tile), let bar = view.qaTitleBarView, let button = view.qaTitleBarShareControl else { continue }
+                let bandBottom = view.convert(NSPoint(x: 0, y: view.resizeMarginInLocalCoordinates), to: bar).y
+                let barPoint = NSPoint(x: button.frame.midX, y: (button.frame.minY + min(button.frame.maxY, bandBottom)) / 2)
+                if view.qaResizeEdge(at: view.convert(barPoint, from: bar)) != nil { found = (zoom, view, bar, barPoint) }
+            }
+            guard let (zoom, _, bar, barPoint) = found else {
+                throw Failure(description: "share entry (relay): no zoom from 0.5 shows \(tile)'s Share under the resize band")
+            }
+            let windowPoint = bar.convert(barPoint, to: nil)
+            NSApp.postEvent(try ShareEntryChecks.mouse(.leftMouseUp, windowPoint, in: window), atStart: false)
+            NSApp.sendEvent(try ShareEntryChecks.mouse(.leftMouseDown, windowPoint, in: window))
+            while let pending = NSApp.nextEvent(matching: [.leftMouseUp], until: Date(), inMode: .default, dequeue: true) {
+                NSApp.sendEvent(pending)
+            }
+            let presented = app.shareEntry.isPresented
+            app.shareEntry.dismiss()
+            return (zoom, presented)
+        }
+        let lentPress = try press(agentA)
+        try expect(lentPress.presented,
+            "at zoom \(lentPress.zoom) a press on the top of a lent agent's Share, inside the resize band, opens the popover")
+        let homePress = try press(agentB)
+        try expect(homePress.presented,
+            "at zoom \(homePress.zoom) the same press on a home agent's Share opens its popover too")
+        // Lent resize still works: the right edge, below the title bar.
+        guard let lentView = canvas.tileView(for: agentA), let widthBefore = canvas.lentTile(agentA)?.tile.areaFrame.width,
+              let frameA = canvas.navigationTileSnapshot(for: agentA)?.worldFrame else {
+            throw Failure(description: "share entry (relay): the lent agent lost its area frame")
+        }
+        canvas.setViewport(CanvasViewport(x: frameA.x - 200, y: frameA.y - 200, zoom: 0.5))
+        canvas.layoutSubtreeIfNeeded()
+        let edgeLocal = NSPoint(x: lentView.bounds.width - 2, y: lentView.bounds.height / 2)
+        let edgeStart = lentView.convert(edgeLocal, to: nil)
+        let edgeEnd = NSPoint(x: edgeStart.x + 60, y: edgeStart.y)
+        NSApp.sendEvent(try ShareEntryChecks.mouse(.leftMouseDown, edgeStart, in: window))
+        NSApp.sendEvent(try ShareEntryChecks.mouse(.leftMouseDragged, NSPoint(x: edgeStart.x + 30, y: edgeStart.y), in: window))
+        NSApp.sendEvent(try ShareEntryChecks.mouse(.leftMouseDragged, edgeEnd, in: window))
+        NSApp.sendEvent(try ShareEntryChecks.mouse(.leftMouseUp, edgeEnd, in: window))
+        let widthAfter = canvas.lentTile(agentA)?.tile.areaFrame.width ?? 0
+        try expect(widthAfter > widthBefore + 60,
+            "dragging a lent agent's right edge at zoom 0.5 still resizes it in the area (\(widthBefore) to \(widthAfter))")
+        canvas.setViewport(CanvasViewport(x: frameA.x - 200, y: frameA.y - 200, zoom: 1))
+        canvas.layoutSubtreeIfNeeded()
+
         // 4. A's tile is already lent to its shared zone. After a relaunch (a
         //    fresh share coordinator: no session holds the link's token), its
         //    header Share opens that area's popover rather than doing nothing.
