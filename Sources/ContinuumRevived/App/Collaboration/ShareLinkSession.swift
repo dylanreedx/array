@@ -45,18 +45,13 @@ protocol ShareLinkServing: AnyObject {
 
 extension ShareLinkCoordinator: ShareLinkServing {}
 
-/// What part 2's conversion hands back: the zone the tiles now live in, and
-/// the area it created, published and bound them to. Part 2 declares the same
-/// type (with each tile's object); when it merges this copy must go.
-struct SharedZoneShare: Equatable {
-    let zoneId: UUID
-    let areaId: UUID
-}
+/// What part 2's conversion hands back: the area, the zone the tiles now live
+/// in, and the shared object each source-bound tile became.
+typealias SharedZoneShare = AppDelegate.SharedZoneShare
 
-/// Part 2 (array/mp-canvas-zone): `createSharedZone(fromTiles:name:)` makes the
-/// area, publishes and binds the tiles, opens it, and moves the sender's tiles
-/// into its zone. `cancelSharedZone` puts them back. Signatures are part 2's
-/// own, so `AppDelegate` conforms once it lands.
+/// Part 2: `createSharedZone(fromTiles:name:)` makes the area, publishes and
+/// binds the tiles, opens it, and moves the sender's tiles into its zone.
+/// `cancelSharedZone` puts them back. `AppDelegate` conforms.
 @MainActor
 protocol SharedZoneCreating: AnyObject {
     func createSharedZone(fromTiles tileIds: [UUID], name: String) async throws -> SharedZoneShare
@@ -240,7 +235,6 @@ final class ShareLinkSession {
     }
 
     static func message(for error: any Error) -> String {
-        if let failure = error as? ShareFailure { return failure.message }
         if let described = (error as? LocalizedError)?.errorDescription { return described }
         return "Sharing could not finish. Nothing was copied; try again."
     }
@@ -250,24 +244,4 @@ final class ShareLinkSession {
         guard let first = words.first else { return "Shared area" }
         return ([first.prefix(1).uppercased() + first.dropFirst()] + words.dropFirst()).joined(separator: " ")
     }
-}
-
-/// Until part 2 lands on this branch, production cannot make a shared zone.
-enum ShareFailure: Error, Equatable {
-    case zonesUnavailable
-    var message: String {
-        switch self {
-        case .zonesUnavailable: return "Shared zones are not in this build yet. Nothing was shared."
-        }
-    }
-}
-
-/// Production's stand-in for part 2 until it merges: it refuses plainly, so
-/// Share never mints a link for tiles that were not shared.
-@MainActor
-final class PendingSharedZones: SharedZoneCreating {
-    func createSharedZone(fromTiles tileIds: [UUID], name: String) async throws -> SharedZoneShare {
-        throw ShareFailure.zonesUnavailable
-    }
-    func cancelSharedZone(areaId: UUID) async {}
 }

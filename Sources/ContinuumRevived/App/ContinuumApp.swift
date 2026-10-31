@@ -12272,9 +12272,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     // and opens the in-canvas popover. Nothing here waits on the Collaboration
     // window: that wait is why a share used to do nothing.
 
-    /// Part 2 plugs in here when it merges; until then Share says so.
+    /// Part 2's zone conversion; checks may substitute a recorder.
     var sharedZoneCreator: SharedZoneCreating?
-    private let pendingSharedZones = PendingSharedZones()
     private var shareEntryStorage: ShareEntryCoordinator?
     private var shareToolView: SharedAreaCaptureSelectionView?
 
@@ -12282,7 +12281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let shareEntryStorage { return shareEntryStorage }
         let entry = ShareEntryCoordinator(
             links: { [unowned self] in self.shareLinks },
-            zones: { [unowned self] in self.sharedZoneCreator ?? self.pendingSharedZones })
+            zones: { [unowned self] in self.sharedZoneCreator ?? self })
         configureShareEntry(entry)
         return entry
     }

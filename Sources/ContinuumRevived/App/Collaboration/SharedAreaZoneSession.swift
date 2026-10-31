@@ -297,3 +297,5 @@ extension AppDelegate {
         }
     }
 }
+
+extension AppDelegate: SharedZoneCreating {}

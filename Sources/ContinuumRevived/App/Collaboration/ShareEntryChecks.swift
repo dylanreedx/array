@@ -69,7 +69,7 @@ enum ShareEntryChecks {
         var calls: [(tiles: [UUID], name: String, share: SharedZoneShare)] = []
         var cancelled: [UUID] = []
         func createSharedZone(fromTiles tileIds: [UUID], name: String) async throws -> SharedZoneShare {
-            let share = SharedZoneShare(zoneId: UUID(), areaId: UUID())
+            let share = SharedZoneShare(areaId: UUID(), zoneId: UUID(), objects: [:])
             calls.append((tileIds, name, share))
             return share
         }
