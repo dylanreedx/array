@@ -604,8 +604,10 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_leg python3 scripts/check-collaboration-pair-features.py
   run_leg swift run --skip-build ContinuumRevivedRelayCoreChecks
   run_leg swift run --skip-build ContinuumRevivedRelayIntegrationChecks
-  # The relay ships on Linux; the Mac legs above cannot see a Linux-only break.
-  run_leg bash scripts/check-relay-linux.sh
+  # The Linux relay leg runs separately (scripts/run-matrix.sh
+  # --notifications-linux) and outside the build lock: a hung container must
+  # never hold every other gate behind it.
+  MATRIX_NOTES+=("Linux relay leg not run here; run scripts/run-matrix.sh --notifications-linux separately, outside the build lock.")
   matrix_report 'Collaboration matrix (targeted)'
   exit $?
 fi
