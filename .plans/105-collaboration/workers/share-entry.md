@@ -327,3 +327,25 @@ Mutations, each RED at its own leg:
 | --- | --- |
 | `shareTarget` ignores lent tiles | "the header Share opened no popover" (the walkthrough's bug) |
 | the open popover reads access once | timeout: "the open popover sees Sam join" |
+
+Gate at a52d6f95, once under the lock, with an isolated `TMUX_TMPDIR` and
+`CONTINUUM_APP_SUPPORT` and `CONTINUUM_SKIP_UI_BASELINES=1`.
+
+- **`scripts/run-matrix.sh --collaboration`: 13 of 14 legs passed.** The
+  native check printed 35 `PASS share entry` and 21 `PASS share entry (relay)`
+  lines.
+- **The one failure was `--shared-area-zone-check`,** in its host-offline
+  stage: "back online, the edge is solid again". This is part 2's
+  host-liveness timing, and this branch does not touch it. Re-run alone under
+  the lock, it passed twice in a row, so it is flaky, not a regression.
+- **Legs that read accessibility trees or drive the band and composer, exit
+  0:**
+  - `--agent-native-menu-check`, `--agent-tile-rename-check`
+  - `--canvas-background-render-check`, `--canvas-background-settings-check`
+  - `--managed-agent-page-zoom-check`
+  - `--composer-key-routing-check`, `--composer-outline-check`
+  - `--agent-face-switch-check`, `--canvas-pointer-path-check`
+- **`--tile-surface-residency-check` fails, and the failure is pre-existing.**
+  The message is "flag off must still pay the native cascade — a gesture that
+  laid nothing out was not a gesture". I built the base 856e105e's sources in
+  this bench, and it fails identically there. It is not on `MATRIX_KNOWN_RED`.
