@@ -244,3 +244,27 @@ skipped:
 - Notes published as discussion have no source binding, so a note doesn't come back to
   the zone at launch; agents and snapshots do.
 - **My own avatar** is drawn with the initial of "You".
+
+## Presence budget flake (branch `array/mp-zone-repaint-budget`, off collaboration-finish 47043941)
+
+**The symptom.** In a gate, `--shared-area-zone-check` failed with "20 cursor-only presence frames repaint neither the zone header nor an agent view (header 2→3, agent 2→3)".
+
+**It is a check timing flake, not an app repaint.**
+- Ten runs passed. In each, a trace of every repaint request on the header and the agent card recorded none during the 20 frames.
+- The member-names change can't reach this stage: the scripted relay sends member records only in the endings stage, and the presence label never changes. A real repaint would show on every run.
+
+**The cause.** The check window is off screen. There, `displayIfNeeded()` clears a layer-backed view's flag without painting; the paint happens when Core Animation commits on a run loop turn. `reveal()` or the warm-up frame can leave a paint pending. When the warm-up had already landed on the first look, no run loop turn ran before the counts were read, so the pending paint committed inside the window. That gives +1 on both views, the gate's signature.
+
+**The fix.** The stage commits with `CATransaction.flush()` before reading the counts and again after the frames. This is stricter than before: a paint the frames ask for is always counted. On failure it prints what each view shows and the stack of every repaint request (`qaRepaintTrace`, which is nil and free outside the check).
+
+**Evidence.**
+- Clean: 3 of 3 passed.
+- `flush-off` (a paint left pending before the old baseline) reproduces the gate failure: header 4→5, agent 2→3.
+- `pending-paint` (the same paint, with the fix) passes.
+- Real repaints still fail: the header repainting on every refresh gives 6→17; the card repainting on every refresh gives 3→16.
+
+**Gate at 7b3bb6e8,** one run under the lock:
+- `--collaboration` ran 13 legs; the Linux relay leg now runs outside the lock. The zone check passed (55 assertions), with its budget stage. The 14 zone and canvas legs and CoreChecks exposure exited 0.
+- Two legs failed. Neither is on this change's path:
+  - `--collaboration-native-check`: "the header Share opened no popover". This is the Share-versus-resize-band bug already open on collaboration-finish.
+  - `--collaboration-full-access-check`: the owner-approval step, claude this time. That check reads the owner's approval state right after `qaDeliver`, with no wait.
