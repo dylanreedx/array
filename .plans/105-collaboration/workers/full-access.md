@@ -164,3 +164,37 @@ isolated `TMUX_TMPDIR` and `CONTINUUM_APP_SUPPORT` and `CONTINUUM_SKIP_UI_BASELI
 deadline when the machine is loaded (load average around 5 from other benches'
 builds). One of my local runs hit the deadline at the last budget measurement. The
 composer pass adds about 0.5 s; the journey was already near its limit before that.
+
+## Follow-up: the approval check race (5bbf6db7, branch array/mp-full-access-pi-approval off aa136edf)
+
+**What failed.** The teammate's view drew the host's update first and only then fetched
+its prompt receipt. For that gap it showed "Waiting for Dylan to approve" beside a stale
+"Queued. It runs on its host after the prompts ahead of it." The check asserted both
+lines at once, and once caught the gap (Pi on aa136edf; Codex in another run).
+
+- The gap was sub-millisecond against the in-process service, which is why 20 clean
+  runs and 10 runs under CPU stress all passed. Against a real relay it is a network
+  round trip.
+- The merge's `AgentSupervisor` changes (account switching, helper tile cap) do not
+  touch the approval path.
+- `ownerSees` was not the cause: `deliver` is synchronous.
+
+**The fix.** `SharedAgentLiveView.poll` now refreshes the receipt before it draws, so one
+render shows one moment.
+
+**The witness, made deterministic.**
+- The approval is raised as the host accepts the prompt.
+- The owner's approval state is waited on with a deadline.
+- For this step the scripted service answers receipt reads at a relay's pace (300 ms).
+- The assertion is unchanged, and on failure it now prints each condition.
+
+**Evidence.**
+- Before the fix: RED 3 of 3, "status 'Waiting for Dylan to approve · live', controls
+  'Queued. …'". Everything else was true.
+- After the fix: 10 runs, each covering all three harnesses (10 per harness), all
+  GREEN.
+
+**Gate** on 5bbf6db7: 14 legs, 13 passed. The one failure is
+`--collaboration-native-check` at "share entry (relay): the header Share opened no
+popover". It also fails in `qa-runs/coordinator/gate-aa136edf.log` on the integrator's
+bench, so it predates this change.
