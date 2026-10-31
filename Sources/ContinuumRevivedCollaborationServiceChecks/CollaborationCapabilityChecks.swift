@@ -52,12 +52,19 @@ private func capabilityInjectPrivateSourceFields(_ value: Any, count: inout Int)
 }
 
 /// Actual service HTTP exercises scope/operation/ownership checks. No runner
-/// exists in this fixture: unimplemented host actions remain unavailable rather
-/// than treating an editor role or a caller-provided grant as execution rights.
+/// exists in this fixture. An editor's prompts go only through the agent
+/// prompt route (CollaborationHandoffChecks); a caller-provided grant never
+/// creates another route.
 func runCollaborationCapabilityChecks() async throws {
     for role in [Collaboration.Role.owner, .editor, .viewer] {
         try capabilityCheck(role.allows(.view), "\(role.rawValue) can view")
-        for action in [Collaboration.Capability.promptAgent, .stopAgent, .approveProviderRequest, .writeTerminal] {
+        // Full access: whoever a share admits as an editor prompts and stops
+        // the shared agent, on its owner's Mac. Approvals and terminals do not move.
+        for action in [Collaboration.Capability.promptAgent, .stopAgent] {
+            try capabilityCheck(role.allows(action) == (role != .viewer),
+                "\(role.rawValue) \(role == .viewer ? "does not grant" : "grants") \(action.rawValue)")
+        }
+        for action in [Collaboration.Capability.approveProviderRequest, .writeTerminal] {
             try capabilityCheck(!role.allows(action), "\(role.rawValue) does not grant \(action.rawValue)")
         }
     }

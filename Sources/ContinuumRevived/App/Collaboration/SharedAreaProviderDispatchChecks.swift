@@ -67,7 +67,7 @@ enum SharedAreaProviderDispatchChecks {
             setenv("PATH", "\(root.appendingPathComponent("bin").path):\(originalPath)", 1)
             try await run(kind, root: root)
         }
-        print("PASS provider dispatch: Claude Code, Codex and Pi runners each received exactly the frozen reviewed context once, refused stale/removed authority before any write, and reported a crash as outcome unknown with no second write")
+        print("PASS provider dispatch: Claude Code, Codex and Pi runners each received exactly the frozen reviewed context once, refused stale/removed authority before any write, ran prompts in arrival order across a busy turn, and reported a crash as outcome unknown with no second write")
     }
 
     private static func run(_ kind: AgentSteeringQAFakes.Harness, root: URL) async throws {
@@ -169,22 +169,31 @@ enum SharedAreaProviderDispatchChecks {
         try expect(written(revoked) == 0 && revokedPhaseValue == .refused,
                    "\(kind): removed membership must refuse before any transport write, got \(String(describing: await phase(revoked))) / \(written(revoked)) writes")
 
-        // 4. A stale turn: a send-now while the agent is busy is refused; a
-        //    queue-mode prompt is host accepted and QUEUED, not yet observed by
-        //    the provider, then drains once the turn ends.
+        // 4. A busy turn: a send-now waits on the service, unclaimed, and the
+        //    prompt behind it waits too (arrival order, full access). Once the
+        //    turn ends the send-now runs; the queue-mode prompt behind it is
+        //    host accepted and QUEUED, not yet observed, then drains after it.
         let seed = await supervisor.accept(.sendPrompt(.init("TOOL owner turn")), for: agent)
         try expect(seed == .accepted, "\(kind): the owner's own turn was refused: \(seed)")
         try await eventually("\(kind): the owner's turn never started") { supervisor.isRunning(agent) }
-        let busySend = make("Send now while busy.")
+        let busySend = make("TOOL send now while busy.")
         let queued = make("Queue after this turn.", .queue)
         await authority.enqueue(busySend); await authority.enqueue(queued)
         await coordinator.pollOnce()
-        try expect((await phase(busySend)) == .refused && written(busySend) == 0,
-                   "\(kind): a send-now on a busy turn must be refused before any write, got \(String(describing: await phase(busySend)))")
-        try expect((await phase(queued)) == .accepted && written(queued) == 0
+        let waitingSend = await phase(busySend), waitingQueue = await phase(queued)
+        try expect(waitingSend == .queued && written(busySend) == 0 && waitingQueue == .queued && written(queued) == 0,
+                   "\(kind): a send-now on a busy turn must wait unclaimed with the prompt behind it, got \(String(describing: waitingSend)) / \(String(describing: waitingQueue))")
+        try await idle()
+        await coordinator.pollOnce()
+        try await eventually("\(kind): the waiting send-now never ran after the turn: \(prompts.map(\.text))") { written(busySend) == 1 }
+        let ranPhase = await phase(busySend), heldPhase = await phase(queued)
+        try expect(ranPhase == .accepted && heldPhase == .accepted && written(queued) == 0
                    && supervisor.queuedMessages(for: agent).contains { $0.text == queued.promptText },
-                   "\(kind): a queued prompt must be accepted and held, not observed by the provider yet")
+                   "\(kind): a queued prompt must be accepted and held behind the running one, not observed by the provider yet")
         try await eventually("\(kind): the queued prompt never drained to the provider: \(prompts.map(\.text))") { written(queued) == 1 }
+        let order = prompts.map(\.text)
+        try expect(order.firstIndex(of: busySend.promptText)! < order.firstIndex(of: queued.promptText)!,
+                   "\(kind): prompts must run in arrival order, got \(order)")
         try await idle()
 
         // 5. A dropped outcome report is recovered as accepted, never resent.
@@ -224,8 +233,8 @@ enum SharedAreaProviderDispatchChecks {
         try expect((await phase(crashed)) == .uncertain && written(crashed) == 1,
                    "\(kind): a relaunched host must report outcome unknown with zero second write, got \(String(describing: await phase(crashed))) / \(written(crashed)) writes")
         let total = prompts.count
-        try expect(total == 6, "\(kind): exactly six prompts may reach the runner (reviewed, next, owner, queued, dropped, crashed), got \(prompts.map(\.text))")
-        print("PASS provider dispatch: \(kind.rawValue) runner transport carries the frozen context once; stale generation, removed membership and a busy turn write nothing; queued is distinct from observed; a crash is outcome unknown with no resend")
+        try expect(total == 7, "\(kind): exactly seven prompts may reach the runner (reviewed, next, owner, busy send, queued, dropped, crashed), got \(prompts.map(\.text))")
+        print("PASS provider dispatch: \(kind.rawValue) runner transport carries the frozen context once; stale generation and removed membership write nothing; a busy turn holds later prompts in arrival order; queued is distinct from observed; a crash is outcome unknown with no resend")
     }
 
     /// The user prompt a fake recorded, and how many non-text parts rode with it.

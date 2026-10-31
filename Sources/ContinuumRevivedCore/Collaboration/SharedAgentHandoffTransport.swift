@@ -33,10 +33,13 @@ public struct SharedAgentHandoffAPI: SharedAgentHandoffTransport {
 @MainActor
 public final class SharedAgentHostDispatcher {
     public typealias Execute = @MainActor (SharedAreaLocalSourceBinding, Collaboration.AgentDispatchCommand) async -> IntentAcceptance
+    /// Whether the bound agent could start a send-now prompt at once.
+    public typealias Ready = @MainActor (SharedAreaLocalSourceBinding) -> Bool
     private let identity: Collaboration.Identity
     private let transport: any SharedAgentHandoffTransport
     private let journal: SharedAgentHostJournal
     private let execute: Execute
+    private let ready: Ready
     private let bootID: UUID
     private static let processBootID = UUID()
     private var isPolling = false
@@ -45,8 +48,9 @@ public final class SharedAgentHostDispatcher {
     public private(set) var lastReceipts: [Collaboration.AgentDispatchReceipt] = []
 
     public init(identity: Collaboration.Identity, transport: any SharedAgentHandoffTransport, journal: SharedAgentHostJournal,
-                bootID: UUID? = nil, execute: @escaping Execute) {
-        self.identity = identity; self.transport = transport; self.journal = journal; self.bootID = bootID ?? Self.processBootID; self.execute = execute
+                bootID: UUID? = nil, ready: @escaping Ready = { _ in true }, execute: @escaping Execute) {
+        self.identity = identity; self.transport = transport; self.journal = journal; self.bootID = bootID ?? Self.processBootID
+        self.ready = ready; self.execute = execute
     }
 
     /// Only the original owning app supplies real local bindings and an actual
@@ -72,8 +76,15 @@ public final class SharedAgentHostDispatcher {
             // requester) must not hold every later command behind it.
             var failure: (any Error)?
             for host in Set(admitted.map(\.host)) {
+                // Prompts run in arrival order. A send-now that finds its agent
+                // busy stays queued on the service, unclaimed, and every later
+                // prompt for that agent waits behind it until the turn ends.
+                var waiting: Set<SharedArea.ID<SharedArea.Object>> = []
                 for receipt in try await transport.pending(host: host.rawValue) {
                     guard let binding = admitted.first(where: { $0.object == receipt.command.object && $0.host == receipt.command.source.host && $0.binding == receipt.command.source.binding }) else { continue }
+                    if receipt.phase == .queued, waiting.contains(binding.object) || (receipt.command.mode == .send && !ready(binding)) {
+                        waiting.insert(binding.object); continue
+                    }
                     try Task.checkCancellation()
                     do {
                         if let result = try await dispatch(receipt, binding: binding) {

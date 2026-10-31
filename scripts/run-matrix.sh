@@ -594,6 +594,7 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_leg .build/debug/ContinuumRevivedCollaborationChecks
   run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
   run_app_check .build/debug/Array --collaboration-native-check
+  run_app_check .build/debug/Array --collaboration-full-access-check
   run_app_check .build/debug/Array --ui-probe-check
   run_app_check .build/debug/Array --menu-contract-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
@@ -1487,6 +1488,7 @@ run_app_check .build/debug/Array --workspace-switch-check
 # first in-process switch has been green this whole time.
 run_app_check .build/debug/Array --zone-tile-hydration-check
 run_app_check .build/debug/Array --collaboration-native-check
+run_app_check .build/debug/Array --collaboration-full-access-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
 run_leg python3 scripts/check-collaboration-pair.py
 # M1.10 (.plans/46): WorkspaceRuntime.canvasView is written in exactly one place,

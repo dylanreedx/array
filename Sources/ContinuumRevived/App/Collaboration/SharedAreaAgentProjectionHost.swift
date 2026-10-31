@@ -11,17 +11,18 @@ final class SharedAreaAgentProjectionHost {
     private let supervisor: AgentSupervisor
     private let directory: URL
     private let makeSink: (SharedArea.ID<SharedArea.Object>) -> SharedAgentProjectionSink
+    private let owner: SharedArea.ID<SharedArea.Person>?
     private(set) var projectors: [SharedArea.ID<SharedArea.Object>: SharedAgentProjector] = [:]
     private var scheduled: Task<Void, Never>?
     private(set) var lastError: (any Error)?
 
-    init(supervisor: AgentSupervisor, directory: URL,
+    init(supervisor: AgentSupervisor, directory: URL, owner: SharedArea.ID<SharedArea.Person>? = nil,
          makeSink: @escaping (SharedArea.ID<SharedArea.Object>) -> SharedAgentProjectionSink) {
-        self.supervisor = supervisor; self.directory = directory; self.makeSink = makeSink
+        self.supervisor = supervisor; self.directory = directory; self.owner = owner; self.makeSink = makeSink
     }
 
     convenience init(supervisor: AgentSupervisor, controller: SharedAreaController) {
-        self.init(supervisor: supervisor, directory: controller.storageDirectory) { [weak controller] object in
+        self.init(supervisor: supervisor, directory: controller.storageDirectory, owner: controller.identity.person) { [weak controller] object in
             SharedAreaControllerProjectionSink(controller: controller, object: object)
         }
     }
@@ -41,7 +42,7 @@ final class SharedAreaAgentProjectionHost {
             do {
                 let generation = try SharedAgentProjectionGenerations.next(directory: directory, object: object)
                 let projector = try SharedAgentProjector(supervisor: supervisor, agent: target.0, host: target.1, object: object,
-                                                         generation: generation, sink: makeSink(object))
+                                                         generation: generation, owner: owner, sink: makeSink(object))
                 projector.onPending = { [weak self] in self?.scheduleFlush() }
                 projectors[object] = projector
                 scheduleFlush()

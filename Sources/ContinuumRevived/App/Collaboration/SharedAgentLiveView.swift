@@ -3,9 +3,12 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import ContinuumRevivedCollaborationProtocol
 
-/// A teammate's read-only live view of the selected published agent. It only
-/// reads the host's projection: it owns no runner, sends nothing and reads one
-/// agent at a time, so a hidden or unselected agent costs no subscription.
+/// A teammate's live view of the selected published agent, with full access:
+/// the host's projection above, and the same composer a local agent has below.
+/// It owns no runner. A prompt travels as an `AgentPromptRequest` and runs on
+/// the owner's Mac, under the owner's CLI login; approvals stay with the owner.
+/// It reads one agent at a time, so a hidden or unselected agent costs no
+/// subscription.
 @MainActor
 final class SharedAgentLiveView: NSView {
     typealias Projection = Collaboration.AgentProjection
@@ -26,17 +29,34 @@ final class SharedAgentLiveView: NSView {
     /// The host's liveness as the area reports it (COL-06). nil = not known;
     /// false = its host is gone, so the view is history and nothing is offered.
     var hostOnline: Bool? { didSet { if hostOnline != oldValue { render() } } }
+    /// Sends this view's prompts. Nil means no route to a host from here, and
+    /// then no composer is offered.
+    var prompter: SharedAgentHandoffController? { didSet { render() } }
+    /// A participant's display name, for "Sam sent the last prompt" and
+    /// "Waiting for Dylan to approve": the label their presence carries.
+    lazy var personName: (SharedArea.ID<SharedArea.Person>) -> String? = { [weak controller] person in
+        controller?.presence.first { $0.identity.person == person }?.label
+    }
 
     var statusText: String { status.stringValue }
     var controlsText: String { controls.stringValue }
     var transcriptText: String { transcript.string }
+    var lastPromptText: String { lastPrompt.stringValue }
     var statusColor: NSColor? { status.textColor }
     var isPolling: Bool { task != nil }
+    var offersComposer: Bool { !composer.isHidden }
+    let composer = AgentComposerView(frame: .zero, variant: .compactFreeform)
 
     private let status = NSTextField(labelWithString: "")
     private let controls = NSTextField(wrappingLabelWithString: "")
     private let transcript = NSTextView()
     private let scroll = NSScrollView()
+    private let lastPrompt = NSTextField(labelWithString: "")
+    private let send = ComposerActionButton(presentation: CollaborationHubView.action("Send", symbol: "arrow.up"))
+    private var source: SharedArea.Source?
+    private var sending = false
+    /// What became of this view's own last prompt, said under the composer.
+    private var delivery: String?
     override var isFlipped: Bool { true }
 
     init(controller: SharedAreaController, read: Reader? = nil) {
@@ -53,7 +73,11 @@ final class SharedAgentLiveView: NSView {
         transcript.textContainerInset = .init(width: 4, height: 6)
         transcript.autoresizingMask = [.width]
         scroll.documentView = transcript; scroll.hasVerticalScroller = true; scroll.drawsBackground = true
-        for view in [status, controls, scroll] { addSubview(view) }
+        lastPrompt.font = .token(.label); lastPrompt.lineBreakMode = .byTruncatingTail
+        composer.onSubmitPrompt = { [weak self] text in self?.submit(text) }
+        composer.setAccessibilityLabel("Prompt the shared agent")
+        send.target = self; send.action = #selector(sendPressed)
+        for view in [status, controls, scroll, lastPrompt, composer, send] { addSubview(view) }
         setAccessibilityRole(.group)
         setAccessibilityLabel("Live agent view")
         applyAppearance()
@@ -65,7 +89,25 @@ final class SharedAgentLiveView: NSView {
         super.layout()
         status.frame = .init(x: 0, y: 0, width: bounds.width, height: 18)
         controls.frame = .init(x: 0, y: 22, width: bounds.width, height: 34)
-        scroll.frame = .init(x: 0, y: 60, width: bounds.width, height: max(0, bounds.height - 60))
+        // Transcript above, then the composer row: who sent the last prompt,
+        // the editor, and Send, the way a local agent tile stacks them.
+        var bottom = bounds.height
+        if !composer.isHidden {
+            let sendSize = send.intrinsicContentSize
+            let width = max(1, bounds.width - sendSize.width - CGFloat(Space.s))
+            composer.frame = .init(x: 0, y: bottom - max(composer.frame.height, 44), width: width, height: max(composer.frame.height, 44))
+            composer.layoutSubtreeIfNeeded()
+            let height = max(composer.intrinsicContentSize.height, 36)
+            composer.frame = .init(x: 0, y: bottom - height, width: width, height: height)
+            send.frame = .init(x: bounds.width - sendSize.width, y: (bottom - height / 2 - sendSize.height / 2).rounded(),
+                               width: sendSize.width, height: sendSize.height)
+            bottom -= height + CGFloat(Space.xs)
+        }
+        if !lastPrompt.isHidden {
+            lastPrompt.frame = .init(x: 0, y: bottom - 18, width: bounds.width, height: 18)
+            bottom -= 18 + CGFloat(Space.xs)
+        }
+        scroll.frame = .init(x: 0, y: 60, width: bounds.width, height: max(0, bottom - 60))
         transcript.frame.size.width = scroll.contentSize.width
     }
 
@@ -73,10 +115,11 @@ final class SharedAgentLiveView: NSView {
     func show(object selected: SharedArea.ID<SharedArea.Object>?, in document: SharedArea.Document?) {
         let visible = selected != nil && document?.items.contains(where: { $0.id == selected && $0.kind == .agentObservation }) == true
         if isHidden == visible { isHidden = !visible; superview?.needsLayout = true }
+        source = selected.flatMap { id in document?.items.first(where: { $0.id == id })?.source }
         guard visible, let selected else { stop(); return }
         guard selected != object || task == nil else { return }
         stop()
-        object = selected; replica = .init(); confirmed = false; unavailable = false
+        object = selected; replica = .init(); confirmed = false; unavailable = false; delivery = nil
         render()
         let ticket = UUID(); generation = ticket
         task = Task { @MainActor [weak self] in
@@ -119,21 +162,84 @@ final class SharedAgentLiveView: NSView {
             unavailable = true
             render()
         }
+        await followDelivery()
         return false
     }
 
+    // MARK: - Full access
+
+    @objc private func sendPressed() { composer.composerRequestedSend(composer.textView) }
+    /// The Send button, pressed. Checks drive the real control.
+    func qaPressSend() { send.sendAction(send.action, to: send.target) }
+
+    /// Fire-and-forget from the composer; only a service-queued prompt clears
+    /// the draft. Anything else leaves it to send again.
+    private func submit(_ text: String) {
+        guard !sending, let prompter, let object else { return }
+        sending = true; delivery = "Sending…"; render()
+        Task { @MainActor [weak self] in
+            let outcome = await prompter.prompt(object: object, text: text)
+            guard let self else { return }
+            sending = false
+            switch outcome {
+            case .queued: composer.acceptCurrentSendIntent(); delivery = Self.deliveryText(prompter.receipt?.phase)
+            case .refused: delivery = prompter.message.hasPrefix("Refused") ? prompter.message : "Refused. " + prompter.message
+            case .unresolved: delivery = "Not confirmed yet. " + prompter.message
+            }
+            render()
+        }
+    }
+
+    /// A queued prompt is followed to its outcome on the projection's beat.
+    private func followDelivery() async {
+        guard let prompter, !sending, delivery != nil else { return }
+        if prompter.pending != nil { await prompter.checkDelivery() }
+        await prompter.refreshReceipt()
+        let next = prompter.message.hasPrefix("Refused") && prompter.receipt?.phase == .refused
+            ? prompter.message : Self.deliveryText(prompter.receipt?.phase)
+        if next != delivery { delivery = next; render() }
+    }
+
+    static func deliveryText(_ phase: Collaboration.AgentDispatchPhase?) -> String? {
+        switch phase {
+        case .queued?, .claimed?: return "Queued. It runs on its host after the prompts ahead of it."
+        case .dispatching?: return "Starting on its host."
+        case .accepted?: return nil
+        case .refused?: return "Refused by its host. Nothing was sent to the agent."
+        case .uncertain?: return "Its host lost track of this prompt. Array will not resend it."
+        case nil: return nil
+        }
+    }
+
+    private func name(_ person: SharedArea.ID<SharedArea.Person>) -> String? {
+        personName(person)
+    }
+
     private func render() {
+        let role = controller.scope?.role ?? .viewer
         guard let state = replica.state else {
             status.stringValue = unavailable ? "Live view unavailable" : "Connecting to the agent's host…"
             controls.stringValue = "Nothing from this agent is shown until its host publishes it."
             if transcript.string != "" { transcript.string = "" }
+            setComposer(offered: false); lastPrompt.isHidden = true
             return
         }
         let offline = hostOnline == false
-        status.stringValue = Self.phase(state.phase) + (offline ? " · host offline, last confirmed"
+        let owner = source.map { name($0.owner) ?? "its owner" } ?? "its owner"
+        let phase = state.phase == .needsAction ? "Waiting for \(owner) to approve" : Self.phase(state.phase)
+        status.stringValue = phase + (offline ? " · host offline, last confirmed"
             : unavailable ? " · last confirmed" : confirmed ? " · live" : "")
-        controls.stringValue = offline ? "Its host is offline. Nothing can reach this agent until it returns."
-            : Self.controlsText(state.capabilities)
+        let controls = Collaboration.AgentProjection.RemoteControls(host: state.capabilities, role: role)
+        self.controls.stringValue = offline ? "Its host is offline. Nothing can reach this agent until it returns."
+            : delivery ?? Self.controlsText(state.capabilities, role: role)
+        if let last = state.lastPrompt {
+            lastPrompt.stringValue = SharedPromptAuthorship.label(mine: last.person == controller.identity.person,
+                                                                  name: name(last.person), at: last.at)
+            lastPrompt.isHidden = false
+        } else { lastPrompt.isHidden = true }
+        // Full access: anyone who may prompt gets the composer, busy or not. A
+        // prompt sent mid-turn waits on the host, in order, and is never dropped.
+        setComposer(offered: prompter != nil && !offline && controls.queue, sending: sending)
         let text = Self.transcriptText(state)
         if transcript.string != text {
             let pinned = scroll.verticalScroller.map { $0.floatValue >= 0.99 } ?? true
@@ -153,13 +259,19 @@ final class SharedAgentLiveView: NSView {
         }
     }
 
-    /// Host facts, then what this view can do with them: nothing directly.
-    static func controlsText(_ host: Projection.Capabilities) -> String {
+    /// What a prompt from here does. Execution and approvals never move.
+    static func controlsText(_ host: Projection.Capabilities, role: Collaboration.Role) -> String {
         guard host.locallyManaged else { return "Watched session. No controls are available from a shared view." }
-        let facts = [(host.canSend, "send"), (host.canQueue, "queue"), (host.canSteer, "steer"), (host.canInterrupt, "interrupt")]
-            .filter(\.0).map(\.1)
-        let now = facts.isEmpty ? "Its host accepts no input right now." : "Its host can " + facts.joined(separator: ", ") + " now."
-        return now + " Steer, interrupt and approvals stay with its owner; prompts go through a handoff."
+        guard role.allows(.promptAgent) else { return "View only. Its owner and editors can prompt it." }
+        return "Prompts run on its owner's Mac, in the order they arrive. Approvals stay with its owner."
+    }
+
+    private func setComposer(offered: Bool, sending: Bool = false) {
+        if composer.isHidden == offered {
+            composer.isHidden = !offered; send.isHidden = !offered
+            needsLayout = true
+        }
+        send.presentation = CollaborationHubView.action("Send", symbol: "arrow.up", enabled: !sending, loading: sending)
     }
 
     static func transcriptText(_ state: Projection.Snapshot) -> String {
@@ -198,5 +310,6 @@ final class SharedAgentLiveView: NSView {
         transcript.textColor = TextToken.textPrimary.color.nsColor(in: self)
         transcript.backgroundColor = SurfaceToken.tileBody.color.nsColor(in: self)
         scroll.backgroundColor = SurfaceToken.tileBody.color.nsColor(in: self)
+        lastPrompt.textColor = TextToken.textSecondary.color.nsColor(in: self)
     }
 }

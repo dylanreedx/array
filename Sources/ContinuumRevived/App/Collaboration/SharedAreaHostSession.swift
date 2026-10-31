@@ -44,7 +44,9 @@ final class SharedAreaHostSession {
         guard pump == nil else { return }
         generation = UUID(); let ticket = generation
         let precedingClose = closing
-        changeObserver = controller.addChangeObserver { [weak self] in self?.ensureCollector(); self?.handoff.hostLivenessChanged() }
+        changeObserver = controller.addChangeObserver { [weak self] in
+            self?.ensureCollector(); self?.handoff.hostLivenessChanged(); self?.rememberParticipantNames()
+        }
         handoff.startHosting()
         pump = Task { [weak self] in
             guard let self else { return }
@@ -56,6 +58,15 @@ final class SharedAreaHostSession {
                 await projections?.flush()
                 do { try await Task.sleep(for: .seconds(2)) } catch { return }
             }
+        }
+    }
+    /// "Sam sent the last prompt" on the owner's tile names people by the
+    /// label their presence carries. A name, once seen, outlives the cursor.
+    private func rememberParticipantNames() {
+        for peer in controller.presence {
+            guard let label = peer.label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty,
+                  supervisor.sharedParticipantNames[peer.identity.person] != label else { continue }
+            supervisor.sharedParticipantNames[peer.identity.person] = label
         }
     }
     func stop() {

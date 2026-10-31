@@ -44,21 +44,30 @@ extension Collaboration {
         }
 
         /// What a recipient may actually offer. Only send and queue have a
-        /// cross-host route (the handoff dispatcher), and only for the person who
-        /// holds control. Steer, interrupt and provider approvals have no remote
-        /// route at all, so they stay unavailable whatever the host runner can do.
+        /// cross-host route (the host dispatcher), for any member whose role may
+        /// prompt. Steer, interrupt and provider approvals have no remote route
+        /// at all, so they stay unavailable whatever the host runner can do.
         public struct RemoteControls: Equatable, Sendable {
             public let send: Bool
             public let queue: Bool
             public let steer = false
             public let interrupt = false
             public let approveProviderRequest = false
-            public init(host: Capabilities, holdsControl: Bool) {
+            public init(host: Capabilities, role: Role) {
                 // Re-derived from decoded values: a wire Capabilities never passed
                 // through the gating initializer.
-                send = holdsControl && host.locallyManaged && host.canSend
-                queue = holdsControl && host.locallyManaged
+                let mayPrompt = role.allows(.promptAgent)
+                send = mayPrompt && host.locallyManaged && host.canSend
+                queue = mayPrompt && host.locallyManaged
             }
+        }
+
+        /// Who sent the prompt the agent last started, and when. The owner's own
+        /// local prompts count too: the person is the source's owner.
+        public struct LastPrompt: Codable, Equatable, Sendable {
+            public let person: SharedArea.ID<SharedArea.Person>
+            public let at: Date
+            public init(person: SharedArea.ID<SharedArea.Person>, at: Date) { self.person = person; self.at = at }
         }
 
         public enum RowKind: Codable, Equatable, Sendable {
@@ -99,6 +108,7 @@ extension Collaboration {
             case turnCompleted(turn: String, outcome: Outcome)
             case assistantText(row: String, turn: String, delta: String)
             case tool(row: String, turn: String?, kind: ToolKind, status: ToolStatus)
+            case prompted(LastPrompt)
         }
 
         /// One sequenced tail event. `(host, object, generation, sequence)` is its
@@ -135,11 +145,13 @@ extension Collaboration {
             public private(set) var rows: [Row]
             /// Rows dropped from the front to respect `maxRows`.
             public private(set) var omittedRows: Int
+            public private(set) var lastPrompt: LastPrompt?
             public init(host: SharedArea.ID<SharedArea.Host>, object: SharedArea.ID<SharedArea.Object>, generation: UInt64,
-                        history: History, phase: Phase, capabilities: Capabilities, rows: [Row] = []) {
+                        history: History, phase: Phase, capabilities: Capabilities, rows: [Row] = [], lastPrompt: LastPrompt? = nil) {
                 schema = AgentProjection.schema
                 self.host = host; self.object = object; self.generation = generation; self.history = history
                 through = 0; self.phase = phase; self.capabilities = capabilities; self.rows = []; omittedRows = 0
+                self.lastPrompt = lastPrompt
                 for row in rows { insert(row) }
             }
 
@@ -168,6 +180,7 @@ extension Collaboration {
                 switch frame.payload {
                 case .phase(let value): phase = value
                 case .capabilities(let value): capabilities = value
+                case .prompted(let value): lastPrompt = value
                 case .turnStarted: phase = .working
                 case .turnCompleted(_, let outcome): phase = outcome == .failed ? .failed : .ready
                 case let .assistantText(id, turn, delta):
@@ -232,7 +245,7 @@ extension Collaboration {
                 return row.utf8.count <= 64 && (turn?.utf8.count ?? 0) <= 64
             case let .turnStarted(turn), let .turnCompleted(turn, _):
                 return turn.utf8.count <= 64
-            case .phase, .capabilities:
+            case .phase, .capabilities, .prompted:
                 return true
             }
         }

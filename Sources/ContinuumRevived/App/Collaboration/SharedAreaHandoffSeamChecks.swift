@@ -9,15 +9,15 @@ import ContinuumRevivedCollaborationProtocol
 /// through the production `SharedAreaHandoffCoordinator`, `AgentSupervisor`
 /// and its real `ClaudeAgentRunner` / `CodexAgentRunner` / `PiRpcAgentRunner`
 /// against the recording `AgentSteeringQAFakes`. Only the collaboration
-/// service is scripted, with `CollaborationStore`'s handoff rules: one
-/// controller per agent, revisions, and a queued prompt whose requester no
-/// longer holds control resolving `refused` at the host's next poll.
+/// service is scripted, with `CollaborationStore`'s rules: one controller per
+/// agent and revisions for the handoff itself, while prompting needs only
+/// membership (full access).
 ///
 /// Each harness must show the real outcome:
 /// - the new controller's prompt reaches the owner's runner, once, verbatim;
-/// - the old owner's own input stops executing while the teammate holds control;
-/// - a prompt the handoff no longer authorises is refused, and reads refused
-///   to the teammate who sent it.
+/// - handing over never locks the owner out: their own input still runs;
+/// - a reclaim does not refuse a prompt already sent, and a teammate keeps
+///   prompting after it.
 @MainActor
 enum SharedAreaHandoffSeamChecks {
     private struct Failure: Error, CustomStringConvertible { let description: String }
@@ -102,16 +102,14 @@ enum SharedAreaHandoffSeamChecks {
         try expect(teammateModel.receipt?.phase == .accepted && count(sent.command.promptText) == 1,
                    "\(kind): the teammate must read the host's acceptance of exactly one write, got \(String(describing: teammateModel.receipt?.phase))")
 
-        // 2. The old owner stops executing while the teammate holds control.
+        // 2. Handing over never locks the owner out: their own input still runs.
         let ownerAfter = await supervisor.accept(.sendPrompt(.init("Owner after handoff.")), for: agent)
-        try await Task.sleep(for: .milliseconds(400))
-        try expect(ownerAfter == .refused(.sharedAgentControlRequired) && count("Owner after handoff.") == 0,
-                   "\(kind): the former owner's input must be refused before any write, got \(ownerAfter) / \(count("Owner after handoff.")) writes")
+        try await eventually("\(kind): the owner's own input must still run while handed over (\(ownerAfter))") { count("Owner after handoff.") == 1 }
+        try await idle()
 
-        // 3. Refused: the teammate queues a prompt, the owner reclaims before the
-        //    host polls. The host refuses it, nothing is written, and the
-        //    teammate's own controller reads refused.
-        await teammateModel.send(text: "Teammate prompt the reclaim overtakes.", context: context.id)
+        // 3. A reclaim between sending and the host's poll does not refuse the
+        //    prompt: it still runs, once, and reads accepted to its sender.
+        await teammateModel.send(text: "Teammate prompt sent before the reclaim.", context: context.id)
         guard let overtaken = teammateModel.receipt, overtaken.phase == .queued, overtaken.command.id != sent.command.id else {
             throw Failure(description: "handoff seam: \(kind): the second teammate prompt was not queued: \(teammateModel.message)")
         }
@@ -119,22 +117,22 @@ enum SharedAreaHandoffSeamChecks {
         await ownerModel.reclaim()
         try expect(ownerModel.control?.controller == owner.person, "\(kind): the owner must hold control after reclaiming — \(ownerModel.message)")
         await coordinator.pollOnce()
-        try await Task.sleep(for: .milliseconds(400))
-        await teammateModel.refresh(object: item.id)
-        try expect(teammateModel.receipt?.command.id == overtaken.command.id && teammateModel.receipt?.phase == .refused
-                   && count(overtaken.command.promptText) == 0,
-                   "\(kind): a prompt the reclaim overtook must read refused with no write, got \(String(describing: teammateModel.receipt?.phase)) / \(count(overtaken.command.promptText)) writes")
-        await teammateModel.send(text: "Teammate prompt without control.", context: context.id)
-        try expect(teammateModel.pending == nil && teammateModel.receipt?.command.id == overtaken.command.id
-                   && teammateModel.message.hasPrefix("This request was not accepted."),
-                   "\(kind): a send without control must be refused, not left unresolved — \(teammateModel.message)")
-
-        // Control is back: the owner's own input runs again.
-        let reclaimed = await supervisor.accept(.sendPrompt(.init("Owner after reclaim.")), for: agent)
-        try await eventually("\(kind): the owner's input never ran after reclaiming (\(reclaimed))") { count("Owner after reclaim.") == 1 }
+        try await eventually("\(kind): a prompt sent before the reclaim never ran: \(prompts)") { count(overtaken.command.promptText) == 1 }
         try await idle()
-        try expect(prompts.count == 3, "\(kind): exactly three prompts may reach the runner, got \(prompts)")
-        print("PASS handoff seam: \(kind.rawValue) — the new controller's prompt reaches the runner once, the former owner's input is refused while handed over, and a prompt the reclaim overtook reads refused with no write")
+        await teammateModel.refresh(object: item.id)
+        try expect(teammateModel.receipt?.command.id == overtaken.command.id && teammateModel.receipt?.phase == .accepted,
+                   "\(kind): a prompt the reclaim crossed must read accepted, got \(String(describing: teammateModel.receipt?.phase))")
+
+        // 4. Without control, the teammate still prompts (full access).
+        await teammateModel.send(text: "Teammate prompt without control.", context: context.id)
+        guard let free = teammateModel.receipt, free.phase == .queued, teammateModel.pending == nil else {
+            throw Failure(description: "handoff seam: \(kind): a member's prompt without control must queue — \(teammateModel.message)")
+        }
+        await coordinator.pollOnce()
+        try await eventually("\(kind): the prompt sent without control never ran: \(prompts)") { count(free.command.promptText) == 1 }
+        try await idle()
+        try expect(prompts.count == 5, "\(kind): exactly five prompts may reach the runner, got \(prompts)")
+        print("PASS handoff seam: \(kind.rawValue) — the new controller's prompt reaches the runner once, the owner keeps prompting while handed over, and neither a reclaim nor lacking control refuses a member's prompt")
     }
 
     /// The collaboration service's handoff rules, scripted. Refusals are the
@@ -192,9 +190,10 @@ enum SharedAreaHandoffSeamChecks {
                 guard existing.command.requester == caller, existing.command.text == request.text else { throw conflict() }
                 return existing
             }
-            guard request.epoch == 1, request.hostGeneration == generation, request.controlRevision == revision else { throw conflict() }
-            guard controller == caller.person else { throw forbidden() }
-            guard let context = document.contexts.last(where: { $0.id == request.contextRevision }), let generation else { throw conflict() }
+            // Full access: membership, not control, admits a prompt.
+            guard request.epoch == 1, request.hostGeneration == generation, let generation else { throw conflict() }
+            let context = request.contextRevision.flatMap { id in document.contexts.last(where: { $0.id == id }) }
+            guard (request.contextRevision == nil) == (context == nil) else { throw conflict() }
             let command = Collaboration.AgentDispatchCommand(id: request.id, area: document.id, object: item.id, source: item.source!,
                 requester: caller, epoch: 1, controlRevision: revision, hostGeneration: generation, context: context,
                 text: request.text, mode: request.mode)
@@ -206,7 +205,7 @@ enum SharedAreaHandoffSeamChecks {
             return receipt
         }
         private func authorized(_ command: Collaboration.AgentDispatchCommand) -> Bool {
-            controller == command.requester.person && revision == command.controlRevision && generation == command.hostGeneration
+            generation == command.hostGeneration
         }
         func pending(_ caller: Collaboration.Identity) throws -> [Collaboration.AgentDispatchReceipt] {
             guard caller == owner else { throw forbidden() }

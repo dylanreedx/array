@@ -333,48 +333,50 @@ class Harness:
         wait_for(lambda: (value := a.call("status")).get("runnerCalls") == value.get("runnerCompleted") == 1 and value.get("sourceRunningAgents") == 0,
             "source owner's ordinary prompt completes and releases its live slot", 10)
         a.call("handoffOffer", person=ready_b["person"]); b.call("handoffAccept")
-        local_refusal = a.call("localSend")
-        assert local_refusal["localControlRefused"] and local_refusal["runnerCalls"] == 1
+        # Full access: handing over never locks the owner out of their agent.
+        assert a.call("localSend")["localControlAccepted"], "a handoff incorrectly blocked the source owner's own prompt"
+        wait_for(lambda: (value := a.call("status")).get("runnerCalls") == value.get("runnerCompleted") == 2 and value.get("sourceRunningAgents") == 0,
+            "the owner's prompt while handed over completes and releases its live slot", 10)
         a.call("rebindSource")
         b.call("handoffSend", text="PAIR HANDOFF from B using the current shared agreement")
         for _ in range(4):
             a.call("hostPoll"); b.call("handoffRefresh")
-            if a.snapshot().get("runnerCalls") == 2: break
+            if a.snapshot().get("runnerCalls") == 3: break
             time.sleep(0.1)
-        host = wait_for(lambda: value if (value := a.snapshot()).get("runnerCalls") == 2 else None, "original host receives exactly one handed-off prompt", 10)
-        wait_for(lambda: (value := a.call("status")).get("runnerCompleted") == 2 and value.get("sourceRunningAgents") == 0,
+        host = wait_for(lambda: value if (value := a.snapshot()).get("runnerCalls") == 3 else None, "original host receives exactly one handed-off prompt", 10)
+        wait_for(lambda: (value := a.call("status")).get("runnerCompleted") == 3 and value.get("sourceRunningAgents") == 0,
             "handed-off prompt reaches a provider-shaped completed result", 10)
         a.call("hostPoll"); a.call("hostPoll")
-        assert a.call("status")["runnerCalls"] == 2 and b.call("status")["runnerConstructions"] == 0
+        assert a.call("status")["runnerCalls"] == 3 and b.call("status")["runnerConstructions"] == 0
         assert "PAIR HANDOFF" in host["runnerPrompts"][-1] and "PAIR replay barrier" in host["runnerPrompts"][-1]
         receipt = wait_for(lambda: value if (value := b.call("handoffRefresh")).get("handoffPhase") == "accepted" else None, "recipient observes native supervisor acceptance receipt", 10)
         assert receipt["handoffRequester"] == ready_b["person"]
-        self.pass_step("explicit teammate handoff blocks ordinary old-owner sending, survives source view rebind, and dispatches one attributed current-context prompt through the original supervisor")
+        self.pass_step("explicit teammate handoff keeps the owner able to prompt, survives source view rebind, and dispatches one attributed current-context prompt through the original supervisor")
         b.kill_abrupt(); b.start(); self.converge(a, b)
         restored_receipt = b.call("handoffRefresh")
         assert restored_receipt["handoffPhase"] == "accepted" and restored_receipt["handoffCommand"] == receipt["handoffCommand"]
         assert restored_receipt["handoffContext"] == receipt["handoffContext"] and restored_receipt["runnerConstructions"] == 0
-        a.call("hostPoll"); assert a.call("status")["runnerCalls"] == 2
+        a.call("hostPoll"); assert a.call("status")["runnerCalls"] == 3
         self.pass_step("recipient abrupt relaunch restores the exact accepted handoff receipt without executing or redispatching its command")
         a.call("usage")
-        usage = wait_for(lambda: value.get("usage") if (value := a.call("status")).get("usage", {}).get("input") == 200 else None, "published source token observation reaches durable accounting", 10)
-        assert usage["output"] == 40
+        usage = wait_for(lambda: value.get("usage") if (value := a.call("status")).get("usage", {}).get("input") == 300 else None, "published source token observation reaches durable accounting", 10)
+        assert usage["output"] == 60
         for _ in range(3): a.call("usage"); a.call("hostPoll")
         repeated = a.call("status")["usage"]
-        assert (repeated["input"], repeated["output"], repeated["todayInput"], repeated["todayOutput"]) == (200, 40, 200, 40), f"usage double-counted: {repeated}"
+        assert (repeated["input"], repeated["output"], repeated["todayInput"], repeated["todayOutput"]) == (300, 60, 300, 60), f"usage double-counted: {repeated}"
         b.call("camera", x=0.0, y=0.0, zoom=1.0)
         a.call("presence", x=80.0, y=80.0); b.call("presence", x=120.0, y=110.0)
         wait_for(lambda: b.snapshot().get("presence", 0) >= 2, "teammate cursor and usage presence")
         off = b.call("hover"); assert not off["hoverText"]
-        hover = wait_for(lambda: text if "Reported total: 240 tokens" in (text := b.call("hover", device=ready_a["device"])["hoverText"]) else None, "hover-only live teammate tokens", 10)
+        hover = wait_for(lambda: text if "Reported total: 360 tokens" in (text := b.call("hover", device=ready_a["device"])["hoverText"]) else None, "hover-only live teammate tokens", 10)
         assert hover
         assert not b.call("hover")["hoverText"]
         b.kill_abrupt(); b.start(); self.converge(a, b); a.call("usage")
         b.call("camera", x=0.0, y=0.0, zoom=1.0); a.call("presence", x=80.0, y=80.0); b.call("presence", x=120.0, y=110.0)
         relaunched = wait_for(lambda: text if "Reported total:" in (text := b.call("hover", device=ready_a["device"])["hoverText"]) else None, "hover after recipient relaunch", 10)
-        assert "Reported total: 240 tokens" in relaunched, f"hover double-counted after relaunch: {relaunched}"
-        assert a.call("status")["usage"]["todayInput"] == 200
-        self.pass_step("real source token events persist as 200 input/40 output and render only while the teammate cursor is inspected; republishing and a recipient relaunch never double-count")
+        assert "Reported total: 360 tokens" in relaunched, f"hover double-counted after relaunch: {relaunched}"
+        assert a.call("status")["usage"]["todayInput"] == 300
+        self.pass_step("real source token events persist as 300 input/60 output over three turns and render only while the teammate cursor is inspected; republishing and a recipient relaunch never double-count")
         end_a, end_b = a.call("status"), b.call("status")
         assert end_a["sourceFiles"] == baseline_a["sourceFiles"] and end_b["sourceFiles"] == baseline_b["sourceFiles"]
         assert end_a["sourceWorld"] == baseline_a["sourceWorld"] and end_b["sourceWorld"] == baseline_b["sourceWorld"]

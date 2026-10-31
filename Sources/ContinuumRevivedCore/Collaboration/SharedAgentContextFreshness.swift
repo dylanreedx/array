@@ -144,7 +144,8 @@ public final class SharedAgentFreshnessLedger: @unchecked Sendable {
         var deliveries: [(command: Collaboration.AgentDispatchCommand, phase: Collaboration.AgentDispatchPhase, observed: Int64, accepted: Int64?)] = []
         for row in rows {
             let command = try JSONDecoder().decode(Collaboration.AgentDispatchCommand.self, from: row["frozen"] as Data)
-            guard command.context.object == agreement, let phase = Collaboration.AgentDispatchPhase(rawValue: row["phase"]) else { continue }
+            // A prompt sent without an agreement revision says nothing about it.
+            guard command.context?.object == agreement, let phase = Collaboration.AgentDispatchPhase(rawValue: row["phase"]) else { continue }
             deliveries.append((command, phase, row["observed"], row["accepted"]))
         }
         let baseline = deliveries.filter { $0.phase == .accepted }.max { ($0.accepted ?? 0) < ($1.accepted ?? 0) }
@@ -155,14 +156,14 @@ public final class SharedAgentFreshnessLedger: @unchecked Sendable {
         let head = document.items.contains(where: { $0.id == agreement }) ? history.last : nil
         func ordinal(_ id: SharedArea.ID<SharedArea.Revision>) -> Int? { history.firstIndex { $0.id == id }.map { $0 + 1 } }
         let state: SharedAgentContextFreshness.State
-        if let sent = baseline?.command.context.id {
+        if let sent = baseline?.command.context?.id {
             if let head {
                 state = head.id == sent ? .current(sent)
                     : .changedSinceSent(sent: sent, current: head.id, newerRevisions: (ordinal(head.id) ?? 0) - (ordinal(sent) ?? 0))
             } else { state = .agreementRemoved(sent: sent) }
         } else { state = .notSent }
         return .init(state: state, lastAccepted: baseline?.command, awaitingHost: awaiting, unresolved: unresolved,
-                     sentOrdinal: baseline.flatMap { ordinal($0.command.context.id) }, currentOrdinal: head.flatMap { ordinal($0.id) })
+                     sentOrdinal: baseline?.command.context.flatMap { ordinal($0.id) }, currentOrdinal: head.flatMap { ordinal($0.id) })
     }
 
     /// Keeps a frozen quote. The same ID can never be rewritten.

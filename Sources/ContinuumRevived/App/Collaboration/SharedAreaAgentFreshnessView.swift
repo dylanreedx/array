@@ -67,7 +67,9 @@ final class SharedAreaAgentFreshnessView: NSView {
 
     /// In-flight and failed sends are reported beside the baseline, never as it.
     static func notice(_ freshness: SharedAgentContextFreshness, in document: SharedArea.Document) -> String? {
-        func ordinal(_ context: SharedArea.Context) -> String {
+        func ordinal(_ context: SharedArea.Context?) -> String {
+            // Freshness only folds prompts that carried a revision.
+            guard let context else { return "A prompt" }
             let history = document.contexts.filter { $0.object == context.object }
             return history.firstIndex(of: context).map { "Revision \($0 + 1)" } ?? "A revision"
         }

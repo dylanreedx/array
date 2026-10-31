@@ -1150,7 +1150,22 @@ final class AgentSupervisor {
     /// The runner for the prompt currently in flight, if any.
     private var runners: [AgentID: AgentRunning] = [:]
     private var sharedAgentControlGates: [AgentID: [String: SharedAgentControlGate]] = [:]
-    private struct SharedInputPermit { let agentID: AgentID }
+    private struct SharedInputPermit {
+        let agentID: AgentID
+        /// The collaboration participant a shared prompt came from; nil is the
+        /// owner typing on this Mac.
+        var requester: SharedArea.ID<SharedArea.Person>? = nil
+    }
+    /// Who sent the prompt each agent last started, for "Sam sent the last
+    /// prompt". A nil requester is the owner, on this Mac.
+    struct LastPromptAuthor: Equatable {
+        let requester: SharedArea.ID<SharedArea.Person>?
+        let at: Date
+    }
+    private(set) var lastPromptAuthors: [AgentID: LastPromptAuthor] = [:]
+    /// Display names of collaboration participants, from presence labels.
+    /// Written by the hosting area session; read by the owner's tile.
+    var sharedParticipantNames: [SharedArea.ID<SharedArea.Person>: String] = [:]
     /// The latest runner generation to own each agent. Unlike `runners`, this is
     /// deliberately retained after the live slot clears: it is the tombstone that
     /// prevents an older runner from becoming authoritative again merely because
@@ -3409,6 +3424,7 @@ final class AgentSupervisor {
         // T5 — steers still marked delivering belong to an earlier turn of a
         // session that has gone idle since; a new turn means they were taken.
         settleStaleDeliveringSteers(for: id)
+        lastPromptAuthors[id] = .init(requester: sharedInputPermit?.requester, at: Date())
         startTurn(on: runner, for: id) { onEvent in try runner.run(prompt: prompt, onEvent: onEvent) }
         // Title from the prompt NOW, not after the first turn: a long first turn
         // showed the raw prompt as its name for as long as it ran. The titler is
@@ -7627,6 +7643,14 @@ final class AgentSupervisor {
         await accept(intent, for: agentID, sharedAdmission: nil)
     }
 
+    /// Whether a teammate's send-now prompt would start at once. When it would
+    /// not, the host leaves it queued on the service, in arrival order.
+    func canStartSharedPromptNow(_ id: AgentID) -> Bool {
+        records[id] != nil && runners[id] == nil && heldForReadiness[id] == nil && !isStillStarting(id)
+    }
+    /// An agent this Mac hosts in a shared area.
+    func isSharedAgent(_ id: AgentID) -> Bool { sharedAgentControlGates[id]?.isEmpty == false }
+
     func installSharedAgentControlGate(for agentID: AgentID, scope: String, gate: SharedAgentControlGate) {
         sharedAgentControlGates[agentID, default: [:]][scope] = gate
     }
@@ -7658,7 +7682,7 @@ final class AgentSupervisor {
                 }
             }
             guard await permitsSharedAgentInput(agentID, admission: admission) else { return nil }
-            return .init(agentID: agentID)
+            return .init(agentID: agentID, requester: admission?.command.requester.person)
         } catch { return nil }
     }
     private func accept(_ intent: AgentComposerIntent, for agentID: AgentID, sharedAdmission: SharedAgentControlAdmission?) async -> IntentAcceptance {
@@ -7686,7 +7710,8 @@ final class AgentSupervisor {
             // Queue mode is the explicit durable choice while the CLI starts.
             if sharedAdmission != nil && isStillStarting(agentID) { return .refused(.harnessNotReady) }
             if let held = holdOrRefuseForReadiness(prepared, for: agentID) { return held }
-            guard sendPrepared(prepared, to: agentID, sharedInputPermit: .init(agentID: agentID)) else { return .refused(.turnNotReady) }
+            guard sendPrepared(prepared, to: agentID, sharedInputPermit: .init(agentID: agentID,
+                requester: sharedAdmission?.command.requester.person)) else { return .refused(.turnNotReady) }
             // B4: an explicit Send releases a queue this agent's last turn left
             // paused after an interrupt — the user looked, and is choosing to act.
             pausedQueues.remove(agentID)
@@ -7717,7 +7742,8 @@ final class AgentSupervisor {
                 guard await permitsSharedAgentInput(agentID, admission: sharedAdmission) else { return .refused(.sharedAgentControlRequired) }
                 if sharedAdmission != nil && isStillStarting(agentID) { return .refused(.harnessNotReady) }
                 if let held = holdOrRefuseForReadiness(prepared, for: agentID) { return held }
-                guard sendPrepared(prepared, to: agentID, sharedInputPermit: .init(agentID: agentID)) else {
+                guard sendPrepared(prepared, to: agentID, sharedInputPermit: .init(agentID: agentID,
+                    requester: sharedAdmission?.command.requester.person)) else {
                     return .refused(.turnNotReady)
                 }
             } catch {

@@ -195,7 +195,7 @@ enum SharedAgentProjectorChecks {
             let idle = SharedAgentProjector.read(supervisor, id).1
             supervisor.qaBindRunnerForCapabilities(runner, for: id)
             let busy = SharedAgentProjector.read(supervisor, id).1
-            let controls = P.RemoteControls(host: busy, holdsControl: true)
+            let controls = P.RemoteControls(host: busy, role: .editor)
             supervisor.qaBindRunnerForCapabilities(nil, for: id)
             try expect(!idle.canSteer && !idle.canInterrupt && busy.locallyManaged && busy.canSteer && busy.canInterrupt
                 && busy.canQueue && !busy.canSend && !controls.send && controls.queue && !controls.steer && !controls.interrupt
@@ -219,7 +219,7 @@ enum SharedAgentProjectorChecks {
         supervisor.qaBindRunnerForCapabilities(nil, for: pi)
         let qaWire = String(decoding: try JSONEncoder().encode(qa), as: UTF8.self)
         try expect(qaTurn?.canRespondToRequests == true && !qa.canSteer && !qa.canInterrupt
-            && !P.RemoteControls(host: qa, holdsControl: true).approveProviderRequest && !qaWire.lowercased().contains("respond"),
+            && !P.RemoteControls(host: qa, role: .editor).approveProviderRequest && !qaWire.lowercased().contains("respond"),
             "a QA responder that the supervisor would let answer requests publishes no approval or steer control")
         var watched = try XCTUnwrapRecord(supervisor, pi)
         watched.capabilities = .observedReadOnly
@@ -231,7 +231,7 @@ enum SharedAgentProjectorChecks {
         let observed = SharedAgentProjector.read(observer, pi).1
         try expect(observer.records[pi]?.capabilities.locallyManaged == false && observer.turnSnapshot(for: pi) != nil
             && !observed.locallyManaged && !observed.canSend && !observed.canQueue && !observed.canInterrupt
-            && !P.RemoteControls(host: observed, holdsControl: true).queue,
+            && !P.RemoteControls(host: observed, role: .editor).queue,
             "a watched (not locally managed) session publishes no controls, even to the control holder")
 
         // 8. The recipient side: remounting views is replica-only, zero executors.

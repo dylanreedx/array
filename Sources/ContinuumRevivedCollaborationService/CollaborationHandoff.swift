@@ -150,15 +150,21 @@ extension CollaborationStore {
                 return try dispatchReceipt(row)
             }
             guard current.epoch == request.epoch else { throw CollaborationStoreError.staleEpoch }
-            guard current.role != .viewer else { throw CollaborationStoreError.forbidden }
+            // Full access: any member whose role may prompt sends, in arrival
+            // order. Handoff control is a courtesy, never a send gate, so a
+            // handoff landing between two prompts does not conflict either.
+            guard current.allows(.promptAgent) else { throw CollaborationStoreError.forbidden }
             let source = try agentSource(db, area: area, object: object)
             guard let state = try control(db, area: area, object: object), state.source == source,
-                  state.epoch == current.epoch, state.hostGeneration == request.hostGeneration, state.revision == request.controlRevision else { throw SharedArea.Failure.conflict }
-            guard state.controller == caller.person else { throw CollaborationStoreError.forbidden }
+                  state.epoch == current.epoch, state.hostGeneration == request.hostGeneration else { throw SharedArea.Failure.conflict }
             let document = try handoffDocument(db, area: area)
-            guard let context = document.contexts.first(where: { $0.id == request.contextRevision }),
-                  document.items.contains(where: { $0.id == context.object }),
-                  document.contexts.last(where: { $0.object == context.object })?.id == context.id else { throw SharedArea.Failure.conflict }
+            var context: SharedArea.Context?
+            if let revision = request.contextRevision {
+                guard let chosen = document.contexts.first(where: { $0.id == revision }),
+                      document.items.contains(where: { $0.id == chosen.object }),
+                      document.contexts.last(where: { $0.object == chosen.object })?.id == chosen.id else { throw SharedArea.Failure.conflict }
+                context = chosen
+            }
             let command = Collaboration.AgentDispatchCommand(id: request.id, area: .init(area), object: object, source: source,
                 requester: caller, epoch: current.epoch, controlRevision: state.revision, hostGeneration: state.hostGeneration,
                 context: context, text: request.text, mode: request.mode)
@@ -295,14 +301,15 @@ extension CollaborationStore {
     }
     private func validateDispatchAuthority(_ db: Database, _ command: Collaboration.AgentDispatchCommand) throws {
         guard try Int.fetchOne(db, sql: "SELECT revoked FROM devices WHERE id=? AND person=?", arguments: [command.requester.device.uuidString, command.requester.person.rawValue.uuidString]) == 0 else { throw CollaborationStoreError.forbidden }
+        // A removed member has no scope at all; removal also bumps the epoch.
         let current = try scope(db, command.requester, command.area.rawValue)
-        guard current.role != .viewer, current.epoch == command.epoch else { throw CollaborationStoreError.forbidden }
+        guard current.allows(.promptAgent), current.epoch == command.epoch else { throw CollaborationStoreError.forbidden }
         let source = try agentSource(db, area: command.area.rawValue, object: command.object)
         guard source == command.source, let state = try control(db, area: command.area.rawValue, object: command.object),
-              state.source == source, state.controller == command.requester.person,
-              state.epoch == current.epoch, state.revision == command.controlRevision, state.hostGeneration == command.hostGeneration else { throw CollaborationStoreError.forbidden }
+              state.source == source, state.epoch == current.epoch, state.hostGeneration == command.hostGeneration else { throw CollaborationStoreError.forbidden }
+        guard let context = command.context else { return }
         let document = try handoffDocument(db, area: command.area.rawValue)
-        guard document.contexts.contains(command.context), document.items.contains(where: { $0.id == command.context.object }),
-              document.contexts.last(where: { $0.object == command.context.object })?.id == command.context.id else { throw CollaborationStoreError.forbidden }
+        guard document.contexts.contains(context), document.items.contains(where: { $0.id == context.object }),
+              document.contexts.last(where: { $0.object == context.object })?.id == context.id else { throw CollaborationStoreError.forbidden }
     }
 }

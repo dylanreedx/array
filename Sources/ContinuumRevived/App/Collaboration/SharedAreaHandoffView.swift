@@ -203,7 +203,7 @@ final class SharedAreaHandoffView: NSView, NSTextViewDelegate, NSTextFieldDelega
         }
         send.presentation = CollaborationHubView.action(warning == nil ? "Send reviewed prompt" : "Send now anyway",
             symbol: warning == nil ? "arrow.up" : "exclamationmark.triangle",
-            enabled: idle && usable && control?.controller == model.identity.person && contextChoice.selectedID != nil && !prompt.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            enabled: idle && usable && contextChoice.selectedID != nil && !prompt.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         check.presentation = CollaborationHubView.action("Check delivery", symbol: "checkmark.circle", enabled: !model.isBusy && model.pending != nil)
         refresh.presentation = CollaborationHubView.action("Refresh", symbol: "arrow.clockwise", enabled: !model.isBusy)
         contextChoice.isEnabled = idle; modeChoice.isEnabled = idle; recipient.isEnabled = idle

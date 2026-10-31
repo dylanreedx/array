@@ -20,15 +20,17 @@ extension Collaboration {
 }
 
 extension Collaboration.Role {
-    /// Current role policy. No area role grants execution on another machine;
-    /// future host actions must additionally validate an object/host grant at
-    /// their actual admission point instead of extending this role shorthand.
+    /// Current role policy. Sharing is full access: an editor (what a share
+    /// link grants) may prompt and stop a shared agent, which still runs on its
+    /// owner's Mac under the owner's CLI login. The owning host revalidates
+    /// membership at its own admission point for every prompt. Provider
+    /// approvals stay with the owner and terminals are never shared.
     public func allows(_ capability: Collaboration.Capability) -> Bool {
         switch capability {
         case .view: return true
-        case .discuss, .layout, .publish: return self != .viewer
+        case .discuss, .layout, .publish, .promptAgent, .stopAgent: return self != .viewer
         case .manageSharing: return self == .owner
-        case .promptAgent, .stopAgent, .approveProviderRequest, .writeTerminal: return false
+        case .approveProviderRequest, .writeTerminal: return false
         }
     }
 }

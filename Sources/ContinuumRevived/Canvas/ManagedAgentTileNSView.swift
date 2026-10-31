@@ -2075,6 +2075,19 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     var qaBackgroundJobsChipValue: String? { compactStatusRow.qaBackgroundJobsValue }
 
+    /// A shared agent's "Sam sent the last prompt · 10:52". Prompts start with a
+    /// turn, and a turn starting notifies the capabilities seam this runs from.
+    private func refreshLastPrompt() {
+        guard let agentID = attachedAgentID, let supervisor = agentSource, supervisor.isSharedAgent(agentID),
+              let author = supervisor.lastPromptAuthors[agentID] else {
+            compactStatusRow.applyLastPrompt(nil); return
+        }
+        compactStatusRow.applyLastPrompt(SharedPromptAuthorship.label(
+            mine: author.requester == nil, name: author.requester.flatMap { supervisor.sharedParticipantNames[$0] }, at: author.at))
+    }
+
+    var qaLastPromptText: String? { compactStatusRow.qaLastPromptText }
+
     /// This agent's processes, in the live panel, opened from the chip.
     func showBackgroundProcesses(from anchor: NSView? = nil) {
         guard let agentID = attachedAgentID, let tracker = agentSource?.processTracker else { return }
@@ -3376,6 +3389,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         defer { chromeDidChange() }
         evaluatePendingTerminalFlip()
         refreshFaceSwitch()
+        refreshLastPrompt()
         if let agentID = attachedAgentID,
            let snapshot = agentSource?.turnSnapshot(for: agentID) {
             let couldRespond = v2TurnSnapshot?.capabilities.canRespondToRequests ?? false

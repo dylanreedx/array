@@ -130,6 +130,8 @@ public final class SharedAgentHandoffController {
     public private(set) var pending: SharedAgentPendingIntent?
     public private(set) var receipt: Collaboration.AgentDispatchReceipt?
     public private(set) var isBusy = false
+    /// The last refresh was refused for membership, not lost in transit.
+    private var refreshDenied = false
     public private(set) var message = "Refresh to check the source host and current control."
     public var onChange: (@MainActor () -> Void)?
     /// What this device's prompts gave each agent incarnation, by host acceptance.
@@ -168,8 +170,12 @@ public final class SharedAgentHandoffController {
                 if let settled = try? await transport.receipt(id: id) { try freshness.record(settled) }
             }
             pending = try intents.load()
-            message = pending == nil ? "Execution stays on the original host. Handoff changes who may send its next prompt." : "A saved request needs a delivery check before another action."
-        } catch { control = nil; areaState = nil; message = Self.failureMessage(error) }
+            message = pending == nil ? "Execution stays on the original host. Anyone in the area may prompt it; handoff says who is driving." : "A saved request needs a delivery check before another action."
+            refreshDenied = false
+        } catch {
+            control = nil; areaState = nil; message = Self.failureMessage(error)
+            if let failure = error as? CollaborationClientError, case let .server(status, _) = failure { refreshDenied = [401, 403, 404].contains(status) }
+        }
     }
     public func offer(to person: SharedArea.ID<SharedArea.Person>) async {
         guard let control, person != identity.person else { message = SharedAgentHandoffError.invalidRecipient.localizedDescription; changed(); return }
@@ -187,6 +193,47 @@ public final class SharedAgentHandoffController {
         let request = Collaboration.AgentPromptRequest(epoch: state.scope.epoch, controlRevision: control.revision,
             hostGeneration: control.hostGeneration, contextRevision: context, text: text, mode: mode)
         await saveAndDeliver(.init(object: control.object, action: .prompt(request)))
+    }
+    /// Full access: any member who may prompt sends to the shared agent, with
+    /// no control handoff and no agreement revision. The prompt runs on the
+    /// source host, after any prompt that reached the service before it.
+    /// Anything but `.queued` leaves the sender's draft where it was.
+    public enum PromptOutcome: Equatable, Sendable {
+        case queued
+        /// The service said no: access ended, or the agent's host changed.
+        case refused
+        /// Not known to have arrived. The saved request is checked again.
+        case unresolved
+    }
+    @discardableResult
+    public func prompt(object: SharedArea.ID<SharedArea.Object>, text: String) async -> PromptOutcome {
+        await refresh(object: object)
+        guard let state = areaState, let control, control.object == object else {
+            if refreshDenied { message = "Refused: you no longer have access to this agent."; changed(); return .refused }
+            message = SharedAgentHandoffError.unavailable.localizedDescription; changed(); return .unresolved
+        }
+        let request = Collaboration.AgentPromptRequest(epoch: state.scope.epoch, controlRevision: control.revision,
+            hostGeneration: control.hostGeneration, text: text, mode: .send)
+        await saveAndDeliver(.init(object: object, action: .prompt(request)))
+        if receipt?.command.id == request.id, pending == nil { return receipt?.phase == .refused ? .refused : .queued }
+        return pending == nil ? .refused : .unresolved
+    }
+    /// Re-reads the last prompt's receipt. A sender whose access ended can no
+    /// longer read it; a prompt the host had not yet admitted can then never
+    /// run, because admission rechecks membership, so it reads refused.
+    public func refreshReceipt() async {
+        guard let current = receipt, !current.phase.isFinal else { return }
+        do {
+            let fresh = try await transport.receipt(id: current.command.id)
+            try intents.saveReceipt(fresh); receipt = fresh
+            try freshness.record(fresh)
+        } catch let failure as CollaborationClientError {
+            guard case let .server(status, _) = failure, [401, 403, 404].contains(status),
+                  current.phase == .queued || current.phase == .claimed else { return }
+            receipt = .init(command: current.command, phase: .refused, claimID: current.claimID)
+            message = "Refused: you no longer have access to this agent."
+        } catch { return }
+        changed()
     }
     public func checkDelivery() async {
         guard !isBusy, let pending else { return }

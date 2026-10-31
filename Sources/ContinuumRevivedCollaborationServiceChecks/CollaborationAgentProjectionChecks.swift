@@ -150,15 +150,15 @@ private func runProjectionContractChecks() throws {
     try projectionCheck(escape == nil && P.sanitize("\u{1B}[31mred\u{7}\n") == "[31mred\n",
         "terminal control characters are refused on the wire and stripped by the host sanitizer")
 
-    // Controls: only routed actions, only for the person holding control.
+    // Controls: only routed actions, for any member who may prompt (full access).
     let wire = try JSONDecoder().decode(P.Capabilities.self,
         from: Data(#"{"locallyManaged":false,"canSend":true,"canQueue":true,"canSteer":true,"canInterrupt":true}"#.utf8))
     let full = P.Capabilities(locallyManaged: true, canSend: true, canQueue: true, canSteer: true, canInterrupt: true)
-    let holder = P.RemoteControls(host: full, holdsControl: true), watcher = P.RemoteControls(host: full, holdsControl: false)
-    let external = P.RemoteControls(host: wire, holdsControl: true)
+    let holder = P.RemoteControls(host: full, role: .editor), watcher = P.RemoteControls(host: full, role: .viewer)
+    let external = P.RemoteControls(host: wire, role: .editor)
     try projectionCheck(holder.send && holder.queue && !holder.steer && !holder.interrupt && !holder.approveProviderRequest
         && !watcher.send && !watcher.queue && !external.send && !external.queue,
-        "remote controls: send/queue only for the control holder of a locally managed agent; steer, interrupt and approvals have no remote route")
+        "remote controls: send/queue for an editor of a locally managed agent, never a viewer; steer, interrupt and approvals have no remote route")
 }
 
 private func runProjectionHTTPChecks() async throws {

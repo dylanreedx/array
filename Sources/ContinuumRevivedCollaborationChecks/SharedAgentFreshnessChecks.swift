@@ -138,7 +138,7 @@ func runSharedAgentFreshnessChecks() async throws {
         let serviceCopy = try await aa.agentDispatchReceipt(area: area, id: toFirst.command.id)
         let frozen = try ledger.frozenCommand(toFirst.command.id)
         try freshnessCheck(frozen == toFirst.command && serviceCopy.command == toFirst.command
-            && frozen?.context.text == rev2.text && frozen?.promptText.contains(rev2.text) == true && frozen?.promptText.contains(rev4.text) == false,
+            && frozen?.context?.text == rev2.text && frozen?.promptText.contains(rev2.text) == true && frozen?.promptText.contains(rev4.text) == false,
             "the accepted execution input still carries revision 2 after revision 4 is published")
         try freshnessCheck((try? journal.prepare(toFirst.command)) != nil,
             "the host journal still matches the original command byte for byte")

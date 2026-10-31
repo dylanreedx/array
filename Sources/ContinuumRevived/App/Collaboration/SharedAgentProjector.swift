@@ -41,6 +41,8 @@ final class SharedAgentProjector {
     let host: SharedArea.ID<SharedArea.Host>
     let object: SharedArea.ID<SharedArea.Object>
     let generation: UInt64
+    /// The person this host acts for: the owner's own local prompts are theirs.
+    let owner: SharedArea.ID<SharedArea.Person>?
     private let supervisor: AgentSupervisor
     private let sink: SharedAgentProjectionSink
     private let salt = UUID().uuidString
@@ -63,18 +65,19 @@ final class SharedAgentProjector {
     /// `object`; `SharedAgentProjectionGenerations` persists that counter.
     init(supervisor: AgentSupervisor, agent: AgentID, host: SharedArea.ID<SharedArea.Host>,
          object: SharedArea.ID<SharedArea.Object>, generation: UInt64, history: Projection.History = .excluded,
-         sink: SharedAgentProjectionSink) throws {
+         owner: SharedArea.ID<SharedArea.Person>? = nil, sink: SharedAgentProjectionSink) throws {
         guard supervisor.hasTranscriptSnapshotBoundary else { throw Unavailable.noSnapshotBoundary }
         guard supervisor.records[agent] != nil else { throw Unavailable.unknownAgent }
         self.supervisor = supervisor; self.agent = agent; self.host = host; self.object = object
-        self.generation = generation; self.sink = sink
+        self.generation = generation; self.owner = owner; self.sink = sink
         // One main-actor step: snapshot and tail registration cannot interleave a
         // delivery, so every later event is in the tail and none is in both.
         let attachment = supervisor.transcriptAttachment(for: agent, reboundTo: AgentSupervisor.threadId(for: agent))
         let rows = history == .assistantOutput ? Self.assistantRows(attachment.snapshot, salt: salt) : []
         let (phase, capabilities) = Self.read(supervisor, agent)
         log = Projection.Log(snapshot: .init(host: host, object: object, generation: generation, history: history,
-                                             phase: phase, capabilities: capabilities, rows: rows))
+                                             phase: phase, capabilities: capabilities, rows: rows,
+                                             lastPrompt: Self.lastPrompt(supervisor, agent, owner: owner)))
         let tail = attachment.tail
         tailTask = Task { @MainActor [weak self] in
             for await event in tail {
@@ -177,6 +180,15 @@ final class SharedAgentProjector {
         let (phase, capabilities) = Self.read(supervisor, agent)
         if phase != log.head.phase { emit(.phase(phase)) }
         if capabilities != log.head.capabilities { emit(.capabilities(capabilities)) }
+        if let prompt = Self.lastPrompt(supervisor, agent, owner: owner), prompt != log.head.lastPrompt { emit(.prompted(prompt)) }
+    }
+
+    /// Who started the agent's last prompt. A person's id and a time cross;
+    /// the prompt itself never does.
+    static func lastPrompt(_ supervisor: AgentSupervisor, _ agent: AgentID,
+                           owner: SharedArea.ID<SharedArea.Person>?) -> Projection.LastPrompt? {
+        guard let author = supervisor.lastPromptAuthors[agent], let person = author.requester ?? owner else { return nil }
+        return .init(person: person, at: author.at)
     }
 
     private func emit(_ payload: Projection.Payload) {

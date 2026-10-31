@@ -99,6 +99,10 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     /// lists each job with its ports and a Stop.
     private let processesPill = AgentStatusPillView()
     private var backgroundJobs: (value: String, detail: String, spoken: String)?
+    /// A shared agent's "Sam sent the last prompt · 10:52". The first thing
+    /// the row gives up when it is narrow.
+    private let lastPromptPill = AgentStatusPillView()
+    private var lastPrompt: String?
     var onBackgroundJobsMenuRequested: ((NSView) -> Void)?
     private let thinkingIndicator: (NSView & AgentThinkingIndicatorAnimating)?
     private let thinkingSlot = NSView()
@@ -298,6 +302,9 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         rootStack.edgeInsets = Self.rootInsets(zoom: pageZoom)
         rootStack.translatesAutoresizingMaskIntoConstraints = false
         rootStack.addArrangedSubview(locationGroup)
+        lastPromptPill.isHidden = true
+        lastPromptPill.setAccessibilityIdentifier("agentTile.lastPrompt")
+        rootStack.addArrangedSubview(lastPromptPill)
         rootStack.addArrangedSubview(activityGroup)
         rootStack.addArrangedSubview(flexibleSpacer)
         processesPill.isHidden = true
@@ -436,7 +443,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
             ? " \(next.context.accessibilityLabel)" : ""
         let spokenQuotas = next.quotas.map { " \($0.accessibilityLabel)" }.joined()
         let spokenCost = next.cost.map { " \($0.accessibilityLabel)" } ?? ""
-        let spokenJobs = backgroundJobs.map { " \($0.spoken)" } ?? ""
+        let spokenJobs = (lastPrompt.map { " \($0)." } ?? "") + (backgroundJobs.map { " \($0.spoken)" } ?? "")
         // Which account, before its windows: the card says it to the eye.
         let spokenAccount = next.account.map { " \($0.accessibilityLabel)" } ?? ""
         setAccessibilityLabel(
@@ -481,6 +488,12 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
             }
             pill.apply(quota)
             pill.isHidden = false
+        }
+        if let lastPrompt {
+            lastPromptPill.apply(symbolName: "person.fill", value: lastPrompt, detail: lastPrompt)
+            lastPromptPill.isHidden = false
+        } else {
+            lastPromptPill.isHidden = true
         }
         if enabled.contains(.processes), let backgroundJobs {
             processesPill.apply(symbolName: AgentProcessUI.symbolName, value: backgroundJobs.value, detail: backgroundJobs.detail)
@@ -552,6 +565,15 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
 
     /// What the agent left running, or nil when nothing is. Kept apart from the
     /// presentation: it changes on the process tracker's tick, not on a turn.
+    func applyLastPrompt(_ text: String?) {
+        guard lastPrompt != text else { return }
+        lastPrompt = text
+        guard let presentation else { return }
+        apply(presentation)
+    }
+    var qaLastPromptText: String? { lastPromptPill.isHidden ? nil : lastPromptPill.qaValueText }
+    var qaLastPromptFill: CGColor? { lastPromptPill.layer?.backgroundColor }
+
     func applyBackgroundJobs(value: String?, detail: String, spoken: String) {
         backgroundJobs = value.map { ($0, detail, spoken) }
         guard let presentation else { return }
@@ -586,7 +608,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         // 276.5pt (`--managed-agent-page-zoom-check`). `Space.l` is at least
         // `spacing`, so charging it covers the spacer whether or not anything
         // follows it.
-        let available = bounds.width - Self.rootInsets(zoom: pageZoom).left
+        var available = bounds.width - Self.rootInsets(zoom: pageZoom).left
             - Self.rootInsets(zoom: pageZoom).right
             - rootStack.customSpacing(after: flexibleSpacer)
         guard available > 0 else { return }
@@ -615,6 +637,15 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
                 available: available,
                 spacing: rootStack.spacing,
                 locationFloor: CGFloat(pageZoom.scaled(48)))
+        }
+        // The last-prompt pill stays only where it costs no other element.
+        if !lastPromptPill.isHidden {
+            let everything = fitting().count
+            available -= lastPromptPill.fittingSize.width + rootStack.spacing
+            if fitting().count < everything {
+                available += lastPromptPill.fittingSize.width + rootStack.spacing
+                lastPromptPill.isHidden = true
+            }
         }
         var kept = fitting()
         // The Compact action gives way before the ring does: its title goes
@@ -770,6 +801,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         // Each pill owns its own fill and value tint; the row only has to ask.
         contextLabel.textColor = contextLabelColor(for: presentation?.context.state ?? .unknown, theme: theme)
         for pill in quotaPills.values { pill.applyTokens() }
+        lastPromptPill.applyTokens()
     }
 
     /// Re-derives every metric this row owns from `zoom`. Same contract as
@@ -785,6 +817,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         elapsedLabel.font = .token(.captionMono, zoom: pageZoom)
         contextLabel.font = .token(.captionMono, zoom: pageZoom)
         for pill in quotaPills.values { pill.applyPageZoom(pageZoom) }
+        lastPromptPill.applyPageZoom(pageZoom)
         quotaGroup.spacing = CGFloat(pageZoom.scaled(Space.m))
         locationGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
         activityGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))

@@ -1700,6 +1700,30 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        // Multiplayer full access (`.plans/105` round 2): a teammate prompts the
+        // owner's agent through the production composer, host and runners.
+        if CommandLine.arguments.contains("--collaboration-full-access-check") {
+            setbuf(stdout, nil)
+            setbuf(stderr, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(240))
+                fputs("FAIL: collaboration full access exceeded its 240-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do {
+                    try await SharedAgentFullAccessChecks.run()
+                    print("ContinuumRevivedCollaborationFullAccessChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
         if CommandLine.arguments.contains("--workspace-scene-owner-check") {
             do {
                 _ = NSApplication.shared
@@ -12074,6 +12098,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 let host = try sharedAreaHostSessions[key] ?? SharedAreaHostSession(account: model, area: area, supervisor: agentSupervisor)
                 sharedAreaHostSessions[key] = host; host.start()
                 shared.scene.onRequestHandoff = { [weak host] object in host?.handoff.show(object: object) }
+                shared.scene.livePanel.prompter = host.handoff.model
                 shared.scene.agentFreshness = try? SharedAgentFreshnessModel(handoff: host.handoff.model)
             } catch {
                 let alert = NSAlert()

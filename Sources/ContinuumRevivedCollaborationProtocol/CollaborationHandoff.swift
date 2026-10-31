@@ -52,11 +52,13 @@ extension Collaboration {
         public let epoch: Int64
         public let controlRevision: UInt64
         public let hostGeneration: UUID
-        public let contextRevision: SharedArea.ID<SharedArea.Revision>
+        /// An agreement revision the prompt carries, when the sender chose one.
+        /// Full access sends without one.
+        public let contextRevision: SharedArea.ID<SharedArea.Revision>?
         public let text: String
         public let mode: AgentPromptMode
         public init(id: UUID = UUID(), epoch: Int64, controlRevision: UInt64, hostGeneration: UUID,
-                    contextRevision: SharedArea.ID<SharedArea.Revision>, text: String, mode: AgentPromptMode = .send) {
+                    contextRevision: SharedArea.ID<SharedArea.Revision>? = nil, text: String, mode: AgentPromptMode = .send) {
             self.id = id; self.epoch = epoch; self.controlRevision = controlRevision; self.hostGeneration = hostGeneration
             self.contextRevision = contextRevision; self.text = text; self.mode = mode
         }
@@ -74,11 +76,11 @@ extension Collaboration {
         public let epoch: Int64
         public let controlRevision: UInt64
         public let hostGeneration: UUID
-        public let context: SharedArea.Context
+        public let context: SharedArea.Context?
         public let text: String
         public let mode: AgentPromptMode
         public init(id: UUID, area: SharedArea.ID<SharedArea.Area>, object: SharedArea.ID<SharedArea.Object>, source: SharedArea.Source,
-                    requester: Identity, epoch: Int64, controlRevision: UInt64, hostGeneration: UUID, context: SharedArea.Context, text: String,
+                    requester: Identity, epoch: Int64, controlRevision: UInt64, hostGeneration: UUID, context: SharedArea.Context?, text: String,
                     mode: AgentPromptMode = .send) {
             self.id = id; self.area = area; self.object = object; self.source = source; self.requester = requester; self.epoch = epoch
             self.controlRevision = controlRevision; self.hostGeneration = hostGeneration; self.context = context; self.text = text; self.mode = mode
@@ -86,7 +88,8 @@ extension Collaboration {
         /// Deliberate, immutable context plus authenticated human attribution.
         /// No local path, provider credential or hidden history is synthesized.
         public var promptText: String {
-            "Shared context revision \(context.id.rawValue.uuidString)\nFrom collaboration participant \(requester.person.rawValue.uuidString)\n\n\(context.text)\n\n---\n\(text)"
+            guard let context else { return "From collaboration participant \(requester.person.rawValue.uuidString)\n\n---\n\(text)" }
+            return "Shared context revision \(context.id.rawValue.uuidString)\nFrom collaboration participant \(requester.person.rawValue.uuidString)\n\n\(context.text)\n\n---\n\(text)"
         }
     }
     public struct AgentDispatchReceipt: Codable, Equatable, Sendable {

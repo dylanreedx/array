@@ -167,7 +167,7 @@ enum SharedAreaPeerRuntime {
                 result["handoffPhase"] = receipt.phase.rawValue
                 result["handoffCommand"] = receipt.command.id.uuidString
                 result["handoffRequester"] = receipt.command.requester.person.rawValue.uuidString
-                result["handoffContext"] = receipt.command.context.id.rawValue.uuidString
+                result["handoffContext"] = receipt.command.context?.id.rawValue.uuidString ?? ""
             }
             if let usage = hostSession?.lastUsage {
                 result["usage"] = ["input": usage.inputTokens, "output": usage.outputTokens, "todayInput": usage.todayInputTokens, "todayOutput": usage.todayOutputTokens, "sequence": usage.sequence]

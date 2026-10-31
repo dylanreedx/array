@@ -70,20 +70,39 @@ func runCollaborationHandoffChecks() async throws {
             }
         }
         func tryRefuseUnhanded() async throws {
-            try await handoffRefuses(403, "area editor permission does not grant source control") {
-                _ = try await bb.sendAgentPrompt(area: area, object: object.id.rawValue, request: makePrompt(control))
+            try await handoffRefuses(404, "an excluded person cannot prompt the shared agent") {
+                _ = try await cc.sendAgentPrompt(area: area, object: object.id.rawValue, request: makePrompt(control))
             }
         }
+        func settle(_ receipt: Collaboration.AgentDispatchReceipt) async throws -> Collaboration.AgentDispatchReceipt {
+            let claim = Collaboration.AgentHostClaim(claimID: UUID(), hostGeneration: receipt.command.hostGeneration)
+            _ = try await aa.claimAgentDispatch(area: area, id: receipt.command.id, claim: claim)
+            _ = try await aa.admitAgentDispatch(area: area, id: receipt.command.id, claim: claim)
+            return try await aa.finishAgentDispatch(area: area, id: receipt.command.id, outcome: .init(claim: claim, phase: .accepted))
+        }
         try await handoffRefuses(404, "excluded C learns no source-control state") { _ = try await cc.agentControl(area: area, object: object.id.rawValue) }
+        // Full access: an editor prompts with no handoff and no agreement
+        // revision, and the owner's own prompt queues behind it, in order.
+        let unhanded = try await bb.sendAgentPrompt(area: area, object: object.id.rawValue, request: .init(epoch: 1,
+            controlRevision: control.revision, hostGeneration: generation, text: "Teammate prompt, no handoff."))
+        let ownerNext = try await aa.sendAgentPrompt(area: area, object: object.id.rawValue, request: .init(epoch: 1,
+            controlRevision: control.revision, hostGeneration: generation, text: "Owner prompt after it."))
+        let ordered = try await aa.pendingAgentDispatches(area: area, host: host.id.rawValue)
+        try handoffCheck(unhanded.command.context == nil && unhanded.command.requester == b.identity
+            && ordered.map(\.command.id) == [unhanded.command.id, ownerNext.command.id],
+            "an editor prompts with no handoff or agreement revision, and two prompts queue in arrival order")
+        let settledUnhanded = try await settle(unhanded), settledOwner = try await settle(ownerNext)
+        try handoffCheck(settledUnhanded.phase == .accepted && settledOwner.phase == .accepted,
+            "both queued prompts are admitted; neither is dropped")
         let offer = Collaboration.AgentHandoffOffer(id: UUID(), recipient: b.identity.person)
         let offerIntent = Collaboration.AgentControlMutation(epoch: 1, expectedRevision: control.revision, hostGeneration: generation, action: .offer(offer))
         control = try await aa.changeAgentControl(area: area, object: object.id.rawValue, request: offerIntent)
         let acceptance = Collaboration.AgentControlMutation(epoch: 1, expectedRevision: control.revision, hostGeneration: generation, action: .accept(offer: offer.id))
         control = try await bb.changeAgentControl(area: area, object: object.id.rawValue, request: acceptance)
         try handoffCheck(control.controller == b.identity.person && control.offer == nil, "only the invited recipient accepts the offered control revision")
-        try await handoffRefuses(403, "source A cannot also prompt while B controls the shared agent") {
-            _ = try await aa.sendAgentPrompt(area: area, object: object.id.rawValue, request: makePrompt(control))
-        }
+        let ownerWhileHanded = try await aa.sendAgentPrompt(area: area, object: object.id.rawValue, request: makePrompt(control))
+        try handoffCheck(try await settle(ownerWhileHanded).phase == .accepted,
+            "handing over never locks the owner out of prompting their own agent")
         let firstPrompt = makePrompt(control)
         let first = try await bb.sendAgentPrompt(area: area, object: object.id.rawValue, request: firstPrompt)
         let duplicate = try await bb.sendAgentPrompt(area: area, object: object.id.rawValue, request: firstPrompt)
@@ -122,6 +141,10 @@ func runCollaborationHandoffChecks() async throws {
         let afterOldReceipt = try await aa.agentControl(area: area, object: object.id.rawValue)
         try handoffCheck(afterOldReceipt == control && control.controller == a.identity.person,
             "old acceptance receipt cannot take control back after the owner reclaimed it")
+        let acrossReclaim = try await bb.sendAgentPrompt(area: area, object: object.id.rawValue, request: .init(epoch: 1,
+            controlRevision: control.revision - 1, hostGeneration: generation, text: "Sent before the reclaim reached me."))
+        try handoffCheck(try await settle(acrossReclaim).phase == .accepted,
+            "a control change between composing and sending does not refuse a member's prompt")
         let nextOffer = Collaboration.AgentHandoffOffer(id: UUID(), recipient: b.identity.person)
         control = try await aa.changeAgentControl(area: area, object: object.id.rawValue,
             request: .init(epoch: 1, expectedRevision: control.revision, hostGeneration: generation, action: .offer(nextOffer)))
@@ -170,6 +193,6 @@ func runCollaborationHandoffChecks() async throws {
         try handoffCheck(reportedAfterWithdrawal.phase == .uncertain,
             "original host can report interruption uncertainty after its source was unpublished")
         try await server.stop()
-        print("Collaboration handoff HTTP checks passed: A/B/C, explicit offer/accept, exclusive control, immutable context, current admission, retries, revocation and service restart; no provider execution.")
+        print("Collaboration handoff HTTP checks passed: A/B/C, full-access prompting in arrival order, explicit offer/accept as a courtesy, immutable context, current admission, retries, revocation and service restart; no provider execution.")
     } catch { try? await server.stop(); throw error }
 }

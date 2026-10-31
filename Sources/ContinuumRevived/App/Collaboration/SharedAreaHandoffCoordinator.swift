@@ -34,6 +34,10 @@ final class SharedAreaHandoffCoordinator {
         let journal = try SharedAgentHostJournal(directory: model.areaDirectory.appendingPathComponent("host-dispatch", isDirectory: true))
         self.journal = journal
         dispatcher = SharedAgentHostDispatcher(identity: model.identity, transport: model.transport, journal: journal,
+            ready: { [weak supervisor] binding in
+                guard let supervisor, let agentID = binding.agentID else { return true }
+                return supervisor.canStartSharedPromptNow(agentID)
+            },
             execute: { [weak supervisor] binding, command in
                 guard lifetime.active, lifetime.dispatchGeneration == lifetime.generation, !Task.isCancelled,
                       let supervisor, let agentID = binding.agentID,
@@ -87,9 +91,11 @@ final class SharedAreaHandoffCoordinator {
                           let source = current.document.items.first(where: { $0.id == binding.object })?.source,
                           source.host == binding.host, source.binding == binding.binding else { return false }
                     guard let command else {
+                        // The owner can always prompt their own agent. Handing
+                        // it over says who is driving; it never locks them out.
                         let local = try await transport.control(object: binding.object.rawValue)
                         return lifetime.admits(ticket) && local.epoch == current.scope.epoch && local.source == source
-                            && local.source.owner == identity.person && local.controller == identity.person
+                            && local.source.owner == identity.person
                     }
                     if command.area == current.document.id && command.object == binding.object {
                         let attempt = try journal.prepare(command)
@@ -99,11 +105,10 @@ final class SharedAreaHandoffCoordinator {
                         return lifetime.admits(ticket) && (admitted.phase == .dispatching || (command.mode == .queue && admitted.phase == .accepted))
                             && admitted.command == command && admitted.claimID == attempt.claimID
                     }
-                    // Another view of this same AgentID may not hand it to a
-                    // competing person. Unhanded owner views do not block it.
+                    // Another area's view of this same AgentID: its own host
+                    // binding must still be current. Control does not gate it.
                     let other = try await transport.control(object: binding.object.rawValue)
                     return lifetime.admits(ticket) && other.epoch == current.scope.epoch && other.source == source
-                        && (other.controller == source.owner || other.controller == command.requester.person)
                 } catch { return false }
             }, rememberQueued: { item, command in
                 try journal.rememberQueued(item: item, command: command)

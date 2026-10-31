@@ -747,7 +747,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             .init(id: "undo-layout", title: "Undo layout change", icon: .system("arrow.uturn.backward"), enabled: canUndoSharedGeometry),
             .init(id: "redo-layout", title: "Redo layout change", icon: .system("arrow.uturn.forward"), enabled: canRedoSharedGeometry),
             .init(id: "delivery", title: "Check pending delivery (\(pendingDeliveryCount))", icon: .system("arrow.clockwise"), enabled: !controller.isSubmitting && (pendingDeliveryCount > 0 || geometryUnavailable)),
-            .init(id: "handoff", title: "Hand agent off…", icon: .system("person.2"), enabled: writable && selectedObject.flatMap { selected in controller.document?.items.first(where: { $0.id == selected && $0.kind == .agentObservation }) } != nil && onRequestHandoff != nil),
+            .init(id: "handoff", title: "Hand over…", icon: .system("person.2"), enabled: writable && selectedObject.flatMap { selected in controller.document?.items.first(where: { $0.id == selected && $0.kind == .agentObservation }) } != nil && onRequestHandoff != nil),
             .init(id: "fit", title: "Fit shared content", icon: .system("arrow.up.left.and.arrow.down.right"), enabled: controller.document?.positions.isEmpty == false),
             .init(id: "invite", title: "Invite collaborator…", icon: .system("person.badge.plus"), enabled: controller.status == .connected && controller.scope?.allows(.manageSharing) == true)
         ] + followTargets.map { target in
@@ -799,7 +799,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             let host = SharedAreaHostLivenessCopy.cardLine(SharedAreaHostLivenessCopy.liveness(for: item, in: knownHosts))
             entries = [host + " " + (onRequestHandoff == nil
                 ? "This is an observation of an agent on its publishing host. Transcript history and execution controls are not available in this shared view yet."
-                : "History is not shared. Execution stays on the original publishing host; control requires a separate accepted handoff. Use Hand agent off in Workspace to review it.")]
+                : "History is not shared. Prompts from anyone in the area run on the publishing host, in order; approvals stay with its owner. Hand over says who is driving.")]
         case .artifact: entries = ["This artifact's content is not available in this view."]
         }
         if followsLatestEntry { readerIndex = max(0, entries.count - 1) }
