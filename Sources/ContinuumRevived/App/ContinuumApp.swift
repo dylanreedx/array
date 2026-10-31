@@ -12097,9 +12097,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             do {
                 let host = try sharedAreaHostSessions[key] ?? SharedAreaHostSession(account: model, area: area, supervisor: agentSupervisor)
                 sharedAreaHostSessions[key] = host; host.start()
-                shared.scene.onRequestHandoff = { [weak host] object in host?.handoff.show(object: object) }
-                shared.scene.livePanel.prompter = host.handoff.model
-                shared.scene.agentFreshness = try? SharedAgentFreshnessModel(handoff: host.handoff.model)
+                host.attach(to: shared.scene)
             } catch {
                 let alert = NSAlert()
                 alert.messageText = "The publishing host is unavailable"
