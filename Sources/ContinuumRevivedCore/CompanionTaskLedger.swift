@@ -55,6 +55,11 @@ public final class CompanionTaskLedger: @unchecked Sendable {
         var admissions: Set<UUID> = []
         var unknownBackground: Set<UUID> = []
         var unknownProviderRuns: Set<UUID> = []
+        /// When this task or any of its runs last changed, in seconds since 1970.
+        /// A number, not a Date: AtomicWriter writes ISO-8601 dates that this
+        /// ledger's decoder (and every older build's) cannot read. Nil only in
+        /// ledgers written before it existed; load stamps those with load time.
+        var touchedAt: Double?
     }
     private struct Run: Codable, Equatable {
         var task: UUID
@@ -85,8 +90,14 @@ public final class CompanionTaskLedger: @unchecked Sendable {
     private let url: URL
     private let writer: AtomicWriter
     private var file: File
+    private let clock: @Sendable () -> Date
+    /// A task with no live run leaves the published batch this long after its
+    /// last change. Far longer than the relay's one-hour alert lifetime, so a
+    /// task never leaves while an alert for it can still be pending.
+    public static let quietTaskWindow: TimeInterval = 24 * 3600
 
-    public init(applicationSupportDirectory: URL) throws {
+    public init(applicationSupportDirectory: URL, clock: @escaping @Sendable () -> Date = { Date() }) throws {
+        self.clock = clock
         let directory = applicationSupportDirectory.appendingPathComponent("companion-tasks", isDirectory: true)
         let backups = directory.appendingPathComponent("backups", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -110,20 +121,36 @@ public final class CompanionTaskLedger: @unchecked Sendable {
                 next.tasks[next.runs[id]!.task]!.complete = false
             }
         }
+        // Tasks from before `touchedAt` count from now, so none leaves the
+        // batch sooner than a full window after this upgrade.
+        let now = clock().timeIntervalSince1970
+        try change(touching: false) { next in
+            for id in Array(next.tasks.keys) where next.tasks[id]!.touchedAt == nil { next.tasks[id]!.touchedAt = now }
+        }
     }
 
     @discardableResult
-    private func change<T>(_ body: (inout File) throws -> T) throws -> T {
+    private func change<T>(touching: Bool = true, _ body: (inout File) throws -> T) throws -> T {
         lock.lock(); defer { lock.unlock() }
         var next = file
         let result = try body(&next)
         if next != file {
+            if touching { Self.stamp(&next, against: file, at: clock().timeIntervalSince1970) }
             guard file.revision < UInt64.max else { throw CompanionTaskLedgerError.revisionExhausted }
             next.revision = max(next.revision, file.revision + 1)
             try writer.write(next, to: url)
             file = next
         }
         return result
+    }
+
+    /// Stamps every task whose own record or any of whose runs changed.
+    private static func stamp(_ next: inout File, against old: File, at now: Double) {
+        var touched = Set<UUID>()
+        for (id, task) in next.tasks where old.tasks[id] != task { touched.insert(id) }
+        for (id, run) in next.runs where old.runs[id] != run { touched.insert(run.task) }
+        for (id, run) in old.runs where next.runs[id] == nil { touched.insert(run.task) }
+        for id in touched where next.tasks[id] != nil { next.tasks[id]!.touchedAt = now }
     }
 
     public func currentRun(agentID: UUID) -> CompanionTaskRunHandle? {
@@ -417,7 +444,9 @@ public final class CompanionTaskLedger: @unchecked Sendable {
     }
 
     public func snapshot(revisionFloor: UInt64 = 0) throws -> CompanionTaskSnapshotBatch {
-        try change { next in
+        // A restored backup marks every task incomplete. That is not activity:
+        // it must not pull every old task back onto the wire.
+        try change(touching: false) { next in
             if revisionFloor > next.revision {
                 guard revisionFloor < UInt64.max else { throw CompanionTaskLedgerError.revisionExhausted }
                 next.revision = revisionFloor + 1
@@ -434,13 +463,27 @@ public final class CompanionTaskLedger: @unchecked Sendable {
             return !task.complete || !task.admissions.isEmpty || !task.unknownBackground.isEmpty || !task.unknownProviderRuns.isEmpty
                 || (runsByTask[id] ?? []).contains { !$0.member.state.terminal }
         })
+        // Live work always rides: a run working, queued or waiting on a person,
+        // or an admission in flight. Everything else (unknown, incomplete or
+        // settled) rides for `quietTaskWindow` after its last change, then
+        // leaves the wire but stays in the ledger; any change brings it back.
+        // Without this, every restart's unknown tasks stayed on the wire for
+        // ever and the batch grew towards the 512-task cap.
+        let live = Set(file.tasks.keys.filter { id in
+            !file.tasks[id]!.admissions.isEmpty || (runsByTask[id] ?? []).contains {
+                [.running, .queued, .needsInput, .needsApproval].contains($0.member.state)
+            }
+        })
+        let cutoff = clock().timeIntervalSince1970 - Self.quietTaskWindow
+        let taskTable = file.tasks
+        let recent = { (id: UUID) in (taskTable[id]!.touchedAt ?? 0) > cutoff }
         // Retain local provenance/tombstones, but bound settled wire history.
         // Unknown/live tasks are never evicted to make room for recent history.
-        let history = file.tasks.keys.filter { !unsettled.contains($0) }.sorted {
+        let history = file.tasks.keys.filter { !unsettled.contains($0) && recent($0) }.sorted {
             let lhs = file.tasks[$0]!.createdRevision, rhs = file.tasks[$1]!.createdRevision
             return lhs == rhs ? $0.uuidString < $1.uuidString : lhs > rhs
         }
-        let selected = unsettled.union(history.prefix(128))
+        let selected = live.union(unsettled.filter(recent)).union(history.prefix(128))
         guard selected.count <= 512, selected.reduce(0, { $0 + (runsByTask[$1]?.count ?? 0) }) <= 4096,
               selected.allSatisfy({ (runsByTask[$0]?.count ?? 0) <= 1000 }) else { throw CompanionTaskLedgerError.capacityExceeded }
         let tasks = selected.sorted { $0.uuidString < $1.uuidString }.map { id in

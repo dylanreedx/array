@@ -247,11 +247,24 @@ fly deploy --app arrayapp-relay --config fly.toml \
   --image registry.fly.io/arrayapp-relay:deployment-01M69D1CAYQDHNZ2E48W955GCZ
 ```
 
+**Staging keeps the fake APNs secrets, on purpose** (orchestrator's call,
+31 October 2026). `APNS_KEY_ID`, `APNS_TEAM_ID` (`STAGINGFAKE`),
+`APNS_ENVIRONMENT=sandbox` and `APNS_PRIVATE_KEY_BASE64` (a P-256 key generated
+on this Mac for staging only) let staging run the delivery half. The key is not
+an Apple key, so any real push from staging fails at Apple; nothing in the
+burst replay sends one. Remove all four before staging ever needs real pushes:
+`fly secrets unset APNS_KEY_ID APNS_TEAM_ID APNS_ENVIRONMENT APNS_PRIVATE_KEY_BASE64 -a arrayapp-relay-staging`.
+
 **Still open.**
 - The Mac's batch grows with every task it knows (349 now), and the relay
   rejects a batch over 512 tasks (`invalidNotificationBatch`). At this rate the
-  Mac will hit that cap and task alerts will stop. Pruning settled tasks on the
-  Mac side is the fix; not done here.
+  Mac will hit that cap and task alerts will stop. **Fixed in source for 0.7.37**
+  (Mac side, not deployed): the real growth was unknown tasks orphaned by
+  restarts (290 of 349), not settled ones, which were already capped at 128.
+  The batch now carries live work always, and everything else for 24 h after
+  its last change. Witness: `task batch retention` in
+  ContinuumRevivedRelayChecks. It is RED (`capacityExceeded`) with the window
+  removed. It takes effect only once Dylan runs a build that contains it.
 - Every publish still decodes and evaluates the whole batch: CPU, not database
   work. Measured only end to end: the Linux-gate fixture's 400-task burst takes
   0.73 s for 6 events (about 0.12 s each, release build under amd64

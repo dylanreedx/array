@@ -210,9 +210,37 @@ flowchart TD
 | OWN-06 | Invalid batch/graph/version/bounds or standalone task.state.v1 publish | Reject entire publication; no partial task ownership or notification. Companion credentials cannot read owner/publish state |
 | OWN-07 | Task delivery/sign/storage preparation or ownership lookup failure | Static redacted failure diagnostic; unavailable ownership evidence suppresses legacy fallback on every hosted surface. Committed alert intents retain outbox recovery semantics; best-effort widget/Live Activity update is not retried |
 
-Task snapshots retain every live/unknown/incomplete task plus the newest 128
-settled tasks. Local provenance/tombstones are retained; snapshot history is not
-local ledger garbage collection. Wire limits: 512 tasks, 4,096 members total,
+Task snapshots always carry live work: a task with a run running, queued or
+waiting on a person (needsInput/needsApproval, including an `agent.notify` wait
+that outlived its turn), or an admission in flight. Every other task (unknown,
+incomplete or settled) rides only for 24 hours after it or any of its runs last
+changed (`CompanionTaskLedger.quietTaskWindow`). Settled tasks are also capped
+at the newest 128. A task that leaves the batch stays in the local ledger, and
+any change brings it back with a fresh decision.
+
+What leaving affects, checked against the paths:
+- T-02 and T-07 decisions are quiet, so an unknown or cancelled task leaving
+  sends and cancels nothing.
+- The relay closes pending outbox rows whose task left the batch (OWN-01
+  supersession). The window is 24 h against the 1 h alert lifetime (OUT-01),
+  so no pending alert can be cut short.
+- T-04 attention never ages out, because a waiting run is live.
+- The task-mode workspace aggregate (widget / Live Activity update) is computed
+  over the batch. Once old unknown tasks leave, it reads `done` or `working`
+  instead of `stale`.
+- An old task that changes again, for example an unknown run later reported
+  failed, re-enters as new relay work and can alert (T-05/T-06). That is
+  correct: the change is real.
+- Before this, every restart's in-flight turns became unknown tasks that rode
+  every batch for ever: 290 of 349 in production on 31 October 2026, heading
+  for the 512-task cap where publication is withheld (HOST-07).
+
+Witness: ContinuumRevivedRelayChecks `task batch retention`. Over 5 simulated
+days, with 120 restart-orphaned tasks a day, the batch stays at 120 or fewer.
+Through the relay's own store, a new completion queues one alert, a task
+waiting on a person stays, and a changed old task rejoins. It was RED with the
+window removed (day 5 exceeds the wire cap). Local provenance/tombstones are
+retained; snapshot history is not local ledger garbage collection. Wire limits: 512 tasks, 4,096 members total,
 1,000 members per task. Exhausting those bounds with unsettled work throws and
 withholds publication; it never truncates unknown/live membership into a false
 completion. Local ledger and compact relay ownership/tombstone growth still need

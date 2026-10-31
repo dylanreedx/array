@@ -11,6 +11,8 @@ import Foundation
 
 do { try runAgentNotifyPolicyChecks() }
 catch { fputs("FAIL: agent notify policy: \(error)\n", stderr); exit(1) }
+do { try await runTaskBatchRetentionChecks() }
+catch { fputs("FAIL: task batch retention: \(error)\n", stderr); exit(1) }
 
 func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() {
