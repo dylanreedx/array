@@ -214,3 +214,9 @@ drives the real thing. On branch `array/mp-share-real-witness`, off
 `ShareEntryChecks.mountScene` is now shared by both stages.
 `qaInstallShareEntry` takes optional services, and an omitted one stays
 production.
+
+Gate at 77b307c6, once under `.worktrees/.locks/app-build.sh`, with an isolated
+`TMUX_TMPDIR` and `CONTINUUM_APP_SUPPORT` and `CONTINUUM_SKIP_UI_BASELINES=1`:
+`scripts/run-matrix.sh --collaboration` ran 14 legs and passed. The native
+check printed 11 `PASS share entry (relay)` lines and 26 `PASS share entry`
+lines.
