@@ -5,6 +5,17 @@ import ContinuumRevivedCollaborationProtocol
 /// Bearer share links. Unlike a person-targeted invitation, a link admits
 /// whoever holds its token, as an editor. The slug is unique among live links
 /// on this relay; only the token's hash is stored.
+/// Newcomer joins through share links, per rolling window. Only joins that
+/// would succeed count; one over either limit creates nothing.
+public struct CollaborationJoinLimits: Sendable, Equatable {
+    public var perLink: Int
+    public var perAddress: Int
+    public var window: TimeInterval
+    public init(perLink: Int = 10, perAddress: Int = 30, window: TimeInterval = 3600) {
+        self.perLink = perLink; self.perAddress = perAddress; self.window = window
+    }
+}
+
 extension CollaborationStore {
     static func registerShareLinkMigration(_ migrator: inout DatabaseMigrator) {
         migrator.registerMigration("collaboration-share-links-v1") { db in
@@ -17,6 +28,17 @@ extension CollaborationStore {
                 CREATE TABLE share_link_admissions(link TEXT NOT NULL REFERENCES share_links(id),
                   person TEXT NOT NULL REFERENCES people(id), admitted DOUBLE NOT NULL,
                   removed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(link,person));
+                """)
+        }
+    }
+
+    static func registerShareLinkJoinLimitMigration(_ migrator: inout DatabaseMigrator) {
+        migrator.registerMigration("collaboration-share-link-joins-v1") { db in
+            // The address is kept only as a hash, and only for the window.
+            try db.execute(sql: """
+                CREATE TABLE share_link_joins(link TEXT NOT NULL REFERENCES share_links(id), address_hash BLOB NOT NULL, joined DOUBLE NOT NULL);
+                CREATE INDEX share_link_joins_link ON share_link_joins(link,joined);
+                CREATE INDEX share_link_joins_address ON share_link_joins(address_hash,joined);
                 """)
         }
     }
@@ -58,14 +80,22 @@ extension CollaborationStore {
     /// The link's token doubles as an enrollment for someone with no account
     /// on this relay: it creates the person and their first device, admitted
     /// to this one area. Nothing else on the relay is granted.
-    public func joinShareLink(_ request: Collaboration.JoinShareLink) throws -> Collaboration.ShareLinkJoin {
+    public func joinShareLink(_ request: Collaboration.JoinShareLink, from address: String) throws -> Collaboration.ShareLinkJoin {
         guard ShareLinkURL.isValidSlug(request.slug), ShareLinkURL.isValidToken(request.token) else { throw CollaborationStoreError.invalidInvitation }
         for label in [request.displayName, request.deviceLabel] {
             guard !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, label.utf8.count <= 120 else { throw CollaborationStoreError.invalidRequest }
         }
         let secret = Self.secret(), device = UUID(), person = SharedArea.ID<SharedArea.Person>()
+        let now = clock().timeIntervalSince1970, addressHash = Self.hash(address)
         return try database.write { db in
             let link = try liveLink(db, slug: request.slug, token: request.token)
+            guard !link.spent else { throw CollaborationStoreError.invalidInvitation }
+            let since = now - joinLimits.window
+            try db.execute(sql: "DELETE FROM share_link_joins WHERE joined<=?", arguments: [since])
+            guard try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM share_link_joins WHERE link=? AND joined>?", arguments: [link.id, since])! < joinLimits.perLink,
+                  try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM share_link_joins WHERE address_hash=? AND joined>?", arguments: [addressHash, since])! < joinLimits.perAddress
+            else { throw CollaborationStoreError.rateLimited }
+            try db.execute(sql: "INSERT INTO share_link_joins(link,address_hash,joined) VALUES (?,?,?)", arguments: [link.id, addressHash, now])
             try db.execute(sql: "INSERT INTO people(id,label) VALUES (?,?)", arguments: [person.rawValue.uuidString, request.displayName])
             try db.execute(sql: "INSERT INTO devices(id,person,label,token_hash) VALUES (?,?,?,?)",
                 arguments: [device.uuidString, person.rawValue.uuidString, request.deviceLabel, Self.hash(secret)])

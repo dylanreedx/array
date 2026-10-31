@@ -10,8 +10,13 @@ import ContinuumRevivedRelayProtocol
 
 public struct RelayServerConfiguration: Sendable {
     public var host: String; public var publicPort: Int; public var adminPort: Int
-    public init(host: String = "0.0.0.0", publicPort: Int = 8080, adminPort: Int = 9090) {
+    /// A header a trusted proxy sets to the client's address (Fly sets
+    /// `fly-client-ip`). Unset means the socket's peer address. Only rate
+    /// limits read it; nothing authenticates by address.
+    public var clientAddressHeader: String?
+    public init(host: String = "0.0.0.0", publicPort: Int = 8080, adminPort: Int = 9090, clientAddressHeader: String? = nil) {
         self.host = host; self.publicPort = publicPort; self.adminPort = adminPort
+        self.clientAddressHeader = clientAddressHeader?.lowercased()
     }
 }
 
@@ -75,7 +80,7 @@ public final class RelayServer: @unchecked Sendable {
             .childChannelInitializer { channel in
                 if admin {
                     return channel.pipeline.configureHTTPServerPipeline().flatMap {
-                        channel.pipeline.addHandler(RelayHTTPHandler(store: store, liveHub: self.liveHub, pushDelivery: self.pushDelivery, collaboration: self.collaboration, admin: true), name: "relay-admin-http")
+                        channel.pipeline.addHandler(RelayHTTPHandler(store: store, liveHub: self.liveHub, pushDelivery: self.pushDelivery, collaboration: self.collaboration, admin: true, clientAddressHeader: self.configuration.clientAddressHeader), name: "relay-admin-http")
                     }
                 }
                 let upgrader = NIOWebSocketServerUpgrader(
@@ -91,7 +96,7 @@ public final class RelayServer: @unchecked Sendable {
                 )
                 let config = NIOHTTPServerUpgradeConfiguration(upgraders: [upgrader]) { _ in }
                 return channel.pipeline.configureHTTPServerPipeline(withServerUpgrade: config).flatMap {
-                    channel.pipeline.addHandler(RelayHTTPHandler(store: store, liveHub: self.liveHub, pushDelivery: self.pushDelivery, collaboration: self.collaboration, admin: false), name: "relay-public-http")
+                    channel.pipeline.addHandler(RelayHTTPHandler(store: store, liveHub: self.liveHub, pushDelivery: self.pushDelivery, collaboration: self.collaboration, admin: false, clientAddressHeader: self.configuration.clientAddressHeader), name: "relay-public-http")
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -109,7 +114,12 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
     private var head: HTTPRequestHead?; private var body = ByteBuffer()
     private var requestTask: Task<Void, Never>?
     private var rejectedBody = false
-    init(store: RelayStore, liveHub: RelayLiveHub, pushDelivery: (any RelayEventPushDelivering)?, collaboration: CollaborationStore?, admin: Bool) { self.collaboration = collaboration; self.store = store; self.liveHub = liveHub; self.pushDelivery = pushDelivery; self.admin = admin }
+    private let clientAddressHeader: String?
+    init(store: RelayStore, liveHub: RelayLiveHub, pushDelivery: (any RelayEventPushDelivering)?, collaboration: CollaborationStore?, admin: Bool,
+         clientAddressHeader: String? = nil) {
+        self.collaboration = collaboration; self.store = store; self.liveHub = liveHub; self.pushDelivery = pushDelivery; self.admin = admin
+        self.clientAddressHeader = clientAddressHeader
+    }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         switch unwrapInboundIn(data) {
@@ -128,8 +138,10 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
             guard let head, !rejectedBody else { return }
             let bytes = body.readData(length: body.readableBytes) ?? Data()
             let contextBox = SendableContext(context)
+            let clientAddress = clientAddressHeader.flatMap { head.headers.first(name: $0) }
+                ?? context.channel.remoteAddress?.ipAddress ?? "unknown"
             requestTask = Task { [store, liveHub, pushDelivery, collaboration, admin] in
-                let response = await Self.route(head: head, body: bytes, store: store, liveHub: liveHub, pushDelivery: pushDelivery, collaboration: collaboration, admin: admin)
+                let response = await Self.route(head: head, body: bytes, store: store, liveHub: liveHub, pushDelivery: pushDelivery, collaboration: collaboration, admin: admin, clientAddress: clientAddress)
                 contextBox.context.eventLoop.execute { self.write(response, context: contextBox.context) }
             }
         }
@@ -147,12 +159,12 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
         write(.error(.payloadTooLarge, "payloadTooLarge"), context: context)
     }
 
-    private static func route(head: HTTPRequestHead, body: Data, store: RelayStore, liveHub: RelayLiveHub, pushDelivery: (any RelayEventPushDelivering)?, collaboration: CollaborationStore?, admin: Bool) async -> Response {
+    private static func route(head: HTTPRequestHead, body: Data, store: RelayStore, liveHub: RelayLiveHub, pushDelivery: (any RelayEventPushDelivering)?, collaboration: CollaborationStore?, admin: Bool, clientAddress: String) async -> Response {
         do {
             if admin { return try await adminRoute(head: head, body: body, store: store) }
             if head.uri.hasPrefix("/collaboration/v1/") {
                 guard let collaboration else { return .error(.notFound, "notFound") }
-                return await CollaborationRoutes.route(head: head, body: body, store: collaboration)
+                return await CollaborationRoutes.route(head: head, body: body, store: collaboration, clientAddress: clientAddress)
             }
             if head.method == .GET, head.uri == "/health" { return .json(.ok, try await store.health()) }
             if head.method == .POST, head.uri == "/v2/invites/redeem" {

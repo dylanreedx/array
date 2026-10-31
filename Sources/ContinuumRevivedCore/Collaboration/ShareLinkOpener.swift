@@ -38,6 +38,7 @@ public final class ShareLinkOpener {
     }
 
     public static let incompleteMessage = "This share link is incomplete. Ask for a new link."
+    public static let rateLimitedMessage = "Too many people joined through this link recently. Try again later, or ask for a new link."
     public static let refusedMessage = "This share link was refused. It was already used, revoked or is not valid. Ask for a new link."
 
     @discardableResult
@@ -87,6 +88,7 @@ public final class ShareLinkOpener {
         if let client = error as? CollaborationClientError, case let .server(status, _) = client {
             switch status {
             case 410: return refusedMessage
+            case 429: return rateLimitedMessage
             case 401: return "This Mac is no longer signed in to collaboration. Sign in again, then open the link."
             default: return "Array could not reach the shared workspace. Try the link again."
             }

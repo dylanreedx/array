@@ -11,6 +11,8 @@ public enum CollaborationStoreError: Error, Equatable {
     case integrityFailure
     /// A live share link on this relay already uses the slug.
     case slugTaken
+    /// Too many joins through one link, or from one address, in the window.
+    case rateLimited
 }
 
 /// Separate database, credentials and namespace from companion v2. Every request
@@ -20,6 +22,7 @@ public actor CollaborationStore {
     let key: SymmetricKey
     let clock: @Sendable () -> Date
     let retention: CollaborationRetention
+    let joinLimits: CollaborationJoinLimits
     /// Post-commit compaction that failed and left the full log in place.
     public internal(set) var compactionFailures = 0
 
@@ -31,13 +34,13 @@ public actor CollaborationStore {
     var hostLivenessStates: [UUID: [UUID: String]] = [:]
 
     public init(path: String, masterKey: Data, clock: @escaping @Sendable () -> Date = { Date() },
-                retention: CollaborationRetention = .init()) throws {
+                retention: CollaborationRetention = .init(), joinLimits: CollaborationJoinLimits = .init()) throws {
         guard masterKey.count >= 32 else { throw CollaborationStoreError.invalidRequest }
         var config = Configuration(); config.busyMode = .timeout(2)
         database = try DatabaseQueue(path: path, configuration: config)
         let normalizedKeyData = Data(SHA256.hash(data: masterKey))
         key = SymmetricKey(data: normalizedKeyData)
-        self.clock = clock; self.retention = retention
+        self.clock = clock; self.retention = retention; self.joinLimits = joinLimits
         // Authenticate an already adopted database before any migration can
         // write with a deployment key that merely has the right length.
         try Self.preflightDatabaseKey(database, keyData: normalizedKeyData)
@@ -89,6 +92,7 @@ public actor CollaborationStore {
         Self.registerHostLivenessMigration(&migrator)
         Self.registerAgentProjectionMigration(&migrator)
         Self.registerShareLinkMigration(&migrator)
+        Self.registerShareLinkJoinLimitMigration(&migrator)
         try migrator.migrate(database)
         try Self.preflightDatabaseKey(database, keyData: normalizedKeyData)
     }

@@ -89,7 +89,8 @@ do {
             throw CollaborationStoreError.invalidRequest
         }
         try FileManager.default.createDirectory(at: collaborationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        collaboration = try CollaborationStore(path: collaborationURL.path, masterKey: collaborationKey, retention: try collaborationRetentionFromEnvironment())
+        collaboration = try CollaborationStore(path: collaborationURL.path, masterKey: collaborationKey, retention: try collaborationRetentionFromEnvironment(),
+                                                  joinLimits: try collaborationJoinLimitsFromEnvironment())
     } else if collaborationPath != nil || collaborationSecret != nil {
         throw CollaborationStoreError.invalidRequest
     } else { collaboration = nil }
@@ -105,7 +106,8 @@ do {
         exit(0)
     }
     let pushDelivery: (any RelayEventPushDelivering)? = try configuration.apns.map { try RelayAPNSService(store: store, configuration: $0, transport: RelayURLSessionAPNSTransport()) }
-    let server = RelayServer(store: store, configuration: .init(host: configuration.host, publicPort: configuration.port, adminPort: configuration.adminPort), pushDelivery: pushDelivery, collaboration: collaboration)
+    let server = RelayServer(store: store, configuration: .init(host: configuration.host, publicPort: configuration.port, adminPort: configuration.adminPort,
+        clientAddressHeader: ProcessInfo.processInfo.environment["RELAY_CLIENT_ADDRESS_HEADER"]), pushDelivery: pushDelivery, collaboration: collaboration)
     try await server.start()
     log("info", "ready", fields: ["public_port": "\(configuration.port)", "admin_port": "\(configuration.adminPort)"])
 

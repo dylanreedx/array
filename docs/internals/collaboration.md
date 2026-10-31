@@ -575,6 +575,19 @@ binding network listeners. Treat this intentional operator output as admission
 material. It is separate from CLI provider login. This command does not yet
 provide existing-account recovery, cancellation or operator roster management.
 
+Share links (`.plans/105-collaboration/workers/share-links.md`) let a newcomer
+join without an operator: `POST /collaboration/v1/links/join` takes the link's
+token as the enrollment. Joins are limited to 10 per link and 30 per client
+address in a rolling hour. Over either limit, the relay answers 429 `rateLimited`
+and creates nothing. Override the limits with
+`RELAY_COLLABORATION_LINK_JOINS_PER_LINK`,
+`RELAY_COLLABORATION_LINK_JOINS_PER_ADDRESS` and
+`RELAY_COLLABORATION_LINK_JOIN_WINDOW_SECONDS`; a malformed value fails startup.
+The address is the socket peer, unless `RELAY_CLIENT_ADDRESS_HEADER` names a
+header a trusted proxy sets. `fly.toml` sets it to `fly-client-ip`, because
+behind Fly's proxy every socket peer is the proxy. The relay keeps only a hash of
+each address, and only for the window.
+
 ## Verification
 
 `scripts/run-matrix.sh --collaboration` rebuilds the portable checks, service HTTP

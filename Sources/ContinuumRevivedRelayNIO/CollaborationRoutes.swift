@@ -4,7 +4,7 @@ import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedCollaborationService
 
 enum CollaborationRoutes {
-    static func route(head: HTTPRequestHead, body: Data, store: CollaborationStore) async -> Response {
+    static func route(head: HTTPRequestHead, body: Data, store: CollaborationStore, clientAddress: String = "unknown") async -> Response {
         if let artifact = await CollaborationArtifactRoutes.route(head: head, body: body, store: store) { return artifact }
         guard body.count <= 262_144 else { return .error(.payloadTooLarge, "payloadTooLarge") }
         do {
@@ -16,7 +16,7 @@ enum CollaborationRoutes {
             }
             // A share link's token is its own admission, as an enrollment code is.
             if head.method == .POST, head.uri == "/collaboration/v1/links/join" {
-                return .json(.created, try await store.joinShareLink(decoder.decode(Collaboration.JoinShareLink.self, from: body)))
+                return .json(.created, try await store.joinShareLink(decoder.decode(Collaboration.JoinShareLink.self, from: body), from: clientAddress))
             }
             guard let header = head.headers.first(name: "authorization"), header.hasPrefix("Bearer ") else { return .error(.unauthorized, "unauthorized") }
             let token = String(header.dropFirst(7))
@@ -100,6 +100,7 @@ enum CollaborationRoutes {
         catch CollaborationStoreError.forbidden { return .error(.forbidden, "forbidden") }
         catch CollaborationStoreError.invalidInvitation { return .error(.gone, "invalidInvitation") }
         catch CollaborationStoreError.slugTaken { return .error(.conflict, "slugTaken") }
+        catch CollaborationStoreError.rateLimited { return .error(.tooManyRequests, "rateLimited") }
         catch CollaborationStoreError.invalidCursor { return .error(.conflict, "resyncRequired") }
         catch CollaborationStoreError.compacted { return .error(.conflict, "snapshotRequired") }
         catch CollaborationStoreError.tooManySubscriptions { return .error(.tooManyRequests, "subscriptionLimit") }

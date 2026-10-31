@@ -80,3 +80,20 @@ func collaborationRetentionFromEnvironment() throws -> CollaborationRetention {
                  compactionBatch: try value("RELAY_COLLABORATION_COMPACTION_BATCH", defaults.compactionBatch),
                  dispatchAuthorityWindow: defaults.dispatchAuthorityWindow)
 }
+
+/// Optional share-link join limits; 10 per link and 30 per address per hour
+/// when unset. RELAY_COLLABORATION_LINK_JOINS_PER_LINK,
+/// RELAY_COLLABORATION_LINK_JOINS_PER_ADDRESS and
+/// RELAY_COLLABORATION_LINK_JOIN_WINDOW_SECONDS take non-negative integers; a
+/// malformed value fails startup rather than silently keeping the defaults.
+func collaborationJoinLimitsFromEnvironment() throws -> CollaborationJoinLimits {
+    let environment = ProcessInfo.processInfo.environment, defaults = CollaborationJoinLimits()
+    func value(_ name: String, _ fallback: Int) throws -> Int {
+        guard let raw = environment[name] else { return fallback }
+        guard let parsed = Int(raw), parsed >= 0 else { throw CollaborationStoreError.invalidRequest }
+        return parsed
+    }
+    return .init(perLink: try value("RELAY_COLLABORATION_LINK_JOINS_PER_LINK", defaults.perLink),
+                 perAddress: try value("RELAY_COLLABORATION_LINK_JOINS_PER_ADDRESS", defaults.perAddress),
+                 window: TimeInterval(try value("RELAY_COLLABORATION_LINK_JOIN_WINDOW_SECONDS", Int(defaults.window))))
+}

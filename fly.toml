@@ -9,6 +9,9 @@ primary_region = "yyz"
   RELAY_HOST = "::"
   RELAY_ADMIN_PORT = "9090"
   RELAY_DATABASE_PATH = "/data/relay.sqlite"
+  # Behind Fly's proxy the socket peer is the proxy; share-link join limits
+  # count per client, which Fly reports in this header.
+  RELAY_CLIENT_ADDRESS_HEADER = "fly-client-ip"
 
 [[mounts]]
   source = "relay_data"

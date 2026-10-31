@@ -200,4 +200,69 @@ func runShareLinkChecks() async throws {
         try? await server.stop()
         throw error
     }
+    try await runShareLinkJoinLimitChecks(root: root)
+}
+
+/// Joins are limited per link and per client address. A second relay with
+/// small limits, behind a test header standing in for Fly's `fly-client-ip`.
+@MainActor
+private func runShareLinkJoinLimitChecks(root: URL) async throws {
+    let store = try CollaborationStore(path: root.appendingPathComponent("limits.sqlite").path, masterKey: Data(repeating: 59, count: 32),
+                                       joinLimits: .init(perLink: 3, perAddress: 5, window: 3600))
+    let companion = try RelayStore(path: root.appendingPathComponent("limits-companion.sqlite").path, masterKey: Data(repeating: 59, count: 32))
+    let server = RelayServer(store: companion, configuration: .init(host: "127.0.0.1", publicPort: 0, adminPort: 0,
+                                                                     clientAddressHeader: "X-Check-Client"), collaboration: store)
+    try await server.start()
+    do {
+        let url = URL(string: "http://127.0.0.1:\(server.listeningPublicPort!)")!
+        let endpoint = try CollaborationServiceEndpoint(url, allowsInsecureLoopback: true)
+        let credentials = CollaborationCredentialStore(vault: ShareLinkVault(), bundleIdentifier: AppChannel.devBundleIdentifier)
+        func signedOut() throws -> CollaborationAccountController {
+            try CollaborationAccountController(store: CollaborationAccountStore(applicationSupportRoot: root.appendingPathComponent("limits-\(UUID())"),
+                bundleIdentifier: AppChannel.devBundleIdentifier), credentialStore: credentials, bundleIdentifier: AppChannel.devBundleIdentifier)
+        }
+        let owner = try signedOut()
+        _ = try await owner.enroll(endpoint: endpoint, code: try await store.provisionPerson(label: "Dylan").code, deviceLabel: "Dylan", accountLabel: "Dylan")
+        let area = try await owner.createArea(label: "Limits").document.id.rawValue
+        let first = try await owner.createShareLink(area: area, slug: "limit-one", lifetime: .untilRevoked)
+        let second = try await owner.createShareLink(area: area, slug: "limit-two", lifetime: .untilRevoked)
+        let session = URLSession(configuration: .ephemeral)
+        func join(_ link: Collaboration.ShareLink, as name: String, from address: String) async throws -> Int {
+            var request = URLRequest(url: url.appendingPathComponent("collaboration/v1/links/join"))
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            request.setValue(address, forHTTPHeaderField: "X-Check-Client")
+            request.httpBody = try JSONEncoder().encode(Collaboration.JoinShareLink(slug: link.slug, token: link.token, displayName: name, deviceLabel: "Mac"))
+            let (_, response) = try await session.data(for: request)
+            return (response as? HTTPURLResponse)?.statusCode ?? 0
+        }
+        func people(_ link: Collaboration.ShareLink) async throws -> Int {
+            try await owner.shareLinks(area: area).first { $0.id == link.id }?.people.count ?? -1
+        }
+        var statuses: [Int] = []
+        for index in 1...3 { statuses.append(try await join(first, as: "Guest \(index)", from: "198.51.100.1")) }
+        let peopleBefore = try await store.operatorPeople().count
+        let overLink = try await join(first, as: "Guest 4", from: "198.51.100.9")
+        let peopleAfter = try await store.operatorPeople().count, admittedFirst = try await people(first)
+        try shareLinkCheck(statuses == [201, 201, 201] && overLink == 429 && peopleAfter == peopleBefore && admittedFirst == 3,
+            "a link's join limit answers 429 from any address and creates no person or admission")
+        statuses = []
+        for index in 1...2 { statuses.append(try await join(second, as: "Visitor \(index)", from: "198.51.100.1")) }
+        let overAddress = try await join(second, as: "Visitor 3", from: "198.51.100.1")
+        let otherAddress = try await join(second, as: "Visitor 4", from: "198.51.100.2")
+        let admittedSecond = try await people(second)
+        try shareLinkCheck(statuses == [201, 201] && overAddress == 429 && otherAddress == 201 && admittedSecond == 3,
+            "an address's join limit spans links and leaves other addresses alone")
+
+        var asked = 0
+        let newcomer = try signedOut()
+        let outcome = await ShareLinkOpener(account: newcomer, signIn: { _ in false }, askName: { _, _ in asked += 1; return "Late" },
+                                            open: { _, _ in }, allowsInsecureLoopback: true).open(first.url)
+        try shareLinkCheck(outcome == .refused(ShareLinkOpener.rateLimitedMessage) && asked == 1 && newcomer.accounts.isEmpty,
+            "a rate-limited newcomer sees the limit in plain words and no account is saved")
+        try await server.stop()
+    } catch {
+        try? await server.stop()
+        throw error
+    }
 }
