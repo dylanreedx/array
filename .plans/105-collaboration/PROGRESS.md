@@ -1344,3 +1344,37 @@ stand-in for part 2 (`PendingSharedZones`). When it merges after part 2:
 remove part 3's duplicate `SharedZoneShare`, add
 `extension AppDelegate: SharedZoneCreating {}`, and set
 `sharedZoneCreator = self`.
+
+## In-canvas round — part 2 canvas zone + part 3 share entry on `7c008471`, 31 October 2026
+
+Merged:
+- Part 2, `array/mp-canvas-zone` (`c5a5aa99`, `6211fcec`, `990a0c76`,
+  `1fa8f54a`; receipt `workers/canvas-zone.md`). It adds the
+  `--shared-area-zone-check` leg. The overlap with pair-features'
+  `SharedAreaHostSession.attach(to:)` was resolved so both still share one
+  wiring. `attach(to:)` now does what part 2's production code does: it sets
+  `livePanel.prompter`, `zonePrompter` and agent freshness, and no longer sets
+  `onRequestHandoff` (part 2 takes the handoff window off the user path).
+  `openSharedArea` calls `attach(to:)` and sets the zone session's
+  `prompter`. The paired-process peer drives handoffs through the handoff
+  model, never the window, so it is unaffected.
+- Part 3, `array/mp-share-entry` (`96e072b1`, `4d5e7ab4`; receipt
+  `workers/share-entry.md`), clean. Then the hookup, `7c008471`:
+  - part 3's `SharedZoneShare` is now `typealias … = AppDelegate.SharedZoneShare`;
+  - the check fake uses part 2's initializer;
+  - `extension AppDelegate: SharedZoneCreating {}`;
+  - `sharedZoneCreator ?? self`.
+
+  `PendingSharedZones` and `ShareFailure` are removed. They are now unused.
+
+Gate: log `qa-runs/coordinator/gate-7c008471.log`, **14 legs, all passed**;
+feature journey 8 passed, 0 pending.
+
+Open:
+- No check drives a real Share click through part 2's
+  `createSharedZone(fromTiles:)`. Part 3's checks use a fake zone creator, and
+  part 2's checks call the conversion directly. The join between them is
+  covered by the build only. Owner: part 3.
+- `WorkspaceRuntime.SharedZoneError` is not a `LocalizedError`, so a refused
+  share (a terminal, an already-shared tile) shows the popover's general "Sharing
+  could not finish" rather than the reason. It is never silent. Owner: part 2.
