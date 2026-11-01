@@ -1,0 +1,45 @@
+==> relay http://127.0.0.1:63360
+==> Avery (host) and Blake (guest) are running, off every display
+PASS journey: step 1: the header Share opens the popover, anchored to T
+PASS journey: step 1: nothing is published, and T has not moved
+PASS journey: step 2: the sidebar row's Share opens the same popover, anchored to T on the canvas
+PASS journey: step 3: a link is on the pasteboard
+PASS journey: step 3: the relay area holds exactly one item, T's agent observation
+PASS journey: step 3: T's zone and world frame are unchanged
+PASS journey: step 3: the workspace document has no new zone
+PASS journey: the host's tile says it is shared
+PASS journey: step 4: exactly one new tile appears, of kind sharedAgent
+PASS journey: step 4: in the guest's armed zone, its world frame inside that zone and in view
+PASS journey: step 4: no zone is created
+PASS journey: step 4: no AgentRecord is created on the guest
+PASS journey: step 4: the tile's tab names the host
+PASS journey: step 5: the host transcript tags P1 with Blake's name, and the reply follows
+PASS journey: step 5: the guest's transcript tags P1 "You", and the reply follows
+PASS journey: step 5: the host runs exactly one turn for P1
+PASS journey: step 6: the guest shows P2 tagged Avery, then its reply
+PASS journey: the host's tile still shows P1, then its own P2 and the reply
+PASS journey: step 7: resending P1 with the same request ID runs nothing new; the receipt matches the first
+PASS journey: step 8: the guest has no Stop and no approval control
+PASS journey: step 8: the host's own agent tile, with its runner, keeps Stop and approvals
+PASS journey: step 9: the host's popover lists Blake with "full access" and Remove
+PASS journey: the host's tab names who it is shared with
+PASS journey: step 9: within the window the guest's tile shows the stopped state
+PASS journey: step 9: it says the host stopped sharing
+PASS journey: step 9: a guest prompt is refused, and nothing runs on the host
+PASS journey: step 10: the host re-shares with a Works once link
+PASS journey: step 10: the guest joins again, into the same tile, live
+PASS journey: step 10: a third app opening the same link is refused
+PASS journey: step 11: within the liveness window the guest's tile shows the offline state
+    offline shown 0.3 s after the host quit
+PASS journey: step 11: dimmed, with a dashed edge and the offline footer
+PASS journey: step 11: a guest prompt is accepted as queued
+PASS journey: step 11: the relaunched host runs the queued prompt
+PASS journey: step 11: exactly once
+PASS journey: step 11: the guest's tile is live again
+PASS journey: step 12: after relaunch the tile reconnects
+PASS journey: step 12: the tile comes back at the same world frame
+PASS journey: step 12: a second install on the guest's root with no account shows the placeholder
+PASS journey: step 12: not a broken agent: no record, still a sharedAgent tile, naming whose it is
+PASS journey: step 12: and it opens no connection without the account
+NOTE journey: no cursor leg: mode A shares one agent with no zone, and the spec gives it no cursors
+Multiplayer journey passed

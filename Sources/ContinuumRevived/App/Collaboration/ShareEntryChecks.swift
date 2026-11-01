@@ -35,7 +35,7 @@ enum ShareEntryChecks {
 
     /// The check app is inactive, so AppKit would eat each press as an
     /// activation click; the user's app is active when they click.
-    private static func acceptFirstMouseEverywhere() {
+    static func acceptFirstMouseEverywhere() {
         guard let method = class_getInstanceMethod(NSView.self, #selector(NSView.acceptsFirstMouse(for:))) else { return }
         let always: @convention(block) (NSView, NSEvent?) -> Bool = { _, _ in true }
         method_setImplementation(method, imp_implementationWithBlock(always))

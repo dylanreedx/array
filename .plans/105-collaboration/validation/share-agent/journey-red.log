@@ -1,0 +1,23 @@
+==> relay http://127.0.0.1:61899
+==> Avery (host) and Blake (guest) are running, off every display
+PASS journey: step 1: the header Share opens the popover, anchored to T
+PASS journey: step 1: nothing is published, and T has not moved
+PASS journey: step 2: the sidebar row's Share opens the same popover, anchored to T on the canvas
+PASS journey: step 3: a link is on the pasteboard
+PASS journey: step 3: the relay area holds exactly one item, T's agent observation
+FAIL journey: step 3: T's zone and world frame are unchanged — {'height': 520, 'width': 640, 'x': 179.5, 'y': 124} -> {}
+FAIL journey: step 3: the workspace document has no new zone
+FAIL journey: the host's tile says it is shared
+FAIL journey: step 4: exactly one new tile appears, of kind sharedAgent — []
+FAIL journey: step 4: in the guest's armed zone, its world frame inside that zone and in view — zone None armed 2187E042-FF4D-4B22-8A4A-093370BFD5C0 frame {} zone {} view {'height': 1119.8258977149076, 'width': 1456.6485310119697, 'x': 1301.6757344940152, 'y': -149.91294885745378}
+FAIL journey: step 4: no zone is created
+PASS journey: step 4: no AgentRecord is created on the guest
+FAIL journey: step 4: the tile's tab names the host
+PASS journey: step 5: the host transcript tags P1 with Blake's name, and the reply follows
+PASS journey: step 5: the guest's transcript tags P1 "You", and the reply follows
+PASS journey: step 5: the host runs exactly one turn for P1
+PASS journey: step 6: the guest shows P2 tagged Avery, then its reply
+PASS journey: the host's tile still shows P1, then its own P2 and the reply
+FAIL journey: Blake: resendLast failed: no receipt to resend
+==> logs kept in ~/array-scratch/mp-sharejourney/*/app.log
+Multiplayer journey: 8 failed: ["step 3: T's zone and world frame are unchanged", 'step 3: the workspace document has no new zone', "the host's tile says it is shared", 'step 4: exactly one new tile appears, of kind sharedAgent', "step 4: in the guest's armed zone, its world frame inside that zone and in view", 'step 4: no zone is created', "step 4: the tile's tab names the host", 'Blake: resendLast failed: no receipt to resend']

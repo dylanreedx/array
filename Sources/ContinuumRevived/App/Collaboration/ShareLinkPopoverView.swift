@@ -34,6 +34,9 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
     private let peopleHeader = NSTextField(labelWithString: "PEOPLE WITH ACCESS")
     private var personLabels: [(name: NSTextField, detail: NSTextField)] = []
     private(set) var removeButtons: [ChoiceAccessoryButton] = []
+    var titleLabelText: String { titleLabel.stringValue }
+    /// Each person row as drawn: "Sam · opened 10:48 · full access".
+    var qaPeopleRows: [String] { personLabels.map { $0.name.stringValue + " · " + $0.detail.stringValue } }
     private let messageLabel = NSTextField(wrappingLabelWithString: "")
     /// "Revoke link" until someone has access, then "Revoke everyone's access".
     let revokeButton = ChoiceAccessoryButton(accessory: .init(id: "revoke", title: "Revoke link", symbol: nil, accessibilityLabel: "Revoke link"))
