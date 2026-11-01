@@ -386,7 +386,7 @@ public enum AgentCharacterThemeParser {
     // expressions: ICU's `$` also matches before a final newline, JavaScript's does not.
 
     /// `^[a-z0-9][a-z0-9-]{0,30}$`
-    static func isThemeID(_ id: String) -> Bool {
+    public static func isThemeID(_ id: String) -> Bool {
         let scalars = Array(id.unicodeScalars)
         guard (1...31).contains(scalars.count) else { return false }
         func lowerOrDigit(_ s: Unicode.Scalar) -> Bool { ("a"..."z").contains(s) || ("0"..."9").contains(s) }

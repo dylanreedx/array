@@ -2309,6 +2309,18 @@ enum ContinuumApp {
             }
         }
 
+        // Plan 110 (agent characters), slice 3: the sprite layer's cost model.
+        if CommandLine.arguments.contains("--character-sprite-check") {
+            _ = NSApplication.shared
+            do {
+                try CharacterSpriteChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL character sprite: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--component-lab-check") {
             do {
                 _ = NSApplication.shared

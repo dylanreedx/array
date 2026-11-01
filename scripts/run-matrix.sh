@@ -2008,6 +2008,10 @@ run_app_check .build/debug/Array --persistence-crash-safe-check
 run_app_check .build/debug/Array --ticket-queue-tile-check
 run_app_check .build/debug/Array --conductor-queue-tile-check
 run_app_check .build/debug/Array --agent-input-check
+# Plan 110 (agent characters), slice 3: 100 sprites for 10 s cause no layout or
+# draw, install one animation per plan change, share one atlas per character, and
+# show the parser's exact pixels in unflipped and flipped hosts.
+run_app_check .build/debug/Array --character-sprite-check
 run_app_check .build/debug/Array --diff-tile-check
 run_app_check .build/debug/Array --diff-review-off-main-check
 run_app_check .build/debug/Array --attention-notification-check
