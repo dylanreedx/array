@@ -249,6 +249,9 @@ check --settings-panel-check
 check --settings-schema-check
 check --settings-search-check
 check --settle-closes-tile-check
+check --share-agent-relay-check
+check --shared-agent-migration-check
+check --shared-agent-render-check
 check --shell-open-as-agent-check
 check --shell-tool-row-check
 check --sidebar-agent-status-line-check
@@ -622,6 +625,9 @@ leg run_app_check .build/debug/Array --settings-modal-check
 leg run_app_check .build/debug/Array --settings-panel-check
 leg run_app_check .build/debug/Array --settings-search-check
 leg run_app_check .build/debug/Array --settle-closes-tile-check
+leg run_app_check .build/debug/Array --share-agent-relay-check
+leg run_app_check .build/debug/Array --shared-agent-migration-check
+leg run_app_check .build/debug/Array --shared-agent-render-check
 leg run_app_check .build/debug/Array --shell-open-as-agent-check
 leg run_app_check .build/debug/Array --shell-tool-row-check
 leg run_app_check .build/debug/Array --sidebar-agent-status-line-check
