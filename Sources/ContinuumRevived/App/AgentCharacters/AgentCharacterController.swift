@@ -56,6 +56,15 @@ final class AgentCharacterController {
         .appendingPathComponent("characters", isDirectory: true)
     /// The system's Reduce Motion, injectable so a check can drive both branches.
     var reduceMotion: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    /// Whether a window's characters may move: on the active space, not fully
+    /// covered, and the app not hidden. Injectable because an offscreen check
+    /// window is never `.visible`.
+    var windowIsVisible: (NSWindow) -> Bool = { window in
+        window.occlusionState.contains(.visible) && !NSApp.isHidden
+    }
+    /// Posted when a window's occlusion or the app's hidden state changes:
+    /// surfaces re-check whether their sprites may move. Never per frame.
+    static let visibilityDidChangeNotification = Notification.Name("array.agentCharacters.visibility")
 
     private struct AtlasKey: Hashable {
         let themeID: String
@@ -75,6 +84,15 @@ final class AgentCharacterController {
             NotificationCenter.default.addObserver(
                 forName: SettingChangeEvent.name(for: SettingID(rawValue: key)), object: nil, queue: .main
             ) { _ in MainActor.assumeIsolated { AgentCharacterController.shared.reload() } }
+        }
+        for name in [NSWindow.didChangeOcclusionStateNotification, NSApplication.didHideNotification,
+                     NSApplication.didUnhideNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated {
+                    guard AgentCharacterController.shared.isEnabled else { return }
+                    NotificationCenter.default.post(name: AgentCharacterController.visibilityDidChangeNotification, object: nil)
+                }
+            })
         }
         observers.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main
@@ -108,6 +126,9 @@ final class AgentCharacterController {
 
     /// Whether characters may move now: the motion setting and the system's Reduce Motion.
     var allowsMotion: Bool { motion == .working && !reduceMotion() }
+
+    /// Where in its loop `agentID`'s character is (0..<1).
+    func phase(for agentID: UUID) -> Double { AgentCharacterConfig.phase(for: agentID) }
 
     func characterIndex(for agentID: UUID) -> Int? {
         guard let theme, !theme.characters.isEmpty else { return nil }

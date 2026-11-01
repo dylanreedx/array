@@ -891,6 +891,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// `addToolTip(_:owner:userData:)` does not retain its owner.
     private var markToolTip: NSString?
     private var markToolTipRect: NSRect?
+    /// Plan 110: whether this row shows a character, and its art width at 1 pt
+    /// per art pixel. Layout reserves the slot only while there is one.
+    private var characterSize: NSSize?
+    private static let characterGap: CGFloat = 4
 
 
     private var shown: (row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
@@ -1119,6 +1123,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         refreshMetadataBackingScale()
+        reconcileCharacterVisibility()
     }
 
     override func viewDidChangeBackingProperties() {
@@ -1257,11 +1262,87 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             seed: row.id, leadColour: row.identityColor.map(AgentInboxView.identityDotColour(named:)))
         if proposal.isTwoLine { applyOwnershipContent(row, now: now) }
 
+        applyCharacter(now: now)
         applyColours()
         applyAccessibility()
         needsLayout = true
         decorations.needsDisplay = true
     }
+
+    // MARK: Character (plan 110)
+
+    /// Show this row's character for its state now. Cheap to repeat: the sprite
+    /// installs an animation only when the plan changes. Never lays out, except
+    /// when the slot appears or goes away.
+    func applyCharacter(now: Date) {
+        let controller = AgentCharacterController.shared
+        let sprite = decorations.characterLayer
+        guard let row = shown?.row,
+              let atlas = controller.atlas(for: row.id, appearance: AgentCharacterController.appearance(of: self)) else {
+            if characterSize != nil {
+                characterSize = nil
+                sprite.clear()
+                needsLayout = true
+            }
+            return
+        }
+        let snapshot = AgentCharacterSnapshot(
+            state: row.state, attention: row.attention, activity: row.characterActivity ?? .init(),
+            title: row.title, allowsMotion: !prefersReducedMotion())
+        sprite.show(controller.plan(for: snapshot, now: now), sprite: atlas,
+                    phase: controller.phase(for: row.id), now: now)
+        let size = NSSize(width: atlas.atlas.frameWidth / (controller.theme?.scale ?? 1),
+                          height: atlas.atlas.frameHeight / (controller.theme?.scale ?? 1))
+        if characterSize != size {
+            characterSize = size
+            needsLayout = true
+        }
+        reconcileCharacterVisibility()
+    }
+
+    /// Hold the character still while nobody can see it: out of a window, under a
+    /// hidden ancestor, or in an occluded window.
+    func reconcileCharacterVisibility() {
+        let visible = window.map { AgentCharacterController.shared.windowIsVisible($0) } ?? false
+        decorations.characterLayer.setPaused(!visible || isHiddenOrHasHiddenAncestor)
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        reconcileCharacterVisibility()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        reconcileCharacterVisibility()
+    }
+
+    var characterLayerForQA: CharacterSpriteLayer { decorations.characterLayer }
+    var characterRectForQA: NSRect? {
+        decorations.characterLayer.isHidden || characterSize == nil
+            ? nil : decorations.convert(decorations.characterLayer.frame, to: self)
+    }
+    var providerMarkRectForQA: NSRect? { decorations.markSlot.map { decorations.convert($0, to: self) } }
+    /// What the character must never cover, in this cell's coordinates.
+    var characterNeighboursForQA: [(name: String, frame: NSRect)] {
+        var out: [(String, NSRect)] = []
+        for (name, view) in [("title", titleLabel), ("branch", branchLabel), ("state", stateLabel),
+                             ("model", modelLabel), ("placement", placementLabel), ("settle nudge", settleNudge),
+                             ("move here", hoverMoveHere), ("copy", hoverCopy)] as [(String, NSView)]
+        where !view.isHidden && view.frame.width > 0 {
+            // Text frames are clipped to the text's own width: a label's frame is
+            // the room it was given, not the ink it drew.
+            var frame = view.convert(view.bounds, to: self)
+            if let field = view as? NSTextField {
+                frame.size.width = min(frame.width, ceil(field.attributedStringValue.size().width) + 4)
+            }
+            out.append((name, frame))
+        }
+        if let slot = decorations.branchSlot { out.append(("branch glyph", decorations.convert(slot, to: self))) }
+        return out
+    }
+    var hoverActionsShownForQA: Bool { hoverActionsShown }
+    var rowForQA: AgentInboxRow? { shown?.row }
 
     /// How long a finished row you have ALREADY READ sits before it asks to be put
     /// away. The close nudge's threshold, not a status change. Five minutes (Dylan,
@@ -1397,6 +1478,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         updateStateLabel(for: row, now: now)
         needsLayout = true
         applyAccessibility()
+        // Slowing at 40 s and dozing at 180 s are time alone; this tick is already
+        // running for a working row, so no timer of the character's own.
+        if row.state == .working { applyCharacter(now: now) }
     }
 
     /// Three glyphs, and most rows get none.
@@ -2195,8 +2279,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             .size(withAttributes: [.font: font]).width) + CGFloat(Metrics.cellTextInset)
     }
 
+    /// Every layout pass any 96 card runs: the sidebar character witness compares
+    /// a scroll with characters on against the same scroll with them off.
+    nonisolated(unsafe) static var qaLayoutPassCount = 0
+
     override func layout() {
         super.layout()
+        Self.qaLayoutPassCount += 1
         if proposal.isTwoLine {
             layoutOwnership()
             return
@@ -2446,6 +2535,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let hasMark = decorations.mark != nil
         let trailing = (hasMark ? markSide : 0)
             + (modelLabel.isHidden ? 0 : modelWidth + (hasMark ? 6 : 0))
+        // Plan 110: the character sits just left of the mark (or the model name),
+        // centred on the line, and the branch gives up its width.
+        let characterWidth = characterSize.map { $0.width + (trailing > 0 ? Self.characterGap : 0) } ?? 0
+        decorations.setCharacterSlot(characterSize.map { size in
+            NSRect(x: textRight - trailing - characterWidth, y: snapped(detailLine - size.height / 2),
+                   width: size.width, height: size.height)
+        })
         let branchGlyph: CGFloat = decorations.drawsBranchGlyph ? Self.branchGlyphSide : 0
         decorations.branchSlot = decorations.drawsBranchGlyph
             ? NSRect(x: textLeft, y: snapped(detailLine - branchInkMidY),
@@ -2454,7 +2550,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let branchLeft = textLeft + branchGlyph + (branchGlyph > 0 ? 4 : 0)
         branchLabel.frame = inCard(NSRect(
             x: branchLeft, y: bandY,
-            width: max(0, textRight - trailing - 6 - branchLeft),
+            width: max(0, textRight - trailing - characterWidth - 6 - branchLeft),
             height: proposal.bandDetail))
         decorations.markSlot = hasMark
             ? NSRect(x: textRight - trailing, y: snapped(detailLine - markInkMidY),
@@ -2466,7 +2562,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // Every trailing action shares the same control geometry and line.
         // Keep the provider lane available for external-session actions.
         let actionEdge = (hoverActionsShown && (onHoverSnooze != nil || onHoverSettle != nil))
-            ? textRight : textRight - trailing - 6
+            ? textRight : textRight - trailing - characterWidth - 6
         var actionRight = actionEdge
         for button in [hoverSettle, hoverSnooze, hoverHide, hoverCopy, hoverMoveHere] where !button.isHidden {
             let size = button.intrinsicContentSize
@@ -2477,7 +2573,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 width: size.width, height: size.height))
             actionRight -= size.width + 6
         }
-        if actionRight < textRight - trailing - 6 {
+        if actionRight < textRight - trailing - characterWidth - 6 {
             var branchFrame = branchLabel.frame
             branchFrame.size.width = max(0, min(branchFrame.width, actionRight - branchLeft))
             branchLabel.frame = branchFrame
@@ -2525,6 +2621,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // text rather than the list reloading the table to fix it.
         applyColours()
         decorations.needsDisplay = true
+        if characterSize != nil, let now = shown?.now { applyCharacter(now: max(now, Date())) }
     }
 
     @objc private func disclosureClicked() { onToggleDisclosure?() }
@@ -3358,6 +3455,16 @@ private final class Decorations: NSView {
     var failure = AccentToken.accentFailed.color.nsColor(for: TokenTheme.light)
     var dark = false
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        // Its own layer from the start: the character is a sublayer framed in the
+        // cell's first layout, before anything has asked this view to draw.
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
     override var isFlipped: Bool { true }
     /// Decoration only — every click belongs to the row beneath it.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -3406,6 +3513,22 @@ private final class Decorations: NSView {
 
     private let markLayer = CALayer()
     private var markRendered: (mark: NSImage, colour: NSColor, size: NSSize, scale: CGFloat)?
+    /// Plan 110: the agent's character, just left of the provider mark. A layer of
+    /// this view's own layer, framed by the cell's layout only when its slot moves,
+    /// and stepped by the render server: it never asks this view to draw.
+    let characterLayer = CharacterSpriteLayer()
+
+    /// Frame the character, or take it away. Called from the cell's `layout()`.
+    func setCharacterSlot(_ slot: NSRect?) {
+        guard let host = layer else { return }
+        if characterLayer.superlayer !== host { host.addSublayer(characterLayer) }
+        let hidden = slot == nil
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if characterLayer.isHidden != hidden { characterLayer.isHidden = hidden }
+        if let slot, characterLayer.frame != slot { characterLayer.frame = slot }
+        CATransaction.commit()
+    }
 
     private func refreshMarkLayer() {
         guard let host = layer else { return }
@@ -3438,15 +3561,18 @@ private final class Decorations: NSView {
         guard markLayer.opacity != target else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        if animated {
-            let fade = CABasicAnimation(keyPath: "opacity")
-            fade.fromValue = markLayer.presentation()?.opacity ?? markLayer.opacity
-            fade.toValue = target
-            fade.duration = AgentInboxCardView.fillFadeDuration
-            fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            markLayer.add(fade, forKey: "mark.fade")
+        // The character fades with the mark: the hover actions take both their places.
+        for faded in [markLayer, characterLayer as CALayer] {
+            if animated {
+                let fade = CABasicAnimation(keyPath: "opacity")
+                fade.fromValue = faded.presentation()?.opacity ?? faded.opacity
+                fade.toValue = target
+                fade.duration = AgentInboxCardView.fillFadeDuration
+                fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                faded.add(fade, forKey: "mark.fade")
+            }
+            faded.opacity = target
         }
-        markLayer.opacity = target
         CATransaction.commit()
     }
     var markOpacityForQA: Float { markLayer.opacity }

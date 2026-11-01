@@ -2012,6 +2012,9 @@ run_app_check .build/debug/Array --agent-input-check
 # draw, install one animation per plan change, share one atlas per character, and
 # show the parser's exact pixels in unflipped and flipped hosts.
 run_app_check .build/debug/Array --character-sprite-check
+# Plan 110, slice 4: characters on the real sidebar, light and dark: placement
+# beside the mark, hover fade, recycled cells, scroll layouts on = off, occlusion.
+run_app_check .build/debug/Array --sidebar-character-check
 run_app_check .build/debug/Array --diff-tile-check
 run_app_check .build/debug/Array --diff-review-off-main-check
 run_app_check .build/debug/Array --attention-notification-check

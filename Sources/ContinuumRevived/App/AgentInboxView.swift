@@ -1654,6 +1654,32 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // the field keeps the legacy one-row constraints and a zero text inset.
         // The result is the exact overlap this style exists to prevent.
         applyHeaderStyle()
+        // Plan 110: characters turned on or off, a new set, new motion settings, or a
+        // window's visibility. Rare events; each touches the visible cells only.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(agentCharactersDidChange),
+            name: AgentCharacterController.didChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(agentCharacterVisibilityDidChange),
+            name: AgentCharacterController.visibilityDidChangeNotification, object: nil)
+    }
+
+    /// The 96 cells on screen, for the character refreshes.
+    private var visibleCharacterCells: [AgentInbox96CellView] {
+        let range = tableView.rows(in: tableView.visibleRect)
+        guard range.length > 0 else { return [] }
+        return (range.location..<range.location + range.length).compactMap {
+            tableView.view(atColumn: 0, row: $0, makeIfNecessary: false) as? AgentInbox96CellView
+        }
+    }
+
+    @objc private func agentCharactersDidChange() {
+        let now = clock()
+        for cell in visibleCharacterCells { cell.applyCharacter(now: now) }
+    }
+
+    @objc private func agentCharacterVisibilityDidChange() {
+        for cell in visibleCharacterCells { cell.reconcileCharacterVisibility() }
     }
 
     required init?(coder: NSCoder) { return nil }
@@ -6024,6 +6050,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         table.resetCursorRects()
         return table.registeredCursorsForQA
     }
+
+    /// Plan 110: the 96 card drawing agent `id`, if it is on screen.
+    func cellForQA(id: UUID) -> AgentInbox96CellView? {
+        guard let tableRow = tableRow(forAgentId: id) else { return nil }
+        return tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+    }
+
+    /// Plan 110: every 96 card on screen, and the scroll view that moves them.
+    var visibleCharacterCellsForQA: [AgentInbox96CellView] { visibleCharacterCells }
+    var scrollViewForQA: NSScrollView { scrollView }
 
     func modelToolTipsForQA(id: UUID) -> (layer: String?, markRect: NSRect?)? {
         guard let tableRow = tableRow(forAgentId: id),

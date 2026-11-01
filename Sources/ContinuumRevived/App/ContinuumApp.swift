@@ -2309,6 +2309,17 @@ enum ContinuumApp {
             }
         }
 
+        // Plan 110, slice 4: characters on the real sidebar.
+        if CommandLine.arguments.contains("--sidebar-character-check") {
+            _ = NSApplication.shared
+            do {
+                print(try SidebarCharacterChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL sidebar character: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         // Plan 110 (agent characters), slice 3: the sprite layer's cost model.
         if CommandLine.arguments.contains("--character-sprite-check") {
             _ = NSApplication.shared
@@ -6851,6 +6862,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) {
             CornerStyleController.adoptSavedStyle(defaults: settingsDefaults)
             AppThemeController.adoptSavedTheme(defaults: settingsDefaults)
+            // Plan 110: agent characters follow Settings (off by default).
+            AgentCharacterController.shared.adopt(defaults: settingsDefaults)
         }
 
         // Ticket 87: headless component snapshot for Layer-2 vision QA. Renders
