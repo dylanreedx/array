@@ -4,6 +4,232 @@
 Bench `.worktrees/mp-share-design`, branch `array/mp-share-design`, on
 `origin/array/integration` 2af6fdd8 (the 0.7.37 release).
 
+## Spec: what each person sees and can do
+
+This page is for agreeing before anything is built. Dylan shares; Sam
+receives. Anything marked *(proposed)* is my recommended answer to one of
+the open questions at the end. Dylan confirms or changes it.
+
+### Mode A: share one agent
+
+**Sharing**
+- On any agent, Share is one quiet icon in the header, drawn like the
+  Terminal switch. No text.
+- The same icon appears on the agent's sidebar row when you hover it.
+- Either one opens a small popover:
+  - the link (`arrayapp.dev/s/…`), with a name you can edit
+  - Copy link
+  - how long the link lasts: "Works once" or "Until revoked"
+  - Revoke
+- Copy is what shares. Only that one agent is shared. **Nothing on Dylan's
+  canvas moves, and no zone is made.**
+- On Dylan's tile, a small tab on its top edge reads "Yours · shared with
+  Sam" once someone has joined.
+
+**What lands on Sam's canvas**
+- Sam opens the link, and Array opens (or offers the download).
+- One agent tile appears in the zone Sam is looking at, in view, beside his
+  own work. It is an ordinary agent tile: transcript, composer, header.
+- It is marked as Dylan's:
+  - an outline in Dylan's colour
+  - a tab, "Dylan's · runs on Dylan's Mac"
+- A banner says "Dylan shared an agent with you. It runs on Dylan's Mac."
+  with a Show button.
+- Sam can move, resize or close the tile on his own canvas. That never
+  changes Dylan's canvas.
+- The tile comes back after Sam relaunches.
+
+**Prompts and the transcript**
+- Both people prompt from the normal composer. Every prompt runs once, on
+  Dylan's Mac, under Dylan's CLI login, permissions and billing.
+- Both see the whole transcript, prompts included *(proposed, Q1)*.
+- Every prompt is tagged with who sent it: "You" for your own, the other
+  person's name for theirs.
+- Stop and tool approvals are Dylan's alone *(proposed, Q7)*. Sam sees that
+  the agent is waiting on Dylan.
+
+**Cursors**
+- None in mode A. The tile sits in a different place on each canvas, so a
+  cursor would point at nothing.
+- Presence is avatars on the tile's tab: who has it open right now.
+
+**Revoke**
+- Dylan reopens the popover from the same icon. It lists who has access,
+  for example "Sam · opened 10:48 · full access", with Remove beside each
+  person, and "Revoke everyone's access".
+- Once removed, Sam's tile says "Dylan stopped sharing". Nothing new
+  arrives, and Sam's prompts are refused. Sam can close the tile.
+- What Sam has already seen stays on his screen until he closes it.
+  Revoking stops future access; it cannot recall what was delivered.
+
+**When Dylan's Mac is offline**
+- Sam's tile dims, with a dashed edge.
+- The composer is replaced by "Dylan's Mac is offline · showing the last
+  update, 4 min ago."
+- A prompt Sam sends waits, marked queued. It runs once, when Dylan's Mac is
+  back.
+- Nothing ever runs on Sam's Mac instead.
+
+### Mode B: a portal into part of Dylan's canvas
+
+**Sharing**
+- Dylan picks the Share tool (toolbar or S) and drags over part of his
+  canvas. The tiles it fully covers are selected.
+- The same popover lists what goes. Terminals are marked "Stays private"
+  and are left out.
+- Copy is what shares. Nothing on Dylan's canvas moves.
+
+**What lands on Sam's canvas**
+- One portal tile, in the zone Sam is looking at.
+  - Its header reads "Dylan's canvas · Checkout · Live · runs on Dylan's
+    Mac", with avatars.
+  - Its body shows Dylan's chosen tiles where they sit on Dylan's canvas,
+    fitted to the tile. There is no panning or zooming inside it.
+- It holds only the tiles chosen when sharing *(proposed, Q2)*. A tile Dylan
+  later drags into that area is not shared. To add one, Dylan shares it into
+  the same portal.
+- When Dylan moves a shared tile, it moves in the portal too. Sam cannot
+  move Dylan's tiles *(proposed, Q3)*. He can move, resize or close the
+  portal tile itself.
+
+**What each kind does in the portal**
+- **Agent:** live. To act on it, Sam hovers and presses "Open beside". That
+  gives him the same tile as in mode A, beside the portal, with prompts and
+  names working exactly as in A.
+- **Note:** live. Only Dylan edits it *(proposed, Q4)*.
+- **File or diff:** live; each save shows up as a new revision. On a diff,
+  Sam can Approve or Request changes.
+- **Browser, public URL:** loads on Sam's Mac, with Sam's own logins.
+- **Browser, localhost or signed-in page:** a still picture marked "Still"
+  *(proposed, Q5)*.
+- **Terminal:** a card that says "Terminal stays on Dylan's Mac".
+- Nothing is streamed as video.
+
+**Cursors**
+- Dylan's cursor shows inside the portal while it is over a shared tile.
+- Sam's cursor shows on Dylan's canvas while Sam points inside the portal.
+- Cursors only appear over shared tiles.
+
+**Revoke**
+- Same popover, from the Share icon on any shared tile.
+- Sam's portal then says "Dylan stopped sharing" and stops updating. So
+  does any agent he opened beside it.
+
+**When Dylan's Mac is offline**
+- The portal dims to the last update, with a dashed edge. Its header says
+  "Dylan's Mac is offline · last update 4 min ago".
+- Agents opened beside it behave as in mode A.
+
+### Proposed answers to the open questions
+
+1. Prompt text travels to the other person: **yes**.
+2. A portal holds **the tiles chosen when sharing**, not a live rectangle.
+3. Sam **cannot** move Dylan's tiles in a portal.
+4. Sam **cannot** edit Dylan's notes in v1.
+5. Unreachable browsers show **a still**.
+6. **Ship mode A first** and try it, then build mode B.
+7. Stop and tool approvals **stay with the owner**.
+
+## Acceptance test
+
+Two Array apps, each with its own app-support dir and its own project root
+(hazard 10), both on one local relay. Drive them through the real paths: the
+pair harness (`scripts/check-collaboration-pair.py` and
+`check-collaboration-pair-features.py`) for the network, and
+`NSApp.sendEvent` for clicks. Each step names what must be true. "Within the
+window" means the relay's poll and liveness intervals, set as constants in
+the script. This list is the witness: a slice is done when its steps pass in
+the matrix's `--collaboration` block.
+
+### Mode A
+
+1. **Header share.** On the host, click the Share icon on agent T in zone Z.
+   - The popover opens, anchored to T.
+   - Nothing is published, and T has not moved.
+2. **Sidebar share.** Hover T's sidebar row and click its Share icon.
+   - The same popover opens, anchored to T on the canvas.
+3. **Copy.**
+   - A link is on the pasteboard.
+   - The relay area holds exactly one item: T's agent observation.
+   - T's zone and world frame are unchanged.
+   - The workspace document has no new zone.
+4. **Open on the guest.** Open the link through `application(_:open:)`.
+   - Exactly one new tile appears, of kind `sharedAgent`, in the guest's
+     armed zone. Its world frame is inside that zone and in view.
+   - No zone is created.
+   - No `AgentRecord` is created on the guest.
+   - The tile's tab names the host.
+5. **Guest prompts.** The guest sends P1.
+   - The host runs exactly one turn for P1.
+   - The host transcript tags P1 with the guest's name; the guest's tags it
+     "You".
+   - The reply appears on both within the window.
+6. **Host prompts.** The host sends P2.
+   - The guest transcript shows P2, tagged with the host's name, and its
+     reply, within the window.
+7. **A retry runs once.** The guest resends P1 with the same request ID.
+   - Nothing new runs; the receipt matches the first.
+8. **Controls.** The guest has no Stop and no approval control; the host
+   still has both.
+9. **Access list and Remove.** The host's popover lists the guest with
+   "full access". The host presses Remove.
+   - Within the window, the guest's tile shows the stopped state.
+   - A guest prompt is refused, and nothing runs on the host.
+10. **Works once.** Re-share with a "Works once" link. After the guest
+    joins, a third app opening the same link is refused.
+11. **Host offline.** Quit the host app.
+    - Within the liveness window the guest tile shows the offline state.
+    - A guest prompt is accepted as queued.
+    - Relaunch the host: the queued prompt runs exactly once, and the tile
+      is live again.
+12. **Guest relaunch.**
+    - The tile comes back at the same world frame and reconnects.
+    - A second install on the guest's root with no account shows the
+      placeholder, not a broken agent.
+
+### Mode B
+
+1. **Share tool.** On the host, drag the Share tool over an agent, two
+   notes, a public-URL browser, a localhost browser and a terminal.
+   - The popover lists everything but the terminal, which is marked
+     private.
+2. **Copy.**
+   - No tile has moved, and no zone was created.
+   - The relay holds the agent, the notes and both browsers, and carries no
+     terminal data.
+3. **Open on the guest.**
+   - Exactly one `sharedPortal` tile appears in the guest's armed zone.
+   - Item frames in the portal match the host's relative world frames,
+     within 1 pt at the portal's scale.
+4. **Host moves a tile.** The host moves a note.
+   - Within the window, the portal's note moves by the same relative amount.
+   - The host then drags an unshared tile into the region: nothing is
+     published, and the portal is unchanged.
+5. **Host edits a note.** The edit shows in the portal within the window.
+   The guest has no way to edit it.
+6. **Browsers and the terminal.**
+   - The public browser loads the same URL on the guest.
+   - The localhost browser shows a still marked "Still".
+   - The terminal shows as its "stays on Dylan's Mac" card.
+7. **Open beside.** The guest presses Open beside on the agent.
+   - A `sharedAgent` tile appears beside the portal.
+   - Mode A steps 5 to 8 pass through it.
+8. **Cursors.**
+   - The host's cursor over the shared agent appears in the portal at the
+     mapped point.
+   - The guest's cursor inside the portal appears on the host's canvas over
+     the same tile.
+9. **Revoke.**
+   - The portal, and the tile opened beside it, show the stopped state.
+   - No further updates arrive.
+10. **Host offline.** The portal dims to the last update, then recovers
+    when the host relaunches.
+11. **Guest relaunch.** The portal comes back at the same world frame.
+
+**What the offline harness cannot prove.** Keychain persistence, a real
+second person and two physical Macs. Those stay in ALPHA-HANDOFF.md's
+manual two-Mac run.
+
 ## What Dylan said about 0.7.37
 
 - Sharing makes a new isolated zone with a discussion panel down its right
@@ -65,12 +291,24 @@ In `share-redesign/`, light and dark:
 - The portal's body is a real capture of the host's canvas, scaled into the
   tile.
 
-**Fixture artefacts to ignore.**
-- Each agent opens with "Notice · Previous session", because the fixture's
-  records restore as idle.
-- The composer's location row says "Alder", the fixture directory's name.
-  On a real guest's shared tile it should name the host's checkout and Mac.
-  That is part of slice A2.
+**Round 2 changes.** Share is icon-only in the header, drawn like the
+Terminal switch, and on the sidebar row's hover. The fixture's leftovers are
+gone: the "Previous session" notice, and "Alder" in the location row.
+
+**What the stills simplify.** The sidebar row's hover icons are drawn on a
+real sidebar snapshot. The location row on Sam's copy of Dylan's agent reads
+"checkout-web". A real shared tile should name the host's checkout and Mac;
+that is part of slice A2.
+
+**Throwaway hooks.** The stills use local, uncommitted tweaks in the bench:
+- the quiet icon-only Share drawing in `TileNSView`;
+- `qaResetProjectionForMock`;
+- `qaSetHoveredForMock`;
+- the fixture's project folder renamed to `checkout-web`.
+
+The real icon-only Share is two lines in `layoutShare`: `labelled: false` and
+a square width. It also needs a resting state with no fill, like
+`FaceToggleControl`.
 
 **To regenerate.** The renderer is a throwaway, uncommitted in the bench:
 `CollabShareRedesignMockSheet.swift` on top of the earlier round's
@@ -87,9 +325,12 @@ Windows are off-screen and never take focus.
 
 ### (A) panels
 
-1. **Dylan shares from the header.** The real 0.7.37 Share button and
-   popover. What changes is what Copy does: the agent stays where it is, no
-   zone is made, and no tile moves.
+1. **Dylan shares from the header.**
+   - Share is one quiet icon in the header. The sidebar row shows the same
+     icon on hover.
+   - The popover is 0.7.37's.
+   - What changes is what Copy does: the agent stays where it is, no zone
+     is made, and no tile moves.
 2. **Sam's canvas.**
    - The link lands one agent tile in Sam's own zone, beside his work.
    - Dylan's colour edges it, and a tab on the top edge says "Dylan's · runs
@@ -342,6 +583,16 @@ the area's positions come from the host's world frames, not from lent tiles.
 
 ## Build plan
 
+**Which steps each slice must pass.** These come from the Acceptance test
+at the top:
+
+- A1: mode A steps 1–3.
+- A2: steps 4, 5 and 8 to 12.
+- A3: steps 5 to 7, with names.
+- B1: mode B steps 1–3 and 7–11.
+- B2: step 4 and step 5.
+- B3: step 6.
+
 **Slice size.** The checks cost far more than the code. Each slice ends
 with the named witness, reported by the matrix's `--collaboration` block.
 
@@ -413,6 +664,8 @@ A1 and A2 together are a usable release. B is worth starting only after
 Dylan has used A, because A answers part of what the portal is for.
 
 ## Open questions for Dylan
+
+My proposed answers are in the spec at the top.
 
 1. **Should prompt text travel to the guest?** Today it deliberately does
    not. "Both people's prompts show with names" needs it, and full access
