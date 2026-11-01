@@ -124,42 +124,61 @@ enum CollaborationCursorMotionChecks {
     // MARK: - The run
 
     struct Measurement {
-        let lane: Bool, fps: Int
+        let direction: String, lane: Bool, fps: Int
         let movedShare: Double, framesSampled: Int, meanStep: Double, maxStep: Double
         let positionsPerSecond: Double, changesPerSecond: Double
         let lagMedian: Double, finalPaintedAfter: Double?
         let frameCostMedian: Double, frameCostMax: Double
         var line: String {
-            String(format: "%@ at %d Hz: cursor moved on %.1f%% of %d frames (mean step %.2f pt, max %.2f pt); B received %.1f positions/s and %.1f scene changes/s; drawn behind the mouse median %.0f ms; final position painted %@ after the mouse stopped; one frame (advance + paint) median %.3f ms max %.3f ms",
-                lane ? "cursor lane" : "update pages only", fps, movedShare * 100, framesSampled, meanStep, maxStep,
+            String(format: "%@, %@ at %d Hz: cursor moved on %.1f%% of %d frames (mean step %.2f pt, max %.2f pt); the receiver got %.1f positions/s and %.1f scene changes/s; drawn behind the mouse median %.0f ms; final position painted %@ after the mouse stopped; one frame (advance + paint) median %.3f ms max %.3f ms",
+                direction, lane ? "cursor lane" : "update pages only", fps, movedShare * 100, framesSampled, meanStep, maxStep,
                 positionsPerSecond, changesPerSecond, lagMedian, finalPaintedAfter.map { String(format: "%.0f ms", $0) } ?? "never (>3 s)",
                 frameCostMedian, frameCostMax)
         }
     }
 
+    /// `CONTINUUM_CURSOR_MOTION_RELAY=<https URL>`: the same measurement over
+    /// the real internet against that relay (staging), with no local relay or
+    /// delay proxy, and with the lane measured in both directions. Unset, the
+    /// check is the offline witness the matrix runs.
+    static var remoteRelay: URL? {
+        ProcessInfo.processInfo.environment["CONTINUUM_CURSOR_MOTION_RELAY"].flatMap { URL(string: $0) }
+    }
+
     static func run(delegate: AppDelegate) async throws {
         let root = try Rig.root("cursor-motion")
         defer { try? FileManager.default.removeItem(at: root) }
-        let relay = try ShareEntryRelayChecks.Relay(root: root.appendingPathComponent("relay"))
-        defer { relay.stop() }
-        try await relay.start()
-        let proxy = try DelayProxy(upstream: relay.port, oneWay: oneWay)
-        defer { proxy.stop() }
-        try await proxy.start()
+        let remote = remoteRelay
+        var relay: ShareEntryRelayChecks.Relay?, proxy: DelayProxy?
+        defer { proxy?.stop(); relay?.stop() }
+        let direct: URL, endpoint: CollaborationServiceEndpoint
+        if let remote {
+            direct = remote
+            endpoint = try CollaborationServiceEndpoint(remote)
+        } else {
+            let local = try ShareEntryRelayChecks.Relay(root: root.appendingPathComponent("relay"))
+            relay = local
+            try await local.start()
+            let delayed = try DelayProxy(upstream: local.port, oneWay: oneWay)
+            proxy = delayed
+            try await delayed.start()
+            direct = URL(string: "http://127.0.0.1:\(local.port)")!
+            endpoint = try CollaborationServiceEndpoint(URL(string: "http://127.0.0.1:\(delayed.port)")!, allowsInsecureLoopback: true)
+        }
+        let network = remote.map { "real internet, \($0.host ?? $0.absoluteString)" } ?? "one-way \(Int(oneWay * 1000)) ms, real continuum-relay"
 
         // Two people and an area, set up directly on the relay.
-        let direct = URL(string: "http://127.0.0.1:\(relay.port)")!
-        let signup = try CollaborationAPI(baseURL: direct, allowsInsecureLoopback: true)
+        let insecure = remote == nil
+        let signup = try CollaborationAPI(baseURL: direct, allowsInsecureLoopback: insecure)
         let credentialA = try await signup.selfEnroll(.init(displayName: "Peer A", deviceLabel: "Peer A's Mac"))
         let credentialB = try await signup.selfEnroll(.init(displayName: "Peer B", deviceLabel: "Peer B's Mac"))
-        let apiA = try CollaborationAPI(baseURL: direct, credential: credentialA.token, allowsInsecureLoopback: true)
-        let apiB = try CollaborationAPI(baseURL: direct, credential: credentialB.token, allowsInsecureLoopback: true)
+        let apiA = try CollaborationAPI(baseURL: direct, credential: credentialA.token, allowsInsecureLoopback: insecure)
+        let apiB = try CollaborationAPI(baseURL: direct, credential: credentialB.token, allowsInsecureLoopback: insecure)
         let area = try await apiA.createArea().document.id
         _ = try await apiB.accept(code: try await apiA.invite(area: area.rawValue, request: .init(person: credentialB.identity.person)).code)
         let a = credentialA.identity, b = credentialB.identity
 
-        // Production controllers on the delayed endpoint.
-        let endpoint = try CollaborationServiceEndpoint(URL(string: "http://127.0.0.1:\(proxy.port)")!, allowsInsecureLoopback: true)
+        // Production controllers on the delayed (or remote) endpoint.
         let lane = LaneSwitch()
         func controller(_ name: String, _ credential: Collaboration.Credential) throws -> SharedAreaController {
             let credentials = CollaborationCredentialStore(vault: Rig.MemoryVault(), bundleIdentifier: nil)
@@ -204,49 +223,68 @@ enum CollaborationCursorMotionChecks {
         try expect(modelA.status == .connected && modelB.status == .connected,
             "a relay that refuses the lane leaves both peers connected on update pages")
 
-        // What B's model received for A: every distinct position, from pages
-        // and lane alike, and every whole-scene change notification.
-        var received: [(CFTimeInterval, Double)] = [], changes: [CFTimeInterval] = []
-        var lastReceived: Collaboration.Point?
-        func noteReceived() {
-            guard let cursor = modelB.presence.first(where: { $0.identity.device == a.device })?.cursor, cursor != lastReceived else { return }
-            lastReceived = cursor; received.append((CACurrentMediaTime(), cursor.x))
+        struct Side {
+            let name: String, scene: SharedAreaSceneView, window: NSWindow
+            let publisher: SharedAreaPresencePublisher, model: SharedAreaController, identity: Collaboration.Identity
         }
-        let changeObserver = modelB.addChangeObserver { changes.append(CACurrentMediaTime()); noteReceived() }
-        let cursorObserver = modelB.addCursorObserver { _ in noteReceived() }
-        defer { modelB.removeChangeObserver(changeObserver); modelB.removeCursorObserver(cursorObserver) }
+        let sideA = Side(name: "A", scene: sceneA, window: windowA, publisher: publisherA, model: modelA, identity: a)
+        let sideB = Side(name: "B", scene: sceneB, window: windowB, publisher: publisherB, model: modelB, identity: b)
 
-        // A's mouse, in A's area coordinates (zoom 1, so points), through the
-        // event queue the publisher's local monitor reads.
-        func post(areaX: Double, areaY: Double = 300) {
-            let location = sceneA.convert(sceneA.screenPoint(forAreaPoint: .init(x: areaX, y: areaY)), to: nil)
+        // What a receiver's model got from the sender: every distinct position,
+        // from pages and lane alike, and every whole-scene change notification.
+        final class Tap {
+            var received: [(CFTimeInterval, Double)] = [], changes: [CFTimeInterval] = []
+            var last: Collaboration.Point?
+        }
+        func tap(_ receiver: Side, from sender: Side) -> (Tap, () -> Void) {
+            let tap = Tap(), model = receiver.model, device = sender.identity.device
+            func noteReceived() {
+                guard let cursor = model.presence.first(where: { $0.identity.device == device })?.cursor, cursor != tap.last else { return }
+                tap.last = cursor; tap.received.append((CACurrentMediaTime(), cursor.x))
+            }
+            let changeObserver = model.addChangeObserver { tap.changes.append(CACurrentMediaTime()); noteReceived() }
+            let cursorObserver = model.addCursorObserver { _ in noteReceived() }
+            return (tap, { model.removeChangeObserver(changeObserver); model.removeCursorObserver(cursorObserver) })
+        }
+        let (tapB, untapB) = tap(sideB, from: sideA)
+        defer { untapB() }
+
+        // The sender's mouse, in its area coordinates (zoom 1, so points),
+        // through the event queue the publisher's local monitor reads.
+        func postMouse(areaX: Double, areaY: Double = 300, on sender: Side) {
+            let location = sender.scene.convert(sender.scene.screenPoint(forAreaPoint: .init(x: areaX, y: areaY)), to: nil)
             guard let event = NSEvent.mouseEvent(with: .mouseMoved, location: location, modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: windowA.windowNumber, context: nil,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: sender.window.windowNumber, context: nil,
                 eventNumber: 0, clickCount: 0, pressure: 0) else { return }
             NSApp.postEvent(event, atStart: false)
         }
-        /// One display frame on B: the overlay's own frame callback (its link
-        /// cannot fire off every display), then the display pass. Returns what
-        /// B painted for A, in area coordinates, and what the frame cost.
-        func frame() -> (CGPoint?, Double) {
+        /// One display frame on the receiver: the overlay's own frame callback
+        /// (its link cannot fire off every display), then the display pass.
+        /// Returns what it painted for the sender, in area coordinates, and
+        /// what the frame cost.
+        func paintFrame(on receiver: Side, of sender: Side) -> (CGPoint?, Double) {
+            let overlay = receiver.publisher.overlay
             let began = CACurrentMediaTime()
             if overlay.isAnimating { overlay.advanceFrame() }
             CATransaction.begin(); overlay.displayIfNeeded(); CATransaction.commit()
             let cost = (CACurrentMediaTime() - began) * 1000
             CATransaction.flush()
-            guard let point = overlay.drawnCursors[a.device] else { return (nil, cost) }
-            return (sceneB.areaPoint(forScreenPoint: overlay.convert(point, to: sceneB)), cost)
+            guard let point = overlay.drawnCursors[sender.identity.device] else { return (nil, cost) }
+            return (receiver.scene.areaPoint(forScreenPoint: overlay.convert(point, to: receiver.scene)), cost)
         }
-        let reach = sceneA.areaPoint(forScreenPoint: publisherA.overlay.convert(NSPoint(x: publisherA.overlay.bounds.maxX - 40, y: 0), to: sceneA)).x
 
-        func measure(fps: Int) async throws -> Measurement {
+        func measure(fps: Int, from sender: Side = sideA, to receiver: Side = sideB, tap: Tap = tapB) async throws -> Measurement {
+            let reach = sender.scene.areaPoint(forScreenPoint: sender.publisher.overlay.convert(
+                NSPoint(x: sender.publisher.overlay.bounds.maxX - 40, y: 0), to: sender.scene)).x
+            func post(areaX: Double) { postMouse(areaX: areaX, on: sender) }
+            func frame() -> (CGPoint?, Double) { paintFrame(on: receiver, of: sender) }
             let period = 1.0 / Double(fps), mousePeriod = 1.0 / 60
             // Settle at the start of the stroke.
             let startX = 60.0, speed = 150.0, duration = 3.0
             post(areaX: startX)
-            try await Rig.eventually("B paints A's cursor at the start", attempts: 1000) { frame().0.map { abs($0.x - startX) < 0.5 } ?? false }
+            try await Rig.eventually("\(receiver.name) paints \(sender.name)'s cursor at the start", attempts: 1000) { frame().0.map { abs($0.x - startX) < 0.5 } ?? false }
             try await Task.sleep(for: .milliseconds(300))
-            try expect(startX + speed * duration < reach, "the stroke stays inside A's shared area (ends at \(Int(startX + speed * duration)) of \(Int(reach)))")
+            try expect(startX + speed * duration < reach, "the stroke stays inside \(sender.name)'s shared area (ends at \(Int(startX + speed * duration)) of \(Int(reach)))")
 
             var samples: [(t: Double, drawn: Double, mouse: Double)] = [], costs: [Double] = []
             let start = CACurrentMediaTime()
@@ -282,7 +320,8 @@ enum CollaborationCursorMotionChecks {
             let seconds = window.1 - window.0
             let lags = steady.map { ($0.mouse - $0.drawn) / speed * 1000 }.sorted()
             let sortedCosts = costs.sorted()
-            return Measurement(lane: lane.enabled, fps: fps,
+            let received = tap.received, changes = tap.changes
+            return Measurement(direction: "\(sender.name) -> \(receiver.name)", lane: lane.enabled, fps: fps,
                 movedShare: steps.isEmpty ? 0 : Double(moved) / Double(steps.count), framesSampled: steps.count,
                 meanStep: steps.isEmpty ? 0 : steps.reduce(0, +) / Double(steps.count), maxStep: steps.max() ?? 0,
                 positionsPerSecond: Double(received.filter { $0.0 >= window.0 && $0.0 <= window.1 }.count) / seconds,
@@ -304,8 +343,15 @@ enum CollaborationCursorMotionChecks {
         let laneFramesBefore = modelB.cursorLaneFramesApplied
         for fps in [60, 120] { results.append(try await measure(fps: fps)) }
         let laneFrames = modelB.cursorLaneFramesApplied - laneFramesBefore
+        if remote != nil {
+            // Over the real internet the two directions are two paths through
+            // the relay; measure the way back too.
+            let (tapA, untapA) = tap(sideA, from: sideB)
+            defer { untapA() }
+            for fps in [60, 120] { results.append(try await measure(fps: fps, from: sideB, to: sideA, tap: tapA)) }
+        }
 
-        for result in results { print("MEASURE cursor motion (one-way \(Int(oneWay * 1000)) ms, real continuum-relay): \(result.line)") }
+        for result in results { print("MEASURE cursor motion (\(network)): \(result.line)") }
 
         let pages = results.filter { !$0.lane }, lanes = results.filter(\.lane)
         for result in pages {
@@ -333,11 +379,11 @@ enum CollaborationCursorMotionChecks {
         // Reduce Motion: a new position is placed, never played back.
         sceneB.reduceMotion = { true }
         let placed = 300.0
-        post(areaX: placed)
+        postMouse(areaX: placed, on: sideA)
         try await Rig.eventually("B's model holds the Reduce Motion position", attempts: 1000) {
             modelB.presence.first(where: { $0.identity.device == a.device })?.cursor?.x == placed
         }
-        let atOnce = frame().0
+        let atOnce = paintFrame(on: sideB, of: sideA).0
         try expect(atOnce.map { abs($0.x - placed) < 0.5 } == true && !overlay.isAnimating,
             "with Reduce Motion the cursor is painted at its new position at once, with no playback")
         print("PASS collaboration cursor motion")
