@@ -822,6 +822,11 @@ enum ContinuumApp {
         // Before anything can order a window or activate: a check run never takes
         // the user's focus or screen (CheckFocusGuard).
         CheckFocusGuard.installIfQARun()
+        // Plan 110: Dylan's agent-characters preview bundle (never prod, never a check).
+        if AgentCharactersPreview.isRequested {
+            AgentCharactersPreview.run()
+            return
+        }
         if (ProcessInfo.processInfo.environment["ARRAY_SIDEBAR_PREVIEW"] == "1"
             || Bundle.main.bundleIdentifier == "dev.arrayapp.macos.sidebar-preview"),
            Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier,
@@ -2333,6 +2338,19 @@ enum ContinuumApp {
             }
         }
 
+        // Plan 110: the preview's offscreen recording (not a matrix leg).
+        if let index = CommandLine.arguments.firstIndex(of: "--agent-characters-recording-check") {
+            _ = NSApplication.shared
+            let out = CommandLine.arguments.dropFirst(index + 1).first.map { URL(fileURLWithPath: $0) }
+                ?? URL(fileURLWithPath: "qa-runs/agent-characters/preview.mp4")
+            do {
+                print(try AgentCharactersPreview.record(to: out))
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL agent characters recording: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         // Plan 110: sets agents write into the themes folder show live; the validator.
         if CommandLine.arguments.contains("--character-themes-live-check") {
             _ = NSApplication.shared
