@@ -2023,6 +2023,10 @@ run_app_check .build/debug/Array --tile-character-check
 # file, a bad file shows its problems and imports nothing, discovery uses a fixture
 # home only, and the preview grid renders in both appearances (still under RM).
 run_app_check .build/debug/Array --character-settings-check
+# Plan 110, slice 8: characters on vs off at 80 agent tiles + 60 sidebar rows,
+# idle / pan / zoom through window dispatch: equal bar and card layout and draw
+# counts, no sprite install during gestures (times printed, not gated).
+run_app_check .build/debug/Array --character-perf-check
 run_app_check .build/debug/Array --diff-tile-check
 run_app_check .build/debug/Array --diff-review-off-main-check
 run_app_check .build/debug/Array --attention-notification-check

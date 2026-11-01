@@ -2309,6 +2309,17 @@ enum ContinuumApp {
             }
         }
 
+        // Plan 110, slice 8: characters on vs off at 80 tiles + 60 rows (counts gated).
+        if CommandLine.arguments.contains("--character-perf-check") {
+            _ = NSApplication.shared
+            do {
+                print(try CharacterPerfChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL character perf: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         // Plan 110, slice 6: Settings › Appearance › Agent characters.
         if CommandLine.arguments.contains("--character-settings-check") {
             _ = NSApplication.shared

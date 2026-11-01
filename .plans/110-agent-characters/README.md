@@ -1,8 +1,8 @@
 # 110 — Agent characters (Duckherd-compatible sprites)
 
-Research and design round. Nothing is built. Researched and written 2026-11-01
-on the `array/agent-characters` bench, from `origin/array/integration` at
-`2af6fdd8` (0.7.37).
+Researched and written 2026-11-01 on the `array/agent-characters` bench, from
+`origin/array/integration` at `2af6fdd8` (0.7.37). **Built 2026-11-01**: see
+"Built" at the end, which records what changed from this design and why.
 
 Dylan's request: "add characters/sprites/animations which Duckherd has built into
 claude mods… this can be appended to the provider logo i think… idk how they
@@ -658,3 +658,61 @@ the counts check in `run-matrix.sh` and confirm a real run prints it.
    stills only.
 9. **Courtesy:** shall we tell Ali Alsalkhadi before shipping his ducks? MIT doesn't
    require it.
+
+## Built (2026-11-01)
+
+Slices 1–6 and 8 are built, one commit each, on
+`agent/agent-characters-build-ducks-679c0f0c` (local, unpushed). Slice 7 is not:
+Dylan decided "no lead duck yet". Dylan's other decisions: off by default; the
+built-in set is the eight exported ducks with the MIT notice beside them and in
+`LICENSES/`; the UI never names the source plugin; import with validation and a
+preview; placement as in the stills; character by a hash of the agent id; resting,
+idle, offscreen, parked and occluded agents hold still; Reduce Motion is a still;
+no model variants, no sounds.
+
+| slice | what | witness |
+|---|---|---|
+| 1 | v1 parser (ordered JSON, the reference's rules and messages), atlas with the light outline, bundled `ducks.theme.json` | CoreChecks `--agent-character-theme-check`: 52-file corpus recorded against the reference `parseTheme` (7 accepted, 45 rejected, messages identical), 8 × 105 frames, atlas pixels |
+| 2 | pose resolver, step → action through `AgentToolKind`, `lastStepFailedAt` in `AgentTurnPresence`, `characterActivity` on the row | CoreChecks `--agent-character-pose-check`: 409 table rows, clip expiries, 40 s / 180 s, Reduce Motion, the real reducer |
+| 3 | `CharacterSpriteLayer`, `AgentCharacterController` (settings, hash, atlas cache, shared deadline timer) | `--character-sprite-check`: 100 sprites × 10 s, 0 layouts, 0 draws, 100 installs and none while animating, 8 shared atlases, parser pixels in an unflipped render and in a flipped real window |
+| 4 | sidebar card slot | `--sidebar-character-check`: placement in Aqua + Dark Aqua, hover fade, 60 recycled rows, scroll layouts on = off, occlusion pause, off leaves none |
+| 5 | tile header slot, fed by `ManagedAgentTileNSView` | `--tile-character-check`: supervisor `deliver` events, 6 chrome-scale buckets, title clear of the pill, far park / out of window hold still, ⌘-scroll zoom through window dispatch costs the bar nothing |
+| 6 | Settings › Appearance › Agent characters | `--character-settings-check`: folder import, bad file, discovery in a fixture home, preview in both appearances, still under Reduce Motion |
+| 8 | the on/off measurement | `--character-perf-check` (counts gated, times printed) |
+
+### Departures from the design, and why
+
+- **No identity-colour tint** (§4.3). Tinting the hat per agent needs an atlas per
+  character × colour; Dylan's rule is one shared atlas per character.
+- **Compact rows.** The sidebar's slim (History / Background) row draws no provider
+  mark, so it has no "left of the mark" slot; characters are on the card row only.
+- **Residency pictures do not pause.** Residency pictures the body; the header stays
+  live and on screen, and rule 7 keeps sprites moving through gestures. Far parking,
+  a parked workspace, occlusion and app hide do pause.
+- **Offscreen-but-not-far-parked tiles keep their animation** (render-server work on a
+  layer nobody composites). Residency is off by default, so far parking is too.
+- **Orientation from the host view.** A view told it entered a window has not yet
+  had its layer flip settled, so `contentsAreFlipped()` read then drew the character
+  upside down until its next state change. Sprites take the host view's `isFlipped`.
+- **"Noticed" needs the record's prompt stamp.** The presence's `submittedAt` is also
+  the provider's own start for a turn it began itself.
+- **The plugin theme file's fixed name is never shown** in "Found on this Mac".
+- **Blink** (`helpers[].blink`) is validated but not drawn.
+- **Motion choice** uses the existing Settings picker row (as every Settings choice
+  does); the set picker uses `ChoiceButton`.
+
+### The measurement (slice 8) and its blind spot
+
+`--character-perf-check`, offscreen, A/B/A/B in one process: 80 agent tiles
+attached to a real supervisor (60 working, fed through `deliver`, 60 characters
+moving), 60 sidebar rows. Each arm: idle 4 s, pan 240 events, zoom 24 events (out and
+back), all dispatched through the window. Bar layouts and draws, card layouts and
+installs are equal on and off (card layouts within one tick of the list's own
+one-second elapsed clock); gestures install nothing. Main-thread CPU and step times
+are equal within noise. The numbers are in the slice 8 commit message.
+
+**Not measured: WindowServer and presented frames.** The motion harness
+(`scripts/canvas-motion/`, on `array/0732-canvas-parity`, not on integration)
+launches its own bundle with `open -n` and screen-captures an uncovered window, so
+it needs Dylan's display idle and unlocked. It was not run, because it would take
+his screen and focus. Run it before shipping, characters on versus off.
