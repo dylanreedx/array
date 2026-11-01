@@ -6401,8 +6401,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var settledMoreTitleForQA: String? { settledMoreCell?.qaTitle }
     var settledMoreTableRowForQA: Int? { settledMoreTableRow }
     var settledLimitForQA: Int { settledLimit }
-    /// The footer view, for a witness that clicks its words through the window.
+    /// The footer and heading views, for a witness that clicks their words
+    /// through the window.
     var settledMoreViewForQA: AgentInboxSettledMoreView? { settledMoreCell }
+    var historyHeaderViewForQA: AgentInboxShelfHeaderView? { historyHeaderCell }
+    var snoozedHeaderViewForQA: AgentInboxShelfHeaderView? { shelfHeaderCell }
     /// Press it the way the user does — through the footer's own button, so the
     /// check exercises the wiring and not just `expandSettledTail`.
     @discardableResult
@@ -7689,6 +7692,7 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
     }
 
     var qaTitle: String { label.stringValue }
+    var qaLabelFrameInWindow: NSRect { label.convert(label.bounds, to: nil) }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
     var qaDisclosureTitle: String { disclosureButton.qaTitle }
 }
