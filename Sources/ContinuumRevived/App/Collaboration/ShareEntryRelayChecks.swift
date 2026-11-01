@@ -34,7 +34,7 @@ enum ShareEntryRelayChecks {
 
     /// `continuum-relay` on loopback with its own databases and keys, the way
     /// `scripts/check-collaboration-pair.py` runs it.
-    private final class Relay {
+    final class Relay {
         let process = Process()
         let port: Int
         let environment: [String: String]
