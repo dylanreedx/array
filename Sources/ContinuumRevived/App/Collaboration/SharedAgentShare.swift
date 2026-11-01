@@ -142,8 +142,13 @@ final class SharedAgentTileSession {
             // delivered stays on screen until the tile is closed.
             live.stop()
             if live.prompter != nil { live.prompter = nil }
-        } else if let item, live.object != item.id || !live.isPolling {
-            live.show(object: item.id, in: controller.document)
+            live.ended = "No longer shared · showing what arrived before"
+        } else {
+            // Access came back (a new link, or a cached refusal the relay
+            // has since lifted): prompts go through again.
+            if live.prompter == nil { live.prompter = prompter }
+            if live.ended != nil { live.ended = nil }
+            if let item, live.object != item.id || !live.isPolling { live.show(object: item.id, in: controller.document) }
         }
         // Only a change repaints: the controller reports every presence frame.
         let applied = Applied(state: next, hostName: hostName, colour: colour)
@@ -321,6 +326,12 @@ extension AppDelegate {
         if let existing = canvas.allWorkspaceTiles().first(where: {
             $0.kind == .sharedAgent && $0.metadata.sharedAgent?.areaId == area && $0.metadata.sharedAgent?.objectId == item.id.rawValue
         }) {
+            // Opened again, say after access was removed and a new link
+            // given: the same tile reconnects with the access just granted.
+            if let view = canvas.tileView(for: existing.id) as? SharedAgentTileNSView, let reference = view.reference {
+                startSharedAgentSession(view, reference: reference, model: model,
+                                        controller: try model.makeSharedAreaController(area: area))
+            }
             canvas.centerOnTile(existing.id)
             focusSpawnedTile(existing.id)
             return existing.id
@@ -331,19 +342,24 @@ extension AppDelegate {
         let controller = try model.makeSharedAreaController(area: area)
         await controller.open()
         let owner = item.source?.owner
+        // Member names come with the first authority frame, a moment after open.
+        for _ in 0..<50 where owner.map({ controller.memberNames[$0] == nil }) ?? false {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
         let hostName = owner.flatMap { controller.memberNames[$0] }.map { String($0.prefix(28)) } ?? "A teammate"
         let label = model.activeAccount?.knownAreas.first(where: { $0.id == area })?.label ?? "Shared agent"
         let reference = SharedAgentTileReference(areaId: area, objectId: item.id.rawValue, hostName: hostName,
                                                  hostPerson: owner?.rawValue, accountId: model.activeAccount?.id)
         let view: SharedAgentTileNSView
-        switch spawner.spawnSharedAgent(reference, title: "Agent · " + label) {
+        switch spawner.spawnSharedAgent(reference, title: label) {
         case .success(let spawned): view = spawned
         case .failure(let error): await controller.close(); throw error
         }
         attachSharedAgentTile(view, model: model, controller: controller)
         canvas.centerOnTile(view.tile.id)
         focusSpawnedTile(view.tile.id)
-        presentSharedAgentArrival(hostName: hostName, tile: view.tile.id)
+        presentSharedAgentArrival(hostName: hostName, tile: view.tile.id,
+                                  colour: owner.map { SharedAreaPersonColour.color(for: $0, host: $0) } ?? .systemPurple)
         return view.tile.id
     }
 
@@ -361,7 +377,10 @@ extension AppDelegate {
             startSharedAgentSession(view, reference: reference, model: given, controller: opened)
             return
         }
+        guard !view.attaching else { return }
+        view.attaching = true
         Task { [weak self, weak view] in
+            defer { view?.attaching = false }
             guard let self, let view, view.session == nil else { return }
             guard let model = try? collaborationAccountModel() else { return }
             if model.status != .ready, let remembered = model.selectedAccountID ?? (model.accounts.count == 1 ? model.accounts.first?.id : nil) {
@@ -375,7 +394,7 @@ extension AppDelegate {
         }
     }
 
-    private func startSharedAgentSession(_ view: SharedAgentTileNSView, reference: SharedAgentTileReference,
+    func startSharedAgentSession(_ view: SharedAgentTileNSView, reference: SharedAgentTileReference,
                                          model: CollaborationAccountController, controller: SharedAreaController) {
         guard let prompter = try? model.makeAgentHandoffController(area: reference.areaId) else { return }
         sharedAgentTileSessions.removeValue(forKey: view.tile.id)?.close()
@@ -389,16 +408,25 @@ extension AppDelegate {
         sharedAgentTileSessions.removeValue(forKey: tileId)?.close()
     }
 
-    /// "Dylan shared an agent with you. It runs on Dylan's Mac." with Show.
-    func presentSharedAgentArrival(hostName: String, tile: UUID) {
+    /// "Dylan shared an agent with you. It runs on Dylan's Mac." with Show,
+    /// at the top of the canvas; it leaves after a few seconds or on Show.
+    func presentSharedAgentArrival(hostName: String, tile: UUID, colour: NSColor = .systemPurple) {
         guard let canvas = canvasView else { return }
-        canvas.showFollowIndicator(name: "\(hostName) shared an agent with you. It runs on \(hostName)'s Mac.",
-                                   color: .controlAccentColor)
-        canvas.onFollowStopRequested = { [weak canvas] in canvas?.hideFollowIndicator() }
-        Task { @MainActor [weak canvas] in
-            try? await Task.sleep(for: .seconds(8))
-            canvas?.hideFollowIndicator()
+        canvas.subviews.filter { $0 is SharedAgentArrivalBanner }.forEach { $0.removeFromSuperview() }
+        let banner = SharedAgentArrivalBanner(text: "\(hostName) shared an agent with you. It runs on \(hostName)'s Mac.", colour: colour)
+        let size = banner.preferredSize
+        banner.frame = NSRect(x: (canvas.bounds.width - size.width) / 2, y: canvas.isFlipped ? 14 : canvas.bounds.height - size.height - 14,
+                              width: size.width, height: size.height)
+        banner.autoresizingMask = canvas.isFlipped ? [.minXMargin, .maxXMargin, .maxYMargin] : [.minXMargin, .maxXMargin, .minYMargin]
+        banner.onShow = { [weak self, weak banner] in
+            banner?.removeFromSuperview()
+            self?.canvasView?.centerOnTile(tile)
+            self?.focusSpawnedTile(tile)
         }
-        _ = tile
+        canvas.addSubview(banner, positioned: .above, relativeTo: nil)
+        Task { @MainActor [weak banner] in
+            try? await Task.sleep(for: .seconds(10))
+            banner?.removeFromSuperview()
+        }
     }
 }

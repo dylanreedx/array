@@ -29,6 +29,8 @@ final class SharedAgentLiveView: NSView {
     /// The host's liveness as the area reports it (COL-06). nil = not known;
     /// false = its host is gone, so the view is history and nothing is offered.
     var hostOnline: Bool? { didSet { if hostOnline != oldValue { render() } } }
+    /// Mode A: sharing stopped. The status says so instead of the last phase.
+    var ended: String? { didSet { if ended != oldValue { render() } } }
     /// Sends this view's prompts. Nil means no route to a host from here, and
     /// then no composer is offered.
     var prompter: SharedAgentHandoffController? { didSet { render() } }
@@ -242,8 +244,8 @@ final class SharedAgentLiveView: NSView {
         let offline = hostOnline == false
         let owner = source.map { name($0.owner) ?? "its owner" } ?? "its owner"
         let phase = state.phase == .needsAction ? "Waiting for \(owner) to approve" : Self.phase(state.phase)
-        setText(status, phase + (offline ? " · host offline, last confirmed"
-            : unavailable ? " · last confirmed" : confirmed ? " · live" : ""))
+        setText(status, ended ?? (phase + (offline ? " · host offline, last confirmed"
+            : unavailable ? " · last confirmed" : confirmed ? " · live" : "")))
         let controls = Collaboration.AgentProjection.RemoteControls(host: state.capabilities, role: role)
         setText(self.controls, delivery ?? (offline ? "Its host is offline. A prompt sent now waits, and runs once when it returns."
             : Self.controlsText(state.capabilities, role: role)))

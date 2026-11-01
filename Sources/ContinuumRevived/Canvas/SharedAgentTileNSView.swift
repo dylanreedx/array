@@ -30,6 +30,8 @@ final class SharedAgentTileNSView: TileNSView {
     private let body = SharedAgentTileBody()
     /// The session that feeds this tile; set by `AppDelegate.attachSharedAgentTile`.
     var session: SharedAgentTileSession?
+    /// An attach is under way: hydration and joining the window both ask.
+    var attaching = false
     /// The tile left the window (unhydrated, workspace switch) or came back.
     var onWindowChange: ((SharedAgentTileNSView, Bool) -> Void)?
 
@@ -178,4 +180,51 @@ final class SharedAgentTileBody: NSView {
         TextToken.textSecondary.color.nsColor(in: self).setFill()
         NSBezierPath(ovalIn: NSRect(x: 12, y: top + 13, width: 7, height: 7)).fill()
     }
+}
+
+/// "Dylan shared an agent with you. It runs on Dylan's Mac." with Show, at the
+/// top of the canvas for a few seconds after a link lands a shared agent.
+@MainActor
+final class SharedAgentArrivalBanner: NSView {
+    let text: String
+    var onShow: (() -> Void)?
+    private let colour: NSColor
+    private var showRect: NSRect = .zero
+    override var isFlipped: Bool { true }
+
+    init(text: String, colour: NSColor) {
+        self.text = text; self.colour = colour
+        super.init(frame: .zero)
+        setAccessibilityElement(true); setAccessibilityRole(.button)
+        setAccessibilityLabel(text + " Show")
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    private var textAttributes: [NSAttributedString.Key: Any] {
+        [.font: NSFont.token(.label), .foregroundColor: TextToken.textPrimary.color.nsColor(in: self)]
+    }
+    private var showAttributes: [NSAttributedString.Key: Any] {
+        [.font: NSFont.token(.label), .foregroundColor: AccentToken.accentWorking.color.nsColor(in: self)]
+    }
+    var preferredSize: NSSize {
+        let body = (text as NSString).size(withAttributes: textAttributes).width
+        let show = ("Show" as NSString).size(withAttributes: showAttributes).width
+        return NSSize(width: ceil(body + show + 58), height: 30)
+    }
+
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
+    override func draw(_ dirtyRect: NSRect) {
+        let pill = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: bounds.height / 2, yRadius: bounds.height / 2)
+        SurfaceToken.tileChrome.color.nsColor(in: self).setFill(); pill.fill()
+        LineToken.borderStrong.color.nsColor(in: self).setStroke(); pill.lineWidth = 1; pill.stroke()
+        colour.setFill()
+        NSBezierPath(ovalIn: NSRect(x: 12, y: bounds.midY - 5, width: 10, height: 10)).fill()
+        let size = (text as NSString).size(withAttributes: textAttributes)
+        (text as NSString).draw(at: NSPoint(x: 30, y: bounds.midY - size.height / 2), withAttributes: textAttributes)
+        let show = ("Show" as NSString).size(withAttributes: showAttributes)
+        showRect = NSRect(x: bounds.width - show.width - 14, y: bounds.midY - show.height / 2, width: show.width, height: show.height)
+        ("Show" as NSString).draw(at: showRect.origin, withAttributes: showAttributes)
+    }
+    override func mouseDown(with event: NSEvent) { onShow?() }
+    override func accessibilityPerformPress() -> Bool { onShow?(); return true }
 }
