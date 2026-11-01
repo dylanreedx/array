@@ -1624,6 +1624,18 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        // Mode A's tiles, tab and banner in light and dark, as PNGs in <dir>.
+        if let index = CommandLine.arguments.firstIndex(of: "--shared-agent-render-check") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            let directory = URL(fileURLWithPath: CommandLine.arguments.indices.contains(index + 1)
+                ? CommandLine.arguments[index + 1] : NSTemporaryDirectory() + "shared-agent-render")
+            Task { @MainActor in
+                do { try await SharedAgentAppearance.render(to: directory); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         // Mode A of the share redesign, alone: a real header Share and Copy
         // against a local continuum-relay (the same stage the native check
         // runs last but one). Needs `continuum-relay` built beside Array.

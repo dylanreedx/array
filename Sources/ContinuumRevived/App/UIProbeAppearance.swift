@@ -1028,6 +1028,8 @@ enum UIProbeAppearance {
         "KanbanCardView",
         "FileTileNSView",
         "RunArtifactsTileNSView",
+        // Someone else's shared agent (mode A): the tile chrome every tile has.
+        "SharedAgentTileNSView",
         "DiffReviewTileNSView",
         "FileTreeTileNSView",
         "CanvasNSView",
@@ -2179,7 +2181,7 @@ enum UIProbeAppearance {
     private static func runDescriptorTileFillCheck() throws -> String {
         // These kinds were introduced on tokens: no retired literal to invent.
         // Keep the historical measurements and render every current kind below.
-        let bornOnTokens: Set<TileKind> = [.kanban, .iosPreview]
+        let bornOnTokens: Set<TileKind> = [.kanban, .iosPreview, .sharedAgent]
         let covered = Set(retiredDescriptorFills.map(\.kind))
         guard covered.isDisjoint(with: bornOnTokens),
               covered.union(bornOnTokens) == Set(TileKind.allCases) else {
