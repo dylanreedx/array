@@ -308,6 +308,51 @@ extension AppDelegate {
         if changed { refreshHostedAgentMarks() }
     }
 
+    // MARK: - Migration from 0.7.37's one-agent zones
+
+    /// A 0.7.37 shared zone holding exactly one agent becomes mode A on load.
+    /// The sharer's agent stays in its own zone and this Mac keeps hosting it;
+    /// on anyone else's canvas the zone becomes one `.sharedAgent` tile in the
+    /// nearest project zone. Either way the zone leaves the document. A zone
+    /// holding anything else stays a zone until the portal tile replaces it.
+    /// Witness: `--shared-agent-migration-check`.
+    @discardableResult
+    func migrateOneAgentZone(_ session: SharedAreaZoneSession, model: CollaborationAccountController,
+                             person: SharedArea.ID<SharedArea.Person>) -> Bool {
+        guard let runtime = sharedAreaRuntime, let document = session.controller.document,
+              document.items.count == 1, let item = document.items.first, item.kind == .agentObservation,
+              let owner = item.source?.owner, let account = model.activeAccount?.id,
+              let zone = runtime.document.zones.first(where: { $0.zoneId == session.zoneId }) else { return false }
+        if owner == person {
+            // The sharer: its tile never left its project (0.7.37 lent it, and a
+            // relaunch lends it again only after this). Keep hosting it.
+            guard let tile = session.controller.sourceBindings.first(where: { $0.object == item.id })?.tileID else { return false }
+            closeSharedAreaZone(session.zoneId)
+            try? hostedAgentShares?.add(.init(account: account, area: session.areaId, tile: tile, object: item.id.rawValue))
+            startHostingSharedAgent(area: session.areaId, model: model)
+            refreshHostedAgentMarks()
+            return true
+        }
+        // Someone else's agent: one tile in the project zone nearest the old zone.
+        let centre = (x: zone.origin.x + zone.size.width / 2, y: zone.origin.y + zone.size.height / 2)
+        func distance(_ other: ZonePlacement) -> Double {
+            let dx = other.origin.x + other.size.width / 2 - centre.x, dy = other.origin.y + other.size.height / 2 - centre.y
+            return dx * dx + dy * dy
+        }
+        guard let target = runtime.document.zones.filter({ $0.projectId != nil }).min(by: { distance($0) < distance($1) }),
+              let project = target.projectId, let spawner = runtime.controller(for: project)?.tileSpawner else { return false }
+        let hostName = session.controller.memberNames[owner].map { String($0.prefix(28)) } ?? "A teammate"
+        let label = model.activeAccount?.knownAreas.first(where: { $0.id == session.areaId })?.label ?? "Shared agent"
+        let reference = SharedAgentTileReference(areaId: session.areaId, objectId: item.id.rawValue, hostName: hostName,
+                                                 hostPerson: owner.rawValue, accountId: account)
+        closeSharedAreaZone(session.zoneId)
+        guard case .success(let view) = spawner.spawnSharedAgent(reference, title: label, targetZoneId: target.zoneId) else {
+            return false
+        }
+        attachSharedAgentTile(view)
+        return true
+    }
+
     // MARK: - Guest: one tile in the armed zone
 
     /// Whether a link's area is one shared agent: exactly one item, an agent

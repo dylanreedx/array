@@ -1636,6 +1636,26 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        if CommandLine.arguments.contains("--shared-agent-migration-check") {
+            setbuf(stdout, nil)
+            setbuf(stderr, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(90))
+                fputs("FAIL: shared agent migration check exceeded its 90-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do {
+                    try await SharedAgentMigrationChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         // Mode A of the share redesign, alone: a real header Share and Copy
         // against a local continuum-relay (the same stage the native check
         // runs last but one). Needs `continuum-relay` built beside Array.

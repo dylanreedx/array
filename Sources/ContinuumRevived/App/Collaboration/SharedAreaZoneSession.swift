@@ -327,6 +327,8 @@ extension AppDelegate {
                       let session = openSharedArea(controller: controller, person: account.identity.person, area: area,
                                                    model: model, reveal: false) else { continue }
                 await session.waitUntilOpen()
+                // 0.7.37 shared one agent as a zone; it is now one tile.
+                if migrateOneAgentZone(session, model: model, person: account.identity.person) { continue }
                 relendBoundTiles(session)
             }
         }

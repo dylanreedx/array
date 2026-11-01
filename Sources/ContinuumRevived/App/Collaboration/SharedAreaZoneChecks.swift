@@ -581,6 +581,7 @@ extension SharedAreaZoneChecks {
         let account = try ShareLinkAppChecks.account(root: root.appendingPathComponent("owner"), identity: owner, authority: authority, links: links)
         _ = try await account.enroll(endpoint: endpoint, code: "scripted-owner-enrollment", deviceLabel: "Dylan's Mac", accountLabel: "Dylan")
 
+        let noteTile = UUID()
         func launch(seedAnchor anchor: ZonePlacement?) throws -> WorkspaceAPIChecks.Fixture {
             try WorkspaceAPIChecks.makeFixture(configureRuntime: { runtime in
                 // The workspace this launch opens carries the area's zone.
@@ -594,7 +595,15 @@ extension SharedAreaZoneChecks {
                 let record = delegate.qaAgentSupervisor.records.values.first(where: { $0.projectRoot == directory.appendingPathComponent("Pb").path && $0.tileId != nil })
                 guard let index = canvas.tiles.firstIndex(where: { $0.id == record?.tileId }) else { throw Failure(description: "source agent tile absent") }
                 canvas.tiles[index].kind = .managedAgent; canvas.tiles[index].title = "Map the checkout state machine"
+                // A note shared with the agent keeps this a zone: since the
+                // share redesign one agent alone shares as a tile (mode A),
+                // and a 0.7.37 one-agent zone migrates to that on load.
+                canvas.tiles.append(.init(id: noteTile, kind: .note, title: "Retry rules",
+                    frame: .init(x: canvas.tiles[index].frame.x, y: canvas.tiles[index].frame.y + canvas.tiles[index].frame.height + 40,
+                                 width: 260, height: 180), zPosition: .fromLegacyRank(5),
+                    zoneId: canvas.tiles[index].zoneId, runtimeRef: nil, metadata: .init(noteId: noteTile)))
                 try source.saveCanvas(canvas)
+                try source.saveNoteBody(id: noteTile, text: "Card declined: no retry.")
                 delegate.qaAdoptCollaborationAccount(account)
             })
         }
@@ -627,7 +636,7 @@ extension SharedAreaZoneChecks {
             == "Terminals stay private, so a terminal can't be shared. Leave it out and share the rest.",
             "a terminal in the selection is refused with the reason, not \"Sharing could not finish\"")
 
-        let share = try await delegate.createSharedZone(fromTiles: [first.agentTileB], name: "Checkout redesign")
+        let share = try await delegate.createSharedZone(fromTiles: [first.agentTileB, noteTile], name: "Checkout redesign")
         guard let object = share.objects[first.agentTileB],
               let session = delegate.qaSharedAreaZoneSessions.first(where: { $0.areaId == share.areaId && !$0.isClosed }) else {
             throw Failure(description: "the share opened no zone")
