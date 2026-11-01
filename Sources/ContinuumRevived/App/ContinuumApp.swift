@@ -1646,8 +1646,11 @@ enum ContinuumApp {
         if let index = CommandLine.arguments.firstIndex(of: "--shared-agent-render-check") {
             setbuf(stdout, nil)
             _ = NSApplication.shared
-            let directory = URL(fileURLWithPath: CommandLine.arguments.indices.contains(index + 1)
-                ? CommandLine.arguments[index + 1] : NSTemporaryDirectory() + "shared-agent-render")
+            // The matrix appends `-continuum.terminal.*` defaults after the
+            // flag; only a following non-flag argument names the folder.
+            let next = CommandLine.arguments.indices.contains(index + 1) ? CommandLine.arguments[index + 1] : nil
+            let directory = URL(fileURLWithPath: next.flatMap { $0.hasPrefix("-") ? nil : $0 }
+                ?? NSTemporaryDirectory() + "shared-agent-render")
             Task { @MainActor in
                 do { try await SharedAgentAppearance.render(to: directory); Foundation.exit(0) }
                 catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
