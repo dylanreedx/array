@@ -7057,6 +7057,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 FilmDirector.parkWindow(window, scene: scene)
             }
             #endif
+            // A driven multiplayer journey is never seen: transparent here,
+            // parked off every display once it is ordered in.
+            if MultiplayerPreview.current?.driver != nil { window.alphaValue = 0 }
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(canvasView)
             self.window = window
@@ -7109,7 +7112,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             } else if smokeTestEnabled {
                 runSmokeTest(window: window, runtime: liveControllers.flatMap(\.runtimes).first)
             } else if let preview = MultiplayerPreview.current {
-                startMultiplayerPreview(preview, window: window)
+                if preview.driver != nil { MultiplayerDriver.start(preview, delegate: self, window: window) }
+                else { startMultiplayerPreview(preview, window: window) }
             } else {
                 startDesktopCompanionSyncService()
                 presentOnboardingIfFirstRun(
@@ -12081,7 +12085,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self else { return false }
             return await signInForShareLink(model)
         }, askName: { [weak self] relay, slug in
-            await self?.askShareLinkName(relay: relay, slug: slug)
+            // A driven multiplayer journey answers with its person's name.
+            if let preview = MultiplayerPreview.current, preview.driver != nil { return preview.name }
+            return await self?.askShareLinkName(relay: relay, slug: slug)
         }, openArea: { [weak self] controller, person, area, model in
             self?.openSharedArea(controller: controller, person: person, area: area, model: model)
         }, inventory: { [weak self] selection in
@@ -12091,7 +12097,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.presentShareLinkRefusal(message)
         })
         coordinator.askSignUpName = { [weak self] relay in
-            await self?.askCollaborationName(title: "Share from Array",
+            if let preview = MultiplayerPreview.current, preview.driver != nil { return preview.name }
+            return await self?.askCollaborationName(title: "Share from Array",
                 detail: "Choose the name your teammates see. Array signs you up on \(relay); no code or password is needed.",
                 action: "Continue")
         }
@@ -12124,6 +12131,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// give person A two agents on the check fakes, have A create a shared
     /// workspace and invite B, have B accept, then open it in both windows.
     /// Progress lands in `<root>/ready.json` or `<root>/error.json`.
+    /// A multiplayer preview or journey: the Getting Started list never opens.
+    func skipGettingStartedForMultiplayer() {
+        onboardingProgressStore.update { progress in GettingStartedTask.allCases.forEach { progress.skipTask($0) } }
+        refreshGettingStartedTasks()
+    }
+
     private func startMultiplayerPreview(_ preview: MultiplayerPreview, window: NSWindow) {
         let ready = preview.rootURL.appendingPathComponent("ready.json")
         let failure = preview.rootURL.appendingPathComponent("error.json")
@@ -18632,7 +18645,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     /// Explicit provider choice belongs to this new agent, never global Settings.
     @discardableResult
-    private func spawnManagedAgentForHarness(_ harness: AgentHarness) -> Bool {
+    func spawnManagedAgentForHarness(_ harness: AgentHarness) -> Bool {
         guard resolvedCreationScope() != nil else {
             requestCreationScope { [weak self] in _ = self?.spawnManagedAgentForHarness(harness) }
             return false

@@ -30,6 +30,13 @@ struct MultiplayerPreview: Decodable, Sendable {
     let areaLabel: String
     /// "left" or "right": which half of the screen this person's windows take.
     let side: String
+    /// `scripts/check-multiplayer-journey.py`: a mailbox folder. When set, the
+    /// window is parked off every display, nothing is seeded, and the journey
+    /// witness drives this person through `MultiplayerDriver`. A driven run may
+    /// also use the staging relay; production stays refused.
+    let driver: String?
+    /// The name this person picks when Array asks (sign-up or joining a link).
+    let name: String?
 
     static let environmentKey = "CONTINUUM_MULTIPLAYER_PREVIEW"
     /// The script's bundles: `dev.arrayapp.macos.mp-a`, `dev.arrayapp.macos.mp-b`.
@@ -56,8 +63,10 @@ struct MultiplayerPreview: Decodable, Sendable {
         let config: MultiplayerPreview
         do { config = try JSONDecoder().decode(MultiplayerPreview.self, from: Data(contentsOf: URL(fileURLWithPath: path))) }
         catch { refuse("unreadable configuration \(path): \(error)") }
-        guard let url = URL(string: config.endpoint),
-              ["127.0.0.1", "localhost", "::1", "[::1]"].contains(url.host?.lowercased() ?? "") else { refuse("relay must be loopback") }
+        guard let url = URL(string: config.endpoint) else { refuse("unreadable relay") }
+        let loopback = ["127.0.0.1", "localhost", "::1", "[::1]"].contains(url.host?.lowercased() ?? "")
+        let staging = config.driver != nil && url == CollaborationServiceEndpoint.stagingURL
+        guard loopback || staging else { refuse("relay must be loopback, or staging for a driven journey") }
         guard config.root.hasPrefix("/"), config.exchange.hasPrefix("/"), ["host", "guest"].contains(config.role) else { refuse("bad root, exchange or role") }
         return config
     }()
