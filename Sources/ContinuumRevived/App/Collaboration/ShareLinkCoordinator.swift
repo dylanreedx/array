@@ -51,6 +51,15 @@ final class ShareLinkCoordinator {
 
     /// Local checks reach a loopback relay over plain http.
     var allowsInsecureLoopback = false
+    /// Where a Mac with no account signs up on first use: the channel's relay,
+    /// or `CONTINUUM_COLLABORATION_ENDPOINT`. Nil falls back to the hub.
+    var defaultEndpoint: @MainActor () -> CollaborationServiceEndpoint? = {
+        CollaborationServiceEndpoint.channelDefault(bundleIdentifier: Bundle.main.bundleIdentifier,
+                                                    environment: ProcessInfo.processInfo.environment)
+    }
+    /// Asks a first-time sender for the name teammates see: relay -> name, or
+    /// nil if they dismissed it. Production shows a sheet on the canvas window.
+    var askSignUpName: @MainActor (String) async -> String? = { _ in nil }
 
     init(account: @escaping AccountProvider, signIn: @escaping SignIn, askName: @escaping AskName, openArea: @escaping OpenArea,
          inventory: @escaping InventoryProvider, presentRefusal: @escaping @MainActor (String) -> Void) {
@@ -116,8 +125,16 @@ final class ShareLinkCoordinator {
 
     // MARK: Internals
 
+    /// The signed-in account. A Mac that has one reuses it; a Mac with none
+    /// signs up inline at the default relay with only a display name. No
+    /// operator code and no key.
     private func signedInAccount() async throws -> CollaborationAccountController {
         let model = try accountProvider()
+        if let endpoint = defaultEndpoint() {
+            guard try await model.ensureAccount(defaultEndpoint: endpoint, deviceLabel: Host.current().localizedName ?? "This Mac",
+                                                askName: askSignUpName) else { throw ShareLinkFailure.notSignedIn }
+            return model
+        }
         if model.status != .ready, let remembered = model.selectedAccountID ?? (model.accounts.count == 1 ? model.accounts.first?.id : nil) {
             _ = try? await model.select(accountID: remembered)
         }

@@ -269,7 +269,8 @@ enum ShareLinkAppChecks {
               let connect = view.subviews.compactMap({ $0 as? NSControl }).first(where: { $0.accessibilityLabel() == "Connect" }) else {
             throw Failure(message: "inline sign-in fields absent")
         }
-        guard url.stringValue.isEmpty else { return }
+        // The hub fills in the channel's relay; this Mac's relay is the fake one.
+        guard enrollment.stringValue.isEmpty else { return }
         url.stringValue = endpoint; enrollment.stringValue = code
         guard connect.isEnabled, connect.sendAction(connect.action, to: connect.target) else { throw Failure(message: "inline Connect not wired") }
     }

@@ -12032,7 +12032,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func makeShareLinkCoordinator() -> ShareLinkCoordinator {
-        ShareLinkCoordinator(account: { [unowned self] in try collaborationAccountModel() }, signIn: { [weak self] model in
+        let coordinator = ShareLinkCoordinator(account: { [unowned self] in try collaborationAccountModel() }, signIn: { [weak self] model in
             guard let self else { return false }
             return await signInForShareLink(model)
         }, askName: { [weak self] relay, slug in
@@ -12045,6 +12045,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }, presentRefusal: { [weak self] message in
             self?.presentShareLinkRefusal(message)
         })
+        coordinator.askSignUpName = { [weak self] relay in
+            await self?.askCollaborationName(title: "Share from Array",
+                detail: "Choose the name your teammates see. Array signs you up on \(relay); no code or password is needed.",
+                action: "Continue")
+        }
+        return coordinator
     }
 
     /// Inline sign-in through the hub's own Connect: a remembered device login
@@ -12072,15 +12078,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// A newcomer joining through a link only picks the name teammates see.
     /// The link's token is the enrollment; no password, code or key is asked for.
     private func askShareLinkName(relay: String, slug: String) async -> String? {
+        await askCollaborationName(title: "Join “\(slug)”", detail: "Choose the name your teammates see. You join through \(relay).", action: "Join")
+    }
+
+    /// The one name prompt for a person with no collaboration account: a sheet
+    /// on the canvas window with a single "Your name" field.
+    private func askCollaborationName(title: String, detail: String, action: String) async -> String? {
         guard let window = window ?? collaborationHub?.window, window.attachedSheet == nil else { return nil }
         let alert = NSAlert()
-        alert.messageText = "Join “\(slug)”"
-        alert.informativeText = "Choose the name your teammates see. You join through \(relay)."
+        alert.messageText = title
+        alert.informativeText = detail
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
         field.stringValue = NSFullUserName(); field.placeholderString = "Your name"
         field.setAccessibilityLabel("Your name")
         alert.accessoryView = field
-        alert.addButton(withTitle: "Join")
+        alert.addButton(withTitle: action)
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
         guard await alert.beginSheetModal(for: window) == .alertFirstButtonReturn else { return nil }

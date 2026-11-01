@@ -72,7 +72,11 @@ final class CollaborationHubView: NSView, TokenThemed {
         status.setAccessibilityLabel("Collaboration status")
         for label in [accountLabel, workspaceLabel, inviteLabel] { label.font = .token(.label) }
         configure(endpoint, placeholder: "Collaboration service URL (https://…)", accessibility: "Collaboration service URL")
-        configure(enrollment, placeholder: "One-time Array enrollment code", accessibility: "One-time Array enrollment code")
+        configure(enrollment, placeholder: "Enrollment code (leave empty to sign up)", accessibility: "One-time Array enrollment code")
+        // First use needs no setup: the channel's relay is filled in, and an
+        // empty code signs this person up there.
+        endpoint.stringValue = CollaborationServiceEndpoint.channelDefault(bundleIdentifier: Bundle.main.bundleIdentifier,
+            environment: ProcessInfo.processInfo.environment)?.canonicalString ?? ""
         configure(device, placeholder: "Device name", accessibility: "Device name"); device.stringValue = "This Mac"
         configure(workspaceValue, placeholder: "Invitation code", accessibility: "Workspace ID or invitation code")
         configure(workspaceName, placeholder: "Workspace name on this Mac", accessibility: "Local workspace name"); workspaceName.stringValue = "Shared workspace"
@@ -199,7 +203,12 @@ final class CollaborationHubView: NSView, TokenThemed {
             } else if selection == "new" {
                 guard let url = URL(string: address) else { throw CollaborationCredentialStoreError.invalidEndpoint }
                 let service = try CollaborationServiceEndpoint(url)
-                account = try await model.enroll(endpoint: service, code: code, deviceLabel: deviceLabel, accountLabel: deviceLabel)
+                if code.isEmpty {
+                    let name = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
+                    account = try await model.selfEnroll(endpoint: service, displayName: name.isEmpty ? deviceLabel : name, deviceLabel: deviceLabel)
+                } else {
+                    account = try await model.enroll(endpoint: service, code: code, deviceLabel: deviceLabel, accountLabel: deviceLabel)
+                }
                 enrollment.stringValue = ""
             } else if let selection { account = try await model.select(accountID: selection) }
             else { throw CollaborationAccountFailure.accountMissing }
@@ -268,6 +277,7 @@ final class CollaborationHubView: NSView, TokenThemed {
             case 403: return "Your account does not have permission for this action."
             case 404: return "This shared workspace is unavailable to your account."
             case 410: return "This invitation or enrollment code has expired or was already used."
+            case 429: return "Too many people signed up from this network recently. Try again later."
             default: break
             }
         }

@@ -66,25 +66,6 @@ enum ShareEntryRelayChecks {
             log = try FileHandle(forWritingTo: logURL)
         }
 
-        /// The operator's one-time enrollment code for a new person.
-        func enroll(_ label: String) throws -> String {
-            let run = Process(), out = Pipe()
-            run.executableURL = executable
-            run.arguments = ["--collaboration-enroll", label]
-            run.environment = environment
-            run.standardOutput = out
-            run.standardError = log
-            try run.run()
-            let data = out.fileHandleForReading.readDataToEndOfFile()
-            run.waitUntilExit()
-            guard run.terminationStatus == 0,
-                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let code = object["code"] as? String else {
-                throw Failure(description: "relay enrollment failed (\(run.terminationStatus))")
-            }
-            return code
-        }
-
         func start() async throws {
             process.executableURL = executable
             process.environment = environment
@@ -141,6 +122,11 @@ enum ShareEntryRelayChecks {
         }
     }
 
+    static func views<T: NSView>(_ type: T.Type, in view: NSView?) -> [T] {
+        guard let view else { return [] }
+        return ((view as? T).map { [$0] } ?? []) + view.subviews.flatMap { views(type, in: $0) }
+    }
+
     // MARK: Run
 
     static func run() async throws {
@@ -151,7 +137,6 @@ enum ShareEntryRelayChecks {
         defer { try? FileManager.default.removeItem(at: root) }
         let relay = try Relay(root: root.appendingPathComponent("relay"))
         defer { relay.stop() }
-        let code = try relay.enroll("QA Dylan")
         try await relay.start()
 
         let scene = try ShareEntryChecks.mountScene("share-entry-relay")
@@ -160,20 +145,34 @@ enum ShareEntryRelayChecks {
         let agentA = TileInsertSlideChecks.tileA, agentB = TileInsertSlideChecks.tileB
         let home = WorkspaceInvariantsFixture.zoneA1
 
-        // The sender's real collaboration account, enrolled over HTTP.
+        // The sender has NO collaboration account: no operator code, no key.
+        // The first Share signs them up at the default relay (here, the local
+        // one in place of the channel's) with only the name they type.
         let endpoint = try CollaborationServiceEndpoint(URL(string: "http://127.0.0.1:\(relay.port)")!, allowsInsecureLoopback: true)
         let account = try CollaborationAccountController(
             store: .init(applicationSupportRoot: root.appendingPathComponent("account"), bundleIdentifier: nil),
             credentialStore: .init(vault: SharedAreaCheckRig.MemoryVault(), bundleIdentifier: nil), bundleIdentifier: nil)
-        _ = try await account.enroll(endpoint: endpoint, code: code, deviceLabel: "QA Mac", accountLabel: "QA Dylan")
-        try expect(account.status == .ready, "the sender enrolls against the local relay")
+        try expect(account.accounts.isEmpty && account.status == .signedOut, "the sender starts with no collaboration account")
         app.qaAdoptCollaborationAccount(account)
+        app.qaAttachWindowForOfflineCheck(window)
+        app.shareLinks.defaultEndpoint = { endpoint }
 
         // Production services; only the pasteboard is private.
         let pasteboard = NSPasteboard(name: NSPasteboard.Name("dev.arrayapp.share-entry-relay.\(UUID().uuidString)"))
         defer { pasteboard.releaseGlobally() }
         app.qaInstallShareEntry(pasteboard: pasteboard)
         app.shareEntry.presentsOffscreenForQA = true
+        /// The production name sheet on the canvas window, answered as a
+        /// person would: type the name, press Continue.
+        var namesAsked = 0
+        func answerNameSheet(_ name: String) {
+            guard let sheet = window.attachedSheet,
+                  let field = Self.views(NSTextField.self, in: sheet.contentView).first(where: { $0.accessibilityLabel() == "Your name" }),
+                  let button = Self.views(NSButton.self, in: sheet.contentView).first(where: { $0.title == "Continue" }) else { return }
+            namesAsked += 1
+            field.stringValue = name
+            button.performClick(nil)
+        }
 
         func world(_ id: UUID) -> TileFrame? { canvas.allTilesInWorldFrames().first { $0.id == id }?.frame }
         func share(_ tile: UUID) throws -> ShareLinkPopoverView {
@@ -194,8 +193,14 @@ enum ShareEntryRelayChecks {
         let recordA = app.agentSupervisor.records[scene.agents[0]]
         let popoverA = try share(agentA)
         try ShareEntryChecks.click(popoverA.copyButton)
-        try await eventually("the first share finishes") { !popoverA.session.isWorking && (popoverA.session.phase != .draft || popoverA.session.failure != nil) }
+        try await eventually("the first share finishes") {
+            answerNameSheet("QA Dylan")
+            return !popoverA.session.isWorking && (popoverA.session.phase != .draft || popoverA.session.failure != nil)
+        }
         try expect(popoverA.session.failure == nil, "the first Copy succeeds against the relay (\(popoverA.session.failure ?? ""))")
+        try expect(namesAsked == 1 && account.status == .ready && account.activeAccount?.label == "QA Dylan"
+            && account.activeAccount?.endpoint == endpoint.canonicalString && account.accounts.count == 1,
+            "the first Share on a Mac with no account signs up at the default relay with one name sheet: no code, no key")
         guard let linkA = popoverA.session.link, let areaA = popoverA.session.area,
               let zoneA = app.sharedAreaRuntime?.sharedAreaZone(for: areaA) else {
             throw Failure(description: "share entry (relay): Copy made no link or no shared zone")
@@ -232,6 +237,7 @@ enum ShareEntryRelayChecks {
         try await eventually("the refused share settles") { !popoverB.session.isWorking && popoverB.session.failure != nil }
         try expect(popoverB.session.failure == ShareLinkFailure.slugTaken.errorDescription && popoverB.session.link == nil,
             "the relay's 409 is shown in the popover")
+        try expect(namesAsked == 1, "a Mac with an account reuses it: the second Share asks for no name")
         try expect(canvas.lentTile(agentB) == nil && canvas.tileRecord(for: agentB)?.zoneId == home
             && canvas.tileView(for: agentB) === viewB && world(agentB) == frameB,
             "the refused share puts the tile back in its home zone, same view, same frame")
