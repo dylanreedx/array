@@ -109,18 +109,55 @@ public enum AgentCharacterImports {
     /// The format reads at most this many candidate files from one folder.
     public static let maximumCandidates = 40
 
-    public static func load(id: String, in directory: URL) -> AgentCharacterTheme? {
-        guard AgentCharacterThemeParser.isThemeID(id) else { return nil }
-        let url = directory.appendingPathComponent(id, isDirectory: true).appendingPathComponent(fileName)
-        guard let data = try? Data(contentsOf: url), case let .success(theme) = AgentCharacterThemeParser.parse(data: data),
-              theme.id == id else { return nil }
-        return theme
+    /// One file in the user themes folder: its theme, or why not.
+    public struct UserThemeFile: Equatable, Sendable {
+        public let url: URL
+        public let result: Result<AgentCharacterTheme, AgentCharacterThemeProblems>
     }
 
-    /// Every imported set, by title.
+    /// Every theme file in the user themes folder, sorted by path: imported copies
+    /// (`<id>/theme.json`) and files written straight into it (`*.theme.json`),
+    /// the way an agent making a set saves one. Each is parsed; a bad one carries
+    /// its problems.
+    public static func scan(_ directory: URL) -> [UserThemeFile] {
+        let fm = FileManager.default
+        var files: [URL] = []
+        for name in ((try? fm.contentsOfDirectory(atPath: directory.path)) ?? []).sorted() where !name.hasPrefix(".") {
+            let url = directory.appendingPathComponent(name)
+            var isFolder: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isFolder) else { continue }
+            if isFolder.boolValue {
+                let copy = url.appendingPathComponent(fileName)
+                if fm.fileExists(atPath: copy.path) { files.append(copy) }
+            } else if name.hasSuffix(themeSuffix) {
+                files.append(url)
+            }
+        }
+        return files.prefix(maximumCandidates * 2).map { url in
+            guard let data = try? Data(contentsOf: url) else {
+                return UserThemeFile(url: url, result: .failure(.init(messages: ["the file could not be read"])))
+            }
+            return UserThemeFile(url: url, result: AgentCharacterThemeParser.parse(data: data))
+        }
+    }
+
+    /// The valid sets in the folder, one per id (the first file by path wins),
+    /// never the built-in id.
+    public static func themes(in scan: [UserThemeFile]) -> [AgentCharacterTheme] {
+        var seen = Set<String>([AgentCharacterBundled.themeID])
+        return scan.compactMap { file in
+            guard case let .success(theme) = file.result, seen.insert(theme.id).inserted else { return nil }
+            return theme
+        }
+    }
+
+    public static func load(id: String, in directory: URL) -> AgentCharacterTheme? {
+        themes(in: scan(directory)).first { $0.id == id }
+    }
+
+    /// Every user set, by title.
     public static func list(in directory: URL) -> [AgentCharacterTheme] {
-        let folders = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-        return folders.compactMap { load(id: $0, in: directory) }.sorted { $0.title < $1.title }
+        themes(in: scan(directory)).sorted { $0.title < $1.title }
     }
 
     public enum ImportResult: Equatable, Sendable {
@@ -169,9 +206,14 @@ public enum AgentCharacterImports {
         return candidates(inFolder: url).map { importTheme(from: $0, into: directory) }
     }
 
+    /// Remove a user set: its imported copy's folder, or the file it was written as.
     public static func remove(id: String, from directory: URL) {
         guard AgentCharacterThemeParser.isThemeID(id) else { return }
-        try? FileManager.default.removeItem(at: directory.appendingPathComponent(id, isDirectory: true))
+        for file in scan(directory) {
+            guard case let .success(theme) = file.result, theme.id == id else { continue }
+            let target = file.url.lastPathComponent == fileName ? file.url.deletingLastPathComponent() : file.url
+            try? FileManager.default.removeItem(at: target)
+        }
     }
 
     /// `<folder>/*.theme.json` and `<folder>/<sub>/duckherd-theme.json`, sorted,
@@ -226,5 +268,68 @@ public enum AgentCharacterImports {
         }
         var seen = Set<String>()
         return found.filter { seen.insert($0.standardizedFileURL.path).inserted }
+    }
+}
+
+/// The validator agents call while making a set:
+/// `Array --validate-agent-character-theme <file or folder>`. Prints one JSON
+/// report and exits 0 when every file is a valid set, 1 when any is not.
+public enum AgentCharacterValidator {
+    public static let flag = "--validate-agent-character-theme"
+
+    /// The report for `paths` (files, or folders scanned like the themes folder).
+    public static func report(paths: [String], themesFolder: URL) -> (json: String, valid: Bool) {
+        var entries: [[String: Any]] = []
+        var allValid = !paths.isEmpty
+        for path in paths {
+            let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            var isFolder: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder) else {
+                entries.append(["file": url.path, "valid": false, "problems": ["no such file"]])
+                allValid = false
+                continue
+            }
+            let files = isFolder.boolValue ? AgentCharacterImports.scan(url).map(\.url) : [url]
+            if files.isEmpty {
+                entries.append(["file": url.path, "valid": false,
+                                "problems": ["no *.theme.json or <id>/theme.json files in this folder"]])
+                allValid = false
+            }
+            for file in files {
+                let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue ?? 0
+                let result: Result<AgentCharacterTheme, AgentCharacterThemeProblems> =
+                    size > AgentCharacterThemeParser.maximumFileBytes
+                    ? .failure(.init(messages: ["the file is over 3 MB"]))
+                    : (try? Data(contentsOf: file)).map(AgentCharacterThemeParser.parse(data:))
+                        ?? .failure(.init(messages: ["the file could not be read"]))
+                switch result {
+                case let .success(theme):
+                    var problems: [String] = []
+                    if theme.id == AgentCharacterBundled.themeID {
+                        problems.append("\"id\" \(theme.id) is the built-in set's; give your set its own id")
+                    }
+                    entries.append([
+                        "file": file.path, "valid": problems.isEmpty, "id": theme.id, "title": theme.title,
+                        "scale": theme.scale, "frameSize": [theme.frameWidth, theme.frameHeight],
+                        "characters": theme.characters.map { character -> [String: Any] in
+                            let frames = AgentCharacterLoop.allCases.reduce(0) { $0 + character.frames(of: $1).count }
+                                + 2 + AgentCharacterClip.allCases.reduce(0) { $0 + (character.clips[$1]?.count ?? 0) }
+                            return ["name": character.name, "frames": frames]
+                        },
+                        "problems": problems,
+                    ])
+                    if !problems.isEmpty { allValid = false }
+                case let .failure(problems):
+                    entries.append(["file": file.path, "valid": false, "problems": problems.messages])
+                    allValid = false
+                }
+            }
+        }
+        let object: [String: Any] = [
+            "valid": allValid, "themesFolder": themesFolder.path, "files": entries,
+            "note": "Array shows a valid set from the themes folder as soon as it is saved there. Problems list at most the first 8, each saying where.",
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])) ?? Data()
+        return (String(decoding: data, as: UTF8.self), allValid)
     }
 }

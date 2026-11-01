@@ -42,6 +42,9 @@ hard rules are the same file — `CLAUDE.md` symlinks to it.
   `.plans/59-parallel-product-investigations/canvas-awareness-api-design.md`.
 - [Workspace iOS Preview control](./internals/workspace-ios-preview.md) — scoped
   device ownership, fresh images, acknowledged taps, human takeover and witnesses
+- [Making an agent character set](./internals/agent-characters-authoring.md) — the
+  theme file format, the states Array plays, the themes folder that reloads live,
+  and the validator an agent runs
 - [Performance on the canvas](./internals/performance.md) — the traps that froze
   the Markdown tile, and how to get evidence instead of theories
 - [Performance budgets](./internals/performance-budgets.md) — deterministic work

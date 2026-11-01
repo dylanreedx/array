@@ -24,6 +24,9 @@ final class AgentCharacterSettingsModel {
     private(set) var problemFile: URL?
     private(set) var message: String?
     private(set) var selectedID: String
+    /// Files in the themes folder that are not valid sets right now.
+    private(set) var folderProblems: [(file: URL, problems: [String])] = []
+    @ObservationIgnored private var folderObserver: NSObjectProtocol?
 
     /// Checks point discovery at a fixture home; production never sets it.
     nonisolated(unsafe) static var homeOverrideForChecks: URL?
@@ -35,10 +38,19 @@ final class AgentCharacterSettingsModel {
         self.home = home ?? Self.homeOverrideForChecks ?? FileManager.default.homeDirectoryForCurrentUser
         selectedID = defaults.string(forKey: AgentCharacterConfig.themeKey) ?? AgentCharacterBundled.themeID
         refresh()
+        // A set an agent adds or edits in the folder appears here live.
+        folderObserver = NotificationCenter.default.addObserver(
+            forName: AgentCharacterController.userThemesDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.refresh() } }
     }
 
     func refresh() {
-        imported = AgentCharacterImports.list(in: importsDirectory)
+        let files = AgentCharacterImports.scan(importsDirectory)
+        imported = AgentCharacterImports.themes(in: files).sorted { $0.title < $1.title }
+        folderProblems = files.compactMap { file in
+            if case let .failure(problems) = file.result { return (file.url, problems.messages) }
+            return nil
+        }
         // Lists file locations only; no theme is read until the person imports it.
         found = AgentCharacterImports.discover(home: home)
         if selectedID != AgentCharacterBundled.themeID, !imported.contains(where: { $0.id == selectedID }) {
@@ -216,6 +228,24 @@ struct AgentCharacterSettingsRows: View {
                 }
             }
             .accessibilityIdentifier("ArrayAgentCharacterProblems")
+        }
+        HStack {
+            InfoRow(text: "Agents can make and edit sets in the themes folder; changes show at once.")
+            Spacer()
+            Button("Show Folder") {
+                try? FileManager.default.createDirectory(at: model.importsDirectory, withIntermediateDirectories: true)
+                NSWorkspace.shared.activateFileViewerSelecting([model.importsDirectory])
+            }
+        }
+        ForEach(Array(model.folderProblems.enumerated()), id: \.offset) { _, entry in
+            VStack(alignment: .leading, spacing: 2) {
+                Label("\(entry.file.lastPathComponent) is not a valid set yet", systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                ForEach(Array(entry.problems.enumerated()), id: \.offset) { _, problem in
+                    Text(problem).font(.callout.monospaced()).foregroundStyle(.secondary)
+                }
+            }
         }
         if !model.found.isEmpty {
             VStack(alignment: .leading, spacing: 4) {

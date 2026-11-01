@@ -123,6 +123,7 @@ public struct AgentCharacterTheme: Equatable, Sendable {
 /// Why a file is not a theme: the first eight problems, each saying where.
 public struct AgentCharacterThemeProblems: Error, Equatable, Sendable {
     public let messages: [String]
+    public init(messages: [String]) { self.messages = messages }
 }
 
 public enum AgentCharacterThemeParser {

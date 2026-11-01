@@ -58,8 +58,32 @@ final class AgentCharacterController {
     private(set) var motion = AgentCharacterConfig.defaultMotion
     private(set) var theme: AgentCharacterTheme?
     /// Where imported sets are copied (`<app support>/characters`). Injected by checks.
+    /// The user themes folder: imported copies and the sets agents write. Watched
+    /// while characters are adopted; a change re-reads it and the canvas and the
+    /// sidebar redraw with no relaunch.
     var importsDirectory: URL = WorkspaceStore.defaultApplicationSupportDirectory()
-        .appendingPathComponent("characters", isDirectory: true)
+        .appendingPathComponent("characters", isDirectory: true) {
+        didSet { if importsDirectory != oldValue { rescanUserThemes(); if stream != nil { watchUserThemes() } } }
+    }
+    /// Posted after the user themes folder was re-read (a set added, edited,
+    /// broken or removed). Settings listens; sprites follow `didChangeNotification`.
+    static let userThemesDidChangeNotification = Notification.Name("array.agentCharacters.userThemesChanged")
+    /// Each file in the folder and what it parsed to, as of the last scan.
+    private(set) var userThemeFiles: [AgentCharacterImports.UserThemeFile] = []
+    /// Every set the folder has ever parsed in this run, by id: a file an agent is
+    /// part-way through rewriting keeps showing its last good version.
+    private var lastGoodUserThemes: [String: AgentCharacterTheme] = [:]
+    /// Files in the folder that are not valid themes right now, with their problems.
+    var userThemeProblems: [(file: URL, problems: [String])] {
+        userThemeFiles.compactMap { file in
+            if case let .failure(problems) = file.result { return (file.url, problems.messages) }
+            return nil
+        }
+    }
+    /// The user sets that show: the valid ones, plus last-good versions of broken ones.
+    var userThemes: [AgentCharacterTheme] { lastGoodUserThemes.values.sorted { $0.title < $1.title } }
+    private var stream: FSEventStreamRef?
+    private(set) var userThemeRescans = 0
     /// The system's Reduce Motion, injectable so a check can drive both branches.
     var reduceMotion: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     /// Whether a window's characters may move: on the active space, not fully
@@ -103,7 +127,67 @@ final class AgentCharacterController {
         observers.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main
         ) { _ in MainActor.assumeIsolated { AgentCharacterController.shared.reload(force: true) } })
+        rescanUserThemes()
+        watchUserThemes()
         reload(force: true)
+    }
+
+    /// Re-read the user themes folder. A set that parses replaces its last good
+    /// version; one that does not keeps it, and its file's problems are listed.
+    func rescanUserThemes() {
+        userThemeRescans += 1
+        let files = AgentCharacterImports.scan(importsDirectory)
+        var next: [String: AgentCharacterTheme] = [:]
+        var byFile: [URL: String] = [:]
+        for file in files {
+            switch file.result {
+            case let .success(theme):
+                // One set per id; the built-in id is never shadowed.
+                guard theme.id != AgentCharacterBundled.themeID, next[theme.id] == nil else { continue }
+                next[theme.id] = theme
+                byFile[file.url] = theme.id
+            case .failure:
+                // Mid-edit or broken: the set this file last parsed to keeps showing.
+                if let id = lastGoodFileIDs[file.url], next[id] == nil, let kept = lastGoodUserThemes[id] {
+                    next[id] = kept
+                    byFile[file.url] = id
+                }
+            }
+        }
+        lastGoodUserThemes = next
+        lastGoodFileIDs = byFile
+        userThemeFiles = files
+        NotificationCenter.default.post(name: Self.userThemesDidChangeNotification, object: self)
+    }
+    private var lastGoodFileIDs: [URL: String] = [:]
+
+    /// One FSEvents stream on the folder: file-level events, coalesced by the
+    /// stream for 0.2 s. Nothing runs while the folder is quiet.
+    private func watchUserThemes() {
+        if let stream {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            self.stream = nil
+        }
+        try? FileManager.default.createDirectory(at: importsDirectory, withIntermediateDirectories: true)
+        var context = FSEventStreamContext(version: 0, info: nil, retain: nil, release: nil, copyDescription: nil)
+        let callback: FSEventStreamCallback = { _, _, _, _, _, _ in
+            // Delivered on the main queue (below).
+            MainActor.assumeIsolated { AgentCharacterController.shared.userThemesChangedOnDisk() }
+        }
+        guard let created = FSEventStreamCreate(
+            nil, callback, &context, [importsDirectory.resolvingSymlinksInPath().path] as CFArray,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.2,
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)) else { return }
+        FSEventStreamSetDispatchQueue(created, .main)
+        FSEventStreamStart(created)
+        stream = created
+    }
+
+    func userThemesChangedOnDisk() {
+        rescanUserThemes()
+        reload()
     }
 
     /// Re-read the settings; post a change only when something a sprite shows changed.
@@ -113,8 +197,9 @@ final class AgentCharacterController {
         let selected = defaults.string(forKey: AgentCharacterConfig.themeKey)
         // Off means nothing resident: no theme, no atlases.
         let theme = enabled ? resolveTheme(id: selected) : nil
-        let changed = force || enabled != isEnabled || motion != self.motion || theme?.id != self.theme?.id
-        if theme?.id != self.theme?.id || theme == nil { atlases.removeAll() }
+        // A set edited in place keeps its id: compare what it draws, not its name.
+        let changed = force || enabled != isEnabled || motion != self.motion || theme != self.theme
+        if theme != self.theme || theme == nil { atlases.removeAll() }
         isEnabled = enabled
         self.motion = motion
         self.theme = theme
@@ -123,9 +208,11 @@ final class AgentCharacterController {
 
     /// The selected set: an imported one by id, else the built-in ducks.
     private func resolveTheme(id: String?) -> AgentCharacterTheme? {
-        if let id, id != AgentCharacterBundled.themeID,
-           let imported = AgentCharacterImports.load(id: id, in: importsDirectory) {
-            return imported
+        if let id, id != AgentCharacterBundled.themeID {
+            // Selected the moment it was imported: the watcher may not have
+            // reported the file yet, so read the folder now.
+            if lastGoodUserThemes[id] == nil { rescanUserThemes() }
+            if let user = lastGoodUserThemes[id] { return user }
         }
         return AgentCharacterBundled.theme()
     }

@@ -806,6 +806,19 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        // Plan 110: the character-set validator agents call. First, so it never
+        // touches the app's state, a window or a lock; prints JSON and exits.
+        if let index = CommandLine.arguments.firstIndex(of: AgentCharacterValidator.flag) {
+            let paths = Array(CommandLine.arguments.dropFirst(index + 1)).filter { !$0.hasPrefix("-") }
+            let folder = WorkspaceStore.defaultApplicationSupportDirectory().appendingPathComponent("characters", isDirectory: true)
+            guard !paths.isEmpty else {
+                fputs("usage: Array \(AgentCharacterValidator.flag) <theme file or folder> [...]\nthemes folder: \(folder.path)\n", stderr)
+                Foundation.exit(2)
+            }
+            let report = AgentCharacterValidator.report(paths: paths, themesFolder: folder)
+            print(report.json)
+            Foundation.exit(report.valid ? 0 : 1)
+        }
         // Before anything can order a window or activate: a check run never takes
         // the user's focus or screen (CheckFocusGuard).
         CheckFocusGuard.installIfQARun()
@@ -2320,6 +2333,17 @@ enum ContinuumApp {
             }
         }
 
+        // Plan 110: sets agents write into the themes folder show live; the validator.
+        if CommandLine.arguments.contains("--character-themes-live-check") {
+            _ = NSApplication.shared
+            do {
+                print(try CharacterThemesLiveChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL character themes live: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         // Plan 110, slice 8: characters on vs off at 80 tiles + 60 rows (counts gated).
         if CommandLine.arguments.contains("--character-perf-check") {
             _ = NSApplication.shared
