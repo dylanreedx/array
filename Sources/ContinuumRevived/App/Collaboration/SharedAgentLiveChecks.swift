@@ -68,7 +68,9 @@ enum SharedAgentLiveChecks {
         let id = supervisor.spawn(role: nil, prompt: nil, cwd: work, harness: harness, model: model, thinking: "low")
         let sink = SharedAgentProjectorChecks.LogSink()
         let host = SharedArea.ID<SharedArea.Host>(), object = SharedArea.ID<SharedArea.Object>()
-        let projector = try SharedAgentProjector(supervisor: supervisor, agent: id, host: host, object: object, generation: 1, sink: sink)
+        let owner = SharedArea.ID<SharedArea.Person>()
+        let projector = try SharedAgentProjector(supervisor: supervisor, agent: id, host: host, object: object, generation: 1,
+                                                 owner: owner, sink: sink)
         defer { projector.stop() }
         let prompt = "TOOL private-prompt-\(kind.rawValue)-marker"
         guard supervisor.send(prompt, to: id) else { throw Failure(description: "\(kind): send refused") }
@@ -107,8 +109,13 @@ enum SharedAgentLiveChecks {
             && sink.log?.head == head,
             "\(kind): a real turn projects its tool step and assistant text, and the delivered log equals the host head"
             + " (rows: \(head.rows.map { "\($0.kind)/\($0.status.map { "\($0)" } ?? "-")/\($0.text.prefix(40))" }), delivered equal: \(sink.log?.head == head))")
-        try expect(!bytes.contains("private-prompt") && !bytes.contains("TOOL ") && !bytes.contains("toolu_") && !bytes.contains("cmd-fake"),
-            "\(kind): the human prompt and provider item ids never cross")
+        // The owner's own prompt crosses, as theirs and exactly as typed (the
+        // decision changed in 0.7.38: teammates read every prompt, by name).
+        let promptRows = head.rows.filter { $0.kind == .prompt(owner) }
+        try expect(promptRows.map(\.text) == [prompt] && head.lastPrompt?.person == owner
+            && !bytes.contains("toolu_") && !bytes.contains("cmd-fake"),
+            "\(kind): the human prompt crosses once as the owner's, word for word; provider item ids never cross"
+            + " (prompt rows \(promptRows.map(\.text)))")
         try expect(spawns == 1, "\(kind): two attached projections and one turn started exactly one CLI process (\(spawns))")
         return sink.log ?? P.Log(snapshot: head)
     }

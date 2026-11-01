@@ -608,6 +608,8 @@ public struct AgentMessagePayload: Codable, Equatable, Sendable {
         /// The Claude app's "Background (from the session that started this
         /// one)" note, which seeds a session it starts.
         case background
+        /// A teammate's prompt on a shared agent: a person on another Mac.
+        case teammate
     }
 
     public var origin: Origin

@@ -454,11 +454,25 @@ machine. The host session owns one `SharedAgentProjector` per published local
 agent. It attaches through the supervisor's atomic `transcriptAttachment`, so
 every event after the attach is in the tail and none is in both. An allowlist
 on the host decides what crosses: assistant text, tool kind and status, turn
-boundaries, phase and bound-runner capabilities. Prompts, reasoning, tool
-titles and output, requests and their questions, usage, error text, provider
-ids and terminal control characters never do. History from before publication
-is excluded unless the owner chooses assistant output, and only assistant
-cards qualify.
+boundaries, phase, bound-runner capabilities and every prompt that starts a
+turn, as its sender and the words they typed (0.7.38). A prompt row is fired
+from the supervisor's one send seam, so the owner's own prompts and teammates'
+cross alike; the "From …" attribution, shared context, reference envelopes and
+local paths do not, and another agent's message crosses only as "who sent the
+last prompt". Reasoning, tool titles and output, requests and their questions,
+usage, error text, provider ids and terminal control characters never cross.
+History from before publication is excluded unless the owner chooses assistant
+output, and only assistant cards qualify.
+
+Prompt rows are newer than the 0.7.37 relay and app: teammates see prompts
+only once the relay is redeployed, and deploying it first costs nothing. A reader that does not ask for prompts (`ReadRequest.prompts`, absent in
+0.7.37) is served the same positions with each prompt as `.prompted` and no
+prompt row. A host whose relay refuses a batch carrying prompts (400
+`invalidRequest`, a 0.7.37 relay's decoder) resends it that way and keeps doing
+so for that projection, so nothing stalls behind a frame the relay cannot read.
+On the owner's Mac a teammate's prompt draws as their named card
+(`AgentMessagePayload.Origin.teammate`), live and on restore, read back from
+the attribution the agent was given.
 
 Every frame carries host, object, a host generation persisted per object and a
 sequence. The host, the service and each viewer apply the same reducer
@@ -468,8 +482,8 @@ the retained 512 frames gets an explicit resnapshot, never a guess. The service
 refuses a stale generation's frames. Only the device that publishes the
 observation, as its owner, may write. Any current member may read.
 Unpublishing deletes the stored projection, and backups authenticate it.
-Bounds (32 rows, 3 KiB per row, 1 KiB deltas) keep a full snapshot under the
-256 KiB request limit.
+Bounds (32 rows, 3 KiB per row, 1 KiB deltas, at most 16 prompt frames per
+batch) keep a full snapshot and a full batch under the 256 KiB request limit.
 
 Controls are read from the bound runner (`turnSnapshot`), never from the
 harness. Interrupt is advertised only with a bound steering runner, and
@@ -483,7 +497,9 @@ unmount, and turns into last-confirmed history when the area reports the host
 offline. Witnesses: the projection sections of the service checks (portable
 and HTTP A/B/C) and the "live agent projections" stage of
 `--collaboration-native-check`, which drives the real supervisor and the three
-fake CLIs and mounts the scene through the production entry.
+fake CLIs and mounts the scene through the production entry, and
+`--collaboration-full-access-check`, which shows every prompt in the owner's
+tile and both teammates' views under its sender's name.
 
 ## Hover usage accounting
 

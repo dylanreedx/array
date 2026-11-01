@@ -18,8 +18,10 @@ enum CollaborationAgentProjectionRoutes {
             return .json(.ok, Collaboration.ErrorBody(code: "observed"))
         }
         if p.count == 8, p[7] == "read" {
-            let cursor = try decoder.decode(Collaboration.AgentProjection.ReadRequest.self, from: body).cursor
-            return .json(.ok, try await store.readAgentProjection(token: token, area: area, object: .init(object), cursor: cursor))
+            let request = try decoder.decode(Collaboration.AgentProjection.ReadRequest.self, from: body)
+            // 0.7.37 readers send no `prompts` and cannot decode a prompt row.
+            return .json(.ok, try await store.readAgentProjection(token: token, area: area, object: .init(object),
+                                                                  cursor: request.cursor, includingPrompts: request.prompts == true))
         }
         return nil
     }

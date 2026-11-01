@@ -173,6 +173,7 @@ final class AgentMessageCardView: NSView {
         case .array: return "Message"
         case .crossSession, .peer: return "Claude session"
         case .background: return "Background"
+        case .teammate: return "Teammate"
         }
     }
 

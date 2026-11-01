@@ -17,6 +17,9 @@ enum SharedAgentProjectionRefusal: Error, Equatable {
     case resnapshotRequired
     /// A newer generation of this projection exists; this session is dead.
     case superseded
+    /// The receiver could not read the batch at all. A 0.7.37 relay answers a
+    /// prompt row this way: it predates them.
+    case unreadable
 }
 
 /// Host side of a published agent: bridges the supervisor's atomic
@@ -52,6 +55,11 @@ final class SharedAgentProjector {
     private var needsSnapshot = true
     private var tailTask: Task<Void, Never>?
     private var capabilityObserver: UUID?
+    private var promptObserver: UUID?
+    /// False once the receiver has refused a batch carrying prompt rows: from
+    /// then on each prompt is delivered as `.prompted` (who and when) at the
+    /// same position, which every relay reads. The host's own log keeps them.
+    private(set) var publishesPrompts = true
     private var flushing: Task<Void, Never>?
     private var assistantRow: [String: String] = [:]
     private var segment: [String: Int] = [:]
@@ -89,12 +97,18 @@ final class SharedAgentProjector {
             guard let self, id == self.agent else { return }
             self.refreshState()
         }
+        promptObserver = supervisor.addPromptStartObserver { [weak self] started in
+            guard let self, started.agent == self.agent else { return }
+            self.receive(started)
+        }
     }
 
     func stop() {
         tailTask?.cancel(); tailTask = nil
         if let capabilityObserver { supervisor.removeTurnCapabilitiesObserver(capabilityObserver) }
         capabilityObserver = nil
+        if let promptObserver { supervisor.removePromptStartObserver(promptObserver) }
+        promptObserver = nil
     }
 
     /// Delivers everything pending, oldest first. A failed delivery keeps the
@@ -105,9 +119,10 @@ final class SharedAgentProjector {
             guard let self else { return }
             while needsSnapshot || !outbox.isEmpty {
                 let snapshot = needsSnapshot ? log.head : nil
-                let frames = snapshot == nil ? Array(outbox.prefix(Projection.maxBatchFrames)) : []
+                let frames = snapshot == nil ? Self.nextBatch(outbox) : []
+                let batch = Projection.Batch(snapshot: snapshot, frames: frames)
                 do {
-                    try await sink.publish(.init(snapshot: snapshot, frames: frames))
+                    try await sink.publish(publishesPrompts ? batch : batch.withoutPrompts)
                     deliveredBatches += 1; lastError = nil
                     if snapshot != nil {
                         needsSnapshot = false
@@ -119,6 +134,12 @@ final class SharedAgentProjector {
                     // Frames the receiver cannot place are replaced by state.
                     lastError = SharedAgentProjectionRefusal.resnapshotRequired
                     needsSnapshot = true
+                } catch SharedAgentProjectionRefusal.unreadable where publishesPrompts && batch.carriesPrompts {
+                    // A relay older than prompt rows. Resend the same positions
+                    // as it can read them, rather than stall every later frame
+                    // behind one it never will.
+                    lastError = SharedAgentProjectionRefusal.unreadable
+                    publishesPrompts = false
                 } catch SharedAgentProjectionRefusal.superseded {
                     lastError = SharedAgentProjectionRefusal.superseded
                     superseded = true; stop(); outbox.removeAll(); needsSnapshot = false
@@ -134,7 +155,37 @@ final class SharedAgentProjector {
         flushing = nil
     }
 
+    /// The oldest pending frames that fit one request: at most
+    /// `maxBatchFrames`, of which at most `maxBatchPromptFrames` are prompts.
+    static func nextBatch(_ outbox: [Projection.Frame]) -> [Projection.Frame] {
+        var batch: [Projection.Frame] = [], prompts = 0
+        for frame in outbox.prefix(Projection.maxBatchFrames) {
+            if frame.isPrompt {
+                guard prompts < Projection.maxBatchPromptFrames else { break }
+                prompts += 1
+            }
+            batch.append(frame)
+        }
+        return batch
+    }
+
     // MARK: - Allowlist
+
+    /// A prompt that started a turn: who sent it and the words they typed.
+    /// The owner's own prompts are theirs; another agent's message has no
+    /// text here and stays a bare "last prompt" fact.
+    private func receive(_ started: AgentSupervisor.StartedPrompt) {
+        guard let text = started.text, let person = started.author.requester ?? owner else { return }
+        var bounded = "", truncated = false, budget = Projection.maxRowTextBytes
+        for character in Projection.sanitize(text) {
+            let size = String(character).utf8.count
+            guard size <= budget else { truncated = true; break }
+            bounded.append(character); budget -= size
+        }
+        guard !bounded.isEmpty else { return }
+        emit(.prompt(row: digest("prompt:\(UUID().uuidString)"), prompt: .init(person: person, at: started.author.at),
+                     text: bounded, truncated: truncated))
+    }
 
     private func receive(_ event: AgentRuntimeEvent) {
         let thread = AgentSupervisor.threadId(for: agent)
@@ -183,8 +234,8 @@ final class SharedAgentProjector {
         if let prompt = Self.lastPrompt(supervisor, agent, owner: owner), prompt != log.head.lastPrompt { emit(.prompted(prompt)) }
     }
 
-    /// Who started the agent's last prompt. A person's id and a time cross;
-    /// the prompt itself never does.
+    /// Who started the agent's last prompt: a person's id and a time. The
+    /// words cross separately, as a prompt row (`receive(_: StartedPrompt)`).
     static func lastPrompt(_ supervisor: AgentSupervisor, _ agent: AgentID,
                            owner: SharedArea.ID<SharedArea.Person>?) -> Projection.LastPrompt? {
         guard let author = supervisor.lastPromptAuthors[agent], let person = author.requester ?? owner else { return nil }

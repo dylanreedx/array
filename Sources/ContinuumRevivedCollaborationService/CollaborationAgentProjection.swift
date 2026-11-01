@@ -59,9 +59,12 @@ extension CollaborationStore {
 
     /// Any current member may read a projection that the area still publishes
     /// from that host. A cursor outside the retained window, or from another
-    /// generation, gets an explicit resnapshot.
+    /// generation, gets an explicit resnapshot. A reader that predates prompt
+    /// rows (`includingPrompts` false) gets the same positions without them,
+    /// which it can decode.
     public func readAgentProjection(token: String, area: UUID, object: SharedArea.ID<SharedArea.Object>,
-                                    cursor: Collaboration.AgentProjection.Cursor?) throws -> Collaboration.AgentProjection.Read {
+                                    cursor: Collaboration.AgentProjection.Cursor?,
+                                    includingPrompts: Bool = true) throws -> Collaboration.AgentProjection.Read {
         try database.read { db in
             let identity = try authenticate(db, token), access = try scope(db, identity, area)
             guard access.allows(.view) else { throw CollaborationStoreError.forbidden }
@@ -71,7 +74,8 @@ extension CollaborationStore {
                   let row = try Row.fetchOne(db, sql: "SELECT host,payload FROM collaboration_agent_projection WHERE area=? AND object=?",
                                              arguments: [area.uuidString, object.rawValue.uuidString]),
                   (row["host"] as String) == source.host.rawValue.uuidString else { throw CollaborationStoreError.unavailable }
-            return try unseal(Collaboration.AgentProjection.Log.self, row["payload"]).read(after: cursor)
+            let read = try unseal(Collaboration.AgentProjection.Log.self, row["payload"]).read(after: cursor)
+            return includingPrompts ? read : read.withoutPrompts
         }
     }
 

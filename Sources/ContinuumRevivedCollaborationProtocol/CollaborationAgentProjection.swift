@@ -4,8 +4,10 @@ extension Collaboration {
     /// A teammate's read-only view of one published agent. The execution host
     /// projects its supervisor's semantic transcript through an allowlist; the
     /// recipient never constructs a runner from it. Every field here is a
-    /// deliberate publication: provider item ids, titles, prompts, reasoning,
-    /// command output, error text, usage and paths have no field to travel in.
+    /// deliberate publication: provider item ids, titles, reasoning, command
+    /// output, error text, usage and paths have no field to travel in. A prompt
+    /// crosses as its sender and the words they typed, never the attribution
+    /// envelope or shared context the host wrapped around them.
     public enum AgentProjection {
         public static let schema = 1
         /// Sized so a whole snapshot, JSON-escaped, stays inside the service's
@@ -14,6 +16,9 @@ extension Collaboration {
         public static let maxRowTextBytes = 3 * 1024
         public static let maxDeltaBytes = 1024
         public static let maxBatchFrames = 64
+        /// A prompt frame may carry a whole row; this many of them plus the
+        /// rest of a batch of deltas stays inside the same 256 KiB.
+        public static let maxBatchPromptFrames = 16
         public static let retainedFrames = 512
 
         /// What the owner chose to include from before publication. Excluded is
@@ -73,6 +78,8 @@ extension Collaboration {
         public enum RowKind: Codable, Equatable, Sendable {
             case assistant
             case tool(ToolKind)
+            /// A prompt that started a turn, from this person.
+            case prompt(SharedArea.ID<SharedArea.Person>)
         }
         public struct Row: Codable, Equatable, Sendable {
             /// Opaque: a digest of the host generation and provider identity.
@@ -109,6 +116,11 @@ extension Collaboration {
             case assistantText(row: String, turn: String, delta: String)
             case tool(row: String, turn: String?, kind: ToolKind, status: ToolStatus)
             case prompted(LastPrompt)
+            /// A prompt that started a turn: who sent it, when, and what they
+            /// typed (sanitized, at most `maxRowTextBytes`). Also sets
+            /// `lastPrompt`, so a reader that cannot show prompts (`withoutPrompts`)
+            /// reads it as `.prompted` at the same sequence.
+            case prompt(row: String, prompt: LastPrompt, text: String, truncated: Bool)
         }
 
         /// One sequenced tail event. `(host, object, generation, sequence)` is its
@@ -124,6 +136,12 @@ extension Collaboration {
                         generation: UInt64, sequence: UInt64, payload: Payload) {
                 self.host = host; self.object = object; self.generation = generation; self.sequence = sequence; self.payload = payload
             }
+            /// The same frame for a reader that predates prompt rows.
+            public var withoutPrompt: Frame {
+                guard case let .prompt(_, prompt, _, _) = payload else { return self }
+                return Frame(host: host, object: object, generation: generation, sequence: sequence, payload: .prompted(prompt))
+            }
+            public var isPrompt: Bool { if case .prompt = payload { return true }; return false }
         }
 
         public enum ApplyError: Error, Equatable, Sendable {
@@ -181,6 +199,10 @@ extension Collaboration {
                 case .phase(let value): phase = value
                 case .capabilities(let value): capabilities = value
                 case .prompted(let value): lastPrompt = value
+                case let .prompt(id, prompt, text, truncated):
+                    guard !rows.contains(where: { $0.id == id }) else { throw .invalid }
+                    lastPrompt = prompt
+                    insert(Row(id: id, turn: nil, kind: .prompt(prompt.person), text: text, truncated: truncated, sequence: frame.sequence))
                 case .turnStarted: phase = .working
                 case .turnCompleted(_, let outcome): phase = outcome == .failed ? .failed : .ready
                 case let .assistantText(id, turn, delta):
@@ -205,6 +227,15 @@ extension Collaboration {
                 through = frame.sequence
                 return true
             }
+
+            /// This state for a reader that predates prompt rows: the same
+            /// position, without them. `lastPrompt` stays.
+            public var withoutPrompts: Snapshot {
+                var copy = self
+                copy.rows.removeAll { if case .prompt = $0.kind { return true }; return false }
+                return copy
+            }
+            public var hasPromptRows: Bool { rows.contains { if case .prompt = $0.kind { return true }; return false } }
 
             private mutating func insert(_ row: Row) {
                 rows.append(row)
@@ -245,6 +276,8 @@ extension Collaboration {
                 return row.utf8.count <= 64 && (turn?.utf8.count ?? 0) <= 64
             case let .turnStarted(turn), let .turnCompleted(turn, _):
                 return turn.utf8.count <= 64
+            case let .prompt(row, _, text, _):
+                return row.utf8.count <= 64 && !text.isEmpty && text.utf8.count <= maxRowTextBytes && sanitize(text) == text
             case .phase, .capabilities, .prompted:
                 return true
             }
@@ -256,6 +289,9 @@ extension Collaboration {
             public let snapshot: Snapshot?
             public let frames: [Frame]
             public init(snapshot: Snapshot?, frames: [Frame]) { self.snapshot = snapshot; self.frames = frames }
+            /// For a service that predates prompt rows and refuses to decode them.
+            public var withoutPrompts: Batch { Batch(snapshot: snapshot?.withoutPrompts, frames: frames.map(\.withoutPrompt)) }
+            public var carriesPrompts: Bool { snapshot?.hasPromptRows == true || frames.contains(where: \.isPrompt) }
         }
         public struct PublishReport: Codable, Sendable {
             public let epoch: Int64
@@ -269,10 +305,21 @@ extension Collaboration {
             /// Late join, stale/newer generation, or a cursor older than retention:
             /// start over from this state. Never a silent skip over a gap.
             case resnapshot(Snapshot)
+            /// For a reader that predates prompt rows: the same positions, each
+            /// prompt as `.prompted` (who and when) and no prompt rows.
+            public var withoutPrompts: Read {
+                switch self {
+                case let .frames(generation, frames, more): return .frames(generation: generation, frames: frames.map(\.withoutPrompt), more: more)
+                case .resnapshot(let snapshot): return .resnapshot(snapshot.withoutPrompts)
+                }
+            }
         }
         public struct ReadRequest: Codable, Sendable {
             public let cursor: Cursor?
-            public init(cursor: Cursor?) { self.cursor = cursor }
+            /// The reader can decode prompt rows. Absent from readers before
+            /// them (0.7.37), which the service answers `withoutPrompts`.
+            public let prompts: Bool?
+            public init(cursor: Cursor?, prompts: Bool? = true) { self.cursor = cursor; self.prompts = prompts }
         }
         public struct Cursor: Codable, Equatable, Sendable {
             public let generation: UInt64

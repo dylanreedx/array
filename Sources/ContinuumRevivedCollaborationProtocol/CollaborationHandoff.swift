@@ -100,6 +100,18 @@ extension Collaboration {
             guard let context else { return "\(attribution)\n\n---\n\(text)" }
             return "Shared context revision \(context.id.rawValue.uuidString)\n\(attribution)\n\n\(context.text)\n\n---\n\(text)"
         }
+        /// `promptText` with no context, read back for a transcript: the name
+        /// it was sent under and what that person typed. Nil for anything else,
+        /// including the context form, whose context and typed text cannot be
+        /// told apart when either holds the separator.
+        public static func attributedPrompt(_ promptText: String) -> (name: String, text: String)? {
+            guard promptText.hasPrefix("From "), let separator = promptText.range(of: "\n\n---\n") else { return nil }
+            let name = promptText[promptText.index(promptText.startIndex, offsetBy: 5)..<separator.lowerBound]
+            let text = promptText[separator.upperBound...]
+            guard !name.isEmpty, !name.contains(where: \.isNewline),
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return (String(name), String(text))
+        }
     }
     public struct AgentDispatchReceipt: Codable, Equatable, Sendable {
         public let command: AgentDispatchCommand

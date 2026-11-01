@@ -32,10 +32,11 @@ final class SharedAgentLiveView: NSView {
     /// Sends this view's prompts. Nil means no route to a host from here, and
     /// then no composer is offered.
     var prompter: SharedAgentHandoffController? { didSet { render() } }
-    /// A participant's display name, for "Sam sent the last prompt" and
-    /// "Waiting for Dylan to approve": the label their presence carries.
+    /// A participant's display name, for "Sam sent the last prompt", "Sam: …"
+    /// and "Waiting for Dylan to approve": the label their presence carries,
+    /// else the name the area records for them (a prompt outlives presence).
     lazy var personName: (SharedArea.ID<SharedArea.Person>) -> String? = { [weak controller] person in
-        controller?.presence.first { $0.identity.person == person }?.label
+        controller?.presence.first { $0.identity.person == person }?.label ?? controller?.memberNames[person]
     }
 
     var statusText: String { status.stringValue }
@@ -254,7 +255,7 @@ final class SharedAgentLiveView: NSView {
         // Full access: anyone who may prompt gets the composer, busy or not. A
         // prompt sent mid-turn waits on the host, in order, and is never dropped.
         setComposer(offered: prompter != nil && !offline && controls.queue, sending: sending)
-        let text = Self.transcriptText(state)
+        let text = Self.transcriptText(state, viewer: controller.identity.person, name: name)
         if transcript.string != text {
             let pinned = scroll.verticalScroller.map { $0.floatValue >= 0.99 } ?? true
             transcript.string = text
@@ -291,7 +292,10 @@ final class SharedAgentLiveView: NSView {
         if send.presentation != presentation { send.presentation = presentation }
     }
 
-    static func transcriptText(_ state: Projection.Snapshot) -> String {
+    /// Prompts read "You: …" for the viewer's own and "<Name>: …" for anyone
+    /// else's, the owner's included.
+    static func transcriptText(_ state: Projection.Snapshot, viewer: SharedArea.ID<SharedArea.Person>,
+                               name: (SharedArea.ID<SharedArea.Person>) -> String?) -> String {
         var lines: [String] = []
         if state.omittedRows > 0 { lines.append("\(state.omittedRows) earlier entries are not shown.") }
         if state.history == .excluded && state.rows.isEmpty { lines.append("History from before it was shared is not included.") }
@@ -299,6 +303,9 @@ final class SharedAgentLiveView: NSView {
             switch row.kind {
             case .assistant: lines.append(row.text + (row.truncated ? " …" : ""))
             case .tool(let kind): lines.append("• \(tool(kind)) · \(row.status.map(status) ?? "running")")
+            case .prompt(let person):
+                let sender = person == viewer ? "You" : name(person) ?? "A teammate"
+                lines.append("\(sender): " + row.text + (row.truncated ? " …" : ""))
             }
         }
         return lines.joined(separator: "\n\n")

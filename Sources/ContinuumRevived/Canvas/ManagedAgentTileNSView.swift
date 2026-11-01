@@ -5136,6 +5136,14 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     var qaTranscriptText: String {
         model.cards.map { "[\($0.title)] \($0.body)" }.joined(separator: "\n")
     }
+    /// Every turn drawn as FROM someone else (an agent or a teammate), as
+    /// "<sender>: <text>".
+    var qaSenderCards: [String] {
+        model.document.entries.flatMap(\.blocks).compactMap { block in
+            guard case let .agentMessage(payload) = block.payload else { return nil }
+            return "\(payload.senderName): \(payload.text)"
+        }
+    }
     var qaLastAssistantCardBody: String? {
         model.cards.last { $0.title == "assistant" }?.body
     }

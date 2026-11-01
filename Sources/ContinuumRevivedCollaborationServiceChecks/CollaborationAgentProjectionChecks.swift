@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedCollaborationClient
 import ContinuumRevivedCollaborationService
@@ -150,6 +153,37 @@ private func runProjectionContractChecks() throws {
     try projectionCheck(escape == nil && P.sanitize("\u{1B}[31mred\u{7}\n") == "[31mred\n",
         "terminal control characters are refused on the wire and stripped by the host sanitizer")
 
+    // Prompt rows: bounded, sanitized, and a worst-case batch still fits.
+    let person = SharedArea.ID<SharedArea.Person>(), at = Date(timeIntervalSince1970: 1_800_000_000)
+    func promptFrame(_ sequence: UInt64, _ text: String, row: String? = nil) -> P.Frame {
+        .init(host: host, object: object, generation: 3, sequence: sequence,
+              payload: .prompt(row: row ?? "p\(sequence)", prompt: .init(person: person, at: at), text: text, truncated: false))
+    }
+    var prompts = bounded
+    let tooLong = try? prompts.apply(promptFrame(sequence + 1, String(repeating: "a", count: P.maxRowTextBytes + 1)))
+    let controls = try? prompts.apply(promptFrame(sequence + 1, "\u{1B}[31mred"))
+    let empty = try? prompts.apply(promptFrame(sequence + 1, ""))
+    try prompts.apply(promptFrame(sequence + 1, "Fix the tests"))
+    let reused = try? prompts.apply(promptFrame(sequence + 2, "again", row: "p\(sequence + 1)"))
+    try projectionCheck(tooLong == nil && controls == nil && empty == nil && reused == nil && prompts.valid
+        && prompts.rows.last?.kind == .prompt(person) && prompts.rows.last?.text == "Fix the tests" && prompts.lastPrompt?.person == person
+        && prompts.withoutPrompts.rows.count == prompts.rows.count - 1 && prompts.withoutPrompts.valid,
+        "a prompt row is refused over \(P.maxRowTextBytes) bytes, with control characters, empty or reusing a row; a valid one names its sender")
+    let heavyPrompt = String(repeating: "\"/\\\n", count: P.maxRowTextBytes / 4)
+    var worst: [P.Frame] = []
+    for index in 0..<P.maxBatchFrames {
+        let row = String(format: "%064d", index), sequence = UInt64(index + 1)
+        if index < P.maxBatchPromptFrames {
+            worst.append(promptFrame(sequence, heavyPrompt, row: row))
+        } else {
+            let delta = P.Payload.assistantText(row: row, turn: String(repeating: "t", count: 64), delta: heavy)
+            worst.append(P.Frame(host: host, object: object, generation: 3, sequence: sequence, payload: delta))
+        }
+    }
+    let worstBatch = try JSONEncoder().encode(P.PublishReport(epoch: 1, batch: .init(snapshot: nil, frames: worst)))
+    try projectionCheck(worstBatch.count < 262_144,
+        "a worst-case batch of \(P.maxBatchPromptFrames) full prompt rows and escaped deltas is \(worstBatch.count) bytes, under 256 KiB")
+
     // Controls: only routed actions, for any member who may prompt (full access).
     let wire = try JSONDecoder().decode(P.Capabilities.self,
         from: Data(#"{"locallyManaged":false,"canSend":true,"canQueue":true,"canSteer":true,"canInterrupt":true}"#.utf8))
@@ -214,13 +248,73 @@ private func runProjectionHTTPChecks() async throws {
         _ = replica.receive(tail)
         try projectionCheck(replica.state?.phase == .ready && replica.state?.through == 3, "B's cursor read returns exactly the new tail frame")
 
+        // A prompt crosses as its sender and the words they typed (0.7.38).
+        let asked = P.LastPrompt(person: b.identity.person, at: Date(timeIntervalSince1970: 1_800_000_000))
+        try await aa.publishAgentProjection(area: area, object: object.rawValue, report: .init(epoch: 1,
+            batch: .init(snapshot: nil, frames: [frame(1, 4, .prompt(row: "p1", prompt: asked, text: "Summarise the diff, please", truncated: false))])))
+        let prompted = try await bb.readAgentProjection(area: area, object: object.rawValue, cursor: replica.cursor)
+        guard case .frames(1, let promptFrames, false) = prompted, promptFrames.map(\.sequence) == [4] else {
+            throw ProjectionCheckFailure(message: "the prompt frame did not read back as the one new frame")
+        }
+        _ = replica.receive(prompted)
+        try projectionCheck(replica.state?.rows.last == P.Row(id: "p1", turn: nil, kind: .prompt(b.identity.person), text: "Summarise the diff, please", sequence: 4)
+            && replica.state?.lastPrompt == asked && replica.state?.through == 4,
+            "a published prompt reads back over HTTP as a prompt row naming its sender, and sets who sent the last prompt")
+        // A 0.7.37 reader sends no `prompts`: the same positions, with each
+        // prompt as `.prompted` and no prompt row, so its decoder never meets one.
+        func legacyRead(_ cursor: P.Cursor?) async throws -> (Data, P.Read) {
+            var request = URLRequest(url: endpoint.appendingPathComponent("collaboration/v1/areas/\(area)/agents/\(object.rawValue)/projection/read"))
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(b.token)", forHTTPHeaderField: "authorization")
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            request.httpBody = try JSONEncoder().encode(["cursor": cursor])
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ProjectionCheckFailure(message: "legacy read refused") }
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            return (data, try decoder.decode(P.Read.self, from: data))
+        }
+        let (legacyTailBytes, legacyTail) = try await legacyRead(.init(generation: 1, through: 3))
+        let (legacyJoinBytes, legacyJoin) = try await legacyRead(nil)
+        let legacyBytes = String(decoding: legacyTailBytes + legacyJoinBytes, as: UTF8.self)
+        guard case .frames(1, let legacyFrames, false) = legacyTail, case .resnapshot(let legacyHead) = legacyJoin else {
+            throw ProjectionCheckFailure(message: "legacy reads changed shape")
+        }
+        try projectionCheck(legacyFrames.map(\.payload) == [.prompted(asked)] && legacyFrames.map(\.sequence) == [4]
+            && legacyHead.through == 4 && legacyHead.lastPrompt == asked && !legacyHead.hasPromptRows && legacyHead.valid
+            && !legacyBytes.contains("\"prompt\"") && !legacyBytes.contains("Summarise"),
+            "a 0.7.37 reader gets the prompt as \"who and when\" at the same sequence, with no prompt row or text it cannot decode")
+        // What a relay answers a payload its decoder has no case for (a 0.7.37
+        // relay meeting a prompt): 400 invalidRequest, which the host's sink
+        // reads as `.unreadable`. Nothing is stored.
+        var future = URLRequest(url: endpoint.appendingPathComponent("collaboration/v1/areas/\(area)/agents/\(object.rawValue)/projection"))
+        future.httpMethod = "POST"
+        future.setValue("Bearer \(a.token)", forHTTPHeaderField: "authorization")
+        future.setValue("application/json", forHTTPHeaderField: "content-type")
+        let valid = String(decoding: try JSONEncoder().encode(P.PublishReport(epoch: 1,
+            batch: .init(snapshot: nil, frames: [frame(1, 5, .phase(.working))]))), as: UTF8.self)
+        let unknown = valid.replacingOccurrences(of: #"{"phase":{"_0":"working"}}"#, with: #"{"futureCase":{"row":"f"}}"#)
+        guard unknown != valid else { throw ProjectionCheckFailure(message: "could not substitute an unknown payload case into \(valid)") }
+        future.httpBody = Data(unknown.utf8)
+        let (futureBody, futureResponse) = try await URLSession.shared.data(for: future)
+        let futureCode = try? JSONDecoder().decode(Collaboration.ErrorBody.self, from: futureBody).code
+        try projectionCheck((futureResponse as? HTTPURLResponse)?.statusCode == 400 && futureCode == "invalidRequest",
+            "a relay refuses a payload case it cannot decode with 400 invalidRequest (got \((futureResponse as? HTTPURLResponse)?.statusCode ?? 0) \(futureCode ?? "-"))")
+        // A 0.7.37 relay cannot decode a prompt; the host resends the same
+        // positions without them, which this relay (and that one) accepts.
+        let stripped = P.Batch(snapshot: nil, frames: [frame(1, 5, .prompt(row: "p2", prompt: asked, text: "Again", truncated: false))]).withoutPrompts
+        try await aa.publishAgentProjection(area: area, object: object.rawValue, report: .init(epoch: 1, batch: stripped))
+        let afterStripped = try await bb.readAgentProjection(area: area, object: object.rawValue, cursor: replica.cursor)
+        _ = replica.receive(afterStripped)
+        try projectionCheck(!stripped.carriesPrompts && replica.state?.through == 5 && replica.state?.rows.last?.id == "p1",
+            "a prompt delivered without its row keeps the sequence contiguous and adds no row")
+
         try await projectionRefuses(409, "a host gap is refused rather than stored as continuity") {
             try await aa.publishAgentProjection(area: area, object: object.rawValue, report: .init(epoch: 1,
-                batch: .init(snapshot: nil, frames: [frame(1, 5, .phase(.failed))])))
+                batch: .init(snapshot: nil, frames: [frame(1, 7, .phase(.failed))])))
         }
         try await projectionRefuses(403, "teammate B cannot forge frames for A's host") {
             try await bb.publishAgentProjection(area: area, object: object.rawValue, report: .init(epoch: 1,
-                batch: .init(snapshot: nil, frames: [frame(1, 4, .phase(.failed))])))
+                batch: .init(snapshot: nil, frames: [frame(1, 6, .phase(.failed))])))
         }
         try await projectionRefuses(403, "B's own registered host cannot publish A's observation") {
             let forged = P.Snapshot(host: otherHost.id, object: object, generation: 9, history: .excluded, phase: .failed, capabilities: .none)
@@ -239,7 +333,7 @@ private func runProjectionHTTPChecks() async throws {
         try await aa.publishAgentProjection(area: area, object: object.rawValue, report: .init(epoch: 1, batch: .init(snapshot: relaunched, frames: [])))
         try await projectionRefuses(409, "a stale host generation's late frame is refused after relaunch") {
             try await aa.publishAgentProjection(area: area, object: object.rawValue, report: .init(epoch: 1,
-                batch: .init(snapshot: nil, frames: [frame(1, 4, .phase(.failed))])))
+                batch: .init(snapshot: nil, frames: [frame(1, 6, .phase(.failed))])))
         }
         let after = try await bb.readAgentProjection(area: area, object: object.rawValue, cursor: replica.cursor)
         guard case .resnapshot(let current) = after, current.generation == 2, current.rows.isEmpty else {

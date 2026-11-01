@@ -28,6 +28,17 @@ import ContinuumRevivedCollaborationProtocol
 /// opened at the supervisor's own event seam on the live runner's turn.
 @MainActor
 enum SharedAgentFullAccessChecks {
+    /// A 0.7.37 relay: its decoder has no prompt case, so a batch carrying one
+    /// is refused whole; everything else is the service log.
+    final class LegacyRelaySink: SharedAgentProjectionSink {
+        let inner = SharedAgentProjectorChecks.LogSink()
+        private(set) var refused = 0
+        func publish(_ batch: Collaboration.AgentProjection.Batch) async throws {
+            if batch.carriesPrompts { refused += 1; throw SharedAgentProjectionRefusal.unreadable }
+            try await inner.publish(batch)
+        }
+    }
+
     private struct Failure: Error, CustomStringConvertible { let description: String }
     private typealias P = Collaboration.AgentProjection
 
@@ -77,7 +88,7 @@ enum SharedAgentFullAccessChecks {
             setenv("PATH", "\(root.appendingPathComponent("bin").path):\(originalPath)", 1)
             try await run(kind, harness: harness, model: model, root: root)
         }
-        print("PASS full access: Claude Code, Codex and Pi — a teammate's prompt reaches the owner's runner once, concurrent prompts run in arrival order, both sides name who sent the last prompt, approvals stay on the owner's Mac, and a removed person's prompt is refused")
+        print("PASS full access: Claude Code, Codex and Pi — a teammate's prompt reaches the owner's runner once, concurrent prompts run in arrival order, every prompt shows in every transcript under its sender's name, both sides name who sent the last prompt, approvals stay on the owner's Mac, and a removed person's prompt is refused")
     }
 
     private static func run(_ kind: AgentSteeringQAFakes.Harness, harness: AgentHarness, model modelID: String, root: URL) async throws {
@@ -135,6 +146,12 @@ enum SharedAgentFullAccessChecks {
         let projector = try SharedAgentProjector(supervisor: supervisor, agent: agent, host: host, object: item.id,
                                                  generation: 1, owner: dylan.person, sink: sink)
         defer { projector.stop() }
+        // The same agent published through a 0.7.37 relay, which cannot decode
+        // a prompt row and answers 400 invalidRequest (the sink's `.unreadable`).
+        let legacySink = LegacyRelaySink()
+        let legacyProjector = try SharedAgentProjector(supervisor: supervisor, agent: agent, host: host, object: .init(),
+                                                       generation: 1, owner: dylan.person, sink: legacySink)
+        defer { legacyProjector.stop() }
 
         // Sam's and Priya's views of it, each over their own area controller.
         let rig = SharedAreaCheckRig.Authority(document: document, members: [(dylan, .owner), (sam, .editor), (priya, .editor)])
@@ -200,6 +217,21 @@ enum SharedAgentFullAccessChecks {
                    && title.lowercased().contains("first prompt"),
                    "\(kind): an unnamed agent takes its name from what Sam typed, never the attribution (got \(title.debugDescription))")
 
+        // 1b. Sam's prompt is in every transcript, named: the owner's tile draws
+        //     it as Sam's card (never the raw "From Sam / ---" wrapper), Sam reads
+        //     it as his own and Priya as Sam's. The relay's member record names
+        //     him, as it does when his presence has lapsed.
+        try await rig.setMemberLabel(sam.person, "Sam")
+        try await rig.setMemberLabel(priya.person, "Priya")
+        try await eventually("\(kind): Sam's prompt never showed in every transcript (owner cards \(ownerTile.qaSenderCards),"
+                             + " owner \(ownerTile.qaTranscriptText.suffix(300).debugDescription), Sam \(samView.transcriptText.suffix(200).debugDescription),"
+                             + " Priya \(priyaView.transcriptText.suffix(200).debugDescription))") {
+            ownerTile.qaSenderCards.contains("Sam: \(first)")
+                && samView.transcriptText.contains("You: \(first)") && priyaView.transcriptText.contains("Sam: \(first)")
+        }
+        try expect(!ownerTile.qaTranscriptText.contains("From Sam") && !ownerTile.qaTranscriptText.contains("---"),
+                   "\(kind): the owner's tile shows Sam's prompt as Sam's card, never the attribution wrapper")
+
         // 2. Who sent the last prompt, on both Macs.
         try await eventually("\(kind): the last-prompt label never reached either side (Sam: \(samView.lastPromptText), owner: \(ownerTile.qaLastPromptText ?? "none"))") {
             samView.lastPromptText == "You sent the last prompt"
@@ -212,6 +244,20 @@ enum SharedAgentFullAccessChecks {
             samView.lastPromptText.hasPrefix("Dylan sent the last prompt · ") && ownerTile.qaLastPromptText == "You sent the last prompt"
         }
         try expect(true, "\(kind): the composer rows say \"Sam sent the last prompt · time\" / \"You sent the last prompt\" on each Mac, and follow the owner's own prompt")
+
+        // 2b. The owner types into his own tile's real composer: both teammates
+        //     read it under his name.
+        let ownerTyped = "PLAIN Dylan types into his own tile."
+        ownerTile.qaSubmitPrompt(ownerTyped)
+        try await eventually("\(kind): the owner's typed prompt never ran: \(prompts)") { written(ownerTyped) == 1 }
+        try await idle()
+        try await eventually("\(kind): the owner's prompts never reached the teammates (Sam \(samView.transcriptText.suffix(300).debugDescription),"
+                             + " Priya \(priyaView.transcriptText.suffix(300).debugDescription))") {
+            samView.transcriptText.contains("Dylan: \(ownerTyped)") && priyaView.transcriptText.contains("Dylan: \(ownerTyped)")
+                && samView.transcriptText.contains("Dylan: PLAIN Dylan's own prompt.")
+        }
+        try expect(ownerTile.qaTranscriptText.contains(ownerTyped) && !ownerTile.qaSenderCards.contains { $0.hasSuffix(ownerTyped) },
+                   "\(kind): the owner's own prompt stays his plain prompt in his tile, and both teammates read it as \"Dylan: …\"")
 
         // 3. Two prompts at once: the owner is mid-turn; Sam then Priya send.
         //    Both wait on the service, unclaimed, then run in arrival order.
@@ -244,6 +290,24 @@ enum SharedAgentFullAccessChecks {
         try expect(samAt < priyaAt && written(samSecond) == 1 && written(priyaFirst) == 1
                    && samPhase == .accepted && priyaPhase == .accepted,
                    "\(kind): two concurrent prompts both run once each, in arrival order (Sam, then Priya)")
+        try await eventually("\(kind): the concurrent prompts never showed, named, on every side (owner cards \(ownerTile.qaSenderCards),"
+                             + " Sam \(samView.transcriptText.suffix(300).debugDescription), Priya \(priyaView.transcriptText.suffix(300).debugDescription))") {
+            ownerTile.qaSenderCards.contains("Sam: \(samSecond)") && ownerTile.qaSenderCards.contains("Priya: \(priyaFirst)")
+                && samView.transcriptText.contains("You: \(samSecond)") && samView.transcriptText.contains("Priya: \(priyaFirst)")
+                && priyaView.transcriptText.contains("Sam: \(samSecond)") && priyaView.transcriptText.contains("You: \(priyaFirst)")
+        }
+        let promptWire = String(decoding: sink.batches.reduce(Data(), +), as: UTF8.self)
+        await legacyProjector.flush()
+        let legacyHead = legacySink.inner.log?.head
+        let legacyWire = String(decoding: legacySink.inner.batches.reduce(Data(), +), as: UTF8.self)
+        try expect(legacySink.refused >= 1 && !legacyProjector.publishesPrompts && legacyHead?.through == legacyProjector.log.head.through
+                   && legacyHead?.hasPromptRows == false && legacyHead?.lastPrompt == legacyProjector.log.head.lastPrompt
+                   && !legacyWire.contains(priyaFirst),
+                   "\(kind): on a relay that predates prompt rows the host keeps publishing, every position delivered, each prompt as who-and-when only"
+                   + " (refused \(legacySink.refused), through \(legacyHead?.through ?? 0)/\(legacyProjector.log.head.through))")
+        try expect(promptWire.contains(priyaFirst) && !promptWire.contains("From Sam") && !promptWire.contains("From Priya")
+                   && !promptWire.contains("\\n---\\n"),
+                   "\(kind): concurrent prompts show on every side under each sender's name; only the typed words cross, never the attribution wrapper")
 
         // 4. The agent stops to ask: only the owner's Mac shows the approval.
         //    Receipts answer at a relay's pace here, so a view that renders the

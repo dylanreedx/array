@@ -86,5 +86,6 @@ final class SharedAreaControllerProjectionSink: SharedAgentProjectionSink {
         do { try await controller.publishAgentProjection(object: object, batch: batch) }
         catch CollaborationClientError.server(409, "resyncRequired") { throw SharedAgentProjectionRefusal.resnapshotRequired }
         catch CollaborationClientError.server(409, "revisionConflict") { throw SharedAgentProjectionRefusal.superseded }
+        catch CollaborationClientError.server(400, "invalidRequest") { throw SharedAgentProjectionRefusal.unreadable }
     }
 }

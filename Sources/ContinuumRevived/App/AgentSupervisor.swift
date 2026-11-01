@@ -1166,6 +1166,23 @@ final class AgentSupervisor {
         let at: Date
     }
     private(set) var lastPromptAuthors: [AgentID: LastPromptAuthor] = [:]
+    /// A prompt that has just started a turn, for a shared agent's projection.
+    /// `text` is what its author wrote, without Array's attribution envelope,
+    /// shared context or reference envelopes, local paths redacted; nil when
+    /// no person wrote it (another agent's message, a host note).
+    struct StartedPrompt: Equatable {
+        let agent: AgentID
+        let author: LastPromptAuthor
+        let text: String?
+    }
+    private var promptStartObservers: [UUID: (StartedPrompt) -> Void] = [:]
+    @discardableResult
+    func addPromptStartObserver(_ observe: @escaping (StartedPrompt) -> Void) -> UUID {
+        let token = UUID()
+        promptStartObservers[token] = observe
+        return token
+    }
+    func removePromptStartObserver(_ token: UUID) { promptStartObservers[token] = nil }
     /// Display names of collaboration participants, from presence labels.
     /// Written by the hosting area session; read by the owner's tile.
     var sharedParticipantNames: [SharedArea.ID<SharedArea.Person>: String] = [:]
@@ -3453,7 +3470,15 @@ final class AgentSupervisor {
         // T5 — steers still marked delivering belong to an earlier turn of a
         // session that has gone idle since; a new turn means they were taken.
         settleStaleDeliveringSteers(for: id)
-        lastPromptAuthors[id] = .init(requester: sharedInputPermit?.requester, at: Date())
+        let author = LastPromptAuthor(requester: sharedInputPermit?.requester, at: Date())
+        lastPromptAuthors[id] = author
+        // Before the turn starts, so a projection carries the prompt ahead of
+        // the turn it began. Every send of every origin passes here once.
+        if !promptStartObservers.isEmpty {
+            let started = StartedPrompt(agent: id, author: author,
+                                        text: Self.authoredText(prompt, sharedText: sharedInputPermit?.requester == nil ? nil : sharedInputPermit?.namingText))
+            for observe in promptStartObservers.values { observe(started) }
+        }
         startTurn(on: runner, for: id) { onEvent in try runner.run(prompt: prompt, onEvent: onEvent) }
         // Title from the prompt NOW, not after the first turn: a long first turn
         // showed the raw prompt as its name for as long as it ran. The titler is
@@ -3462,6 +3487,28 @@ final class AgentSupervisor {
         // so no local copy of the record can clobber the naming marker.
         if capturesFirstPrompt { refreshDerivedName(for: id) }
         return true
+    }
+
+    /// What a person wrote in `prompt`, as a teammate may read it. A shared
+    /// prompt is exactly what its sender typed (`sharedText`), never the
+    /// "From …" envelope or the context around it. Another agent's message and
+    /// a host note are nobody's prompt. Board and agent references reduce to
+    /// the words typed with them; local paths never cross.
+    nonisolated static func authoredText(_ prompt: AgentPrompt, sharedText: String?) -> String? {
+        var text: String
+        if let sharedText {
+            text = sharedText
+        } else {
+            guard AgentMessageEnvelope.classify(prompt.text) == .prompt else { return nil }
+            let board = BoardReferencePromptEnvelope.parse(prompt.text)
+            text = AgentReferencePromptEnvelope.parse(board?.text ?? prompt.text)?.text ?? board?.text ?? prompt.text
+            if let task = BoardTaskPromptEnvelope.parse(text) {
+                let words = task.additionalInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+                text = words.isEmpty ? "Task: \(task.title)" : "Task: \(task.title)\n\n\(words)"
+            }
+        }
+        text = SecretRedactor.redactLocalPathReferences(text).trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
     }
 
     /// T5 — binds `runner` to the agent's live slot and drives `operation` off
@@ -7720,8 +7767,11 @@ final class AgentSupervisor {
     }
     private func accept(_ intent: AgentComposerIntent, for agentID: AgentID, sharedAdmission: SharedAgentControlAdmission?) async -> IntentAcceptance {
         // What a person typed is never Array's envelope (`sendAgentMessage`
-        // does not come through here).
-        let intent = intent.neutralizingTypedEnvelopes
+        // does not come through here). A shared admission's text IS Array's
+        // own attribution envelope (`AgentDispatchCommand.promptText`), built
+        // by the host around what the teammate typed: neutralizing it would
+        // make the teammate's prompt read as the owner's.
+        let intent = sharedAdmission == nil ? intent.neutralizingTypedEnvelopes : intent
         guard records[agentID] != nil else { return .refused(.unknownAgent) }
         if case .stop = intent {} else {
             guard await permitsSharedAgentInput(agentID, admission: sharedAdmission) else { return .refused(.sharedAgentControlRequired) }
@@ -7745,6 +7795,8 @@ final class AgentSupervisor {
             if let held = holdOrRefuseForReadiness(prepared, for: agentID) { return held }
             guard sendPrepared(prepared, to: agentID, sharedInputPermit: .init(agentID: agentID,
                 requester: sharedAdmission?.command.requester.person, namingText: sharedAdmission?.command.text)) else { return .refused(.turnNotReady) }
+            // No composer on this Mac painted a teammate's prompt.
+            if sharedAdmission != nil { echoPrompt(prepared.prompt, for: agentID) }
             // B4: an explicit Send releases a queue this agent's last turn left
             // paused after an interrupt — the user looked, and is choosing to act.
             pausedQueues.remove(agentID)
@@ -7779,6 +7831,8 @@ final class AgentSupervisor {
                     requester: sharedAdmission?.command.requester.person, namingText: sharedAdmission?.command.text)) else {
                     return .refused(.turnNotReady)
                 }
+                // No composer on this Mac painted a teammate's prompt.
+                if sharedAdmission != nil { echoPrompt(prepared.prompt, for: agentID) }
             } catch {
                 warn("AgentSupervisor.accept: attachment preparation refused for agent \(agentID.rawValue.uuidString): invalid managed attachment")
                 return .refused(.invalidAttachment)

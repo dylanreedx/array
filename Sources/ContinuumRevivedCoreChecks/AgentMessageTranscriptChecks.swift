@@ -1,4 +1,5 @@
 import ContinuumRevivedAgentContent
+import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedCore
 import Foundation
 
@@ -217,5 +218,37 @@ func runAgentMessageTranscriptChecks() {
                "agent message (\(route) sender restore): the key or the target id crossed with the text: \(fields)")
     }
 
-    print("Agent message transcript checks passed: envelope escaping round-trips, plain and look-alike prompts stay verbatim, six malformed envelopes fall back with nothing lost, the Claude app's cross-session/peer/background messages map to their sender and its side-sessions note to a quiet notice; live and claude/codex/pi rehydrated turns project one agent-message card and no user prose")
+    // 8. A teammate's prompt on a shared agent, exactly as the host hands it
+    //    to the agent (`AgentDispatchCommand.promptText`): drawn as theirs,
+    //    by name, live and on restore; the typed words keep their own "---".
+    func command(_ text: String, name: String?, context: SharedArea.Context? = nil) -> Collaboration.AgentDispatchCommand {
+        let object = SharedArea.ID<SharedArea.Object>()
+        return .init(id: UUID(), area: .init(), object: object, source: .init(owner: .init(), host: .init(), binding: .init()),
+                     requester: .init(person: .init(), device: UUID()), epoch: 1, controlRevision: 1, hostGeneration: UUID(),
+                     context: context, text: text, requesterName: name)
+    }
+    let typed = "Rerun the failing leg.\n\n---\nThen report the diff."
+    let shared = command(typed, name: "Sam").promptText
+    let teammate = AgentMessagePayload(origin: .teammate, senderName: "Sam", text: typed)
+    expect(AgentMessageEnvelope.classify(shared) == .agentMessage(teammate),
+           "teammate prompt: the host's attribution must read back as Sam's words, got \(AgentMessageEnvelope.classify(shared))")
+    var sharedLive = AgentTranscriptProjection(threadId: "teammate-live")
+    _ = try? sharedLive.appendUserPrompt(id: AgentNodeID(rawValue: "submission:teammate-live")!, prompt: AgentPrompt(shared))
+    assertAgentMessage(sharedLive.document, route: "teammate live", expected: teammate)
+    let sharedRestore = ClaudeSessionTranscriptReader.parse(lines: [
+        jsonLine(["type": "user", "isSidechain": false, "message": ["role": "user", "content": shared]]),
+    ], threadId: "teammate-claude")
+    assertAgentMessage(replay(sharedRestore, route: "teammate claude"), route: "teammate claude restore", expected: teammate)
+    expect(AgentMessageEnvelope.classify(command("hi", name: nil).promptText)
+            == .agentMessage(AgentMessagePayload(origin: .teammate, senderName: "a teammate", text: "hi")),
+           "teammate prompt: an unnamed sender reads as \"a teammate\"")
+    let withContext = command("hi", name: "Sam", context: .init(id: .init(), object: .init(), parent: nil, author: .init(), text: "ctx")).promptText
+    let lookalike = AgentMessageEnvelope.neutralizedUserText(shared)
+    expect(AgentMessageEnvelope.classify(withContext) == .prompt && AgentMessageEnvelope.classify(lookalike) == .prompt
+            && AgentMessageEnvelope.classify("From Sam\nand Priya\n\n---\nhi") == .prompt
+            && AgentMessageEnvelope.classify(AgentMessageEnvelope.neutralizedUserText(
+                "Background (from the session that started this one): hi")) == .prompt,
+           "teammate prompt: the context form, a typed look-alike (neutralized, as is a typed background heading) and a two-line \"From\" stay plain prompts")
+
+    print("Agent message transcript checks passed: envelope escaping round-trips, plain and look-alike prompts stay verbatim, six malformed envelopes fall back with nothing lost, the Claude app's cross-session/peer/background messages map to their sender and its side-sessions note to a quiet notice; live and claude/codex/pi rehydrated turns project one agent-message card and no user prose; a teammate's shared prompt draws as their named card live and restored")
 }

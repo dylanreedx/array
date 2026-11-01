@@ -1,4 +1,5 @@
 import ContinuumRevivedAgentContent
+import ContinuumRevivedCollaborationProtocol
 import Foundation
 
 /// A turn one agent wrote for another, recognised on its way into the
@@ -65,15 +66,17 @@ public enum AgentMessageEnvelope {
     /// Text a person typed, made safe to send. Only Array's own wrap may
     /// read back as another agent's words (`.plans/79`): a typed prompt that
     /// is word for word an envelope — Array's, or one of the Claude app's —
-    /// gets a zero-width space just inside its opening tag (before the
-    /// background note's heading), so it draws and restores as the user's
-    /// prompt, and the model is not handed a tag that names a sender who
-    /// never wrote it. The text looks the same; anything else is untouched.
+    /// gets a zero-width space after its first character (just inside an
+    /// opening tag; inside the first word of a heading or a teammate's "From"),
+    /// so it draws and restores as the user's prompt, and the model is not
+    /// handed a tag that names a sender who never wrote it. Never before it:
+    /// `classify` trims, and trimming removes a leading zero-width space. The
+    /// text looks the same; anything else is untouched.
     public static func neutralizedUserText(_ text: String) -> String {
         guard classify(text) != .prompt,
               let first = text.firstIndex(where: { !$0.isWhitespace && !$0.isNewline }) else { return text }
         var out = text
-        out.insert("\u{200B}", at: text[first] == "<" ? text.index(after: first) : first)
+        out.insert("\u{200B}", at: text.index(after: first))
         return out
     }
 
@@ -101,6 +104,12 @@ public enum AgentMessageEnvelope {
             return .agentMessage(AgentMessagePayload(
                 origin: isPeer ? .peer : .crossSession,
                 senderName: name ?? unnamedSessionName, text: body))
+        }
+        // A teammate's prompt on a shared agent, as the host hands it over
+        // (`AgentDispatchCommand.promptText`): drawn as theirs, by name.
+        if let shared = Collaboration.AgentDispatchCommand.attributedPrompt(trimmed),
+           let name = singleLineName(shared.name) {
+            return .agentMessage(AgentMessagePayload(origin: .teammate, senderName: name, text: shared.text))
         }
         if let element = element(trimmed, tag: sideSessionsTag), element.attributes.isEmpty,
            let note = firstSentence(element.body) {
