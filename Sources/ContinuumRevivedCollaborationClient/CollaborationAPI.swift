@@ -42,6 +42,9 @@ public struct CollaborationAPI: Sendable {
     public func acceptShareLink(slug: String, token: String) async throws -> Collaboration.Scope {
         try await request("POST", "links/accept", body: Collaboration.AcceptShareLink(slug: slug, token: token))
     }
+    public func selfEnroll(_ value: Collaboration.SelfEnroll) async throws -> Collaboration.Credential {
+        try await request("POST", "self-enroll", body: value)
+    }
     public func joinShareLink(_ value: Collaboration.JoinShareLink) async throws -> Collaboration.ShareLinkJoin {
         try await request("POST", "links/join", body: value)
     }

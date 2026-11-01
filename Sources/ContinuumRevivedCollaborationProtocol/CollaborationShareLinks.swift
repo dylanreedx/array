@@ -41,6 +41,14 @@ extension Collaboration {
     }
     /// A valid link token doubles as an enrollment: a person with no account
     /// on the relay joins with a display name and gets a device credential.
+    /// First use with no account: a person signs themselves up on a relay
+    /// with only a display name and gets their own first device credential.
+    /// It grants no area; sharing or a link admits them to one afterwards.
+    public struct SelfEnroll: Codable, Sendable {
+        public let displayName: String
+        public let deviceLabel: String
+        public init(displayName: String, deviceLabel: String) { self.displayName = displayName; self.deviceLabel = deviceLabel }
+    }
     public struct JoinShareLink: Codable, Sendable {
         public let slug: String
         public let token: String

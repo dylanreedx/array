@@ -93,6 +93,7 @@ public actor CollaborationStore {
         Self.registerAgentProjectionMigration(&migrator)
         Self.registerShareLinkMigration(&migrator)
         Self.registerShareLinkJoinLimitMigration(&migrator)
+        Self.registerSelfEnrollMigration(&migrator)
         try migrator.migrate(database)
         try Self.preflightDatabaseKey(database, keyData: normalizedKeyData)
     }

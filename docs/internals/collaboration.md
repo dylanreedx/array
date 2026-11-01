@@ -588,6 +588,24 @@ header a trusted proxy sets. `fly.toml` sets it to `fly-client-ip`, because
 behind Fly's proxy every socket peer is the proxy. The relay keeps only a hash of
 each address, and only for the window.
 
+Sharing works with no setup. On a Mac with no collaboration account, the first
+Share (or Connect in File > Collaboration with no enrollment code) signs the
+person up with only a display name. `POST /collaboration/v1/self-enroll`
+creates that person and their first device, and grants no area. It allows 10
+self-enrollments per client address per hour
+(`RELAY_COLLABORATION_SELF_ENROLLS_PER_ADDRESS`; 0 turns self-enrollment off).
+Over the limit, the relay answers 429 and creates nothing. A Mac that already
+has an account reuses it.
+
+The relay it signs up on depends on the build:
+- A Prod build (`dev.arrayapp.macos`) uses `https://relay.arrayapp.dev`.
+- Every other build uses staging, `https://arrayapp-relay-staging.fly.dev`, so a
+  dev build never signs anyone up on production.
+- `CONTINUUM_COLLABORATION_ENDPOINT` overrides both, and may be plain http on
+  loopback. The multiplayer preview and local checks use it.
+
+`CollaborationServiceEndpoint.channelDefault` is the one place that decides.
+
 ## Verification
 
 `scripts/run-matrix.sh --collaboration` rebuilds the portable checks, service HTTP

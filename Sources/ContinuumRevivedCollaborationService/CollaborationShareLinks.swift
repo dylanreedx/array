@@ -10,9 +10,11 @@ import ContinuumRevivedCollaborationProtocol
 public struct CollaborationJoinLimits: Sendable, Equatable {
     public var perLink: Int
     public var perAddress: Int
+    /// Self-enrollments (first use with no account) per client address.
+    public var enrollPerAddress: Int
     public var window: TimeInterval
-    public init(perLink: Int = 10, perAddress: Int = 30, window: TimeInterval = 3600) {
-        self.perLink = perLink; self.perAddress = perAddress; self.window = window
+    public init(perLink: Int = 10, perAddress: Int = 30, enrollPerAddress: Int = 10, window: TimeInterval = 3600) {
+        self.perLink = perLink; self.perAddress = perAddress; self.enrollPerAddress = enrollPerAddress; self.window = window
     }
 }
 
@@ -40,6 +42,38 @@ extension CollaborationStore {
                 CREATE INDEX share_link_joins_link ON share_link_joins(link,joined);
                 CREATE INDEX share_link_joins_address ON share_link_joins(address_hash,joined);
                 """)
+        }
+    }
+
+    static func registerSelfEnrollMigration(_ migrator: inout DatabaseMigrator) {
+        migrator.registerMigration("collaboration-self-enroll-v1") { db in
+            // The address is kept only as a hash, and only for the window.
+            try db.execute(sql: """
+                CREATE TABLE self_enrollments(address_hash BLOB NOT NULL, enrolled DOUBLE NOT NULL);
+                CREATE INDEX self_enrollments_address ON self_enrollments(address_hash,enrolled);
+                """)
+        }
+    }
+
+    /// A person with no account signs themselves up: a new person and their
+    /// first device, nothing else. No operator code and no area grant; the
+    /// only gate is the per-address limit, checked before anything is created.
+    public func selfEnroll(_ request: Collaboration.SelfEnroll, from address: String) throws -> Collaboration.Credential {
+        for label in [request.displayName, request.deviceLabel] {
+            guard !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, label.utf8.count <= 120 else { throw CollaborationStoreError.invalidRequest }
+        }
+        let secret = Self.secret(), device = UUID(), person = SharedArea.ID<SharedArea.Person>()
+        let now = clock().timeIntervalSince1970, addressHash = Self.hash(address)
+        return try database.write { db in
+            let since = now - joinLimits.window
+            try db.execute(sql: "DELETE FROM self_enrollments WHERE enrolled<=?", arguments: [since])
+            guard try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM self_enrollments WHERE address_hash=? AND enrolled>?",
+                                   arguments: [addressHash, since])! < joinLimits.enrollPerAddress else { throw CollaborationStoreError.rateLimited }
+            try db.execute(sql: "INSERT INTO self_enrollments(address_hash,enrolled) VALUES (?,?)", arguments: [addressHash, now])
+            try db.execute(sql: "INSERT INTO people(id,label) VALUES (?,?)", arguments: [person.rawValue.uuidString, request.displayName])
+            try db.execute(sql: "INSERT INTO devices(id,person,label,token_hash) VALUES (?,?,?,?)",
+                arguments: [device.uuidString, person.rawValue.uuidString, request.deviceLabel, Self.hash(secret)])
+            return .init(identity: .init(person: person, device: device), token: secret)
         }
     }
 

@@ -81,9 +81,10 @@ func collaborationRetentionFromEnvironment() throws -> CollaborationRetention {
                  dispatchAuthorityWindow: defaults.dispatchAuthorityWindow)
 }
 
-/// Optional share-link join limits; 10 per link and 30 per address per hour
-/// when unset. RELAY_COLLABORATION_LINK_JOINS_PER_LINK,
-/// RELAY_COLLABORATION_LINK_JOINS_PER_ADDRESS and
+/// Optional share-link join and self-enroll limits; 10 joins per link, 30 joins
+/// and 10 self-enrollments per address per hour when unset.
+/// RELAY_COLLABORATION_LINK_JOINS_PER_LINK, RELAY_COLLABORATION_LINK_JOINS_PER_ADDRESS,
+/// RELAY_COLLABORATION_SELF_ENROLLS_PER_ADDRESS and
 /// RELAY_COLLABORATION_LINK_JOIN_WINDOW_SECONDS take non-negative integers; a
 /// malformed value fails startup rather than silently keeping the defaults.
 func collaborationJoinLimitsFromEnvironment() throws -> CollaborationJoinLimits {
@@ -95,5 +96,6 @@ func collaborationJoinLimitsFromEnvironment() throws -> CollaborationJoinLimits 
     }
     return .init(perLink: try value("RELAY_COLLABORATION_LINK_JOINS_PER_LINK", defaults.perLink),
                  perAddress: try value("RELAY_COLLABORATION_LINK_JOINS_PER_ADDRESS", defaults.perAddress),
+                 enrollPerAddress: try value("RELAY_COLLABORATION_SELF_ENROLLS_PER_ADDRESS", defaults.enrollPerAddress),
                  window: TimeInterval(try value("RELAY_COLLABORATION_LINK_JOIN_WINDOW_SECONDS", Int(defaults.window))))
 }

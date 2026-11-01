@@ -15,6 +15,20 @@ public enum CollaborationCredentialStoreError: Error, Equatable {
 public struct CollaborationServiceEndpoint: Hashable, Sendable {
     public let canonicalURL: URL
     public var canonicalString: String { canonicalURL.absoluteString }
+    public static let productionURL = URL(string: "https://relay.arrayapp.dev")!
+    public static let stagingURL = URL(string: "https://arrayapp-relay-staging.fly.dev")!
+    /// Where sharing goes on a Mac with no account yet. Prod-channel builds use
+    /// the production relay; every other build (Dev, bare binaries, checks)
+    /// uses staging, so a dev build never signs anyone up on production.
+    /// `CONTINUUM_COLLABORATION_ENDPOINT` overrides both, and may be plain
+    /// http on loopback: the multiplayer preview and local checks use it.
+    public static func channelDefault(bundleIdentifier: String?, environment: [String: String]) -> CollaborationServiceEndpoint? {
+        if let raw = environment["CONTINUUM_COLLABORATION_ENDPOINT"] {
+            return URL(string: raw).flatMap { try? CollaborationServiceEndpoint($0, allowsInsecureLoopback: true) }
+        }
+        return try? CollaborationServiceEndpoint(bundleIdentifier == AppChannel.prodBundleIdentifier ? productionURL : stagingURL)
+    }
+
     /// The relay as a share link carries it: host, port and path, no scheme.
     public var shareLinkRelay: String {
         var value = canonicalString

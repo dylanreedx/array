@@ -201,6 +201,106 @@ func runShareLinkChecks() async throws {
         throw error
     }
     try await runShareLinkJoinLimitChecks(root: root)
+    try await runFirstUseShareChecks(root: root)
+}
+
+/// A Mac with no collaboration account shares out of the box: it signs up at
+/// the default relay with only a name (no operator code, no key), shares an
+/// agent, gets a link, and a second fresh Mac joins through it. Then the
+/// per-address self-enroll limit.
+@MainActor
+private func runFirstUseShareChecks(root: URL) async throws {
+    let store = try CollaborationStore(path: root.appendingPathComponent("first-use.sqlite").path, masterKey: Data(repeating: 61, count: 32),
+                                       joinLimits: .init(enrollPerAddress: 3))
+    let companion = try RelayStore(path: root.appendingPathComponent("first-use-companion.sqlite").path, masterKey: Data(repeating: 61, count: 32))
+    let server = RelayServer(store: companion, configuration: .init(host: "127.0.0.1", publicPort: 0, adminPort: 0,
+                                                                     clientAddressHeader: "X-Check-Client"), collaboration: store)
+    try await server.start()
+    do {
+        let url = URL(string: "http://127.0.0.1:\(server.listeningPublicPort!)")!
+        let endpoint = try CollaborationServiceEndpoint(url, allowsInsecureLoopback: true)
+        let credentials = CollaborationCredentialStore(vault: ShareLinkVault(), bundleIdentifier: AppChannel.devBundleIdentifier)
+        func mac(_ name: String) throws -> CollaborationAccountController {
+            try CollaborationAccountController(store: CollaborationAccountStore(applicationSupportRoot: root.appendingPathComponent("first-use-\(name)"),
+                bundleIdentifier: AppChannel.devBundleIdentifier), credentialStore: credentials, bundleIdentifier: AppChannel.devBundleIdentifier)
+        }
+        try shareLinkCheck(CollaborationServiceEndpoint.channelDefault(bundleIdentifier: AppChannel.prodBundleIdentifier, environment: [:])?.canonicalString == "https://relay.arrayapp.dev"
+            && CollaborationServiceEndpoint.channelDefault(bundleIdentifier: AppChannel.devBundleIdentifier, environment: [:])?.canonicalString == "https://arrayapp-relay-staging.fly.dev"
+            && CollaborationServiceEndpoint.channelDefault(bundleIdentifier: nil, environment: [:])?.canonicalString == "https://arrayapp-relay-staging.fly.dev"
+            && CollaborationServiceEndpoint.channelDefault(bundleIdentifier: AppChannel.prodBundleIdentifier,
+                environment: ["CONTINUUM_COLLABORATION_ENDPOINT": url.absoluteString])?.canonicalString == endpoint.canonicalString,
+            "Prod builds default to relay.arrayapp.dev, every other build to staging, and CONTINUUM_COLLABORATION_ENDPOINT overrides both")
+
+        let peopleBefore = try await store.operatorPeople().count
+        let sender = try mac("sender")
+        var asked: [String] = []
+        let ready = try await sender.ensureAccount(defaultEndpoint: endpoint, deviceLabel: "Sender Mac", askName: { relay in asked.append(relay); return "Dylan" })
+        let peopleAfter = try await store.operatorPeople().count
+        try shareLinkCheck(ready && sender.status == .ready && sender.activeAccount?.label == "Dylan" && asked == [endpoint.shareLinkRelay]
+            && sender.activeAccount?.endpoint == endpoint.canonicalString && peopleAfter == peopleBefore + 1,
+            "a Mac with no account signs up at the default relay with only a name: no operator code, no key")
+        let relaunched = try mac("sender")
+        let reused = try await relaunched.ensureAccount(defaultEndpoint: endpoint, deviceLabel: "Sender Mac", askName: { relay in asked.append(relay); return "Again" })
+        let peopleReused = try await store.operatorPeople().count
+        try shareLinkCheck(reused && relaunched.status == .ready && relaunched.activeAccount?.identity == sender.activeAccount?.identity
+            && asked.count == 1 && peopleReused == peopleAfter, "a Mac with an account reuses it after a relaunch, asking nothing")
+
+        // Share an agent from the new account, then mint its link.
+        let area = try await relaunched.createArea(label: "Checkout").document
+        let host = try await relaunched.registerHost()
+        let controller = try relaunched.makeSharedAreaController(area: area.id.rawValue)
+        await controller.open()
+        let agentTile = Tile(id: UUID(), kind: .managedAgent, title: "Map the checkout state machine", frame: .init(x: 40, y: 80, width: 640, height: 480),
+            zPosition: .fromLegacyRank(0), zoneId: UUID(), runtimeRef: .init(kind: .terminalSession, id: UUID()), metadata: .init())
+        let source = SharedAreaPublication.SourceTile(projectID: UUID(), tile: agentTile, agentID: .init(rawValue: UUID()))
+        let inventory = SharedAreaPublication.Inventory(workspaceID: UUID(), coverage: .completeWorkspace, sources: [source])
+        let choices: [SharedAreaPublication.Choice] = [.init(source: source.key, content: .agentObservation)]
+        let review = try SharedAreaPublication.prepare(inventory: inventory, selection: .tiles([source.key]), choices: choices,
+            area: area.id, author: relaunched.activeAccount!.identity.person, host: host, expectedRevision: area.revision)
+        let published = await controller.submitPublication(try SharedAreaPublication.confirm(review, expectedDigest: review.digest, inventory: inventory, choices: choices))
+        await controller.close()
+        guard case .accepted = published else { throw CheckFailure(label: "share links: the first-use sender's agent was not published: \(published)") }
+        let link = try await relaunched.createShareLink(area: area.id.rawValue, slug: "first-use", lifetime: .untilRevoked)
+
+        let receiver = try mac("receiver")
+        let joined = await ShareLinkOpener(account: receiver, signIn: { _ in false }, askName: { _, _ in "Sam" }, open: { _, _ in },
+                                           allowsInsecureLoopback: true).open(link.url)
+        let seen = try await receiver.openArea(id: area.id.rawValue).document
+        try shareLinkCheck(joined == .opened(area: area.id.rawValue) && seen.items.contains { $0.kind == .agentObservation }
+            && receiver.activeAccount?.label == "Sam",
+            "the new sender's shared agent reaches a second fresh Mac through the link alone")
+
+        // Self-enroll is limited per address, and over the limit creates nothing.
+        let session = URLSession(configuration: .ephemeral)
+        func enroll(from address: String?) async throws -> Int {
+            var request = URLRequest(url: url.appendingPathComponent("collaboration/v1/self-enroll"))
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            if let address { request.setValue(address, forHTTPHeaderField: "X-Check-Client") }
+            request.httpBody = try JSONEncoder().encode(Collaboration.SelfEnroll(displayName: "Visitor", deviceLabel: "Mac"))
+            let (_, response) = try await session.data(for: request)
+            return (response as? HTTPURLResponse)?.statusCode ?? 0
+        }
+        var statuses: [Int] = []
+        for _ in 1...3 { statuses.append(try await enroll(from: "203.0.113.7")) }
+        let beforeOver = try await store.operatorPeople().count
+        let over = try await enroll(from: "203.0.113.7"), elsewhere = try await enroll(from: "203.0.113.8")
+        let afterOver = try await store.operatorPeople().count
+        try shareLinkCheck(statuses == [201, 201, 201] && over == 429 && elsewhere == 201 && afterOver == beforeOver + 1,
+            "self-enroll answers 429 past the per-address limit, creates nothing, and leaves other addresses alone")
+        // The loopback address already signed the sender up; use up the rest.
+        for _ in 1...2 { _ = try await enroll(from: nil) }
+        let limited = try mac("limited")
+        do {
+            _ = try await limited.ensureAccount(defaultEndpoint: endpoint, deviceLabel: "Mac", askName: { _ in "Late" })
+            throw CheckFailure(label: "share links: a rate-limited first use signed up")
+        } catch let error as CollaborationClientError where error == .server(status: 429, code: "rateLimited") {}
+        try shareLinkCheck(limited.accounts.isEmpty && limited.status != .ready, "a rate-limited first use saves no account")
+        try await server.stop()
+    } catch {
+        try? await server.stop()
+        throw error
+    }
 }
 
 /// Joins are limited per link and per client address. A second relay with

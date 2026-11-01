@@ -15,6 +15,10 @@ enum CollaborationRoutes {
                 return .json(.created, try await store.redeem(decoder.decode(Collaboration.RedeemEnrollment.self, from: body)))
             }
             // A share link's token is its own admission, as an enrollment code is.
+            // First use with no account: a person signs themselves up, limited per address.
+            if head.method == .POST, head.uri == "/collaboration/v1/self-enroll" {
+                return .json(.created, try await store.selfEnroll(decoder.decode(Collaboration.SelfEnroll.self, from: body), from: clientAddress))
+            }
             if head.method == .POST, head.uri == "/collaboration/v1/links/join" {
                 return .json(.created, try await store.joinShareLink(decoder.decode(Collaboration.JoinShareLink.self, from: body), from: clientAddress))
             }
