@@ -1648,7 +1648,8 @@ run_app_check .build/debug/Array --sidebar-ownership-check
 # real events: it lights and presses like a subagent row, opens all 43 in the
 # visible rows' style and order, "Show less" holds through a refresh and live
 # pushes (a folded subagent's change rebuilds nothing; a new one leaves the row
-# being read in place), and folds back under the pointer.
+# being read in place), and folds back under the pointer. Also clicks the words
+# of History's "Show 25 more" footer and asserts 25 more closed agents appear.
 run_app_check .build/debug/Array --sidebar-fold-expand-check
 # The sidebar's project icon: `.array/icon.*` beats a shipped favicon; static/,
 # website/public/, Packaging/*.icns and an xcassets AppIcon resolve; a miss is

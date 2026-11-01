@@ -6401,6 +6401,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var settledMoreTitleForQA: String? { settledMoreCell?.qaTitle }
     var settledMoreTableRowForQA: Int? { settledMoreTableRow }
     var settledLimitForQA: Int { settledLimit }
+    /// The footer view, for a witness that clicks its words through the window.
+    var settledMoreViewForQA: AgentInboxSettledMoreView? { settledMoreCell }
     /// Press it the way the user does — through the footer's own button, so the
     /// check exercises the wiring and not just `expandSettledTail`.
     @discardableResult
@@ -7737,8 +7739,10 @@ final class AgentInboxSettledMoreView: NSTableCellView, TokenThemed {
         hitButton.setAccessibilityRole(.button)
         hitButton.setAccessibilityHelp("Shows more agents from History")
         hitButton.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(hitButton)
         addSubview(label)
+        // Over the words: a label takes the click it is under, so with the button
+        // beneath it, pressing "Show 25 more" itself did nothing.
+        addSubview(hitButton)
 
         NSLayoutConstraint.activate([
             hitButton.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -7786,6 +7790,7 @@ final class AgentInboxSettledMoreView: NSTableCellView, TokenThemed {
     }
 
     var qaTitle: String { label.stringValue }
+    var qaLabelFrameInWindow: NSRect { label.convert(label.bounds, to: nil) }
 }
 
 // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md

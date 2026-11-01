@@ -13,7 +13,8 @@ import ContinuumRevivedCore
 // pushes — a folded subagent's change rebuilds nothing, a new subagent builds
 // only what is on screen and leaves the row being read in place — reveals a
 // formerly folded subagent on click, and folds back with the line under the
-// pointer. With a directory it writes the stills.
+// pointer. It also clicks the words of History's "Show 25 more" footer and
+// asserts 25 more closed agents appear. With a directory it writes the stills.
 extension SidebarOwnershipChecks {
     static let foldLead = 0xA00
     static let foldRecent = [0xA01, 0xA02, 0xA03]
@@ -73,8 +74,67 @@ extension SidebarOwnershipChecks {
         var report: [String] = []
         for dark in [true, false] {
             report.append(try checkFoldExpansion(dark: dark, outputDirectory: outputDirectory))
+            report.append(try checkHistoryFooter(dark: dark))
         }
         return "SidebarFoldExpandChecks passed:\n" + report.joined(separator: "\n")
+    }
+
+    static let historyLead = 0xC00
+    static let historyClosed = Array(0xC01..<0xC29)
+
+    /// One live lead and forty settled agents in History.
+    static func historyRows() -> [AgentInboxRow] {
+        func ago(_ minutes: Double) -> Date { now.addingTimeInterval(-minutes * 60) }
+        func row(_ n: Int, _ title: String, lifecycle: InboxLifecycle, spawned: Double) -> AgentInboxRow {
+            AgentInboxRow(
+                id: uuid(n), title: title, projectName: "Array", projectId: uuid(0x805),
+                workspaceName: "personal", workspaceId: workspaceId, state: .ready, lifecycle: lifecycle,
+                model: "claude-opus-5-5", branch: "array/integration", elapsed: nil, elapsedStartedAt: nil,
+                lastActiveAt: ago(spawned - 5), depth: 0, createdAt: ago(spawned), parentId: nil,
+                harness: "Claude Code", terminalEvent: nil, terminalIsUnread: false, identityColor: "blue",
+                selfReport: nil, hasTile: false, isPinned: false)
+        }
+        return [row(historyLead, "Ship the sidebar release", lifecycle: .active, spawned: 30)]
+            + historyClosed.enumerated().map { i, n in
+                row(n, "Closed review \(i + 1)", lifecycle: .settled(at: ago(60 + Double(i))), spawned: 120 + Double(i))
+            }
+    }
+
+    /// History's "Show 25 more" footer, clicked on its words through the window,
+    /// pages 25 more closed agents into the open History shelf.
+    static func checkHistoryFooter(dark: Bool) throws -> String {
+        let label = "\(dark ? "dark" : "light") History footer"
+        func fail(_ message: String) -> Failure { Failure(description: "\(label): \(message)") }
+        let (inbox, window) = build(dark: dark, height: 720, rows: historyRows(), folds: [:]) { _, _ in }
+        defer { window.orderOut(nil) }
+        // The app's sidebar layout: History is a folded shelf at the bottom; open it.
+        inbox.foldsHistoryIntoShelf = true
+        inbox.restoreShelfExpansion(snoozed: false, history: true)
+        inbox.scrollToBottomForQA(materializeAll: false)
+        let closed = Set(historyClosed.map(uuid))
+        func shownClosed() -> Int { inbox.rowIdsForQA.filter(closed.contains).count }
+        let first = InboxSort.settledPageSize
+        guard shownClosed() == first, let footer = inbox.settledMoreViewForQA,
+              footer.qaTitle == AgentInboxSettledMoreView.title(hidden: historyClosed.count - first) else {
+            throw fail("open History shows \(shownClosed()) closed agents, footer \(inbox.settledMoreTitleForQA ?? "none")")
+        }
+        let words = footer.qaLabelFrameInWindow
+        let point = NSPoint(x: words.midX, y: words.midY)
+        guard let hit = window.contentView?.hitTest(point), hit === footer || hit.isDescendant(of: footer) else {
+            throw fail("the footer's words are not on screen to click")
+        }
+        NSApp.postEvent(try mouse(.leftMouseUp, at: point, window: window), atStart: false)
+        NSApp.sendEvent(try mouse(.leftMouseDown, at: point, window: window))
+        while let pending = NSApp.nextEvent(matching: [.leftMouseUp], until: Date(), inMode: .default, dequeue: true) {
+            NSApp.sendEvent(pending)
+        }
+        inbox.layoutViewportForQA()
+        let paged = first + InboxSort.settledPageStep
+        guard shownClosed() == paged, inbox.settledLimitForQA == paged else {
+            throw fail("clicking \"\(footer.qaTitle)\" left \(shownClosed()) closed agents shown, wanted \(paged)")
+        }
+        return "\(label): clicking the words of \"\(AgentInboxSettledMoreView.title(hidden: historyClosed.count - first))\" "
+            + "pages \(first) → \(paged) closed agents"
     }
 
     static func checkFoldExpansion(dark: Bool, outputDirectory: URL?) throws -> String {
