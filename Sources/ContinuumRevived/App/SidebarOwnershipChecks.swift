@@ -16,8 +16,12 @@ import ContinuumRevivedCore
 enum SidebarOwnershipChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
 
-    private final class KeyWindow: NSWindow {
+    final class KeyWindow: NSWindow {
         override var canBecomeKey: Bool { true }
+        /// An inactive check app's window is never key, and the table ignores a
+        /// row press in a window that is not; the user's window is key.
+        var reportsKey = false
+        override var isKeyWindow: Bool { reportsKey || super.isKeyWindow }
     }
 
     static let now = Date(timeIntervalSince1970: 1_900_600_000)
@@ -139,7 +143,7 @@ enum SidebarOwnershipChecks {
         return (inbox, window)
     }
 
-    private static func mouse(_ type: NSEvent.EventType, at point: NSPoint, window: NSWindow) throws -> NSEvent {
+    static func mouse(_ type: NSEvent.EventType, at point: NSPoint, window: NSWindow) throws -> NSEvent {
         guard let event = NSEvent.mouseEvent(
             with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
@@ -505,7 +509,7 @@ enum SidebarOwnershipChecks {
         try click(busyLead, "expanding")
         try expectRows([busyLead, needsYou, working, recentDone, recentFailed, laterDone,
                         oldDone, olderDone, oldFailed, quietLead, quietLead + 1], "expanded")
-        try expectFold(busyLead, "Show fewer", "expanded")
+        try expectFold(busyLead, "Show less", "expanded")
         if let outputDirectory {
             try write(inbox, to: outputDirectory.appendingPathComponent("helper-priority-open-\(dark ? "dark" : "light").png"))
         }

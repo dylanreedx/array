@@ -839,6 +839,24 @@ enum ContinuumApp {
         // sidebar; Copy forks one into a managed agent in its project.
         // .plans/87 (quick hide/show): the sidebar's toggle pills, driven through
         // real events on the production sidebar.
+        // .plans/106: a lead's "40 more, all done" opens and folds back through
+        // real clicks, and a long open group keeps its cells on live pushes.
+        if let index = CommandLine.arguments.firstIndex(of: "--sidebar-fold-expand-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    let next = CommandLine.arguments.index(after: index)
+                    // Any flag, not just `--`: the matrix appends `-continuum.…` defaults.
+                    let dir = next < CommandLine.arguments.endIndex && !CommandLine.arguments[next].hasPrefix("-")
+                        ? URL(fileURLWithPath: CommandLine.arguments[next]) : nil
+                    print(try SidebarOwnershipChecks.runFoldExpansion(outputDirectory: dir))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         // .plans/106: who owns whom — subagents in their lead's card.
         if let index = CommandLine.arguments.firstIndex(of: "--sidebar-ownership-check") {
             _ = NSApplication.shared

@@ -1074,7 +1074,7 @@ private func runInboxFanoutCheck() {
     // removes only the cap, preserves the frozen global root/block order, and
     // leaves no remainder metadata behind.
     let expanded = InboxSort.boundedForInbox(rows: sorted, expandedParents: [parentID], now: now)
-    expect(expanded.remainders.map(\.isExpanded) == [true] && expanded.remainders.first?.title == "Show fewer",
+    expect(expanded.remainders.map(\.isExpanded) == [true] && expanded.remainders.first?.title == "Show less",
            "an expanded parent keeps the one row that folds it back")
     expect(expanded.rows.map(\.id) == expectedVisible + [childIDs[5], childIDs[2]],
            "expanded fan-out emits the folded children after the visible ones, each exactly once")

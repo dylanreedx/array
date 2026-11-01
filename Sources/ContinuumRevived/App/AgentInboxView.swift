@@ -1028,6 +1028,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The viewport height the spacer was last sized against; a resize re-sizes it.
     private var lastSpacerViewportHeight: CGFloat?
     private var fanoutRemainderCellsByParent: [UUID: AgentInboxRemainderView] = [:]
+    /// The parent whose fold line the pointer is over.
+    private var hoveredFanoutParentId: UUID?
     private(set) var cellBuildCountForQA = 0
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.3-content-derived-row-height.md
@@ -2190,7 +2192,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // changed the count in it (or brought the header into existence at all) has
         // changed the list even when every agent row is where it was.
         guard next.map(\.identity) == items.map(\.identity) else {
+            // A list longer than the viewport keeps the row being read where it
+            // is: a subagent arriving at the top of an open 40-row group otherwise
+            // pushed everything under the pointer down a row. (`render` does not
+            // animate rows above `rowMotionRowLimit`, so nothing else moves them.)
+            let anchor = next.count > Self.rowMotionRowLimit
+                ? visibleScrollAnchor(excluding: changed.touched) : nil
             render(next)
+            if let anchor {
+                layoutSubtreeIfNeeded()
+                tableView.layoutSubtreeIfNeeded()
+                restoreScrollAnchor(anchor)
+            }
             return
         }
         let disclosureMoved = previousParents.symmetricDifference(parentsWithChildren)
@@ -2912,14 +2925,40 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// discarded or inferred from a row count, and the selection/focus reset
     /// follows every other list-shape change because the table's index space
     /// changes.
+    ///
+    /// Opening leaves everything above the line where it was. Folding back keeps
+    /// the line where it was on screen, so "Show less" at the foot of a long
+    /// group lands as "40 more" under the same pointer, its lead just above.
     func toggleFanout(parentId: UUID) {
         guard fanoutRemaindersByParent[parentId] != nil else { return }
-        if expandedFanoutParents.remove(parentId) == nil { expandedFanoutParents.insert(parentId) }
+        let closing = expandedFanoutParents.contains(parentId)
+        let lineViewportY = closing ? fanoutLineTableRow(parentId: parentId).map {
+            tableView.rect(ofRow: $0).minY - visibleTableRect.minY
+        } : nil
+        if closing { expandedFanoutParents.remove(parentId) } else { expandedFanoutParents.insert(parentId) }
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         hoveredAgentId = nil
         keyboardFocusIntent = nil
-        render(display(from: allRows))
+        // No fade-out ghosts when folding back: the list may scroll to keep the
+        // line still, and the ghosts would hang where the rows were.
+        render(display(from: allRows), animateRows: !closing)
+        guard let lineViewportY, let row = fanoutLineTableRow(parentId: parentId) else { return }
+        layoutSubtreeIfNeeded()
+        tableView.layoutSubtreeIfNeeded()
+        keep(tableRow: row, atViewportMinY: lineViewportY)
+    }
+
+    /// The table row of one parent's fold line, if it is drawn.
+    private func fanoutLineTableRow(parentId: UUID) -> Int? {
+        items.firstIndex {
+            if case let .fanoutRemainder(remainder) = $0 { return remainder.parentId == parentId }
+            return false
+        }
+    }
+
+    private var visibleTableRect: NSRect {
+        scrollView.contentView.convert(scrollView.contentView.bounds, to: tableView)
     }
 
     /// Which control a row draws, if any: only a parent with children in this list
@@ -3589,6 +3628,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 cell.setNesting(nesting(atTableRow: row))
                 if ownsSubagents { cell.setOwnership(ownership(atTableRow: row)) }
                 cell.apply(remainder: remainder)
+                cell.isHovered = hoveredFanoutParentId == remainder.parentId
                 fanoutRemainderCellsByParent[remainder.parentId] = cell
                 return cell
             case .agent:
@@ -5487,13 +5527,32 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         setHovered(agentId: agentId(atWindowPoint: event.locationInWindow))
+        setHoveredFanout(parentId: fanoutParentId(atWindowPoint: event.locationInWindow))
         setSearchFieldHovered(searchField.frame.contains(convert(event.locationInWindow, from: nil)))
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         setHovered(agentId: nil)
+        setHoveredFanout(parentId: nil)
         setSearchFieldHovered(false)
+    }
+
+    /// The parent whose "N more" / "Show less" line is under a window point.
+    private func fanoutParentId(atWindowPoint point: NSPoint) -> UUID? {
+        let local = tableView.convert(point, from: nil)
+        let viewport = scrollView.contentView.convert(scrollView.contentView.bounds, to: tableView)
+        guard viewport.contains(local),
+              case let .fanoutRemainder(remainder)? = item(at: tableView.row(at: local)) else { return nil }
+        return remainder.parentId
+    }
+
+    /// The fold line lights from the same pointer facts as the agent rows.
+    private func setHoveredFanout(parentId: UUID?) {
+        guard parentId != hoveredFanoutParentId else { return }
+        if let previous = hoveredFanoutParentId { fanoutRemainderCellsByParent[previous]?.isHovered = false }
+        hoveredFanoutParentId = parentId
+        if let parentId { fanoutRemainderCellsByParent[parentId]?.isHovered = true }
     }
 
     /// The search field's only resting affordance is that it lights up under the
@@ -5707,10 +5766,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// not given the same delta a second time (notably when a row shrinks at bottom).
     private func restoreScrollAnchor(_ anchor: (id: UUID, viewportMinY: CGFloat)?) {
         guard let anchor, let tableRow = tableRow(forAgentId: anchor.id) else { return }
+        keep(tableRow: tableRow, atViewportMinY: anchor.viewportMinY)
+    }
+
+    /// Scroll so one table row's top sits `viewportMinY` below the viewport's top.
+    private func keep(tableRow: Int, atViewportMinY viewportMinY: CGFloat) {
         let currentY = tableView.rect(ofRow: tableRow).minY
         let visibleRect = scrollView.contentView.convert(
             scrollView.contentView.bounds, to: tableView)
-        let desiredVisibleMinY = currentY - anchor.viewportMinY
+        let desiredVisibleMinY = currentY - viewportMinY
         let currentOrigin = scrollView.contentView.bounds.origin
         let delta = desiredVisibleMinY - visibleRect.minY
         // Use the current origin plus the difference between the desired and
@@ -5739,9 +5803,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func refreshHoverFromPointer() {
         guard let window, window.isKeyWindow else {
             setHovered(agentId: nil)
+            setHoveredFanout(parentId: nil)
             return
         }
         setHovered(agentId: agentId(atWindowPoint: window.mouseLocationOutsideOfEventStream))
+        setHoveredFanout(parentId: fanoutParentId(atWindowPoint: window.mouseLocationOutsideOfEventStream))
     }
 
     private func setHovered(agentId: UUID?) {
@@ -7317,7 +7383,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Scroll to the list's document bottom through the real scroll view path.
     /// The bottom-shrink witness needs AppKit's constrained origin, not an
     /// arbitrary clip offset that happens to be large.
-    func scrollToBottomForQA() {
+    /// `materializeAll: false` lays out the viewport only, as a user's scroll
+    /// does, for a witness that measures where rows land on screen.
+    func scrollToBottomForQA(materializeAll: Bool = true) {
         let clip = scrollView.contentView
         let documentBottom = tableView.numberOfRows > 0
             ? tableView.rect(ofRow: tableView.numberOfRows - 1).maxY
@@ -7325,7 +7393,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let maxY = max(0, documentBottom - clip.bounds.height)
         clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: maxY))
         scrollView.reflectScrolledClipView(clip)
-        layoutForQA()
+        if materializeAll { layoutForQA() } else { layoutViewportForQA() }
     }
 
     /// Whether the list's own last row bottom is aligned with the clip viewport.
@@ -7729,9 +7797,19 @@ final class AgentInboxSettledMoreView: NSTableCellView, TokenThemed {
 @MainActor
 final class AgentInboxRemainderView: NSTableCellView {
     private let label = NSTextField(labelWithString: "")
-    private let button = NSButton(frame: .zero)
+    private let button = InboxPressReportingButton(frame: .zero)
     private var remainder: FanoutRemainder?
     var onExpand: (() -> Void)?
+    /// The subagent rows' own hover and pressed fill, on the same footprint, so
+    /// the line reads as one more row of the card that you can press.
+    private let fill = AgentInboxCardView()
+    /// Set by the list, which owns the pointer for every row.
+    var isHovered = false { didSet { applyInteraction() } }
+    private var isPressed = false { didSet { applyInteraction() } }
+    /// How many presses reached this row through its button's own tracking.
+    private(set) var qaPressCount = 0
+    /// The fill's role while the last press was held.
+    private(set) var qaPressedRole: SidebarSurfaceRole?
     // Ticket: .plans/0721-subagents-handoff.md
     /// The connector, and the two constraints the nesting moves.
     ///
@@ -7763,12 +7841,24 @@ final class AgentInboxRemainderView: NSTableCellView {
         button.translatesAutoresizingMaskIntoConstraints = false
         button.target = self
         button.action = #selector(expandClicked)
+        button.onPressChange = { [weak self] pressed in
+            guard let self else { return }
+            self.isPressed = pressed
+            if pressed {
+                self.qaPressCount += 1
+                self.qaPressedRole = self.fill.surfaceRole
+            }
+        }
         groupBackground.translatesAutoresizingMaskIntoConstraints = false
         spine.translatesAutoresizingMaskIntoConstraints = false
+        fill.translatesAutoresizingMaskIntoConstraints = true
         addSubview(groupBackground)
-        addSubview(button)
+        addSubview(fill)
         addSubview(label)
         addSubview(spine)
+        // Over the words: a label takes the click it is under, so the button
+        // sat beneath it, and pressing "40 more" itself did nothing.
+        addSubview(button)
         let leading = label.leadingAnchor.constraint(
             equalTo: leadingAnchor, constant: Inset.row.left)
         let centre = label.centerYAnchor.constraint(equalTo: centerYAnchor)
@@ -7821,6 +7911,13 @@ final class AgentInboxRemainderView: NSTableCellView {
 
     @objc private func expandClicked() { onExpand?() }
 
+    /// `ChromeIconButton`'s ladder: held, the row-selected step; under the
+    /// pointer, the hover step.
+    private func applyInteraction() {
+        fill.isSelected = isPressed
+        fill.isHovered = isHovered && !isPressed
+    }
+
     // Ticket: .plans/0721-subagents-handoff.md
     /// Where this remainder sits in the tree — it is a member of its parent's
     /// group, so it takes the group's indent and the group's connector, and it can
@@ -7867,6 +7964,13 @@ final class AgentInboxRemainderView: NSTableCellView {
                 gap: SidebarDensityProposal.production.gapBetweenRows,
                 spacing: CGFloat(AgentInboxView.rowSpacing), laneTop: 0,
                 rowMid: InboxOwnershipChrome.subagentHeight / 2)
+            // A subagent row's card footprint (`AgentInbox96CellView.layoutOwnership`).
+            let gutter = CGFloat(AgentInbox96CellView.outerGutter)
+            let spacing = CGFloat(AgentInboxView.rowSpacing)
+            let left = gutter + InboxOwnershipChrome.subagentLeading - 6
+            fill.frame = NSRect(x: left, y: -spacing / 2, width: max(0, bounds.width - gutter - 6 - left),
+                                height: InboxOwnershipChrome.subagentHeight + spacing)
+            fill.underlayAlpha = groupBackground.alphaUnderCard
             return
         }
         let metrics = AgentInbox96CellView.spineMetrics
@@ -7883,9 +7987,15 @@ final class AgentInboxRemainderView: NSTableCellView {
         spine.show(
             nesting, metrics: metrics, cardTop: Double(bleed), cardHeight: max(1, content),
             rowHeight: Double(bounds.height) + Double(AgentInboxView.rowSpacing))
+        let left = (labelLeading?.constant ?? CGFloat(Inset.row.left)) - 6
+        fill.frame = NSRect(x: left, y: 0, width: max(0, bounds.width - 6 - left), height: max(0, CGFloat(content)))
     }
 
     var qaSpineSegmentsForQA: [InboxSpineSegment] { spine.qaSegmentsForQA }
+    var qaFillRole: SidebarSurfaceRole { fill.surfaceRole }
+    var qaFillColor: CGColor? { fill.layer?.backgroundColor }
+    var qaFillFrame: NSRect { fill.frame }
+    var qaLabelFrameInWindow: NSRect { label.convert(label.bounds, to: nil) }
     var qaLabelFrameForQA: NSRect { label.convert(label.bounds, to: self) }
     @discardableResult
     func clickForQA() -> Bool {
@@ -7897,6 +8007,20 @@ final class AgentInboxRemainderView: NSTableCellView {
     var qaParentID: UUID? { remainder?.parentId }
     var qaTitle: String { label.stringValue }
     var qaAccessibilityLabel: String? { button.accessibilityLabel() }
+}
+
+/// A borderless hit target that says when it is held, for the row it covers to
+/// paint its pressed fill (`ChromeIconButton.mouseDown`'s pattern).
+@MainActor
+private final class InboxPressReportingButton: NSButton {
+    var onPressChange: ((Bool) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        onPressChange?(true)
+        defer { onPressChange?(false) }
+        super.mouseDown(with: event)
+    }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
