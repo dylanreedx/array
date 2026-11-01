@@ -1,0 +1,434 @@
+{
+ "reference": "parseTheme, hooks/themes.ts at ea44e834632e91c17fc410e3227e7ba060ce0674 (v0.4.10, MIT)",
+ "cases": [
+  {
+   "file": "good-pond.theme.json",
+   "accepted": true,
+   "id": "pond",
+   "title": "Theme pond",
+   "helpers": [
+    "First",
+    "Second"
+   ],
+   "hasLead": true,
+   "scale": 1
+  },
+  {
+   "file": "good-pond-scale4.theme.json",
+   "accepted": true,
+   "id": "pond-big",
+   "title": "Theme pond-big",
+   "helpers": [
+    "First",
+    "Second"
+   ],
+   "hasLead": true,
+   "scale": 4
+  },
+  {
+   "file": "good-minimal.theme.json",
+   "accepted": true,
+   "id": "minimal",
+   "title": "minimal",
+   "helpers": [
+    "First",
+    "Other"
+   ],
+   "hasLead": false,
+   "scale": 1
+  },
+  {
+   "file": "good-wide-size.theme.json",
+   "accepted": true,
+   "id": "wide",
+   "title": "Theme wide",
+   "helpers": [
+    "First",
+    "Second"
+   ],
+   "hasLead": true,
+   "scale": 1
+  },
+  {
+   "file": "good-long-title.theme.json",
+   "accepted": true,
+   "id": "long-title",
+   "title": "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+   "helpers": [
+    "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNN",
+    "Second"
+   ],
+   "hasLead": true,
+   "scale": 1
+  },
+  {
+   "file": "good-own-colours.theme.json",
+   "accepted": true,
+   "id": "own-colours",
+   "title": "Theme own-colours",
+   "helpers": [
+    "First",
+    "Second"
+   ],
+   "hasLead": true,
+   "scale": 1
+  },
+  {
+   "file": "good-64-frames.theme.json",
+   "accepted": true,
+   "id": "frames-64",
+   "title": "Theme frames-64",
+   "helpers": [
+    "First",
+    "Second"
+   ],
+   "hasLead": true,
+   "scale": 1
+  },
+  {
+   "file": "bad-not-json.theme.json",
+   "accepted": false,
+   "errors": [
+    "not valid JSON"
+   ]
+  },
+  {
+   "file": "bad-array.theme.json",
+   "accepted": false,
+   "errors": [
+    "the file is not a JSON object"
+   ]
+  },
+  {
+   "file": "bad-version-2.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"duckherdTheme\": 1 is missing"
+   ]
+  },
+  {
+   "file": "bad-version-true.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"duckherdTheme\": 1 is missing"
+   ]
+  },
+  {
+   "file": "bad-version-string.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"duckherdTheme\": 1 is missing"
+   ]
+  },
+  {
+   "file": "bad-reserved-id.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"id\" must be lowercase letters, digits and dashes, and not \"ducks\""
+   ]
+  },
+  {
+   "file": "bad-id-spaces.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"id\" must be lowercase letters, digits and dashes, and not \"ducks\""
+   ]
+  },
+  {
+   "file": "bad-id-too-long.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"id\" must be lowercase letters, digits and dashes, and not \"ducks\"",
+    "helpers[0].names: letters and digits, up to 20 characters",
+    "helpers[1].names: letters and digits, up to 20 characters"
+   ]
+  },
+  {
+   "file": "bad-scale-2.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"scale\" must be 1 or 4"
+   ]
+  },
+  {
+   "file": "bad-helper-size.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"helperSize\" is [width, height] in pixels: whole cells, a multiple of 2 wide (at most 80) and of 4 tall (at most 32) at scale 1"
+   ]
+  },
+  {
+   "file": "bad-lead-size-too-big.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"leadSize\" is [width, height] in pixels: whole cells, a multiple of 2 wide (at most 80) and of 4 tall (at most 32) at scale 1"
+   ]
+  },
+  {
+   "file": "bad-palette-hex.theme.json",
+   "accepted": false,
+   "errors": [
+    "palette A: a #rrggbb colour",
+    "\"marks\" needs star, starLit, drop, dropLit, asked and told, each a palette letter",
+    "helpers[0].loops.dabble[0]: the letter \"A\" is not in the palette",
+    "helpers[0].loops.read[0]: the letter \"A\" is not in the palette",
+    "helpers[0].loops.type[0]: the letter \"A\" is not in the palette",
+    "helpers[0].loops.run[0]: the letter \"A\" is not in the palette",
+    "helpers[0].loops.think[0]: the letter \"A\" is not in the palette",
+    "helpers[0].ends.done: the letter \"A\" is not in the palette"
+   ]
+  },
+  {
+   "file": "bad-palette-key.theme.json",
+   "accepted": false,
+   "errors": [
+    "palette key \"AB\": one character, not \".\""
+   ]
+  },
+  {
+   "file": "bad-palette-dot.theme.json",
+   "accepted": false,
+   "errors": [
+    "palette key \".\": one character, not \".\""
+   ]
+  },
+  {
+   "file": "bad-palette-emoji.theme.json",
+   "accepted": false,
+   "errors": [
+    "palette key \"😀\": one character, not \".\""
+   ]
+  },
+  {
+   "file": "bad-palette-missing.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"palette\" is missing",
+    "\"marks\" needs star, starLit, drop, dropLit, asked and told, each a palette letter",
+    "helpers[0].loops.dabble[0]: the letter \"A\" is not in the palette",
+    "helpers[0].loops.dabble[1]: the letter \"B\" is not in the palette",
+    "helpers[0].loops.read[0]: the letter \"A\" is not in the palette",
+    "helpers[0].loops.read[1]: the letter \"B\" is not in the palette",
+    "helpers[0].loops.type[0]: the letter \"A\" is not in the palette",
+    "helpers[0].loops.type[1]: the letter \"B\" is not in the palette"
+   ]
+  },
+  {
+   "file": "bad-unknown-letter.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"marks\" needs star, starLit, drop, dropLit, asked and told, each a palette letter",
+    "helpers[0].loops.dabble[1]: the letter \"B\" is not in the palette",
+    "helpers[0].loops.read[1]: the letter \"B\" is not in the palette",
+    "helpers[0].loops.type[1]: the letter \"B\" is not in the palette",
+    "helpers[0].loops.run[1]: the letter \"B\" is not in the palette",
+    "helpers[0].loops.think[1]: the letter \"B\" is not in the palette",
+    "helpers[0].ends.failed: the letter \"B\" is not in the palette",
+    "helpers[0].ends.droop[0]: the letter \"B\" is not in the palette"
+   ]
+  },
+  {
+   "file": "bad-short-row.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0].loops.run[0]: rows are 20 wide"
+   ]
+  },
+  {
+   "file": "bad-row-count.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0].loops.run[0]: a frame is 12 rows of text"
+   ]
+  },
+  {
+   "file": "bad-zero-frames.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0].loops.type: 1 to 64 frames"
+   ]
+  },
+  {
+   "file": "bad-65-frames.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0].loops.type: 1 to 64 frames"
+   ]
+  },
+  {
+   "file": "bad-frame-ms-49.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0].loops.read: {\"frameMs\": 50 to 5000, \"frames\": [...]}"
+   ]
+  },
+  {
+   "file": "bad-frame-ms-5001.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0].loops.read: {\"frameMs\": 50 to 5000, \"frames\": [...]}"
+   ]
+  },
+  {
+   "file": "bad-frame-ms-string.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0].loops.read: {\"frameMs\": 50 to 5000, \"frames\": [...]}"
+   ]
+  },
+  {
+   "file": "bad-13-helpers.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"helpers\": 1 to 12 entries"
+   ]
+  },
+  {
+   "file": "bad-no-helpers.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"helpers\": 1 to 12 entries"
+   ]
+  },
+  {
+   "file": "bad-duplicate-name.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[1].names: Same is used twice"
+   ]
+  },
+  {
+   "file": "bad-name-shape.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0].names: letters and digits, up to 20 characters"
+   ]
+  },
+  {
+   "file": "bad-sound-folder.theme.json",
+   "accepted": false,
+   "errors": [
+    "sounds.quack: a .wav or .mp3 file name beside the theme file, no folders"
+   ]
+  },
+  {
+   "file": "bad-sound-subfolder.theme.json",
+   "accepted": false,
+   "errors": [
+    "sounds.honk: a .wav or .mp3 file name beside the theme file, no folders"
+   ]
+  },
+  {
+   "file": "bad-sound-absolute.theme.json",
+   "accepted": false,
+   "errors": [
+    "sounds.quack: a .wav or .mp3 file name beside the theme file, no folders"
+   ]
+  },
+  {
+   "file": "bad-sound-ogg.theme.json",
+   "accepted": false,
+   "errors": [
+    "sounds.snore: a .wav or .mp3 file name beside the theme file, no folders"
+   ]
+  },
+  {
+   "file": "bad-stuck.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"stuck\" is {\"drop\": [row, col], \"mark\": col}"
+   ]
+  },
+  {
+   "file": "bad-marks.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"marks\" needs star, starLit, drop, dropLit, asked and told, each a palette letter"
+   ]
+  },
+  {
+   "file": "bad-missing-loop.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[1].loops.think: {\"frameMs\": 50 to 5000, \"frames\": [...]}"
+   ]
+  },
+  {
+   "file": "bad-missing-end.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0].ends.wave: 1 to 64 frames"
+   ]
+  },
+  {
+   "file": "bad-missing-done.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0].ends.done: a frame is 12 rows of text"
+   ]
+  },
+  {
+   "file": "bad-helper-not-object.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0]: not an object"
+   ]
+  },
+  {
+   "file": "bad-helper-no-name.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0]: \"name\" is missing"
+   ]
+  },
+  {
+   "file": "bad-blink.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0].blink: two single letters"
+   ]
+  },
+  {
+   "file": "bad-own-colour.theme.json",
+   "accepted": false,
+   "errors": [
+    "helpers[0].colors \"x\": one character and a #rrggbb colour"
+   ]
+  },
+  {
+   "file": "bad-lead-levels.theme.json",
+   "accepted": false,
+   "errors": [
+    "lead.levels: 1 to 4 sets of frames"
+   ]
+  },
+  {
+   "file": "bad-lead-flare.theme.json",
+   "accepted": false,
+   "errors": [
+    "lead.flare: {\"small\": [[[row, col, letter], ...]], \"big\": ...}, each letter in the palette"
+   ]
+  },
+  {
+   "file": "bad-opus-mark.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"opusMark\" must be true or false"
+   ]
+  },
+  {
+   "file": "bad-many-problems.theme.json",
+   "accepted": false,
+   "errors": [
+    "\"duckherdTheme\": 1 is missing",
+    "\"id\" must be lowercase letters, digits and dashes, and not \"ducks\"",
+    "\"scale\" must be 1 or 4",
+    "palette key \"AB\": one character, not \".\"",
+    "palette key \"CD\": one character, not \".\"",
+    "palette key \"EF\": one character, not \".\"",
+    "palette key \"GH\": one character, not \".\"",
+    "palette key \"IJ\": one character, not \".\""
+   ]
+  }
+ ]
+}

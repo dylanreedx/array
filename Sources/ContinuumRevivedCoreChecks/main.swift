@@ -30,6 +30,13 @@ if CommandLine.arguments.contains("--browser-profile-registry-check") {
     Foundation.exit(0)
 }
 
+// Plan 110 (agent characters), slice 1: the theme format against the reference
+// parser's recorded corpus, the built-in set and its notice, and the atlas pixels.
+if CommandLine.arguments.contains("--agent-character-theme-check") {
+    runAgentCharacterThemeChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--tile-selection-geometry-check") {
     runTileSelectionGeometryChecks()
     print("TileSelectionGeometryChecks passed")
