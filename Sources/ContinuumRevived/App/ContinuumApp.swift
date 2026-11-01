@@ -2309,6 +2309,17 @@ enum ContinuumApp {
             }
         }
 
+        // Plan 110, slice 5: characters in the agent tile header.
+        if CommandLine.arguments.contains("--tile-character-check") {
+            _ = NSApplication.shared
+            do {
+                print(try TileCharacterChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL tile character: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         // Plan 110, slice 4: characters on the real sidebar.
         if CommandLine.arguments.contains("--sidebar-character-check") {
             _ = NSApplication.shared

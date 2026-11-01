@@ -766,6 +766,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             self?.setIdentityColorName(name)
         }
         setIdentityColorName(supervisor.records[agentID]?.identityColor)
+        // Plan 110: the header's character from the moment the agent is attached,
+        // not only after its first event.
+        refreshAgentCharacter()
         locationProjectName = projectName
         applyBranchContext(supervisor.branchContext(for: agentID))
         refreshLocationStatus()
@@ -3434,6 +3437,25 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         refreshTranscriptThinkingIndicator()
     }
 
+    /// Plan 110: the header's character, from the same facts and the same state
+    /// projection the sidebar row uses, so the two always show one pose.
+    private func refreshAgentCharacter(now: Date = Date()) {
+        guard let agentID = attachedAgentID ?? projectedAgentID else {
+            setAgentCharacter(agentID: nil, snapshot: nil, now: now)
+            return
+        }
+        let record = agentSource?.records[agentID]
+        let state = v2TurnSnapshot.map(InboxState.state(forSnapshot:))
+            ?? (record?.latestTerminalEvent.map { $0.outcome == .failed || $0.outcome == .runtimeError } == true
+                ? .failed : .ready)
+        let activity = AgentCharacterActivityProjection.activity(
+            presence: currentPresence, terminalEvent: record?.latestTerminalEvent, latestPromptAt: record?.latestPromptAt)
+        setAgentCharacter(
+            agentID: agentID.rawValue,
+            snapshot: AgentCharacterSnapshot(state: state, activity: activity, title: headerAgentName ?? tile.title),
+            now: now)
+    }
+
     /// This tile's own layer fills, on top of the base tile's (P1.9), now on
     /// `DesignTokens` (P1.10): the content area is `tileBody` and the header and
     /// compose strip are `tileChrome`, which the palette defines as "one step off
@@ -4536,6 +4558,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private func applyHeader(status: AgentStatus) {
         refreshTitleBarIdentity()
         applyAgentHeader(status: status)
+        refreshAgentCharacter()
     }
 
     private func refreshTitleBarIdentity() {

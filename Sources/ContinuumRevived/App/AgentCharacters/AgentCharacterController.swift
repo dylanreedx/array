@@ -38,6 +38,12 @@ final class AgentCharacterSpriteAtlas {
     static let minimumFrameDuration: CFTimeInterval = 1.0 / 12
 }
 
+/// A surface whose character may change with time alone.
+@MainActor
+protocol AgentCharacterRevisiting: AnyObject {
+    func revisitCharacter(now: Date)
+}
+
 /// The app's one owner of agent characters: whether they show, which set, how
 /// they move, and each character's atlas, built once and shared.
 @MainActor
@@ -156,6 +162,55 @@ final class AgentCharacterController {
         var snapshot = snapshot
         snapshot.allowsMotion = snapshot.allowsMotion && allowsMotion
         return AgentCharacterPose.resolve(snapshot, now: now)
+    }
+
+    // MARK: Time alone (slowing at 40 s, dozing at 180 s)
+
+    /// One shared one-shot timer for every surface whose plan changes by time
+    /// alone, set for the earliest deadline. Not a timer per sprite and nothing per
+    /// frame: it fires at most twice per quiet spell per agent.
+    private final class Revisit {
+        weak var owner: AgentCharacterRevisiting?
+        var at: Date
+        init(owner: AgentCharacterRevisiting, at: Date) { self.owner = owner; self.at = at }
+    }
+    private var revisits: [ObjectIdentifier: Revisit] = [:]
+    private var revisitTimer: Timer?
+    private var revisitFireAt: Date?
+    var pendingRevisitsForQA: Int { revisits.count }
+
+    func scheduleRevisit(for owner: AgentCharacterRevisiting, at date: Date?) {
+        let key = ObjectIdentifier(owner)
+        guard let date else { revisits[key] = nil; return }
+        if let existing = revisits[key] { existing.at = date } else { revisits[key] = Revisit(owner: owner, at: date) }
+        if revisitFireAt.map({ date < $0 }) ?? true { armRevisitTimer(at: date) }
+    }
+
+    private func armRevisitTimer(at date: Date) {
+        revisitTimer?.invalidate()
+        revisitFireAt = date
+        let timer = Timer(fire: date, interval: 0, repeats: false) { _ in
+            MainActor.assumeIsolated { AgentCharacterController.shared.fireRevisits() }
+        }
+        timer.tolerance = 0.5
+        RunLoop.main.add(timer, forMode: .common)
+        revisitTimer = timer
+    }
+
+    func fireRevisits(now: Date = Date()) {
+        revisitTimer = nil
+        revisitFireAt = nil
+        var due: [AgentCharacterRevisiting] = []
+        for (key, entry) in revisits {
+            guard let owner = entry.owner else { revisits[key] = nil; continue }
+            if entry.at <= now.addingTimeInterval(0.5) {
+                revisits[key] = nil
+                due.append(owner)
+            }
+        }
+        // Each owner re-resolves and schedules its next deadline, if any.
+        for owner in due { owner.revisitCharacter(now: now) }
+        if let next = revisits.values.map(\.at).min() { armRevisitTimer(at: next) }
     }
 
     static func appearance(of view: NSView) -> AgentCharacterAtlas.Appearance {

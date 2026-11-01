@@ -60,7 +60,10 @@ public enum AgentCharacterActivityProjection {
     public static func activity(presence: AgentTurnPresence?, terminalEvent: AgentTerminalEvent?,
                                 latestPromptAt: Date?) -> AgentCharacterActivity {
         var activity = AgentCharacterActivity()
-        activity.promptSentAt = presence?.submittedAt ?? latestPromptAt
+        // The record's prompt stamp is the person pressing Return. The presence's
+        // `submittedAt` is also the provider's own start for a turn it began by
+        // itself, which is not a prompt to notice, so it is not read here.
+        activity.promptSentAt = latestPromptAt
         if let presence {
             let step: AgentTurnPresence.Tool?
             if case let .tool(open) = presence.phase { step = open } else { step = presence.lastTool }

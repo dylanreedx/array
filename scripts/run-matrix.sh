@@ -2015,6 +2015,10 @@ run_app_check .build/debug/Array --character-sprite-check
 # Plan 110, slice 4: characters on the real sidebar, light and dark: placement
 # beside the mark, hover fade, recycled cells, scroll layouts on = off, occlusion.
 run_app_check .build/debug/Array --sidebar-character-check
+# Plan 110, slice 5: the agent tile header, driven by supervisor events: slot at
+# every chrome scale, title clear of the pill, far park / out of window hold still,
+# and a ⌘-scroll zoom through the window costs the bar nothing extra.
+run_app_check .build/debug/Array --tile-character-check
 run_app_check .build/debug/Array --diff-tile-check
 run_app_check .build/debug/Array --diff-review-off-main-check
 run_app_check .build/debug/Array --attention-notification-check

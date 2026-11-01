@@ -3460,6 +3460,7 @@ private final class Decorations: NSView {
         // Its own layer from the start: the character is a sublayer framed in the
         // cell's first layout, before anything has asked this view to draw.
         wantsLayer = true
+        characterLayer.hostIsFlipped = isFlipped
     }
 
     @available(*, unavailable)
@@ -3528,6 +3529,7 @@ private final class Decorations: NSView {
         if characterLayer.isHidden != hidden { characterLayer.isHidden = hidden }
         if let slot, characterLayer.frame != slot { characterLayer.frame = slot }
         CATransaction.commit()
+        if slot != nil { characterLayer.refreshOrientation() }
     }
 
     private func refreshMarkLayer() {

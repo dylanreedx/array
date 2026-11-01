@@ -25,6 +25,12 @@ final class CharacterSpriteLayer: CALayer {
     /// The plan whose animation is on the layer now; nil when it holds still.
     private(set) var installedPlan: AgentCharacterPlan?
     private var installedFlipped: Bool?
+    /// The orientation of the view whose layer hosts this sprite, when its owner
+    /// knows it. AppKit settles a view layer's flip only after the view has been
+    /// told it entered a window, so `contentsAreFlipped()` read at that moment can
+    /// be stale and draw the character upside down until its next state change.
+    /// The host's `isFlipped` is what that flip settles to. nil reads the layer.
+    var hostIsFlipped: Bool?
     /// A paused sprite holds its still frame: parked, pictured, scrolled off,
     /// in a hidden or occluded window. The plan is kept to resume with.
     private(set) var isPaused = false
@@ -90,6 +96,24 @@ final class CharacterSpriteLayer: CALayer {
 
     var isAnimating: Bool { animation(forKey: Self.animationKey) != nil }
 
+    /// Re-check which way the layer's unit space runs, and fix the still frame and
+    /// the animation if it changed. A view re-entering a window is told so
+    /// (`viewDidMoveToWindow`) before AppKit has settled its layer's flip, so the
+    /// orientation read there can be stale; the owner calls this from its own
+    /// `layout()`, which runs after. One comparison; nothing when unchanged.
+    func refreshOrientation(now: Date = Date()) {
+        guard let plan, let sprite else { return }
+        let flipped = hostIsFlipped ?? contentsAreFlipped()
+        let still = rect(of: sprite.atlas.frameIndex(of: plan.still), flipped: flipped)
+        if contentsRect != still {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            contentsRect = still
+            CATransaction.commit()
+        }
+        if installedPlan != nil, installedFlipped != flipped { reconcile(now: now, force: true) }
+    }
+
     private func reconcile(now: Date, force: Bool) {
         guard let plan, let sprite, plan.isAnimated, !isPaused else {
             if installedPlan != nil || animation(forKey: Self.animationKey) != nil {
@@ -98,7 +122,7 @@ final class CharacterSpriteLayer: CALayer {
             }
             return
         }
-        let flipped = contentsAreFlipped()
+        let flipped = hostIsFlipped ?? contentsAreFlipped()
         guard force || installedPlan != plan || installedFlipped != flipped || !isAnimating else { return }
         add(Self.animation(for: plan, sprite: sprite, phase: phase, now: now, layerTime: convertTime(CACurrentMediaTime(), from: nil),
                            rect: { self.rect(of: $0, flipped: flipped) }),
@@ -113,7 +137,7 @@ final class CharacterSpriteLayer: CALayer {
     func rect(of frame: Int, flipped: Bool? = nil) -> CGRect {
         guard let sprite else { return CGRect(x: 0, y: 0, width: 1, height: 1) }
         let unit = sprite.atlas.unitRect(of: frame)
-        let y = (flipped ?? contentsAreFlipped()) ? unit.y : 1 - unit.y - unit.height
+        let y = (flipped ?? hostIsFlipped ?? contentsAreFlipped()) ? unit.y : 1 - unit.y - unit.height
         return CGRect(x: unit.x, y: y, width: unit.width, height: unit.height)
     }
 
