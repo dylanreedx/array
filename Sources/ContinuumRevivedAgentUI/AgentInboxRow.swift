@@ -1287,7 +1287,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
             closingSince: closingSince, hasLiveRunner: hasLiveRunner,
             identityColor: identityColor, selfReport: selfReport,
-            hasTile: hasTile, isPinned: isPinned)
+            hasTile: hasTile, isPinned: isPinned, characterActivity: characterActivity)
     }
 
     /// Equal but for `elapsed`, when both rows carry the same live turn start: the

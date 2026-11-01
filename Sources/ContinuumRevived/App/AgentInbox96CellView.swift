@@ -2078,7 +2078,16 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if !modelLabel.isHidden {
             place(modelLabel, x: right - trailing, centre: l2, width: modelWidth)
         }
-        var lineRight = right - trailing - 8
+        // Plan 110: the character sits just left of the mark (or the model name),
+        // centred on line 2. The settle nudge takes the mark's place, and the
+        // character's with it.
+        let characterSize = settleNudge.isHidden ? self.characterSize : nil
+        let characterWidth = characterSize.map { $0.width + (trailing > 0 ? Self.characterGap : 0) } ?? 0
+        decorations.setCharacterSlot(characterSize.map { size in
+            NSRect(x: right - trailing - characterWidth, y: snapped(l2 - size.height / 2),
+                   width: size.width, height: size.height)
+        })
+        var lineRight = right - trailing - characterWidth - 8
         if !settleNudge.isHidden {
             let size = settleNudge.intrinsicContentSize
             let top = snapped(l2 - size.height / 2)
@@ -2228,6 +2237,16 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             restingWidth += markSide + 7
         } else {
             decorations.markSlot = nil
+        }
+        // Plan 110: a helper's character, just left of its mark while it rests;
+        // the hover controls take both places.
+        if showsResting, let size = characterSize {
+            let gap = decorations.markSlot == nil ? 7 : Self.characterGap
+            decorations.setCharacterSlot(NSRect(x: right - restingWidth - gap - size.width,
+                                                y: snapped(mid - size.height / 2), width: size.width, height: size.height))
+            restingWidth += size.width + gap
+        } else {
+            decorations.setCharacterSlot(nil)
         }
         used = max(used, restingWidth)
         let titleX = x0 + 14
