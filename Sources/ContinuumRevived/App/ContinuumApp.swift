@@ -12219,6 +12219,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 Task { _ = await agentSupervisor.accept(.sendPrompt(AgentPrompt(prompt)), for: agent) }
             }
         }
+        // `scripts/share-agent-preview.sh`: first use, as a person meets it. No
+        // account and no shared workspace; A's first Share signs A up with a
+        // name, and B joins from the link alone.
+        if preview.enrollmentCode.isEmpty && preview.areaLabel.isEmpty {
+            try? preview.write(["label": preview.label], to: ready)
+            return
+        }
         Task { [weak self] in
             guard let self else { return }
             do {
