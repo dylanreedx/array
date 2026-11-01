@@ -2019,6 +2019,10 @@ run_app_check .build/debug/Array --sidebar-character-check
 # every chrome scale, title clear of the pill, far park / out of window hold still,
 # and a ⌘-scroll zoom through the window costs the bar nothing extra.
 run_app_check .build/debug/Array --tile-character-check
+# Plan 110, slice 6: Settings › Appearance › Agent characters: import copies one
+# file, a bad file shows its problems and imports nothing, discovery uses a fixture
+# home only, and the preview grid renders in both appearances (still under RM).
+run_app_check .build/debug/Array --character-settings-check
 run_app_check .build/debug/Array --diff-tile-check
 run_app_check .build/debug/Array --diff-review-off-main-check
 run_app_check .build/debug/Array --attention-notification-check

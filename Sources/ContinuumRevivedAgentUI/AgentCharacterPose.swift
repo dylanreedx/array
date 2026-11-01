@@ -83,6 +83,12 @@ public struct AgentCharacterPlan: Equatable, Sendable {
     /// nil when only a new state can.
     public let revisitAt: Date?
 
+    public init(segments: [Segment], still: AgentCharacterStill, revisitAt: Date?) {
+        self.segments = segments
+        self.still = still
+        self.revisitAt = revisitAt
+    }
+
     public var isAnimated: Bool {
         segments.contains { if case .hold = $0 { return false } else { return true } }
     }

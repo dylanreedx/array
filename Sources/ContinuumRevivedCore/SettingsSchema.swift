@@ -81,6 +81,21 @@ public enum SettingsSchema {
                 SettingsRow(.toggle(key: ResizeHUDConfig.enabledKey, label: "Show size while resizing", default: ResizeHUDConfig.defaultEnabled),
                             keywords: ["resize", "dimensions", "hud"]),
             ]),
+            // Plan 110: small characters beside each agent's provider mark.
+            SettingsGroup(id: "appearance.agentCharacters", title: "Agent characters", rows: [
+                SettingsRow(.toggle(key: AgentCharacterConfig.enabledKey, label: "Show agent characters",
+                                    default: AgentCharacterConfig.defaultEnabled),
+                            help: "A small character beside each agent's provider mark acts out what the agent is doing.",
+                            keywords: ["characters", "sprites", "ducks", "animation", "mascot"]),
+                SettingsRow(.choice(key: AgentCharacterConfig.motionKey, label: "Motion",
+                                    options: AgentCharacterConfig.Motion.allCases.map(\.rawValue),
+                                    default: AgentCharacterConfig.defaultMotion.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.Motion.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "Resting agents always hold still. Reduce Motion in System Settings stills every character.",
+                            keywords: ["characters", "animation", "reduce motion"]),
+                SettingsRow(.custom(id: "agentCharacters", label: "Character set"),
+                            keywords: ["characters", "theme", "import", "ducks"]),
+            ]),
             SettingsGroup(id: "appearance.commandMenu", title: "Command menu", rows: [
                 SettingsRow(.choice(key: CommandCenterAppearanceConfig.glassinessKey, label: "Background", options: CommandCenterAppearanceConfig.options, default: CommandCenterAppearanceConfig.defaultGlassiness.rawValue),
                             keywords: ["command center", "palette", "glass", "blur", "frosted", "transparency"]),
