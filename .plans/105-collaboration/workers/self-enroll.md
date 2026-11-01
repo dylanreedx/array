@@ -96,7 +96,18 @@ and looks display-dependent; it is worth watching in the gate.
 
 ## Gate
 
-See "Gate run" below.
+- `scripts/run-matrix.sh --collaboration`, once, under
+  `.worktrees/.locks/app-build.sh`, with an isolated `TMUX_TMPDIR` and
+  `CONTINUUM_APP_SUPPORT`, `TMUX`/`TMUX_PANE` unset,
+  `CONTINUUM_SKIP_UI_BASELINES=1`, and `caffeinate -u`. Result: "Collaboration
+  matrix (targeted) passed", 13 legs. The log shows 36 `PASS share links:`
+  lines, including the 4 first-use HTTP checks, and 27 `PASS share entry
+  (relay)` lines.
+- The Linux relay leg runs separately on this branch, outside the lock, as the
+  matrix asks: `scripts/run-matrix.sh --notifications-linux`, which runs
+  `check-relay-linux.sh` in Docker on Linux/amd64. Result: "Linux notifications
+  matrix (targeted) passed", 2 legs. The new route and migration compile and
+  pass the relay suites on Linux.
 
 ## Open
 
