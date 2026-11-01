@@ -187,50 +187,80 @@ enum ShareEntryRelayChecks {
             return popover
         }
 
-        // 1. A real Share: header, then Copy.
+        // 1. Header share (SHARE-REDESIGN acceptance, mode A step 1): the
+        //    popover opens anchored to T; nothing is published and T has not moved.
         let viewA = canvas.tileView(for: agentA)
         let runnersBefore = scene.runnerConstructions()
         let recordA = app.agentSupervisor.records[scene.agents[0]]
+        let frameA0 = world(agentA)
+        let zonesBefore0 = app.sharedAreaRuntime?.document.zones.count
         let popoverA = try share(agentA)
-        try ShareEntryChecks.click(popoverA.copyButton)
+        try expect(popoverA.session.target.isSingleAgent && popoverA.session.area == nil
+            && app.shareEntry.qaAnchorView === viewA && account.activeAccount == nil,
+            "step 1: the header Share opens the popover on T, and nothing is published yet")
+        try expect(world(agentA) == frameA0 && canvas.tileRecord(for: agentA)?.zoneId == home,
+            "step 1: T has not moved")
+        app.shareEntry.dismiss()
+
+        // 2. Sidebar share: the row's Share opens the same popover, on T.
+        try expect(app.performInboxRowAction(.share, on: [scene.agents[0].rawValue]), "step 2: the sidebar row offers Share")
+        try await eventually("step 2: the sidebar's popover") { app.shareEntry.isPresented }
+        try expect(app.shareEntry.qaAnchorView === canvas.tileView(for: agentA)
+            && app.shareEntry.presentedView?.session.target.tileIDs == [agentA],
+            "step 2: the sidebar's Share opens the same popover, anchored to T on the canvas")
+        app.shareEntry.dismiss()
+
+        // 3. Copy: a link on the pasteboard; the relay's area holds exactly
+        //    T's observation; T's zone and frame are unchanged; no new zone.
+        let popoverA2 = try share(agentA)
+        try ShareEntryChecks.click(popoverA2.copyButton)
         try await eventually("the first share finishes") {
             answerNameSheet("QA Dylan")
-            return !popoverA.session.isWorking && (popoverA.session.phase != .draft || popoverA.session.failure != nil)
+            return !popoverA2.session.isWorking && (popoverA2.session.phase != .draft || popoverA2.session.failure != nil)
         }
-        try expect(popoverA.session.failure == nil, "the first Copy succeeds against the relay (\(popoverA.session.failure ?? ""))")
+        try expect(popoverA2.session.failure == nil, "the first Copy succeeds against the relay (\(popoverA2.session.failure ?? ""))")
         try expect(namesAsked == 1 && account.status == .ready && account.activeAccount?.label == "QA Dylan"
             && account.activeAccount?.endpoint == endpoint.canonicalString && account.accounts.count == 1,
             "the first Share on a Mac with no account signs up at the default relay with one name sheet: no code, no key")
-        guard let linkA = popoverA.session.link, let areaA = popoverA.session.area,
-              let zoneA = app.sharedAreaRuntime?.sharedAreaZone(for: areaA) else {
-            throw Failure(description: "share entry (relay): Copy made no link or no shared zone")
+        guard let linkA = popoverA2.session.link, let areaA = popoverA2.session.area else {
+            throw Failure(description: "share entry (relay): Copy made no link")
         }
-        try expect(zoneA.projectId == nil && canvas.lentTile(agentA)?.zoneId == zoneA.zoneId
-            && canvas.tileView(for: agentA) === viewA,
-            "the agent's tile becomes the shared zone with its own view")
-        try expect(scene.runnerConstructions() == runnersBefore
-            && app.agentSupervisor.records[scene.agents[0]]?.tileId == recordA?.tileId,
-            "the share builds no runner and keeps the agent bound to its tile")
-        let published = app.qaSharedAreaZoneSessions.first { $0.areaId == areaA }?.controller.document?.items ?? []
-        try expect(published.contains { $0.kind == .agentObservation },
-            "the relay's area holds the agent as an observation")
         let copied = pasteboard.string(forType: .string)
         try expect(copied == linkA.url.absoluteString && linkA.slug == "map-the-checkout-state-machine"
             && ShareLinkURL.parse(linkA.url)?.slug == linkA.slug && ShareLinkURL.parse(linkA.url)?.token == linkA.token,
-            "Copy puts the relay's link, with its slug and token, on the pasteboard (\(copied ?? "nothing"))")
+            "step 3: Copy puts the relay's link, with its slug and token, on the pasteboard (\(copied ?? "nothing"))")
+        let areaController = try account.makeSharedAreaController(area: areaA)
+        await areaController.open()
+        let published = areaController.document?.items ?? []
+        await areaController.close()
+        try expect(published.count == 1 && published.first?.kind == .agentObservation,
+            "step 3: the relay's area holds exactly one item, T's agent observation (\(published.map(\.kind)))")
+        try expect(world(agentA) == frameA0 && canvas.tileRecord(for: agentA)?.zoneId == home
+            && canvas.lentTile(agentA) == nil && canvas.tileView(for: agentA) === viewA,
+            "step 3: T's zone and world frame are unchanged, and it keeps its own view")
+        try expect(app.sharedAreaRuntime?.document.zones.count == zonesBefore0
+            && app.sharedAreaRuntime?.sharedAreaZone(for: areaA) == nil && app.qaSharedAreaZoneSessions.isEmpty,
+            "step 3: the workspace document has no new zone")
+        try expect(scene.runnerConstructions() == runnersBefore
+            && app.agentSupervisor.records[scene.agents[0]]?.tileId == recordA?.tileId,
+            "the share builds no runner and keeps the agent bound to its tile")
+        try expect(app.sharedAreaHostSessions.keys.contains { $0.hasSuffix("/" + areaA.uuidString) }
+            && app.hostedAgentArea(forTile: agentA) == areaA,
+            "this Mac hosts the shared agent, and remembers which area it is shared through")
         let access = try await app.shareLinks.listAccess(area: areaA)
         try expect(access.contains { $0.id == linkA.id && $0.status == .active },
             "the relay lists the minted link as active")
+        try expect(canvas.tileView(for: agentA)?.qaOwnershipTabText == "Yours · shared",
+            "T's tab reads \"Yours · shared\" (\(canvas.tileView(for: agentA)?.qaOwnershipTabText ?? "none"))")
         app.shareEntry.dismiss()
 
-        // 2. A taken name: the relay refuses the link and the tile goes home.
-        //    Opening the first share revealed its zone; pan back to B, as a
-        //    person would before pressing its Share.
+        // 3a. A taken name: the relay refuses the link, and the agent is
+        //     neither published nor hosted. Nothing moved in the first place.
         canvas.setViewport(CanvasViewport(x: 300, y: 250, zoom: 1))
         canvas.layoutSubtreeIfNeeded()
         let viewB = canvas.tileView(for: agentB)
         let frameB = world(agentB)
-        let zonesBefore = app.sharedAreaRuntime?.document.zones.filter { $0.projectId == nil }.count
+        let zonesBefore = app.sharedAreaRuntime?.document.zones.count
         let popoverB = try share(agentB)
         popoverB.slugField.stringValue = linkA.slug
         try ShareEntryChecks.click(popoverB.copyButton)
@@ -238,11 +268,10 @@ enum ShareEntryRelayChecks {
         try expect(popoverB.session.failure == ShareLinkFailure.slugTaken.errorDescription && popoverB.session.link == nil,
             "the relay's 409 is shown in the popover")
         try expect(namesAsked == 1, "a Mac with an account reuses it: the second Share asks for no name")
-        try expect(canvas.lentTile(agentB) == nil && canvas.tileRecord(for: agentB)?.zoneId == home
-            && canvas.tileView(for: agentB) === viewB && world(agentB) == frameB,
-            "the refused share puts the tile back in its home zone, same view, same frame")
-        try expect(app.sharedAreaRuntime?.document.zones.filter { $0.projectId == nil }.count == zonesBefore
-            && canvas.lentTile(agentA)?.zoneId == zoneA.zoneId,
+        try expect(canvas.tileRecord(for: agentB)?.zoneId == home && canvas.tileView(for: agentB) === viewB
+            && world(agentB) == frameB && app.hostedAgentArea(forTile: agentB) == nil,
+            "the refused share leaves B where it was and does not host it")
+        try expect(app.sharedAreaRuntime?.document.zones.count == zonesBefore && app.hostedAgentArea(forTile: agentA) == areaA,
             "the refused share leaves no zone behind and the first share untouched")
         try expect(pasteboard.string(forType: .string) == linkA.url.absoluteString,
             "a refused share copies nothing")
@@ -269,13 +298,13 @@ enum ShareEntryRelayChecks {
                                          as: "Sam", insecureLoopback: true)
         try expect("\(unreachable)".contains("could not reach the relay at 127.0.0.1:\(silent)"),
             "a link whose relay is not running says the relay could not be reached (\(unreachable))")
-        // 3b. A lent agent is reachable, and the band's controls beat its
-        //     resize edge. A fresh coordinator, as after a relaunch.
+        // 3b. A shared agent is reachable from the sidebar, and the band's
+        //     controls beat its resize edge. A fresh coordinator, as after a relaunch.
         app.qaInstallShareEntry(pasteboard: pasteboard)
         app.shareEntry.presentsOffscreenForQA = true
         try expect(app.performInboxRowAction(.share, on: [scene.agents[0].rawValue]),
-            "the sidebar's Share reveals a lent agent rather than refusing")
-        try await eventually("the sidebar's popover for the lent agent") { app.shareEntry.presentedView?.session.target.area == areaA }
+            "the sidebar's Share on a shared agent opens it rather than refusing")
+        try await eventually("the sidebar's popover for the shared agent") { app.shareEntry.presentedView?.session.target.area == areaA }
         app.shareEntry.dismiss()
         /// A press at a point of the Share button, given in the title bar, the
         /// way a pointer reaches it: through the window.
@@ -312,35 +341,18 @@ enum ShareEntryRelayChecks {
             app.shareEntry.dismiss()
             return (zoom, presented)
         }
-        let lentPress = try press(agentA)
-        try expect(lentPress.presented,
-            "at zoom \(lentPress.zoom) a press on the top of a lent agent's Share, inside the resize band, opens the popover")
+        let sharedPress = try press(agentA)
+        try expect(sharedPress.presented,
+            "at zoom \(sharedPress.zoom) a press on the top of a shared agent's Share, inside the resize band, opens the popover")
         let homePress = try press(agentB)
         try expect(homePress.presented,
-            "at zoom \(homePress.zoom) the same press on a home agent's Share opens its popover too")
-        // Lent resize still works: the right edge, below the title bar.
-        guard let lentView = canvas.tileView(for: agentA), let widthBefore = canvas.lentTile(agentA)?.tile.areaFrame.width,
-              let frameA = canvas.navigationTileSnapshot(for: agentA)?.worldFrame else {
-            throw Failure(description: "share entry (relay): the lent agent lost its area frame")
-        }
-        canvas.setViewport(CanvasViewport(x: frameA.x - 200, y: frameA.y - 200, zoom: 0.5))
-        canvas.layoutSubtreeIfNeeded()
-        let edgeLocal = NSPoint(x: lentView.bounds.width - 2, y: lentView.bounds.height / 2)
-        let edgeStart = lentView.convert(edgeLocal, to: nil)
-        let edgeEnd = NSPoint(x: edgeStart.x + 60, y: edgeStart.y)
-        NSApp.sendEvent(try ShareEntryChecks.mouse(.leftMouseDown, edgeStart, in: window))
-        NSApp.sendEvent(try ShareEntryChecks.mouse(.leftMouseDragged, NSPoint(x: edgeStart.x + 30, y: edgeStart.y), in: window))
-        NSApp.sendEvent(try ShareEntryChecks.mouse(.leftMouseDragged, edgeEnd, in: window))
-        NSApp.sendEvent(try ShareEntryChecks.mouse(.leftMouseUp, edgeEnd, in: window))
-        let widthAfter = canvas.lentTile(agentA)?.tile.areaFrame.width ?? 0
-        try expect(widthAfter > widthBefore + 60,
-            "dragging a lent agent's right edge at zoom 0.5 still resizes it in the area (\(widthBefore) to \(widthAfter))")
-        canvas.setViewport(CanvasViewport(x: frameA.x - 200, y: frameA.y - 200, zoom: 1))
+            "at zoom \(homePress.zoom) the same press on an unshared agent's Share opens its popover too")
+        canvas.setViewport(CanvasViewport(x: 300, y: 250, zoom: 1))
         canvas.layoutSubtreeIfNeeded()
 
-        // 4. A's tile is already lent to its shared zone. After a relaunch (a
-        //    fresh share coordinator: no session holds the link's token), its
-        //    header Share opens that area's popover rather than doing nothing.
+        // 4. A is already shared. After a relaunch (a fresh share coordinator:
+        //    no session holds the link's token), its header Share opens that
+        //    area's popover rather than a second share.
         canvas.centerOnTile(agentA)
         canvas.layoutSubtreeIfNeeded()
         app.qaInstallShareEntry(pasteboard: pasteboard)
@@ -363,6 +375,8 @@ enum ShareEntryRelayChecks {
         existing.layoutSubtreeIfNeeded()
         try expect(existing.revokeButton.isHidden && !existing.revokeEveryoneButton.isHidden && existing.removeButtons.count == 1,
             "without reopening, the popover lists Sam with Remove and offers Revoke everyone's access")
+        try await eventually("T's tab names Sam") { canvas.tileView(for: agentA)?.qaOwnershipTabText == "Yours · shared with Sam" }
+        try expect(true, "once Sam has joined, T's tab reads \"Yours · shared with Sam\"")
         try ShareEntryChecks.click(existing.copyButton)
         try await eventually("New link on the shared area") { !existing.session.isWorking && existing.session.link != nil }
         let fresh = existing.session.link
@@ -378,6 +392,6 @@ enum ShareEntryRelayChecks {
         try await app.shareLinks.revokeLink(area: areaA, link: revokable.id)
         let revoked = try await open(revokable.url, as: "Priya", insecureLoopback: true)
         try expect(revoked == .refused(ShareLinkOpener.refusedMessage), "a revoked link says it was already used or revoked")
-        print("Share entry relay checks passed: a header Share and Copy against a local continuum-relay make the real shared zone and link, a slug collision puts the tile back, and a link that cannot open says why.")
+        print("Share entry relay checks passed: a header Share and Copy against a local continuum-relay share one agent with no zone and nothing moved, a slug collision shares nothing, and a link that cannot open says why.")
     }
 }

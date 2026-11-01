@@ -74,6 +74,15 @@ enum ShareEntryChecks {
             return share
         }
         func cancelSharedZone(areaId: UUID) async { cancelled.append(areaId) }
+        /// Mode A: one agent shares into a new area with no zone.
+        var agentShares: [(tile: UUID, name: String, area: UUID)] = []
+        var cancelledAgentShares: [UUID] = []
+        func shareAgent(tile: UUID, name: String) async throws -> UUID {
+            let area = UUID()
+            agentShares.append((tile, name, area))
+            return area
+        }
+        func cancelAgentShare(area: UUID) async { cancelledAgentShares.append(area) }
     }
 
     // MARK: Run

@@ -1624,6 +1624,29 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        // Mode A of the share redesign, alone: a real header Share and Copy
+        // against a local continuum-relay (the same stage the native check
+        // runs last but one). Needs `continuum-relay` built beside Array.
+        if CommandLine.arguments.contains("--share-agent-relay-check") {
+            setbuf(stdout, nil)
+            setbuf(stderr, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(90))
+                fputs("FAIL: share agent relay check exceeded its 90-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do {
+                    try await ShareEntryRelayChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--collaboration-native-check") {
             setbuf(stdout, nil)
             setbuf(stderr, nil)
@@ -6631,7 +6654,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// The share-link controller (IN-CANVAS.md, Round 2): the popover's API and
     /// the one entry point for array:// and arrayapp.dev/s/ links.
     private(set) lazy var shareLinks = makeShareLinkCoordinator()
-    private var sharedAreaHostSessions: [String: SharedAreaHostSession] = [:]
+    var sharedAreaHostSessions: [String: SharedAreaHostSession] = [:]
+    /// Mode A (`SharedAgentShare.swift`): the shared agent tiles this canvas
+    /// shows, by tile, and the agents this Mac shares, with who has access.
+    var sharedAgentTileSessions: [UUID: SharedAgentTileSession] = [:]
+    var hostedAgentSharesStorage: HostedAgentShareIndex?
+    var hostedAgentPeople: [UUID: [String]] = [:]
+    var hostedAgentAccessTask: Task<Void, Never>?
     private var pendingSharedAreaCapture: SharedAreaCaptureRequest?
     private var captureSelectionView: SharedAreaCaptureSelectionView?
     private var sharedAreaCaptureWindows: [UUID: SharedAreaCaptureWindowController] = [:]
@@ -8842,6 +8871,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case .runArtifacts:
             // Run artifact viewer tiles are read-only; retain the run directory.
             break
+        case .sharedAgent:
+            // Closing it forgets it on this canvas only; the owner's agent,
+            // and anyone else's access, are untouched.
+            sharedAgentTileClosed(id)
         case .managedAgent:
             // CLOSING A TILE IS CLOSING A WINDOW, NOT ENDING THE WORK (P2A.5, locked
             // decision). Four things happen here and a fifth deliberately does not:
@@ -12096,6 +12129,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }, presentRefusal: { [weak self] message in
             self?.presentShareLinkRefusal(message)
         })
+        coordinator.openAgent = { [weak self] model, area, item in
+            guard let self else { throw ShareLinkFailure.noWorkspace }
+            try await openSharedAgentLink(model: model, area: area, item: item)
+        }
         coordinator.askSignUpName = { [weak self] relay in
             if let preview = MultiplayerPreview.current, preview.driver != nil { return preview.name }
             return await self?.askCollaborationName(title: "Share from Array",
@@ -12228,7 +12265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return name.isEmpty ? nil : name
     }
 
-    private func presentShareLinkRefusal(_ message: String) {
+    func presentShareLinkRefusal(_ message: String) {
         guard let window = window ?? collaborationHub?.window, window.attachedSheet == nil else { return }
         let alert = NSAlert()
         alert.messageText = "This link can't be opened"
@@ -12443,6 +12480,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func configureShareEntry(_ entry: ShareEntryCoordinator) {
+        entry.onAccessRefreshed = { [weak self] area, people in
+            guard let self, hostedAgentPeople[area] != people,
+                  hostedAgentShares?.entries.contains(where: { $0.area == area }) == true else { return }
+            hostedAgentPeople[area] = people
+            refreshHostedAgentMarks()
+        }
         entry.onClose = { [weak self] in
             guard let selection = self?.canvasView?.tileSelection, selection.marquee else { return }
             selection.clear()
@@ -12490,6 +12533,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return ShareTarget(workspaceID: runtime.workspaceId, origin: origin, items: lent, area: lentArea)
         }
         guard !items.isEmpty else { return nil }
+        // Mode A: an agent this Mac already shares opens that share's
+        // popover (its links and people), not a second share.
+        if items.count == 1, items[0].kind == .managedAgent, let hosted = hostedAgentArea(forTile: items[0].key.tileID) {
+            return ShareTarget(workspaceID: runtime.workspaceId, origin: origin, items: items, area: hosted)
+        }
         return ShareTarget(workspaceID: runtime.workspaceId, origin: origin, items: items)
     }
 
@@ -18560,7 +18608,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         refreshGettingStartedTasks()
     }
 
-    private func focusSpawnedTile(_ tileId: UUID) {
+    func focusSpawnedTile(_ tileId: UUID) {
         // CX-01: a palette spawn's focus is the user's newer intent; `.tileSpawned`
         // never arms a zone, so nothing else records it.
         workspaceRuntime?.noteUserInteraction()
@@ -21914,7 +21962,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         )
     }
 
-    private func spawnerForFilesystemCreation() -> TileSpawner? {
+    func spawnerForFilesystemCreation() -> TileSpawner? {
         if let projectId = resolvedCreationScope()?.projectId {
             // The resolved scope names a project, so ONLY that project's spawner
             // may serve it. The fallback below used to run whenever the scoped
@@ -22493,6 +22541,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 installInitialRunArtifactsTile(tile, in: canvasView, via: spawner)
             case .managedAgent:
                 installInitialManagedAgentTile(tile, in: canvasView)
+            case .sharedAgent:
+                let view = SharedAgentTileNSView(tile: tile)
+                canvasView.install(tileView: view, for: tile)
+                attachSharedAgentTile(view)
             }
         }
 
@@ -22805,6 +22857,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     self?.sendReviewCommentsFromMenu(reviewTileId: tile.id)
                 })
             view.onSourceChanged = { [weak canvasView] updated in canvasView?.updateTile(updated) }
+            return view
+
+        case .sharedAgent:
+            // A reference only: the session reconnects through the account
+            // that joined, or the tile shows its placeholder.
+            let view = SharedAgentTileNSView(tile: tile)
+            attachSharedAgentTile(view)
             return view
 
         case .managedAgent:

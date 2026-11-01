@@ -33,6 +33,7 @@ extension TileNSView: FocusSurfaceAdapter {
         case .kanban: return .kanban
         case .diffReview: return .diffReview
         case .runArtifacts: return .runArtifacts
+        case .sharedAgent: return .managedAgent
         case .managedAgent: return .managedAgent
         }
     }

@@ -245,16 +245,18 @@ final class SharedAgentLiveView: NSView {
         setText(status, phase + (offline ? " · host offline, last confirmed"
             : unavailable ? " · last confirmed" : confirmed ? " · live" : ""))
         let controls = Collaboration.AgentProjection.RemoteControls(host: state.capabilities, role: role)
-        setText(self.controls, offline ? "Its host is offline. Nothing can reach this agent until it returns."
-            : delivery ?? Self.controlsText(state.capabilities, role: role))
+        setText(self.controls, delivery ?? (offline ? "Its host is offline. A prompt sent now waits, and runs once when it returns."
+            : Self.controlsText(state.capabilities, role: role)))
         let author = state.lastPrompt.map { last in
             SharedPromptAuthorship.label(mine: last.person == controller.identity.person, name: name(last.person), at: last.at)
         }
         if let author, lastPrompt.stringValue != author { lastPrompt.stringValue = author }
         if lastPrompt.isHidden != (author == nil) { lastPrompt.isHidden = author == nil; needsLayout = true }
         // Full access: anyone who may prompt gets the composer, busy or not. A
-        // prompt sent mid-turn waits on the host, in order, and is never dropped.
-        setComposer(offered: prompter != nil && !offline && controls.queue, sending: sending)
+        // prompt sent mid-turn, or while the host is offline, waits on the
+        // relay, in order, and runs once on the host; it is never dropped and
+        // never runs anywhere else.
+        setComposer(offered: prompter != nil && controls.queue, sending: sending)
         let text = Self.transcriptText(state, viewer: controller.identity.person, name: name)
         if transcript.string != text {
             let pinned = scroll.verticalScroller.map { $0.floatValue >= 0.99 } ?? true

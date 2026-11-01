@@ -100,6 +100,9 @@ public final class CollaborationAccountController {
     public var accounts: [CollaborationLocalAccount] { registry.accounts }
     public var selectedAccountID: String? { registry.selectedAccountID }
     public var activeAccount: CollaborationLocalAccount? { active?.account }
+    /// This channel's collaboration folder, for app-side records that sit
+    /// beside the account list (never credentials).
+    public var storeDirectory: URL { store.directory }
 
     private struct Active {
         var account: CollaborationLocalAccount

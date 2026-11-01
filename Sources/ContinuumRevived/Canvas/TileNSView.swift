@@ -907,6 +907,7 @@ class TileNSView: NSView, TokenThemed {
         super.layout()
         layoutChrome()
         layoutContentView()
+        layoutOwnershipMark()
         updateAffordanceOverlay()
     }
 
@@ -1493,7 +1494,71 @@ class TileNSView: NSView, TokenThemed {
     /// reflowed the document. At low zoom the enlarged grab strip therefore overlays
     /// the top of the body rather than pushing it down — chrome geometry is
     /// unchanged, only what it covers.
-    var contentTopInsetWorldHeight: CGFloat { Self.titleBarHeight }
+    var contentTopInsetWorldHeight: CGFloat {
+        Self.titleBarHeight + (ownershipMark == nil ? 0 : Self.ownershipStripHeight)
+    }
+
+    // MARK: - Ownership mark (`.plans/105-collaboration/SHARE-REDESIGN.md`, mode A)
+    //
+    // Whose agent this is when it is shared: a strip under the header with one
+    // tab ("Dylan's · runs on Dylan's Mac", "Yours · shared with Sam") and, on
+    // someone else's agent, an outline in the owner's colour, dashed while the
+    // owner's Mac is offline. The header band keeps its controls; the strip
+    // pushes the body down instead of covering it.
+
+    struct OwnershipMark: Equatable {
+        var text: String
+        /// The tab's dot, and the outline when `outlined`.
+        var colour: NSColor
+        var outlined: Bool
+        var dashed: Bool = false
+    }
+    static let ownershipStripHeight: CGFloat = 22
+    private(set) var ownershipMark: OwnershipMark?
+    private var ownershipStrip: TileOwnershipStripView?
+    private var ownershipOutline: TileOwnershipOutlineView?
+    var qaOwnershipTabText: String? { ownershipStrip?.text }
+
+    func setOwnershipMark(_ mark: OwnershipMark?) {
+        guard mark != ownershipMark else { return }
+        let insetChanged = (mark == nil) != (ownershipMark == nil)
+        ownershipMark = mark
+        if let mark {
+            let strip = ownershipStrip ?? TileOwnershipStripView(frame: .zero)
+            if strip.superview == nil { addSubview(strip) }
+            ownershipStrip = strip
+            strip.apply(text: mark.text, colour: mark.colour)
+            if mark.outlined {
+                let outline = ownershipOutline ?? TileOwnershipOutlineView(frame: bounds)
+                if outline.superview == nil { addSubview(outline) }
+                ownershipOutline = outline
+                outline.apply(colour: mark.colour, dashed: mark.dashed)
+            } else {
+                ownershipOutline?.removeFromSuperview(); ownershipOutline = nil
+            }
+        } else {
+            ownershipStrip?.removeFromSuperview(); ownershipStrip = nil
+            ownershipOutline?.removeFromSuperview(); ownershipOutline = nil
+        }
+        setAccessibilityHelp(mark?.text)
+        if insetChanged { needsLayout = true }
+        layoutOwnershipMark()
+    }
+
+    private func layoutOwnershipMark() {
+        guard let strip = ownershipStrip else { return }
+        let frame = NSRect(x: 0, y: Self.titleBarHeight, width: bounds.width, height: Self.ownershipStripHeight)
+        if strip.frame != frame { strip.frame = frame }
+        if let outline = ownershipOutline, outline.frame != bounds { outline.frame = bounds }
+        // Above the body; the outline above everything but the corner overlay.
+        if let contentView, let index = subviews.firstIndex(of: strip),
+           let body = subviews.firstIndex(of: contentView), index < body {
+            addSubview(strip, positioned: .above, relativeTo: contentView)
+        }
+        if let outline = ownershipOutline, subviews.last !== outline, subviews.last !== affordanceOverlay {
+            addSubview(outline, positioned: affordanceOverlay == nil ? .above : .below, relativeTo: affordanceOverlay)
+        }
+    }
 
     private(set) var qaCanvasLayoutInvalidationCount = 0
 
@@ -1833,6 +1898,9 @@ private final class BandActionControl: NSControl {
     private var labelled = true
     private var chromeScale: CGFloat = 1
     private var isPressed = false
+    /// Drawn like the Terminal switch: no fill at rest, secondary ink. Share
+    /// is one quiet icon (`.plans/105-collaboration/SHARE-REDESIGN.md`).
+    var quiet = false { didSet { if quiet != oldValue { needsDisplay = true } } }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1881,10 +1949,18 @@ private final class BandActionControl: NSControl {
 
     override func draw(_ dirtyRect: NSRect) {
         let theme = effectiveTokenTheme
-        let radius = CornerStyle.current == .sharp ? 0 : bounds.height / 2
-        (isPressed ? AgentSurfaceRole.rowSelected : AgentSurfaceRole.rowHover).color.nsColor(for: theme).setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
-        let ink = TextToken.textPrimary.color.nsColor(for: theme)
+        if quiet {
+            if isPressed {
+                let radius = CornerStyle.current == .sharp ? 0 : CGFloat(Radius.card) * chromeScale
+                AgentSurfaceRole.rowSelected.color.nsColor(for: theme).setFill()
+                NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+            }
+        } else {
+            let radius = CornerStyle.current == .sharp ? 0 : bounds.height / 2
+            (isPressed ? AgentSurfaceRole.rowSelected : AgentSurfaceRole.rowHover).color.nsColor(for: theme).setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+        }
+        let ink = (quiet ? TextToken.textSecondary : TextToken.textPrimary).color.nsColor(for: theme)
         let attributes: [NSAttributedString.Key: Any] = [.font: Self.font(scale: chromeScale), .foregroundColor: ink]
         let text = labelled ? (title as NSString) : nil
         let textSize = text?.size(withAttributes: attributes) ?? .zero
@@ -2355,6 +2431,7 @@ private final class TitleBarView: NSView, TokenThemed {
             control.target = self
             control.action = #selector(handleShare(_:))
             control.apply(title: "Share", symbol: "square.and.arrow.up")
+            control.quiet = true
             control.setAccessibilityHelp("Share this agent by link")
             addSubview(control)
             shareControl = control
@@ -2375,13 +2452,14 @@ private final class TitleBarView: NSView, TokenThemed {
         let scale = chromeScale
         let gap = CGFloat(Space.s) * scale
         let height = closeButtonWorldSize
-        let width = control.preferredWidth(labelled: true, scale: scale, minimum: height)
+        // Icon only, square, like the Terminal switch beside it.
+        let width = height
         let edge = agentStatus.flatMap { statusPillRect(for: $0, theme: theme)?.minX }
             ?? min(qaDragHandleLeadingX, leadingBandControlX)
         let x = edge - gap - width
         control.isHidden = x - gap < titleLeadingX + Self.titleMinimumWidth * scale
         guard !control.isHidden else { return }
-        control.configure(labelled: true, chromeScale: scale)
+        control.configure(labelled: false, chromeScale: scale)
         control.frame = NSRect(x: x, y: (bounds.height - height) / 2, width: width, height: height)
     }
 
@@ -3322,5 +3400,63 @@ extension TitleBarView: NSTextFieldDelegate {
         // field is being installed does not.
         guard !isOpeningTitleEditForDelegate, (obj.object as? NSTextField) === titleEditorForQA else { return }
         endTitleEdit(commit: true)
+    }
+}
+
+
+/// The ownership mark's strip: one quiet tab under the header.
+@MainActor
+final class TileOwnershipStripView: NSView {
+    private(set) var text = ""
+    private var colour: NSColor = .systemOrange
+    override var isFlipped: Bool { true }
+
+    func apply(text: String, colour: NSColor) {
+        guard text != self.text || colour != self.colour else { return }
+        self.text = text; self.colour = colour
+        setAccessibilityElement(true); setAccessibilityRole(.staticText); setAccessibilityLabel(text)
+        needsDisplay = true
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let theme = effectiveTokenTheme
+        SurfaceToken.tileBody.color.nsColor(for: theme).setFill()
+        bounds.fill()
+        let font = NSFont.token(.caption)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: TextToken.textSecondary.color.nsColor(for: theme)]
+        let size = (text as NSString).size(withAttributes: attributes)
+        let pill = NSRect(x: 8, y: 3, width: min(bounds.width - 16, ceil(size.width) + 26), height: bounds.height - 6)
+        guard pill.width > 24 else { return }
+        let path = NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2)
+        AgentSurfaceRole.rowHover.color.nsColor(for: theme).setFill(); path.fill()
+        colour.withAlphaComponent(0.6).setStroke(); path.lineWidth = 1; path.stroke()
+        colour.setFill()
+        NSBezierPath(ovalIn: NSRect(x: pill.minX + 6, y: pill.midY - 4, width: 8, height: 8)).fill()
+        (text as NSString).draw(in: NSRect(x: pill.minX + 18, y: pill.midY - size.height / 2, width: pill.width - 22, height: size.height),
+                                withAttributes: attributes)
+    }
+}
+
+/// The ownership mark's outline: the owner's colour round the whole tile,
+/// dashed while the owner's Mac is offline. Never takes a click.
+@MainActor
+final class TileOwnershipOutlineView: NSView {
+    private var colour: NSColor = .systemOrange
+    private(set) var dashed = false
+    override var isFlipped: Bool { true }
+    func apply(colour: NSColor, dashed: Bool) {
+        guard colour != self.colour || dashed != self.dashed else { return }
+        self.colour = colour; self.dashed = dashed
+        needsDisplay = true
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: Radius.container - 1, yRadius: Radius.container - 1)
+        path.lineWidth = 2
+        if dashed { path.setLineDash([6, 4], count: 2, phase: 0) }
+        colour.withAlphaComponent(0.9).setStroke()
+        path.stroke()
     }
 }

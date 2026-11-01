@@ -36,12 +36,16 @@ final class ShareLinkCoordinator {
     typealias SignIn = ShareLinkOpener.SignIn
     typealias AskName = ShareLinkOpener.AskName
     typealias OpenArea = @MainActor (SharedAreaController, SharedArea.ID<SharedArea.Person>, UUID, CollaborationAccountController) throws -> Void
+    /// Mode A: a link to one agent lands as one tile, not a zone.
+    typealias OpenAgent = @MainActor (CollaborationAccountController, UUID, SharedArea.Item) async throws -> Void
     typealias InventoryProvider = @MainActor (SharedAreaPublication.Selection) throws -> SharedAreaInventory.Snapshot
 
     private let accountProvider: AccountProvider
     private let signIn: SignIn
     private let askName: AskName
     private let openArea: OpenArea
+    /// Nil keeps every link on the zone path (checks that predate mode A).
+    var openAgent: OpenAgent?
     private let inventory: InventoryProvider
     /// Shows a refusal to the person. Production presents it on the canvas window.
     var presentRefusal: @MainActor (String) -> Void
@@ -76,12 +80,18 @@ final class ShareLinkCoordinator {
         let outcome: ShareLinkOpenOutcome
         do {
             let model = try accountProvider()
-            let opener = ShareLinkOpener(account: model, signIn: signIn, askName: askName, open: { [openArea] state, model in
+            let opener = ShareLinkOpener(account: model, signIn: signIn, askName: askName, open: { [openArea, openAgent] state, model in
                 guard let person = model.activeAccount?.identity.person else { throw CollaborationAccountFailure.notConnected }
                 let area = state.document.id.rawValue
+                // Mode A: a link to one agent lands as one tile, never a zone.
+                if let openAgent, let item = AppDelegate.sharedAgentItem(in: state.document, me: person) {
+                    try await openAgent(model, area, item)
+                    return
+                }
                 try openArea(try model.makeSharedAreaController(area: area), person, area, model)
             }, deviceLabel: Host.current().localizedName ?? "This Mac", allowsInsecureLoopback: allowsInsecureLoopback)
-            switch await opener.open(url) {
+            let opened = await opener.open(url)
+            switch opened {
             case .opened(let area): outcome = .opened(area: area)
             case .refused(let message): outcome = .refused(message)
             case .cancelled: outcome = .cancelled

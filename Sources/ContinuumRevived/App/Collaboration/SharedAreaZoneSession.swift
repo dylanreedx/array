@@ -295,8 +295,9 @@ extension AppDelegate {
         guard let runtime = sharedAreaRuntime, let canvas = canvasView else { return }
         wireSharedAreaZoneCallbacks(canvas: canvas, runtime: runtime)
         runtime.onSceneWillChange = { [weak self] in self?.closeSharedAreaSessions() }
-        runtime.onSceneChanged = { [weak self] in self?.reopenSharedAreas() }
+        runtime.onSceneChanged = { [weak self] in self?.reopenSharedAreas(); self?.refreshHostedAgentMarks() }
         reopenSharedAreas()
+        resumeHostedAgentShares()
     }
 
     /// Every open area leaves the canvas: presence ends and each controller

@@ -114,6 +114,7 @@ public enum WorkspaceAPIExposure {
         "tile.metadata.boardViewState": .notExposed("Board library presentation stays user-owned."),
         "tile.metadata.fileEditorViewState": .notExposed("Editor presentation and cursor state stay user-owned."),
         "tile.metadata.boardId": .internal,
+        "tile.metadata.sharedAgent": .internal, // Written when a share link is opened; the owner's Mac owns the agent.
 
         "zone.zoneId": .internal,
         "zone.projectId": .notExposed("Changing a zone's project is native UI only."),

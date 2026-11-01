@@ -174,6 +174,11 @@ public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
     case runArtifacts
     case managedAgent
     case kanban
+    /// Someone else's agent, shared with this person by link
+    /// (`.plans/105-collaboration/SHARE-REDESIGN.md`, mode A). It runs on its
+    /// owner's Mac; this canvas holds only `TileMetadata.sharedAgent`, a
+    /// reference. Never a `.managedAgent`: there is no `AgentRecord` here.
+    case sharedAgent
 
     /// Human label for chrome. `rawValue.capitalized` produced "Managedagent",
     /// "Filetree", "Browserinspector" — camelCase gets lowercased after the
@@ -193,6 +198,7 @@ public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
         case .runArtifacts: return "Artifacts"
         case .managedAgent: return "Agent"
         case .kanban: return "Board"
+        case .sharedAgent: return "Shared agent"
         }
     }
 }
@@ -324,6 +330,9 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     /// on the geometry undo stack.
     public var boardViewState: BoardViewState?
     public var boardId: UUID?
+    /// `.sharedAgent` only: which shared agent the tile shows. A reference,
+    /// never a path, record or credential.
+    public var sharedAgent: SharedAgentTileReference?
 
     public init(
         launchProfileId: String? = nil,
@@ -353,7 +362,8 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         markdownDocumentMode: MarkdownDocumentMode? = nil,
         fileEditorViewState: FileEditorViewState? = nil,
         boardViewState: BoardViewState? = nil,
-        boardId: UUID? = nil
+        boardId: UUID? = nil,
+        sharedAgent: SharedAgentTileReference? = nil
     ) {
         self.launchProfileId = launchProfileId
         self.projectRelativeCwd = projectRelativeCwd
@@ -383,6 +393,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.fileEditorViewState = fileEditorViewState
         self.boardViewState = boardViewState
         self.boardId = boardId
+        self.sharedAgent = sharedAgent
     }
 
     enum CodingKeys: String, CodingKey, CaseIterable {
@@ -414,6 +425,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case fileEditorViewState
         case boardViewState
         case boardId
+        case sharedAgent
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -446,6 +458,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(fileEditorViewState, forKey: .fileEditorViewState)
         try container.encodeIfPresent(boardViewState, forKey: .boardViewState)
         try container.encodeIfPresent(boardId, forKey: .boardId)
+        try container.encodeIfPresent(sharedAgent, forKey: .sharedAgent)
     }
 
     /// The agent that may drive this browser without a hand-over. The owner
@@ -454,6 +467,25 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     /// then needs the same explicit hand-over as any user tile.
     public var browserControllingAgentId: AgentID? {
         browserProfileId == BrowserProfile.agentsProfileId ? browserOwnerAgentId : nil
+    }
+}
+
+/// What a `.sharedAgent` tile persists: the shared area and the agent's object
+/// in it, and whose it is. The account is the collaboration account that
+/// opened the link; another account (or none) shows a placeholder, never a
+/// broken agent.
+public struct SharedAgentTileReference: Codable, Equatable, Sendable {
+    public var areaId: UUID
+    public var objectId: UUID
+    /// The owner's display name, as it was when the link was opened.
+    public var hostName: String
+    public var hostPerson: UUID?
+    /// `CollaborationLocalAccount.id` of the account that joined.
+    public var accountId: String?
+
+    public init(areaId: UUID, objectId: UUID, hostName: String, hostPerson: UUID? = nil, accountId: String? = nil) {
+        self.areaId = areaId; self.objectId = objectId; self.hostName = hostName
+        self.hostPerson = hostPerson; self.accountId = accountId
     }
 }
 

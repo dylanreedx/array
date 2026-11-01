@@ -24,6 +24,8 @@ struct ShareTarget: Equatable {
 
     var keys: Set<SharedAreaPublication.SourceKey> { Set(items.map(\.key)) }
     var tileIDs: [UUID] { items.map(\.key.tileID) }
+    /// Mode A: one agent is shared on its own, with no zone and nothing moved.
+    var isSingleAgent: Bool { items.count == 1 && items.first?.kind == .managedAgent }
     /// One agent's zone is named after the agent; an area's after its slug.
     var name: String {
         if origin == .agent, let agent = items.first { return agent.title }
@@ -59,6 +61,10 @@ typealias SharedZoneShare = AppDelegate.SharedZoneShare
 protocol SharedZoneCreating: AnyObject {
     func createSharedZone(fromTiles tileIds: [UUID], name: String) async throws -> SharedZoneShare
     func cancelSharedZone(areaId: UUID) async
+    /// Mode A (`.plans/105-collaboration/SHARE-REDESIGN.md`): publish one agent
+    /// into a new area and host it, with no zone and no tile moved. Returns the area.
+    func shareAgent(tile: UUID, name: String) async throws -> UUID
+    func cancelAgentShare(area: UUID) async
 }
 
 /// One share, from the first Copy to Revoke. Nothing is shared until Copy, so
@@ -156,13 +162,24 @@ final class ShareLinkSession {
                 self.write(link)
                 return
             }
-            let zone = try await self.zones.createSharedZone(fromTiles: self.target.tileIDs, name: self.zoneName)
             let link: Collaboration.ShareLink
-            do {
-                link = try await self.links.createShareLink(area: zone.areaId, slug: self.slug, lifetime: self.lifetime)
-            } catch {
-                await self.zones.cancelSharedZone(areaId: zone.areaId)
-                throw error
+            if self.target.isSingleAgent, let tile = self.target.tileIDs.first {
+                // One agent: nothing on this canvas moves and no zone is made.
+                let area = try await self.zones.shareAgent(tile: tile, name: self.zoneName)
+                do {
+                    link = try await self.links.createShareLink(area: area, slug: self.slug, lifetime: self.lifetime)
+                } catch {
+                    await self.zones.cancelAgentShare(area: area)
+                    throw error
+                }
+            } else {
+                let zone = try await self.zones.createSharedZone(fromTiles: self.target.tileIDs, name: self.zoneName)
+                do {
+                    link = try await self.links.createShareLink(area: zone.areaId, slug: self.slug, lifetime: self.lifetime)
+                } catch {
+                    await self.zones.cancelSharedZone(areaId: zone.areaId)
+                    throw error
+                }
             }
             self.phase = .live(link)
             self.write(link)

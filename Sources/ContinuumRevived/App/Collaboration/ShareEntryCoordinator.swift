@@ -13,6 +13,10 @@ final class ShareEntryCoordinator {
     private var sessions: [Set<SharedAreaPublication.SourceKey>: ShareLinkSession] = [:]
     private let popover = ChoicePopoverController()
     private(set) weak var presentedView: ShareLinkPopoverView?
+    /// The view the popover hangs from: the shared tile itself.
+    private(set) weak var qaAnchorView: NSView?
+    /// Who has access, each time the open popover reads it: (area, names).
+    var onAccessRefreshed: ((UUID, [String]) -> Void)?
     /// The popover closed: the Share tool's rings clear here.
     var onClose: (() -> Void)?
 
@@ -52,11 +56,13 @@ final class ShareEntryCoordinator {
                                    self?.onClose?()
                                })
         presentedView = content
+        qaAnchorView = view
         // Live: someone joining shows while the popover is open.
         accessRefresh?.cancel()
         accessRefresh = Task { [weak self, weak session] in
             while !Task.isCancelled, let session {
                 await session.refreshAccess()
+                if let area = session.area { self?.onAccessRefreshed?(area, session.people.map(\.label)) }
                 try? await Task.sleep(for: Self.accessRefreshInterval)
                 guard self?.isPresented == true else { return }
             }
