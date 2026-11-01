@@ -201,6 +201,8 @@ do {
         try await runCollaborationHostLivenessChecks()
     } else if CommandLine.arguments.contains("--capabilities-only") {
         try await runCollaborationCapabilityChecks()
+    } else if CommandLine.arguments.contains("--cursor-lane-only") {
+        try await runCollaborationCursorLaneChecks()
     } else {
         if !CommandLine.arguments.contains("--updates-only") && !CommandLine.arguments.contains("--client-boundaries-only") { try await run() }
         if CommandLine.arguments.contains("--client-boundaries-only") {
@@ -213,6 +215,7 @@ do {
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationCapabilityChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationHandoffChecks(); try await runCollaborationUsageChecks(); try await runCollaborationEndorsementChecks(); try await runCollaborationAgentProjectionChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationRecoveryScaleChecks() }
+        if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationCursorLaneChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationRetentionChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationArtifactChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationBoundaryAuditChecks() }

@@ -83,14 +83,28 @@ public final class RelayServer: @unchecked Sendable {
                         channel.pipeline.addHandler(RelayHTTPHandler(store: store, liveHub: self.liveHub, pushDelivery: self.pushDelivery, collaboration: self.collaboration, admin: true, clientAddressHeader: self.configuration.clientAddressHeader), name: "relay-admin-http")
                     }
                 }
+                let collaboration = self.collaboration
                 let upgrader = NIOWebSocketServerUpgrader(
                     shouldUpgrade: { channel, head in
-                        guard head.uri == "/v2/socket" else { return channel.eventLoop.makeSucceededFuture(nil) }
-                        return channel.eventLoop.makeSucceededFuture(HTTPHeaders())
+                        if head.uri == "/v2/socket" { return channel.eventLoop.makeSucceededFuture(HTTPHeaders()) }
+                        // The collaboration cursor lane: admitted (bearer, active
+                        // membership) before the upgrade, so a refusal is a plain
+                        // HTTP status and no frame is ever exchanged.
+                        guard let collaboration, let lane = CollaborationCursorSocket.request(head) else {
+                            return channel.eventLoop.makeSucceededFuture(nil)
+                        }
+                        let promise = channel.eventLoop.makePromise(of: HTTPHeaders?.self)
+                        promise.completeWithTask {
+                            (try? await collaboration.admitCursorLane(token: lane.token, area: lane.area)) != nil ? HTTPHeaders() : nil
+                        }
+                        return promise.futureResult
                     },
-                    upgradePipelineHandler: { channel, _ in
+                    upgradePipelineHandler: { channel, head in
                         channel.pipeline.removeHandler(name: "relay-public-http").flatMap {
-                            channel.pipeline.addHandler(RelayWebSocketHandler(store: store, liveHub: self.liveHub, pushDelivery: self.pushDelivery))
+                            if let collaboration, let lane = CollaborationCursorSocket.request(head) {
+                                return channel.pipeline.addHandler(CollaborationCursorSocket(store: collaboration, area: lane.area, token: lane.token))
+                            }
+                            return channel.pipeline.addHandler(RelayWebSocketHandler(store: store, liveHub: self.liveHub, pushDelivery: self.pushDelivery))
                         }
                     }
                 )

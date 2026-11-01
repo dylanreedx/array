@@ -10,6 +10,7 @@ final class SharedAreaPresencePublisher {
     private let scene: SharedAreaSceneView
     private let controller: SharedAreaController
     private var observer: UUID?
+    private var cursorObserver: UUID?
     private var monitor: Any?
     private var timer: Timer?
     private var session: UUID?
@@ -18,6 +19,9 @@ final class SharedAreaPresencePublisher {
     private var generation = UUID()
     private var cursor: Collaboration.Point?
     private var screenCursor: NSPoint?
+    /// When `cursor` was sampled, on this Mac's monotonic clock. Receivers play
+    /// positions back at the spacing they were sampled.
+    private var cursorSampledAt: TimeInterval = ProcessInfo.processInfo.systemUptime
     private var lastSent = Date.distantPast
     /// A position changed while a send was out or inside the 50 ms window. It is
     /// sent as soon as either clears, so the last position is never dropped.
@@ -58,6 +62,7 @@ final class SharedAreaPresencePublisher {
         }
         scene.window?.acceptsMouseMovedEvents = true
         observer = controller.addChangeObserver { [weak self] in self?.refresh() }
+        cursorObserver = controller.addCursorObserver { [weak self] update in self?.cursorArrived(update) }
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .mouseExited]) { [weak self] event in
             guard let self, event.window === self.scene.window else { return event }
             let local = self.overlay.convert(event.locationInWindow, from: nil)
@@ -68,6 +73,7 @@ final class SharedAreaPresencePublisher {
                 let area = self.scene.areaPoint(forScreenPoint: self.scene.convert(event.locationInWindow, from: nil))
                 self.cursor = .init(x: area.x, y: area.y)
             } else { self.cursor = nil }
+            self.cursorSampledAt = ProcessInfo.processInfo.systemUptime
             self.send(force: false)
             return event
         }
@@ -79,6 +85,7 @@ final class SharedAreaPresencePublisher {
     func stop() {
         guard !stopped else { return }; stopped = true; generation = UUID()
         if let observer { controller.removeChangeObserver(observer) }; observer = nil
+        if let cursorObserver { controller.removeCursorObserver(cursorObserver) }; cursorObserver = nil
         if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil
         timer?.invalidate(); timer = nil; task?.cancel(); task = nil
         trailingTimer?.invalidate(); trailingTimer = nil; trailing = false
@@ -151,6 +158,13 @@ final class SharedAreaPresencePublisher {
         targets.sort { $0.label == $1.label ? $0.device.uuidString < $1.device.uuidString : $0.label < $1.label }
         scene.setFollowTargets(Array(targets.prefix(16)), followed: followedDevice)
     }
+    /// A teammate's position from the cursor lane: straight to the overlay's
+    /// playback, and to the camera when following them. No scene refresh.
+    private func cursorArrived(_ update: SharedAreaController.CursorUpdate) {
+        guard !stopped else { return }
+        overlay.receive(update)
+        if update.device == followedDevice, let viewport = update.viewport, viewport.valid { applyFollow(viewport) }
+    }
     private func localNavigation() {
         if followedDevice != nil { stopFollowing(notice: nil) } else { overlay.followBanner = nil }
     }
@@ -177,7 +191,7 @@ final class SharedAreaPresencePublisher {
         if scene.applyFollowedCamera(camera) { followCameraApplies += 1 }
     }
     func publishPointer(_ point: Collaboration.Point?) async {
-        cursor = point
+        cursor = point; cursorSampledAt = ProcessInfo.processInfo.systemUptime
         screenCursor = point.map { overlay.convert(scene.screenPoint(forAreaPoint: .init(x: $0.x, y: $0.y)), from: scene) }
         send(force: true); await task?.value
     }
@@ -189,17 +203,23 @@ final class SharedAreaPresencePublisher {
                 let area = scene.areaPoint(forScreenPoint: overlay.convert(screenCursor, to: scene))
                 cursor = .init(x: area.x, y: area.y)
             } else { cursor = nil; self.screenCursor = nil; overlay.pointerMoved(to: nil) }
+            cursorSampledAt = ProcessInfo.processInfo.systemUptime
         }
         send(force: false)
     }
-    /// One request in flight, at most one every 50 ms (the service fans out at
-    /// 20 Hz). A move that cannot go now is not dropped: the newest position
-    /// leaves the moment the flight lands or the window opens. Before this, a
-    /// stopped mouse waited for the one-second timer, up to a second behind.
+    /// One send in flight, at most one every 50 ms over update pages (the
+    /// service wakes readers at 20 Hz), or one a display frame at 60 Hz over the
+    /// cursor lane, where a send is a WebSocket write rather than a round trip.
+    /// A move that cannot go now is not dropped: the newest position leaves the
+    /// moment the flight lands or the window opens. Before this, a stopped
+    /// mouse waited for the one-second timer, up to a second behind.
+    static let laneInterval: TimeInterval = 1.0 / 60
+    static let pageInterval: TimeInterval = 0.05
     private func send(force: Bool) {
         guard !stopped, controller.status == .connected else { return }
         guard task == nil else { trailing = true; return }
-        let wait = 0.05 - Date().timeIntervalSince(lastSent)
+        let window = controller.cursorLaneState == .live ? Self.laneInterval : Self.pageInterval
+        let wait = window - Date().timeIntervalSince(lastSent)
         if !force, wait > 0 {
             trailing = true
             if trailingTimer == nil {
@@ -213,7 +233,7 @@ final class SharedAreaPresencePublisher {
         trailingTimer?.invalidate(); trailingTimer = nil
         let ticket = generation
         // The window counts from when a send leaves, so a round trip longer than
-        // 50 ms is the only limit on the rate.
+        // the window is the only limit on the rate.
         lastSent = Date()
         task = Task { [weak self] in
             guard let self else { return }
@@ -236,7 +256,8 @@ final class SharedAreaPresencePublisher {
                 // otherwise let two cameras chase each other.
                 let viewport = followedDevice != nil ? nil : SharedArea.Rect(x: camera.x, y: camera.y,
                     width: max(1, bounds.width / camera.zoom), height: max(1, bounds.height / camera.zoom))
-                try await controller.publishPresence(.init(session: session, sequence: sequence, cursor: cursor, viewport: viewport))
+                try await controller.publishPresence(.init(session: session, sequence: sequence, cursor: cursor, viewport: viewport,
+                    sentAt: cursorSampledAt))
             } catch { if ticket == generation { session = nil } }
         }
     }

@@ -22,6 +22,16 @@ public protocol SharedAreaControllerTransport: Sendable {
     func reportUsage(_ report: Collaboration.UsageReport) async throws
     func publishAgentProjection(object: UUID, report: Collaboration.AgentProjection.PublishReport) async throws
     func readAgentProjection(object: UUID, cursor: Collaboration.AgentProjection.Cursor?) async throws -> Collaboration.AgentProjection.Read
+    /// The area's cursor lane: pointers both ways at the sender's rate. A
+    /// transport without one throws, and presence stays on update pages.
+    func openCursorLane() async throws -> any SharedAreaCursorLane
+}
+
+/// One open cursor lane. `messages` finishes when the connection ends.
+public protocol SharedAreaCursorLane: Sendable {
+    var messages: AsyncStream<Collaboration.CursorLaneMessage> { get }
+    func send(_ input: Collaboration.PresenceInput) async throws
+    func close() async
 }
 
 public extension SharedAreaControllerTransport {
@@ -35,6 +45,16 @@ public extension SharedAreaControllerTransport {
     func readAgentProjection(object: UUID, cursor: Collaboration.AgentProjection.Cursor?) async throws -> Collaboration.AgentProjection.Read {
         throw CollaborationClientError.server(status: 503, code: "projectionUnavailable")
     }
+    func openCursorLane() async throws -> any SharedAreaCursorLane {
+        throw CollaborationClientError.server(status: 501, code: "cursorLaneUnavailable")
+    }
+}
+
+private struct SharedAreaAPICursorLane: SharedAreaCursorLane {
+    let client: CollaborationCursorLaneClient
+    var messages: AsyncStream<Collaboration.CursorLaneMessage> { client.messages }
+    func send(_ input: Collaboration.PresenceInput) async throws { try await client.send(input) }
+    func close() async { client.close() }
 }
 
 private actor SharedAreaAPIConnection: SharedAreaControllerConnection {
@@ -73,6 +93,9 @@ public struct SharedAreaAPITransport: SharedAreaControllerTransport {
     }
     public func readAgentProjection(object: UUID, cursor: Collaboration.AgentProjection.Cursor?) async throws -> Collaboration.AgentProjection.Read {
         try await api.readAgentProjection(area: area, object: object, cursor: cursor)
+    }
+    public func openCursorLane() async throws -> any SharedAreaCursorLane {
+        SharedAreaAPICursorLane(client: try await api.openCursorLane(area: area))
     }
 }
 
@@ -122,6 +145,27 @@ public final class SharedAreaController {
         let id = UUID(); changeObservers[id] = observer; return id
     }
     public func removeChangeObserver(_ id: UUID) { changeObservers.removeValue(forKey: id) }
+
+    /// A teammate's pointer from the cursor lane. Applied to `presence` without
+    /// a change notification (that would refresh the whole scene up to 60
+    /// times a second per teammate); only cursor observers hear it.
+    public struct CursorUpdate: Sendable, Equatable {
+        public let device: UUID
+        public let cursor: Collaboration.Point?
+        public let viewport: SharedArea.Rect?
+        /// The sender's sample time, seconds on its own clock; nil from pages.
+        public let sentAt: Double?
+    }
+    public enum CursorLaneState: Sendable, Equatable { case off, connecting, live }
+    /// `.off` when this transport or relay has no lane: presence rides pages only.
+    public private(set) var cursorLaneState: CursorLaneState = .off
+    /// Lane frames applied, for the motion witness.
+    public private(set) var cursorLaneFramesApplied = 0
+    private var cursorObservers: [UUID: @MainActor (CursorUpdate) -> Void] = [:]
+    @discardableResult public func addCursorObserver(_ observer: @escaping @MainActor (CursorUpdate) -> Void) -> UUID {
+        let id = UUID(); cursorObservers[id] = observer; return id
+    }
+    public func removeCursorObserver(_ id: UUID) { cursorObservers.removeValue(forKey: id) }
     public var view: SharedAreaLocalView { localState?.view ?? .init() }
     public var drafts: [SharedAreaLocalDraft] { localState?.drafts ?? [] }
     public var sourceBindings: [SharedAreaLocalSourceBinding] { localState?.sourceBindings ?? [] }
@@ -152,7 +196,15 @@ public final class SharedAreaController {
     public func publishPresence(_ input: Collaboration.PresenceInput) async throws {
         guard status == .connected, let transport else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
         let current = generation
-        try await transport.publishPresence(input)
+        if let lane = cursorLane {
+            // The relay no longer knows this session (it restarted): the caller
+            // begins a new one, as it does when a page publish is refused.
+            if rejectedCursorSessions.contains(input.session) { throw CollaborationClientError.server(status: 400, code: "invalidRequest") }
+            do { try await lane.send(input) }
+            catch { try await transport.publishPresence(input) }
+        } else {
+            try await transport.publishPresence(input)
+        }
         guard generation == current, status == .connected else { throw CollaborationClientError.server(status: 409, code: "superseded") }
     }
     public func endPresence(_ session: UUID) async throws {
@@ -198,6 +250,12 @@ public final class SharedAreaController {
     private var isRecoveringOperations = false
     private var recoveryTask: Task<Void, Never>?
     private var uploadPass: Task<Void, Never>?
+    private var cursorLane: (any SharedAreaCursorLane)?
+    private var cursorLaneTask: Task<Void, Never>?
+    /// The newest (session, sequence) the lane delivered for each device, so a
+    /// slower update page never moves a cursor back.
+    private var laneCursors: [UUID: (session: UUID, sequence: UInt64)] = [:]
+    private var rejectedCursorSessions: Set<UUID> = []
 
     public init(localStore: SharedAreaLocalStore, credentialStore: CollaborationCredentialStore,
                 credentialScope: CollaborationCredentialScope,
@@ -219,7 +277,7 @@ public final class SharedAreaController {
             status = document == nil ? .closed : .cached
         }
     }
-    deinit { updateTask?.cancel(); recoveryTask?.cancel() }
+    deinit { updateTask?.cancel(); recoveryTask?.cancel(); cursorLaneTask?.cancel() }
     public nonisolated static func liveTransport(endpoint: CollaborationServiceEndpoint, credential: Collaboration.Credential, area: UUID) throws -> any SharedAreaControllerTransport {
         try SharedAreaAPITransport(endpoint: endpoint, credential: credential, area: area)
     }
@@ -229,6 +287,7 @@ public final class SharedAreaController {
     public func open() async {
         let current = UUID(); generation = current
         recoveryTask?.cancel(); recoveryTask = nil
+        stopCursorLane()
         let previous = connection; connection = nil
         let retirements = Array(retiringConnections.values)
         updateTask?.cancel(); updateTask = nil; transport = nil
@@ -271,6 +330,7 @@ public final class SharedAreaController {
                 }
                 self?.streamEnded(generation: current)
             }
+            startCursorLane(active, generation: current)
             // Only document mutations are queued here. Executable host commands
             // have a separate admission ledger and never enter this outbox.
             _ = await recoverPendingOperations()
@@ -296,6 +356,7 @@ public final class SharedAreaController {
     public func close() async {
         generation = UUID()
         recoveryTask?.cancel(); recoveryTask = nil
+        stopCursorLane()
         let previous = connection; connection = nil
         let retirements = Array(retiringConnections.values)
         updateTask?.cancel(); updateTask = nil; transport = nil
@@ -645,7 +706,7 @@ public final class SharedAreaController {
         admittedEpoch = max(admittedEpoch ?? 0, replica.scope.epoch)
         document = localState?.accessDenied == true ? nil : localState?.document
         if scope == nil || replica.scope.epoch >= scope!.epoch { scope = replica.scope }
-        if !preservingPresence { presence = replica.presence; hostLiveness = replica.hosts ?? []; artifactHeads = replica.artifactHeads }
+        if !preservingPresence { presence = mergingLaneCursors(replica.presence); hostLiveness = replica.hosts ?? []; artifactHeads = replica.artifactHeads }
         for member in replica.members ?? [] { memberNames[member.person] = member.label }
         for peer in replica.presence where replica.members?.contains(where: { $0.person == peer.identity.person }) != true {
             if let label = peer.label, memberNames[peer.identity.person] == nil { memberNames[peer.identity.person] = label }
@@ -679,6 +740,7 @@ public final class SharedAreaController {
             catch { lastPersistenceError = error }
         }
         generation = UUID()
+        stopCursorLane()
         let previous = connection; connection = nil
         updateTask?.cancel(); updateTask = nil; transport = nil
         admittedRevision = nil; admittedEpoch = nil
@@ -704,5 +766,96 @@ public final class SharedAreaController {
     private func changed() {
         onChange?()
         for observer in Array(changeObservers.values) { observer() }
+    }
+
+    // MARK: Cursor lane
+
+    /// Keeps the lane open while this generation is connected, reconnecting
+    /// with backoff. A relay that refuses the upgrade (an older relay answers
+    /// 404) is not retried: presence stays on update pages, as before the lane.
+    private func startCursorLane(_ transport: any SharedAreaControllerTransport, generation current: UUID) {
+        cursorLaneTask?.cancel()
+        cursorLaneState = .connecting
+        cursorLaneTask = Task { [weak self] in
+            var backoff = 500
+            while !Task.isCancelled {
+                do {
+                    let lane = try await transport.openCursorLane()
+                    // Only `self?` across awaits: a dropped controller is not kept
+                    // alive by its own lane.
+                    guard !Task.isCancelled, self?.adoptCursorLane(lane, generation: current) == true else { await lane.close(); return }
+                    backoff = 500
+                    for await message in lane.messages {
+                        guard !Task.isCancelled else { break }
+                        self?.receiveCursorLane(message, generation: current)
+                    }
+                    await lane.close()
+                    guard !Task.isCancelled, self?.cursorLaneEnded(.connecting, generation: current) == true else { return }
+                } catch CollaborationClientError.server(let status, _) where (400..<500).contains(status) || status == 501 {
+                    _ = self?.cursorLaneEnded(.off, generation: current)
+                    return
+                } catch {
+                    guard !Task.isCancelled, self?.cursorLaneEnded(.connecting, generation: current) == true else { return }
+                }
+                do { try await Task.sleep(for: .milliseconds(backoff)) } catch { return }
+                backoff = min(backoff * 2, 30_000)
+            }
+        }
+    }
+    private func adoptCursorLane(_ lane: any SharedAreaCursorLane, generation current: UUID) -> Bool {
+        guard generation == current else { return false }
+        cursorLane = lane; cursorLaneState = .live
+        return true
+    }
+    private func cursorLaneEnded(_ next: CursorLaneState, generation current: UUID) -> Bool {
+        guard generation == current else { return false }
+        cursorLane = nil; cursorLaneState = next
+        return true
+    }
+    private func stopCursorLane() {
+        cursorLaneTask?.cancel(); cursorLaneTask = nil
+        if let lane = cursorLane { Task { await lane.close() } }
+        cursorLane = nil; cursorLaneState = .off
+        laneCursors = [:]; rejectedCursorSessions = []
+    }
+    private func receiveCursorLane(_ message: Collaboration.CursorLaneMessage, generation current: UUID) {
+        guard generation == current, status == .connected else { return }
+        if let session = message.rejectedSession { rejectedCursorSessions.insert(session); return }
+        guard let frame = message.frame, frame.identity.device != identity.device else { return }
+        let device = frame.identity.device
+        if let seen = laneCursors[device], seen.session == frame.session, frame.sequence <= seen.sequence { return }
+        laneCursors[device] = (frame.session, frame.sequence)
+        cursorLaneFramesApplied += 1
+        let expires = Date().addingTimeInterval(15)
+        let update = CursorUpdate(device: device, cursor: frame.cursor, viewport: frame.viewport, sentAt: frame.sentAt)
+        guard let index = presence.firstIndex(where: { $0.identity.device == device }) else {
+            // A teammate the pages have not shown yet: one full change.
+            presence.append(.init(identity: frame.identity, cursor: frame.cursor, viewport: frame.viewport, expiresAt: expires,
+                label: memberNames[frame.identity.person], session: frame.session, sequence: frame.sequence))
+            changed()
+            for observer in Array(cursorObservers.values) { observer(update) }
+            return
+        }
+        let old = presence[index]
+        presence[index] = .init(identity: old.identity, cursor: frame.cursor, viewport: frame.viewport, expiresAt: max(old.expiresAt, expires),
+            label: old.label, usage: old.usage, session: frame.session, sequence: frame.sequence)
+        // Appearing, disappearing or a view starting/stopping changes more
+        // than a position: hit targets, follow targets. Those are rare.
+        let shapeChanged = (old.cursor == nil) != (frame.cursor == nil) || (old.viewport?.valid == true) != (frame.viewport?.valid == true)
+        if shapeChanged { changed() }
+        for observer in Array(cursorObservers.values) { observer(update) }
+    }
+    /// A page's presence, keeping any cursor the lane has already delivered
+    /// newer than the page's copy of the same session.
+    private func mergingLaneCursors(_ incoming: [Collaboration.Presence]) -> [Collaboration.Presence] {
+        guard !laneCursors.isEmpty else { return incoming }
+        return incoming.map { page in
+            let device = page.identity.device
+            guard let lane = laneCursors[device], let session = page.session, session == lane.session,
+                  let sequence = page.sequence, sequence < lane.sequence,
+                  let current = presence.first(where: { $0.identity.device == device }) else { return page }
+            return .init(identity: page.identity, cursor: current.cursor, viewport: current.viewport, expiresAt: page.expiresAt,
+                label: page.label, usage: page.usage, session: lane.session, sequence: lane.sequence)
+        }
     }
 }

@@ -31,6 +31,9 @@ public actor CollaborationStore {
     var presenceEntries: [CollaborationPresenceKey: CollaborationPresenceEntry] = [:]
     var presenceFlushes: [CollaborationPresenceKey: Task<Void, Never>] = [:]
     var presenceVersions: [UUID: UUID] = [:]
+    /// Open cursor lanes by lane ID, and each area's lanes for fan-out.
+    var cursorLanes: [UUID: CollaborationCursorLane] = [:]
+    var cursorLaneAreas: [UUID: Set<UUID>] = [:]
     var hostLivenessStates: [UUID: [UUID: String]] = [:]
 
     public init(path: String, masterKey: Data, clock: @escaping @Sendable () -> Date = { Date() },

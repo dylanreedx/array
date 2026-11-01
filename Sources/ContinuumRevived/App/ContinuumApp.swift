@@ -1773,15 +1773,16 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
-        // A teammate's cursor over a relay-speed network: lands where the mouse
-        // stopped, glides between deliveries, cheap to apply (`.plans/105`).
+        // A teammate's cursor over a relay-speed network, against the real
+        // continuum-relay: update pages alone, then the cursor lane, each at
+        // 60 and 120 Hz display frames (`.plans/105`).
         if CommandLine.arguments.contains("--collaboration-cursor-motion-check") {
             setbuf(stdout, nil)
             setbuf(stderr, nil)
             _ = NSApplication.shared
             Task { @MainActor in
-                try? await Task.sleep(for: .seconds(60))
-                fputs("FAIL: collaboration cursor motion exceeded its 60-second deadline\n", stderr)
+                try? await Task.sleep(for: .seconds(120))
+                fputs("FAIL: collaboration cursor motion exceeded its 120-second deadline\n", stderr)
                 Foundation.exit(1)
             }
             Task { @MainActor in
