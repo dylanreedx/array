@@ -83,6 +83,30 @@ enum TileCharacterChecks {
         try expect(view.qaCharacterLayer?.isAnimating == true, "a working agent's character moves")
         try expect(controller.pendingRevisitsForQA >= 1, "the 40 s slow-down is scheduled on the shared deadline timer")
 
+        // 2b. The sidebar mirrors the tile: the row the production builder makes from
+        // the supervisor's live snapshot and record shows the same pose and character.
+        let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
+        let inboxWindow = NSWindow(contentRect: inbox.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        inboxWindow.contentView = inbox
+        inboxWindow.orderFrontOffscreenForChecks()
+        defer { inboxWindow.orderOut(nil) }
+        func mirrored(_ label: String) throws {
+            let now = Date()
+            inbox.clock = { now }
+            inbox.reload(rows: [AgentInboxRowBuilder.row(
+                from: AgentsBoardRow(agentId: agentID.rawValue, status: .idle, lastSummary: "", recent: [], updatedAt: now),
+                turnSnapshot: supervisor.turnSnapshot(for: agentID), record: supervisor.records[agentID], now: now)])
+            inbox.layoutForQA()
+            guard let cell = inbox.cellForQA(id: agentID.rawValue) else { throw Failure(description: "\(label): no row") }
+            let rowPlan = cell.characterLayerForQA.plan, tilePlan = view.qaCharacterLayer?.plan
+            try expect(rowPlan?.segments == tilePlan?.segments && rowPlan?.still == tilePlan?.still,
+                       "\(label): the row plays what the tile plays (\(String(describing: rowPlan?.segments)) vs \(String(describing: tilePlan?.segments)))")
+            try expect(cell.characterLayerForQA.sprite?.atlas.frames == view.qaCharacterLayer?.sprite?.atlas.frames
+                       && controller.characterIndex(for: agentID.rawValue) != nil,
+                       "\(label): the row and the tile show the same character")
+        }
+        try mirrored("working")
+
         // 3. The slot at every chrome scale bucket.
         var buckets: [Double] = []
         for zoom in [1.0, 0.75, 0.5, 0.35, 0.2, 0.12] {
@@ -110,6 +134,16 @@ enum TileCharacterChecks {
         try expect(Set(buckets).count >= 3, "the sweep crossed several chrome scale buckets: \(buckets)")
         canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
         canvas.layoutSubtreeIfNeeded()
+
+        // The turn ends: both surfaces cheer, from the same end time, then hold done.
+        supervisor.qaDeliver(.itemCompleted(threadId: "t", itemId: "e1", kind: .fileChange, status: .completed), to: agentID)
+        supervisor.qaDeliver(.turnCompleted(threadId: "t", turnId: "u1", outcome: .completed, errorMessage: nil), to: agentID)
+        try expect(pump(until: { view.qaCharacterLayer?.plan?.still == .done }), "a finished turn reaches the header as done")
+        try mirrored("finished")
+        // A new turn so the rest of the check has a working agent.
+        supervisor.qaDeliver(.turnStarted(threadId: "t", turnId: "u2"), to: agentID)
+        supervisor.qaDeliver(.itemStarted(threadId: "t", itemId: "e2", kind: .fileChange, title: "Sources/App.swift"), to: agentID)
+        try expect(pump(until: { view.qaCharacterLayer?.isAnimating == true }), "a new turn moves again")
 
         // 4. Far parking holds it still; coming back restores it. So does leaving the window.
         let park = NSView(frame: .zero)
