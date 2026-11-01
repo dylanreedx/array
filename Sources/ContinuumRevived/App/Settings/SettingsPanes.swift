@@ -481,6 +481,8 @@ struct SettingsAccountRow: Equatable {
 /// other saved logins with Switch, then Add. One login per CLI for the app.
 private struct SettingsAccountRows: View {
     let model: SettingsModel
+    @State private var renameTarget: SettingsAccountRow?
+    @State private var renameText = ""
 
     var body: some View {
         let _ = model.revision
@@ -503,6 +505,7 @@ private struct SettingsAccountRows: View {
                                 actionTitle: actionTitle(row),
                                 action: { action(row) })
                             .settingsRenderedText("account.\(row.id)", "\(row.title): \(status(row)) · \(row.switchingDetail ?? row.detail)", model: model)
+                            manageLine(row)
                         }
                         if let add = model.onAddAccount {
                             Button(harness == .claudeCode ? "Add Claude account…" : "Add Codex account…") { add(harness) }
@@ -513,6 +516,43 @@ private struct SettingsAccountRows: View {
             }
         }
         .settingsAnchor("agentAccounts.list", model: model)
+        .alert("Rename account", isPresented: Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })) {
+            TextField("Name", text: $renameText)
+            Button("Rename") {
+                if let target = renameTarget { model.onRenameAccount?(target.id, renameText) }
+                renameTarget = nil
+            }
+            .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button("Cancel", role: .cancel) { renameTarget = nil }
+        } message: {
+            Text("Only the name changes. The login stays where it is.")
+        }
+    }
+
+    /// Rename, and the CLI's own sign-in again in this account's folder: the
+    /// two ways to fix a label that names the wrong login.
+    @ViewBuilder
+    private func manageLine(_ row: SettingsAccountRow) -> some View {
+        let rename = model.onRenameAccount != nil
+        // "Sign In…" is already the row's action when it is signed out or a duplicate.
+        let signInAgain = model.onSignInAccount != nil && !row.canSignIn
+        if rename || signInAgain {
+            HStack(spacing: 12) {
+                if rename {
+                    Button("Rename…") { renameTarget = row; renameText = row.title }
+                        .buttonStyle(.link)
+                }
+                if signInAgain {
+                    Button("Sign in again…") { model.onSignInAccount?(row.id) }
+                        .buttonStyle(.link)
+                }
+            }
+            .font(.callout)
+            .settingsRenderedText(
+                "account.manage.\(row.id)",
+                [rename ? "Rename…" : nil, signInAgain ? "Sign in again…" : nil].compactMap { $0 }.joined(separator: " "),
+                model: model)
+        }
     }
 
     private func status(_ row: SettingsAccountRow) -> String {

@@ -2135,8 +2135,14 @@ final class AgentSupervisor {
 
     /// Every account: each CLI's own login, then the ones Array added.
     var accounts: [AgentAccount] {
-        [AgentAccount.defaultAccount(for: .claudeCode), AgentAccount.defaultAccount(for: .codex)]
-            + accountState.accounts
+        [defaultAccount(for: .claudeCode), defaultAccount(for: .codex)] + accountState.accounts
+    }
+
+    /// The CLI's own login, under the name the user gave it.
+    private func defaultAccount(for harness: AgentHarness) -> AgentAccount {
+        var account = AgentAccount.defaultAccount(for: harness)
+        if let label = accountState.defaultLabels[account.id] { account.label = label }
+        return account
     }
 
     /// THE account a CLI uses, for every one of its agents. Falls back to the
@@ -2145,7 +2151,29 @@ final class AgentSupervisor {
     func activeAccount(for harness: AgentHarness) -> AgentAccount {
         let chosen = accountState.active[harness.rawValue]
         return accounts.first { $0.id == chosen && $0.harness == harness }
-            ?? AgentAccount.defaultAccount(for: harness)
+            ?? defaultAccount(for: harness)
+    }
+
+    /// Renames a saved login. Only the NAME changes: the id, its folder and
+    /// whichever login is in it stay, so a label that names the wrong login is
+    /// fixed by relabelling, never by moving a login between folders.
+    @discardableResult
+    func renameAccount(_ accountId: String, to label: String) -> Bool {
+        let label = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !label.isEmpty, let account = accounts.first(where: { $0.id == accountId }) else { return false }
+        var state = accountState
+        if account.isDefault {
+            state.defaultLabels[account.id] = label == AgentAccount.defaultAccount(for: account.harness).label ? nil : label
+        } else if let index = state.accounts.firstIndex(where: { $0.id == accountId }) {
+            state.accounts[index].label = label
+        }
+        guard state != accountState else { return true }
+        do { try accountStore.save(state) } catch { return false }
+        accountState = state
+        // A live runner's copy names the turn it is finishing in Settings.
+        for (id, live) in runnerAccounts where live.id == accountId { runnerAccounts[id]?.label = label }
+        NotificationCenter.default.post(name: Self.accountUsageDidChangeNotification, object: self)
+        return true
     }
 
     /// Reads one account off the main thread. Production's reads nothing
@@ -2327,9 +2355,7 @@ final class AgentSupervisor {
             return mine.map { account in
                 let identity = accountIdentities[account.id]
                 let signedOut = signedOutAccounts.contains(account.id)
-                let detail = identity.map { [$0.email ?? $0.organizationName, $0.planDisplayName].compactMap { $0 }
-                    .joined(separator: " · ") }
-                    ?? (signedOut ? "Not signed in" : "Checking…")
+                let detail = identity.map(\.summary) ?? (signedOut ? "Not signed in" : "Checking…")
                 let from = previousLabel ?? "the previous account"
                 let switching: String? = account.id == active.id && !finishing.isEmpty
                     ? (finishing.count == 1

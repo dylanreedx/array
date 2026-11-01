@@ -56,6 +56,22 @@ public struct AgentAccountIdentity: Equatable, Sendable, Codable {
         }
     }
 
+    /// The organisation as a person reads it. Claude names the organisation of
+    /// an individual plan after its email (`me@x.com's Organization`), which
+    /// repeats the email beside it; that one reads "Personal organization".
+    public var organizationDisplayName: String? {
+        guard let name = organizationName, !name.isEmpty else { return nil }
+        if let email, name == "\(email)'s Organization" { return "Personal organization" }
+        return name
+    }
+
+    /// `me@x.com · Bannockburn · Team`: email, organisation and plan. One
+    /// email can hold a personal and a team login, so the email alone never
+    /// tells two accounts apart; the organisation and plan do.
+    public var summary: String {
+        [email, organizationDisplayName, planDisplayName].compactMap { $0 }.joined(separator: " · ")
+    }
+
     /// `claude auth status --json`. Nil when the dir is signed out: a
     /// signed-out login has no identity to show, and an empty one would read
     /// as a real account with no name.

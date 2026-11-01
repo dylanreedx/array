@@ -76,9 +76,22 @@ public struct AgentAccountStore {
     public struct State: Codable, Equatable {
         public var accounts: [AgentAccount]
         public var active: [String: String]
-        public init(accounts: [AgentAccount] = [], active: [String: String] = [:]) {
+        /// A name the user gave a CLI's own login ("Personal" renamed), by
+        /// account id. The default account is never stored, so its label lives
+        /// here; an added account's label is on its record.
+        public var defaultLabels: [String: String]
+        public init(accounts: [AgentAccount] = [], active: [String: String] = [:], defaultLabels: [String: String] = [:]) {
             self.accounts = accounts
             self.active = active
+            self.defaultLabels = defaultLabels
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            accounts = try container.decode([AgentAccount].self, forKey: .accounts)
+            active = try container.decode([String: String].self, forKey: .active)
+            // Absent in files written before accounts could be renamed.
+            defaultLabels = try container.decodeIfPresent([String: String].self, forKey: .defaultLabels) ?? [:]
         }
     }
 
