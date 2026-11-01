@@ -447,6 +447,46 @@ ID returns that refusal. A relay receipt is never execution: `queued` says the
 host has not accepted the prompt. An attempt already past admission is the
 host's record and is never rewritten by expiry.
 
+## Sharing one agent (mode A)
+
+`.plans/105-collaboration/SHARE-REDESIGN.md`, mode A. Share on one agent (the
+header's icon, or the sidebar row's hover icon) opens the link popover; Copy
+calls `AppDelegate.shareAgent(tile:name:)`. It creates an area, publishes the
+agent into it as an `agentObservation` and starts a `SharedAreaHostSession`
+for it. The area is only a permission and membership container: no zone is
+made, and the tile keeps its zone, frame, view and runner. Several tiles (the
+Share tool) still convert into a shared zone until the portal tile replaces it.
+
+The sharer's Mac remembers what it shares in `hosted-agents.json`, beside the
+account list (channel-split app state; account, area, tile, object). It
+restarts those hosts at launch, so prompts queued while it was away run, and
+Share on the same tile reopens that area's popover. The tile's tab reads
+"Yours · shared", then "Yours · shared with Sam" once the relay lists Sam. At
+quit each host ends its run (`SharedAreaHostHeartbeat.endAtQuit`, bounded), so
+teammates see it offline at once instead of after `offlineAfter`.
+
+A link whose area holds exactly one agent observation owned by someone else
+lands as one `.sharedAgent` tile in the receiver's armed zone, through
+`TileSpawner.spawnSharedAgent` (one target zone for placement, siblings, z and
+install). It persists only `TileMetadata.sharedAgent`: area, object, the
+owner's name and person, and the account that joined. It is never a
+`.managedAgent` and has no `AgentRecord`. `SharedAgentTileSession` feeds it:
+the area's controller (document, host liveness, member names), the owner's
+projection through `SharedAgentLiveView`, and prompts through the receiver's
+`SharedAgentHandoffController`, so a prompt runs once, on the owner's Mac.
+States: live; offline (dimmed, dashed, "Dylan's Mac is offline"; a prompt
+still queues on the relay); stopped ("Dylan stopped sharing" once access is
+removed; the composer goes and the relay refuses prompts); placeholder (an
+install with no account, or another account: "Shared by Dylan · sign in to see
+it"). Closing the tile forgets it on that canvas only.
+
+On load, a 0.7.37 shared zone holding exactly one agent becomes this shape
+(`migrateOneAgentZone`): on the sharer's canvas the zone goes and the agent
+stays hosted; on anyone else's the zone becomes one `.sharedAgent` tile in the
+nearest project zone. Witnesses: `--share-agent-relay-check` (steps 1-3 on a
+local relay), `--shared-agent-migration-check`, and
+`scripts/check-multiplayer-journey.py` (all twelve mode A steps, two real apps).
+
 ## Live agent views
 
 A teammate can watch a published agent without anything running on their
