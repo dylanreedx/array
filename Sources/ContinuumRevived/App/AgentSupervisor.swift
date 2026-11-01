@@ -3474,11 +3474,7 @@ final class AgentSupervisor {
         lastPromptAuthors[id] = author
         // Before the turn starts, so a projection carries the prompt ahead of
         // the turn it began. Every send of every origin passes here once.
-        if !promptStartObservers.isEmpty {
-            let started = StartedPrompt(agent: id, author: author,
-                                        text: Self.authoredText(prompt, sharedText: sharedInputPermit?.requester == nil ? nil : sharedInputPermit?.namingText))
-            for observe in promptStartObservers.values { observe(started) }
-        }
+        publishPrompt(prompt, author: author, sharedText: sharedInputPermit?.requester == nil ? nil : sharedInputPermit?.namingText, for: id)
         startTurn(on: runner, for: id) { onEvent in try runner.run(prompt: prompt, onEvent: onEvent) }
         // Title from the prompt NOW, not after the first turn: a long first turn
         // showed the raw prompt as its name for as long as it ran. The titler is
@@ -3487,6 +3483,19 @@ final class AgentSupervisor {
         // so no local copy of the record can clobber the naming marker.
         if capturesFirstPrompt { refreshDerivedName(for: id) }
         return true
+    }
+
+    private func publishPrompt(_ prompt: AgentPrompt, author: LastPromptAuthor, sharedText: String?, for id: AgentID) {
+        guard !promptStartObservers.isEmpty else { return }
+        let started = StartedPrompt(agent: id, author: author, text: Self.authoredText(prompt, sharedText: sharedText))
+        for observe in promptStartObservers.values { observe(started) }
+    }
+
+    /// A steer joins the conversation when the provider takes it, not when a
+    /// turn starts, so it never passes `sendPrepared`. Teammates see it then.
+    /// Only the owner can steer: a shared agent offers teammates no steer.
+    private func publishSteer(_ prompt: AgentPrompt, for id: AgentID) {
+        publishPrompt(prompt, author: .init(requester: nil, at: Date()), sharedText: nil, for: id)
     }
 
     /// What a person wrote in `prompt`, as a teammate may read it. A shared
@@ -9648,6 +9657,7 @@ final class AgentSupervisor {
             updateCompanionTasks { try $0.applyQueuedToParent(steerID) }
             recordTranscriptUserPrompt(entry.prompt, for: id)
             echoPrompt(entry.prompt, for: id)
+            publishSteer(entry.prompt, for: id)
         case .returned:
             if let store = submissionRecoveryStore {
                 runQueueOp(for: id) { await store.requeueHeldSteersAtFront([entry.message], for: id) }
@@ -9697,6 +9707,7 @@ final class AgentSupervisor {
         for entry in deliveringSteers.removeValue(forKey: id) ?? [] {
             recordTranscriptUserPrompt(entry.prompt, for: id)
             echoPrompt(entry.prompt, for: id)
+            publishSteer(entry.prompt, for: id)
         }
     }
 

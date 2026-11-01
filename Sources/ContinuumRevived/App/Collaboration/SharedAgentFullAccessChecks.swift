@@ -259,6 +259,29 @@ enum SharedAgentFullAccessChecks {
         try expect(ownerTile.qaTranscriptText.contains(ownerTyped) && !ownerTile.qaSenderCards.contains { $0.hasSuffix(ownerTyped) },
                    "\(kind): the owner's own prompt stays his plain prompt in his tile, and both teammates read it as \"Dylan: …\"")
 
+        // 2c. The owner types into his tile while the agent works: the composer
+        //     steers, which joins the conversation without starting a turn.
+        //     Teammates read it under his name too (the multiplayer journey
+        //     found it missing: a steer never passes the send seam).
+        let longStep = await supervisor.accept(.sendPrompt(.init("SLOW Dylan starts a long step.")), for: agent)
+        try await eventually("\(kind): the owner's long turn never started (\(longStep))") { supervisor.isRunning(agent) }
+        let ownerSteer = "PLAIN Dylan steers while it works."
+        ownerTile.qaSubmitPrompt(ownerSteer)
+        // A steer is its own frame per harness (claude: a user line; codex:
+        // turn/steer; pi: steer), so look for its words in any frame.
+        func steered() -> Bool {
+            AgentSteeringQAFakes.receivedFrames(in: bin).contains { frame in
+                (try? JSONSerialization.data(withJSONObject: frame)).map { String(decoding: $0, as: UTF8.self).contains(ownerSteer) } ?? false
+            }
+        }
+        try await eventually("\(kind): the owner's mid-turn prompt never reached the agent: \(prompts)") { steered() }
+        try await idle()
+        try await eventually("\(kind): the owner's steer never reached the teammates (Sam \(samView.transcriptText.suffix(300).debugDescription),"
+                             + " Priya \(priyaView.transcriptText.suffix(300).debugDescription))") {
+            samView.transcriptText.contains("Dylan: \(ownerSteer)") && priyaView.transcriptText.contains("Dylan: \(ownerSteer)")
+        }
+        try expect(true, "\(kind): a prompt the owner types while the agent works (a steer) reaches both teammates as \"Dylan: …\"")
+
         // 3. Two prompts at once: the owner is mid-turn; Sam then Priya send.
         //    Both wait on the service, unclaimed, then run in arrival order.
         let busy = await supervisor.accept(.sendPrompt(.init("TOOL Dylan is mid-turn.")), for: agent)
