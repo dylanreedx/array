@@ -1,5 +1,6 @@
 check --add-zone-check
 check --agent-account-quota-check
+check --agent-account-manage-check
 check --agent-account-usage-check
 check --agent-awareness-check
 check --agent-browser-spawn-check
@@ -413,6 +414,7 @@ leg run swift build --product ContinuumRevivedCoreChecks
 leg run swift run ContinuumRevivedSyncIntegrationChecks
 leg run_app_check .build/debug/Array --add-zone-check
 leg run_app_check .build/debug/Array --agent-account-usage-check
+leg run_app_check .build/debug/Array --agent-account-manage-check
 leg run_app_check .build/debug/Array --agent-awareness-check
 leg run_app_check .build/debug/Array --agent-browser-spawn-check
 leg run_app_check .build/debug/Array --agent-compaction-ui-check

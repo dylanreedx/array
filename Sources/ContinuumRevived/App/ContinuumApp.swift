@@ -2581,6 +2581,22 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // Two same-email accounts read distinctly; Rename and sign in again
+        // through Settings, relabelling without moving a login's folder.
+        if CommandLine.arguments.contains("--agent-account-manage-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentAccountManageChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         // .plans/101: account identity and live limits, read with no turn,
         // through a real supervisor into real attached tiles.
         if CommandLine.arguments.contains("--agent-account-usage-check") {
@@ -13339,6 +13355,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         model.onAddAccount = { [weak self] harness in self?.addAccountAndSignIn(harness) }
         model.onSignInAccount = { [weak self] accountId in self?.signInToAccount(accountId) }
+        model.onRenameAccount = { [weak self] accountId, label in
+            guard let self, !self.agentSupervisor.renameAccount(accountId, to: label) else { return }
+            self.setWorkspaceManagementMessage("Couldn't rename the account.", kind: .error)
+        }
         // Opening Settings reads who each saved login is.
         agentSupervisor.refreshAccountUsage(harness: .claudeCode, minimumInterval: 30)
         agentSupervisor.refreshAccountUsage(harness: .codex, minimumInterval: 30)

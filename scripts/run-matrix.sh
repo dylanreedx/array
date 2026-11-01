@@ -1183,6 +1183,7 @@ run_app_check .build/debug/Array --agent-tile-reference-check
 run_app_check .build/debug/Array --canvas-pointer-path-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
 run_app_check .build/debug/Array --agent-account-usage-check
+run_app_check .build/debug/Array --agent-account-manage-check
 # Real installed-provider warning/compaction/task-retention acceptance spends
 # subscription usage. Opt in explicitly; ordinary matrix runs stay offline.
 if [[ "${CONTINUUM_CHECK_CONTEXT_LIVE_COMPACTION:-0}" == "1" ]]; then

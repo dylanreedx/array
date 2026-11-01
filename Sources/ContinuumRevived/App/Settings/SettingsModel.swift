@@ -33,6 +33,9 @@ final class SettingsModel {
     @ObservationIgnored var onSwitchAccount: ((String) -> Void)?
     @ObservationIgnored var onAddAccount: ((AgentHarness) -> Void)?
     @ObservationIgnored var onSignInAccount: ((String) -> Void)?
+    /// Relabels a saved login (account id, new name). The folder and the login
+    /// in it stay; only the name moves.
+    @ObservationIgnored var onRenameAccount: ((String, String) -> Void)?
     /// Versions and in-app updates for the agent CLIs; nil draws readiness only.
     @ObservationIgnored var cliUpdates: AgentCLIUpdateCenter?
     /// `.custom` rows that embed an AppKit view, by id.
