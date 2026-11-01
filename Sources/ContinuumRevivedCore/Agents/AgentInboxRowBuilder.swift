@@ -310,7 +310,14 @@ public enum AgentInboxRowBuilder {
             selfReport: record.flatMap(selfReport(for:)),
             // A row with no record is a terminal session, which is its tile.
             hasTile: record.map { $0.tileId != nil } ?? true,
-            isPinned: record?.pinned ?? false
+            isPinned: record?.pinned ?? false,
+            // Plan 110: what the agent's character acts out. Facts the supervisor
+            // already keeps; nil for a session with neither a turn nor a record.
+            characterActivity: turnSnapshot?.presence != nil || record != nil
+                ? AgentCharacterActivityProjection.activity(
+                    presence: turnSnapshot?.presence, terminalEvent: record?.latestTerminalEvent,
+                    latestPromptAt: record?.latestPromptAt)
+                : nil
         )
     }
 

@@ -36,6 +36,11 @@ if CommandLine.arguments.contains("--agent-character-theme-check") {
     runAgentCharacterThemeChecks()
     Foundation.exit(0)
 }
+// Plan 110, slice 2: the pose state machine and the step-to-action projection.
+if CommandLine.arguments.contains("--agent-character-pose-check") {
+    runAgentCharacterPoseChecks()
+    Foundation.exit(0)
+}
 
 if CommandLine.arguments.contains("--tile-selection-geometry-check") {
     runTileSelectionGeometryChecks()
