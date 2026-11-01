@@ -85,6 +85,19 @@ public final class SharedAreaHostHeartbeat {
         let transport = self.transport
         Task { try? await transport.endHost(host: host, generation: run) }
     }
+
+    /// `end()` for a quitting app: the main thread waits, at most `timeout`,
+    /// for the relay to hear it, so teammates see the host offline at once
+    /// rather than after `offlineAfter`. A kill still falls back to expiry.
+    public func endAtQuit(timeout: TimeInterval = 1.5) {
+        task?.cancel(); task = nil
+        guard let host, let run = generation, phase == .beating else { end(); return }
+        phase = .ended; self.host = nil; generation = nil
+        let transport = self.transport
+        let done = DispatchSemaphore(value: 0)
+        Task.detached { try? await transport.endHost(host: host, generation: run); done.signal() }
+        _ = done.wait(timeout: .now() + timeout)
+    }
 }
 
 /// The words a teammate reads on a published agent card. Every state names

@@ -110,23 +110,35 @@ final class ShareLinkCoordinator {
     /// publishing into it and opening the zone are the shared zone's job.
     func createShareLink(area: UUID, slug: String, lifetime: Collaboration.ShareLinkLifetime) async throws -> Collaboration.ShareLink {
         guard ShareLinkURL.isValidSlug(slug) else { throw ShareLinkFailure.invalidSlug }
-        return try await mint(try await signedInAccount(), area: area, slug: slug, lifetime: lifetime)
+        return try await Self.waitingOutBusy { try await self.mint(try await self.signedInAccount(), area: area, slug: slug, lifetime: lifetime) }
+    }
+
+    /// The account runs one request at a time and refuses a second with
+    /// `.busy` before anything is sent. The open popover re-reads who has
+    /// access every 2 s, so a press could meet that read in flight; it waits
+    /// its turn instead of failing.
+    static func waitingOutBusy<T>(_ body: () async throws -> T) async throws -> T {
+        for _ in 0..<40 {
+            do { return try await body() }
+            catch CollaborationAccountFailure.busy { try await Task.sleep(for: .milliseconds(100)) }
+        }
+        return try await body()
     }
 
     /// "New link" for an area that is already shared. Same as createShareLink;
     /// kept as its own name for the popover.
     func newLink(area: UUID, slug: String, lifetime: Collaboration.ShareLinkLifetime) async throws -> Collaboration.ShareLink {
         guard ShareLinkURL.isValidSlug(slug) else { throw ShareLinkFailure.invalidSlug }
-        return try await mint(try await signedInAccount(), area: area, slug: slug, lifetime: lifetime)
+        return try await Self.waitingOutBusy { try await self.mint(try await self.signedInAccount(), area: area, slug: slug, lifetime: lifetime) }
     }
     func revokeLink(area: UUID, link: UUID) async throws {
-        try await signedInAccount().revokeShareLink(area: area, link: link)
+        try await Self.waitingOutBusy { try await self.signedInAccount().revokeShareLink(area: area, link: link) }
     }
     func removeAccess(area: UUID, link: UUID, person: SharedArea.ID<SharedArea.Person>) async throws {
-        try await signedInAccount().removeShareLinkPerson(area: area, link: link, person: person)
+        try await Self.waitingOutBusy { try await self.signedInAccount().removeShareLinkPerson(area: area, link: link, person: person) }
     }
     func listAccess(area: UUID) async throws -> [Collaboration.ShareLinkAccess] {
-        try await signedInAccount().shareLinks(area: area)
+        try await Self.waitingOutBusy { try await self.signedInAccount().shareLinks(area: area) }
     }
 
     /// The signed-in account, signing in first if needed. The shared zone

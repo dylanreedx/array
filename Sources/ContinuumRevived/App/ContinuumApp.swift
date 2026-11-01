@@ -18880,6 +18880,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
         view.onShareRequested = { [weak self] tile in self?.shareAgentTile(tile) }
         view.setTitleBarShareAction(true)
+        // A rebuilt view of an agent this Mac shares keeps its "Yours · shared" tab.
+        if hostedAgentArea(forTile: view.tile.id) != nil {
+            DispatchQueue.main.async { [weak self] in self?.refreshHostedAgentMarks() }
+        }
         let supervisor = agentSupervisor
         let agentId: AgentID
         if let agentID {
@@ -23132,6 +23136,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// its process until the Phase 3 inbox. Quitting must therefore end the work it
     /// started, or the run leaks past the session.
     func applicationWillTerminate(_ notification: Notification) {
+        // Teammates see this Mac's shared agents go offline now, not after
+        // the relay's expiry. Bounded; a kill still falls back to expiry.
+        for host in sharedAreaHostSessions.values { host.heartbeat?.endAtQuit() }
         agentSupervisor.stopAll()
         editorLanguageServices.shutdown()
         sweepManagedSessionsAtQuit()

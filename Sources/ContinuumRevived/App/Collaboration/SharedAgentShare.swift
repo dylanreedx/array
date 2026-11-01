@@ -184,8 +184,11 @@ extension AppDelegate {
         if hostedAgentShares?.area(forTile: tileId, account: account) != nil {
             throw WorkspaceRuntime.SharedZoneError.alreadyShared(tileId)
         }
-        let area = try await model.createArea(label: name).scope.area.rawValue
-        let objects = try await shareLinks.publish(selection: .tiles([.init(projectID: project, tileID: tileId)]), intoArea: area)
+        // The access poll can hold the account for a moment; wait it out.
+        let area = try await ShareLinkCoordinator.waitingOutBusy { try await model.createArea(label: name).scope.area.rawValue }
+        let objects = try await ShareLinkCoordinator.waitingOutBusy {
+            try await self.shareLinks.publish(selection: .tiles([.init(projectID: project, tileID: tileId)]), intoArea: area)
+        }
         guard let object = objects[tileId] else { throw ShareLinkFailure.nothingToShare }
         try hostedAgentShares?.add(.init(account: account, area: area, tile: tileId, object: object.rawValue))
         startHostingSharedAgent(area: area, model: model)
@@ -214,7 +217,7 @@ extension AppDelegate {
     /// The host that publishes the agent's projection and runs teammates'
     /// prompts. It needs no zone and no scene.
     func startHostingSharedAgent(area: UUID, model: CollaborationAccountController) {
-        guard let account = model.activeAccount?.id else { return }
+        guard let account = model.activeAccount?.id, Self.reachesRelay(model) else { return }
         let key = account + "/" + area.uuidString
         if let existing = sharedAreaHostSessions[key] { existing.start(); return }
         do {
@@ -226,14 +229,24 @@ extension AppDelegate {
         }
     }
 
+    /// Fixture accounts name relays that do not exist: a check talks to the
+    /// relay only when it runs a real one on loopback, as `openSharedArea`
+    /// rules for zones.
+    static func reachesRelay(_ model: CollaborationAccountController) -> Bool {
+        !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") })
+            || (model.activeAccount?.endpoint.hasPrefix("http://127.0.0.1") ?? false)
+    }
+
     /// At launch: every agent this Mac shares is hosted again, so queued
     /// prompts run and teammates see it live. Never asks for a sign-in.
     func resumeHostedAgentShares() {
+        // Nothing is read from the Keychain unless this Mac shares an agent.
+        guard let model = try? collaborationAccountModel(),
+              let remembered = model.activeAccount?.id ?? model.selectedAccountID ?? (model.accounts.count == 1 ? model.accounts.first?.id : nil),
+              hostedAgentShares?.entries(account: remembered).isEmpty == false else { return }
         Task { [weak self] in
-            guard let self, let model = try? collaborationAccountModel() else { return }
-            if model.status != .ready, let remembered = model.selectedAccountID ?? (model.accounts.count == 1 ? model.accounts.first?.id : nil) {
-                _ = try? await model.select(accountID: remembered)
-            }
+            guard let self else { return }
+            if model.status != .ready { _ = try? await model.select(accountID: remembered) }
             guard model.status == .ready, let account = model.activeAccount?.id,
                   let entries = hostedAgentShares?.entries(account: account), !entries.isEmpty else { return }
             for entry in entries { startHostingSharedAgent(area: entry.area, model: model) }
@@ -260,11 +273,18 @@ extension AppDelegate {
             view.setOwnershipMark(.init(text: text, colour: me.map { SharedAreaPersonColour.color(for: $0, host: $0) } ?? .systemPurple,
                                         outlined: false))
         }
-        guard hostedAgentAccessTask == nil, !entries.isEmpty else { return }
+        guard hostedAgentAccessTask == nil, !entries.isEmpty, Self.reachesRelay(model) else { return }
+        // Who has access, re-read on a slow beat while anything is shared, so
+        // the tab names someone who joined without the popover open.
         hostedAgentAccessTask = Task { [weak self] in
-            defer { self?.hostedAgentAccessTask = nil }
-            guard let self else { return }
-            await refreshHostedAgentPeople()
+            while !Task.isCancelled {
+                guard let self, let account = (try? collaborationAccountModel())?.activeAccount?.id,
+                      hostedAgentShares?.entries(account: account).isEmpty == false else { break }
+                // An open popover reads access itself, every 2 s.
+                if !shareEntry.isPresented { await refreshHostedAgentPeople() }
+                try? await Task.sleep(for: .seconds(15))
+            }
+            self?.hostedAgentAccessTask = nil
         }
     }
 
@@ -280,7 +300,7 @@ extension AppDelegate {
                 .filter { $0.active && seen.insert($0.person.rawValue).inserted }.map(\.label)
             if hostedAgentPeople[entry.area] != names { hostedAgentPeople[entry.area] = names; changed = true }
         }
-        if changed { hostedAgentAccessTask = nil; refreshHostedAgentMarks() }
+        if changed { refreshHostedAgentMarks() }
     }
 
     // MARK: - Guest: one tile in the armed zone
