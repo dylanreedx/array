@@ -253,6 +253,7 @@ check --shell-open-as-agent-check
 check --shell-tool-row-check
 check --sidebar-agent-status-line-check
 check --sidebar-bulk-hide-check
+check --sidebar-fold-expand-check
 check --sidebar-hidden-footer-check
 check --sidebar-hide-any-row-check
 check --sidebar-lifecycle-check
@@ -625,6 +626,7 @@ leg run_app_check .build/debug/Array --shell-open-as-agent-check
 leg run_app_check .build/debug/Array --shell-tool-row-check
 leg run_app_check .build/debug/Array --sidebar-agent-status-line-check
 leg run_app_check .build/debug/Array --sidebar-bulk-hide-check
+leg run_app_check .build/debug/Array --sidebar-fold-expand-check
 leg run_app_check .build/debug/Array --sidebar-hidden-footer-check
 leg run_app_check .build/debug/Array --sidebar-hide-any-row-check
 leg run_app_check .build/debug/Array --sidebar-liveness-check

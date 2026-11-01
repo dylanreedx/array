@@ -641,6 +641,7 @@ if [[ "$SIDEBAR_REFINEMENTS_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --sidebar-bulk-hide-check
   run_app_check .build/debug/Array --sidebar-scope-popover-check
   run_app_check .build/debug/Array --sidebar-ownership-check
+  run_app_check .build/debug/Array --sidebar-fold-expand-check
   run_app_check .build/debug/Array --hide-external-rows-check
   run_app_check .build/debug/Array --sidebar-truth-check
   matrix_report 'Sidebar refinements matrix (targeted)'
@@ -1646,6 +1647,14 @@ run_app_check .build/debug/Array --sidebar-scope-popover-check
 # on its lead, the stem's lanes, the card's light, and Pop out / Stop on hover
 # and the right-click tile verbs through real events, in light and dark.
 run_app_check .build/debug/Array --sidebar-ownership-check
+# .plans/106: a lead's "40 more, all done" line, clicked on its words through
+# real events: it lights and presses like a subagent row, opens all 43 in the
+# visible rows' style and order, "Show less" holds through a refresh and live
+# pushes (a folded subagent's change rebuilds nothing; a new one leaves the row
+# being read in place), and folds back under the pointer. Also clicks the words
+# of the Snoozed and History headings and History's "Show 25 more" footer, and
+# asserts each opens or pages its rows.
+run_app_check .build/debug/Array --sidebar-fold-expand-check
 # The sidebar's project icon: `.array/icon.*` beats a shipped favicon; static/,
 # website/public/, Packaging/*.icns and an xcassets AppIcon resolve; a miss is
 # cached, and an added override or an edited winning file still shows.

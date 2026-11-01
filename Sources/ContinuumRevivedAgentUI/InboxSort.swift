@@ -56,9 +56,9 @@ public struct FanoutRemainder: Equatable, Sendable {
     public var hiddenChildCount: Int { hiddenChildIDs.count }
     public var hiddenDescendantCount: Int { hiddenDescendantIDs.count }
     /// "4 more, all done" when nothing folded is live or failed; otherwise the
-    /// count and what is in it, "4 more · 1 failed". "Show fewer" while open.
+    /// count and what is in it, "4 more · 1 failed". "Show less" while open.
     public var title: String {
-        if isExpanded { return "Show fewer" }
+        if isExpanded { return "Show less" }
         var parts = ["\(hiddenChildCount) more"]
         if hiddenNeedsYou > 0 { parts.append("\(hiddenNeedsYou) needs you") }
         if hiddenFailed > 0 { parts.append("\(hiddenFailed) failed") }
@@ -80,9 +80,12 @@ public struct FanoutRemainder: Equatable, Sendable {
     /// counts are included because a non-agent remainder cell has no row diff of
     /// its own to trigger a repaint. The anchor is included too: expanding a
     /// nested visible child can move its parent's remainder to a later agent row
-    /// without changing the parent's hidden-child count.
+    /// without changing the parent's hidden-child count. Open, the row reads
+    /// "Show less" whatever its rows are doing, so the counts are left out: a
+    /// helper's state change must not rebuild a 40-row open group.
     public var identity: String {
         let ids = hiddenChildIDs.map(\.uuidString).joined(separator: ",")
+        if isExpanded { return "\(parentId.uuidString):\(afterRowID.uuidString):\(ids):open" }
         return "\(parentId.uuidString):\(afterRowID.uuidString):\(ids):\(hiddenWorking):\(hiddenNeedsYou):\(hiddenFailed):\(isExpanded)"
     }
 }

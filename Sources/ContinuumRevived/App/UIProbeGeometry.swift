@@ -1953,7 +1953,7 @@ enum UIProbeGeometry {
               probe.inbox.rowIdsForQA == collapsedRootExpandedRows.map(\.id),
               probe.inbox.rowIdsForQA.contains(directIDs[8]),
               probe.inbox.fanoutRemainderRowsForQA.map(\.parentId) == [rootID],
-              probe.inbox.fanoutRemainderTitlesForQA == ["Show fewer"],
+              probe.inbox.fanoutRemainderTitlesForQA == ["Show less"],
               probe.inbox.tableRowCountForQA == collapsedRootExpandedRows.count + 1,
               probe.inbox.nonAgentTableRowCountForQA == 1 else {
             throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): re-anchored root expansion did not materialize its ninth child while preserving the nested fold")
@@ -1982,7 +1982,7 @@ enum UIProbeGeometry {
         let bothExpanded = InboxSort.boundedForInbox(
             rows: sorted, expandedParents: [rootID, directIDs[7]], now: now)
         guard probe.inbox.expandedFanoutParentsForQA == Set([rootID, directIDs[7]]),
-              probe.inbox.fanoutRemainderTitlesForQA == ["Show fewer", "Show fewer"],
+              probe.inbox.fanoutRemainderTitlesForQA == ["Show less", "Show less"],
               probe.inbox.fanoutRemainderParentIDsForQA == Set([rootID, directIDs[7]]),
               probe.inbox.rowIdsForQA == sorted.map(\.id),
               probe.inbox.qaMaterializedRowCellCount == rows.count,
@@ -3282,7 +3282,7 @@ enum UIProbeGeometry {
                     }
                 } else {
                     // Plan 106: an expanded group keeps the row that folds it back.
-                    guard transitionProbe.inbox.fanoutRemainderTitlesForQA == ["Show fewer"],
+                    guard transitionProbe.inbox.fanoutRemainderTitlesForQA == ["Show less"],
                           transitionProbe.inbox.tableRowCountForQA
                             == transitionProbe.inbox.qaMaterializedRowCellCount + 1 else {
                         throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): expanded group lost the row that folds it back at \(phase)")
