@@ -246,7 +246,7 @@ enum ShareEntryChecks {
             && agentPopover.session.target.keys == [key(for: agentA)]
             && agentPopover.session.target.name == "Map the checkout state machine",
             "a click on the header's Share opens the popover for that one agent, as .tiles of its own tile")
-        try expect(links.created.isEmpty && zones.calls.isEmpty,
+        try expect(links.created.isEmpty && zones.calls.isEmpty && zones.agentShares.isEmpty,
             "opening the popover shares nothing: no area, no link, no tile moved")
         if let panel = app.shareEntry.qaPanel, let anchor = tileA.titleBarShareAnchor {
             let button = window.convertToScreen(tileA.convert(anchor, to: nil))
@@ -267,26 +267,26 @@ enum ShareEntryChecks {
             "the slug starts from the agent's name")
         try stillPopover("2-agent-draft", agentPopover, to: renders)
 
-        // 2. A taken name: the link fails, the popover says so, the tiles go
-        //    back and nothing reaches the pasteboard.
+        // 2. A taken name: the link fails, the popover says so, the share is
+        //    undone and nothing reaches the pasteboard.
         pasteboard.clearContents()
         links.refuseNext = ShareLinkFailure.slugTaken
         try click(agentPopover.copyButton)
         try await eventually("refused Copy settles") { agentPopover.session.failure != nil && !agentPopover.session.isWorking }
-        try expect(zones.calls.count == 1 && zones.cancelled == [zones.calls[0].share.areaId]
+        try expect(zones.calls.isEmpty && zones.agentShares.count == 1 && zones.cancelledAgentShares == [zones.agentShares[0].area]
             && agentPopover.session.link == nil && pasteboard.string(forType: .string) == nil
             && agentPopover.session.failure == ShareLinkFailure.slugTaken.errorDescription,
-            "a slug the relay refuses is shown in the popover, the zone is undone and nothing is copied")
+            "a slug the relay refuses is shown in the popover, the agent's share is undone and nothing is copied")
         try stillPopover("2b-agent-slug-taken", agentPopover, to: renders)
 
         // 3. Copy shares, then puts the link on the (private) pasteboard.
         try click(agentPopover.copyButton)
         try await eventually("Copy finishes") { agentPopover.session.copied }
         let firstLink = agentPopover.session.link
-        try expect(zones.calls.count == 2 && zones.calls[1].tiles == [agentA]
-            && zones.calls[1].name == "Map the checkout state machine",
-            "Copy first makes the agent a one-tile shared zone named after it")
-        try expect(links.created.count == 1 && links.created[0].area == zones.calls[1].share.areaId
+        try expect(zones.calls.isEmpty && zones.agentShares.count == 2 && zones.agentShares[1].tile == agentA
+            && zones.agentShares[1].name == "Map the checkout state machine",
+            "Copy shares the one agent into an area named after it, with no zone (mode A)")
+        try expect(links.created.count == 1 && links.created[0].area == zones.agentShares[1].area
             && links.created[0].slug == "map-the-checkout-state-machine" && links.created[0].lifetime == .once,
             "then mints the link on that zone's area with the slug and Works once")
         try expect(pasteboard.string(forType: .string) == firstLink?.url.absoluteString
