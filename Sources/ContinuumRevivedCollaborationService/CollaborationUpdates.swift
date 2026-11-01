@@ -118,7 +118,8 @@ extension CollaborationStore {
                 .map { value in
                     Collaboration.Presence(identity: value.identity, cursor: value.cursor, viewport: value.viewport,
                         expiresAt: value.expiresAt, label: value.label,
-                        usage: try usageForPresence(db, area: area, identity: value.identity))
+                        usage: try usageForPresence(db, area: area, identity: value.identity),
+                        session: value.session, sequence: value.sequence)
                 }
             let version = presenceVersions[area] ?? UUID()
             presenceVersions[area] = version
@@ -143,34 +144,43 @@ extension CollaborationStore {
     }
     public func publishPresence(token: String, area: UUID, input: Collaboration.PresenceInput) throws {
         guard input.cursor?.valid != false, input.viewport?.valid != false else { throw CollaborationStoreError.invalidRequest }
-        try database.read { db in
+        let (identity, label) = try database.read { db in
             let identity = try authenticate(db, token)
             _ = try scope(db, identity, area)
-            let key = CollaborationPresenceKey(area: area, device: identity.device)
-            guard var entry = presenceEntries[key], entry.session == input.session else { throw CollaborationStoreError.invalidRequest }
-            if let sequence = entry.sequence, input.sequence <= sequence { return }
-            let now = clock()
-            // Keep the latest observation and bound fanout to 20 updates/sec.
-            entry.sequence = input.sequence
-            entry.value = .init(identity: identity, cursor: input.cursor, viewport: input.viewport,
-                expiresAt: now.addingTimeInterval(Self.presenceLifetime),
-                label: try String.fetchOne(db, sql: "SELECT label FROM people WHERE id=?", arguments: [identity.person.rawValue.uuidString]))
-            if let last = entry.lastPublished, now.timeIntervalSince(last) < 0.05 {
-                presenceEntries[key] = entry
-                if presenceFlushes[key] == nil {
-                    let delay = max(1, Int(ceil((0.05 - now.timeIntervalSince(last)) * 1000)))
-                    presenceFlushes[key] = Task { [weak self] in
-                        do { try await Task.sleep(for: .milliseconds(delay)) } catch { return }
-                        await self?.flushPresence(key, session: input.session)
-                    }
-                }
-            } else {
-                presenceFlushes.removeValue(forKey: key)?.cancel()
-                entry.lastPublished = now
-                presenceEntries[key] = entry
-                presenceChanged(area)
-            }
+            return (identity, try String.fetchOne(db, sql: "SELECT label FROM people WHERE id=?", arguments: [identity.person.rawValue.uuidString]))
         }
+        _ = try recordPresence(area: area, identity: identity, label: label, input: input)
+    }
+    /// The presence entry update both lanes share: validate, keep the latest
+    /// observation, and wake held update reads at most every 50 ms (20 Hz) with
+    /// a trailing flush. The cursor lane relays each frame at once besides.
+    /// False for a stale sequence, which is ignored.
+    func recordPresence(area: UUID, identity: Collaboration.Identity, label: String?, input: Collaboration.PresenceInput) throws -> Bool {
+        guard input.cursor?.valid != false, input.viewport?.valid != false, input.sentAt?.isFinite != false else { throw CollaborationStoreError.invalidRequest }
+        let key = CollaborationPresenceKey(area: area, device: identity.device)
+        guard var entry = presenceEntries[key], entry.session == input.session else { throw CollaborationStoreError.invalidRequest }
+        if let sequence = entry.sequence, input.sequence <= sequence { return false }
+        let now = clock()
+        entry.sequence = input.sequence
+        entry.value = .init(identity: identity, cursor: input.cursor, viewport: input.viewport,
+            expiresAt: now.addingTimeInterval(Self.presenceLifetime), label: label,
+            session: input.session, sequence: input.sequence)
+        if let last = entry.lastPublished, now.timeIntervalSince(last) < 0.05 {
+            presenceEntries[key] = entry
+            if presenceFlushes[key] == nil {
+                let delay = max(1, Int(ceil((0.05 - now.timeIntervalSince(last)) * 1000)))
+                presenceFlushes[key] = Task { [weak self] in
+                    do { try await Task.sleep(for: .milliseconds(delay)) } catch { return }
+                    await self?.flushPresence(key, session: input.session)
+                }
+            }
+        } else {
+            presenceFlushes.removeValue(forKey: key)?.cancel()
+            entry.lastPublished = now
+            presenceEntries[key] = entry
+            presenceChanged(area)
+        }
+        return true
     }
     public func endPresence(token: String, area: UUID, session: UUID) throws {
         try database.read { db in
@@ -199,6 +209,7 @@ extension CollaborationStore {
     }
     func invalidateDevice(_ device: UUID) {
         for id in updateWaiters.filter({ $0.value.device == device }).map(\.key) { finishWaiter(id) }
+        closeCursorLanes { $0.identity.device == device }
         for key in presenceEntries.keys.filter({ $0.device == device }) {
             presenceFlushes.removeValue(forKey: key)?.cancel()
             presenceEntries.removeValue(forKey: key)
@@ -206,6 +217,7 @@ extension CollaborationStore {
         }
     }
     func invalidateMember(area: UUID, person: UUID) {
+        closeCursorLanes { $0.area == area && $0.identity.person.rawValue == person }
         for key in presenceEntries.filter({ $0.key.area == area && $0.value.identity.person.rawValue == person }).map(\.key) {
             presenceFlushes.removeValue(forKey: key)?.cancel()
             presenceEntries.removeValue(forKey: key)

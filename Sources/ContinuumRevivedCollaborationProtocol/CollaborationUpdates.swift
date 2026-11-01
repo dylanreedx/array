@@ -30,9 +30,36 @@ extension Collaboration {
         public let sequence: UInt64
         public let cursor: Point?
         public let viewport: SharedArea.Rect?
-        public init(session: UUID, sequence: UInt64, cursor: Point?, viewport: SharedArea.Rect? = nil) {
-            self.session = session; self.sequence = sequence; self.cursor = cursor; self.viewport = viewport
+        /// When the sender sampled this position, in seconds on its own
+        /// monotonic clock. Opaque to the relay; receivers use only the spacing
+        /// between one sender's samples, to play them back at the pace they
+        /// were made. Absent from older senders.
+        public let sentAt: Double?
+        public init(session: UUID, sequence: UInt64, cursor: Point?, viewport: SharedArea.Rect? = nil, sentAt: Double? = nil) {
+            self.session = session; self.sequence = sequence; self.cursor = cursor; self.viewport = viewport; self.sentAt = sentAt
         }
+    }
+    /// One position on the cursor lane, relayed as it arrives (no 20 Hz
+    /// coalescing). `session`/`sequence` order it against update pages.
+    public struct CursorFrame: Codable, Sendable, Equatable {
+        public let identity: Identity
+        public let session: UUID
+        public let sequence: UInt64
+        public let cursor: Point?
+        public let viewport: SharedArea.Rect?
+        public let sentAt: Double?
+        public init(identity: Identity, session: UUID, sequence: UInt64, cursor: Point?, viewport: SharedArea.Rect?, sentAt: Double?) {
+            self.identity = identity; self.session = session; self.sequence = sequence
+            self.cursor = cursor; self.viewport = viewport; self.sentAt = sentAt
+        }
+    }
+    /// What the relay sends down the cursor lane: a teammate's frame, or a
+    /// refusal of one of this device's own frames (its presence session is
+    /// unknown, e.g. after a relay restart) so the sender begins a new one.
+    public struct CursorLaneMessage: Codable, Sendable, Equatable {
+        public let frame: CursorFrame?
+        public let rejectedSession: UUID?
+        public init(frame: CursorFrame? = nil, rejectedSession: UUID? = nil) { self.frame = frame; self.rejectedSession = rejectedSession }
     }
     public struct PresenceSession: Codable, Sendable {
         public let id: UUID
@@ -45,9 +72,15 @@ extension Collaboration {
         public let expiresAt: Date
         public let label: String?
         public let usage: UsageSnapshot?
-        public init(identity: Identity, cursor: Point?, viewport: SharedArea.Rect?, expiresAt: Date, label: String? = nil, usage: UsageSnapshot? = nil) {
+        /// The presence session and sequence this cursor came from, so a page
+        /// never replaces a newer position already delivered on the cursor
+        /// lane. Absent from a relay that predates the lane.
+        public let session: UUID?
+        public let sequence: UInt64?
+        public init(identity: Identity, cursor: Point?, viewport: SharedArea.Rect?, expiresAt: Date, label: String? = nil, usage: UsageSnapshot? = nil,
+                    session: UUID? = nil, sequence: UInt64? = nil) {
             self.identity = identity; self.cursor = cursor; self.viewport = viewport; self.expiresAt = expiresAt
-            self.label = label; self.usage = usage
+            self.label = label; self.usage = usage; self.session = session; self.sequence = sequence
         }
     }
     /// A member of an area as the relay records them: the name they chose when
