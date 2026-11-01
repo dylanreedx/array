@@ -317,7 +317,8 @@ public enum AgentInboxRowBuilder {
                 ? AgentCharacterActivityProjection.activity(
                     presence: turnSnapshot?.presence, terminalEvent: record?.latestTerminalEvent,
                     latestPromptAt: record?.latestPromptAt)
-                : nil
+                : nil,
+            characterName: record?.characterName
         )
     }
 

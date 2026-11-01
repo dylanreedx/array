@@ -175,8 +175,9 @@ class TileNSView: NSView, TokenThemed {
 
     /// Show `agentID`'s character in the header for `snapshot`, or none (nil).
     /// Called by the agent tile when its status or turn changes; cheap to repeat.
-    func setAgentCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, now: Date = Date()) {
-        titleBar?.setCharacter(agentID: agentID, snapshot: snapshot, now: now)
+    func setAgentCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, characterName: String? = nil,
+                           now: Date = Date()) {
+        titleBar?.setCharacter(agentID: agentID, snapshot: snapshot, characterName: characterName, now: now)
     }
     var qaCharacterLayer: CharacterSpriteLayer? { titleBar?.characterLayer }
     var qaCharacterRect: NSRect? { titleBar?.qaCharacterRect }
@@ -2098,7 +2099,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// A sublayer of the bar, never drawn in `draw(_:)`: a sprite frame never
     /// invalidates the chrome, and it survives the controls being drawn inline.
     let characterLayer = CharacterSpriteLayer()
-    private var characterInput: (id: UUID, snapshot: AgentCharacterSnapshot)?
+    private var characterInput: (id: UUID, snapshot: AgentCharacterSnapshot, name: String?)?
     /// The character's size at chrome scale 1 (1 pt per art pixel); nil for none.
     private var characterSize: NSSize?
     /// Held still by the tile (far parked).
@@ -2428,8 +2429,8 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     var qaCharacterRect: NSRect? { characterLayer.isHidden ? nil : characterRect }
     var qaProviderMarkRect: NSRect? { providerMarkView.isHidden ? nil : providerMarkView.frame }
 
-    func setCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, now: Date) {
-        if let agentID, let snapshot { characterInput = (agentID, snapshot) } else { characterInput = nil }
+    func setCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, characterName: String?, now: Date) {
+        if let agentID, let snapshot { characterInput = (agentID, snapshot, characterName) } else { characterInput = nil }
         refreshCharacter(now: now)
     }
 
@@ -2437,7 +2438,8 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     func refreshCharacter(now: Date) {
         let controller = AgentCharacterController.shared
         guard let input = characterInput,
-              let atlas = controller.atlas(for: input.id, appearance: AgentCharacterController.appearance(of: self)) else {
+              let atlas = controller.atlas(for: input.id, appearance: AgentCharacterController.appearance(of: self),
+                                           name: input.name) else {
             controller.scheduleRevisit(for: self, at: nil)
             if characterSize != nil {
                 characterSize = nil

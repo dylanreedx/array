@@ -1278,7 +1278,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let controller = AgentCharacterController.shared
         let sprite = decorations.characterLayer
         guard let row = shown?.row,
-              let atlas = controller.atlas(for: row.id, appearance: AgentCharacterController.appearance(of: self)) else {
+              let atlas = controller.atlas(for: row.id, appearance: AgentCharacterController.appearance(of: self),
+                                           name: row.characterName) else {
             if characterSize != nil {
                 characterSize = nil
                 sprite.clear()

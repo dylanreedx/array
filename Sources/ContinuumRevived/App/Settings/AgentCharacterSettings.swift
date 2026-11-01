@@ -198,6 +198,7 @@ struct AgentCharacterSettingsRows: View {
                 Button("Remove") { model.remove(id: theme.id) }
             }
         }
+        InfoRow(text: "Each agent gets a character from its id. To choose one for an agent, use Character in its tile's ⋯ menu.")
         if let message = model.message {
             InfoRow(text: message)
         }

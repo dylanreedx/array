@@ -1605,6 +1605,8 @@ run_app_check .build/debug/Array --workspace-api-grants-check
 # preset, other-agent approval, byte caps, zero lifecycle side effects.
 # Agent colour: durable record update through the real workspace API.
 run_app_check .build/debug/Array --workspace-api-agent-colour-check
+# Plan 110: a per-agent character through agent.update and the tile's own menu.
+run_app_check .build/debug/Array --workspace-api-agent-character-check
 # Agent rename: agent.update displayName — self without approval, another agent
 # under the canvas-write grant, a proactive rename refused on a name the user
 # typed, a requested one allowed, the titler yielding to an agent-set name.

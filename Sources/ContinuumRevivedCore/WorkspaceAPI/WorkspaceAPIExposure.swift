@@ -44,6 +44,7 @@ public enum WorkspaceAPIExposure {
         "agent.delegationContext": .internal, // Original brief, retry lineage and checkout baseline; host-owned.
         "agent.workspaceToolsEnabled": .notExposed("Only the user may grant workspace-tool access."),
         "agent.identityColor": .exposed(.agentUpdate),
+        "agent.characterName": .exposed(.agentUpdate),
         "agent.parentRelativeOrdinal": .internal,
         "agent.nextChildOrdinal": .internal,
         "agent.createdAtReferenceInterval": .internal,

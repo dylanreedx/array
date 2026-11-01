@@ -136,14 +136,25 @@ final class AgentCharacterController {
     /// Where in its loop `agentID`'s character is (0..<1).
     func phase(for agentID: UUID) -> Double { AgentCharacterConfig.phase(for: agentID) }
 
-    func characterIndex(for agentID: UUID) -> Int? {
+    /// `agentID`'s character in the shown set: the one named `name` when the
+    /// set has it (case-insensitive), else the pick hashed from the id.
+    func characterIndex(for agentID: UUID, name: String? = nil) -> Int? {
         guard let theme, !theme.characters.isEmpty else { return nil }
+        if let name, let index = Self.index(of: name, in: theme) { return index }
         return AgentCharacterConfig.characterIndex(for: agentID, count: theme.characters.count)
     }
 
+    static func index(of name: String, in theme: AgentCharacterTheme) -> Int? {
+        theme.characters.firstIndex { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
+    /// The selected set, whether or not characters are showing: what a per-agent
+    /// pick is chosen from and validated against.
+    var selectedTheme: AgentCharacterTheme? { theme ?? resolveTheme(id: defaults.string(forKey: AgentCharacterConfig.themeKey)) }
+
     /// The shared atlas for `agentID`'s character in `appearance`; nil when off.
-    func atlas(for agentID: UUID, appearance: AgentCharacterAtlas.Appearance) -> AgentCharacterSpriteAtlas? {
-        guard isEnabled, let theme, let index = characterIndex(for: agentID) else { return nil }
+    func atlas(for agentID: UUID, appearance: AgentCharacterAtlas.Appearance, name: String? = nil) -> AgentCharacterSpriteAtlas? {
+        guard isEnabled, let theme, let index = characterIndex(for: agentID, name: name) else { return nil }
         return atlas(theme: theme, character: index, appearance: appearance)
     }
 

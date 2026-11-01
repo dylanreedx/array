@@ -1915,6 +1915,17 @@ enum ContinuumApp {
         // CX-01 Phase 2a: agent.find ranking/ambiguity and agent.inspect evidence,
         // self-inspect in the preset, other-agent inspect through the trusted
         // prompt, byte caps, and zero lifecycle/presentation side effects.
+        // Plan 110: agent.update's character, through production dispatch and views.
+        if CommandLine.arguments.contains("--workspace-api-agent-character-check") {
+            do {
+                _ = NSApplication.shared
+                print(try WorkspaceAPIAgentCharacterChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-api-agent-colour-check") {
             do {
                 _ = NSApplication.shared
@@ -22547,6 +22558,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // colour picked on a tile only needs the rows rebuilt — the same re-push
         // a rename from the inbox does.
         agentSupervisor.onIdentityColorChanged = { [weak self] _, _ in
+            self?.reloadWorkspaceSidebar()
+        }
+        // Plan 110: a character pick is read from the record on every row build too.
+        agentSupervisor.onCharacterNameChanged = { [weak self] _, _ in
             self?.reloadWorkspaceSidebar()
         }
         // An agent's own status or report is drawn under its name in the sidebar

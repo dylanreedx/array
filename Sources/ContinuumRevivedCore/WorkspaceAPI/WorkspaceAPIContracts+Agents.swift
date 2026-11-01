@@ -444,8 +444,9 @@ public enum AgentRenameIntent: String, Codable, Sendable {
     case proactive
 }
 
-/// Sets the identity colour, the display name, or both. A field that is absent
-/// is left alone; `identityColor: null` clears the colour.
+/// Sets the identity colour, the display name, the character, or any of them. A
+/// field that is absent is left alone; `identityColor: null` clears the colour
+/// and `character: null` returns the agent to its hashed character.
 public struct AgentUpdateRequest: Codable, Equatable, Sendable {
     public var agentId: AgentID
     public var identityColor: String?
@@ -455,7 +456,22 @@ public struct AgentUpdateRequest: Codable, Equatable, Sendable {
     public var displayName: String?
     /// Required with `displayName`.
     public var nameIntent: AgentRenameIntent?
+    /// Plan 110: a character's name in the selected set, or nil to clear.
+    public var character: String?
+    /// Whether the request carried `character` at all.
+    public var setsCharacter: Bool = false
     public var idempotencyKey: String?
+
+    public init(agentId: AgentID, character: String?, idempotencyKey: String? = nil) {
+        self.agentId = agentId
+        self.identityColor = nil
+        self.setsIdentityColor = false
+        self.displayName = nil
+        self.nameIntent = nil
+        self.character = character
+        self.setsCharacter = true
+        self.idempotencyKey = idempotencyKey
+    }
 
     public init(agentId: AgentID, identityColor: String?, idempotencyKey: String? = nil) {
         self.agentId = agentId
@@ -475,7 +491,7 @@ public struct AgentUpdateRequest: Codable, Equatable, Sendable {
         self.idempotencyKey = idempotencyKey
     }
 
-    private enum CodingKeys: String, CodingKey { case agentId, identityColor, displayName, nameIntent, idempotencyKey }
+    private enum CodingKeys: String, CodingKey { case agentId, identityColor, displayName, nameIntent, character, idempotencyKey }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         agentId = try c.decode(AgentID.self, forKey: .agentId)
@@ -483,10 +499,12 @@ public struct AgentUpdateRequest: Codable, Equatable, Sendable {
         identityColor = try c.decodeIfPresent(String.self, forKey: .identityColor)
         displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
         nameIntent = try c.decodeIfPresent(AgentRenameIntent.self, forKey: .nameIntent)
+        setsCharacter = c.contains(.character)
+        character = try c.decodeIfPresent(String.self, forKey: .character)
         idempotencyKey = try c.decodeIfPresent(String.self, forKey: .idempotencyKey)
-        guard setsIdentityColor || displayName != nil else {
+        guard setsIdentityColor || displayName != nil || setsCharacter else {
             throw DecodingError.keyNotFound(CodingKeys.identityColor,
-                .init(codingPath: decoder.codingPath, debugDescription: "identityColor or displayName is required; use identityColor null to clear"))
+                .init(codingPath: decoder.codingPath, debugDescription: "identityColor, displayName or character is required; use null to clear"))
         }
         guard (displayName == nil) == (nameIntent == nil) else {
             throw DecodingError.keyNotFound(CodingKeys.nameIntent,
@@ -502,6 +520,9 @@ public struct AgentUpdateRequest: Codable, Equatable, Sendable {
         }
         try c.encodeIfPresent(displayName, forKey: .displayName)
         try c.encodeIfPresent(nameIntent, forKey: .nameIntent)
+        if setsCharacter {
+            if let character { try c.encode(character, forKey: .character) } else { try c.encodeNil(forKey: .character) }
+        }
         try c.encodeIfPresent(idempotencyKey, forKey: .idempotencyKey)
     }
 }
@@ -516,14 +537,17 @@ public struct AgentUpdateResult: Codable, Equatable, Sendable {
     /// whichever fields the request carried.
     public var displayName: String
     public var nameSource: AgentNameSource
+    /// The agent's chosen character after the update; nil is the hashed pick.
+    public var character: String?
     public var revision: WorkspaceRevision
     public var durability: Durability
 
     public init(
         operationId: String, agentId: AgentID, identityColor: String?,
-        displayName: String, nameSource: AgentNameSource,
+        displayName: String, nameSource: AgentNameSource, character: String? = nil,
         revision: WorkspaceRevision, durability: Durability
     ) {
+        self.character = character
         self.operationId = operationId
         self.agentId = agentId
         self.identityColor = identityColor
@@ -533,7 +557,7 @@ public struct AgentUpdateResult: Codable, Equatable, Sendable {
         self.durability = durability
     }
 
-    private enum CodingKeys: String, CodingKey { case schema, operationId, agentId, identityColor, displayName, nameSource, revision, durability }
+    private enum CodingKeys: String, CodingKey { case schema, operationId, agentId, identityColor, displayName, nameSource, character, revision, durability }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(schema, forKey: .schema)
@@ -543,6 +567,7 @@ public struct AgentUpdateResult: Codable, Equatable, Sendable {
         else { try c.encodeNil(forKey: .identityColor) }
         try c.encode(displayName, forKey: .displayName)
         try c.encode(nameSource, forKey: .nameSource)
+        if let character { try c.encode(character, forKey: .character) } else { try c.encodeNil(forKey: .character) }
         try c.encode(revision, forKey: .revision)
         try c.encode(durability, forKey: .durability)
     }
