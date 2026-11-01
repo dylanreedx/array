@@ -2004,8 +2004,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         } else {
             settleNudge.frame = .zero
         }
-        // Hover actions take the mark's place, as they always have.
-        let actionEdge = (hoverActionsShown && (onHoverSnooze != nil || onHoverSettle != nil || onHoverShare != nil)) ? right : lineRight + 8
+        // Hover actions take the mark's place, as they always have, and sit left of
+        // the settle nudge while it shows: Share is offered on every row, and drawn
+        // over the nudge it took the "All set?" click.
+        let nudgeEdge = settleNudge.isHidden ? right : right - settleNudge.intrinsicContentSize.width - 6
+        let actionEdge = (hoverActionsShown && (onHoverSnooze != nil || onHoverSettle != nil || onHoverShare != nil)) ? nudgeEdge : lineRight + 8
         var actionRight = actionEdge
         for button in [hoverSettle, hoverSnooze, hoverShare, hoverHide, hoverCopy, hoverMoveHere] where !button.isHidden {
             let size = button.intrinsicContentSize
@@ -2549,6 +2552,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     @objc private func hoverSettleClicked() { onHoverSettle?() }
     @objc private func hoverShareClicked() { onHoverShare?() }
     var hoverShareButtonForQA: NSView? { hoverShare.isHidden ? nil : hoverShare }
+    var settleNudgeViewForQA: NSView? { settleNudge.isHidden ? nil : settleNudge }
     @objc private func hoverMoveHereClicked() { onHoverMoveHere?() }
     @objc private func hoverCopyClicked() { onHoverCopy?() }
     @objc private func hoverHideClicked() { onHoverHide?() }

@@ -364,6 +364,36 @@ enum ShareEntryChecks {
             "the row menu's Share… opens the same popover for that agent")
         app.shareEntry.dismiss()
 
+        // 6b. A finished row left sitting shows "All set?". Hovered, it also offers
+        //     Share, which must sit beside the nudge, not over it: a real click on
+        //     the nudge settles the row and opens nothing.
+        let leftAt = now.addingTimeInterval(-10 * 60)
+        inbox.clock = { now }
+        inbox.reload(rows: [AgentInboxRow(id: agents[1].rawValue, title: "Audit the receipt email path", projectName: "checkout-web",
+            projectId: WorkspaceInvariantsFixture.projectA1, workspaceName: "A", workspaceId: WorkspaceInvariantsFixture.workspaceA,
+            state: .ready, lifecycle: .active, model: "claude-opus-5-5", branch: "checkout/retry", elapsed: nil, elapsedStartedAt: nil,
+            lastActiveAt: leftAt, depth: 0, createdAt: leftAt.addingTimeInterval(-600), parentId: nil, harness: "Claude Code",
+            terminalEvent: AgentTerminalEvent(sequence: 1, turnID: "t1", outcome: .succeeded, endedAt: leftAt),
+            terminalIsUnread: false, identityColor: nil, selfReport: nil, hasTile: true, isPinned: false)])
+        inbox.layoutForQA()
+        guard let rowSet = inbox.ownershipCellForQA(id: agents[1].rawValue) else { throw Failure(description: "no row for the finished agent") }
+        rowSet.layoutSubtreeIfNeeded()
+        let setCentre = rowSet.convert(NSPoint(x: rowSet.bounds.midX, y: rowSet.bounds.midY), to: nil)
+        inbox.mouseMoved(with: try mouse(.mouseMoved, setCentre, in: sidebarWindow))
+        inbox.layoutForQA(); rowSet.layoutSubtreeIfNeeded()
+        guard let nudge = rowSet.settleNudgeViewForQA else { throw Failure(description: "a finished row read 10 minutes ago shows no All set? nudge") }
+        guard let shareBeside = rowSet.hoverShareButtonForQA else { throw Failure(description: "hovering the finished row shows no Share") }
+        let nudgeRect = nudge.convert(nudge.bounds, to: nil), shareRect = shareBeside.convert(shareBeside.bounds, to: nil)
+        try expect(!nudgeRect.intersects(shareRect),
+            "hover Share sits beside the All set? nudge, not over it: nudge \(nudgeRect), share \(shareRect)")
+        var setActions: [InboxRowAction] = []
+        inbox.onRowAction = { action, _ in setActions.append(action) }
+        try click(nudge)
+        try expect(setActions == [.settle] && !app.shareEntry.isPresented,
+            "a real click on All set? settles the row and opens no Share popover; got \(setActions), popover \(app.shareEntry.isPresented)")
+        inbox.onRowAction = { action, ids in _ = app.performInboxRowAction(action, on: ids) }
+        inbox.mouseExited(with: try mouse(.mouseMoved, .zero, in: sidebarWindow))
+
         // 7. The Share tool: S arms it; a marquee over A, B and part of C
         //    selects exactly A and B as it goes; release opens the area popover.
         try expect(FloatingToolbarView.visibleItems(defaults: UserDefaults(suiteName: "share-entry-\(UUID())")!)
