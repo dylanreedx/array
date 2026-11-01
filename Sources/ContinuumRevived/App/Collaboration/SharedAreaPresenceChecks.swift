@@ -17,6 +17,10 @@ enum SharedAreaPresenceChecks {
             return view.subviews.lazy.compactMap { scene(in: $0) }.first
         }
         guard let scene = scene(in: host) else { throw Failure(message: "missing production scene fixture") }
+        // These hover assertions read the cursor right after each new position,
+        // so they pin the instant path; the glide between positions is
+        // `--collaboration-cursor-motion-check`.
+        scene.reduceMotion = { true }
         let overlay = SharedAreaPresenceOverlay(scene: scene)
         scene.areaCanvasView.addSubview(overlay)
         let identity = Collaboration.Identity(person: .init(), device: UUID())

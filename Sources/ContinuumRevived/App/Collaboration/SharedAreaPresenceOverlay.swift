@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import ContinuumRevivedCore
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCollaborationProtocol
@@ -9,7 +10,7 @@ import ContinuumRevivedCollaborationProtocol
 @MainActor
 final class SharedAreaPresenceOverlay: NSView {
     weak var scene: SharedAreaSceneView?
-    var peers: [Collaboration.Presence] = [] { didSet { refreshGeometry() } }
+    var peers: [Collaboration.Presence] = [] { didSet { retarget(); refreshGeometry() } }
     var onPointerExit: (() -> Void)?
     var onFollow: ((UUID) -> Void)?
     var onStopFollowing: (() -> Void)?
@@ -39,6 +40,28 @@ final class SharedAreaPresenceOverlay: NSView {
     private var pointerTracking: NSTrackingArea?
     private var cardRect: NSRect = .zero
     private(set) var renderedUsageText: String?
+    /// A teammate's cursor arrives about once per network round trip (one long
+    /// poll per page), 5-10 times a second. Drawn where it arrived, it jumps
+    /// that often. Each cursor instead glides, in area coordinates, from where it
+    /// is drawn to its newest position over the observed arrival interval, so it
+    /// moves on every frame at the teammate's speed. The glide is capped, so it
+    /// never adds more than `maxGlide` behind the teammate.
+    private struct Glide {
+        var from: CGPoint, to: CGPoint, start: CFTimeInterval, duration: CFTimeInterval
+        var arrival: CFTimeInterval, interval: CFTimeInterval
+        func position(at now: CFTimeInterval) -> CGPoint {
+            guard duration > 0 else { return to }
+            let f = CGFloat(min(1, max(0, (now - start) / duration)))
+            return .init(x: from.x + (to.x - from.x) * f, y: from.y + (to.y - from.y) * f)
+        }
+        func done(at now: CFTimeInterval) -> Bool { now - start >= duration }
+    }
+    static let maxGlide: CFTimeInterval = 0.12
+    private var glides: [UUID: Glide] = [:]
+    private var glideLink: CADisplayLink?
+    /// Frames the glide advanced, for the motion witness.
+    private(set) var glideFrames = 0
+    var clock: () -> CFTimeInterval = { CACurrentMediaTime() }
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -95,9 +118,12 @@ final class SharedAreaPresenceOverlay: NSView {
         setInspected(device: device)
     }
     private func setInspected(device: UUID?) {
+        let previous = inspectedDevice
         inspectedDevice = device.flatMap { id in visiblePeers.contains(where: { $0.identity.device == id }) ? id : nil }
         if inspectedDevice == nil { renderedUsageText = nil; cardRect = .zero }
-        needsDisplay = true
+        // No card before or after: nothing on screen changed, so a local mouse
+        // move or a gliding cursor does not repaint the whole overlay.
+        if previous != nil || inspectedDevice != nil { needsDisplay = true }
     }
     func pointerMoved(to point: NSPoint?) {
         pointer = point; pointerInspection = true
@@ -125,7 +151,69 @@ final class SharedAreaPresenceOverlay: NSView {
     }
     private func cursorPoint(_ peer: Collaboration.Presence) -> NSPoint? {
         guard let scene, let cursor = peer.cursor else { return nil }
-        return convert(scene.screenPoint(forAreaPoint: .init(x: cursor.x, y: cursor.y)), from: scene)
+        let area = glides[peer.identity.device]?.position(at: clock()) ?? CGPoint(x: cursor.x, y: cursor.y)
+        return convert(scene.screenPoint(forAreaPoint: area), from: scene)
+    }
+    /// New positions start a glide from wherever the cursor is drawn now. A
+    /// cursor seen for the first time, or with Reduce Motion on, is placed.
+    private func retarget() {
+        let now = clock(), snap = scene?.reduceMotion() ?? true
+        var next: [UUID: Glide] = [:]
+        for peer in peers {
+            guard let cursor = peer.cursor else { continue }
+            let target = CGPoint(x: cursor.x, y: cursor.y), device = peer.identity.device
+            guard var glide = glides[device], !snap else {
+                next[device] = .init(from: target, to: target, start: now, duration: 0, arrival: now, interval: Self.maxGlide)
+                continue
+            }
+            if glide.to != target {
+                // Smoothed arrival interval: one late page must not stretch the glide.
+                glide.interval = min(Self.maxGlide, max(1.0 / 120, (glide.interval + (now - glide.arrival)) / 2))
+                glide.from = glide.position(at: now); glide.to = target
+                glide.start = now; glide.duration = glide.interval; glide.arrival = now
+            }
+            next[device] = glide
+        }
+        glides = next
+        updateGlideLink()
+    }
+    private func updateGlideLink() {
+        let now = clock()
+        let moving = glides.values.contains { !$0.done(at: now) }
+        if moving, glideLink == nil, window != nil {
+            let link = displayLink(target: self, selector: #selector(glideTick(_:)))
+            link.add(to: .main, forMode: .common)
+            glideLink = link
+        } else if !moving, let link = glideLink {
+            link.invalidate(); glideLink = nil
+        }
+    }
+    @objc private func glideTick(_ link: CADisplayLink) { advanceGlide() }
+    /// True while a display link is driving a cursor glide.
+    var isGliding: Bool { glideLink != nil }
+    /// One display frame of the glide. Also stepped by the cursor motion witness,
+    /// whose fixture window sits off every display where links do not tick.
+    func advanceGlide() {
+        guard glideLink != nil else { return }
+        glideFrames += 1
+        // A visible hover card follows its cursor; otherwise repaint only the
+        // cursors, where they were drawn and where they are now.
+        if inspectedDevice != nil { needsDisplay = true } else {
+            for peer in visiblePeers {
+                if let old = drawnCursors[peer.identity.device] { setNeedsDisplay(Self.cursorRect(at: old)) }
+                if let now = cursorPoint(peer) { setNeedsDisplay(Self.cursorRect(at: now)) }
+            }
+        }
+        if pointerInspection { reevaluatePointer() }
+        updateGlideLink()
+    }
+    /// The arrow and its name label.
+    private static func cursorRect(at point: NSPoint) -> NSRect {
+        NSRect(x: point.x - 4, y: point.y - 10, width: 260, height: 34)
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { glideLink?.invalidate(); glideLink = nil } else { updateGlideLink() }
     }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) {

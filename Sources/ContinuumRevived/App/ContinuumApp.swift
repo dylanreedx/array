@@ -1730,6 +1730,36 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        // A teammate's cursor over a relay-speed network: lands where the mouse
+        // stopped, glides between deliveries, cheap to apply (`.plans/105`).
+        if CommandLine.arguments.contains("--collaboration-cursor-motion-check") {
+            setbuf(stdout, nil)
+            setbuf(stderr, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(60))
+                fputs("FAIL: collaboration cursor motion exceeded its 60-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do {
+                    let delegate = AppDelegate()
+                    guard let support = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] else {
+                        throw SelfCheckError("the cursor motion check requires isolated app support")
+                    }
+                    delegate.agentSupervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory:
+                        URL(fileURLWithPath: support).appendingPathComponent("cursor-motion-supervisor")),
+                        makeRunner: { _ in ScriptedAgentRunner(script: []) })
+                    try await CollaborationCursorMotionChecks.run(delegate: delegate)
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
         // Multiplayer full access (`.plans/105` round 2): a teammate prompts the
         // owner's agent through the production composer, host and runners.
         if CommandLine.arguments.contains("--collaboration-full-access-check") {

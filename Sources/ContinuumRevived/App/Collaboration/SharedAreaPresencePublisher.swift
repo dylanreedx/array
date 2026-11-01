@@ -19,6 +19,10 @@ final class SharedAreaPresencePublisher {
     private var cursor: Collaboration.Point?
     private var screenCursor: NSPoint?
     private var lastSent = Date.distantPast
+    /// A position changed while a send was out or inside the 50 ms window. It is
+    /// sent as soon as either clears, so the last position is never dropped.
+    private var trailing = false
+    private var trailingTimer: Timer?
     private var stopped = true
     private var lastStatus: SharedAreaController.Status?
     /// Follow is a private camera concern: it reads a teammate's published
@@ -77,6 +81,7 @@ final class SharedAreaPresencePublisher {
         if let observer { controller.removeChangeObserver(observer) }; observer = nil
         if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil
         timer?.invalidate(); timer = nil; task?.cancel(); task = nil
+        trailingTimer?.invalidate(); trailingTimer = nil; trailing = false
         scene.onCanvasTransformChange = nil; overlay.onPointerExit = nil
         scene.onLocalCameraNavigation = nil; overlay.onFollow = nil; overlay.onStopFollowing = nil
         scene.onFollowTeammate = nil; scene.setFollowTargets([], followed: nil)
@@ -187,13 +192,37 @@ final class SharedAreaPresencePublisher {
         }
         send(force: false)
     }
+    /// One request in flight, at most one every 50 ms (the service fans out at
+    /// 20 Hz). A move that cannot go now is not dropped: the newest position
+    /// leaves the moment the flight lands or the window opens. Before this, a
+    /// stopped mouse waited for the one-second timer, up to a second behind.
     private func send(force: Bool) {
-        guard !stopped, controller.status == .connected, task == nil,
-              force || Date().timeIntervalSince(lastSent) >= 0.05 else { return }
+        guard !stopped, controller.status == .connected else { return }
+        guard task == nil else { trailing = true; return }
+        let wait = 0.05 - Date().timeIntervalSince(lastSent)
+        if !force, wait > 0 {
+            trailing = true
+            if trailingTimer == nil {
+                trailingTimer = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
+                    Task { @MainActor in self?.sendTrailing() }
+                }
+            }
+            return
+        }
+        trailing = false
+        trailingTimer?.invalidate(); trailingTimer = nil
         let ticket = generation
+        // The window counts from when a send leaves, so a round trip longer than
+        // 50 ms is the only limit on the rate.
+        lastSent = Date()
         task = Task { [weak self] in
             guard let self else { return }
-            defer { if ticket == generation { task = nil } }
+            defer {
+                if ticket == generation {
+                    task = nil
+                    if trailing { sendTrailing() }
+                }
+            }
             do {
                 if session == nil {
                     let next = try await controller.beginPresence()
@@ -208,8 +237,12 @@ final class SharedAreaPresencePublisher {
                 let viewport = followedDevice != nil ? nil : SharedArea.Rect(x: camera.x, y: camera.y,
                     width: max(1, bounds.width / camera.zoom), height: max(1, bounds.height / camera.zoom))
                 try await controller.publishPresence(.init(session: session, sequence: sequence, cursor: cursor, viewport: viewport))
-                if ticket == generation { lastSent = Date() }
             } catch { if ticket == generation { session = nil } }
         }
+    }
+    private func sendTrailing() {
+        trailingTimer?.invalidate(); trailingTimer = nil
+        guard trailing else { return }
+        send(force: false)
     }
 }
