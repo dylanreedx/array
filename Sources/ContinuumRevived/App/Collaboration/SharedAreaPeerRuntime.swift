@@ -218,7 +218,6 @@ enum SharedAreaPeerRuntime {
                 result["artifactPanel"] = ["object": artifact.object?.rawValue.uuidString ?? NSNull(), "summary": artifact.summaryText,
                     "rendered": artifact.renderedText, "latestDigest": artifact.state?.latest?.contentDigest ?? NSNull(), "loads": artifact.loads,
                     "bytes": (artifact.contents?.bytes ?? [:]).mapValues { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() }] as [String: Any]
-                result["freshness"] = ["status": scene.freshnessPanel.statusText, "notice": scene.freshnessPanel.noticeText]
             }
             // The live view, not the private camera: following writes that once,
             // when it ends. Area point under the canvas centre, as the native

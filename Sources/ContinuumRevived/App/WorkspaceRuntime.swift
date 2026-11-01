@@ -2377,12 +2377,11 @@ final class WorkspaceRuntime {
                 }
             }
         }
-        // The tiles keep their arrangement, inset under the zone header, with
-        // room on the right for the discussion dock.
+        // The tiles keep their arrangement, inset under the zone header.
         let minX = sources.map(\.world.x).min()!, minY = sources.map(\.world.y).min()!
         let maxX = sources.map { $0.world.x + $0.world.width }.max()!
         let maxY = sources.map { $0.world.y + $0.world.height }.max()!
-        let pad = 24.0, header = ZoneChromeNSView.headerHeight, dock = Double(SharedAreaSceneView.zoneDockWidth) + 24
+        let pad = 24.0, header = ZoneChromeNSView.headerHeight
         let existing = sharedAreaZone(for: areaId)
         let after = existing.flatMap { zone in
             canvas.sharedAreaLayer(for: zone.zoneId)?.lent.map { $0.areaFrame.x + $0.areaFrame.width }.max()
@@ -2395,7 +2394,7 @@ final class WorkspaceRuntime {
         let homes = sources.map(\.zone)
         let origin = ZonePoint(x: (homes.map { $0.origin.x + $0.size.width }.max() ?? maxX) + 60,
                                y: homes.map(\.origin.y).min() ?? minY)
-        let size = ZoneSize(width: after + (maxX - minX) + pad * 2 + dock, height: max((maxY - minY) + header + pad * 2, 560))
+        let size = ZoneSize(width: after + (maxX - minX) + pad * 2, height: max((maxY - minY) + header + pad * 2, 560))
         var placement = try ensureSharedAreaZone(areaId: areaId, name: name, origin: origin, size: size)
         if existing != nil, placement.size.width < size.width || placement.size.height < size.height {
             // An open area grows to take what is added; it never shrinks.

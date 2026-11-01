@@ -116,11 +116,8 @@ func runSharedAgentHostDispatchChecks() async throws {
         await bAfterRelaunch.refresh(object: object.id)
         try hostDispatchCheck(sourceAcceptances == 1 && bAfterRelaunch.receipt?.command.id == queued.command.id && bAfterRelaunch.receipt?.phase == .accepted,
             "both client relaunch and lost host report recover the original accepted receipt without another prompt")
-        let incarnation = Collaboration.AgentIncarnation(object: object.id, hostGeneration: queued.command.hostGeneration)
-        let given = try bAfterRelaunch.freshness.freshness(of: incarnation, agreement: agreement.id,
-            in: bAfterRelaunch.areaState?.document ?? SharedArea.Document())
-        try hostDispatchCheck(try bAfterRelaunch.freshness.unsettledCommands().isEmpty && given.state == .current(context.id)
-            && given.lastAccepted == queued.command,
+        try hostDispatchCheck(try bAfterRelaunch.freshness.unsettledCommands().isEmpty
+            && bAfterRelaunch.freshness.frozenCommand(queued.command.id) == queued.command && queued.command.context?.id == context.id,
             "a relaunched controller's refresh settles the host's acceptance: the agent was given the current agreement revision")
         await bAfterRelaunch.send(text: "Second deliberate prompt.", context: context.id)
         guard let second = bAfterRelaunch.receipt else { throw HostDispatchCheckFailure(message: "second prompt absent") }

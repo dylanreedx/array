@@ -104,23 +104,6 @@ def stage_live_views(h, a, b):
     return "B's live view tails A's running agent with no executor of its own, and turns to history when A's host stops"
 
 
-def stage_freshness(h, a, b):
-    """COL-14: after B's handoff is accepted, B's panel reads Current; a later
-    agreement edit makes it Changed since sent, and nothing is redispatched."""
-    gate(b.call("status"), "freshness")
-    calls = a.call("status")["runnerCalls"]
-    a.call("handoffOffer", person=b.ready["person"]); b.call("handoffAccept")
-    b.call("handoffSend", text="FEATURES freshness handoff")
-    wait_for(lambda: a.call("hostPoll") is not None and a.call("status")["runnerCalls"] == calls + 1, "A's host runs the handed-off prompt once", 20)
-    wait_for(lambda: b.call("handoffRefresh").get("handoffPhase") == "accepted", "B sees the host accept it", 20)
-    b.call("select", kind="agentObservation")
-    wait_for(lambda: "Current" in b.call("status")["freshness"]["status"] and "Changed" not in b.call("status")["freshness"]["status"], "B reads the delivered revision as current", 30)
-    a.call("edit", text="FEATURES agreement after the handoff"); h.converge(a, b)
-    wait_for(lambda: "Changed since sent" in b.call("status")["freshness"]["status"], "B reads Changed since sent", 30)
-    a.call("hostPoll"); assert a.call("status")["runnerCalls"] == calls + 1, "editing the agreement dispatched again"
-    return "after B's handoff is accepted B's panel reads Current; A's later edit turns it to Changed since sent, with no second dispatch"
-
-
 def stage_endorsements(h, a, b):
     """COL-12: revision-bound endorsement, then a concurrent edit that keeps
     the losing author's draft as a conflict instead of overwriting."""
@@ -232,7 +215,7 @@ def stage_harnesses(h, a, b):
 
 
 STAGES = [("liveness", stage_liveness), ("artifacts", stage_artifacts), ("liveViews", stage_live_views),
-          ("freshness", stage_freshness), ("endorsements", stage_endorsements), ("follow", stage_follow),
+          ("endorsements", stage_endorsements), ("follow", stage_follow),
           ("compaction", stage_compaction), ("harnesses", stage_harnesses)]
 
 

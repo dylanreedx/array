@@ -129,7 +129,8 @@ enum CollaborationBudgetChecks {
             }
         }
         settle()
-        try expect(!sceneB.agreementPanel.isHidden, "the measured client shows a shared scene with its agreement panel")
+        try expect(sceneB.selectedObject == agreement.id && !sceneB.selectedEntryText.isEmpty,
+            "the measured client shows a shared scene with its agreement selected")
 
         let source = root.appendingPathComponent("source/.array/canvas.json")
         try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -284,7 +285,7 @@ enum CollaborationBudgetChecks {
             let next = SharedArea.Context(id: .init(), object: agreement.id, parent: parent, author: a.person, text: "Revision \(index)")
             parent = next.id
             return [.context(next)]
-        }, until: { sceneB.agreementPanel.summaryText.hasPrefix("Revision 11") })
+        }, until: { sceneB.selectedEntryText == "Revision 19" })
         var rect = placement.rect
         try await measureRemote("remote moves and posts", events: 20, { index in
             if index % 2 == 0 { return [.post(.init(id: .init(), object: discussion.id, author: a.person, text: "Remote \(index)"))] }

@@ -178,24 +178,16 @@ enum CollaborationAccessibilityChecks {
         try await Rig.eventually("agreement selected by keys") { scene.selectedObject == agreement.id }
         window.layoutIfNeeded()
         try focus(window, on: scene.areaCanvasView)
-        try assertLoop(window, root: scene, order: ["Shared objects", "Objects", "Workspace", "History", "Endorse revision 1",
+        try assertLoop(window, root: scene, order: ["Shared objects", "Objects", "Workspace", "History",
             "Selected shared entry", "Private discussion or agreement draft"], surface: "shared scene with an agreement")
         guard let draft = Rig.descendants(scene).first(where: { $0.accessibilityLabel() == "Private discussion or agreement draft" }) else {
             throw Rig.Failure(description: "draft editor missing")
         }
         try focus(window, on: draft)
         let reverse = try walk(window, backwards: true).map(name)
-        try expect(reverse == ["Selected shared entry", "Endorse revision 1", "History", "Workspace", "Objects", "Shared objects"],
+        try expect(reverse == ["Selected shared entry", "History", "Workspace", "Objects", "Shared objects"],
             "shared scene: Shift-Tab walks the same stops in reverse (\(reverse.joined(separator: " → ")))")
 
-        guard let endorse = Rig.descendants(scene).first(where: { $0.accessibilityLabel() == "Endorse revision 1" }) else {
-            throw Rig.Failure(description: "Endorse control missing")
-        }
-        try focus(window, on: endorse); try enter(window)
-        try await Rig.eventually("endorsed by keys") { model.document?.endorsements(of: revision.id).map(\.person) == [me.person] }
-        try expect(true, "Return on the focused Endorse control records this person's endorsement")
-        try expect(name(focused(window)) == "Selected shared entry",
-            "when Endorse turns into a disabled Endorsed, keyboard focus moves on to the next stop instead of dropping to the window")
 
         let appliesBefore = await authority.applies
         try focus(window, on: workspace)

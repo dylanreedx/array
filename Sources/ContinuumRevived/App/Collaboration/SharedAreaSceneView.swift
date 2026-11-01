@@ -55,16 +55,6 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     private let postButton = ComposerActionButton(presentation: .init(primaryAction: .send, title: "Post", symbolName: "arrow.up",
         accessibilityLabel: "Post to discussion", isEnabled: false, isLoading: false, secondaryActions: []))
     private let canvas = SharedAreaSceneCanvas(frame: .zero)
-    private(set) lazy var agreementPanel = SharedAreaAgreementView(controller: controller)
-    private(set) lazy var freshnessPanel = SharedAreaAgentFreshnessView()
-    /// Per-agent agreement freshness and excerpt source checks (COL-14).
-    var agentFreshness: SharedAgentFreshnessModel? {
-        didSet {
-            oldValue?.stopWatchingLedger()
-            agentFreshness?.onChange = { [weak self] in self?.refreshFreshness() }
-            agentFreshness?.startWatchingLedger()
-        }
-    }
     private(set) lazy var artifactPanel = SharedAreaArtifactView(controller: controller, person: person)
     private(set) lazy var livePanel = SharedAgentLiveView(controller: controller)
     private var localCamera = SharedAreaLocalView()
@@ -137,9 +127,6 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     var onDriveCanvasCamera: ((SharedAreaLocalView) -> Void)?
     /// The area's header strip over the zone's own header (zone only).
     private(set) lazy var zoneHeader = SharedAreaZoneHeaderView(controller: controller)
-    /// The discussion dock's surface at the zone's right edge (zone only).
-    private(set) lazy var zoneDock = SharedAreaZoneDockView()
-    private let pinnedAgreementLabel = NSTextField(wrappingLabelWithString: "")
     /// Read-only live views of published agents, at their area positions.
     private let zoneAgentLayer = SharedAreaZoneAgentLayer()
     private(set) var zoneAgentViews: [SharedArea.ID<SharedArea.Object>: SharedAreaZoneAgentView] = [:]
@@ -154,7 +141,6 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     }
     /// A shared position changed (any author): lent tiles follow it.
     var onPositionsChanged: (([SharedArea.Position]) -> Void)?
-    static let zoneDockWidth: CGFloat = 340
     static let zoneHeaderHeight: CGFloat = 34
 
     convenience init(controller: SharedAreaController, person: SharedArea.ID<SharedArea.Person>) {
@@ -206,38 +192,31 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         }
         canvas.canUndoGeometry = { [weak self] in self?.canUndoSharedGeometry ?? false }
         canvas.canRedoGeometry = { [weak self] in self?.canRedoSharedGeometry ?? false }
-        for view in [canvas, titleLabel, statusLabel, objectNavigator, actions, detailLabel, entryLabel, history, readerScroll, editorScroll, postButton, messageLabel] {
-            addSubview(view)
-        }
-        addSubview(agreementPanel)
-        addSubview(freshnessPanel)
-        addSubview(artifactPanel)
-        addSubview(livePanel)
+        addSubview(canvas)
         if isZone {
-            // Behind everything: the dock's surface; under the shared canvas:
-            // the agents' live views, so the canvas can draw selection over them.
-            addSubview(zoneDock, positioned: .below, relativeTo: nil)
+            // Under the shared canvas: the agents' live views, so the canvas
+            // can draw selection over them. A zone has no discussion panel.
             addSubview(zoneAgentLayer, positioned: .below, relativeTo: canvas)
             addSubview(zoneHeader)
             addSubview(zoneEnded)
             zoneEnded.onRemove = { [weak self] in self?.onRemoveFromCanvas?() }
-            pinnedAgreementLabel.font = .token(.body); pinnedAgreementLabel.maximumNumberOfLines = 4
-            pinnedAgreementLabel.lineBreakMode = .byWordWrapping
-            pinnedAgreementLabel.cell?.truncatesLastVisibleLine = true
-            addSubview(pinnedAgreementLabel)
             canvas.zoneMode = true
             canvas.onEscape = { [weak self] in
                 guard let self, followedTeammate != nil else { return false }
                 onFollowTeammate?(nil); return true
             }
-            titleLabel.isHidden = true; statusLabel.isHidden = true; objectNavigator.isHidden = true
             zoneHeader.onFollow = { [weak self] device in self?.onFollowTeammate?(device) }
             zoneHeader.person = person
+        } else {
+            for view in [titleLabel, statusLabel, objectNavigator, actions, detailLabel, entryLabel, history, readerScroll, editorScroll, postButton, messageLabel] {
+                addSubview(view)
+            }
+            addSubview(artifactPanel)
+            addSubview(livePanel)
+            // Reading order: canvas, header menus, the selected entry, then compose.
+            CollaborationKeyLoop.link([canvas, objectNavigator, actions, history, reader, editor, postButton])
         }
-        agreementPanel.onRebaseDraft = { [weak self] in self?.rebaseAgreementDraft() }
         reader.delegate = self
-        // Reading order: canvas, header menus, the selected entry, then compose.
-        CollaborationKeyLoop.link([canvas, objectNavigator, actions, history] + agreementPanel.keyViews + [reader, editor, postButton])
         setAccessibilityRole(.group)
         setAccessibilityLabel("Shared workspace")
         applyTokens()
@@ -295,11 +274,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         setFrame(entryLabel, .init(x: x, y: header + 39, width: width, height: 18))
         setFrame(history, .init(x: x, y: header + 63, width: min(148, width), height: ChoiceButton.controlHeight))
         let editorTop = max(header + 220, bounds.height - 190)
-        let agreement = !agreementPanel.isHidden ? SharedAreaAgreementView.height + 8
-            : !freshnessPanel.isHidden ? SharedAreaAgentFreshnessView.height + 8 : 0
-        setFrame(agreementPanel, .init(x: x, y: header + 106, width: width, height: SharedAreaAgreementView.height))
-        setFrame(freshnessPanel, .init(x: x, y: header + 106, width: width, height: SharedAreaAgentFreshnessView.height))
-        setFrame(readerScroll, .init(x: x, y: header + 106 + agreement, width: width, height: max(48, editorTop - header - 118 - agreement)))
+        setFrame(readerScroll, .init(x: x, y: header + 106, width: width, height: max(48, editorTop - header - 118)))
         // A selected agent's live view takes the reader's place.
         setFrame(livePanel, readerScroll.frame)
         setFrame(editorScroll, .init(x: x, y: editorTop, width: width, height: 112))
@@ -310,38 +285,13 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     }
 
     /// The zone body: the whole zone rect, area-local. The area's items keep
-    /// their positions; the dock sits inside the right edge, under the header.
+    /// their positions.
     private func layoutZone() {
-        let header = Self.zoneHeaderHeight, inset: CGFloat = 12
+        let header = Self.zoneHeaderHeight
         setFrame(canvas, bounds)
         setFrame(zoneAgentLayer, bounds)
         let headerWidth = min(bounds.width - 220, 460)
         setFrame(zoneHeader, .init(x: bounds.width - headerWidth - 70, y: 0, width: max(0, headerWidth), height: header))
-        let dockWidth = min(Self.zoneDockWidth, max(0, bounds.width * 0.4))
-        let dock = NSRect(x: bounds.width - dockWidth - inset, y: header + inset, width: dockWidth, height: max(0, bounds.height - header - inset * 2))
-        setFrame(zoneDock, dock)
-        let x = dock.minX + 14, width = max(1, dock.width - 28)
-        // Dock order: the discussion's actions, the pinned agreement, the
-        // thread, then the reply field.
-        setFrame(detailLabel, .init(x: x, y: dock.minY + 12, width: width - 140, height: 22))
-        setFrame(actions, .init(x: dock.maxX - 14 - 130, y: dock.minY + 10, width: 130, height: ChoiceButton.controlHeight))
-        setFrame(entryLabel, .init(x: x, y: dock.minY + 40, width: width, height: 18))
-        var y = dock.minY + 64
-        if !pinnedAgreementLabel.isHidden {
-            setFrame(pinnedAgreementLabel, .init(x: x, y: y, width: width, height: 64)); y += 70
-        }
-        if !agreementPanel.isHidden {
-            setFrame(agreementPanel, .init(x: x, y: y, width: width, height: SharedAreaAgreementView.height)); y += SharedAreaAgreementView.height + 8
-        }
-        let composer: CGFloat = 96 + ComposerActionButton.controlHeight + 40
-        let editorTop = max(y + 60, dock.maxY - composer)
-        setFrame(readerScroll, .init(x: x, y: y, width: width, height: max(40, editorTop - y - 8)))
-        setFrame(artifactPanel, .init(x: x, y: dock.minY + 64, width: width, height: max(120, dock.maxY - dock.minY - 76)))
-        setFrame(editorScroll, .init(x: x, y: editorTop, width: width, height: 96))
-        setFrame(postButton, .init(x: x, y: editorTop + 104, width: min(width, 160), height: ComposerActionButton.controlHeight))
-        setFrame(messageLabel, .init(x: x, y: editorTop + 104 + ComposerActionButton.controlHeight + 6, width: width, height: 17))
-        setFrame(history, .zero); history.isHidden = true
-        setFrame(livePanel, .zero); setFrame(freshnessPanel, .zero)
         layoutZoneAgents()
         let card = NSSize(width: min(520, max(0, bounds.width - 48)), height: 170)
         setFrame(zoneEnded, .init(x: (bounds.width - card.width) / 2, y: header + max(24, (bounds.height - header - card.height) / 2),
@@ -352,7 +302,6 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         if isZone {
             // The zone's own chrome paints the background; the body adds none.
             layer?.backgroundColor = nil
-            pinnedAgreementLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         } else {
             layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
         }
@@ -519,7 +468,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     }
     func selectObject(_ object: SharedArea.ID<SharedArea.Object>?) throws {
         // In a zone an agent is read in place, in its own live view: selecting
-        // it marks it on the canvas and leaves the dock on its discussion.
+        // it marks it on the canvas.
         if isZone, let object, controller.document?.items.first(where: { $0.id == object })?.kind == .agentObservation {
             zoneSelectedAgent = object
             canvas.setSelection(object)
@@ -851,16 +800,8 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         refreshControls()
     }
 
-    private var selectingDockDefault = false
     /// The agent selected on the zone's canvas (zone only).
     private(set) var zoneSelectedAgent: SharedArea.ID<SharedArea.Object>?
-    /// The agreement the dock pins: the area's latest.
-    var pinnedAgreement: SharedArea.ID<SharedArea.Object>? {
-        knownDocument?.items.last(where: { $0.kind == .agreement })?.id
-    }
-    private var defaultDockObject: SharedArea.ID<SharedArea.Object>? {
-        knownDocument?.items.first(where: { $0.kind == .discussion })?.id ?? pinnedAgreement
-    }
     /// A person as the zone names them: the relay's member record, which
     /// outlives presence, then a presence label, then "Teammate".
     func displayName(of other: SharedArea.ID<SharedArea.Person>) -> String {
@@ -904,15 +845,11 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             zoneHeader.endingText = ending?.title
             zoneHeader.refresh(document: knownDocument, hosts: knownHosts)
         }
-        // An ended area keeps no live parts: no shell of a dock, composer or cards.
-        let live: [NSView] = [canvas, zoneAgentLayer, zoneDock, detailLabel, entryLabel, actions, pinnedAgreementLabel,
-                              agreementPanel, readerScroll, editorScroll, postButton, messageLabel, artifactPanel]
+        // An ended area keeps no live parts: no shell of cards or agents.
+        let live: [NSView] = [canvas, zoneAgentLayer]
         for view in live where ending != nil { view.isHidden = true }
-        if ending == nil, zoneDock.isHidden {
-            for view in [canvas, zoneAgentLayer, zoneDock, detailLabel, entryLabel, actions, readerScroll, editorScroll, postButton, messageLabel] as [NSView] {
-                view.isHidden = false
-            }
-            lastControlsKey = nil; refreshReader(); refreshControls()
+        if ending == nil, canvas.isHidden {
+            for view in live { view.isHidden = false }
         }
         needsLayout = true
     }
@@ -927,7 +864,6 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         knownHosts = hosts
         zoneHeader.refresh(document: knownDocument, hosts: hosts, presence: presence, status: .connected)
         refreshZoneAgents()
-        lastControlsKey = nil; refreshReader(); refreshControls()
     }
     private func refresh() {
         guard isMounted else { return }
@@ -959,13 +895,6 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         } else { canvas.setCamera(drawCamera) }
         setText(statusLabel, statusText)
         if isZone {
-            // Selecting saves the private view, which refreshes again before
-            // the selection is set; the flag keeps that from recursing.
-            if selectedObject == nil, !selectingDockDefault, let target = defaultDockObject {
-                selectingDockDefault = true
-                defer { selectingDockDefault = false }
-                try? selectObject(target)
-            }
             zoneHeader.refresh(document: knownDocument, hosts: knownHosts)
             refreshZoneAgents()
             if changed, let positions = knownDocument?.positions { onPositionsChanged?(positions) }
@@ -997,18 +926,11 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         }
     }
     private func refreshControls() {
+        // A zone has no discussion panel: its agents are read in place.
+        guard !isZone else { return }
         let heldFocus = CollaborationKeyLoop.holdFocus(in: window)
         defer { CollaborationKeyLoop.restoreFocus(heldFocus, in: window) }
-        // A zone's dock always pins the area's agreement; its agents are read
-        // in place, so neither the freshness panel nor the single live view shows.
-        agreementPanel.show(agreement: isZone ? pinnedAgreement : selectedObject, in: knownDocument, draft: activeDraft)
-        freshnessPanel.show(agent: isZone ? nil : selectedObject, in: knownDocument, model: agentFreshness)
-        livePanel.show(object: isZone ? nil : selectedObject, in: knownDocument)
-        if isZone {
-            let pinnedText = pinnedAgreement.flatMap { pinned in knownDocument?.contexts.last(where: { $0.object == pinned })?.text }
-            setText(pinnedAgreementLabel, pinnedText ?? "")
-            if pinnedAgreementLabel.isHidden != (pinnedText == nil) { pinnedAgreementLabel.isHidden = pinnedText == nil; needsLayout = true }
-        }
+        livePanel.show(object: selectedObject, in: knownDocument)
         // Stale is not offline: it may still be running, so only offline turns the view into history.
         livePanel.hostOnline = knownDocument?.items.first(where: { $0.id == selectedObject })
             .flatMap { SharedAreaHostLivenessCopy.liveness(for: $0, in: knownHosts) }
@@ -1041,11 +963,6 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             .init(id: "delivery", title: "Check pending delivery (\(pendingDeliveryCount))", icon: .system("arrow.clockwise"), enabled: !controller.isSubmitting && (pendingDeliveryCount > 0 || geometryUnavailable)),
             .init(id: "handoff", title: "Hand over…", icon: .system("person.2"), enabled: writable && selectedObject.flatMap { selected in controller.document?.items.first(where: { $0.id == selected && $0.kind == .agentObservation }) } != nil && onRequestHandoff != nil),
             .init(id: "fit", title: "Fit shared content", icon: .system("arrow.up.left.and.arrow.down.right"), enabled: controller.document?.positions.isEmpty == false),
-        ] + (!isZone ? [] : [
-            .init(id: "dock:discussion", title: "Reply in the discussion", icon: .system("bubble.left"),
-                  enabled: knownDocument?.items.contains(where: { $0.kind == .discussion }) == true),
-            .init(id: "dock:agreement", title: "Propose an agreement change", icon: .system("doc.text"), enabled: pinnedAgreement != nil),
-        ]) + [
             .init(id: "invite", title: "Invite collaborator…", icon: .system("person.badge.plus"), enabled: controller.status == .connected && controller.scope?.allows(.manageSharing) == true)
         ] + followTargets.map { target in
             target.device == followedTeammate
@@ -1070,6 +987,8 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         history.items = items; history.setPresentationTitle("History")
     }
     private func refreshReader() {
+        // A zone has no discussion panel and no reader.
+        guard !isZone else { return }
         let heldFocus = CollaborationKeyLoop.holdFocus(in: window)
         defer { CollaborationKeyLoop.restoreFocus(heldFocus, in: window) }
         // An artifact replaces the text reader and composer with its own
@@ -1079,7 +998,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         // A selected agent's live view takes the reader's place, entry navigation included.
         livePanel.show(object: selectedObject, in: knownDocument)
         if !livePanel.isHidden { readerScroll.isHidden = true }
-        entryLabel.isHidden = !livePanel.isHidden; history.isHidden = isZone || !livePanel.isHidden
+        entryLabel.isHidden = !livePanel.isHidden; history.isHidden = !livePanel.isHidden
         guard let document = knownDocument, let object = selectedObject,
               let item = document.items.first(where: { $0.id == object }) else {
             setText(detailLabel, activeDraft == nil ? "Select an object" : "Private draft")
@@ -1087,21 +1006,10 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             return
         }
         setText(detailLabel, Self.title(for: item.kind))
-        if isZone {
-            // The dock reads a discussion as one thread, every post with its author.
-            let people = Set(document.items.compactMap { $0.source?.owner } + controller.presence.map(\.identity.person) + [person]).count
-            let agreements = document.items.filter { $0.kind == .agreement }.count
-            setText(entryLabel, "\(people) \(people == 1 ? "person" : "people") · \(agreements) \(agreements == 1 ? "agreement" : "agreements")")
-        }
         let entries: [String]
         switch item.kind {
-        case .discussion where isZone:
-            let thread = document.posts.filter { $0.object == object }.map {
-                displayName(of: $0.author) + "\n" + SharedAreaExcerptPresentation.entry(for: $0, in: document, model: agentFreshness)
-            }
-            entries = thread.isEmpty ? [] : [thread.joined(separator: "\n\n")]
         case .discussion:
-            entries = document.posts.filter { $0.object == object }.map { SharedAreaExcerptPresentation.entry(for: $0, in: document, model: agentFreshness) }
+            entries = document.posts.filter { $0.object == object }.map(\.text)
         case .agreement: entries = document.contexts.filter { $0.object == object }.map(\.text)
         case .agentObservation:
             let host = SharedAreaHostLivenessCopy.cardLine(SharedAreaHostLivenessCopy.liveness(for: item, in: knownHosts))
@@ -1116,17 +1024,12 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         displayedContextRevision = revisions.indices.contains(readerIndex) ? revisions[readerIndex] : nil
         let text = entries.isEmpty ? (item.kind == .agreement ? "No agreement revision yet." : "No discussion messages yet.") : entries[readerIndex]
         if reader.string != text { reader.string = text; reader.scrollRangeToVisible(.init(location: 0, length: 0)) }
-        if !isZone { setText(entryLabel, entries.isEmpty ? "" : "Entry \(readerIndex + 1) of \(entries.count) · full entry") }
+        setText(entryLabel, entries.isEmpty ? "" : "Entry \(readerIndex + 1) of \(entries.count) · full entry")
         setHistory([
             .init(id: "earlier", title: "Earlier entry", enabled: readerIndex > 0),
             .init(id: "later", title: "Later entry", enabled: readerIndex + 1 < entries.count),
             .init(id: "latest", title: "Latest entry", enabled: !entries.isEmpty)
         ])
-    }
-    private func refreshFreshness() {
-        guard isMounted else { return }
-        freshnessPanel.show(agent: selectedObject, in: knownDocument, model: agentFreshness)
-        refreshReader()
     }
     private func navigateHistory(_ action: String) {
         if action == "earlier" { readerIndex = max(0, readerIndex - 1); followsLatestEntry = false }
@@ -1145,12 +1048,6 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
         case "fit": do { try fitContent() } catch { showPrivateSaveFailure() }
         case "invite": onRequestInvite?()
         case "unfollow": onFollowTeammate?(nil)
-        case "dock:discussion":
-            if let target = knownDocument?.items.first(where: { $0.kind == .discussion })?.id {
-                do { try selectObject(target) } catch { showPrivateSaveFailure() }
-            }
-        case "dock:agreement":
-            if let target = pinnedAgreement { do { try selectObject(target) } catch { showPrivateSaveFailure() } }
         case let id where id.hasPrefix("follow:"):
             if let device = UUID(uuidString: String(id.dropFirst("follow:".count))) { onFollowTeammate?(device) }
         default: break
@@ -1182,11 +1079,6 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
             messageLabel.stringValue = "Delivery unknown. Draft retained."
         }
         refreshControls()
-    }
-    private func rebaseAgreementDraft() {
-        guard let id = activeDraft?.id else { return }
-        do { try saveCurrentDraft(); activeDraft = try controller.rebaseDraft(id: id) } catch { showPrivateSaveFailure() }
-        lastControlsKey = nil; refreshControls()
     }
     private func saveCurrentDraft() throws {
         draftTimer?.invalidate(); draftTimer = nil
@@ -1255,10 +1147,10 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
         let preview: String
         var kind: SharedArea.Kind = .discussion
     }
-    /// A zone body (`SharedAreaSceneView.Presentation.zone`): no background, the
-    /// discussion and agreement live in the dock rather than as cards, agents
-    /// draw as live views under this canvas, and every click that lands on no
-    /// card passes through to the canvas behind.
+    /// A zone body (`SharedAreaSceneView.Presentation.zone`): no background, no
+    /// discussion or agreement cards, agents draw as live views under this
+    /// canvas, and every click that lands on no card passes through to the
+    /// canvas behind.
     var zoneMode = false { didSet { needsDisplay = true } }
     /// Escape in a zone, before keyboard navigation: true when it was used
     /// (to stop following).
@@ -1446,7 +1338,7 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
         let visible = visibleCards()
         if visible.cards.isEmpty {
             draw(hasDocument ? "Nothing shared here yet" : "Shared content unavailable",
-                 rect: .init(x: 28, y: 52, width: max(0, bounds.width - SharedAreaSceneView.zoneDockWidth - 70), height: 22), role: .title, color: .textSecondary)
+                 rect: .init(x: 28, y: 52, width: max(0, bounds.width - 70), height: 22), role: .title, color: .textSecondary)
         }
         for (card, frame) in visible.cards where card.kind == .artifact {
             let radius = CGFloat(CornerRole.card.radius)
@@ -1455,7 +1347,7 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
             LineToken.border.color.nsColor(in: self).setStroke(); path.lineWidth = 1; path.stroke()
             NSGraphicsContext.saveGraphicsState(); NSBezierPath(rect: frame.insetBy(dx: 10, dy: 10)).addClip()
             draw(card.title, rect: .init(x: frame.minX + 14, y: frame.minY + 13, width: max(0, frame.width - 28), height: 22), role: .title, color: .textPrimary)
-            draw("Select it to read its revision in the dock.", rect: .init(x: frame.minX + 14, y: frame.minY + 47, width: max(0, frame.width - 28), height: 18), role: .label, color: .textSecondary)
+            draw(card.preview, rect: .init(x: frame.minX + 14, y: frame.minY + 47, width: max(0, frame.width - 28), height: 18), role: .label, color: .textSecondary)
             NSGraphicsContext.restoreGraphicsState()
         }
         for (card, frame) in visible.cards where selectedPlacements.contains(card.position.id) {
@@ -1592,8 +1484,8 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
         guard values.allSatisfy(\.isFinite), (values[0] + values[2]).isFinite, (values[1] + values[3]).isFinite else { return nil }
         return .init(x: values[0], y: values[1], width: values[2], height: values[3])
     }
-    /// A zone draws no card for the dock's discussion and agreement, or for an
-    /// object a lent tile shows; none of them can be grabbed there.
+    /// A zone draws no card for a discussion or agreement, or for an object a
+    /// lent tile shows; none of them can be grabbed there.
     private func isGrabbable(_ card: Card) -> Bool {
         !zoneMode || !(card.kind == .discussion || card.kind == .agreement || hiddenObjects.contains(card.position.object))
     }

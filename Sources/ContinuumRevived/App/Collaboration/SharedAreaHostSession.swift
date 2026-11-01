@@ -40,15 +40,14 @@ final class SharedAreaHostSession {
             })
         handoff.hostLiveness = { [weak controller] object in controller?.hostLiveness(forObject: object) }
     }
-    /// Wires this host's handoff and per-agent freshness into a mounted shared
-    /// scene. The app's shared window and the paired-process witness both use
-    /// this one path, so the witness cannot mount a scene production would not.
+    /// Wires this host's handoff into a mounted shared scene. The app's shared
+    /// window and the paired-process witness both use this one path, so the
+    /// witness cannot mount a scene production would not.
     func attach(to scene: SharedAreaSceneView) {
         // The handoff window is no longer on the user path: teammates prompt
         // from the zone's agent views and the live panel.
         scene.livePanel.prompter = handoff.model
         scene.zonePrompter = handoff.model
-        scene.agentFreshness = try? SharedAgentFreshnessModel(handoff: handoff.model)
     }
     func start() {
         guard pump == nil else { return }

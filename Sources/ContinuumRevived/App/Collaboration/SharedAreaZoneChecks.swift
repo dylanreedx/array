@@ -277,22 +277,6 @@ enum SharedAreaZoneChecks {
         try expect(canvas.armedZoneId == armedBefore && runtime.document.lastActiveZoneId == lastActive,
             "a click inside the zone, through the window, still arms nothing")
 
-        print("STAGE shared area zone: dock")
-        let dock = scene.session.scene
-        try expect(dock.pinnedAgreement == scene.agreement.id && dock.agreementPanel.summaryText.hasPrefix("Revision 2 · endorsed by 1 teammate")
-            && dock.agreementPanel.canEndorse && dock.selectedEntryText.contains("Yes, the link.")
-            && dock.selectedEntryText.contains("Copy draft 2"),
-            "the dock pins the agreement's current revision with Endorse, and reads the whole thread")
-        try expect(close(scene.worldFrame(of: dock.zoneDock).maxX, scene.zone.origin.x + scene.zone.size.width - 12)
-            && scene.worldFrame(of: dock.zoneDock).minY > scene.zone.origin.y + Double(ZoneChromeNSView.headerHeight),
-            "the dock is inside the zone's right edge, under its header")
-        await dock.agreementPanel.endorseCurrentRevision()
-        try await SharedAreaCheckRig.eventually("endorsement lands") {
-            await scene.authority.document.endorsements.contains { $0.person == scene.me.person }
-        }
-        try expect(dock.agreementPanel.summaryText.contains("endorsed by you"),
-            "Endorse in the dock reaches the area's agreement through the existing controller")
-
         print("STAGE shared area zone: moving an item shares a .place")
         try runtime.flushMountedWorkspaceState()
         let filesBefore = try canvasFileBytes(scene.fixture)
@@ -801,7 +785,7 @@ extension SharedAreaZoneChecks {
         let hostItems = scene.session.controller.document?.items.filter { $0.source?.owner == scene.mate.person }.map(\.id) ?? []
         try await scene.authority.remote(hostItems.map { .remove($0) })
         try await SharedAreaCheckRig.eventually("Dylan's items leave the zone") { scene.session.scene.zoneAgentViews[scene.mateAgent.id] == nil }
-        try expect(scene.session.scene.zoneEnding == nil && scene.session.scene.zoneAgentViews[scene.myAgent.id] != nil && !scene.session.scene.zoneDock.isHidden,
+        try expect(scene.session.scene.zoneEnding == nil && scene.session.scene.zoneAgentViews[scene.myAgent.id] != nil && !scene.session.scene.areaCanvasView.isHidden,
             "while this Mac's own agent is still in the area, the zone stays live (ending \(String(describing: scene.session.scene.zoneEnding)))")
         let rest = scene.session.controller.document?.items.map(\.id) ?? []
         try await scene.authority.remote(rest.map { .remove($0) })
@@ -810,8 +794,8 @@ extension SharedAreaZoneChecks {
         canvas.layoutSubtreeIfNeeded()
         try expect(scene.session.scene.zoneEnding == .stoppedSharing(host: "Dylan Reed") && !ended.isHidden
             && ended.titleLabel.stringValue == "Dylan Reed stopped sharing" && header.statusText == "Dylan Reed stopped sharing"
-            && scene.session.scene.zoneDock.isHidden && scene.session.scene.zoneAgentViews.isEmpty,
-            "when everything is taken back, the zone says who stopped sharing and keeps no empty dock or cards (ending \(String(describing: scene.session.scene.zoneEnding)), hidden \(ended.isHidden), title \(ended.titleLabel.stringValue), status \(header.statusText), dock hidden \(scene.session.scene.zoneDock.isHidden), cards \(scene.session.scene.zoneAgentViews.count))")
+            && scene.session.scene.areaCanvasView.isHidden && scene.session.scene.zoneAgentViews.isEmpty,
+            "when everything is taken back, the zone says who stopped sharing and keeps no empty cards (ending \(String(describing: scene.session.scene.zoneEnding)), hidden \(ended.isHidden), title \(ended.titleLabel.stringValue), status \(header.statusText), canvas hidden \(scene.session.scene.areaCanvasView.isHidden), cards \(scene.session.scene.zoneAgentViews.count))")
 
         print("STAGE shared area zone: access removed, and the zone taken off the canvas")
         await scene.authority.endAccess(scene.me)

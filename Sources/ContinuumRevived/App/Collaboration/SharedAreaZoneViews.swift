@@ -220,28 +220,6 @@ final class SharedAreaZoneHeaderView: NSView {
     }
 }
 
-/// The discussion dock's surface inside the zone's right edge. Its controls
-/// are the scene's own reader, composer and agreement panel laid over it.
-@MainActor
-final class SharedAreaZoneDockView: NSView {
-    override var isFlipped: Bool { true }
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setAccessibilityElement(true); setAccessibilityRole(.group); setAccessibilityLabel("Discussion and agreements")
-    }
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
-    override func draw(_ dirtyRect: NSRect) {
-        let radius = CGFloat(CornerRole.card.radius)
-        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius)
-        SurfaceToken.panel.color.nsColor(in: self).setFill(); shape.fill()
-        LineToken.separator.color.nsColor(in: self).setStroke(); shape.lineWidth = 1; shape.stroke()
-        LineToken.separator.color.nsColor(in: self).setFill()
-        NSRect(x: 0, y: 60, width: bounds.width, height: 1).fill()
-    }
-}
-
 /// Holds the agents' live views under the shared canvas, so the canvas can
 /// draw selection over them. Passes clicks through where no agent is.
 @MainActor

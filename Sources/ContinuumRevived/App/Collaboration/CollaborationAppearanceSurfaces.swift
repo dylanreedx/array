@@ -34,9 +34,9 @@ enum CollaborationAppearanceSurfaces {
     }
 
     /// A shared area as a zone on a canvas (IN-CANVAS option A): the shared
-    /// header, a teammate's live agent with its chip and read-only footer, my
-    /// own shared agent, and the docked agreement and thread. Offline dims and
-    /// dashes the host's agent and the zone; following draws the frame and pill.
+    /// header, a teammate's live agent with its chip and read-only footer, and
+    /// my own shared agent. Offline dims and dashes the host's agent and the
+    /// zone; following draws the frame and pill.
     private static func sharedZone(offline: Bool, following: Bool, ended: Bool = false) throws -> NSView {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-zone-appearance-\(UUID())")
         let me = Collaboration.Identity(person: .init(), device: UUID()), mate = Collaboration.Identity(person: .init(), device: UUID())
@@ -90,8 +90,8 @@ enum CollaborationAppearanceSurfaces {
         return host
     }
 
-    /// A scene with a working agreement selected (endorsement panel visible),
-    /// optionally while following a teammate whose usage card is open.
+    /// A scene with a working agreement selected, optionally while following
+    /// a teammate whose usage card is open.
     private static func agreementScene(following: Bool) throws -> NSView {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-agreement-appearance-\(UUID())")
         let me = Collaboration.Identity(person: .init(), device: UUID()), mate = Collaboration.Identity(person: .init(), device: UUID())
@@ -126,7 +126,7 @@ enum CollaborationAppearanceSurfaces {
     }
 
     /// A scene with one published agent or artifact selected: the agent shows
-    /// its freshness panel and live view, the artifact its revision panel.
+    /// its live view, the artifact its revision panel.
     private static func selectedScene(_ kind: SharedArea.Kind) throws -> NSView {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-\(kind.rawValue)-appearance-\(UUID())")
         let me = Collaboration.Identity(person: .init(), device: UUID()), mate = Collaboration.Identity(person: .init(), device: UUID())

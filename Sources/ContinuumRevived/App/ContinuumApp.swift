@@ -1685,18 +1685,6 @@ enum ContinuumApp {
                     }, executorCount: {
                         supervisor.records.keys.filter { supervisor.isRunning($0) }.count + executorConstructions
                     })
-                    print("STAGE collaboration native: agreements and endorsements")
-                    try await SharedAreaAgreementSceneChecks.run(mount: { controller, person, host in
-                        delegate.mountWorkspaceSceneAtBoot(sharedAreaController: controller, person: person, in: host)
-                    }, executorCount: {
-                        supervisor.records.keys.filter { supervisor.isRunning($0) }.count + executorConstructions
-                    })
-                    print("STAGE collaboration native: per-agent agreement freshness and excerpts")
-                    try await SharedAreaFreshnessSceneChecks.run(mount: { controller, person, host in
-                        delegate.mountWorkspaceSceneAtBoot(sharedAreaController: controller, person: person, in: host)
-                    }, executorCount: {
-                        supervisor.records.keys.filter { supervisor.isRunning($0) }.count + executorConstructions
-                    })
                     print("STAGE collaboration native: live agent projections")
                     try await SharedAgentProjectorChecks.run()
                     try await SharedAgentLiveChecks.run(mount: { controller, person, host in
