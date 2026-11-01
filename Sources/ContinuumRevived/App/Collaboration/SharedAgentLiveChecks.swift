@@ -111,10 +111,12 @@ enum SharedAgentLiveChecks {
             + " (rows: \(head.rows.map { "\($0.kind)/\($0.status.map { "\($0)" } ?? "-")/\($0.text.prefix(40))" }), delivered equal: \(sink.log?.head == head))")
         // The owner's own prompt crosses, as theirs and exactly as typed (the
         // decision changed in 0.7.38: teammates read every prompt, by name).
+        // So does the owner's steer, once the provider takes it.
         let promptRows = head.rows.filter { $0.kind == .prompt(owner) }
-        try expect(promptRows.map(\.text) == [prompt] && head.lastPrompt?.person == owner
+        let typed = kind == .claude ? [prompt] : [prompt, "change course"]
+        try expect(promptRows.map(\.text) == typed && head.lastPrompt?.person == owner
             && !bytes.contains("toolu_") && !bytes.contains("cmd-fake"),
-            "\(kind): the human prompt crosses once as the owner's, word for word; provider item ids never cross"
+            "\(kind): the human prompt and steer cross once each as the owner's, word for word; provider item ids never cross"
             + " (prompt rows \(promptRows.map(\.text)))")
         try expect(spawns == 1, "\(kind): two attached projections and one turn started exactly one CLI process (\(spawns))")
         return sink.log ?? P.Log(snapshot: head)
