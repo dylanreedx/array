@@ -39,6 +39,13 @@ and a terminal shared after its warning as a read-only mirror.
 Cursors are not in mode A (the spec: "None in mode A"); the cursor-latency
 leg runs only when the share made a zone.
 
+`--mode terminal` shares one terminal (`.plans/114-terminal-sharing/README.md`):
+the host's tmux runs in its own namespace, and the journey measures and
+asserts what reaches the guest: the screen a late joiner lands on, a coloured
+line in the host's palette, a typed command's latency, a 30/s redraw, 400
+ordered lines, a 100,000-line flood, a full-screen program, vim and top as
+stills, read-only input, and Stop sharing from the host's Live badge.
+
 `--mode b` runs mode B instead: the portal (`.plans/105-collaboration/PORTAL-CONTRACT.md`).
 
    B1. the Share tool over an agent, two notes, a public and a localhost
@@ -65,6 +72,7 @@ leg runs only when the share made a zone.
   scripts/check-multiplayer-journey.py                  # staging relay
   scripts/check-multiplayer-journey.py --skip-build     # reuse the bundles
   scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds   # the kinds alone
+  scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal   # a shared terminal
 
 Every run deletes the people and areas it created on the relay, through the
 relay's admin port (`RELAY_ADMIN_TOKEN`). A local relay gets its own token. On
@@ -108,6 +116,8 @@ LIVENESS_WINDOW = 105
 # Cursor budget on a real relay: the last position of a stroke must land on the
 # other Mac within this, and the median position within the second.
 FINAL_BUDGET_MS, MEDIAN_BUDGET_MS = 700, 500
+# Terminal budgets on a local relay (`.plans/114-terminal-sharing/README.md`).
+ECHO_MEDIAN_MS, ECHO_MAX_MS, STEADY_RATE, FLOOD_BEHIND_SECONDS = 120, 400, 20, 1.0
 
 
 class Failed(AssertionError):
@@ -127,8 +137,11 @@ def wait_for(probe, label, timeout):
 class Person:
     """One app. `folder` holds its support, mailbox and log; `project` is the
     root it opens (another person's, for the second-install step)."""
-    def __init__(self, side, endpoint, env_extra, folder=None, project=None):
+    def __init__(self, side, endpoint, env_extra, folder=None, project=None, tmux=False):
         self.side = side
+        # Terminal mode: tmux on, in this app's own TMUX_TMPDIR (never the
+        # default socket), so a shared terminal streams through its pane.
+        self.tmux = tmux
         self.bundle_name, self.bundle_id, self.name, self.role = PEOPLE[side]
         self.app = APPS / f"{self.bundle_name}.app"
         self.root = STATE / (folder or side)
@@ -150,6 +163,16 @@ class Person:
         (self.root / "preview.json").write_text(json.dumps(config))
         subprocess.run(["defaults", "delete", self.bundle_id], capture_output=True)
         env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE", "ARRAY_AGENT_ID")}
+        if self.tmux:
+            # The app's tmux server, started here first with no config: a user's
+            # ~/.tmux.conf can block a new server's first client (a plugin
+            # manager's `run`), and this namespace's server is always new.
+            tenv = {**env, "TMUX_TMPDIR": str(self.root / "tmux")}
+            subprocess.run(["tmux", "-f", "/dev/null", "new-session", "-d", "-s", "journey-hold"], env=tenv, check=True, timeout=10)
+            sock = subprocess.run(["tmux", "display-message", "-p", "-t", "journey-hold", "#{socket_path}"], env=tenv,
+                                  capture_output=True, text=True, timeout=10).stdout.strip()
+            if not os.path.realpath(sock).startswith(os.path.realpath(self.root / "tmux") + "/"):
+                raise Failed(f"the journey's tmux server is outside its namespace: {sock}")
         args = ["open", "-n", "-g",
                 "--env", f"CONTINUUM_PROJECT_ROOT={self.project}",
                 "--env", f"CONTINUUM_APP_SUPPORT={self.root / 'support'}",
@@ -160,7 +183,7 @@ class Person:
                  str(self.app), "--args", "-ApplePersistenceIgnoreState", "YES",
                  # As the matrix's app legs run: no tmux, so a terminal tile
                  # (mode B shares one as a private card) restores without one.
-                 "-continuum.terminal.tmux.enabled", "NO", "-continuum.terminal.tmux.path", ""]
+                 "-continuum.terminal.tmux.enabled", "YES" if self.tmux else "NO", "-continuum.terminal.tmux.path", ""]
         subprocess.run(args, env=env, check=True)
         self.ready()
 
@@ -182,6 +205,19 @@ class Person:
         value = json.loads(response.read_text())
         if not value.get("ok"): raise Failed(f"{self.name}: {op} failed: {value.get('error')}")
         return value
+
+    def post(self, op, timeout=90, **fields):
+        """Sends `op` now and returns a function that waits for its answer."""
+        n = self.next; self.next += 1
+        request = self.mailbox / f"req-{n}.json"
+        tmp = request.with_suffix(".tmp"); tmp.write_text(json.dumps({"op": op, **fields})); tmp.rename(request)
+        def answer():
+            response = self.mailbox / f"res-{n}.json"
+            wait_for(response.exists, f"{self.name}: {op} answered", timeout)
+            value = json.loads(response.read_text())
+            if not value.get("ok"): raise Failed(f"{self.name}: {op} failed: {value.get('error')}")
+            return value
+        return answer
 
     def pids(self):
         out = subprocess.run(["pgrep", "-f", f"{self.app}/Contents/MacOS/"], capture_output=True, text=True).stdout
@@ -668,6 +704,228 @@ def kinds_journey(host, guest, check, eventually, legs=frozenset({"note", "file"
     pages.shutdown()
 
 
+def tmux_env(person):
+    env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+    env["TMUX_TMPDIR"] = str(person.root / "tmux")
+    return env
+
+
+def host_pane_text(host, tile):
+    """The host's pane as tmux holds it, read in the host app's own tmux
+    namespace. The socket is checked to be inside it; the default server is
+    never touched."""
+    env, root = tmux_env(host), os.path.realpath(host.root / "tmux")
+    for name in (f"array-view-{tile.upper()}", f"array-{tile.upper()}"):
+        r = subprocess.run(["tmux", "display-message", "-p", "-t", name, "#{socket_path} #{pane_id}"], env=env, capture_output=True, text=True)
+        if r.returncode != 0 or " " not in r.stdout.strip(): continue
+        sock, pane = r.stdout.strip().rsplit(" ", 1)
+        if not os.path.realpath(sock).startswith(root + "/"): raise Failed(f"tmux socket {sock} is outside {root}")
+        # -J: a soft-wrapped line as one line, as a terminal's own text read has it.
+        return subprocess.run(["tmux", "capture-pane", "-p", "-J", "-t", pane], env=env, capture_output=True, text=True).stdout
+    return None
+
+
+def screen_lines(text):
+    lines = [line.rstrip() for line in (text or "").split("\n")]
+    while lines and not lines[-1]: lines.pop()
+    return lines
+
+
+def same_screen(a, b):
+    """The same screen, wherever a long line wraps: tmux and Ghostty disagree
+    about soft wraps at the screen's top edge, never about what is on it."""
+    return "".join(screen_lines(a)) == "".join(screen_lines(b))
+
+
+def stats(values):
+    if not values: return "none"
+    ordered = sorted(values)
+    return (f"n={len(values)} median {statistics.median(values):.0f} ms, p90 {ordered[int(len(ordered) * 0.9) if len(ordered) > 1 else 0]:.0f} ms, "
+            f"min {ordered[0]:.0f} ms, max {ordered[-1]:.0f} ms")
+
+
+def terminal_journey(host, guest, check, eventually, stills=None):
+    """`.plans/114-terminal-sharing/README.md`: a terminal shared with a
+    teammate is the host's terminal, drawn on the guest's Mac. The host's
+    shell, prompt and palette make the output; only the output travels.
+    Measured and asserted through the real relay: the screen a late joiner
+    lands on, a coloured line, a full-screen TUI, a steady redraw, an ordered
+    stream, a flood, and how late each arrives."""
+    token = "".join(random.choice(string.ascii_lowercase) for _ in range(6))
+    stills = Path(stills or STATE / "stills"); stills.mkdir(parents=True, exist_ok=True)
+    project = Path(host.project)
+    (project / "colour.swift").write_text('import Foundation\n\n/// A file for the shared vim still.\nstruct Greeting {\n'
+                                          '    let name: String\n    func say() -> String { "Hello, \\(name)" }\n}\n\n'
+                                          'let count = 42\nprint(Greeting(name: "Blake").say(), count)\n')
+    terminal = host.call("spawnKind", kind="terminal")["tile"]
+    eventually(lambda: host.call("termHost", tile=terminal).get("text", "").strip() != "", "terminal: the host's shell starts", 45)
+    eventually(lambda: host_pane_text(host, terminal) is not None, "terminal: the host's terminal runs in its own tmux namespace", 30)
+    # A known shell: the user's own (plugins, prompt themes) would make the
+    # timings and screens theirs, and a plugin can swallow a fast Return.
+    host.call("termSend", tile=terminal, text="exec env -i HOME=\"$HOME\" TERM=\"$TERM\" PATH=/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin "
+              "PS1='avery$ ' /bin/bash --noprofile --norc")
+    eventually(lambda: (host_pane_text(host, terminal) or "").rstrip().endswith("avery$"), "terminal: a plain bash runs in it", 20,
+               lambda: json.dumps(screen_lines(host_pane_text(host, terminal))[-3:]))
+    # Before the share: what a late joiner must land on.
+    host.call("termSend", tile=terminal, text=f"printf 'P%s\\n' RE-{token}")
+    s = host.call("shareKind", tile=terminal, slug=f"terminal-{token}")
+    check(bool(s.get("warning")) and not s.get("publishedAfterFirstPress"),
+          "terminal: the first Copy warns that output may contain secrets, and shares nothing", json.dumps(s.get("warning")))
+    check(s.get("areaItems") == ["liveTile"] and s.get("published") == [terminal], "terminal: the confirm shares it",
+          json.dumps({k: s.get(k) for k in ("areaItems", "published")}))
+    opened_at = time.time()
+    result = guest.call("open", url=s["url"], expectTile=False, timeout=150)
+    check(result["outcome"] == "opened", "terminal: the guest opens the link", json.dumps(result))
+    eventually(lambda: guest.call("termGuest").get("present"), "terminal: one shared terminal lands on the guest's canvas", 60)
+    late = guest.call("termWatch", marker=f"PRE-{token}", timeout=45)
+    check(late.get("seenAt") is not None, "late joiner: the guest's first picture already holds what ran before the share",
+          json.dumps(late)[-300:])
+    if late.get("seenAt"): print(f"TERMINAL join: first screen {1000 * (late['seenAt'] - opened_at):.0f} ms after the open began")
+    g = guest.call("termGuest")
+    check(g.get("tab", "").startswith(f"{host.name}'s Terminal"), "title: the guest's tab reads \"<host>'s Terminal\"", g.get("tab", ""))
+    h = host.call("termHost", tile=terminal)
+    check(h.get("badge") == "Live", "host: the tile carries a Live badge while shared", json.dumps({k: h.get(k) for k in ("badge", "tab")}))
+    check(bool(h.get("stopControl")), "host: the badge offers Stop sharing", json.dumps(h.get("stopControl")))
+    print(f"TERMINAL host: published {h.get('published')} states; " + json.dumps({k: v for k, v in h.items() if k.startswith("stream")}))
+
+    # A coloured line, in the host's palette.
+    palette = h.get("palette") or []
+    red, green = (palette[1], palette[2]) if len(palette) > 2 else ("#cc0000", "#4e9a06")
+    sent = host.call("termSend", tile=terminal, text=f"printf '\\033[31mR%s\\033[0m \\033[42;30mG%s\\033[0m\\n' ED-{token} REEN-{token}")["sentAt"]
+    seen = guest.call("termWatch", marker=f"RED-{token}", timeout=45)
+    check(seen.get("seenAt") is not None, "colour: the coloured line reaches the guest", json.dumps(seen)[-300:])
+    time.sleep(0.4)
+    g = guest.call("termGuest", still=str(stills / "guest-colour.png"), colours=[red, green])
+    host.call("termHost", tile=terminal, still=str(stills / "host-colour.png"))
+    pixels = g.get("colourPixels", {})
+    print(f"TERMINAL colour: host palette red {red} green {green}; guest pixels {json.dumps(pixels)}; "
+          f"arrived {1000 * (seen['seenAt'] - sent):.0f} ms after the keystrokes" if seen.get("seenAt") else "TERMINAL colour: never arrived")
+    check(pixels.get(red, 0) > 20 and pixels.get(green, 0) > 200, "colour: the guest draws the line in the host's red and green",
+          json.dumps(pixels))
+    check(same_screen(g.get("text"), host_pane_text(host, terminal)),
+          "screen: the guest's screen is the host's pane, line for line",
+          json.dumps([screen_lines(g.get("text")), screen_lines(host_pane_text(host, terminal))]))
+
+    # How late a line is: ten echoes, the guest watching before each is typed.
+    delays = []
+    for i in range(10):
+        watch = guest.post("termWatch", marker=f"Z{i}-{token}", timeout=20)
+        sent = host.call("termSend", tile=terminal, text=f"printf 'Z%s\\n' {i}-{token}")["sentAt"]
+        seen = watch()
+        if seen.get("seenAt"): delays.append(1000 * (seen["seenAt"] - sent))
+        time.sleep(0.15)
+    print(f"TERMINAL echo latency (keystrokes on the host to the line drawn on the guest): {stats(delays)}")
+    check(len(delays) == 10 and statistics.median(delays) <= ECHO_MEDIAN_MS and max(delays) <= ECHO_MAX_MS,
+          f"latency: a typed command's output is on the guest within {ECHO_MEDIAN_MS} ms (median) and {ECHO_MAX_MS} ms (max)", stats(delays))
+
+    # A steady redraw: a counter rewritten in place 30 times a second for 3 s.
+    record = guest.post("termRecord", seconds=4.0)
+    sent = host.call("termSend", tile=terminal, text="for i in $(seq 1 90); do printf 'T%03d\\r' $i; sleep 0.033; done; echo")["sentAt"]
+    changes = [t for t in record()["changes"] if t >= sent]
+    span = (changes[-1] - changes[0]) if len(changes) > 1 else 0
+    rate = (len(changes) - 1) / span if span > 0 else 0
+    print(f"TERMINAL steady redraw (30/s on the host): the guest's picture changed {len(changes)} times, {rate:.1f}/s")
+    check(rate >= STEADY_RATE, f"smooth: a 30/s redraw changes the guest's picture at least {STEADY_RATE}/s", f"{rate:.1f}/s")
+
+    # In order: 400 numbered lines at ~200 a second, every one in the guest's
+    # scrollback, in order.
+    sent = host.call("termSend", tile=terminal, text=f"for i in $(seq 1 400); do echo S$i-{token}; sleep 0.004; done; printf 'E%s\\n' ND-{token}")["sentAt"]
+    seen = guest.call("termWatch", marker=f"END-{token}", timeout=60)
+    g = guest.call("termGuest", scrollback=True)
+    numbers = [int(line[1:].split("-")[0]) for line in (g.get("scrollback") or g.get("text", "")).split("\n")
+               if line.startswith("S") and line.endswith(f"-{token}") and line[1:].split("-")[0].isdigit()]
+    print(f"TERMINAL ordered stream: {len(numbers)} of 400 numbered lines in the guest's scrollback; "
+          f"in order: {numbers == sorted(numbers)}; arrived {1000 * (seen['seenAt'] - sent):.0f} ms after the keystrokes" if seen.get("seenAt") else
+          f"TERMINAL ordered stream: the end never arrived; {len(numbers)} numbered lines seen")
+    check(numbers == list(range(1, 401)), "order: all 400 lines reach the guest, in order, none twice",
+          f"{len(numbers)} lines, first {numbers[:5]}, last {numbers[-5:]}")
+
+    # A flood: 100,000 lines as fast as the host can make them.
+    before = host.call("termHost", tile=terminal)
+    record = guest.post("termRecord", seconds=30.0, marker=f"DONE-{token}", timeout=60)
+    sent = host.call("termSend", tile=terminal, text=f"yes LOG-{token} | head -100000; printf 'D%s\\n' ONE-{token}")["sentAt"]
+    # How long the host's own terminal takes: the flood runs through its tmux
+    # and its Ghostty first, share or no share.
+    host_done = wait_for(lambda: f"DONE-{token}" in (host_pane_text(host, terminal) or "") and time.time(), "flood: the host finishes", 60)
+    # And how long the host's own terminal tile takes to draw it: what the
+    # host sees, and the same app the share runs in.
+    host_view_done = wait_for(lambda: f"DONE-{token}" in host.call("termHost", tile=terminal).get("text", "") and time.time(),
+                              "flood: the host's tile shows the end", 60)
+    recorded = record()
+    seen = {"seenAt": recorded.get("seenAt")}
+    changes = [t for t in recorded["changes"] if t >= sent]
+    after = host.call("termHost", tile=terminal)
+    took = (seen["seenAt"] - sent) if seen.get("seenAt") else None
+    sent_bytes = (after.get("streamBytesSent") or 0) - (before.get("streamBytesSent") or 0)
+    read_bytes = (after.get("streamBytesRead") or 0) - (before.get("streamBytesRead") or 0)
+    behind = (seen["seenAt"] - host_done) if seen.get("seenAt") else None
+    print(f"TERMINAL flood (yes | head -100000): the host's own pane showed the end {1000 * (host_done - sent):.0f} ms after the keystrokes; "
+          f"the host's own tile {1000 * (host_view_done - sent):.0f} ms; the guest {1000 * behind:.0f} ms after the pane"
+          if behind is not None else "TERMINAL flood: the guest never showed the end")
+    print(f"TERMINAL flood (yes | head -100000): the end reached the guest {1000 * took:.0f} ms after the keystrokes; "
+          f"the guest's picture changed {len(changes)} times; host read {read_bytes} bytes and sent {sent_bytes}" if took else
+          "TERMINAL flood: the end never arrived")
+    print("TERMINAL flood host log: " + json.dumps(after.get("streamLog", [])[-25:]))
+    gf = guest.call("termGuest")
+    print("TERMINAL flood guest: " + json.dumps({k: gf.get(k) for k in ("lane", "laneFrames", "resets", "gaps", "sequence", "grid", "hostGrid")})
+          + " log " + json.dumps((gf.get("log") or [])[-25:]))
+    time.sleep(0.5)
+    check(behind is not None and behind <= FLOOD_BEHIND_SECONDS,
+          f"flood: the end of a 100,000-line flood is on the guest within {FLOOD_BEHIND_SECONDS} s of the host's own terminal", f"{behind}")
+    check(read_bytes > 0 and sent_bytes < read_bytes / 4, "flood: the host sends a fraction of what the program wrote (bounded)",
+          f"read {read_bytes} sent {sent_bytes}")
+    check(same_screen(guest.call("termGuest").get("text"), host_pane_text(host, terminal)),
+          "flood: afterwards the guest's screen is the host's pane, line for line",
+          json.dumps([screen_lines(guest.call("termGuest").get("text"))[-4:], screen_lines(host_pane_text(host, terminal))[-4:]]))
+
+    # A full-screen program: the alternate screen, positioned and coloured.
+    host.call("termSend", tile=terminal, text="printf '\\033[?1049h\\033[2J\\033[3;5H\\033[1;44;37m \\124UI-%s \\033[0m\\033[8;12Hrow8\\033[5;30H' "
+              + token + "; sleep 5; printf '\\033[?1049l'")
+    seen = guest.call("termWatch", marker=f"TUI-{token}", timeout=45)
+    time.sleep(0.4)
+    g = guest.call("termGuest")
+    check(seen.get("seenAt") is not None and screen_lines(g.get("text")) == screen_lines(host_pane_text(host, terminal)),
+          "TUI: the guest shows the full-screen program exactly where the host does",
+          json.dumps([screen_lines(g.get("text")), screen_lines(host_pane_text(host, terminal))]))
+    eventually(lambda: f"TUI-{token}" not in (host_pane_text(host, terminal) or "TUI-"), "TUI: the program exits on the host", 20)
+    time.sleep(0.6)
+    check(same_screen(guest.call("termGuest").get("text"), host_pane_text(host, terminal)),
+          "TUI: when it exits, the guest's screen returns to the host's shell, line for line",
+          json.dumps([screen_lines(guest.call("termGuest").get("text")), screen_lines(host_pane_text(host, terminal))]))
+    # Real programs, for the stills: vim with syntax colours, then top.
+    host.call("termSend", tile=terminal, text="vim -u NONE -N -c 'syntax on' -c 'set number' colour.swift")
+    eventually(lambda: "Greeting" in (host_pane_text(host, terminal) or "") and "~" in (host_pane_text(host, terminal) or ""), "vim: opens on the host", 20)
+    time.sleep(1.0)
+    guest.call("termGuest", still=str(stills / "guest-vim.png")); host.call("termHost", tile=terminal, still=str(stills / "host-vim.png"))
+    check(screen_lines(guest.call("termGuest").get("text")) == screen_lines(host_pane_text(host, terminal)), "vim: the guest's screen is the host's",
+          json.dumps([screen_lines(guest.call("termGuest").get("text"))[:4], screen_lines(host_pane_text(host, terminal))[:4]]))
+    host.call("termSend", tile=terminal, text=":qa!")
+    host.call("termSend", tile=terminal, text="top -s 1 -n 12")
+    eventually(lambda: "PID" in (host_pane_text(host, terminal) or ""), "top: runs on the host", 20)
+    time.sleep(2.2)
+    guest.call("termGuest", still=str(stills / "guest-top.png")); host.call("termHost", tile=terminal, still=str(stills / "host-top.png"))
+    host.call("termSend", tile=terminal, text="q", **{"return": False})
+    time.sleep(0.8)
+
+    # Typing stays with the host.
+    g = guest.call("guestKind", kind="terminal", type=f"echo guest-{token}", appendDirect="terminalInput")
+    check(not g.get("editable") and not g.get("typed"), "read only: the guest has nowhere to type", json.dumps(g)[-300:])
+    check("forbidden" in g.get("direct", "") or "403" in g.get("direct", ""), "read only: the relay refuses input sent straight at it",
+          g.get("direct", ""))
+    check(f"guest-{token}" not in (host_pane_text(host, terminal) or ""), "read only: nothing the guest typed reached the host")
+
+    # Stop sharing, from the host's badge.
+    try:
+        host.call("termStopSharing", tile=terminal)
+        eventually(lambda: "stopped" in guest.call("termGuest").get("state", "") or "no longer shared" in guest.call("termGuest").get("tab", ""),
+                   "stop: Stop sharing on the host's badge stops the guest's view", 30, lambda: json.dumps(guest.call("termGuest")))
+        h = host.call("termHost", tile=terminal)
+        check(not h.get("badge"), "stop: the host's badge is gone", json.dumps(h.get("badge")))
+    except Failed as error:
+        check(False, "stop: Stop sharing on the host's badge stops the guest's view", str(error))
+    print(f"==> stills in {stills}")
+
+
 def free_port():
     with socket.socket() as s: s.bind(("127.0.0.1", 0)); return s.getsockname()[1]
 
@@ -734,7 +992,9 @@ def main():
     parser.add_argument("--keep", action="store_true", help="leave the state folder for inspection")
     parser.add_argument("--hold", type=int, default=0, help="on failure, keep the apps running this many seconds")
     parser.add_argument("--name", default="Journey", help="bundle and state name, e.g. ShareJourney (letters only)")
-    parser.add_argument("--mode", choices=["a", "b"], default="a", help="a: share one agent; b: the portal")
+    parser.add_argument("--mode", choices=["a", "b", "terminal"], default="a",
+                        help="a: share one agent; b: the portal; terminal: a shared terminal's stream (.plans/114)")
+    parser.add_argument("--stills", help="with --mode terminal: where to write the host's and guest's stills")
     parser.add_argument("--no-lock", action="store_true",
                         help="build without the shared build lock: the caller (the matrix) already serialises builds")
     parser.add_argument("--kinds", default="note,file,diff,browser,public,terminal,excluded",
@@ -802,11 +1062,13 @@ def main():
         try: wait_for(probe, label, timeout); check(True, label); return True
         except Failed: check(False, label, detail()); return False
     try:
-        host = Person("a", endpoint, env_extra); guest = Person("b", endpoint, env_extra)
+        host = Person("a", endpoint, env_extra, tmux=args.mode == "terminal"); guest = Person("b", endpoint, env_extra)
         people = [host, guest]
         print(f"==> {host.name} (host) and {guest.name} (guest) are running, off every display")
         if args.mode == "b":
             mode_b(host, guest, check, eventually, endpoint, env_extra, people)
+        if args.mode == "terminal":
+            terminal_journey(host, guest, check, eventually, args.stills)
         if args.mode == "a" and args.only in ("all", "kinds"):
             kinds_journey(host, guest, check, eventually, set(args.kinds.split(",")))
         if args.mode == "a" and args.only in ("all", "agent"):

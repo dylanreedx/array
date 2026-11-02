@@ -260,6 +260,7 @@ check --shared-agent-render-check
 check --shared-portal-migration-check
 check --shared-portal-render-check
 check --shared-area-zone-check
+check --shared-terminal-render-check
 check --shell-open-as-agent-check
 check --shell-tool-row-check
 check --sidebar-agent-status-line-check
@@ -645,6 +646,7 @@ leg run_app_check .build/debug/Array --shared-agent-render-check
 leg run_app_check .build/debug/Array --shared-portal-migration-check
 leg run_app_check .build/debug/Array --shared-portal-render-check
 leg run_app_check .build/debug/Array --shared-area-zone-check
+leg run_app_check .build/debug/Array --shared-terminal-render-check
 leg run_app_check .build/debug/Array --shell-open-as-agent-check
 leg run_app_check .build/debug/Array --shell-tool-row-check
 leg run_app_check .build/debug/Array --sidebar-agent-status-line-check
@@ -788,6 +790,7 @@ leg run_app_check .build/debug/Array --zone-tile-hydration-check
 leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
 leg run_leg .build/debug/ContinuumRevivedCollaborationChecks
+leg run_leg .build/debug/ContinuumRevivedCollaborationChecks --terminal-stream-only
 leg run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-usage-check
@@ -845,6 +848,7 @@ leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
 leg run_leg python3 scripts/check-collaboration-pair-features.py
 leg run_leg python3 scripts/check-collaboration-pair.py
+leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --no-lock
 leg run_leg python3 scripts/check-notification-map.py --self-test
 leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 leg run_leg scripts/capture-cli-fixtures.sh check
@@ -882,7 +886,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 22
-count ContinuumRevivedCollaborationChecks 22
+count ContinuumRevivedCollaborationChecks 23
 count ContinuumRevivedCollaborationServiceChecks 29
 count ContinuumRevivedCoreChecks 199
 count ContinuumRevivedFileTreeChecks 0

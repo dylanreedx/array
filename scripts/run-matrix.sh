@@ -610,6 +610,12 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --shared-tile-render-check
   run_app_check .build/debug/Array --portal-kinds-check
   run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
+  # A shared terminal streamed from its tmux pane (.plans/114-terminal-sharing):
+  # the follower and the stream lane, the guest's Ghostty mirror in light and
+  # dark, and two real apps through a local relay.
+  run_leg .build/debug/ContinuumRevivedCollaborationChecks --terminal-stream-only
+  run_app_check .build/debug/Array --shared-terminal-render-check
+  run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --no-lock
   run_app_check .build/debug/Array --ui-probe-check
   run_app_check .build/debug/Array --menu-contract-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
@@ -1532,6 +1538,12 @@ run_leg .build/debug/ContinuumRevivedCollaborationChecks --live-tile-only
 run_app_check .build/debug/Array --shared-tile-render-check
 run_app_check .build/debug/Array --portal-kinds-check
 run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
+# A shared terminal streamed from its tmux pane (.plans/114-terminal-sharing):
+# the follower and the stream lane, the guest's Ghostty mirror in light and
+# dark, and two real apps through a local relay.
+run_leg .build/debug/ContinuumRevivedCollaborationChecks --terminal-stream-only
+run_app_check .build/debug/Array --shared-terminal-render-check
+run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --no-lock
 run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
 run_leg python3 scripts/check-collaboration-pair.py
 # M1.10 (.plans/46): WorkspaceRuntime.canvasView is written in exactly one place,

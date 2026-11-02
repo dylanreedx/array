@@ -768,6 +768,9 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
 }
 
 final class GhosttyRuntimeContext {
+    /// The newest context: what a shared terminal's mirror draws with
+    /// (`SharedTerminalMirrorView`), which has no runtime of its own.
+    nonisolated(unsafe) static weak var current: GhosttyRuntimeContext?
     private var appPointer: ghostty_app_t?
     private var configPointer: ghostty_config_t?
     private(set) var themeSnapshot = GhosttyThemeSnapshot.empty
@@ -862,6 +865,7 @@ final class GhosttyRuntimeContext {
         }
 
         appPointer = app
+        Self.current = self
         ghostty_app_set_focus(app, true)
     }
 

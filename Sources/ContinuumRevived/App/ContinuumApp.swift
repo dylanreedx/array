@@ -5723,6 +5723,21 @@ enum ContinuumApp {
             }
         }
 
+        // `.plans/114-terminal-sharing`: a teammate's shared terminal, drawn by a
+        // real Ghostty surface from the host's stream, light and dark, as PNGs.
+        // Below `ghostty_init()`: it makes a surface.
+        if let index = CommandLine.arguments.firstIndex(of: "--shared-terminal-render-check") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            let next = CommandLine.arguments.indices.contains(index + 1) ? CommandLine.arguments[index + 1] : nil
+            let directory = URL(fileURLWithPath: next.flatMap { $0.hasPrefix("-") ? nil : $0 }
+                ?? NSTemporaryDirectory() + "shared-terminal-render")
+            Task { @MainActor in
+                do { try await SharedTerminalAppearance.render(to: directory); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--terminal-tmux-persistence-check") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)

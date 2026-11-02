@@ -38,7 +38,7 @@ final class SharedTileNSView: TileNSView {
     var qaPlaceholderText: String? { container.placeholderText }
 
     /// "Dylan's browser", "Dylan's note": what the tab calls it.
-    var ownedNoun: String { liveKind.map(LiveTileBodyView.noun) ?? "tile" }
+    var ownedNoun: String { liveKind == .terminal ? "Terminal" : liveKind.map(LiveTileBodyView.noun) ?? "tile" }
 
     func apply(_ next: SharedAgentTileNSView.State, hostName: String, colour: NSColor) {
         state = next

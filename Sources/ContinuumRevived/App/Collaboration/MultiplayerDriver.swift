@@ -668,7 +668,9 @@ final class MultiplayerDriver {
             return [:]
 
         default:
-            // Mode B ops (`MultiplayerDriverPortal.swift`).
+            // Terminal ops (`MultiplayerDriverTerminal.swift`), then mode B's
+            // (`MultiplayerDriverPortal.swift`).
+            if let result = try await performTerminal(op, request) { return result }
             return try await performPortal(op, request)
         }
     }
