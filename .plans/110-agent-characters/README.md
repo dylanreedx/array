@@ -745,6 +745,24 @@ Core dependency guard inside the KNOWN-RED bare CoreChecks run was already red o
 (Collaboration dependencies); it now also pins `Resources/AgentCharacters`. Run the
 matrix again with the display unlocked before landing.
 
+**Motion harness, measured (round 3, unlocked display, release "Array Motion" bundle).**
+Off and on interleaved, three rounds each, under the same background load (load
+average 4.4-6.0 from other benches compiling):
+
+| | off | on |
+|---|---|---|
+| zoom, camera states/s | 28, 28, 28 | 28, 28, 26 |
+| zoom, main thread per commit (median) | 26.38 ms | 26.19 ms |
+| zoom, instructions per commit (median) | 362 M | 357 M |
+| pan, camera states/s | 57, 55, 54 | 56, 56, 57 |
+| pan, main thread per commit (median) | 8.33 ms | 8.23 ms |
+
+No measurable cost. An earlier, non-interleaved pair of zoom arms had shown 3-5 extra
+full prose re-measures with characters on; the report now counts re-measures by cause
+(`77faf747`), and the interleaved arms showed none in any arm, on or off, and a frozen
+arm (`CANVAS_MOTION_CHARACTER_MOTION=never`) showed none either: characters never
+change a transcript's width.
+
 **Not measured: WindowServer and presented frames.** The motion harness
 (`scripts/canvas-motion/`, on `array/0732-canvas-parity`, not on integration)
 launches its own bundle with `open -n` and screen-captures an uncovered window, so
