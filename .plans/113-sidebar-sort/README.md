@@ -49,7 +49,8 @@ Rendered offscreen by the check, light and dark:
 
 - `most-active-light.png`, `most-active-dark.png`: the header with the sort
   button, and the list in Most active order.
-- `by-project-light.png`, `by-project-dark.png`: project headings.
+- `by-project-light.png`, `by-project-dark.png`: project headings, no repeated chip.
+- `lead-glyph-light.png`, `lead-glyph-dark.png`: an idle, folded lead with a working helper.
 - `sort-list-light.png`, `sort-list-dark.png`: the open sort list.
 
 ## The check
@@ -75,10 +76,20 @@ Teeth, confirmed: disabling the pointer hold, disabling the rename hold, or
 removing the host's restore line each turns the check red with a specific
 message.
 
+## Added 2026-11-02
+
+- **Working glyph on a lead whose helpers run.** A lead row shows the gyro (and
+  a working character, with characters on) while it works or while any helper
+  under it works, folded or open. The fact is the same rollup the card's
+  outline sweep reads, and Most active already keys a lead by its helpers.
+  Still: `lead-glyph-light.png`, `lead-glyph-dark.png` (a folded lead).
+- **No repeated chip in By project.** A lead under its own project heading
+  draws no project chip, and its line 2 no longer opens with a stray dot.
+  VoiceOver still reads the project. A chip naming a different folder (a
+  worktree) stays, and every other mode keeps the chip.
+
 ## Left out on purpose
 
-- By project still shows the project chip on each row, under a heading that
-  already names the project. Hiding the chip in that mode is a small follow-up.
 - Project headings do not collapse.
 - The New Agent button is missing from the sidebar's hand-built accessibility
   children. That gap predates this work; the sort button is included.

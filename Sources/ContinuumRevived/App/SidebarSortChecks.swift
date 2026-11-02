@@ -152,7 +152,29 @@ enum SidebarSortChecks {
         guard inbox.projectHeadingTitlesForQA == ["Array (2)", "Film (2)", "Site (1)", "No project (1)"] else {
             throw Failure(description: "the project headings read \(inbox.projectHeadingTitlesForQA)")
         }
+        // Under its own heading a row draws no project chip; VoiceOver still names it.
+        func chip(_ n: Int, in view: AgentInboxView) throws -> AgentInbox96CellView {
+            guard let cell = view.ownershipCellForQA(id: uuid(n)) else {
+                throw Failure(description: "no row for \(String(n, radix: 16))")
+            }
+            cell.layoutSubtreeIfNeeded()
+            return cell
+        }
+        for (n, project) in [(alpha, "Array"), (gamma, "Array"), (beta, "Film"), (epsilon, "Film"), (delta, "Site")] {
+            let cell = try chip(n, in: inbox)
+            guard cell.placementTextForQA.isEmpty, !cell.projectIconShownForQA,
+                  cell.accessibilityLabel()?.contains(project) == true else {
+                throw Failure(description: "By project: \(String(n, radix: 16)) draws chip "
+                    + "'\(cell.placementTextForQA)', icon \(cell.projectIconShownForQA), "
+                    + "spoken '\(cell.accessibilityLabel() ?? "")'")
+            }
+        }
 
+        // With no chip before it, the lead's tail opens on its words, not a dot.
+        let asking = try chip(gamma, in: inbox)
+        guard asking.tailTextForQA?.hasPrefix("Needs you") == true else {
+            throw Failure(description: "By project: Gamma's tail reads '\(asking.tailTextForQA ?? "nil")'")
+        }
         // 4. The project filter is the scope's `Projects ›` pick, in either sort.
         guard inbox.pickScopeForQA(.project("Film")) else {
             throw Failure(description: "the Film project is not pickable from the scope list")
@@ -166,10 +188,34 @@ enum SidebarSortChecks {
         guard inbox.pickScopeForQA(.all) else { throw Failure(description: "All agents is not pickable") }
         inbox.layoutForQA()
         try expectSequence(inbox, mostActive, "Most active, all projects again")
+        for (n, project) in [(alpha, "Array"), (beta, "Film"), (delta, "Site")] {
+            let cell = try chip(n, in: inbox)
+            guard cell.placementTextForQA == project, cell.projectIconShownForQA else {
+                throw Failure(description: "Most active: \(String(n, radix: 16)) lost its project chip: "
+                    + "'\(cell.placementTextForQA)', icon \(cell.projectIconShownForQA)")
+            }
+        }
+        // A chip naming another folder than the heading is not a repeat, and stays.
+        var worktree = row(0x99, "Worktree lead", project: "Array", activeMinutesAgo: 1, createdMinutesAgo: 5)
+        worktree = AgentInboxRow(
+            id: worktree.id, title: worktree.title, projectName: "Array", projectId: worktree.projectId,
+            directoryName: "array-sidebar-sort", workspaceName: "personal", workspaceId: workspaceId,
+            state: .ready, lastActiveAt: worktree.lastActiveAt, createdAt: worktree.createdAt)
+        let (folders, foldersWindow) = build(dark: false, rows: [worktree])
+        defer { foldersWindow.orderOut(nil) }
+        folders.setSortMode(.byProject)
+        folders.layoutForQA()
+        let folderCell = try chip(0x99, in: folders)
+        guard folders.projectHeadingTitlesForQA == ["Array (1)"],
+              folderCell.placementTextForQA == "array-sidebar-sort", folderCell.projectIconShownForQA else {
+            throw Failure(description: "a worktree folder under its project's heading drew "
+                + "'\(folderCell.placementTextForQA)' under \(folders.projectHeadingTitlesForQA)")
+        }
         guard picked == [.mostActive, .byProject, .mostActive] else {
             throw Failure(description: "each pick is reported once for the host to store: \(picked.map(\.title))")
         }
-        report.append("orders: newest, most active, by project with 4 headings; Film filter in both")
+        report.append("orders: newest, most active, by project with 4 headings; Film filter in both; "
+            + "chips hidden under their own heading (still spoken), kept in Most active and for a worktree folder")
 
         // 5. Held under the pointer. Alpha starts working and a new agent arrives:
         //    rows already drawn stay put, the new one goes on top.
