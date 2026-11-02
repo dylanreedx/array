@@ -9058,9 +9058,10 @@ do {
     // ContextWindows.json (3954fa393) and TestedCLIVersions.json (abc6fb0bb)
     // are data tables Core reads at runtime; pinning them keeps a dropped or
     // renamed resource red alongside the dependency list.
-    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")],resources:[.copy("Resources/PiExtensions"),.copy("Resources/ContextWindows.json"),.copy("Resources/TestedCLIVersions.json")]),"#
+    // AgentCharacters (plan 110) is the built-in character set and its MIT notice.
+    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")],resources:[.copy("Resources/PiExtensions"),.copy("Resources/ContextWindows.json"),.copy("Resources/TestedCLIVersions.json"),.copy("Resources/AgentCharacters")]),"#
     expect(compactDeclaration == expectedDeclaration,
-           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, GRDB, and the pinned PiExtensions, ContextWindows and TestedCLIVersions resources, found: \(declaration)")
+           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, GRDB, and the pinned PiExtensions, ContextWindows, TestedCLIVersions and AgentCharacters resources, found: \(declaration)")
     print("dependencies guard: ContinuumRevivedCore target has only AgentContent + AgentUI + GRDB dependencies, plus the pinned resources")
 }
 

@@ -103,7 +103,7 @@ final class AgentCharactersPreview: NSObject, NSApplicationDelegate {
         static let titles = [
             "Rework the sign-in screen", "Find every caller of saveCanvas", "Run the release matrix",
             "Delete the stale benches", "Fix the zoom stutter", "Write the release notes",
-            "Audit the notification paths", "New agent",
+            "Audit the notification paths", AgentName.defaultName,
         ]
         static let models = [
             "anthropic/claude-opus-4-6", "openai/gpt-5.5", "pi/kimi-k2", "anthropic/claude-sonnet-4-5",
