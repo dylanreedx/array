@@ -329,6 +329,13 @@ MATRIX_KNOWN_RED=(
   # over Dylan's session. Fix: confirm in an active-app run, or split the
   # metric into placement (offset must be zero) and shading.
   --file-tile-zoom-check
+  # A real product gap, and the witness that tracks it (2026-11-02): a guest's
+  # shared agent draws the projection as plain text, and a guest's browser and
+  # other kinds do not draw what the host's tile draws. The multiplayer polish
+  # round (transcript-lead, shared-browser, kinds-parity) closes it; the
+  # report names each differing kind and element. Remove this line when the
+  # leg passes, never by loosening its tolerance.
+  --shared-tile-parity-check
 
 )
 # Advisory legs whose status the caller captures itself (`|| var=$?`); these must
@@ -610,6 +617,9 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_leg .build/debug/ContinuumRevivedCollaborationChecks --live-tile-only
   run_app_check .build/debug/Array --shared-tile-render-check
   run_app_check .build/debug/Array --portal-kinds-check
+  # Host vs guest of each shared kind through the production share path
+  # (view classes, elements, pixels; light and dark). KNOWN-RED below.
+  run_app_check .build/debug/Array --shared-tile-parity-check
   run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
   # A shared terminal streamed from its tmux pane (.plans/114-terminal-sharing):
   # the follower and the stream lane, the guest's Ghostty mirror in light and
@@ -1541,6 +1551,9 @@ run_leg .build/debug/ContinuumRevivedCollaborationChecks --note-text-only
 run_leg .build/debug/ContinuumRevivedCollaborationChecks --live-tile-only
 run_app_check .build/debug/Array --shared-tile-render-check
 run_app_check .build/debug/Array --portal-kinds-check
+# Host vs guest of each shared kind through the production share path: view
+# classes, rendered elements and pixels, light and dark (KNOWN-RED below).
+run_app_check .build/debug/Array --shared-tile-parity-check
 run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
 # A shared terminal streamed from its tmux pane (.plans/114-terminal-sharing):
 # the follower and the stream lane, the guest's Ghostty mirror in light and

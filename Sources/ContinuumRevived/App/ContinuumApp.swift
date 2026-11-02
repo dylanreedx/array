@@ -1724,6 +1724,25 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // Host vs guest of each shared kind, through the production share path:
+        // view classes, element lists and pixels, light and dark, into <dir>.
+        if let index = CommandLine.arguments.firstIndex(of: "--shared-tile-parity-check") {
+            setbuf(stdout, nil); setbuf(stderr, nil)
+            _ = NSApplication.shared
+            let next = CommandLine.arguments.indices.contains(index + 1) ? CommandLine.arguments[index + 1] : nil
+            let directory = URL(fileURLWithPath: next.flatMap { $0.hasPrefix("-") ? nil : $0 }
+                ?? NSTemporaryDirectory() + "shared-tile-parity")
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(150))
+                fputs("FAIL: shared tile parity check exceeded its 150-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do { try await SharedTileParityChecks.run(directory: directory); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         // Every other shared kind as the guest sees it, light and dark, as PNGs.
         if let index = CommandLine.arguments.firstIndex(of: "--shared-tile-render-check") {
             setbuf(stdout, nil)
