@@ -26,6 +26,9 @@ public protocol SharedAreaControllerTransport: Sendable {
     func publishLiveTileState(object: UUID, report: Collaboration.LiveTile.PublishState) async throws
     func appendLiveTileEvent(object: UUID, body: Collaboration.LiveTile.EventBody) async throws -> Collaboration.LiveTile.Appended
     func readLiveTile(object: UUID, request: Collaboration.LiveTile.ReadRequest) async throws -> Collaboration.LiveTile.Read
+    /// A published agent's whole transcript (`Collaboration.AgentTranscript`).
+    func publishAgentTranscript(object: UUID, report: Collaboration.AgentTranscript.Publish) async throws
+    func readAgentTranscript(object: UUID, request: Collaboration.AgentTranscript.ReadRequest) async throws -> Collaboration.AgentTranscript.Read
     /// The area's cursor lane: pointers both ways at the sender's rate. A
     /// transport without one throws, and presence stays on update pages.
     func openCursorLane() async throws -> any SharedAreaCursorLane
@@ -73,6 +76,12 @@ public extension SharedAreaControllerTransport {
     }
     func readLiveTile(object: UUID, request: Collaboration.LiveTile.ReadRequest) async throws -> Collaboration.LiveTile.Read {
         throw CollaborationClientError.server(status: 503, code: "liveTileUnavailable")
+    }
+    func publishAgentTranscript(object: UUID, report: Collaboration.AgentTranscript.Publish) async throws {
+        throw CollaborationClientError.server(status: 503, code: "transcriptUnavailable")
+    }
+    func readAgentTranscript(object: UUID, request: Collaboration.AgentTranscript.ReadRequest) async throws -> Collaboration.AgentTranscript.Read {
+        throw CollaborationClientError.server(status: 503, code: "transcriptUnavailable")
     }
 }
 
@@ -141,6 +150,12 @@ public struct SharedAreaAPITransport: SharedAreaControllerTransport {
     }
     public func readLiveTile(object: UUID, request: Collaboration.LiveTile.ReadRequest) async throws -> Collaboration.LiveTile.Read {
         try await api.readLiveTile(area: area, object: object, request: request)
+    }
+    public func publishAgentTranscript(object: UUID, report: Collaboration.AgentTranscript.Publish) async throws {
+        try await api.publishAgentTranscript(area: area, object: object, report: report)
+    }
+    public func readAgentTranscript(object: UUID, request: Collaboration.AgentTranscript.ReadRequest) async throws -> Collaboration.AgentTranscript.Read {
+        try await api.readAgentTranscript(area: area, object: object, request: request)
     }
 }
 
@@ -294,6 +309,18 @@ public final class SharedAreaController {
     public func readLiveTile(object: SharedArea.ID<SharedArea.Object>, request: Collaboration.LiveTile.ReadRequest) async throws -> Collaboration.LiveTile.Read {
         guard status == .connected, let transport else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
         return try await transport.readLiveTile(object: object.rawValue, request: request)
+    }
+    /// A published agent's whole transcript: the host writes, any member reads.
+    public func publishAgentTranscript(object: SharedArea.ID<SharedArea.Object>, host: SharedArea.ID<SharedArea.Host>, stream: String,
+                                       checkpoint: Collaboration.AgentTranscript.Checkpoint?,
+                                       frames: [Collaboration.AgentTranscript.Frame]) async throws {
+        guard status == .connected, let transport, let scope else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
+        try await transport.publishAgentTranscript(object: object.rawValue, report: .init(epoch: scope.epoch, host: host, stream: stream,
+                                                                                         checkpoint: checkpoint, frames: frames))
+    }
+    public func readAgentTranscript(object: SharedArea.ID<SharedArea.Object>, request: Collaboration.AgentTranscript.ReadRequest) async throws -> Collaboration.AgentTranscript.Read {
+        guard status == .connected, let transport else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
+        return try await transport.readAgentTranscript(object: object.rawValue, request: request)
     }
     /// A shared terminal's stream lane: its owner's host sends, members watch.
     public func openTileStream(object: SharedArea.ID<SharedArea.Object>) async throws -> any SharedAreaTileStream {
