@@ -47,6 +47,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     private let findRow: NSStackView
     private let findRowHeightConstraint: NSLayoutConstraint
     private let errorBanner: NSTextField
+    private let passkeyNotice = BrowserPasskeyNotice(frame: .zero)
     private let tabStrip: NSStackView
     private let newTabButton: NSButton
     private let closeTabButton: NSButton
@@ -220,6 +221,12 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         body.addSubview(findRow)
         body.addSubview(errorBanner)
         body.addSubview(hostView)
+        passkeyNotice.isHidden = true
+        passkeyNotice.translatesAutoresizingMaskIntoConstraints = false
+        passkeyNotice.onDismiss = { [weak self] in self?.passkeyNotice.isHidden = true }
+        body.addSubview(passkeyNotice)
+        let noticePreferredWidth = passkeyNotice.widthAnchor.constraint(equalTo: hostView.widthAnchor, constant: -16)
+        noticePreferredWidth.priority = .defaultHigh
 
         NSLayoutConstraint.activate([
             tabStrip.topAnchor.constraint(equalTo: body.topAnchor, constant: 4),
@@ -245,7 +252,14 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
             hostView.topAnchor.constraint(equalTo: errorBanner.bottomAnchor, constant: 4),
             hostView.leadingAnchor.constraint(equalTo: body.leadingAnchor),
             hostView.trailingAnchor.constraint(equalTo: body.trailingAnchor),
-            hostView.bottomAnchor.constraint(equalTo: body.bottomAnchor)
+            hostView.bottomAnchor.constraint(equalTo: body.bottomAnchor),
+
+            passkeyNotice.topAnchor.constraint(equalTo: hostView.topAnchor, constant: 8),
+            passkeyNotice.centerXAnchor.constraint(equalTo: hostView.centerXAnchor),
+            passkeyNotice.leadingAnchor.constraint(greaterThanOrEqualTo: hostView.leadingAnchor, constant: 8),
+            passkeyNotice.widthAnchor.constraint(lessThanOrEqualToConstant: 560),
+            noticePreferredWidth,
+            passkeyNotice.heightAnchor.constraint(equalToConstant: BrowserPasskeyNotice.preferredHeight)
         ])
 
         setContentView(body)
@@ -269,6 +283,9 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         runtime.onFindResult = { [weak self] matchFound in
             self?.showFindResult(matchFound: matchFound)
         }
+        (runtime as? WKWebViewBrowserRuntime)?.onPasskeyUnavailable = { [weak self] in
+            self?.passkeyNotice.isHidden = false
+        }
         refresh()
         rebuildTabStrip()
     }
@@ -276,6 +293,10 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
     }
+
+    var passkeyNoticeVisibleForQA: Bool { !passkeyNotice.isHidden }
+    var passkeyNoticeFrameForQA: NSRect { passkeyNotice.frame }
+    func dismissPasskeyNoticeForQA() { passkeyNotice.onDismiss?() }
 
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)

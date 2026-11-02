@@ -240,6 +240,9 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     private(set) var consoleMessageHandlerEventCountForQA = 0
     private(set) var networkLiteDelegateEventCountForQA = 0
     private(set) var consoleBridgeUserScriptInstalledForQA = false
+    private(set) var passkeyFailureWatchInstalledForQA = false
+    /// A page's passkey request failed because this build can't use passkeys.
+    var onPasskeyUnavailable: (() -> Void)?
     var onConsoleLogBufferChange: (() -> Void)?
     var onNetworkLiteEventBufferChange: (() -> Void)?
     var reservedShortcutHandler: ((NSEvent) -> Bool)? {
@@ -276,6 +279,14 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
             forMainFrameOnly: false
         )
         controller.addUserScript(script)
+        if !BrowserPasskeySupport.processIsEntitled {
+            controller.addUserScript(WKUserScript(
+                source: BrowserPasskeySupport.failureWatchScript(handlerName: consoleMessageHandlerName),
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
+            ))
+            passkeyFailureWatchInstalledForQA = true
+        }
         controller.add(self, name: consoleMessageHandlerName)
         consoleBridgeUserScriptInstalledForQA = true
     }
@@ -898,6 +909,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         onStateChange = nil
         onConsoleLogBufferChange = nil
         onNetworkLiteEventBufferChange = nil
+        onPasskeyUnavailable = nil
     }
 
     /// Captures the opaque WKWebView interactionState blob (back/forward history,
@@ -916,6 +928,11 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
 extension WKWebViewBrowserRuntime: WKScriptMessageHandler {
     nonisolated func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         MainActor.assumeIsolated {
+            if (message.body as? [String: Any])?["kind"] as? String == BrowserPasskeySupport.failureMessageKind {
+                guard message.name == self.consoleMessageHandlerName, !self.isTerminated else { return }
+                self.onPasskeyUnavailable?()
+                return
+            }
             self.receiveConsoleMessage(
                 name: message.name,
                 payload: parsePendingBrowserConsoleLogPayload(message.body)

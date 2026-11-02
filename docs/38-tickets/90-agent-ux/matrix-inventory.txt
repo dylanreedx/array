@@ -73,6 +73,7 @@ check --browser-inspector-tile-shell-check
 check --browser-lease-check
 check --browser-lru-budget-check
 check --browser-note-action-check
+check --browser-passkey-notice-check
 check --browser-profile-persistence-check
 check --browser-profile-registry-check
 check --browser-restore-state-check
@@ -498,6 +499,7 @@ leg run_app_check .build/debug/Array --browser-inspector-tile-shell-check
 leg run_app_check .build/debug/Array --browser-lease-check
 leg run_app_check .build/debug/Array --browser-lru-budget-check
 leg run_app_check .build/debug/Array --browser-note-action-check
+leg run_app_check .build/debug/Array --browser-passkey-notice-check
 leg run_app_check .build/debug/Array --browser-profile-persistence-check
 leg run_app_check .build/debug/Array --browser-restore-state-check
 leg run_app_check .build/debug/Array --browser-target-blank-check

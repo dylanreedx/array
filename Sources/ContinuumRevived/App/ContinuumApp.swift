@@ -4242,6 +4242,23 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-passkey-notice-check") {
+            do {
+                _ = NSApplication.shared
+                let outputDir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["CONTINUUM_QA_OUTPUT_DIR"] ?? NSTemporaryDirectory())
+                    .appendingPathComponent("browser-passkey-notice", isDirectory: true)
+                let result = try BrowserTileNSView.runPasskeyNoticeSelfCheck(outputDir: outputDir)
+                let json = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+                try json.write(to: outputDir.appendingPathComponent("result.json"))
+                print(String(decoding: json, as: UTF8.self))
+                print("ContinuumRevivedBrowserPasskeyNoticeChecks passed: \(outputDir.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-ui-delegate-check") {
             do {
                 _ = NSApplication.shared

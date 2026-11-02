@@ -1265,6 +1265,7 @@ run_app_check .build/debug/Array --agent-observer-independence-check
 run_app_check .build/debug/Array --keybind-edit-check
 run_app_check .build/debug/Array --browser-url-focus-check
 run_app_check .build/debug/Array --browser-ui-delegate-check
+run_app_check .build/debug/Array --browser-passkey-notice-check
 run_app_check .build/debug/Array --browser-element-context-check
 run_app_check .build/debug/Array --browser-target-blank-check
 run_app_check .build/debug/Array --browser-download-check
