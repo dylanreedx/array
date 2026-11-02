@@ -98,9 +98,18 @@ ended. The journey now watches inside the recording; 369 ms is the re-run.
 | Tab and title | "Avery's terminal" | **"Avery's Terminal"**; tile title "Avery's Terminal · Shell" (the host tile's own title) |
 | Host's tile | "Yours · shared with Blake" | the same, plus a red **Live** badge and **Stop sharing** |
 
-(Local relay on loopback, so these are the app's own costs. Over the network
-add the round trip: with the stream lane a frame takes one way to the relay and
-one way back out, the cursor lane's ~100 ms at a 100 ms round trip.)
+The table is a local relay on loopback: the app's own costs. **Over the
+network, on staging** (`arrayapp-relay-staging`, Fly, Toronto; both apps on
+this Mac, so every frame goes there and back), the same journey, all 32 checks
+passing:
+
+| | Staging |
+| --- | --- |
+| A typed command's output on the guest | median **63 ms**, max **67 ms** |
+| A 30/s redraw | **22.8** changes a second |
+| 400 lines at ~200/s | **400 of 400**, in order |
+| `yes \| head -100000` | end on the guest at **260 ms**; host sent 2,234 bytes |
+| Late joiner | first screen 1.2 s after the open began (joining the area included) |
 
 | Guest, after | |
 | --- | --- |
@@ -132,6 +141,13 @@ defaults, so a pixel proves where it came from), light and dark:
   newest screen and the output after it). The host publishes it every second
   beside the stream lane, every 100 ms when the relay has no stream lane. It
   stays under the 240 KB state cap: a checkpoint is taken every 64 KB of output.
+- **Opening a watcher's lane.** The relay sends a joiner its replay at once,
+  so over a real network the replay arrives ahead of the pong for the
+  client's opening ping. The client now reads from the moment the socket
+  opens (a pong queued behind unread frames never completed the ping: the
+  first staging run sat in "connecting" and the guest followed on the state
+  lane at one state a second, 723 ms median), and gives the ping 10 s before
+  retrying.
 - **WebSocket frame size.** The upgrade now admits 256 KB frames (NIO's
   default was 16 KB). The two older sockets (`/v2/socket`, the cursor lane)
   keep their own limits: the cursor lane already refused frames over 2 KB, and
@@ -172,13 +188,24 @@ defaults, so a pixel proves where it came from), light and dark:
   branch's protocol drops `screen` when it re-encodes the state, and guests show
   the text mirror.
 
-## 6. Witnesses
+## 6. Staging relay
+
+Deployed 2 November 2026 to `arrayapp-relay-staging` only: **v11**, from
+`fc22d6da` (this branch, which contains the relay housekeeping that staging v10
+ran). `fly deploy . --config deploy/fly.staging.toml --dockerfile Dockerfile`.
+Health 200 five times (0.13-0.34 s); the stream route answers 401 without
+credentials; the journey above ran against it and cleaned up after itself.
+Rollback: `fly deploy --app arrayapp-relay-staging --config deploy/fly.staging.toml
+--image registry.fly.io/arrayapp-relay-staging:deployment-01M6D4FMH2F1CA73NFNVPFW9HR` (v10).
+Production (`arrayapp-relay`) is untouched; it needs Dylan's go.
+
+## 7. Witnesses
 
 | Witness | What it asserts | Result |
 | --- | --- | --- |
-| `ContinuumRevivedCollaborationChecks --terminal-stream-only` | the follower (13 cases); the stream lane against the real NIO relay on loopback with the production client: refusals before the upgrade, order, whole screens with colours, late-joiner replay, checkpoints, a member's frame closing their lane, the rate cut and resync, the frame cap, the state lane's screen, an older terminal state decoding, lanes closing with the tile | 28 PASS |
+| `ContinuumRevivedCollaborationChecks --terminal-stream-only` | the follower (13 cases); the stream lane against the real NIO relay on loopback with the production client: refusals before the upgrade, order, whole screens with colours, late-joiner replay, checkpoints, a member's frame closing their lane, the rate cut and resync, the frame cap, the state lane's screen, an older terminal state decoding, lanes closing with the tile | 27 PASS |
 | `Array --shared-terminal-render-check` | a real Ghostty surface fed a keyframe built by the host's own code, light and dark, off screen: the host's grid exactly, the screen line for line, history in the scrollback, the host's palette (94% background, red and green present), the tab "Avery's Terminal", a click lands on the shield, the chrome follows the appearance | PASS |
-| `check-multiplayer-journey.py --relay local --mode terminal` | two real apps, a local relay, tmux in the host's own namespace: everything in section 2, asserted | 32 PASS |
+| `check-multiplayer-journey.py --relay local --mode terminal` (and `--relay staging`) | two real apps, a relay, tmux in the host's own namespace: everything in section 2, asserted | 32 PASS on both |
 | `check-multiplayer-journey.py --relay local --only kinds --kinds terminal` | the existing leg (tmux off): the text fallback | 12 PASS |
 | `--live-tile-only`, `--shared-tile-render-check`, `--portal-kinds-check` | regressions in the shared live-tile code | PASS |
 
@@ -188,10 +215,10 @@ The journey's terminal mode starts the host's tmux server itself with
 new. Every tmux command in the journey and the checks runs in a fresh
 `TMUX_TMPDIR` with `TMUX`/`TMUX_PANE` unset, and checks `#{socket_path}`.
 
-## 7. Open
+## 8. Open
 
-- Over a real network: not yet measured end to end (see the staging section
-  below once deployed).
+- Staging was measured with both apps on one Mac. Two Macs on different
+  networks add each one's own trip to the relay.
 - Fonts are the guest's: the grid, colours and cursor are the host's, glyphs
   come from the guest's Ghostty font.
 - The host's palette is its Ghostty config's, not colours a program set with
