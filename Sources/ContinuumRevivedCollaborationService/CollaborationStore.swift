@@ -37,6 +37,8 @@ public actor CollaborationStore {
     var hostLivenessStates: [UUID: [UUID: String]] = [:]
     /// Shared notes, files, diffs, browsers and terminals: memory only.
     var liveTiles = CollaborationLiveTileTable()
+    /// Shared terminals' stream lanes (`.plans/114-terminal-sharing`): memory only.
+    var tileStreams = CollaborationTileStreamTable()
 
     public init(path: String, masterKey: Data, clock: @escaping @Sendable () -> Date = { Date() },
                 retention: CollaborationRetention = .init(), joinLimits: CollaborationJoinLimits = .init()) throws {

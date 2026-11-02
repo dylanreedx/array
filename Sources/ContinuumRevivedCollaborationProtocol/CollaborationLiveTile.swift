@@ -93,12 +93,17 @@ extension Collaboration {
         }
         public struct Terminal: Codable, Equatable, Sendable {
             public let title: String
-            /// The last screenful and some scrollback, plain text.
+            /// The last screenful and some scrollback, plain text: what a viewer
+            /// that cannot draw `screen` shows.
             public let text: String
             public let columns: Int
             public let rows: Int
-            public init(title: String, text: String, columns: Int, rows: Int) {
-                self.title = title; self.text = text; self.columns = columns; self.rows = rows
+            /// The terminal as it drew itself: the newest screen and the output
+            /// after it (`TerminalScreen`, `.plans/114-terminal-sharing`). Absent
+            /// from an older host, and from a terminal that is not in tmux.
+            public let screen: TerminalScreen?
+            public init(title: String, text: String, columns: Int, rows: Int, screen: TerminalScreen? = nil) {
+                self.title = title; self.text = text; self.columns = columns; self.rows = rows; self.screen = screen
             }
         }
 

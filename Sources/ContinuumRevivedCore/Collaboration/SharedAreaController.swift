@@ -29,6 +29,16 @@ public protocol SharedAreaControllerTransport: Sendable {
     /// The area's cursor lane: pointers both ways at the sender's rate. A
     /// transport without one throws, and presence stays on update pages.
     func openCursorLane() async throws -> any SharedAreaCursorLane
+    /// A shared terminal's stream lane (`.plans/114-terminal-sharing`). A
+    /// transport without one throws, and the terminal stays on the state lane.
+    func openTileStream(object: UUID) async throws -> any SharedAreaTileStream
+}
+
+/// One open terminal stream lane. `messages` finishes when the connection ends.
+public protocol SharedAreaTileStream: Sendable {
+    var messages: AsyncStream<Collaboration.LiveTile.StreamMessage> { get }
+    func send(_ frame: Collaboration.LiveTile.TerminalFrame) async throws
+    func close() async
 }
 
 /// One open cursor lane. `messages` finishes when the connection ends.
@@ -52,6 +62,9 @@ public extension SharedAreaControllerTransport {
     func openCursorLane() async throws -> any SharedAreaCursorLane {
         throw CollaborationClientError.server(status: 501, code: "cursorLaneUnavailable")
     }
+    func openTileStream(object: UUID) async throws -> any SharedAreaTileStream {
+        throw CollaborationClientError.server(status: 501, code: "tileStreamUnavailable")
+    }
     func publishLiveTileState(object: UUID, report: Collaboration.LiveTile.PublishState) async throws {
         throw CollaborationClientError.server(status: 503, code: "liveTileUnavailable")
     }
@@ -61,6 +74,13 @@ public extension SharedAreaControllerTransport {
     func readLiveTile(object: UUID, request: Collaboration.LiveTile.ReadRequest) async throws -> Collaboration.LiveTile.Read {
         throw CollaborationClientError.server(status: 503, code: "liveTileUnavailable")
     }
+}
+
+private struct SharedAreaAPITileStream: SharedAreaTileStream {
+    let client: CollaborationTileStreamClient
+    var messages: AsyncStream<Collaboration.LiveTile.StreamMessage> { client.messages }
+    func send(_ frame: Collaboration.LiveTile.TerminalFrame) async throws { try await client.send(frame) }
+    func close() async { client.close() }
 }
 
 private struct SharedAreaAPICursorLane: SharedAreaCursorLane {
@@ -109,6 +129,9 @@ public struct SharedAreaAPITransport: SharedAreaControllerTransport {
     }
     public func openCursorLane() async throws -> any SharedAreaCursorLane {
         SharedAreaAPICursorLane(client: try await api.openCursorLane(area: area))
+    }
+    public func openTileStream(object: UUID) async throws -> any SharedAreaTileStream {
+        SharedAreaAPITileStream(client: try await api.openTileStream(area: area, object: object))
     }
     public func publishLiveTileState(object: UUID, report: Collaboration.LiveTile.PublishState) async throws {
         try await api.publishLiveTileState(area: area, object: object, report: report)
@@ -271,6 +294,11 @@ public final class SharedAreaController {
     public func readLiveTile(object: SharedArea.ID<SharedArea.Object>, request: Collaboration.LiveTile.ReadRequest) async throws -> Collaboration.LiveTile.Read {
         guard status == .connected, let transport else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
         return try await transport.readLiveTile(object: object.rawValue, request: request)
+    }
+    /// A shared terminal's stream lane: its owner's host sends, members watch.
+    public func openTileStream(object: SharedArea.ID<SharedArea.Object>) async throws -> any SharedAreaTileStream {
+        guard status == .connected, let transport else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
+        return try await transport.openTileStream(object: object.rawValue)
     }
 
     private let localStore: SharedAreaLocalStore
