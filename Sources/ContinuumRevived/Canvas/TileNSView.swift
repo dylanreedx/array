@@ -1103,6 +1103,11 @@ class TileNSView: NSView, TokenThemed {
             Self.hitTestPromotionTotal &+= 1
             promoteBodyToNative()
         }
+        // "Add to share" (mode B) sits over the body near the top: it wins its
+        // own press, ahead of the low-zoom grab strip that would make it a drag.
+        if let pill = subviews.last(where: { $0 is SharedPortalAddPill && !$0.isHidden }), pill.frame.contains(local) {
+            return pill
+        }
         // Keep the visible close glyph usable when the enlarged corner target
         // overlaps it at low zoom. The outer resize edge still takes precedence.
         let edge = resizeMarginInLocalCoordinates

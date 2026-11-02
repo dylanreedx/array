@@ -175,8 +175,11 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
 
     private func buildItems() {
         guard session.target.origin == .area else { return }
-        let items = session.target.items
-        for item in items.prefix(Self.maxListedItems) {
+        // A terminal is always listed, marked private: the person sees it
+        // goes as a card with nothing of it, however long the list is.
+        let all = session.target.items
+        let items = all.filter { $0.kind != .terminal }.prefix(Self.maxListedItems) + all.filter { $0.kind == .terminal }
+        for item in items {
             let label = NSTextField(labelWithString: "\(item.kind.displayName) · \(item.title)" + (item.badge.map { " · \($0)" } ?? ""))
             label.font = .token(.caption)
             label.lineBreakMode = .byTruncatingTail
@@ -185,8 +188,8 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
             itemLabels.append(label); itemIcons.append(icon)
             addSubview(icon); addSubview(label)
         }
-        if items.count > Self.maxListedItems {
-            let more = NSTextField(labelWithString: "and \(items.count - Self.maxListedItems) more")
+        if all.count > items.count {
+            let more = NSTextField(labelWithString: "and \(all.count - items.count) more")
             more.font = .token(.caption)
             itemLabels.append(more)
             addSubview(more)

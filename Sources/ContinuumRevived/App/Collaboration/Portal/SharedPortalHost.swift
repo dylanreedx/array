@@ -330,7 +330,8 @@ final class SharedPortalHostSession {
         guard let app, let canvas = app.canvasView else { throw SharedPortalError.notHosted }
         let fresh = ids.filter { id in !entry.tiles.contains { $0.tile == id } }
         guard !fresh.isEmpty else { return }
-        let added = try await app.admitPortalTiles(fresh, area: area, origin: entry.origin, model: model, canvas: canvas)
+        let added = try await app.admitPortalTiles(fresh, area: area, origin: entry.origin, model: model, canvas: canvas,
+                                                   controller: controller)
         entry.tiles += added
         try app.hostedPortalIndex?.put(entry)
         publishManifest()
@@ -478,7 +479,8 @@ extension AppDelegate {
     /// the agent publication (so prompts and projections work as in mode A),
     /// every other kind as an artifact item, and on first share the manifest.
     func admitPortalTiles(_ tileIds: [UUID], area: UUID, origin: SharedPortal.Origin, model: CollaborationAccountController,
-                          canvas: CanvasNSView, withManifest: Bool = false) async throws -> [HostedPortalIndex.Shared] {
+                          canvas: CanvasNSView, withManifest: Bool = false,
+                          controller existing: SharedAreaController? = nil) async throws -> [HostedPortalIndex.Shared] {
         guard let person = model.activeAccount?.identity.person else { throw ShareLinkFailure.notSignedIn }
         var tiles: [(tile: Tile, world: TileFrame, project: UUID, kind: SharedPortal.ItemKind)] = []
         for id in tileIds {
@@ -498,12 +500,20 @@ extension AppDelegate {
             for agent in agents { if let object = published[agent.tile.id] { objects[agent.tile.id] = object } }
         }
         let hostID = try await model.registerHost()
-        let controller = try model.makeSharedAreaController(area: area)
-        await controller.open()
-        defer { Task { await controller.close() } }
+        // A portal already hosted admits through its own open controller: a
+        // second one on the same area's store would trip over its writes.
+        let controller = try existing ?? model.makeSharedAreaController(area: area)
+        if existing == nil { await controller.open() }
+        defer { if existing == nil { Task { await controller.close() } } }
+        // The agents' publication just moved the area on: read it again.
+        if existing != nil, !agents.isEmpty {
+            for _ in 0..<50 where !agents.allSatisfy({ agent in objects[agent.tile.id].map { object in controller.document?.items.contains { $0.id == object } == true } ?? true }) {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        }
         var shared: [HostedPortalIndex.Shared] = []
-        for _ in 0..<3 {
-            guard controller.canSubmit, let document = controller.document else { try await Task.sleep(for: .milliseconds(200)); continue }
+        for _ in 0..<20 {
+            guard controller.canSubmit, let document = controller.document else { try await Task.sleep(for: .milliseconds(250)); continue }
             var edits: [SharedArea.Edit] = []
             var next: [HostedPortalIndex.Shared] = []
             var z = (document.positions.map(\.z).max() ?? 0) + 1
@@ -530,7 +540,7 @@ extension AppDelegate {
             guard !edits.isEmpty else { return next }
             switch await controller.submit(.init(area: document.id, expectedRevision: document.revision, edits: edits)) {
             case .accepted: shared = next
-            case .rejected(.conflict), .rejected(.busy): try await Task.sleep(for: .milliseconds(200)); continue
+            case .rejected(.conflict), .rejected(.busy): try await Task.sleep(for: .milliseconds(250)); continue
             default: throw ShareLinkFailure.publishFailed("The shared canvas could not take these tiles.")
             }
             break
@@ -639,7 +649,10 @@ extension AppDelegate {
         let area = session.area
         pill.onPress = { [weak self, weak pill] in
             pill?.removeFromSuperview()
-            Task { @MainActor [weak self] in try? await self?.addToPortal(area: area, tiles: [tileId]) }
+            Task { @MainActor [weak self] in
+                do { try await self?.addToPortal(area: area, tiles: [tileId]) }
+                catch { fputs("Add to share failed: \(error)\n", stderr) }
+            }
         }
         let size = pill.preferredSize
         pill.frame = NSRect(x: max(8, view.bounds.width - size.width - 12), y: view.isFlipped ? TileNSView.titleBarHeight + 8 : view.bounds.height - TileNSView.titleBarHeight - size.height - 8,
