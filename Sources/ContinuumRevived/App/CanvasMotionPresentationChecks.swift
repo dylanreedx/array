@@ -349,6 +349,10 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
             if env["CANVAS_MOTION_CHARACTER_MOTION"] == "never" {
                 defaults.set(AgentCharacterConfig.Motion.never.rawValue, forKey: AgentCharacterConfig.motionKey)
             }
+            // CANVAS_MOTION_CHARACTER_SIZE=medium|large: the character size setting.
+            if let size = env["CANVAS_MOTION_CHARACTER_SIZE"].flatMap(AgentCharacterConfig.Size.init(rawValue:)) {
+                defaults.set(size.rawValue, forKey: AgentCharacterConfig.sizeKey)
+            }
             AgentCharacterController.shared.adopt(defaults: defaults)
         }
         let markdownCount = max(0, Int(env["CANVAS_MOTION_MARKDOWN_COUNT"] ?? "") ?? 24)

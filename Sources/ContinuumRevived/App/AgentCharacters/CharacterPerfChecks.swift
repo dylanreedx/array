@@ -44,6 +44,10 @@ enum CharacterPerfChecks {
         controller.reduceMotion = { false }
         controller.windowIsVisible = { _ in true }   // offscreen windows are never .visible
         defaults.set(true, forKey: AgentCharacterConfig.enabledKey)
+        // ARRAY_CHARACTER_PERF_SIZE=medium|large: the same A/B at a bigger size.
+        let size = ProcessInfo.processInfo.environment["ARRAY_CHARACTER_PERF_SIZE"]
+            .flatMap(AgentCharacterConfig.Size.init(rawValue:)) ?? .small
+        defaults.set(size.rawValue, forKey: AgentCharacterConfig.sizeKey)
         controller.adopt(defaults: defaults)
 
         AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
@@ -56,8 +60,11 @@ enum CharacterPerfChecks {
         defer { supervisor.stopAll() }
 
         // The canvas: 80 agent tiles, all in view at zoom 0.45.
+        // ARRAY_CHARACTER_PERF_ZOOM: the resting zoom instead (1: the few tiles in
+        // view at 100%, where a bigger character size makes the bar taller).
+        let restingZoom = ProcessInfo.processInfo.environment["ARRAY_CHARACTER_PERF_ZOOM"].flatMap(Double.init) ?? 0.45
         let canvas = CanvasNSView(canvasState: CanvasState(
-            viewport: CanvasViewport(x: 0, y: 0, zoom: 0.45), tiles: [], groups: [], lastActiveTileId: nil))
+            viewport: CanvasViewport(x: 0, y: 0, zoom: restingZoom), tiles: [], groups: [], lastActiveTileId: nil))
         canvas.focusBroker = FocusBroker()
         canvas.frame = NSRect(x: 0, y: 0, width: 1600, height: 1000)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -163,7 +170,7 @@ enum CharacterPerfChecks {
             inbox.reload(rows: rowsNow())
         }
         func measure(_ phase: String, seconds: TimeInterval) throws -> Phase {
-            canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 0.45))
+            canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: restingZoom))
             freshen()
             settle(0.5)
             var result = Phase()
@@ -212,7 +219,11 @@ enum CharacterPerfChecks {
             settle(0.5)
         }
         var table: [String: [Phase]] = [:]
-        for (round, on) in [true, false, true, false].enumerated() {
+        // Profiling only: ARRAY_CHARACTER_PERF_ONLY=on|off runs one arm, so a
+        // sampler sees that arm alone. The gate below needs both and is skipped.
+        let only = ProcessInfo.processInfo.environment["ARRAY_CHARACTER_PERF_ONLY"]
+        let arms = [true, false, true, false].filter { only == nil || ($0 ? "on" : "off") == only }
+        for (round, on) in arms.enumerated() {
             setEnabled(on)
             _ = round
             for phase in ["idle", "pan", "zoom"] {
@@ -226,6 +237,13 @@ enum CharacterPerfChecks {
         func p(_ values: [Double], _ q: Double) -> Double {
             let sorted = values.sorted(); guard !sorted.isEmpty else { return 0 }
             return sorted[min(sorted.count - 1, Int(Double(sorted.count) * q))]
+        }
+        if let only {
+            return ["idle", "pan", "zoom"].map { phase in
+                let runs = table["\(only).\(phase)"] ?? []
+                let steps = runs.flatMap(\.steps)
+                return String(format: "%@ %@ only: step p50 %5.2f p95 %5.2f ms", phase, only, p(steps, 0.5), p(steps, 0.95))
+            }.joined(separator: "\n")
         }
         for phase in ["idle", "pan", "zoom"] {
             let on = table["on.\(phase)"]!, off = table["off.\(phase)"]!
@@ -250,12 +268,12 @@ enum CharacterPerfChecks {
                                     layouts, draws, runs.reduce(0) { $0 + $1.cellLayouts }, runs.reduce(0) { $0 + $1.installs }))
             }
         }
-        let report = (["Character perf (offscreen; WindowServer not measured): 80 agent tiles (\(working) characters moving), 60 sidebar rows (\(sidebarSprites) visible moving), 2 x 4 s per arm and phase, A/B/A/B"] + lines)
+        let report = (["Character perf (offscreen; WindowServer not measured), size \(size.rawValue), zoom \(restingZoom): 80 agent tiles (\(working) characters moving), 60 sidebar rows (\(sidebarSprites) visible moving), 2 x 4 s per arm and phase, A/B/A/B"] + lines)
             .joined(separator: "\n")
         let out = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("qa-runs/agent-characters", isDirectory: true)
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
-        try? report.write(to: out.appendingPathComponent("perf.txt"), atomically: true, encoding: .utf8)
+        try? report.write(to: out.appendingPathComponent(size == .small ? "perf.txt" : "perf-\(size.rawValue).txt"), atomically: true, encoding: .utf8)
         guard failures.isEmpty else { throw Failure(description: report + "\n" + failures.joined(separator: "\n")) }
         return report
     }
