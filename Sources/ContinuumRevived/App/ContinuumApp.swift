@@ -2901,6 +2901,19 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--managed-mode-live-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runManagedModeLiveChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--workspace-api-live-delegation-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -14334,6 +14347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     /// .plans/113: the sidebar's real host wiring, for `--sidebar-sort-check`.
     func configureWorkspaceSidebarForQA(_ sidebar: WorkspaceSidebarView) { configureWorkspaceSidebar(sidebar) }
+    func agentInboxRowsForQA() -> [AgentInboxRow] { buildAgentInboxRows() }
 
     private func configureWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
         installSidebarTurnObserver()
