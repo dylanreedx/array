@@ -591,7 +591,8 @@ extension AppDelegate {
               hostedPortalIndex?.entries(account: remembered).isEmpty == false else { return }
         Task { [weak self] in
             guard let self else { return }
-            if model.status != .ready { _ = try? await model.select(accountID: remembered) }
+            await Self.awaitPortalAccount(model)
+            _ = remembered
             guard model.status == .ready, let account = model.activeAccount?.id,
                   let entries = hostedPortalIndex?.entries(account: account), !entries.isEmpty else { return }
             for entry in entries { startHostingPortal(entry, model: model) }
