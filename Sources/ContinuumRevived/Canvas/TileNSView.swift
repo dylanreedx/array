@@ -771,6 +771,8 @@ class TileNSView: NSView, TokenThemed {
             self.onShareRequested?(self)
         }
         bar.onStopRunRequested = { [weak self] in self?.onStopRun?() }
+        // Plan 110 › size: a character's size grows its bar; the body moves down.
+        bar.onHeaderScaleChange = { [weak self] in self?.needsLayout = true }
         bar.additionalMenuItemsProvider = { [weak self] in
             guard let self else { return [] }
             // A tile lent to a shared area also offers the area's actions.
@@ -953,10 +955,14 @@ class TileNSView: NSView, TokenThemed {
     private func layoutChrome() {
         let barHeight = chromeBarHeight
         let barFrame = NSRect(x: 0, y: 0, width: bounds.width, height: barHeight)
-        if titleBar?.frame != barFrame {
+        let chrome = zoomChromeScale
+        if titleBar?.frame != barFrame || titleBar?.zoomChromeScale != chrome {
+            titleBar?.zoomChromeScale = chrome
             titleBar?.frame = barFrame
-            // Bar height changed (zoom crossed the floor) → redraw the title +
-            // dots at the new chrome scale.
+            // Bar height or chrome scale changed (zoom crossed the floor) →
+            // lay out and redraw the title + dots at the new chrome scale. A
+            // Medium or Large bar can keep its height while the scale moves.
+            titleBar?.needsLayout = true
             titleBar?.invalidateChrome()
         }
         titleBar?.applyCloseButtonSizing(buttonSize: closeButtonWorldSize, glyphPointSize: closeGlyphWorldPointSize)
@@ -1328,7 +1334,7 @@ class TileNSView: NSView, TokenThemed {
             // for every tile kind — e.g. a browser sized to 1280×720 reads as that.
             canvas.showResizeDimensions(
                 widthPx: Int(next.frame.width.rounded()),
-                heightPx: Int(max(0, next.frame.height - Double(TileNSView.titleBarHeight)).rounded()),
+                heightPx: Int(max(0, next.frame.height - Double(naturalTitleBarHeight)).rounded()),
                 atWindowPoint: event.locationInWindow
             )
         case .none:
@@ -1491,7 +1497,15 @@ class TileNSView: NSView, TokenThemed {
     /// at low zoom the constant-px floor (`minScreenGrabPx/zoom` world units)
     /// exceeds the drawn `titleBarHeight`, keeping the move target grabbable.
     /// Mirrors `resizeMarginInLocalCoordinates`'s screen-px-in-world pattern.
-    var grabHeightInLocalCoordinates: CGFloat {
+    ///
+    /// Plan 110 › size: a character's size raises the bar's design height
+    /// (24 → 36 → 54 pt); the zoom floor applies on top, the same for every bar,
+    /// so zoomed far out every size converges on today's floored bar.
+    var grabHeightInLocalCoordinates: CGFloat { max(naturalTitleBarHeight, zoomFloorHeight) }
+
+    /// Today's bar height for this zoom: `titleBarHeight`, floored to
+    /// `minScreenGrabPx` on screen.
+    var zoomFloorHeight: CGFloat {
         guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return Self.titleBarHeight }
         // The floor is quantised into scale BUCKETS before it is applied. Without
         // this the bar's world height changes on every zoom step, which re-frames
@@ -1501,6 +1515,18 @@ class TileNSView: NSView, TokenThemed {
         // the bucket changes.
         return max(Self.titleBarHeight, Self.minScreenGrabPx / CGFloat(Self.chromeScaleBucket(for: zoom)))
     }
+
+    /// The zoom chrome scale every bar draws its controls at: the floored grab
+    /// height over the natural 24 pt (1 zoomed in, > 1 zoomed out).
+    var zoomChromeScale: CGFloat { max(1, zoomFloorHeight / Self.titleBarHeight) }
+
+    /// Plan 110 › size: how much taller this tile's bar is for its character's
+    /// size (Small 1, Medium 1.5, Large 2.25); 1 for a tile with no character.
+    var titleBarScale: CGFloat { titleBar?.headerScale ?? 1 }
+
+    /// The bar's design height: `titleBarHeight` times `titleBarScale`, before
+    /// the zoom floor.
+    var naturalTitleBarHeight: CGFloat { Self.titleBarHeight * titleBarScale }
 
     /// Steps per octave for the chrome floor's scale bucket. Higher is
     /// finer-grained chrome and more layout passes; lower is steadier and fewer.
@@ -1545,7 +1571,7 @@ class TileNSView: NSView, TokenThemed {
     /// points of body colour, zoomed out it overlays the body like the bar does.
     var contentTopInsetWorldHeight: CGFloat {
         let under = underBarWorldHeight
-        return Self.titleBarHeight + (under == 0 ? 0 : (under * Self.minScreenGrabPx / Self.titleBarHeight).rounded(.up))
+        return naturalTitleBarHeight + (under == 0 ? 0 : (under * Self.minScreenGrabPx / Self.titleBarHeight).rounded(.up))
     }
 
     // MARK: - Ownership mark (`.plans/105-collaboration/SHARE-REDESIGN.md`, mode A)
@@ -1673,7 +1699,9 @@ class TileNSView: NSView, TokenThemed {
         let bar = chromeBarHeight
         // The bar's chrome scale, until the row's essentials (the indicator's
         // dot, a Stop sharing control) would no longer fit across the tile.
-        let scale = max(1, min(bar / Self.titleBarHeight, bounds.width / underBar.minimumContentWidth))
+        // `zoomChromeScale`, not bar / titleBarHeight: a Large character size
+        // makes the bar taller without the row needing to grow with it.
+        let scale = max(1, min(zoomChromeScale, bounds.width / underBar.minimumContentWidth))
         underBar.place(frame: NSRect(x: 0, y: bar, width: bounds.width, height: base * scale), unscaledHeight: base)
     }
 
@@ -2237,6 +2265,24 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     private var characterInput: (id: UUID, snapshot: AgentCharacterSnapshot, name: String?)?
     /// The character's size at chrome scale 1 (1 pt per art pixel); nil for none.
     private var characterSize: NSSize?
+    /// Plan 110 › size: how much taller than 24 pt this bar is for its character's
+    /// size; 1 with no character. Scales the bar, the provider mark, the character
+    /// and (by half the step) the title; the band controls keep their size, centred.
+    private(set) var headerScale: CGFloat = 1
+    var onHeaderScaleChange: (() -> Void)?
+    /// The zoom chrome scale, set by the tile: today's floored bar over 24 pt.
+    /// Controls (⋯, the pill, the drag dots, gaps) draw at this, as they always
+    /// have; a Medium or Large bar's taller height never shrinks them.
+    var zoomChromeScale: CGFloat = 1
+    /// What the mark and the character draw at: the size's factor, or the zoom
+    /// chrome scale once the zoom floor is larger, so zoomed far out every size
+    /// draws like Small and nothing is ever smaller than Small.
+    private var sizeScale: CGFloat { max(headerScale, chromeScale) }
+    /// The title grows half as much as the bar: 12, 15 and 19.5 pt at zoom 1,
+    /// never below Small's.
+    private var titleScale: CGFloat { max(1 + (headerScale - 1) / 2, chromeScale) }
+    /// The provider mark's side: a whole point at the size's own scale.
+    private var markSide: CGFloat { (14 * headerScale).rounded() * sizeScale / headerScale }
     /// Held still by the tile (far parked).
     private var characterHeld = false
     private var displayTitleOverride: String?
@@ -2558,8 +2604,21 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         let x = providerMarkView.isHidden
             ? CGFloat(Space.m) * scale
             : providerMarkView.frame.maxX + 4 * scale
-        let height = size.height * scale
-        return NSRect(x: x, y: (bounds.height - height) / 2, width: size.width * scale, height: height)
+        guard headerScale > chromeScale else {
+            // Small, or any size once the zoom floor is the larger: the original
+            // geometry, the art scaled with the chrome.
+            let height = size.height * sizeScale
+            return NSRect(x: x, y: (bounds.height - height) / 2, width: size.width * sizeScale, height: height)
+        }
+        // Medium and Large at their own scale: the sidebar's rule, a whole number
+        // of device pixels per art pixel (`Size.devicePixelsPerArtPixel`), from a
+        // device-pixel origin. Exact on screen at 100%; zoomed, nearest-neighbour
+        // like the rest of the canvas.
+        let backing = backingScaleForCharacter
+        let perArt = max(1, (headerScale * backing).rounded(.toNearestOrAwayFromZero)) / backing
+        let width = size.width * perArt, height = size.height * perArt
+        func snap(_ value: CGFloat) -> CGFloat { (value * backing).rounded() / backing }
+        return NSRect(x: snap(x), y: snap((bounds.height - height) / 2), width: width, height: height)
     }
     var qaCharacterRect: NSRect? { characterLayer.isHidden ? nil : characterRect }
     var qaProviderMarkRect: NSRect? { providerMarkView.isHidden ? nil : providerMarkView.frame }
@@ -2583,6 +2642,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
                 needsLayout = true
                 invalidateChrome()
             }
+            setHeaderScale(1)
             return
         }
         let plan = controller.plan(for: input.snapshot, now: now)
@@ -2595,8 +2655,33 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             needsLayout = true
             invalidateChrome()
         }
+        setHeaderScale(controller.layoutFactor)
         reconcileCharacterVisibility()
     }
+
+    private var backingScaleForCharacter: CGFloat {
+        window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+    }
+
+    private func setHeaderScale(_ scale: CGFloat) {
+        guard scale != headerScale else { return }
+        headerScale = scale
+        needsLayout = true
+        invalidateChrome()
+        onHeaderScaleChange?()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        // A Medium or Large sprite's whole-device-pixel size depends on the
+        // display. Canvas zoom also lands here (it moves the effective backing
+        // scale), so only a new WINDOW scale re-lays the bar.
+        let scale = backingScaleForCharacter
+        guard scale != laidOutBackingScale else { return }
+        laidOutBackingScale = scale
+        if characterSize != nil, headerScale != 1 { needsLayout = true }
+    }
+    private var laidOutBackingScale: CGFloat = 0
 
     func revisitCharacter(now: Date) { refreshCharacter(now: now) }
 
@@ -2816,7 +2901,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             width: size,
             height: size
         )
-        let markSize = 14 * chromeScale
+        let markSize = markSide
         providerMarkView.frame = NSRect(
             x: CGFloat(Space.m) * chromeScale,
             y: (bounds.height - markSize) / 2,
@@ -3159,11 +3244,11 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// height. 1 when zoomed in (floor inert), > 1 when zoomed out. Title text +
     /// drag dots scale by this so they grow with the tab instead of shrinking to
     /// nothing at low zoom (the bar height is `bounds.height`, set by the parent).
-    private var chromeScale: CGFloat { max(1, bounds.height / TileNSView.titleBarHeight) }
+    private var chromeScale: CGFloat { zoomChromeScale }
 
     /// World point size the title is drawn at (natural 12 × chrome scale). On
     /// screen it renders at `* zoom`. Exposed for the chrome-scale check.
-    var titleFontWorldSize: CGFloat { 12 * chromeScale }
+    var titleFontWorldSize: CGFloat { 12 * titleScale }
 
     /// The attributes the title is drawn with. Truncating-tail, which is the fix for
     /// a real defect the P0.6 baselines caught: the title was drawn at an origin with

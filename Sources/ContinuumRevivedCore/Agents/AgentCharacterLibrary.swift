@@ -65,6 +65,55 @@ public enum AgentCharacterConfig {
 
     public static let defaultMotion = Motion.working
 
+    /// How big characters are, and with them the line that holds each one: the
+    /// sidebar row's second line and the agent tile's title bar.
+    public static let sizeKey = "agentCharacters.size"
+
+    public enum Size: String, CaseIterable, Sendable {
+        /// The original size: one point per art pixel, a 24 pt title bar.
+        case small
+        case medium
+        case large
+
+        /// How much the character's slot and its surroundings grow.
+        public var factor: Double {
+            switch self {
+            case .small: return 1
+            case .medium: return 1.5
+            case .large: return 2.25
+            }
+        }
+
+        public var title: String {
+            switch self {
+            case .small: return "Small"
+            case .medium: return "Medium"
+            case .large: return "Large"
+            }
+        }
+
+        /// Device pixels per art pixel on a display of `backingScale`: the nearest
+        /// whole number to `factor × backingScale`, halves rounding up, so a
+        /// pixel-art character is never resampled to a fraction and every size
+        /// is bigger than Small on every display (2/3/5 on Retina, 1/2/2 at 1x).
+        public func devicePixelsPerArtPixel(backingScale: Double) -> Int {
+            let scale = backingScale.isFinite && backingScale > 0 ? backingScale : 2
+            return max(1, Int((factor * scale).rounded(.toNearestOrAwayFromZero)))
+        }
+
+        /// Points per art pixel: `devicePixelsPerArtPixel / backingScale`.
+        public func pointsPerArtPixel(backingScale: Double) -> Double {
+            let scale = backingScale.isFinite && backingScale > 0 ? backingScale : 2
+            return Double(devicePixelsPerArtPixel(backingScale: scale)) / scale
+        }
+    }
+
+    public static let defaultSize = Size.small
+
+    public static func size(_ defaults: UserDefaults) -> Size {
+        defaults.string(forKey: sizeKey).flatMap(Size.init(rawValue:)) ?? defaultSize
+    }
+
     public static func isEnabled(_ defaults: UserDefaults) -> Bool {
         defaults.object(forKey: enabledKey) as? Bool ?? defaultEnabled
     }

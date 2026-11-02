@@ -56,6 +56,10 @@ final class AgentCharacterController {
     private(set) var defaults: UserDefaults = .standard
     private(set) var isEnabled = false
     private(set) var motion = AgentCharacterConfig.defaultMotion
+    private(set) var size = AgentCharacterConfig.defaultSize
+    /// How much a character's line grows: the size's factor while characters
+    /// show, else 1 (off never makes a row or a bar taller).
+    var layoutFactor: CGFloat { isEnabled ? CGFloat(size.factor) : 1 }
     private(set) var theme: AgentCharacterTheme?
     /// Where imported sets are copied (`<app support>/characters`). Injected by checks.
     /// The user themes folder: imported copies and the sets agents write. Watched
@@ -110,7 +114,8 @@ final class AgentCharacterController {
     func adopt(defaults: UserDefaults) {
         self.defaults = defaults
         observers.forEach(NotificationCenter.default.removeObserver)
-        observers = [AgentCharacterConfig.enabledKey, AgentCharacterConfig.motionKey, AgentCharacterConfig.themeKey].map { key in
+        observers = [AgentCharacterConfig.enabledKey, AgentCharacterConfig.motionKey, AgentCharacterConfig.themeKey,
+                     AgentCharacterConfig.sizeKey].map { key in
             NotificationCenter.default.addObserver(
                 forName: SettingChangeEvent.name(for: SettingID(rawValue: key)), object: nil, queue: .main
             ) { _ in MainActor.assumeIsolated { AgentCharacterController.shared.reload() } }
@@ -194,14 +199,16 @@ final class AgentCharacterController {
     func reload(force: Bool = false) {
         let enabled = AgentCharacterConfig.isEnabled(defaults)
         let motion = AgentCharacterConfig.motion(defaults)
+        let size = AgentCharacterConfig.size(defaults)
         let selected = defaults.string(forKey: AgentCharacterConfig.themeKey)
         // Off means nothing resident: no theme, no atlases.
         let theme = enabled ? resolveTheme(id: selected) : nil
         // A set edited in place keeps its id: compare what it draws, not its name.
-        let changed = force || enabled != isEnabled || motion != self.motion || theme != self.theme
+        let changed = force || enabled != isEnabled || motion != self.motion || size != self.size || theme != self.theme
         if theme != self.theme || theme == nil { atlases.removeAll() }
         isEnabled = enabled
         self.motion = motion
+        self.size = size
         self.theme = theme
         if changed { NotificationCenter.default.post(name: Self.didChangeNotification, object: self) }
     }
@@ -309,6 +316,16 @@ final class AgentCharacterController {
         // Each owner re-resolves and schedules its next deadline, if any.
         for owner in due { owner.revisitCharacter(now: now) }
         if let next = revisits.values.map(\.at).min() { armRevisitTimer(at: next) }
+    }
+
+    /// A character's drawn size in points: its art at a whole number of device
+    /// pixels per art pixel for `backingScale` (`Size.devicePixelsPerArtPixel`).
+    func spriteSize(of atlas: AgentCharacterSpriteAtlas, backingScale: CGFloat,
+                    size: AgentCharacterConfig.Size? = nil) -> NSSize {
+        let perArtPixel = CGFloat((size ?? self.size).pointsPerArtPixel(backingScale: Double(backingScale)))
+        let themeScale = CGFloat(theme?.scale ?? 1)
+        return NSSize(width: CGFloat(atlas.atlas.frameWidth) / themeScale * perArtPixel,
+                      height: CGFloat(atlas.atlas.frameHeight) / themeScale * perArtPixel)
     }
 
     static func appearance(of view: NSView) -> AgentCharacterAtlas.Appearance {

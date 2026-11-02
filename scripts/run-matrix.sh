@@ -2083,6 +2083,11 @@ run_app_check .build/debug/Array --tile-character-check
 # chip in that child's pose, a sender's card, a Task row, off-viewport slots own
 # no sprite, and off restores today's icons at the same chip height.
 run_app_check .build/debug/Array --transcript-character-check
+# Plan 110 › size: Small / Medium / Large through the setting's notification:
+# tile bar 28/36/54 at 100% (today's zoom floor on top), sidebar row +0/8/20 pt,
+# the character at whole device pixels per art pixel and centred with the mark,
+# title, pill, ⋯ and ×, a note unchanged, Small byte-identical to today.
+run_app_check .build/debug/Array --character-size-check
 # Plan 110, slice 6: Settings › Appearance › Agent characters: import copies one
 # file, a bad file shows its problems and imports nothing, discovery uses a fixture
 # home only, and the preview grid renders in both appearances (still under RM).

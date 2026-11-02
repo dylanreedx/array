@@ -947,6 +947,20 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         Double(proposal.pitch)
     }
 
+    /// Plan 110 › size: how much a two-line lead card's second line (where its
+    /// character and provider mark sit) grows for the character size: its 16 pt
+    /// band times the size's factor, so 0 / 8 / 20 pt for Small / Medium / Large,
+    /// and 0 while characters are off. The title line keeps the sidebar's type.
+    static func characterLineExtra(for proposal: SidebarDensityProposal) -> CGFloat {
+        guard proposal.isTwoLine else { return 0 }
+        return (proposal.bandDetail * (AgentCharacterController.shared.layoutFactor - 1)).rounded()
+    }
+
+    /// A lead card's height: the proposal's, plus its character line's growth.
+    static func leadCardHeight(for proposal: SidebarDensityProposal) -> CGFloat {
+        proposal.cardHeight + characterLineExtra(for: proposal)
+    }
+
     // Ticket: .plans/0721-subagents-handoff.md
     /// The list's outer gutter — where a ROOT card's leading edge sits. Named
     /// rather than typed at the one call site, because the tree connector has to
@@ -1142,6 +1156,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         metadataRasterScale = scale
         refreshInkMetrics()
         needsLayout = true
+        // The sprite's whole-device-pixel size depends on the display; posed at the
+        // list's own clock, as every other re-apply is.
+        if characterSize != nil, let now = shown?.now { applyCharacter(now: max(now, Date())) }
     }
 
     override var isFlipped: Bool { true }
@@ -1303,8 +1320,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             title: row.title, allowsMotion: !prefersReducedMotion())
         sprite.show(controller.plan(for: snapshot, now: now), sprite: atlas,
                     phase: controller.phase(for: row.id), now: now)
-        let size = NSSize(width: atlas.atlas.frameWidth / (controller.theme?.scale ?? 1),
-                          height: atlas.atlas.frameHeight / (controller.theme?.scale ?? 1))
+        // Plan 110 › size: a lead's character takes the size setting, at a whole
+        // number of device pixels per art pixel. A subagent's one-line 20 pt row
+        // inside its lead's card keeps the small one, as transcript chips do.
+        let size = controller.spriteSize(of: atlas, backingScale: metadataRasterScale,
+                                         size: isSubagentRow ? .small : nil)
         if characterSize != size {
             characterSize = size
             needsLayout = true
@@ -1998,7 +2018,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                                 height: InboxOwnershipChrome.subagentHeight + spacing)
         } else {
             card.frame = NSRect(x: gutter, y: gap / 2, width: max(0, bounds.width - gutter * 2),
-                                height: proposal.cardHeight)
+                                height: Self.leadCardHeight(for: proposal))
         }
         decorations.frame = card.bounds
         card.underlayAlpha = groupBackground.alphaUnderCard
@@ -2031,7 +2051,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         decorations.needsDisplay = true
         let hintSize = jumpHint.fittingSize
         jumpHint.frame = NSRect(x: bounds.width - hintSize.width - 8,
-                                y: (min(bounds.height, sub ? bounds.height : proposal.cardHeight) - hintSize.height) / 2,
+                                y: (min(bounds.height, sub ? bounds.height : Self.leadCardHeight(for: proposal)) - hintSize.height) / 2,
                                 width: hintSize.width, height: hintSize.height)
     }
 
@@ -2050,7 +2070,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private func layoutLeadLines(pad: CGFloat, l1: CGFloat) {
         guard let shown else { return }
         let right = card.bounds.width - pad
-        let l2 = proposal.insetV + proposal.bandTitle + proposal.gapBottom + lineCentres.detail
+        let lineExtra = Self.characterLineExtra(for: proposal)
+        let l2 = proposal.insetV + proposal.bandTitle + proposal.gapBottom + lineCentres.detail + lineExtra / 2
         // Line 1: fold glyph and count, dot, title — running glyph and clock right.
         var x = pad
         if !disclosureButton.isHidden {
@@ -2095,8 +2116,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         place(titleLabel, x: textX, centre: l1, width: r - 4 - textX)
 
         // Line 2, under the title: folder and project, then the tail or the branch;
-        // the provider mark at the right.
-        let markSide: CGFloat = 12
+        // the provider mark at the right. The mark grows with the character size.
+        let markSide = (12 * AgentCharacterController.shared.layoutFactor).rounded()
         // The settle nudge takes the mark's place on line 2, as hover actions do.
         let hasMark = decorations.mark != nil && settleNudge.isHidden
         let modelWidth = modelLabel.isHidden ? 0 : min(card.bounds.width * 0.4, Self.width(of: modelLabel))

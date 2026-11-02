@@ -355,6 +355,7 @@ struct AgentInboxCardStyleOverride {
                 proposal.isTwoLine && row.depth > 0
                     ? Double(InboxOwnershipChrome.subagentHeight)
                     : AgentInbox96CellView.rowHeight(for: proposal)
+                        + Double(AgentInbox96CellView.characterLineExtra(for: proposal))
             },
             ownsSubagents: proposal.isTwoLine)
     }
@@ -1714,8 +1715,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     @objc private func agentCharactersDidChange() {
         let now = clock()
+        // Plan 110 › size: a new size (or characters on or off at Medium or Large)
+        // changes every lead card's height. Re-measured once, on the change only.
+        let extra = AgentInbox96CellView.characterLineExtra(for: .production)
+        if extra != characterLineExtraApplied {
+            characterLineExtraApplied = extra
+            if tableView.numberOfRows > 0 {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0
+                    tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<tableView.numberOfRows))
+                }
+            }
+            for cell in visibleCharacterCells { cell.needsLayout = true }
+        }
         for cell in visibleCharacterCells { cell.applyCharacter(now: now) }
     }
+    private var characterLineExtraApplied: CGFloat = 0
 
     @objc private func agentCharacterVisibilityDidChange() {
         for cell in visibleCharacterCells { cell.reconcileCharacterVisibility() }

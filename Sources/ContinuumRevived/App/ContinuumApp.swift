@@ -2459,6 +2459,19 @@ enum ContinuumApp {
         }
 
         // Plan 110: the preview's offscreen recording (not a matrix leg).
+        // Plan 110 › size: the comparison sheets and the live size-switch recording.
+        if let index = CommandLine.arguments.firstIndex(of: "--agent-characters-size-recording-check") {
+            _ = NSApplication.shared
+            let out = CommandLine.arguments.dropFirst(index + 1).first.map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? URL(fileURLWithPath: "qa-runs/agent-characters/size", isDirectory: true)
+            do {
+                print(try CharacterSizePreview.run(outDirectory: out))
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL character size recording: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--agent-characters-recording-check") {
             _ = NSApplication.shared
             let out = CommandLine.arguments.dropFirst(index + 1).first.map { URL(fileURLWithPath: $0) }
@@ -2523,6 +2536,17 @@ enum ContinuumApp {
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL transcript character: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        // Plan 110 › size: Small / Medium / Large grow the tile bar and the sidebar row.
+        if CommandLine.arguments.contains("--character-size-check") {
+            _ = NSApplication.shared
+            do {
+                print(try CharacterSizeChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL character size: \(error)\n", stderr)
                 Foundation.exit(1)
             }
         }
