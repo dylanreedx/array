@@ -12699,10 +12699,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let lentArea {
             return ShareTarget(workspaceID: runtime.workspaceId, origin: origin, items: lent, area: lentArea)
         }
-        // A portal needs one tile that is more than a private card.
-        guard items.contains(where: { $0.kind != .terminal }) else { return nil }
+        // A portal needs one tile that is more than a private card. A
+        // terminal shared on its own is a mirror, after its own warning.
+        guard !items.isEmpty, origin != .area || items.contains(where: { $0.kind != .terminal }) else { return nil }
         // Mode B: Share on any tile in a portal opens that portal's popover.
-        if origin == .agent, items.count == 1, let portal = hostedPortalArea(forTile: items[0].key.tileID) {
+        if origin != .area, items.count == 1, let portal = hostedPortalArea(forTile: items[0].key.tileID) {
             return ShareTarget(workspaceID: runtime.workspaceId, origin: .area, items: items, area: portal)
         }
         // Mode B: tiles already shared through one portal open that portal's

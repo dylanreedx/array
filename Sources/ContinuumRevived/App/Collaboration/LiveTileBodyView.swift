@@ -79,6 +79,8 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         frameView.onClick = { [weak self] x, y in self?.send(.browserClick(x: x, y: y)) }
         frameView.onScroll = { [weak self] dx, dy in self?.accumulateScroll(dx: dx, dy: dy) }
         frameView.isHidden = true
+        // A browser shows a page or pictures, never text.
+        scroll.isHidden = kind == .browser
         addSubview(caption); addSubview(scroll); addSubview(frameView)
         applyEditability()
         renderCaption()
@@ -153,11 +155,12 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
             // Edits typed before the first state arrived are folded in now.
             showReplicaText()
         case .file(let file):
-            setReadOnlyText(file.text ?? file.notice ?? "", attributed: nil)
+            setReadOnlyText(file.text ?? file.notice ?? "")
         case .diff(let diff):
-            setReadOnlyText(diff.diff, attributed: Self.colouredDiff(diff.diff, in: self))
+            setReadOnlyText(diff.diff)
+            colourDiffLines()
         case .terminal(let terminal):
-            setReadOnlyText(terminal.text, attributed: nil, scrollToEnd: true)
+            setReadOnlyText(terminal.text, scrollToEnd: true)
         case .browser(let browser):
             applyBrowser(browser)
         }
@@ -237,35 +240,33 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
 
     // MARK: Read-only kinds
 
-    private func setReadOnlyText(_ text: String, attributed: NSAttributedString?, scrollToEnd: Bool = false) {
-        guard textView.string != text || attributed != nil else { return }
+    private func setReadOnlyText(_ text: String, scrollToEnd: Bool = false) {
+        guard textView.string != text else { return }
         let visible = scroll.contentView.bounds.origin
-        if let attributed { textView.textStorage?.setAttributedString(attributed) }
-        else {
-            textView.string = text
-            textView.textColor = TextToken.textPrimary.color.nsColor(in: self)
-        }
+        textView.string = text
+        textView.textColor = TextToken.textPrimary.color.nsColor(in: self)
         if scrollToEnd { textView.scrollToEndOfDocument(nil) }
         else { scroll.contentView.scroll(to: visible); scroll.reflectScrolledClipView(scroll.contentView) }
     }
 
-    static func colouredDiff(_ diff: String, in view: NSView) -> NSAttributedString {
-        let result = NSMutableAttributedString()
-        let font = NSFont.token(.bodyMono)
-        let primary = TextToken.textPrimary.color.nsColor(in: view)
-        let secondary = TextToken.textSecondary.color.nsColor(in: view)
-        let added = AccentToken.accentDone.color.nsColor(in: view)
-        let removed = AccentToken.accentFailed.color.nsColor(in: view)
-        for line in diff.split(separator: "\n", omittingEmptySubsequences: false) {
-            let colour: NSColor
+    /// The diff's +/- colours, as token runs over the text's one token colour
+    /// (the appearance census reads both).
+    private func colourDiffLines() {
+        guard let storage = textView.textStorage else { return }
+        let text = textView.string as NSString
+        let secondary = TextToken.textSecondary.color.nsColor(in: self)
+        let added = AccentToken.accentDone.color.nsColor(in: self)
+        let removed = AccentToken.accentFailed.color.nsColor(in: self)
+        text.enumerateSubstrings(in: NSRange(location: 0, length: text.length), options: .byLines) { line, range, _, _ in
+            guard let line else { return }
+            let colour: NSColor?
             if line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("diff ") || line.hasPrefix("index ") || line.hasPrefix("@@") {
                 colour = secondary
             } else if line.hasPrefix("+") { colour = added }
             else if line.hasPrefix("-") { colour = removed }
-            else { colour = primary }
-            result.append(NSAttributedString(string: line + "\n", attributes: [.font: font, .foregroundColor: colour]))
+            else { colour = nil }
+            if let colour { storage.addAttribute(.foregroundColor, value: colour, range: range) }
         }
-        return result
     }
 
     // MARK: Browser
@@ -382,11 +383,11 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyAppearance() }
     private func applyAppearance() {
         caption.textColor = TextToken.textSecondary.color.nsColor(in: self)
-        if kind == .diff, case .diff(let diff)? = state?.payload {
-            textView.textStorage?.setAttributedString(Self.colouredDiff(diff.diff, in: self))
-        } else {
-            textView.textColor = TextToken.textPrimary.color.nsColor(in: self)
-        }
+        let primary = TextToken.textPrimary.color.nsColor(in: self)
+        textView.textColor = primary
+        // An empty text view reads its colour back from its typing attributes.
+        textView.typingAttributes[.foregroundColor] = primary
+        if kind == .diff { colourDiffLines() }
         textView.insertionPointColor = TextToken.textPrimary.color.nsColor(in: self)
         needsDisplay = true
     }

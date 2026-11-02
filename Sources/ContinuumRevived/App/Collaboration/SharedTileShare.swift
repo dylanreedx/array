@@ -170,7 +170,7 @@ extension AppDelegate {
         case .browser:
             let view: @MainActor () -> BrowserTileNSView? = { [weak canvas] in canvas?.tileView(for: tileID) as? BrowserTileNSView }
             return BrowserLiveSource(webView: { (view()?.runtime as? WKWebViewBrowserRuntime)?.webView },
-                                     address: { view()?.runtime.url ?? tile.metadata.url ?? "" },
+                                     address: { (view()?.runtime.url).flatMap { $0.isEmpty ? nil : $0 } ?? tile.metadata.url ?? "" },
                                      title: { view()?.runtime.title ?? tile.title })
         default:
             return nil
@@ -315,7 +315,8 @@ enum LiveTileTextSplice {
             return range.location + replacement.utf16.count
         }
         let selection = textView.selectedRange()
-        textView.textStorage?.replaceCharacters(in: range, with: replacement)
+        // In the view's own font and colour, as typing would have put it there.
+        textView.textStorage?.replaceCharacters(in: range, with: NSAttributedString(string: replacement, attributes: textView.typingAttributes))
         let anchor = map(selection.location), end = map(NSMaxRange(selection))
         textView.setSelectedRange(NSRange(location: anchor, length: max(0, end - anchor)))
     }

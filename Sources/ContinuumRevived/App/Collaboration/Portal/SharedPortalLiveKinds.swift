@@ -100,7 +100,7 @@ struct SharedPortalBrowserKind: SharedPortalKind {
     static func source(tile id: UUID, host: SharedPortalHostContext) -> BrowserLiveSource {
         let view: @MainActor () -> BrowserTileNSView? = { host.tileView(id) as? BrowserTileNSView }
         return BrowserLiveSource(webView: { (view()?.runtime as? WKWebViewBrowserRuntime)?.webView },
-                                 address: { view()?.runtime.url ?? host.tile(id)?.metadata.url ?? "" },
+                                 address: { (view()?.runtime.url).flatMap { $0.isEmpty ? nil : $0 } ?? host.tile(id)?.metadata.url ?? "" },
                                  title: { view()?.runtime.title ?? host.tile(id)?.title ?? "" })
     }
     /// The contract's payload: `browser.json`, and for a private page the still.
