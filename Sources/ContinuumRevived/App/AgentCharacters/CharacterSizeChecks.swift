@@ -167,8 +167,12 @@ enum CharacterSizeChecks {
                 let expectedBar = max(24 * factor, floor)
                 let bar = view.chromeBarHeight
                 try expect(abs(bar - expectedBar) < 0.01, "\(where_): the agent tile's title bar is \(expectedBar) pt, got \(bar)")
-                try expect(abs(view.contentTopInsetWorldHeight - 24 * factor) < 0.01,
-                           "\(where_): the body starts \(24 * factor) pt down (\(view.contentTopInsetWorldHeight))")
+                // The size sets the design bar; the body starts under it and under
+                // the under-bar, which owns its own height (`--tile-chrome-scale-check`).
+                let under = view.underBarWorldHeight
+                let expectedTop = 24 * factor + (under == 0 ? 0 : (under * TileNSView.minScreenGrabPx / TileNSView.titleBarHeight).rounded(.up))
+                try expect(abs(view.naturalTitleBarHeight - 24 * factor) < 0.01 && abs(view.contentTopInsetWorldHeight - expectedTop) < 0.01,
+                           "\(where_): the body starts \(expectedTop) pt down, under a \(24 * factor) pt bar (\(view.naturalTitleBarHeight), \(view.contentTopInsetWorldHeight))")
                 try expect(noteView.chromeBarHeight == floor, "\(where_): a note (no character) keeps today's \(floor) pt bar, got \(noteView.chromeBarHeight)")
                 guard let sprite = view.qaCharacterRect, let mark = view.qaProviderMarkRect,
                       let barView = view.qaTitleBarView else {
