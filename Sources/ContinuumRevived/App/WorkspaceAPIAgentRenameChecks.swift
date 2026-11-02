@@ -103,7 +103,7 @@ enum WorkspaceAPIAgentRenameChecks {
         try expect(try stored(f.agentId).map { $0 == ("Fix parser tests", .agent) } == true, "agent-set name survives a store reload")
         spin(0.3) { rowTitle(f.agentId) == "Fix parser tests" }
         try expect(rowTitle(f.agentId) == "Fix parser tests", "sidebar row shows the API name, got \(String(describing: rowTitle(f.agentId)))")
-        try expect(tileTitle() == "Agent · Fix parser tests", "tile title shows the API name, got \(String(describing: tileTitle()))")
+        try expect(tileTitle() == "Fix parser tests", "tile title shows the API name, got \(String(describing: tileTitle()))")
         try expect(try result(rename(f.agentId, "Fix parser tests", "proactive", key: "self-1")) == first, "same-key replay returns the original outcome")
         try error(rename(f.agentId, "Something else", "proactive", key: "self-1"), .idempotencyConflict)
         try expect(try result(rename(f.agentId, "Fix parser tests", "proactive"))["durability"]?.string == "unchanged", "same name is unchanged")
@@ -124,7 +124,7 @@ enum WorkspaceAPIAgentRenameChecks {
         try error(rename(f.agentId, "Drift", "proactive"), .targetConflict)
         try expect(supervisor.records[f.agentId]?.displayName == "Requested title", "proactive may not replace a requested name either")
         spin(0.3) { rowTitle(f.agentId) == "Requested title" }
-        try expect(rowTitle(f.agentId) == "Requested title" && tileTitle() == "Agent · Requested title",
+        try expect(rowTitle(f.agentId) == "Requested title" && tileTitle() == "Requested title",
                    "row and tile follow a requested rename: \(String(describing: rowTitle(f.agentId))) / \(String(describing: tileTitle()))")
 
         // 4. Refusals change nothing.
@@ -194,7 +194,7 @@ enum WorkspaceAPIAgentRenameChecks {
         try error(rename(f.agentId, "Unsaved", "requested"), .outcomeUnknown)
         try FileManager.default.removeItem(at: file)
         try FileManager.default.moveItem(at: backup, to: file)
-        try expect(supervisor.records[f.agentId]?.displayName == "Via pi" && tileTitle() == "Agent · Via pi",
+        try expect(supervisor.records[f.agentId]?.displayName == "Via pi" && tileTitle() == "Via pi",
                    "a failed save neither changes memory nor the tile")
 
         try expect(f.canvas.armedZoneId == armed && f.canvas.viewport == viewport && f.focusBroker.activeSurface == focus

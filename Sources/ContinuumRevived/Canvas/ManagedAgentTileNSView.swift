@@ -4625,8 +4625,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             model: providerSettings.model,
             id: attachedAgentID?.rawValue
         )
+        // Just the name: the mark beside it already says it is an agent.
         setTitleBarIdentity(
-            title: "Agent · \(name)",
+            title: name,
             providerModel: providerSettings.model
         )
     }

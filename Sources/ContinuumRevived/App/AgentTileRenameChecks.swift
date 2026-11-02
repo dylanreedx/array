@@ -165,14 +165,14 @@ enum AgentTileRenameChecks {
               "the rename was not persisted: \(String(describing: stored()?.displayName))")
         pump(0.2)
         check(row() == "Parser flake hunt", "the sidebar row still reads \(String(describing: row()))")
-        check(title() == "Agent · Parser flake hunt", "the tile title reads \(String(describing: title()))")
+        check(title() == "Parser flake hunt", "the tile title reads \(String(describing: title()))")
 
         // 3. Escape cancels whatever was typed.
         doubleClickTitle()
         type("Discard me")
         escape()
         check(tile.qaTitleEditor == nil, "Escape left the rename field open")
-        check(name() == "Parser flake hunt" && title() == "Agent · Parser flake hunt",
+        check(name() == "Parser flake hunt" && title() == "Parser flake hunt",
               "Escape renamed the agent to \(String(describing: name()))")
 
         // 4. An empty or whitespace-only name is refused; the old one stays.
@@ -211,7 +211,7 @@ enum AgentTileRenameChecks {
         check(name() == "Renamed from the menu" && stored()?.displayName == "Renamed from the menu",
               "the menu rename did not land: \(String(describing: name()))")
         pump(0.2)
-        check(row() == "Renamed from the menu" && title() == "Agent · Renamed from the menu",
+        check(row() == "Renamed from the menu" && title() == "Renamed from the menu",
               "row/title after menu rename: \(String(describing: row())) / \(String(describing: title()))")
 
         // 6. A relaunch reads the same name from disk.

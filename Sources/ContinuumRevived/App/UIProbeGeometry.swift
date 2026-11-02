@@ -6357,7 +6357,7 @@ enum UIProbeGeometry {
                 }
                 tile.layoutSubtreeIfNeeded()
                 transcript.layoutSubtreeIfNeeded()
-                guard tile.chromeSnapshot?.title == "Agent · \(AgentRecord.defaultAgentName)",
+                guard tile.chromeSnapshot?.title == AgentRecord.defaultAgentName,
                       tile.chromeSnapshot?.providerModel == tile.qaProviderSettings.model,
                       tile.chromeSnapshot?.showsProviderMark
                         == (BrandMark96.mark(forModel: tile.qaProviderSettings.model) != nil) else {

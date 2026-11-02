@@ -2295,7 +2295,8 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     }
 
     private var displayedTitle: String {
-        displayTitleOverride ?? "\(tile.kind.displayName) · \(tile.title)"
+        displayTitleOverride ?? (tile.kind == .managedAgent && !tile.title.isEmpty
+            ? tile.title : "\(tile.kind.displayName) · \(tile.title)")
     }
 
     var snapshot: TileNSView.ChromeSnapshot {

@@ -19953,7 +19953,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             metadata: TileMetadata(launchProfileId: "managed")))
         displayTile.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
         displayTile.applyProviderSettings(.init(model: "openai/gpt-5.6-sol", thinking: "medium"))
-        try expect(displayTile.chromeSnapshot?.title == "Agent · \(AgentRecord.defaultAgentName)",
+        try expect(displayTile.chromeSnapshot?.title == AgentRecord.defaultAgentName,
                    "managed chrome must use the conversation name, not the model — got \(displayTile.chromeSnapshot?.title ?? "nil")")
         try expect(displayTile.chromeSnapshot?.showsProviderMark == true
                    && displayTile.chromeSnapshot?.providerModel == "openai/gpt-5.6-sol",
@@ -19975,7 +19975,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                    "re-attach to a custom folder must show the folder name, got \(displayTile.qaLocationText)")
         try expect(delegate.agentSupervisor.rename(agentID: displayAgent, to: "Investigate tile identity"),
                    "the chrome identity witness could not rename its attached agent")
-        try expect(displayTile.chromeSnapshot?.title == "Agent · Investigate tile identity",
+        try expect(displayTile.chromeSnapshot?.title == "Investigate tile identity",
                    "record rename did not update the draggable chrome — got \(displayTile.chromeSnapshot?.title ?? "nil")")
     }
 

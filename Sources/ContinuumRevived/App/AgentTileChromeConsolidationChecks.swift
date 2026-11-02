@@ -38,7 +38,7 @@ enum AgentTileChromeConsolidationChecks {
                     // writes: it used to change only the outer bar, leaving a
                     // visible Configuring label and duplicate title underneath.
                     tile.agentStatus = .done
-                    tile.setTitleBarIdentity(title: "Agent · \(tile.qaAgentHeaderName)", providerModel: tile.chromeSnapshot?.providerModel)
+                    tile.setTitleBarIdentity(title: tile.qaAgentHeaderName, providerModel: tile.chromeSnapshot?.providerModel)
                     tile.wakeChrome()
                     tile.layoutSubtreeIfNeeded()
                     let context = tile.qaPageZoomHeaderView
