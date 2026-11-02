@@ -875,6 +875,22 @@ enum ContinuumApp {
                 }
             }
         }
+        // .plans/113: sort the sidebar by activity or project.
+        if let index = CommandLine.arguments.firstIndex(of: "--sidebar-sort-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    let next = CommandLine.arguments.index(after: index)
+                    let dir = next < CommandLine.arguments.endIndex && !CommandLine.arguments[next].hasPrefix("-")
+                        ? URL(fileURLWithPath: CommandLine.arguments[next]) : nil
+                    print(try SidebarSortChecks.run(outputDirectory: dir))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         // .plans/106: who owns whom — subagents in their lead's card.
         if let index = CommandLine.arguments.firstIndex(of: "--sidebar-ownership-check") {
             _ = NSApplication.shared
@@ -14020,6 +14036,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// .plans/113: the sidebar's real host wiring, for `--sidebar-sort-check`.
+    func configureWorkspaceSidebarForQA(_ sidebar: WorkspaceSidebarView) { configureWorkspaceSidebar(sidebar) }
+
     private func configureWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
         installSidebarTurnObserver()
         // Confidence pass: History folds behind a counted heading and the shelves
@@ -14067,6 +14086,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.configureInboxScope(WorkspaceSidebarConfig.resolveScope(defaults: settingsDefaults)) { [weak self] scope in
             guard let self else { return }
             WorkspaceSidebarConfig.setScope(scope, defaults: self.settingsDefaults)
+        }
+        // .plans/113: the sort, persisted beside the scope.
+        sidebar.agentInbox.setSortMode(WorkspaceSidebarConfig.resolveSortMode(defaults: settingsDefaults))
+        sidebar.agentInbox.onSortModeChange = { [weak self] mode in
+            guard let self else { return }
+            WorkspaceSidebarConfig.setSortMode(mode, defaults: self.settingsDefaults)
         }
         // .plans/87: the pills' second dimension, persisted beside the scope.
         sidebar.agentInbox.setHiddenSources(WorkspaceSidebarConfig.hiddenSources(defaults: settingsDefaults))
@@ -39456,6 +39481,10 @@ extension AppDelegate {
     let restoreRevealShelves = WorkspaceSidebarConfig.qaIsolateShelves(defaults: standardDefaults)
     defer { restoreRevealShelves() }
     revealApp.configureWorkspaceSidebar(revealSidebar)
+    // .plans/113: ⌘N jumps by position, so this section draws the frozen order
+    // rather than the stored Most active default (`--sidebar-sort-check` owns
+    // that). Set on the view, so no defaults domain is written for it.
+    revealSidebar.agentInbox.setSortMode(.newest)
     // Production installs this immediately after the active controller wires the
     // broker. This check needs the same app-level focus→read bridge so a tile click
     // is not accidentally proven only by the sidebar's explicit reveal call.
@@ -43069,6 +43098,10 @@ extension AppDelegate {
         defer { restoreShelves() }
         app.configureWorkspaceSidebar(sidebar)
         sidebar.configureInboxScope(.all) { _ in }
+        // .plans/113: this leg counts what a push rebuilds with rows that stay
+        // put, so it draws the frozen order; a Most active re-sort is a reload
+        // by design (`--sidebar-sort-check` owns it).
+        sidebar.agentInbox.setSortMode(.newest)
         app.refreshAgentSurfaces(notify: false)
         sidebar.layoutSubtreeIfNeeded()
         let inbox = sidebar.inboxForQA

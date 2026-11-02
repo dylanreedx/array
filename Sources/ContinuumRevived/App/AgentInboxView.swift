@@ -659,6 +659,24 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the same spawn ⌘K's New Agent makes.
     private let newAgentButton = ChromeIconButton(symbolName: "square.and.pencil", accessibilityLabel: "New Agent")
     var onNewAgent: (() -> Void)?
+    // Plan: .plans/113-sidebar-sort
+    /// The sort choice, icon-only beside the scope (one-row header only). It opens
+    /// a shared choice list: Most active, By project, Newest first.
+    private let sortButton = ChromeIconButton(symbolName: "arrow.up.arrow.down", accessibilityLabel: "Sort agents")
+    private let sortPopover = ChoicePopoverController()
+    /// How the live block is ordered. Born `.newest`, the frozen order every
+    /// committed baseline draws; the host restores the stored mode (default
+    /// `.mostActive`) through `setSortMode`, as it does the scope.
+    private(set) var sortMode: InboxSortMode = .newest
+    /// The user picked a sort. The host persists it. Not called for a restore.
+    var onSortModeChange: ((InboxSortMode) -> Void)?
+    /// The pointer is over the sidebar. While it is, or while a row is being
+    /// renamed, a push keeps every drawn row where it is; the re-sort waits for
+    /// the pointer to leave and then slides into place.
+    private var pointerOverList = false
+    private var sortHoldPending = false
+    /// Checks only: the sort list opens inside the offscreen check window.
+    var presentsSortOffscreenForQA = false
     /// The square the New agent button occupies: T3's `size-7`.
     static let headerIconButtonSide: CGFloat = 28
     private let scrollView: NSScrollView
@@ -1021,6 +1039,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The History heading's cell (.plans/05-close-to-history.md). Cached
     /// separately from the shelf's: both headings can be on screen at once.
     private var historyHeaderCell: AgentInboxShelfHeaderView?
+    /// .plans/113: one heading cell per project group in `By project`.
+    private var projectHeadingCells: [String: AgentInboxShelfHeaderView] = [:]
     // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
     /// The settled tail's footer, kept out of `cellsByRow` for the same reason the
     /// heading is. At most one exists — the tail is one section.
@@ -1457,6 +1477,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         newAgentButton.toolTip = "New Agent"
         newAgentButton.setAccessibilityIdentifier("ContinuumAgentInboxNewAgent")
         addSubview(newAgentButton)
+        sortButton.translatesAutoresizingMaskIntoConstraints = false
+        sortButton.onOpenMenu = { [weak self] in self?.toggleSortPopover() }
+        sortButton.setAccessibilityIdentifier("ContinuumAgentInboxSort")
+        sortButton.setAccessibilityHelp("Opens the sort choices")
+        applySortButtonLabel()
+        addSubview(sortButton)
         searchIcon.translatesAutoresizingMaskIntoConstraints = false
         searchIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
         searchIcon.imageScaling = .scaleProportionallyDown
@@ -1580,7 +1606,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             scopeButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
             searchFloor,
-            newAgentButton.leadingAnchor.constraint(equalTo: scopeButton.trailingAnchor, constant: Space.xs),
+            sortButton.leadingAnchor.constraint(equalTo: scopeButton.trailingAnchor, constant: Space.xs),
+            sortButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            sortButton.widthAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
+            sortButton.heightAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
+            newAgentButton.leadingAnchor.constraint(equalTo: sortButton.trailingAnchor, constant: Space.xs),
             newAgentButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
             newAgentButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             newAgentButton.widthAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
@@ -1792,6 +1822,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             defaultHeaderConstraints + stackedHeaderConstraints + oneRowHeaderConstraints)
         NSLayoutConstraint.activate(chosen)
         newAgentButton.isHidden = !oneRow
+        sortButton.isHidden = !oneRow
         // In one row the scope control holds its title against everything but
         // the search field's floor: below that its label truncates, rather than
         // the row forcing the sidebar wider than it is.
@@ -1827,6 +1858,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         tableView.setAccessibilityValue(count == 1 ? "1 agent" : "\(count) agents")
         emptyLabel.setAccessibilityValue(emptyLabel.stringValue)
         var children: [NSView] = [scopeButton, searchField, tableView]
+        // .plans/113: the sort button, wherever the header shows it.
+        if !sortButton.isHidden { children.insert(sortButton, at: 1) }
         if !emptyLabel.isHidden { children.append(emptyLabel) }
         if !bulkBar.isHidden { children.append(bulkBar) }
         if !undoToast.isHidden { children.append(undoToast) }
@@ -2111,6 +2144,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         cellsByRow.removeAll()
         shelfHeaderCell = nil
         historyHeaderCell = nil
+        projectHeadingCells.removeAll()
         settledMoreCell = nil
         fanoutRemainderCellsByParent.removeAll()
         updateShelfSpacerHeight()
@@ -2224,7 +2258,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // animate rows above `rowMotionRowLimit`, so nothing else moves them.)
             let anchor = next.count > Self.rowMotionRowLimit
                 ? visibleScrollAnchor(excluding: changed.touched) : nil
+            // .plans/113: a re-sort moves rows; they slide to their new places.
+            let slides = sortMode != .newest && next.count <= Self.rowMotionRowLimit
+                && window != nil && !prefersReducedMotion()
+            let previousY = slides ? drawnRowMinYs() : [:]
             render(next)
+            if slides {
+                layoutSubtreeIfNeeded()
+                tableView.layoutSubtreeIfNeeded()
+                slideSurvivors(from: previousY)
+            }
             if let anchor {
                 layoutSubtreeIfNeeded()
                 tableView.layoutSubtreeIfNeeded()
@@ -2305,7 +2348,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 .compactMap { $0?.localizedLowercase }
                 .contains { $0.localizedCaseInsensitiveContains(query) }
         }
-        let sorted = InboxSort.sortForInbox(rows: searched)
+        // .plans/113: under the pointer, rows already drawn keep their places.
+        let holding = sortHeld && !rows.isEmpty
+        if holding { sortHoldPending = true }
+        let sorted = InboxSort.sortForInbox(
+            rows: searched, mode: sortMode, heldOrder: holding ? rows.map(\.id) : nil)
         marksWorkspaces = Set(sorted.compactMap(\.workspaceId)).count > 1
         // P2D.4/P2D.5 must read the FULL sorted list. Capping or folding before
         // these derivations would make a hidden child's disclosure, rollup and
@@ -2367,7 +2414,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // "in 25m" is read from, so a card whose snooze expires between two renders
         // cannot make a committed baseline flap.
         let parts = InboxSort.partition(rows: visible, now: clock())
-        var built = agentItems(for: parts.active)
+        var built = sortMode == .byProject ? projectGroupedItems(for: parts.active) : agentItems(for: parts.active)
         // NO HEADER FOR AN EMPTY SHELF: "Snoozed (0)" is a line of chrome about
         // nothing, and it would take a row's worth of a 320pt sidebar to say it.
         if parts.shelfCount > 0 {
@@ -2408,6 +2455,33 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             built.insert(.shelfSpacer, at: firstShelf)
         }
         return built
+    }
+
+    // Plan: .plans/113-sidebar-sort
+    /// The live block in `By project`: a heading over each project's run of
+    /// top-level agents, which `InboxSort` already placed together. A subagent
+    /// stays with its lead, whatever project it is in. The count is the leads.
+    private func projectGroupedItems(for sectionRows: [AgentInboxRow]) -> [InboxListItem] {
+        var runs: [(title: String, rows: [AgentInboxRow])] = []
+        var currentKey: String?? = .none
+        for row in sectionRows {
+            if row.depth == 0 {
+                let key = InboxSort.projectGroupName(for: row)
+                if currentKey != .some(key) || runs.isEmpty {
+                    runs.append((key ?? InboxSort.noProjectTitle, []))
+                    currentKey = .some(key)
+                }
+            } else if runs.isEmpty {
+                runs.append((InboxSort.noProjectTitle, []))
+            }
+            runs[runs.count - 1].rows.append(row)
+        }
+        var result: [InboxListItem] = []
+        for run in runs {
+            result.append(.projectHeading(title: run.title, count: run.rows.filter { $0.depth == 0 }.count))
+            result.append(contentsOf: agentItems(for: run.rows))
+        }
+        return result
     }
 
     /// Turn a section's agent rows into table items, inserting each remainder
@@ -2545,7 +2619,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             case .fanoutRemainder(let remainder):
                 depths.append(min((depthByAgent[remainder.parentId] ?? 0) + 1,
                                   AgentInboxRow.maxDepth))
-            case .shelfHeader, .historyHeader, .shelfSpacer, .settledMore:
+            case .shelfHeader, .historyHeader, .shelfSpacer, .settledMore, .projectHeading:
                 depths.append(0)
             }
         }
@@ -3080,6 +3154,94 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if notify, sourcesChanged { onHiddenSourcesChange?(nextSources) }
     }
 
+    // MARK: - Sort (.plans/113)
+
+    /// Whether a push must keep the drawn order: the pointer is over the list or a
+    /// row is being renamed. The frozen order never moves a row, so it never holds.
+    private var sortHeld: Bool {
+        sortMode != .newest && !bypassesSortHold && (pointerOverList || renameField != nil)
+    }
+    private var bypassesSortHold = false
+
+    /// Restore (`notify: false`) or pick (`notify: true`) a sort. A pick is the
+    /// user asking for the move, so it is never held; rows slide to their places.
+    func setSortMode(_ next: InboxSortMode, notify: Bool = false) {
+        guard next != sortMode else { return }
+        sortMode = next
+        sortHoldPending = false
+        applySortButtonLabel()
+        let slides = window != nil && !prefersReducedMotion()
+        let previousY = slides ? drawnRowMinYs() : [:]
+        bypassesSortHold = true
+        let shown = display(from: allRows)
+        bypassesSortHold = false
+        render(shown, animateRows: false)
+        if slides, shown.count <= Self.rowMotionRowLimit {
+            layoutSubtreeIfNeeded()
+            tableView.layoutSubtreeIfNeeded()
+            slideSurvivors(from: previousY)
+        }
+        if notify { onSortModeChange?(next) }
+    }
+
+    /// The re-sort the pointer held, now that nothing holds it.
+    private func releaseSortHold() {
+        guard sortHoldPending, !sortHeld else { return }
+        sortHoldPending = false
+        applyRows(allRows, changed: .empty)
+    }
+
+    private func drawnRowMinYs() -> [UUID: CGFloat] {
+        var result: [UUID: CGFloat] = [:]
+        for (index, row) in rows.enumerated() {
+            if let tableRow = tableRow(forRowIndex: index) { result[row.id] = tableView.rect(ofRow: tableRow).minY }
+        }
+        return result
+    }
+
+    private func applySortButtonLabel() {
+        sortButton.toolTip = "Sort: \(sortMode.title)"
+        sortButton.setAccessibilityValue(sortMode.title)
+    }
+
+    private static func sortIcon(_ mode: InboxSortMode) -> String {
+        switch mode {
+        case .mostActive: return "bolt"
+        case .byProject: return "folder"
+        case .newest: return "clock"
+        }
+    }
+
+    private var sortItems: [ChoiceItem] {
+        InboxSortMode.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title, icon: .system(Self.sortIcon($0))) }
+    }
+
+    private func toggleSortPopover() {
+        if sortPopover.isPresented {
+            sortPopover.dismiss()
+            sortButton.isActive = false
+            return
+        }
+        sortButton.isActive = true
+        sortPopover.dismissesOnAnchorClick = true
+        sortPopover.present(
+            items: sortItems, selectedID: sortMode.rawValue,
+            presentation: .compactChoices,
+            layout: .commands(CommandPopoverLayout(maximumVisibleRows: 6, minimumWidth: 168, maximumWidth: 240)),
+            anchor: sortButton.bounds, relativeTo: sortButton,
+            placementFrame: presentsSortOffscreenForQA ? window?.frame : nil,
+            takesFocus: !presentsSortOffscreenForQA,
+            accessibilityLabel: "Sort agents",
+            onSelection: { [weak self] item in
+                guard let self else { return }
+                self.sortButton.isActive = false
+                if let mode = InboxSortMode(rawValue: item.id) { self.setSortMode(mode, notify: true) }
+            },
+            focusReturnView: sortButton,
+            onClose: { [weak self] in self?.sortButton.isActive = false })
+        sortButton.isActive = sortPopover.isPresented
+    }
+
     func controlTextDidChange(_ obj: Notification) {
         guard (obj.object as? NSTextField) === searchField else { return }
         let next = searchField.stringValue
@@ -3575,7 +3737,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             switch item {
             case .fanoutRemainder:
                 return (ownsSubagents ? InboxOwnershipChrome.subagentHeight : AgentInboxView.slimRowHeight) + groupEndGap
-            case .shelfHeader, .historyHeader, .settledMore:
+            case .shelfHeader, .historyHeader, .settledMore, .projectHeading:
                 return AgentInboxView.shelfHeaderHeight
             case .shelfSpacer:
                 return max(1, shelfSpacerHeight)
@@ -3639,6 +3801,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 return header
             case .shelfSpacer:
                 return NSView()
+            // .plans/113: the shelf heading's look, without its triangle.
+            case .projectHeading(let title, let count):
+                let header = projectHeadingCells[title] ?? AgentInboxShelfHeaderView()
+                header.onToggle = nil
+                header.apply(section: .project(title), count: count, isExpanded: true)
+                projectHeadingCells[title] = header
+                return header
             // P4.8
             case .settledMore(let hidden):
                 let footer = settledMoreCell ?? AgentInboxSettledMoreView()
@@ -4321,6 +4490,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // suppression into the next ordinary click after editing ends. A real
         // second-click event is independently rejected by clickCount above.
         suppressedTrailingActivationAgentId = nil
+        // .plans/113: a re-sort held for the rename lands once it is over. Next
+        // turn, because `render` itself ends a rename on its way to a reload.
+        if sortHoldPending {
+            DispatchQueue.main.async { [weak self] in self?.releaseSortHold() }
+        }
         guard commit else {
             qaRenameCancelCount += 1
             return
@@ -5550,8 +5724,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         trackingArea = area
     }
 
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        pointerOverList = true
+    }
+
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
+        pointerOverList = true
         setHovered(agentId: agentId(atWindowPoint: event.locationInWindow))
         setHoveredFanout(parentId: fanoutParentId(atWindowPoint: event.locationInWindow))
         setSearchFieldHovered(searchField.frame.contains(convert(event.locationInWindow, from: nil)))
@@ -5562,6 +5742,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         setHovered(agentId: nil)
         setHoveredFanout(parentId: nil)
         setSearchFieldHovered(false)
+        pointerOverList = false
+        releaseSortHold()
     }
 
     /// The parent whose "N more" / "Show less" line is under a window point.
@@ -5658,6 +5840,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 MainActor.assumeIsolated {
                     self?.setHovered(agentId: nil)
                     self?.setKeyboardFocus(agentId: nil)
+                    // .plans/113: a window you left is not being read.
+                    self?.pointerOverList = false
+                    self?.releaseSortHold()
                 }
             })
         }
@@ -6407,6 +6592,43 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 return nil
             }
         }
+    }
+    // .plans/113
+    var sortModeForQA: InboxSortMode { sortMode }
+    var sortButtonForQA: ChromeIconButton { sortButton }
+    var sortPopoverForQA: ChoicePopoverController { sortPopover }
+    /// The project headings the table draws, top to bottom, in their own words.
+    var projectHeadingTitlesForQA: [String] {
+        items.compactMap { item -> String? in
+            guard case .projectHeading(let title, let count) = item else { return nil }
+            return AgentInboxShelfHeaderView.title(section: .project(title), count: count)
+        }
+    }
+    /// The drawn order, agent rows and project headings, for order assertions.
+    var drawnSequenceForQA: [String] {
+        items.compactMap { item -> String? in
+            switch item {
+            case .agent(let row): return row.title
+            case .projectHeading(let title, _): return "# \(title)"
+            default: return nil
+            }
+        }
+    }
+    var isSortHoldPendingForQA: Bool { sortHoldPending }
+    func drawnRowMinYForQA(id: UUID) -> CGFloat? { drawnRowMinYs()[id] }
+    /// Press the sort button the way a click does: its menu hook, which is what
+    /// `ChromeIconButton.mouseDown` calls.
+    func openSortMenuForQA() { sortButton.onOpenMenu?() }
+    /// The pointer entering or leaving the list, through the view's own handlers.
+    func pointerForQA(inside: Bool) {
+        guard let window else { return }
+        let point = convert(NSPoint(x: bounds.midX, y: bounds.midY), to: nil)
+        let event = NSEvent.enterExitEvent(
+            with: inside ? .mouseEntered : .mouseExited, location: point, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)
+        guard let event else { return }
+        if inside { mouseEntered(with: event) } else { mouseExited(with: event) }
     }
     /// Open History without a click, for harnesses that read every row.
     func expandHistoryShelfForQA() {
@@ -7531,12 +7753,15 @@ enum InboxListItem {
     /// The flexible row above the first shelf heading that pushes the shelves to
     /// the bottom of the sidebar.
     case shelfSpacer
+    /// .plans/113: a project's name over its agents in `By project`. Not
+    /// collapsible and not an agent; drawn by the shelf heading's view.
+    case projectHeading(title: String, count: Int)
 
     /// One of the two counted, collapsible headings.
     var isShelfHeading: Bool {
         switch self {
         case .shelfHeader, .historyHeader: return true
-        case .agent, .fanoutRemainder, .settledMore, .shelfSpacer: return false
+        case .agent, .fanoutRemainder, .settledMore, .shelfSpacer, .projectHeading: return false
         }
     }
 
@@ -7566,6 +7791,7 @@ enum InboxListItem {
         // path repaints only the agent rows it was told about.
         case .settledMore(let hidden): return "more:\(hidden)"
         case .shelfSpacer: return "spacer"
+        case .projectHeading(let title, let count): return "project:\(count):\(title)"
         }
     }
 }
@@ -7608,13 +7834,21 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
         case history
         /// .plans/87: sessions from elsewhere you hid, pinned under the list.
         case hidden
+        /// .plans/113: a project group in `By project`. A label, not a toggle.
+        case project(String)
 
         var word: String {
             switch self {
             case .snoozed: return "Snoozed"
             case .history: return "History"
             case .hidden: return "Hidden"
+            case .project(let name): return name
             }
+        }
+
+        var isCollapsible: Bool {
+            if case .project = self { return false }
+            return true
         }
 
         /// What VoiceOver reads for the count, in the same words the section uses.
@@ -7623,6 +7857,7 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
             case .snoozed: return "snoozed"
             case .history: return "in History"
             case .hidden: return "hidden"
+            case .project: return "agents"
             }
         }
 
@@ -7631,6 +7866,7 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
             case .snoozed: return "Shows or hides snoozed agents"
             case .history: return "Shows or hides agents in History"
             case .hidden: return "Shows hidden sessions in place, dimmed"
+            case .project: return ""
             }
         }
     }
@@ -7696,6 +7932,17 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
         self.section = section
         label.stringValue = AgentInboxShelfHeaderView.title(section: section, count: count)
         hitButton.setAccessibilityHelp(section.accessibilityHelp)
+        disclosureButton.isHidden = !section.isCollapsible
+        hitButton.isEnabled = section.isCollapsible
+        guard section.isCollapsible else {
+            hitButton.setAccessibilityRole(.staticText)
+            hitButton.setAccessibilityLabel("\(section.word), \(count) \(section.spokenNoun)")
+            hitButton.setAccessibilityValue(nil)
+            setAccessibilityChildren([hitButton])
+            applyTokens()
+            return
+        }
+        hitButton.setAccessibilityRole(.button)
         disclosureButton.show(isExpanded ? .expanded : .collapsed)
         let action = isExpanded ? "Collapse" : "Expand"
         hitButton.setAccessibilityLabel("\(action) \(label.stringValue)")

@@ -99,6 +99,21 @@ public enum WorkspaceSidebarConfig {
         defaults.set(scope.storageValue, forKey: scopeKey)
     }
 
+    // Plan: .plans/113-sidebar-sort
+    /// How the live agents are ordered, beside the scope. Dylan: "most intuitive
+    /// would be most active", so that is the default. The view itself starts on
+    /// the frozen `.newest` and is told this by the host, like the scope.
+    public static let sortKey = "continuum.workspaceSidebar.sort"
+    public static let defaultSortMode = InboxSortMode.mostActive
+
+    public static func resolveSortMode(defaults: UserDefaults = .standard) -> InboxSortMode {
+        defaults.string(forKey: sortKey).flatMap(InboxSortMode.init(rawValue:)) ?? defaultSortMode
+    }
+
+    public static func setSortMode(_ mode: InboxSortMode, defaults: UserDefaults = .standard) {
+        defaults.set(mode.rawValue, forKey: sortKey)
+    }
+
     // Plan: .plans/87-sidebar-liveness/README.md (quick hide/show)
     /// The outside sources the sidebar's pills turned off (`InboxSource` keys),
     /// beside the scope they filter with. Absent means every source shows, which

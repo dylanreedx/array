@@ -251,6 +251,10 @@ enum SidebarTruthChecks {
         // defaults: a private suite here, never `.standard`.
         let settingsSuite = "array.qa.sidebar-truth.\(UUID().uuidString)"
         app.qaSettingsDefaults = QAIsolatedDefaults(isolatedSuiteName: settingsSuite)
+        // .plans/113: these witnesses hover and resize rows that must stay where
+        // they are, so they draw the frozen order (`--sidebar-sort-check` owns the
+        // Most active default). In this check's own suite.
+        if let settings = app.qaSettingsDefaults { WorkspaceSidebarConfig.setSortMode(.newest, defaults: settings) }
         app.registryStore = registryStore
         try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
         let runners = Runners()

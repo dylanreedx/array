@@ -178,6 +178,120 @@ public enum InboxSort {
             + nest(history, by: mostRecentlyEndedFirst)
     }
 
+    // Plan: .plans/113-sidebar-sort
+    /// The desktop list in a chosen sort mode. `.newest` is `sortForInbox(rows:)`
+    /// exactly. The other two reorder the LIVE block's top-level rows only: the
+    /// shelf and History keep their own orders, and a subagent stays under its
+    /// lead in the lead's own frozen sibling order (the card's priority is
+    /// `boundedForInbox`'s, as before).
+    ///
+    /// A row moves only when its STATE changes, never while it streams: a working
+    /// lead is keyed by the start of its current turn, not by its last activity,
+    /// and an idle lead by its last activity, which stops moving once it is idle.
+    /// A lead counts as working while any of its subagents is.
+    ///
+    /// `heldOrder` is the order on screen. While the pointer is over the list the
+    /// view passes it, and every row already drawn keeps its place; a row that was
+    /// not drawn goes above them, as a new agent always has. Grouping still
+    /// applies, so a held row never leaves its project's heading.
+    public static func sortForInbox(
+        rows: [AgentInboxRow], mode: InboxSortMode, heldOrder: [UUID]? = nil
+    ) -> [AgentInboxRow] {
+        guard mode != .newest else { return sortForInbox(rows: rows) }
+        var live: [AgentInboxRow] = []
+        var shelf: [AgentInboxRow] = []
+        var history: [AgentInboxRow] = []
+        for row in rows {
+            switch row.lifecycle {
+            case .active: live.append(row)
+            case .snoozed: shelf.append(row)
+            case .settled, .archived: history.append(row)
+            }
+        }
+        let keys = activityKeys(live)
+        var held: [UUID: Int] = [:]
+        for (index, id) in (heldOrder ?? []).enumerated() where held[id] == nil { held[id] = index }
+        let byProject = mode == .byProject
+        func rootOrder(_ lhs: AgentInboxRow, _ rhs: AgentInboxRow) -> Bool {
+            if byProject {
+                let left = projectGroupName(for: lhs), right = projectGroupName(for: rhs)
+                if left != right { return projectGroupPrecedes(left, right) }
+            }
+            switch (held[lhs.id], held[rhs.id]) {
+            case let (left?, right?) where left != right: return left < right
+            case (nil, _?): return true
+            case (_?, nil): return false
+            default: break
+            }
+            let left = keys[lhs.id] ?? ActivityKey(live: false, at: lhs.createdAt)
+            let right = keys[rhs.id] ?? ActivityKey(live: false, at: rhs.createdAt)
+            if left.live != right.live { return left.live }
+            if left.at != right.at { return left.at > right.at }
+            return newestSpawnedFirst(lhs, rhs)
+        }
+        return nest(live, by: rootOrder, childrenBy: newestSpawnedFirst)
+            + nest(shelf, by: newestSpawnedFirst)
+            + nest(history, by: mostRecentlyEndedFirst)
+    }
+
+    /// The heading a row is grouped under in `.byProject`: its project, or nil
+    /// for an agent in none (drawn last, as `noProjectTitle`).
+    public static func projectGroupName(for row: AgentInboxRow) -> String? {
+        guard let name = row.projectName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !name.isEmpty else { return nil }
+        return name
+    }
+
+    public static let noProjectTitle = "No project"
+
+    /// Projects A to Z, case-insensitively; no project last.
+    static func projectGroupPrecedes(_ lhs: String?, _ rhs: String?) -> Bool {
+        guard let lhs else { return false }
+        guard let rhs else { return true }
+        let order = lhs.localizedCaseInsensitiveCompare(rhs)
+        return order == .orderedSame ? lhs < rhs : order == .orderedAscending
+    }
+
+    struct ActivityKey: Equatable {
+        /// Working or needing you, here or in any subagent below.
+        var live: Bool
+        /// Live: the newest live turn's start. Otherwise: the newest activity.
+        var at: Date
+    }
+
+    /// Each row's key over its whole subtree, so a lead whose helper works sorts
+    /// as working. Cycle-safe: a row is folded into its ancestors once.
+    static func activityKeys(_ rows: [AgentInboxRow]) -> [UUID: ActivityKey] {
+        let byId = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var keys: [UUID: ActivityKey] = [:]
+        for row in rows {
+            let isLive: Bool
+            switch row.state {
+            case .working, .approval, .input: isLive = true
+            case .ready, .failed: isLive = false
+            }
+            let own = ActivityKey(
+                live: isLive,
+                at: isLive
+                    ? (row.elapsedStartedAt ?? row.lastActiveAt ?? row.createdAt)
+                    : (row.lastActiveAt ?? row.createdAt))
+            var visited: Set<UUID> = []
+            var current: AgentInboxRow? = row
+            while let node = current, visited.insert(node.id).inserted {
+                let existing = keys[node.id]
+                keys[node.id] = merge(existing, own)
+                current = node.parentId.flatMap { byId[$0] }
+            }
+        }
+        return keys
+    }
+
+    private static func merge(_ existing: ActivityKey?, _ next: ActivityKey) -> ActivityKey {
+        guard let existing else { return next }
+        if existing.live != next.live { return existing.live ? existing : next }
+        return existing.at >= next.at ? existing : next
+    }
+
     // Plan: .plans/106-sidebar-ownership (helper priority)
     /// How long a finished subagent stays in its lead's card before it folds into
     /// the "N more" row.
@@ -406,7 +520,8 @@ public enum InboxSort {
     /// the input length.
     private static func nest(
         _ rows: [AgentInboxRow],
-        by areInIncreasingOrder: (AgentInboxRow, AgentInboxRow) -> Bool
+        by areInIncreasingOrder: (AgentInboxRow, AgentInboxRow) -> Bool,
+        childrenBy childOrder: ((AgentInboxRow, AgentInboxRow) -> Bool)? = nil
     ) -> [AgentInboxRow] {
         // No `count > 1` shortcut: a single row can still be an orphan carrying a
         // stale depth from whoever built it, and returning it untouched would draw
@@ -426,7 +541,11 @@ public enum InboxSort {
         // slot, and a child never competes with its parent's peers.
         roots.sort(by: areInIncreasingOrder)
         for key in childrenOf.keys {
-            childrenOf[key]?.sort(by: areInIncreasingOrder)
+            if let childOrder {
+                childrenOf[key]?.sort(by: childOrder)
+            } else {
+                childrenOf[key]?.sort(by: areInIncreasingOrder)
+            }
         }
 
         var ordered: [AgentInboxRow] = []
@@ -762,4 +881,25 @@ public struct InboxPartition: Equatable, Sendable {
     /// The same fact for the History header. Separate property rather than a
     /// parameterised one so a call site cannot ask the shelf for history's count.
     public var historyCount: Int { history.count }
+}
+
+// Plan: .plans/113-sidebar-sort
+/// How the sidebar orders its live agents (`InboxSort.sortForInbox(rows:mode:)`).
+/// The raw value is what `WorkspaceSidebarConfig` stores.
+public enum InboxSortMode: String, CaseIterable, Equatable, Sendable {
+    /// Working and needs-you first, newest turn first; then the rest by their
+    /// last activity, so quiet agents sink to the bottom.
+    case mostActive = "active"
+    /// Grouped under project headings, A to Z, most active first in each.
+    case byProject = "project"
+    /// Newest spawned first: the frozen order (P3.4).
+    case newest = "newest"
+
+    public var title: String {
+        switch self {
+        case .mostActive: return "Most active"
+        case .byProject: return "By project"
+        case .newest: return "Newest first"
+        }
+    }
 }
