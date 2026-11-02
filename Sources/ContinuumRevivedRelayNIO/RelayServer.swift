@@ -89,11 +89,20 @@ public final class RelayServer: @unchecked Sendable {
                 }
                 let collaboration = self.collaboration
                 let upgrader = NIOWebSocketServerUpgrader(
+                    maxFrameSize: CollaborationTileStreamSocket.maximumFrameBytes,
                     shouldUpgrade: { channel, head in
                         if head.uri == "/v2/socket" { return channel.eventLoop.makeSucceededFuture(HTTPHeaders()) }
                         // The collaboration cursor lane: admitted (bearer, active
                         // membership) before the upgrade, so a refusal is a plain
                         // HTTP status and no frame is ever exchanged.
+                        // A shared terminal's stream lane (.plans/114), the same way.
+                        if let collaboration, let stream = CollaborationTileStreamSocket.request(head) {
+                            let promise = channel.eventLoop.makePromise(of: HTTPHeaders?.self)
+                            promise.completeWithTask {
+                                (try? await collaboration.admitTileStream(token: stream.token, area: stream.area, object: stream.object)) != nil ? HTTPHeaders() : nil
+                            }
+                            return promise.futureResult
+                        }
                         guard let collaboration, let lane = CollaborationCursorSocket.request(head) else {
                             return channel.eventLoop.makeSucceededFuture(nil)
                         }
@@ -105,6 +114,9 @@ public final class RelayServer: @unchecked Sendable {
                     },
                     upgradePipelineHandler: { channel, head in
                         channel.pipeline.removeHandler(name: "relay-public-http").flatMap {
+                            if let collaboration, let stream = CollaborationTileStreamSocket.request(head) {
+                                return channel.pipeline.addHandler(CollaborationTileStreamSocket(store: collaboration, request: stream))
+                            }
                             if let collaboration, let lane = CollaborationCursorSocket.request(head) {
                                 return channel.pipeline.addHandler(CollaborationCursorSocket(store: collaboration, area: lane.area, token: lane.token))
                             }
@@ -302,6 +314,15 @@ private final class RelayWebSocketHandler: ChannelInboundHandler, @unchecked Sen
     init(store: RelayStore, liveHub: RelayLiveHub, pushDelivery: (any RelayEventPushDelivering)?) { self.store = store; self.liveHub = liveHub; self.pushDelivery = pushDelivery }
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let frame = unwrapInboundIn(data)
+        // The upgrade now admits 256 KiB frames for the terminal stream lane;
+        // this socket keeps the 16 KiB limit it always had, closing as NIO did.
+        guard frame.length <= 1 << 14 else {
+            var reason = context.channel.allocator.buffer(capacity: 2)
+            reason.write(webSocketErrorCode: .messageTooLarge)
+            let box = SendableContext(context)
+            context.writeAndFlush(wrapOutboundOut(.init(fin: true, opcode: .connectionClose, data: reason))).whenComplete { _ in box.context.close(promise: nil) }
+            return
+        }
         guard frame.opcode == .text else { return }
         var bytes = frame.unmaskedData
         guard let data = bytes.readData(length: bytes.readableBytes), let message = try? JSONDecoder.relay.decode(RelaySocketFrame.self, from: data) else { send(.error(code: "invalidFrame"), context); return }

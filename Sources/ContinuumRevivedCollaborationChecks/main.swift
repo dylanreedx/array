@@ -23,6 +23,9 @@ if CommandLine.arguments.contains("--artifacts-only") {
 if CommandLine.arguments.contains("--live-tile-only") {
     do { try await runLiveTileLaneChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
 }
+if CommandLine.arguments.contains("--terminal-stream-only") {
+    do { try await runTerminalStreamChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
+}
 if CommandLine.arguments.contains("--host-liveness-only") {
     do { try await runSharedAreaHostLivenessChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
 }

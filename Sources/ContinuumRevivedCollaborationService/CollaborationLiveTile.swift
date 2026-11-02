@@ -26,7 +26,7 @@ struct CollaborationLiveTileTable {
 
 extension CollaborationStore {
     /// The item, if this area still publishes it as a live tile.
-    private func liveTileItem(_ db: Database, area: UUID, object: UUID) throws -> SharedArea.Item {
+    func liveTileItem(_ db: Database, area: UUID, object: UUID) throws -> SharedArea.Item {
         let state: Data = try Data.fetchOne(db, sql: "SELECT snapshot FROM areas WHERE id=?", arguments: [area.uuidString])!
         let document = try unseal(SharedArea.Document.self, state)
         guard let item = document.items.first(where: { $0.id.rawValue == object && $0.kind == .liveTile }),
@@ -156,6 +156,10 @@ extension CollaborationStore {
         for key in liveTiles.entries.keys where key.hasPrefix(prefix) && live[key] != liveTiles.entries[key]?.host {
             liveTiles.entries.removeValue(forKey: key)
             wakeLiveTile(key)
+        }
+        // A terminal's stream lanes go with its tile, or its move to another host.
+        for key in tileStreams.keys.keys where key.hasPrefix(prefix) && live[key] == nil {
+            closeTileStreams { $0.key == key }
         }
     }
 }

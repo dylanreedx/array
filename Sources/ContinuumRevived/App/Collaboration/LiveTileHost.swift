@@ -25,6 +25,13 @@ protocol LiveTileSource: AnyObject {
     /// Events this source wants appended (the host's own note edits).
     var outbox: [Collaboration.LiveTile.EventBody] { get set }
     func stop()
+    /// The host is connected: a source with a lane of its own (a terminal's
+    /// stream) opens it here.
+    func connect(controller: SharedAreaController, object: SharedArea.ID<SharedArea.Object>)
+}
+
+extension LiveTileSource {
+    func connect(controller: SharedAreaController, object: SharedArea.ID<SharedArea.Object>) {}
 }
 
 @MainActor
@@ -52,6 +59,7 @@ final class LiveTileHost {
     func start() {
         guard pump == nil else { return }
         source.onChange = { [weak self] in self?.markDirty() }
+        if let controller { source.connect(controller: controller, object: binding.object) }
         pump = Task { [weak self] in
             while let self, !Task.isCancelled {
                 // Not connected yet: wait, never spin. `beat` returns without
@@ -301,30 +309,6 @@ final class DiffLiveSource: LiveTileSource {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         return String(data: data, encoding: .utf8)
-    }
-    func receive(_ events: [Collaboration.LiveTile.Event], me: SharedArea.ID<SharedArea.Person>) {}
-    func stop() {}
-}
-
-/// A terminal: a read-only mirror of what it shows. Nothing typed elsewhere
-/// ever reaches it; the relay refuses input to a terminal outright.
-@MainActor
-final class TerminalLiveSource: LiveTileSource {
-    let kind: Collaboration.LiveTile.Kind = .terminal
-    let interval: Duration = .milliseconds(500)
-    var onChange: (() -> Void)?
-    var outbox: [Collaboration.LiveTile.EventBody] = []
-    private let text: @MainActor () -> String?
-    private let title: @MainActor () -> String
-    static let maxTextBytes = 64 * 1024
-
-    init(text: @escaping @MainActor () -> String?, title: @escaping @MainActor () -> String) { self.text = text; self.title = title }
-
-    func payload(eventsThrough: UInt64) async -> Collaboration.LiveTile.Payload? {
-        guard var value = text() else { return nil }
-        if value.utf8.count > Self.maxTextBytes { value = String(value.suffix(Self.maxTextBytes / 2)) }
-        let lines = value.split(separator: "\n", omittingEmptySubsequences: false)
-        return .terminal(.init(title: title(), text: value, columns: lines.map(\.count).max() ?? 0, rows: lines.count))
     }
     func receive(_ events: [Collaboration.LiveTile.Event], me: SharedArea.ID<SharedArea.Person>) {}
     func stop() {}

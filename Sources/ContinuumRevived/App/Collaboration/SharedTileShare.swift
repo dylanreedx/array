@@ -165,8 +165,13 @@ extension AppDelegate {
             return DiffLiveSource(root: URL(fileURLWithPath: controller.project.rootPath, isDirectory: true),
                                   source: DiffReviewSource(metadata: tile.metadata), title: tile.title.isEmpty ? "Changes" : tile.title)
         case .terminal:
-            return TerminalLiveSource(text: { [weak canvas] in (canvas?.tileView(for: tileID) as? TerminalTileNSView)?.runtime.visibleText() },
-                                      title: title)
+            // The host's own terminal, read from its tmux pane; its colours from
+            // the Ghostty config it draws with (`.plans/114-terminal-sharing`).
+            let terminal: @MainActor () -> TerminalTileNSView? = { [weak canvas] in canvas?.tileView(for: tileID) as? TerminalTileNSView }
+            let theme = (terminal()?.runtime as? GhosttyTerminalRuntime)?.resolvedThemeSnapshot ?? GhosttyRuntimeContext.current?.themeSnapshot
+            return TerminalLiveSource(text: { terminal()?.runtime.visibleText() }, title: title,
+                                      palette: theme.flatMap(TerminalLiveSource.palette),
+                                      tapTarget: { TmuxLocator.resolve(defaults: .standard).map { ($0, tileID) } })
         case .browser:
             let view: @MainActor () -> BrowserTileNSView? = { [weak canvas] in canvas?.tileView(for: tileID) as? BrowserTileNSView }
             return BrowserLiveSource(webView: { (view()?.runtime as? WKWebViewBrowserRuntime)?.webView },
@@ -211,14 +216,18 @@ extension AppDelegate {
         }
         // What kind it is comes with the owner's first state.
         var kind: Collaboration.LiveTile.Kind?
+        var first: Collaboration.LiveTile.State?
         for _ in 0..<100 where kind == nil {
-            kind = (try? await controller.readLiveTile(object: item.id, request: .init(generation: nil, revision: nil, eventsAfter: nil,
-                                                                                        waitMilliseconds: 2_000)))?.state?.kind
+            first = (try? await controller.readLiveTile(object: item.id, request: .init(generation: nil, revision: nil, eventsAfter: nil,
+                                                                                         waitMilliseconds: 2_000)))?.state
+            kind = first?.kind
             if kind == nil { try? await Task.sleep(for: .milliseconds(200)) }
         }
         guard let kind else { await controller.close(); throw ShareLinkFailure.unavailableArea }
         let hostName = owner.flatMap { controller.memberNames[$0] }.map { String($0.prefix(28)) } ?? "A teammate"
-        let label = model.activeAccount?.knownAreas.first(where: { $0.id == area })?.label ?? "Shared \(LiveTileBodyView.noun(kind))"
+        var label = model.activeAccount?.knownAreas.first(where: { $0.id == area })?.label ?? "Shared \(LiveTileBodyView.noun(kind))"
+        // A terminal is named for whose it is: "Dylan's Terminal · zsh".
+        if case .terminal(let terminal)? = first?.payload { label = SharedTerminalTitle.title(hostName: hostName, hostTitle: terminal.title) }
         let reference = SharedAgentTileReference(areaId: area, objectId: item.id.rawValue, hostName: hostName,
                                                  hostPerson: owner?.rawValue, accountId: model.activeAccount?.id, liveKind: kind.rawValue)
         let view: SharedTileNSView

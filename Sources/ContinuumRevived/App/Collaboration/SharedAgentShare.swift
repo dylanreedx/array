@@ -280,6 +280,8 @@ extension AppDelegate {
             view.setOwnershipMark(.init(text: text, colour: me.map { SharedAreaPersonColour.color(for: $0, host: $0) } ?? .systemPurple,
                                         outlined: false))
         }
+        // A shared terminal also carries its Live badge and Stop sharing.
+        refreshTerminalLiveBadges(shared: shared, areas: Dictionary(entries.map { ($0.tile, $0.area) }, uniquingKeysWith: { _, last in last }))
         // An agent shared in a portal keeps that mark instead.
         refreshHostedPortalMarks()
         guard hostedAgentAccessTask == nil, !entries.isEmpty, Self.reachesRelay(model) else { return }

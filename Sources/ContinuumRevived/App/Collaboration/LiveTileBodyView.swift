@@ -46,6 +46,8 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
     private let scroll = NSScrollView()
     private let textView = NSTextView()
     private let frameView = LiveTileFrameView()
+    /// A terminal that streams draws through this (`SharedTerminalMirrorView`).
+    private let terminalMirror: SharedTerminalMirrorView?
     private var webView: WKWebView?
     private(set) var browserMode: BrowserMode = .waiting
     private(set) var followedURL: String?
@@ -57,6 +59,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
 
     init(kind: Collaboration.LiveTile.Kind, hostName: String, replicaID: String = UUID().uuidString) {
         self.kind = kind; self.hostName = hostName; self.replicaID = replicaID
+        terminalMirror = kind == .terminal ? SharedTerminalMirrorView() : nil
         super.init(frame: .zero)
         caption.font = .token(.caption); caption.lineBreakMode = .byTruncatingTail
         textView.isRichText = false
@@ -82,6 +85,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         // A browser shows a page or pictures, never text.
         scroll.isHidden = kind == .browser
         addSubview(caption); addSubview(scroll); addSubview(frameView)
+        if let terminalMirror { terminalMirror.isHidden = true; addSubview(terminalMirror) }
         applyEditability()
         renderCaption()
         applyAppearance()
@@ -97,6 +101,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         if self.controller === controller, self.object == object, reader != nil { return }
         stop()
         self.controller = controller; self.object = object
+        terminalMirror?.attach(controller: controller, object: object)
         reader = Task { [weak self] in
             while let self, !Task.isCancelled {
                 let failed = await self.readOnce()
@@ -109,6 +114,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
 
     func stop() {
         reader?.cancel(); reader = nil
+        terminalMirror?.stop()
         flusher?.cancel(); flusher = nil
         scrollFlush?.cancel(); scrollFlush = nil
     }
@@ -162,7 +168,12 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
             setReadOnlyText(diff.diff)
             colourDiffLines()
         case .terminal(let terminal):
-            setReadOnlyText(terminal.text, scrollToEnd: true)
+            if let screen = terminal.screen, let terminalMirror {
+                terminalMirror.isHidden = false; scroll.isHidden = true
+                terminalMirror.take(screen)
+            } else {
+                setReadOnlyText(terminal.text, scrollToEnd: true)
+            }
         case .browser(let browser):
             applyBrowser(browser)
         }
@@ -379,6 +390,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         let body = NSRect(x: 0, y: 26, width: bounds.width, height: max(0, bounds.height - 26))
         scroll.frame = body
         frameView.frame = body
+        terminalMirror?.frame = body
         webView?.frame = body
     }
 
@@ -409,6 +421,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
     var qaFrameSequence: UInt64 { frameView.frame_?.sequence ?? 0 }
     var qaFrameView: LiveTileFrameView { frameView }
     var qaTextView: NSTextView { textView }
+    var qaTerminalMirror: SharedTerminalMirrorView? { terminalMirror?.isHidden == false ? terminalMirror : nil }
     var qaPendingEvents: Int { outbox.count }
 }
 

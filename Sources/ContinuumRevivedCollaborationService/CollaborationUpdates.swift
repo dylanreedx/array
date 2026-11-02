@@ -210,6 +210,7 @@ extension CollaborationStore {
     func invalidateDevice(_ device: UUID) {
         for id in updateWaiters.filter({ $0.value.device == device }).map(\.key) { finishWaiter(id) }
         closeCursorLanes { $0.identity.device == device }
+        closeTileStreams { $0.identity.device == device }
         for key in presenceEntries.keys.filter({ $0.device == device }) {
             presenceFlushes.removeValue(forKey: key)?.cancel()
             presenceEntries.removeValue(forKey: key)
@@ -218,6 +219,7 @@ extension CollaborationStore {
     }
     func invalidateMember(area: UUID, person: UUID) {
         closeCursorLanes { $0.area == area && $0.identity.person.rawValue == person }
+        closeTileStreams { $0.area == area && $0.identity.person.rawValue == person }
         for key in presenceEntries.filter({ $0.key.area == area && $0.value.identity.person.rawValue == person }).map(\.key) {
             presenceFlushes.removeValue(forKey: key)?.cancel()
             presenceEntries.removeValue(forKey: key)

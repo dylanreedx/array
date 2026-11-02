@@ -20,7 +20,7 @@ the guest's canvas, the same way a mode A agent does. The portal (mode B,
 | Diff | The tile's git diff, re-run every 2 s, re-published when it changed (cap 200 KB) | The coloured diff, live | Read |
 | Browser, public URL | URL, title, and pictures | The same URL, loaded in a browser on the guest's own Mac, following the host's navigation | Use the page with their own logins |
 | Browser, localhost, LAN, file, or a page that will not load for the guest | URL, title, and pictures: WebKit snapshots as JPEG, at most 8 a second, only while the host's tile is on screen and only when the page changed, each under 180 KB | The host's page as pictures, marked "Dylan's browser" | Click and scroll; both land on the host's page |
-| Terminal | Its visible text, 2 times a second (cap 64 KB) | A read-only mirror | Nothing: typing is host-only. The relay refuses input to a terminal. |
+| Terminal | The bytes its tmux pane wrote, at most 60 frames a second on a stream lane, and its screen as VT for anyone joining or behind ([114-terminal-sharing](../114-terminal-sharing/README.md)); its visible text when it is not in tmux | "Dylan's Terminal": a read-only Ghostty surface in the host's colours, at the host's grid | Scroll back. Typing is host-only; the relay refuses input to a terminal. |
 
 Sharing a terminal needs a second press: the first Copy shows "This
 terminal's output may contain secrets…" and publishes nothing; the button
