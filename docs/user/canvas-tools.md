@@ -51,6 +51,8 @@ Canvas movement uses the same geometry route and undo history as a user drag. It
 
 `array_board_query` discovers boards and columns or reads a board’s tasks, revision, bodies, links, image metadata, and assignees. `array_board_apply` creates, edits, moves, assigns, unassigns, or deletes one task through the same durable board machinery as the UI.
 
+`array_board_manage` creates, renames or deletes a whole board. It creates the default columns and opens a tile in the agent’s zone; it only deletes empty boards. Rename and delete use the current board revision, and every call uses a stable request key. Under **Ask first**, the first create or delete asks for approval; rename uses the board-edit grant. Changes can be undone and preserve your view. [Workspace tools reference](/docs/workspace-api/#array_board_manage).
+
 The agent queries before writing and supplies a revision and stable request key. A board task is user-authored content; its presence does not automatically instruct every agent to execute it. [Board workflows](/docs/boards/).
 
 ## Visible delegation

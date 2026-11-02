@@ -10,6 +10,42 @@ Array supplies these tools to managed agents when Workspace Tools is enabled. Cl
 Browser access to remote domains and user-owned browsers needs separate approval. A browser snapshot supplies element references for actions; use a screenshot to inspect appearance. iOS automation uses host-owned disposable simulators, not arbitrary existing simulator identifiers. Observations must be fresh for device actions.
 
 These tools do not grant access to another project’s canvas, let an agent grant itself permission, or turn the workspace API into an operating-system sandbox. An agent cannot assume an unhydrated zone has no saved tiles. Presentation can be deferred or require the user to open a workspace; canvas edits do not move the camera.
+**Free within a project** is the default. It permits gated workspace operations in the agent’s own project without a general workspace prompt. Opening a file or inspecting an agent in another project can still require approval. **Ask first** requests permission for the first delegation, message, canvas move or resize, browser control action, iOS device operation, and board creation or deletion. Board rename uses the board-edit grant and does not add a separate prompt. Inspecting another agent and opening a document outside the preset scope can also ask. Updating another agent’s identity uses the canvas-write grant; changing your own identity does not. Board operations use the project grant. The exact available and approval-required operations are in `array_workspace_context` and can depend on the target.
+
+When Array asks, choose **Allow Once**, **Allow for This Agent Session**, or **Deny**. Session grants end when Array quits or Workspace Tools is turned off for that agent. **Off** gives new agents no Workspace Tools by default; existing agents keep their own setting. Turning an agent’s tools off revokes its grants. An agent cannot issue its own approval.
+
+Browser approvals are separate. Navigation to a remote domain asks for domain approval even under Free. A user-owned browser needs explicit handover for control; user input or replacing the browser runtime ends that handover. Under Free, snapshot, screenshot and console reads can inspect a browser in the project without control handover, subject to page approval. Under Ask first those reads require control or handover. JavaScript evaluation can require a separate approval. Agents cannot control another agent’s browser. Device calls are limited to the agent’s own checkout and owned disposable simulator; a listed human simulator is not an authorization to control it.
+
+## Presentation
+
+The presentation result reports what happened to the workspace, armed zone, selection, camera and keyboard focus: preserved, changed, deferred or unavailable. Canvas moves and resizes preserve the view. Messaging preserves it by default. An explicit document open or agent reveal can request a camera reveal; the host’s explicit-open default requests one, subject to the grant and current user interaction. Ask the agent to preserve the camera when you want no view movement. A request to reveal does not itself grant permission or override a newer user interaction. Array can return `presentation_required` when the destination needs the user to open the workspace or zone.
+
+## Retries and outcomes
+
+For operations that accept `idempotencyKey`, use the same key and same request for a retry. Reusing a remembered key for a different payload can return `idempotency_conflict`. Keys are required for delegation, messaging, board writes and whole-board management. Before repeating an uncertain effect, inspect `array_workspace_context` recent operations or use `array_get_operation` where supported. Operation lookup is scoped to the caller and can return `accepted`, `partial`, `committed`, `failed` or `expired`. An expired result does not prove nothing happened. Records are bounded, so do not treat a key as permanent storage or repeat an expired effect blindly.
+
+## What agents cannot do
+
+Workspace tools cannot grant themselves access, write another project’s canvas, message an agent in another project, or infer that an unhydrated zone is empty. They can move and resize tiles, but cannot move, resize or rename zones through this API. Existing agent harness, model and home, tile names, and workspace-tool permissions remain user-controlled. Browser tools drive Array browser tiles and device tools drive eligible iOS simulators; they do not control arbitrary Mac apps. Device actions do not provide shell, raw HID, arbitrary code execution or the Mac clipboard. The API is not an operating-system sandbox for other programs run by the agent.
+
+## Reading results and errors
+
+A reply has a status (`ok`, `error`, or `cancelled`), with a result on success or a structured error code and message. MCP exposes host errors as tool errors; Pi retains the structured reply. Image results are delivered as image content rather than base64 in the text. Invalid inputs can return `invalid_request`; disabled or revoked access can return `permission_denied` for any call. The operation notes below name other relevant refusals; exact details are in the returned message.
+
+| Error | What to do |
+| --- | --- |
+| `scope_approval_required` | The necessary scope, browser handover, domain or evaluation approval was not granted. Stop and ask the user. |
+| `not_found` | The requested resource or operation is unavailable in the allowed scope. |
+| `target_conflict` | The target is ambiguous, stale, busy or otherwise conflicts with the request; read the message and refresh context. `board_not_empty` means a board still has tasks; `board_in_use` means the user is working in its tile. |
+| `revision_conflict` | Query the current canvas or board before deciding on another write. |
+| `cursor_expired` | Restart the query; its underlying data changed. |
+| `busy` | A conflicting operation or user gesture is in progress. |
+| `presentation_required` | The user needs to open the relevant workspace or surface. |
+| `unsupported` | The requested operation or target cannot be handled in this context. |
+| `idempotency_conflict` | The key is already associated with a different request. |
+| `browser_not_live` | The browser runtime was evicted or terminated; reload the tile. |
+| `durability_failed` | Array could not save the effect; inspect the operation-specific message. |
+| `outcome_unknown` | Recover the outcome before retrying; the effect may have happened. |
 
 ## Operations
 
@@ -111,6 +147,26 @@ Create, edit, move, assign, unassign or delete one task in your project. Uses th
 | `assigneeAgentId` | Optional.  |
 | `afterCardId` | Optional.  |
 | `beforeCardId` | Optional.  |
+
+### `array_board_manage`
+
+Create, rename or delete a whole board. `create` opens a board with To Do, Doing and Done columns in the agent’s own zone, beside its tile or another tile in that zone. If no title is supplied, Array uses the zone’s board name. `rename` updates the board title in its tile and the Boards sidebar. `delete` removes an empty board and closes its tile. A board with tasks is refused; leave it for the user or move or delete the tasks first.
+
+| Input | Meaning |
+| --- | --- |
+| `op` | Required. `create`, `rename` or `delete`. |
+| `idempotencyKey` | Required. Stable request key, at most 128 UTF-8 bytes. Reuse only for the same request. |
+| `checkoutHandle` | Optional. Create and delete are limited to the agent’s own project. |
+| `boardId` | Required for rename and delete; omit for create. |
+| `expectedRevision` | Required for rename and delete; use the current board revision from `array_board_query`. Omit for create. |
+| `title` | Required for rename; optional for create. A single line of at most 200 UTF-8 bytes. Omit for delete. |
+| `nextToTileId` | Create only. A tile in the agent’s own zone; defaults to the agent’s tile. |
+
+**Returns:** `operationId`, `op`, `boardId`, `tileId` when present, `zoneId` for create, title, revision, columns and their IDs, `durability: committed`, and `undoRegistered`. After delete the tile ID is absent.
+
+**Errors:** `target_conflict` with `board_not_empty` refuses a board with tasks; `board_in_use` means the user is working in the tile. A stale revision returns `revision_conflict`, a changed request under the same key returns `idempotency_conflict`, an unhydrated board tile can return `unsupported` with `zone_unhydrated`, and a failed save returns `durability_failed`. A declined create or delete can return `scope_approval_required`.
+
+These changes preserve camera, focus and selection. Undo a rename from the board tile; undo a create or delete from the canvas with **Edit → Undo**.
 
 ### `array_delegate`
 
