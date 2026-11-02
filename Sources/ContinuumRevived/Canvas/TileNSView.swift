@@ -1730,9 +1730,10 @@ class TileNSView: NSView, TokenThemed {
     private func layoutOwnershipMark() {
         layoutUnderBar()
         if let outline = ownershipOutline, outline.frame != bounds { outline.frame = bounds }
-        // Above the body; the outline above everything but the corner overlay.
+        // Directly above the body, so everything a kind stacks over the body (an
+        // agent's awareness border) and the outline stay above the row too.
         if let underBar, let contentView, let index = subviews.firstIndex(of: underBar),
-           let body = subviews.firstIndex(of: contentView), index < body {
+           let body = subviews.firstIndex(of: contentView), index != body + 1 {
             addSubview(underBar, positioned: .above, relativeTo: contentView)
         }
         if let outline = ownershipOutline, subviews.last !== outline, subviews.last !== affordanceOverlay {
@@ -3750,6 +3751,13 @@ extension TitleBarView: NSTextFieldDelegate {
 }
 
 
+/// An under-bar accessory that drops content below some width (an agent's
+/// Managed pill yields first); the row keeps it at least that wide.
+@MainActor
+protocol TileUnderBarAccessory: NSView {
+    var minimumWholeWidth: CGFloat { get }
+}
+
 /// The row under a tile's title bar (see `TileNSView` › Under-bar): the live
 /// collaboration indicator, the kind's accessory and a trailing control.
 @MainActor
@@ -3822,9 +3830,11 @@ final class TileUnderBarView: NSView {
     static let indicatorFont = NSFont.token(.caption)
 
     static let compactIndicatorWidth: CGFloat = 20
-    /// What an accessory (an agent's pills, with the row's insets) keeps
-    /// before the indicator's text gives way.
-    static let accessoryMinimumWidth: CGFloat = 150
+    /// What an accessory keeps before the indicator's text gives way.
+    private var accessoryMinimumWidth: CGFloat {
+        guard let accessory, !accessory.isHidden else { return 0 }
+        return (accessory as? TileUnderBarAccessory)?.minimumWholeWidth ?? 150
+    }
 
     /// The narrowest row that still shows everything that must stay: the
     /// indicator's dot and the trailing control. The tile caps the row's
@@ -3833,7 +3843,7 @@ final class TileUnderBarView: NSView {
         var width: CGFloat = 8
         if indicatorText != nil { width += Self.compactIndicatorWidth + 8 }
         if trailing != nil { width += trailingWidth + 8 }
-        if let accessory, !accessory.isHidden { width += Self.accessoryMinimumWidth }
+        width += accessoryMinimumWidth
         return max(width, 1)
     }
 
@@ -3844,7 +3854,7 @@ final class TileUnderBarView: NSView {
         let textWidth = ceil((text as NSString).size(withAttributes: [.font: Self.indicatorFont]).width)
         var cap = bounds.width - 16 - (trailing == nil ? 0 : trailingWidth + 8)
         if let accessory, !accessory.isHidden {
-            cap = min(cap, bounds.width * 0.45, bounds.width - Self.accessoryMinimumWidth - 12)
+            cap = min(cap, bounds.width * 0.45, bounds.width - accessoryMinimumWidth - 12)
         }
         let width = textWidth + 26 <= cap ? textWidth + 26 : (cap >= 64 ? cap : Self.compactIndicatorWidth)
         let height = Self.indicatorPillHeight

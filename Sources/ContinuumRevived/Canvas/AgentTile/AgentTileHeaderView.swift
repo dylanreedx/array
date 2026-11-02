@@ -7,7 +7,7 @@ import ContinuumRevivedCore
 /// operational status belong to the tile bar; live elapsed time belongs to the
 /// compact activity row. Standalone probes can still exercise the elapsed lane.
 @MainActor
-final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
+final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable, TileUnderBarAccessory {
     static let stopActionTitle = "Stop agent run"
     static let detachActionTitle = "Detach agent view"
 
@@ -36,10 +36,18 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     private func updateManagedVisibility() {
         // Preserve branch and actionable status first. At 320pt the badge fits
         // beside a branch; a status or 150% text zoom makes it yield as a unit.
-        let floor = pageZoom.scaled(statusBadge?.isHidden == false ? 440 : 300)
-        managedBadge.isHidden = !showsManaged || (bounds.width > 0 && bounds.width < floor
-            && (!branchChip.isHidden || statusBadge?.isHidden == false))
+        managedBadge.isHidden = !showsManaged || (bounds.width > 0 && bounds.width < managedFloor)
     }
+
+    /// The width below which Managed yields; zero when nothing makes it yield.
+    private var managedFloor: CGFloat {
+        guard !branchChip.isHidden || statusBadge?.isHidden == false else { return 0 }
+        return CGFloat(pageZoom.scaled(statusBadge?.isHidden == false ? 440 : 300))
+    }
+
+    /// The tile's under-bar keeps this header at least this wide, so a low
+    /// zoom never costs a pill.
+    var minimumWholeWidth: CGFloat { showsManaged ? max(managedFloor, 150) : 150 }
     var qaManagedFrame: NSRect? {
         managedBadge.isHidden ? nil : managedBadge.convert(managedBadge.bounds, to: self)
     }
@@ -75,11 +83,15 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     /// view as a whole appears or goes.
     var onVisibilityChange: (() -> Void)?
 
+    private var reportedWholeWidth: CGFloat = 0
+
     func updateVisibility() {
         updateManagedVisibility()
         let hidden = branchChip.isHidden && managedBadge.isHidden && statusBadge?.isHidden != false && !showsElapsed
-        guard hidden != isHidden else { return }
+        let whole = minimumWholeWidth
+        guard hidden != isHidden || whole != reportedWholeWidth else { return }
         isHidden = hidden
+        reportedWholeWidth = whole
         onVisibilityChange?()
     }
 

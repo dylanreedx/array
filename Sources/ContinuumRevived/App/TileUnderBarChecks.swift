@@ -32,10 +32,15 @@ enum TileUnderBarChecks {
         let agentShared = tile(.managedAgent, x: 900)
         let agentPlain = tile(.managedAgent, x: 1340)
         let browserShared = tile(.browser, x: 1780)
-        let tiles = [terminalShared, terminalPlain, agentShared, agentPlain, browserShared]
+        // Dylan's 0.7.39 screenshot: a shared agent at the default width with
+        // a branch, Managed and Complete, its pills cut off under the bar.
+        let agentFull = Tile(id: UUID(), kind: .managedAgent, title: "Pioneer Lead Orchestrator 0.7.40",
+                             frame: TileFrame(x: 20, y: 660, width: 640, height: 520),
+                             zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tiles = [terminalShared, terminalPlain, agentShared, agentPlain, browserShared, agentFull]
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
             tiles: tiles, groups: [], lastActiveTileId: nil))
-        canvas.frame = NSRect(x: 0, y: 0, width: 3600, height: 1100)
+        canvas.frame = NSRect(x: 0, y: 0, width: 3600, height: 2000)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = canvas
@@ -58,6 +63,15 @@ enum TileUnderBarChecks {
             if shared { view.setOwnershipMark(.init(text: "Yours · shared with Sam", colour: colour, outlined: false)) }
             views.append((name, view, shared, true))
         }
+        let full = ManagedAgentTileNSView(tile: agentFull)
+        canvas.install(tileView: full, for: agentFull)
+        full.applyBranchContext(AgentRowContext(agentKind: .managed, checkedOutBranch: "array/integration"))
+        full.applyAwarenessSignal(AgentSignal(id: "under-bar-complete", kind: .completed, agentID: nil, tileID: agentFull.id,
+                                              threadID: nil, occurredAt: Date(), source: .managedRuntime))
+        // After the branch: applying it re-derives Managed from the (absent) record.
+        full.qaPageZoomHeaderView.showsManaged = true
+        full.setOwnershipMark(.init(text: "Yours · shared with Sam", colour: colour, outlined: false))
+        views.append(("agent-full", full, true, false))
         // A shared terminal's Live badge rides the same row, at its right.
         let badge = SharedTerminalLiveBadge(frame: .zero)
         views[0].view.installLiveBadge(badge)
@@ -90,8 +104,11 @@ enum TileUnderBarChecks {
                                "\(entry.name) zoom \(zoom): indicator \(indicator) clips the title bar \(bar)")
                     try expect(indicator.minX < under.minX + under.width * 0.25,
                                "\(entry.name) zoom \(zoom): indicator \(indicator) is not at the under-bar's far left")
-                    ratios[entry.name, default: []].append(Double(under.height / bar.height))
-                    screen[entry.name, default: []].append(Double(under.height) * zoom)
+                    // agent-full's row is held to its pills' width instead (below).
+                    if entry.name != "agent-full" {
+                        ratios[entry.name, default: []].append(Double(under.height / bar.height))
+                        screen[entry.name, default: []].append(Double(under.height) * zoom)
+                    }
                 } else {
                     try expect(indicator == nil, "\(entry.name) zoom \(zoom): an unshared tile shows a live indicator")
                 }
@@ -115,6 +132,38 @@ enum TileUnderBarChecks {
                                                   "\(entry.name) zoom \(zoom): indicator \(indicator) overlaps the managed pill \(pill)") }
                     pillRatios[entry.name, default: []].append(Double(pill.height / bar.height))
                     screen[entry.name + ":managed", default: []].append(Double(pill.height) * zoom)
+                }
+                if entry.name == "agent-full", let agent = view as? ManagedAgentTileNSView, let under {
+                    // Every pill whole: shown, inside the row and the tile, below
+                    // the bar, and clear of each other and of the indicator.
+                    let header = agent.qaPageZoomHeaderView
+                    let status = header.subviews.flatMap(\.subviews).compactMap { $0 as? AgentSignalBadgeView }.first
+                    let locals: [(String, NSRect?, NSView)] = [
+                        ("branch", header.qaBranch == nil ? nil : header.qaBranchFrame, header),
+                        ("managed", header.qaManagedFrame, header),
+                        ("status", status.flatMap { $0.isHidden ? nil : $0.bounds }, status ?? header),
+                    ]
+                    var pills: [(String, NSRect)] = []
+                    for (name, local, owner) in locals {
+                        guard let local, let rect = view.qaUnderBarRect(local, in: owner) else {
+                            throw Failure(description: "under-bar: agent-full zoom \(zoom): the \(name) pill is not shown (header \(header.frame) whole \(header.minimumWholeWidth), row \(String(describing: under)))")
+                        }
+                        row[name] = NSStringFromRect(rect)
+                        try expect(!rect.intersects(bar), "agent-full zoom \(zoom): \(name) pill \(rect) clips the title bar \(bar)")
+                        try expect(under.insetBy(dx: -0.5, dy: -0.5).contains(rect),
+                                   "agent-full zoom \(zoom): \(name) pill \(rect) is outside the under-bar \(under)")
+                        try expect(rect.minX >= 0 && rect.maxX <= view.bounds.width - 1,
+                                   "agent-full zoom \(zoom): \(name) pill \(rect) runs past the tile's edge")
+                        if let indicator { try expect(!indicator.intersects(rect),
+                                                      "agent-full zoom \(zoom): indicator overlaps the \(name) pill") }
+                        for (other, frame) in pills {
+                            try expect(!frame.intersects(rect), "agent-full zoom \(zoom): \(name) pill overlaps \(other)")
+                        }
+                        pills.append((name, rect))
+                    }
+                    // Never smaller on screen than the camera alone would make it.
+                    try expect(under.height * CGFloat(zoom) >= view.underBarWorldHeight * CGFloat(zoom) - 0.5,
+                               "agent-full zoom \(zoom): the row shrank faster than the camera")
                 }
                 if entry.name == "terminal-shared" {
                     let frame = badge.convert(badge.bounds, to: view)
