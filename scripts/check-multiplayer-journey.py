@@ -754,17 +754,11 @@ def kinds_journey(host, guest, check, eventually, legs=frozenset({"note", "file"
     pages.shutdown()
 
 
-def tmux_env(person):
-    env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
-    env["TMUX_TMPDIR"] = str(person.root / "tmux")
-    return env
-
-
 def host_pane_text(host, tile):
     """The host's pane as tmux holds it, read in the host app's own tmux
     namespace. The socket is checked to be inside it; the default server is
     never touched."""
-    env, root = tmux_env(host), os.path.realpath(host.root / "tmux")
+    env, root = tmux_env(host.tmux), os.path.realpath(host.tmux)
     for name in (f"array-view-{tile.upper()}", f"array-{tile.upper()}"):
         r = subprocess.run(["tmux", "display-message", "-p", "-t", name, "#{socket_path} #{pane_id}"], env=env, capture_output=True, text=True)
         if r.returncode != 0 or " " not in r.stdout.strip(): continue
