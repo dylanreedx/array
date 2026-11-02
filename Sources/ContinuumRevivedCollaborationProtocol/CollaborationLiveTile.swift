@@ -26,6 +26,16 @@ extension Collaboration {
         public static let maxEventsPerRead = 256
         public static let maxWaitMilliseconds = 25_000
 
+        /// What a client sends with every request to say which areas it can
+        /// read. 0.7.38 and earlier send nothing and cannot decode an area
+        /// holding a live tile, so the relay refuses them that area at the link
+        /// (HTTP 426) before admitting anyone or spending a "Works once" link.
+        public static let capabilityHeader = "x-array-collaboration-capabilities"
+        public static let capability = "live-tile"
+        public static func clientReadsLiveTiles(_ header: String?) -> Bool {
+            header?.split(separator: ",").contains { $0.trimmingCharacters(in: .whitespaces) == capability } ?? false
+        }
+
         public enum Kind: String, Codable, Sendable, CaseIterable { case note, file, diff, browser, terminal }
 
         public struct Note: Codable, Equatable, Sendable {

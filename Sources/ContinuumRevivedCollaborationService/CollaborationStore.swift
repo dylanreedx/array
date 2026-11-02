@@ -13,6 +13,9 @@ public enum CollaborationStoreError: Error, Equatable {
     case slugTaken
     /// Too many joins through one link, or from one address, in the window.
     case rateLimited
+    /// The area holds something this client says it cannot read (a live
+    /// tile, to a client from before them): update first.
+    case clientTooOld
 }
 
 /// Separate database, credentials and namespace from companion v2. Every request

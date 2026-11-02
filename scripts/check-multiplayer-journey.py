@@ -100,6 +100,9 @@ PEOPLE: dict = {}
 # --tmux: terminals keep tmux session persistence, as a person's app does.
 # Each app's tmux lives in its own TMUX_TMPDIR under the state folder.
 TMUX_PERSISTENCE = False
+# --old-guest NAME: the bundles a 0.7.38 build made under that journey name
+# ("Array NAME B.app"), opened as a person whose Array predates live tiles.
+OLD_GUEST = None
 TMUX_DIRS: list = []
 
 
@@ -145,6 +148,8 @@ def configure(name: str):
     PEOPLE = {"a": (f"Array {name} A", f"dev.arrayapp.macos.mp-{slug}-a", "Avery", "host"),
               "b": (f"Array {name} B", f"dev.arrayapp.macos.mp-{slug}-b", "Blake", "guest"),
               "c": (f"Array {name} C", f"dev.arrayapp.macos.mp-{slug}-c", "Casey", "guest")}
+    if OLD_GUEST:
+        PEOPLE["o"] = (f"Array {OLD_GUEST} B", f"dev.arrayapp.macos.mp-{OLD_GUEST.lower()}-b", "Olive", "guest")
 # The windows the steps wait within. Delivery: the guest polls the projection
 # every 1 s and the host flushes every 2 s, so a reply lands in a few seconds;
 # 45 s covers a slow relay. Liveness: a host that quits cleanly ends its run at
@@ -583,7 +588,8 @@ def git(project, *args):
                         "GIT_COMMITTER_NAME": "Journey", "GIT_COMMITTER_EMAIL": "journey@example.invalid"})
 
 
-def kinds_journey(host, guest, check, eventually, legs=frozenset({"note", "file", "diff", "browser", "public", "terminal", "excluded"})):
+def kinds_journey(host, guest, check, eventually, legs=frozenset({"note", "file", "diff", "browser", "public", "terminal", "excluded"}),
+                  endpoint=None, env_extra=None, people=None):
     """`.plans/105-collaboration/SHARE-KINDS.md`: every other tile kind, shared
     from its own header Share. For each: the host shares it, the guest sees it,
     a host change reaches the guest, and the guest's action reaches the host
@@ -751,6 +757,27 @@ def kinds_journey(host, guest, check, eventually, legs=frozenset({"note", "file"
         reasons = {e[0]: e[2] for e in t["excluded"]}
         check(listed == {tree, note, browser}, "every selected tile is either shared or listed as left out", json.dumps(t))
         check(bool(reasons.get(tree)), "a file tree is listed as \"can't be shared yet\", with its reason", json.dumps(reasons))
+    # A Mac on 0.7.38 opens a live-tile link: it cannot read the area, so the
+    # relay refuses it before admitting anyone or spending the link.
+    if "oldguest" in legs:
+        older = host.call("spawnKind", kind="note", title="For an older Mac")["tile"]
+        host.call("hostKind", tile=older, type=f"Hello {token}")
+        s = host.call("shareKind", tile=older, slug=f"kinds-old-{token}")
+        old = Person("o", endpoint, env_extra); people.append(old)
+        refused = old.call("open", url=s["url"], expectTile=False, timeout=150)
+        print(f"NOTE journey: 0.7.38 shows: {refused.get('outcome')}")
+        check("(426)" in refused.get("outcome", "") and not refused.get("outcome", "").startswith("opened"),
+              "0.7.38: the relay refuses its join with 426 before admitting it", refused.get("outcome", ""))
+        snap = old.call("snapshot")
+        check(not snap.get("sharedAgentTiles") and snap.get("sharedZoneSessions", 0) == 0 and "sharedTile" not in snap.get("tileKinds", []),
+              "0.7.38: nothing landed on its canvas", json.dumps({k: snap.get(k) for k in ("tileKinds", "sharedZoneSessions")}))
+        state = host.call("linkState", tile=older)
+        check(state["phase"].startswith("live") and not state["people"] and state["rows"] == ["active"],
+              "0.7.38: the Works once link is not spent, and nobody was admitted", json.dumps(state))
+        old.quit(); people.remove(old)
+        opened_new = guest.call("open", url=s["url"], expectTile=False, timeout=150)
+        eventually(lambda: f"Hello {token}" in guest_kind("note").get("text", ""),
+                   "an updated Mac then opens the same link and sees the note", 45, lambda: json.dumps(opened_new))
     pages.shutdown()
 
 
@@ -1039,6 +1066,8 @@ def main():
     parser.add_argument("--mode", choices=["a", "b", "terminal"], default="a",
                         help="a: share one agent; b: the portal; terminal: a shared terminal's stream (.plans/114)")
     parser.add_argument("--stills", help="with --mode terminal: where to write the host's and guest's stills")
+    parser.add_argument("--old-guest", default=None,
+                        help="journey name of bundles built from 0.7.38 (b0689628); adds the oldguest leg")
     parser.add_argument("--tmux", action="store_true",
                         help="terminals keep tmux persistence, each app in its own TMUX_TMPDIR (never the default socket)")
     parser.add_argument("--no-lock", action="store_true",
@@ -1051,6 +1080,8 @@ def main():
                         help="delete what a kept state folder (--keep, or a failed run) left on the relay, and nothing else")
     args = parser.parse_args()
     if not args.name.isalpha(): parser.error("--name takes letters only")
+    global OLD_GUEST
+    OLD_GUEST = args.old_guest
     configure(args.name)
     global TMUX_PERSISTENCE
     TMUX_PERSISTENCE = args.tmux
@@ -1080,7 +1111,8 @@ def main():
         build_env = {k: v for k, v in os.environ.items() if k != "SDKROOT"}
         lock = [] if args.no_lock else [str(LOCK)]
         subprocess.run([*lock, "swift", "build", "--product", "continuum-relay"], check=True, env=build_env)
-        for bundle_name, bundle_id, _, _ in PEOPLE.values():
+        for side, (bundle_name, bundle_id, _, _) in PEOPLE.items():
+            if side == "o": continue
             subprocess.run([*lock, "scripts/make-app-bundle.sh", "--configuration", "debug", "--bundle-id", bundle_id,
                             "--name", bundle_name, "--output", str(APPS / f"{bundle_name}.app")], check=True, env=build_env)
 
@@ -1118,7 +1150,9 @@ def main():
         if args.mode == "terminal":
             terminal_journey(host, guest, check, eventually, args.stills)
         if args.mode == "a" and args.only in ("all", "kinds"):
-            kinds_journey(host, guest, check, eventually, set(args.kinds.split(",")))
+            legs = set(args.kinds.split(","))
+            if OLD_GUEST: legs.add("oldguest")
+            kinds_journey(host, guest, check, eventually, legs, endpoint=endpoint, env_extra=env_extra, people=people)
         if args.mode == "a" and args.only in ("all", "agent"):
             tile = host.call("spawnAgent")["tile"]
             before = host.call("snapshot", tile=tile)

@@ -39,6 +39,7 @@ public final class ShareLinkOpener {
 
     public static let incompleteMessage = "This share link is incomplete. Ask for a new link."
     public static let rateLimitedMessage = "Too many people joined through this link recently. Try again later, or ask for a new link."
+    public static let updateMessage = "This share needs a newer version of Array. Update Array, then open the link again. The link still works."
     public static let refusedMessage = "This share link was refused. It was already used, revoked or is not valid. Ask for a new link."
 
     @discardableResult
@@ -110,6 +111,7 @@ public final class ShareLinkOpener {
             case 429: return rateLimitedMessage
             case 401: return "This Mac is no longer signed in to collaboration. Sign in again, then open the link."
             case 404: return "This link does not exist on \(place). Ask for a new link."
+            case 426: return updateMessage
             default: return "Array could not open the link: \(place) answered with an error (\(status)). Try it again later."
             }
         }
