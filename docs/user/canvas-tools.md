@@ -55,7 +55,7 @@ The agent queries before writing and supplies a revision and stable request key.
 
 ## Visible delegation
 
-`array_delegate` creates a child agent in a visible tile, inheriting the parent’s provider, model, and checkout. It creates no worktree. Use it only when the user has asked for delegation.
+`array_delegate` creates a child agent in a visible tile, in the parent’s checkout. By default it inherits the parent’s harness and model; the lead can choose another harness and an available model. It creates no worktree. Use it only when the user has asked for delegation.
 
 `array_reveal_agent` presents an existing child without creating a new one. `array_message_agent` starts a turn on another agent: under **Free within a project**, any agent in the same project, so you can ask an agent to “message the agent to your right”; under **Ask first**, only the agents it created and the agent that created it. It never interrupts an active turn. A chain of agent-to-agent turns with no prompt from you stops after 20, so two agents cannot keep each other running forever. `wait_agents` collects child results using the returned operation handles.
 
