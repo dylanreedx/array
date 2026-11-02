@@ -40,6 +40,17 @@ final class KanbanCardView: NSView, TokenThemed {
     /// The carried copy must be invisible to hit-testing, or it masks the agent
     /// tile the drag is hunting for.
     var ignoresHitTesting = false
+    /// Someone else's board: a press opens the task to read, nothing moves.
+    var isReadOnly = false {
+        didSet {
+            guard isReadOnly != oldValue else { return }
+            grip.isHidden = isReadOnly
+            assignButton.toolTip = isReadOnly ? nil : "Choose an agent, or drag this task onto an agent tile"
+            toolTip = isReadOnly ? "Click to read this task" : "Click for task details · Drag to move or assign to an agent"
+            if let shown { update(card: shown.card, assigneeName: shown.assignee) }
+            window?.invalidateCursorRects(for: self)
+        }
+    }
 
     static let horizontalPadding: CGFloat = 11
     static let verticalPadding: CGFloat = 12
@@ -108,7 +119,9 @@ final class KanbanCardView: NSView, TokenThemed {
 
     // MARK: - Content
 
+    private var shown: (card: BoardCard, assignee: String?)?
     func update(card: BoardCard, assigneeName: String?) {
+        shown = (card, assigneeName)
         if titleField.stringValue != card.title, !isEditing {
             titleField.stringValue = card.title
         }
@@ -118,7 +131,7 @@ final class KanbanCardView: NSView, TokenThemed {
         assignButton.image = NSImage(systemSymbolName: "person.crop.circle", accessibilityDescription: "Agent")?
             .withSymbolConfiguration(symbol)
         assignButton.imagePosition = .imageLeading
-        assignButton.title =  (assigneeName ?? (card.assignee == nil ? "Assign agent" : "Unavailable agent")) + "  ▾"
+        assignButton.title =  (assigneeName ?? (card.assignee == nil ? (isReadOnly ? "Unassigned" : "Assign agent") : "Unavailable agent")) + (isReadOnly ? "" : "  ▾")
         assignButton.setAccessibilityLabel(assigneeName.map { "Assigned agent: " + $0 } ?? "Assign agent")
         let meta = Self.metaText(for: card, assigneeName: assigneeName)
         metaLabel.stringValue = meta ?? ""
@@ -196,6 +209,7 @@ final class KanbanCardView: NSView, TokenThemed {
         if event.modifierFlags.contains(.command) { super.mouseDown(with: event); return }
         guard let tile else { super.mouseDown(with: event); return }
         tile.setFocusState(.selected(cardId))
+        if tile.isReadOnly { tile.openTask(cardId); return }
         tile.beginCardDrag(cardId: cardId, event: event)
     }
 
@@ -235,7 +249,10 @@ final class KanbanCardView: NSView, TokenThemed {
     }
 
     private func contextItems() -> [ChoiceItem] {
-        [
+        if tile?.isReadOnly == true {
+            return [ChoiceItem(id: "open", title: "Open Details", icon: .system("rectangle.and.pencil.and.ellipsis"))]
+        }
+        return [
             ChoiceItem(id: "open", title: "Open Details", icon: .system("rectangle.and.pencil.and.ellipsis")),
             ChoiceItem(id: "move", title: "Move to…", icon: .system("arrow.right.circle")),
             ChoiceItem(id: "assign", title: "Assign to…", icon: .system("person.crop.circle.badge.plus")),
@@ -297,6 +314,9 @@ final class KanbanCardView: NSView, TokenThemed {
     var qaPresentedContextItems: [ChoiceItem] { contextMenuController.listView?.qaItems ?? [] }
     func qaPerformContextChoice(_ id: String) { performContextChoice(id, anchor: .zero) }
     func qaDismissContextMenu() { contextMenuController.dismiss() }
+    var qaAssigneeTitle: String { assignButton.title }
+    var qaMetaText: String { metaLabel.isHidden ? "" : metaLabel.stringValue }
+    var qaHasThumbnail: Bool { !thumbnail.isHidden && thumbnail.image != nil }
     var qaAssigneeImageAspectRatio: CGFloat {
         guard let size = assignButton.image?.size, size.height > 0 else { return 0 }
         return size.width / size.height
@@ -305,10 +325,13 @@ final class KanbanCardView: NSView, TokenThemed {
 
     // MARK: - Layout
 
-    @objc private func assignAgent() { tile?.openTask(cardId, assign: true) }
+    @objc private func assignAgent() {
+        if let tile, tile.isReadOnly { tile.onReadOnlyAssignee?(cardId); return }
+        tile?.openTask(cardId, assign: true)
+    }
     override func resetCursorRects() {
         super.resetCursorRects()
-        if !isEditing { addCursorRect(bounds, cursor: .openHand) }
+        if !isEditing { addCursorRect(bounds, cursor: isReadOnly ? .pointingHand : .openHand) }
     }
     func loadThumbnail(card: BoardCard, store: BoardAttachmentStore?, boardID: UUID) {
         guard let attachment = card.attachments.first, let store else {

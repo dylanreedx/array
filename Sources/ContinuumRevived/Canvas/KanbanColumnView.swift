@@ -30,6 +30,8 @@ final class KanbanColumnView: NSView, TokenThemed {
     private var measuredWidth: CGFloat = 0
     private var measurementCards: [UUID: (BoardCard, String?)] = [:]
     var onAddTask: (() -> Void)?
+    /// False on a board shown read only: no add row.
+    var allowsAdding = true { didSet { addButton.isHidden = !allowsAdding } }
     private let addButton = NSButton(title: "+ Add task", target: nil, action: nil)
 
     private(set) var liftedCardId: UUID?

@@ -35,6 +35,19 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
     /// The only way anything leaves this view.
     var onCommand: ((BoardCommand) -> Void)?
 
+    /// Someone else's board, shown in a portal on this Mac: this same renderer
+    /// with every edit route closed. The value is the owner's name, for the
+    /// read-only line. Nil on the board's own Mac. Edits stay on the owner's
+    /// Mac this release (`~/array-scratch/shared-boards/REPORT.md`).
+    var readOnlyOwner: String? { didSet { applyReadOnly() } }
+    var isReadOnly: Bool { readOnlyOwner != nil }
+    var qaGestureHint: String { gestureHint.stringValue }
+    var qaTitleBarActionsHidden: Bool { titleBarActions?.isHidden ?? true }
+    var qaTaskDetail: BoardTaskDetailController? { taskDetail }
+    /// Read only: the assignee chip was pressed on this card.
+    var onReadOnlyAssignee: ((UUID) -> Void)?
+    private weak var titleBarActions: NSView?
+
     var boardLibraryProvider: (() -> [BoardLibraryEntry])?
     var onSelectBoard: ((UUID) -> Void)?
     var onCreateBoard: (() -> Void)?
@@ -220,12 +233,23 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
         let actions = NSStackView(views: [toggle, button])
         actions.orientation = .horizontal
         actions.spacing = 8
+        titleBarActions = actions
         setTitleBarAccessory(actions)
+    }
+
+    private func applyReadOnly() {
+        titleBarActions?.isHidden = isReadOnly
+        if isReadOnly, boardViewState.sidebarExpanded { boardViewState.sidebarExpanded = false; rebuildLibraryShell() }
+        for column in columnViews { column.allowsAdding = !isReadOnly }
+        gestureHint.stringValue = readOnlyOwner.map { "Read only · \($0)'s board  ·  Click a task to read it  ·  Changes happen on \($0)'s Mac" }
+            ?? "Drag a task onto an agent to assign it  ·  Click to open details"
+        cardViews.forEach { $0.isReadOnly = isReadOnly }
+        needsLayout = true
     }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if event.clickCount == 2,
+        if event.clickCount == 2, !isReadOnly,
            !event.modifierFlags.contains(.command),
            canvas?.pointerPanRequested(for: event) != true,
            titleHitRect?.contains(point) == true {
@@ -248,6 +272,7 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
     }
 
     @objc func toggleBoardSidebar() {
+        guard !isReadOnly else { return }
         boardViewState.sidebarExpanded.toggle()
         onBoardViewStateChange?(boardViewState)
         rebuildLibraryShell()
@@ -349,6 +374,7 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
         // A cross-lane move may replace the card view while retaining the
         // focused ID. Reapply selection to that new renderer.
         if let focused = focusState.cardId { cardView(for: focused)?.setSelected(true) }
+        if isReadOnly { cardViews.forEach { $0.isReadOnly = true } }
         // A card the model no longer has cannot stay selected.
         if let focused = focusState.cardId, board.card(focused) == nil {
             setFocusState(.none)
@@ -378,12 +404,15 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
                 self?.agentDisplayName?(id)
             })
             view.onAddTask = { [weak self] in self?.createCard(in: column.id) }
+            view.allowsAdding = !isReadOnly
             body.addSubview(view)
             return view
         }
         emptyBoardLabel.isHidden = !columnViews.isEmpty
         needsLayout = true
     }
+
+    private var cardViews: [KanbanCardView] { columnViews.flatMap(\.cardViews) }
 
     func columnView(for id: UUID) -> KanbanColumnView? {
         columnViews.first { $0.columnId == id }
@@ -570,6 +599,7 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
     }
 
     func createCard(in columnId: UUID) {
+        guard !isReadOnly else { return }
         let id = UUID()
         let last = board.orderedCards(in: columnId).last?.id
         onCommand?(.createCard(id: id, columnId: columnId, title: "", after: last, before: nil))
@@ -588,8 +618,8 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
     override func keyDown(with event: NSEvent) {
         // Every move below is the SAME `BoardCommand` a drag produces. The
         // keyboard is not a second, simpler path into the model.
-        let option = event.modifierFlags.contains(.option)
-        let command = event.modifierFlags.contains(.command)
+        let option = event.modifierFlags.contains(.option) && !isReadOnly
+        let command = event.modifierFlags.contains(.command) && !isReadOnly
         switch event.keyCode {
         case 36:  // Return
             switch focusState {
@@ -607,7 +637,7 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
             // Deletes ONLY from selection. In editing, the key belongs to the
             // text field, which is where an ambiguous state machine deletes the
             // user's card instead of a character.
-            if case .selected(let id) = focusState {
+            if case .selected(let id) = focusState, !isReadOnly {
                 onCommand?(.deleteCard(id: id))
                 setFocusState(.none)
             } else {
