@@ -81,6 +81,17 @@ fresh_state() {
   rm -rf "$STATE/a" "$STATE/b"
   for side in a b; do mkdir -p "$STATE/$side/project" "$STATE/$side/support" "$STATE/$side/tmux"; done
   chmod 700 "$STATE/a" "$STATE/b"
+  # A's project is a small git repo with one uncommitted change, so a file
+  # tile and a diff tile have something to share.
+  (
+    cd "$STATE/a/project"
+    git init -q
+    printf '.array/\n' > .gitignore
+    printf 'export function greet(name) {\n  return "Hello, " + name;\n}\n' > greet.js
+    printf '# Checkout\n\nA scratch project for the 0.7.39 preview.\n' > README.md
+    git add -A && git commit -q -m "chore(preview): seed the scratch project"
+    printf 'export function greet(name) {\n  return `Hello, ${name}!`;\n}\n\nexport function bye(name) {\n  return `Bye, ${name}.`;\n}\n' > greet.js
+  )
   for id in "$ID_A" "$ID_B"; do
     defaults delete "$id" >/dev/null 2>&1 || true
     defaults write "$id" agentCharacters.enabled -bool YES
