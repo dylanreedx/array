@@ -4,8 +4,9 @@
 #
 #   scripts/preview-0739.sh build       # build both bundles and the relay (the agent did this)
 #   scripts/preview-0739.sh relay       # fresh state, start the local relay
-#   scripts/preview-0739.sh launch a    # open Array Preview A (the host)
-#   scripts/preview-0739.sh launch b    # open Array Preview B (the guest)
+#   scripts/preview-0739.sh launch a --real   # open Array Preview A (the host) on your own claude and codex
+#   scripts/preview-0739.sh launch b --real   # open Array Preview B (the guest) the same way
+#   scripts/preview-0739.sh launch a          # the same on the check fakes (canned replies, no usage)
 #   scripts/preview-0739.sh open-link   # give B the share link on the clipboard
 #   scripts/preview-0739.sh stop        # quit both, stop the relay, leave nothing running
 #
@@ -15,7 +16,10 @@
 #   root for both (CLAUDE.md hazard 10), never ~/Documents.
 # - The bundle ids carry the multiplayer preview prefix, so opening either app
 #   from Finder is refused instead of falling onto the shared "Array Dev" store.
-# - Agents run on the check fakes: no real model, login or usage.
+# - With --real, agents run your own claude and codex with their own logins
+#   (Array stores no credential); every turn is a real one. Without it they
+#   run the check fakes: no model, no login, no usage, and a plain prompt to
+#   the Claude fake draws no reply (only TOOL prompts show a step).
 # - Agent characters are switched on in both apps' defaults.
 # - Terminals keep tmux persistence, each app with its own tmux server in
 #   ~/array-scratch/preview-0739/{a,b}/tmux (TMUX and TMUX_PANE unset), never
@@ -167,8 +171,10 @@ start_tmux() { # side: this app's own tmux server, with no user config
     || { echo "tmux socket $sock is outside $dir; not launching" >&2; exit 1; }
 }
 
-launch() { # side
-  local side="$1" app
+launch() { # side [--real]
+  local side="$1" real="${2:-}" app
+  local mode=(--env "CONTINUUM_MULTIPLAYER_PREVIEW_REAL_CLIS=0")
+  [[ "$real" == --real ]] && mode=(--env "CONTINUUM_MULTIPLAYER_PREVIEW_REAL_CLIS=1")
   app="$(side_app "$side")"
   [[ -f "$STATE/relay.env" ]] || { echo "the relay is not running; run $0 relay first" >&2; exit 1; }
   [[ -z "$(app_pids "$app")" ]] || { echo "$(basename "$app" .app) is already running" >&2; exit 1; }
@@ -184,17 +190,19 @@ launch() { # side
     --env "CONTINUUM_MULTIPLAYER_PREVIEW=$STATE/$side/preview.json" \
     --env "CONTINUUM_COLLABORATION_ENDPOINT=http://127.0.0.1:$RELAY_PORT" \
     --env "TMUX_TMPDIR=$STATE/$side/tmux" \
+    "${mode[@]}" \
     --stdout "$STATE/$side/app.log" --stderr "$STATE/$side/app.log" \
     "$app" --args -ApplePersistenceIgnoreState YES
-  echo "==> opened $(basename "$app" .app); its log is $STATE/$side/app.log"
+  echo "==> opened $(basename "$app" .app) ($([[ "$real" == --real ]] && echo "your own claude and codex" || echo "the check fakes")); its log is $STATE/$side/app.log"
 }
 
 case "${1:-}" in
   build) build ;;
   relay) stop >/dev/null; fresh_state; start_relay ;;
   launch)
-    side="${2:-}"; [[ "$side" == a || "$side" == b ]] || { echo "usage: $0 launch a|b" >&2; exit 2; }
-    launch "$side" ;;
+    side="${2:-}"; [[ "$side" == a || "$side" == b ]] || { echo "usage: $0 launch a|b [--real]" >&2; exit 2; }
+    [[ -z "${3:-}" || "${3:-}" == --real ]] || { echo "usage: $0 launch a|b [--real]" >&2; exit 2; }
+    launch "$side" "${3:-}" ;;
   open-link)
     link="$(pbpaste)"
     [[ "$link" == https://arrayapp.dev/s/* || "$link" == array*://s/* ]] || { echo "the clipboard holds no share link: $link" >&2; exit 1; }
@@ -202,5 +210,5 @@ case "${1:-}" in
     open -a "$APP_B" "$link"
     echo "==> gave Array Preview B the link" ;;
   stop) stop ;;
-  *) echo "usage: $0 build | relay | launch a|b | open-link | stop" >&2; exit 2 ;;
+  *) echo "usage: $0 build | relay | launch a|b [--real] | open-link | stop" >&2; exit 2 ;;
 esac

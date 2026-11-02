@@ -6009,9 +6009,11 @@ enum ContinuumApp {
         // A multiplayer preview runs the check fakes, never a real CLI: they lead
         // PATH, and the login-shell PATH (where a real claude lives) never merges.
         let multiplayerPreview = MultiplayerPreview.current
-        multiplayerPreview?.installFakeCLIs()
+        // `--real` previews run the person's own CLIs: no fakes, the login PATH.
+        let previewRunsFakes = multiplayerPreview.map { !$0.usesRealCLIs } ?? false
+        if previewRunsFakes { multiplayerPreview?.installFakeCLIs() }
         ToolEnvironment.shared.bootstrap()
-        if multiplayerPreview == nil { ToolEnvironment.shared.startLoginShellUpgrade() }
+        if !previewRunsFakes { ToolEnvironment.shared.startLoginShellUpgrade() }
         #if ARRAY_FILM
         // Film build: `--film` stages its scene on disk BEFORE `AppDelegate` reads
         // any store, and freezes the catalogue to the scene's. No provider is
@@ -6037,7 +6039,7 @@ enum ContinuumApp {
         // re-check) so the picker offers whatever providers the user has
         // authed in pi. QA never enables this and keeps the frozen fallback,
         // and neither does a multiplayer preview, whose CLIs are the fakes.
-        if multiplayerPreview == nil {
+        if !previewRunsFakes {
             AgentModelCatalog.shared.enableLiveRefresh()
             AgentHookSurfaceCatalog.shared.startRefresh()
             // Session titles: each harness titles with its own CLI. Same opt-in rule
@@ -12506,7 +12508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                                 width: screen.width / 2, height: screen.height)
             window.setFrame(column, display: true)
         }
-        if preview.role == "host", agentSupervisor.records.isEmpty, let canvasView {
+        if preview.role == "host", !preview.usesRealCLIs, agentSupervisor.records.isEmpty, let canvasView {
             for (harness, prompt) in [(AgentHarness.claudeCode, "TOOL Read the shared plan and note the next step."),
                                       (AgentHarness.codex, "Summarise what this preview is for in one line.")] {
                 let before = Set(canvasView.allWorkspaceTiles().map(\.id))

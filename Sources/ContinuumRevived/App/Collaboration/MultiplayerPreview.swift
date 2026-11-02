@@ -39,6 +39,14 @@ struct MultiplayerPreview: Decodable, Sendable {
     let name: String?
 
     static let environmentKey = "CONTINUUM_MULTIPLAYER_PREVIEW"
+    /// `scripts/preview-0739.sh launch a --real`: the person's own `claude` and
+    /// `codex` (their own logins; Array stores no credential) instead of the
+    /// check fakes. The live catalogue, titling and account reads run as in a
+    /// real install, and nothing is seeded, so nothing spends a turn unasked.
+    /// Everything else stays a preview: own app support, the credential file,
+    /// a loopback relay, no Ghostty config, no `~/.pi` writes, no focus.
+    static let realCLIsEnvironmentKey = "CONTINUUM_MULTIPLAYER_PREVIEW_REAL_CLIS"
+    var usesRealCLIs: Bool { getenv(Self.realCLIsEnvironmentKey).map { String(cString: $0) == "1" } ?? false }
     /// The script's bundles: `dev.arrayapp.macos.mp-a`, `dev.arrayapp.macos.mp-b`.
     static let bundlePrefix = "dev.arrayapp.macos.mp-"
 
