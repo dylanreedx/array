@@ -22,6 +22,10 @@ public protocol SharedAreaControllerTransport: Sendable {
     func reportUsage(_ report: Collaboration.UsageReport) async throws
     func publishAgentProjection(object: UUID, report: Collaboration.AgentProjection.PublishReport) async throws
     func readAgentProjection(object: UUID, cursor: Collaboration.AgentProjection.Cursor?) async throws -> Collaboration.AgentProjection.Read
+    /// A shared note, file, diff, browser or terminal (`Collaboration.LiveTile`).
+    func publishLiveTileState(object: UUID, report: Collaboration.LiveTile.PublishState) async throws
+    func appendLiveTileEvent(object: UUID, body: Collaboration.LiveTile.EventBody) async throws -> Collaboration.LiveTile.Appended
+    func readLiveTile(object: UUID, request: Collaboration.LiveTile.ReadRequest) async throws -> Collaboration.LiveTile.Read
     /// The area's cursor lane: pointers both ways at the sender's rate. A
     /// transport without one throws, and presence stays on update pages.
     func openCursorLane() async throws -> any SharedAreaCursorLane
@@ -47,6 +51,15 @@ public extension SharedAreaControllerTransport {
     }
     func openCursorLane() async throws -> any SharedAreaCursorLane {
         throw CollaborationClientError.server(status: 501, code: "cursorLaneUnavailable")
+    }
+    func publishLiveTileState(object: UUID, report: Collaboration.LiveTile.PublishState) async throws {
+        throw CollaborationClientError.server(status: 503, code: "liveTileUnavailable")
+    }
+    func appendLiveTileEvent(object: UUID, body: Collaboration.LiveTile.EventBody) async throws -> Collaboration.LiveTile.Appended {
+        throw CollaborationClientError.server(status: 503, code: "liveTileUnavailable")
+    }
+    func readLiveTile(object: UUID, request: Collaboration.LiveTile.ReadRequest) async throws -> Collaboration.LiveTile.Read {
+        throw CollaborationClientError.server(status: 503, code: "liveTileUnavailable")
     }
 }
 
@@ -96,6 +109,15 @@ public struct SharedAreaAPITransport: SharedAreaControllerTransport {
     }
     public func openCursorLane() async throws -> any SharedAreaCursorLane {
         SharedAreaAPICursorLane(client: try await api.openCursorLane(area: area))
+    }
+    public func publishLiveTileState(object: UUID, report: Collaboration.LiveTile.PublishState) async throws {
+        try await api.publishLiveTileState(area: area, object: object, report: report)
+    }
+    public func appendLiveTileEvent(object: UUID, body: Collaboration.LiveTile.EventBody) async throws -> Collaboration.LiveTile.Appended {
+        try await api.appendLiveTileEvent(area: area, object: object, body: body)
+    }
+    public func readLiveTile(object: UUID, request: Collaboration.LiveTile.ReadRequest) async throws -> Collaboration.LiveTile.Read {
+        try await api.readLiveTile(area: area, object: object, request: request)
     }
 }
 
@@ -233,6 +255,22 @@ public final class SharedAreaController {
     public func readAgentProjection(object: SharedArea.ID<SharedArea.Object>, cursor: Collaboration.AgentProjection.Cursor?) async throws -> Collaboration.AgentProjection.Read {
         guard status == .connected, let transport else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
         return try await transport.readAgentProjection(object: object.rawValue, cursor: cursor)
+    }
+
+    /// A shared note, file, diff, browser or terminal. The host writes state;
+    /// any member reads, and appends input where the kind takes it.
+    public func publishLiveTileState(object: SharedArea.ID<SharedArea.Object>, host: SharedArea.ID<SharedArea.Host>,
+                                     state: Collaboration.LiveTile.State) async throws {
+        guard status == .connected, let transport, let scope else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
+        try await transport.publishLiveTileState(object: object.rawValue, report: .init(epoch: scope.epoch, host: host, state: state))
+    }
+    public func appendLiveTileEvent(object: SharedArea.ID<SharedArea.Object>, body: Collaboration.LiveTile.EventBody) async throws -> Collaboration.LiveTile.Appended {
+        guard status == .connected, let transport else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
+        return try await transport.appendLiveTileEvent(object: object.rawValue, body: body)
+    }
+    public func readLiveTile(object: SharedArea.ID<SharedArea.Object>, request: Collaboration.LiveTile.ReadRequest) async throws -> Collaboration.LiveTile.Read {
+        guard status == .connected, let transport else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
+        return try await transport.readLiveTile(object: object.rawValue, request: request)
     }
 
     private let localStore: SharedAreaLocalStore

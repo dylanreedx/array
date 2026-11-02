@@ -95,6 +95,15 @@ enum SharedAreaPeerRuntime {
         func readAgentProjection(object: UUID, cursor: Collaboration.AgentProjection.Cursor?) async throws -> Collaboration.AgentProjection.Read {
             try await live.readAgentProjection(object: object, cursor: cursor)
         }
+        func publishLiveTileState(object: UUID, report: Collaboration.LiveTile.PublishState) async throws {
+            try await live.publishLiveTileState(object: object, report: report)
+        }
+        func appendLiveTileEvent(object: UUID, body: Collaboration.LiveTile.EventBody) async throws -> Collaboration.LiveTile.Appended {
+            try await live.appendLiveTileEvent(object: object, body: body)
+        }
+        func readLiveTile(object: UUID, request: Collaboration.LiveTile.ReadRequest) async throws -> Collaboration.LiveTile.Read {
+            try await live.readLiveTile(object: object, request: request)
+        }
         func artifactState(object: UUID) async throws -> Collaboration.Artifact.State { try await live.artifactState(object: object) }
         func readArtifact(object: UUID, revision: UUID?) async throws -> CollaborationArtifactContents { try await live.readArtifact(object: object, revision: revision) }
         func publishArtifact(epoch: Int64, capture: Collaboration.Artifact.Capture) async throws -> Collaboration.Artifact.PublishReceipt {
