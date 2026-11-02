@@ -128,6 +128,14 @@ final class BoardTaskDetailController: NSObject, WKScriptMessageHandler, WKNavig
                 "columnID": card.columnId.uuidString,
                 "assigneeID": card.assignee.map { $0.rawValue.uuidString } as Any? ?? NSNull(),
                 "assigneeName": tile.assigneeName(for: card) as Any? ?? NSNull()]
+            .merging(readOnlyFields(tile: tile, card: card)) { $1 }
+    }
+    /// Someone else's board: the editor shows the same document with every
+    /// control off, and says whose it is.
+    private func readOnlyFields(tile: KanbanTileNSView, card: BoardCard) -> [String: Any] {
+        guard let owner = tile.readOnlyOwner else { return [:] }
+        let agent = tile.assigneeName(for: card).map { "\($0) is \(owner)'s agent. It runs on \(owner)'s Mac." } ?? ""
+        return ["readOnly": true, "readOnlyNote": "Read only · \(owner)'s board", "readOnlyDetail": agent]
     }
     private static func imageJSON(_ image: BoardAttachment) -> [String: Any] {
         ["id": image.id.uuidString, "filename": image.filename, "url": image.imageURL]
@@ -142,6 +150,8 @@ final class BoardTaskDetailController: NSObject, WKScriptMessageHandler, WKNavig
     }
     private func refreshImageScope() { images.attachments = Dictionary(uniqueKeysWithValues: draft.attachments.map { ($0.id, $0) }) }
     private func changed(_ value: [String: Any]) {
+        // Read only: the editor's re-serialised Markdown is never an edit.
+        guard tile?.isReadOnly != true else { return }
         if let title = value["title"] as? String { draft.title = title }
         if let body = value["body"] as? String { draft.body = body }
         saveTask?.cancel()
@@ -193,6 +203,8 @@ final class BoardTaskDetailController: NSObject, WKScriptMessageHandler, WKNavig
     }
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.frameInfo.isMainFrame, let value = message.body as? [String: Any], let type = value["type"] as? String else { return }
+        // Read only: the editor posts nothing else, and nothing else is honoured.
+        if tile?.isReadOnly == true, !["ready", "close"].contains(type) { return }
         switch type {
         case "ready":
             ready = true

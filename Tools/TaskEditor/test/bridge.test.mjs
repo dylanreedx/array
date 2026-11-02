@@ -31,3 +31,26 @@ test('editor controls emit typed native bridge messages and keep initial content
  assert.equal(messages.at(-1).type,'change'); assert.equal(messages.at(-1).title,'Edited'); assert.equal(messages.at(-1).body,'**Context**');
  dom.window.close();
 });
+test('a read-only task (a board shared from another Mac) shows the document and sends no edits',()=>{
+ const html=readFileSync(new URL('../src/index.html',import.meta.url),'utf8');
+ const dom=new JSDOM(html,{url:'file:///TaskEditor/index.html',runScripts:'outside-only',pretendToBeVisual:true});
+ const messages=[]; const w=dom.window;
+ w.webkit={messageHandlers:{taskEditor:{postMessage:m=>messages.push(m)}}};
+ w.eval(readFileSync(new URL('../../../Sources/ContinuumRevived/Resources/TaskEditor/editor.js',import.meta.url),'utf8'));
+ w.taskEditor.load({title:'Shared task',body:'## Plan\n\n- **wallets** first',attachments:[],columns:[{id:'todo',name:'To do'},{id:'done',name:'Done'}],columnID:'todo',agents:[],assigneeID:'a',assigneeName:'Scout',readOnly:true,readOnlyNote:"Read only · Dylan's board",readOnlyDetail:"Scout is Dylan's agent."});
+ const d=w.document;
+ assert.equal(d.querySelector('.tiptap h2').textContent,'Plan','the body renders as Markdown');
+ assert.equal(d.querySelector('.tiptap strong').textContent,'wallets');
+ assert.equal(d.querySelector('.tiptap').getAttribute('contenteditable'),'false');
+ assert.equal(d.getElementById('title').readOnly,true);
+ assert.equal(d.getElementById('toolbar').hidden,true);
+ assert.equal(d.getElementById('add-images').hidden,true);
+ assert.equal(d.getElementById('save-status').textContent,"Read only · Dylan's board");
+ assert.equal(d.getElementById('assignee-value').textContent,'Scout');
+ const before=messages.length;
+ d.getElementById('status').click(); d.getElementById('assignee').click();
+ assert.equal(d.getElementById('status-picker').hidden,true); assert.equal(d.getElementById('agent-picker').hidden,true);
+ d.getElementById('title').value='Edited';d.getElementById('title').dispatchEvent(new w.Event('input'));
+ assert.equal(messages.length,before,'read only posts nothing');
+ dom.window.close();
+});
