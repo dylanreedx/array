@@ -352,3 +352,23 @@ How to use them: ALPHA-HANDOFF.md §2, "Deleting people and areas".
 - Staging still holds 59 older throwaway people (Avery, Blake, Peer A and B,
   Probe 0-9, Staging Owner…, Staging probe…). Not deleted: nothing records
   which runs own them.
+
+## The 0.7.39 preview relay (staging v12)
+
+2 November 2026. Source: `array/preview-0739` at `07122561`: 0.7.38 plus the
+portal with every tile kind, the live-tile lane and note CRDT, the terminal
+stream lane (also inside portals), the 0.7.38 live-tile refusal (426 before
+admission), and the deletion routes. Production is untouched.
+
+- Snapshot first: `vs_5z5qRO5ZeB2PUAq1NxGm`. Rollback target: v11 image
+  `registry.fly.io/arrayapp-relay-staging:deployment-01M6DEARAY9HEZQ2YCJFYK4T74`.
+- `fly deploy . --config deploy/fly.staging.toml --dockerfile Dockerfile --app arrayapp-relay-staging`
+  gave v12, image `deployment-01M6DKJKV8VTB4GXSX5Z5XRJFT`.
+- Health 200 three times (0.12-0.17 s), schema 5.
+
+Roll back with:
+
+```sh
+fly deploy --app arrayapp-relay-staging --config deploy/fly.staging.toml \
+  --image registry.fly.io/arrayapp-relay-staging:deployment-01M6DEARAY9HEZQ2YCJFYK4T74
+```
