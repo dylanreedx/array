@@ -145,7 +145,9 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         lastUpdate = Date()
         switch next.payload {
         case .note(let note):
-            if replica == nil {
+            // A portal revision is the whole text, not this editor's history:
+            // it replaces the replica. Merging it would interleave two texts.
+            if replica == nil || inPortal {
                 replica = Collaboration.NoteText.Replica(snapshot: note.snapshot, replica: replicaID)
                 eventCursor = note.eventsThrough
                 applyEditability()
