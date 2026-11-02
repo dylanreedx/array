@@ -763,8 +763,7 @@ full prose re-measures with characters on; the report now counts re-measures by 
 arm (`CANVAS_MOTION_CHARACTER_MOTION=never`) showed none either: characters never
 change a transcript's width.
 
-**Not measured: WindowServer and presented frames.** The motion harness
-(`scripts/canvas-motion/`, on `array/0732-canvas-parity`, not on integration)
-launches its own bundle with `open -n` and screen-captures an uncovered window, so
-it needs Dylan's display idle and unlocked. It was not run, because it would take
-his screen and focus. Run it before shipping, characters on versus off.
+**Owed at gate time: one clean motion-harness rerun.** The round 3 arms above ran
+while other benches compiled (load average 4.4-6.0). The gate should rerun
+`scripts/canvas-motion/character-arms.sh` on an idle, unlocked Mac, characters off
+versus on, and confirm the zoom and pan numbers and the zero width re-measures.
