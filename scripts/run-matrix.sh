@@ -2088,6 +2088,10 @@ run_app_check .build/debug/Array --transcript-character-check
 # the character at whole device pixels per art pixel and centred with the mark,
 # title, pill, ⋯ and ×, a note unchanged, Small byte-identical to today.
 run_app_check .build/debug/Array --character-size-check
+# Plan 110 › lead: a lead with helpers draws lead art in its row and header, its
+# helpers draw distinct characters in delegation order (stable over a restore), a
+# manual pick wins, a lone agent keeps its hash, a set with no lead art falls back.
+run_app_check .build/debug/Array --lead-character-check
 # Plan 110, slice 6: Settings › Appearance › Agent characters: import copies one
 # file, a bad file shows its problems and imports nothing, discovery uses a fixture
 # home only, and the preview grid renders in both appearances (still under RM).

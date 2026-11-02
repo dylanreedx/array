@@ -209,6 +209,7 @@ final class AgentCharacterController {
         isEnabled = enabled
         self.motion = motion
         self.size = size
+        if theme != self.theme { leadSet = theme?.leadSet }
         self.theme = theme
         if changed { NotificationCenter.default.post(name: Self.didChangeNotification, object: self) }
     }
@@ -230,12 +231,48 @@ final class AgentCharacterController {
     /// Where in its loop `agentID`'s character is (0..<1).
     func phase(for agentID: UUID) -> Double { AgentCharacterConfig.phase(for: agentID) }
 
-    /// `agentID`'s character in the shown set: the one named `name` when the
-    /// set has it (case-insensitive), else the pick hashed from the id.
+    // MARK: Leads and packs (plan 110 › lead)
+
+    /// The shown set's lead art as a drawable set (one character per power level).
+    private(set) var leadSet: AgentCharacterTheme?
+    /// Who leads and who helps, as the host's records say. Written by the
+    /// supervisor when its records' shape changes; never per event.
+    private(set) var packs: [UUID: AgentCharacterPacks.Role] = [:]
+    /// A guest's characters for agents another Mac hosts: the host's facts, drawn
+    /// as given (they already include the host's manual picks and packs).
+    private(set) var shippedAssignments: [UUID: AgentCharacterAssignment] = [:]
+
+    func setPacks(_ roles: [UUID: AgentCharacterPacks.Role]) {
+        guard roles != packs else { return }
+        packs = roles
+        if isEnabled { NotificationCenter.default.post(name: Self.didChangeNotification, object: self) }
+    }
+
+    /// Guest side: adopt the host's character for `agentID`, or nil to forget it.
+    func adoptShippedAssignment(_ assignment: AgentCharacterAssignment?, for agentID: UUID) {
+        guard shippedAssignments[agentID] != assignment else { return }
+        shippedAssignments[agentID] = assignment
+        if isEnabled { NotificationCenter.default.post(name: Self.didChangeNotification, object: self) }
+    }
+
+    /// The single source of which character `agentID` draws in the shown set:
+    /// a shipped host fact, else the host rule over `name` (the agent's manual
+    /// pick) and its pack role. Host code ships exactly this value.
+    func assignment(for agentID: UUID, name: String? = nil) -> AgentCharacterAssignment? {
+        guard let theme else { return nil }
+        if let shipped = shippedAssignments[agentID] {
+            let count = shipped.kind == .lead ? (leadSet?.characters.count ?? 0) : theme.characters.count
+            if shipped.index >= 0, shipped.index < count { return shipped }
+        }
+        return AgentCharacterAssignment.resolve(agentID: agentID, name: name, role: packs[agentID], theme: theme)
+    }
+
+    /// `agentID`'s helper character in the shown set: its assignment's, or for a
+    /// lead drawing lead art, the character it draws when it is not leading.
     func characterIndex(for agentID: UUID, name: String? = nil) -> Int? {
-        guard let theme, !theme.characters.isEmpty else { return nil }
-        if let name, let index = Self.index(of: name, in: theme) { return index }
-        return AgentCharacterConfig.characterIndex(for: agentID, count: theme.characters.count)
+        guard let theme, let assignment = assignment(for: agentID, name: name) else { return nil }
+        if assignment.kind == .helper { return assignment.index }
+        return AgentCharacterAssignment.resolve(agentID: agentID, name: name, role: nil, theme: theme)?.index
     }
 
     static func index(of name: String, in theme: AgentCharacterTheme) -> Int? {
@@ -248,8 +285,11 @@ final class AgentCharacterController {
 
     /// The shared atlas for `agentID`'s character in `appearance`; nil when off.
     func atlas(for agentID: UUID, appearance: AgentCharacterAtlas.Appearance, name: String? = nil) -> AgentCharacterSpriteAtlas? {
-        guard isEnabled, let theme, let index = characterIndex(for: agentID, name: name) else { return nil }
-        return atlas(theme: theme, character: index, appearance: appearance)
+        guard isEnabled, let theme, let assignment = assignment(for: agentID, name: name) else { return nil }
+        if assignment.kind == .lead, let leadSet {
+            return atlas(theme: leadSet, character: assignment.index, appearance: appearance)
+        }
+        return atlas(theme: theme, character: assignment.index, appearance: appearance)
     }
 
     func atlas(theme: AgentCharacterTheme, character: Int, appearance: AgentCharacterAtlas.Appearance) -> AgentCharacterSpriteAtlas? {
@@ -258,7 +298,7 @@ final class AgentCharacterController {
         guard let built = AgentCharacterSpriteAtlas(theme: theme, character: character, appearance: appearance) else { return nil }
         atlasBuilds += 1
         // Only the selected set's atlases are kept; a preview of another set is not.
-        if theme.id == self.theme?.id { atlases[key] = built }
+        if theme.id == self.theme?.id || theme.id == leadSet?.id { atlases[key] = built }
         return built
     }
 

@@ -110,14 +110,56 @@ public struct AgentCharacterTheme: Equatable, Sendable {
     public let frameHeight: Int
     public let palette: [Character: AgentCharacterColour]
     public let characters: [AgentCharacter]
-    /// Whether the file has art for an orchestrating lead. Read and validated;
-    /// Array does not draw a lead yet.
-    public let hasLead: Bool
+    /// The file's art for an orchestrating lead, at its own (larger) size.
+    public let lead: AgentCharacterLead?
+    /// Whether the file has art for an orchestrating lead.
+    public var hasLead: Bool { lead != nil }
+
+    /// The lead art as a set the atlas draws: one character per power level,
+    /// each at the lead's size, posed as a helper is (plan 110 › lead). nil when
+    /// the file has no lead art.
+    ///
+    /// The format gives a lead `rest`, `rising` and 1–4 `levels`, not a helper's
+    /// five loops and ten reactions, so each pose maps onto the nearest lead art:
+    /// every work loop plays the level, `cheer` and `noticed` play `rising` (the
+    /// lead powering up), the other reactions play `rest`, and the held `done` and
+    /// `failed` poses are `rest`'s first frame.
+    public var leadSet: AgentCharacterTheme? {
+        guard let lead else { return nil }
+        let still = lead.rest[0]
+        let characters = lead.levels.enumerated().map { level, frames in
+            AgentCharacter(
+                name: "Lead \(level + 1)", names: [], colours: [:],
+                loops: Dictionary(uniqueKeysWithValues: AgentCharacterLoop.allCases.map {
+                    ($0, AgentCharacter.Loop(frameMs: AgentCharacterLead.frameMs, frames: frames))
+                }),
+                done: still, failed: still,
+                clips: [.cheer: lead.rising, .noticed: lead.rising, .droop: [still], .asleep: [still],
+                        .idle: lead.rest, .flinch: [still], .wave: lead.rest])
+        }
+        return AgentCharacterTheme(
+            id: id + "+lead", title: title, scale: scale, frameWidth: lead.width, frameHeight: lead.height,
+            palette: palette, characters: characters, lead: nil)
+    }
 
     /// The colour of `letter` for `character`: its own colours first.
     public func colour(of letter: Character, in character: AgentCharacter) -> AgentCharacterColour? {
         character.colours[letter] ?? palette[letter]
     }
+}
+
+/// A theme's lead art (format `lead`): frames at `leadSize`, 28 × 16 by default.
+public struct AgentCharacterLead: Equatable, Sendable {
+    public let width: Int
+    public let height: Int
+    /// The lead at rest: no helpers running.
+    public let rest: [AgentCharacterFrame]
+    /// Powering up, played once.
+    public let rising: [AgentCharacterFrame]
+    /// 1 to 4 loops, one per power level: the more helpers, the higher.
+    public let levels: [[AgentCharacterFrame]]
+    /// The format's 150 ms beat: lead frames carry no pace of their own.
+    public static let frameMs: Double = 150
 }
 
 /// Why a file is not a theme: the first eight problems, each saying where.
@@ -334,14 +376,14 @@ public enum AgentCharacterThemeParser {
             bad("\"helpers\": 1 to 12 entries")
         }
 
-        var hasLead = false
+        var leadArt: AgentCharacterLead?
         if let lead = raw["lead"] {
             let rest = frames(lead.isObject ? lead["rest"] : nil, leadSize, "lead.rest", baseKnown)
             let rising = frames(lead.isObject ? lead["rising"] : nil, leadSize, "lead.rising", baseKnown)
-            var levelsValid = false
+            var levelSets: [[AgentCharacterFrame]]?
             if let levels = lead.isObject ? lead["levels"]?.arrayValue : nil, (1...4).contains(levels.count) {
                 let sets = levels.enumerated().map { frames($0.element, leadSize, "lead.levels[\($0.offset)]", baseKnown) }
-                levelsValid = !sets.contains(where: { $0 == nil })
+                levelSets = sets.contains(where: { $0 == nil }) ? nil : sets.compactMap { $0 }
             } else {
                 bad("lead.levels: 1 to 4 sets of frames")
             }
@@ -362,7 +404,9 @@ public enum AgentCharacterThemeParser {
                     bad("lead.flare: {\"small\": [[[row, col, letter], ...]], \"big\": ...}, each letter in the palette")
                 }
             }
-            hasLead = rest != nil && rising != nil && levelsValid
+            if let rest, let rising, let levelSets {
+                leadArt = AgentCharacterLead(width: leadSize.w, height: leadSize.h, rest: rest, rising: rising, levels: levelSets)
+            }
         }
 
         // Sounds are validated, never played: a sound on an agent event would be a
@@ -380,7 +424,7 @@ public enum AgentCharacterThemeParser {
         let title = titleText.isEmpty ? id : utf16Prefix(titleText, 60)
         return .success(AgentCharacterTheme(
             id: id, title: title, scale: px, frameWidth: helperSize.w, frameHeight: helperSize.h,
-            palette: palette, characters: characters, hasLead: hasLead))
+            palette: palette, characters: characters, lead: leadArt))
     }
 
     // MARK: - The format's small grammars, written out rather than as regular

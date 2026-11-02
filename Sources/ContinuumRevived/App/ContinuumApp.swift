@@ -2517,6 +2517,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // Plan 110 › lead: one lead per pack, distinct helpers in delegation order.
+        if CommandLine.arguments.contains("--lead-character-check") {
+            _ = NSApplication.shared
+            do {
+                print(try LeadCharacterChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL lead character: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         // Plan 110, slice 5: characters in the agent tile header.
         if CommandLine.arguments.contains("--tile-character-check") {
             _ = NSApplication.shared

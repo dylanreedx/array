@@ -147,6 +147,110 @@ public enum AgentCharacterConfig {
     }
 }
 
+/// Plan 110 › lead: who leads and who helps, from the host's agent records.
+///
+/// The rule, kept simple on purpose:
+/// - A **lead** is the root of a delegation tree (no parent, or its parent is
+///   gone) that has delegated helpers right now. Only a root can lead, so a pack
+///   has exactly one lead: a helper that delegates further is still a helper.
+/// - A **helper** is a lead's direct child. Its place in the pack is its
+///   delegation ordinal (`AgentRecord.parentRelativeOrdinal`), which is assigned
+///   at spawn, persisted, and never reused when a sibling is archived, so a
+///   helper keeps its character across relaunches and archives.
+/// - A helper's own helpers (depth 2 and below) keep the hashed pick: they have
+///   no stable place in the lead's sequence, and inventing one would reshuffle
+///   characters as the tree grows.
+public enum AgentCharacterPacks {
+    public struct Member: Equatable, Sendable {
+        public let id: UUID
+        public let parentID: UUID?
+        /// 1-based delegation ordinal under the parent; nil for legacy records.
+        public let ordinal: Int?
+        /// The agent's manual pick (`AgentRecord.characterName`).
+        public let characterName: String?
+
+        public init(id: UUID, parentID: UUID?, ordinal: Int?, characterName: String?) {
+            self.id = id
+            self.parentID = parentID
+            self.ordinal = ordinal
+            self.characterName = characterName
+        }
+    }
+
+    public enum Role: Equatable, Sendable {
+        case lead(helpers: Int)
+        /// `slot` is 0-based delegation order; the lead's pick decides where a
+        /// set with no lead art starts counting.
+        case helper(slot: Int, lead: UUID, leadCharacterName: String?)
+    }
+
+    public static func roles(_ members: [Member]) -> [UUID: Role] {
+        let byID = Dictionary(members.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        func isRoot(_ member: Member) -> Bool { member.parentID.map { byID[$0] == nil } ?? true }
+        var roles: [UUID: Role] = [:]
+        var helpers: [UUID: Int] = [:]
+        for member in members {
+            guard let parentID = member.parentID, let lead = byID[parentID], isRoot(lead) else { continue }
+            helpers[parentID, default: 0] += 1
+            if let ordinal = member.ordinal, ordinal >= 1 {
+                roles[member.id] = .helper(slot: ordinal - 1, lead: parentID, leadCharacterName: lead.characterName)
+            }
+        }
+        for (lead, count) in helpers { roles[lead] = .lead(helpers: count) }
+        return roles
+    }
+}
+
+/// The character one agent draws: a fact the host computes from its records and
+/// ships to a guest, which draws it as given and never re-derives it.
+public struct AgentCharacterAssignment: Codable, Equatable, Hashable, Sendable {
+    public enum Kind: String, Codable, Sendable {
+        /// `index` is into the set's characters.
+        case helper
+        /// `index` is the power level, into the set's `leadSet` characters.
+        case lead
+    }
+
+    public let kind: Kind
+    public let index: Int
+
+    public init(kind: Kind, index: Int) {
+        self.kind = kind
+        self.index = index
+    }
+
+    /// The precedence: a manual pick the set has, then lead art for a lead (when
+    /// the set has some), then the helper's place in its lead's pack, then the hash.
+    ///
+    /// Helpers take the set's characters in delegation order and wrap only once
+    /// they run out. In a set with no lead art the lead keeps a helper character,
+    /// so its helpers start just after it and the lead is never doubled before the
+    /// set is exhausted.
+    public static func resolve(agentID: UUID, name: String?, role: AgentCharacterPacks.Role?,
+                               theme: AgentCharacterTheme) -> AgentCharacterAssignment? {
+        let count = theme.characters.count
+        guard count > 0 else { return nil }
+        func named(_ name: String?) -> Int? {
+            guard let name else { return nil }
+            return theme.characters.firstIndex { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        }
+        if let index = named(name) { return .init(kind: .helper, index: index) }
+        switch role {
+        case let .lead(helpers)?:
+            if let levels = theme.leadSet?.characters.count, helpers > 0 {
+                return .init(kind: .lead, index: min(helpers, levels) - 1)
+            }
+        case let .helper(slot, lead, leadName)?:
+            if theme.hasLead { return .init(kind: .helper, index: slot % count) }
+            let leadIndex = named(leadName) ?? AgentCharacterConfig.characterIndex(for: lead, count: count)
+            return .init(kind: .helper, index: (leadIndex + 1 + slot) % count)
+        case nil:
+            break
+        }
+        return .init(kind: .helper, index: AgentCharacterConfig.characterIndex(for: agentID, count: count))
+    }
+}
+
 /// Sets the person imported: each a copy of one theme file in
 /// `<app support>/characters/<id>/theme.json`. Read only, never redistributed,
 /// and never written back to where it came from.

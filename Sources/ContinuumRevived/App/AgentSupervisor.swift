@@ -1117,7 +1117,33 @@ final class AgentSupervisor {
 
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
-    private(set) var records: [AgentID: AgentRecord] = [:]
+    private(set) var records: [AgentID: AgentRecord] = [:] {
+        // Plan 110 › lead: a spawn or an archive changes the packs. O(1) here
+        // (no `oldValue`, so the dictionary is still mutated in place); the walk
+        // over the records runs once per run-loop turn, and only when one did.
+        didSet { if records.count != characterPackRecordCount { scheduleCharacterPacks() } }
+    }
+    private var characterPackRecordCount = 0
+    private var characterPacksScheduled = false
+
+    private func scheduleCharacterPacks() {
+        characterPackRecordCount = records.count
+        guard !characterPacksScheduled else { return }
+        characterPacksScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.publishCharacterPacks() }
+        }
+    }
+
+    /// Plan 110 › lead: tell the character controller who leads and who helps.
+    /// The host computes this from its own records; a guest is shipped the result.
+    func publishCharacterPacks() {
+        characterPacksScheduled = false
+        AgentCharacterController.shared.setPacks(AgentCharacterPacks.roles(records.values.map {
+            AgentCharacterPacks.Member(id: $0.id.rawValue, parentID: $0.parentAgentID?.rawValue,
+                                       ordinal: $0.parentRelativeOrdinal, characterName: $0.characterName)
+        }))
+    }
 
     /// CX-01 (`.plans/59`, §15): where a bound runner's host tool request goes.
     /// Called on the main actor with the SUPERVISOR's `AgentID` for the runner
@@ -6923,6 +6949,8 @@ final class AgentSupervisor {
         // Publish only a durable pick. persist updates the live record on success.
         guard persist(record) else { return false }
         NotificationCenter.default.post(name: Self.characterNameDidChangeNotification, object: id.rawValue)
+        // A lead's pick decides where its helpers start in a set with no lead art.
+        if record.parentAgentID == nil { publishCharacterPacks() }
         onCharacterNameChanged?(id, value)
         return true
     }
