@@ -2285,7 +2285,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             let slides = sortMode != .newest && next.count <= Self.rowMotionRowLimit
                 && window != nil && !prefersReducedMotion()
             let previousY = slides ? drawnRowMinYs() : [:]
+            // .plans/113: a re-sort is not the person leaving their selection. The
+            // frozen order never reorders on a push, so a multi-selection used to
+            // survive every push; `render` empties the table's selection, so the
+            // rows still on screen are selected again by id.
+            let keptSelection = sortMode != .newest ? selectedRows.map(\.id) : []
             render(next)
+            if !keptSelection.isEmpty { restoreSelection(ids: keptSelection) }
             if slides {
                 layoutSubtreeIfNeeded()
                 tableView.layoutSubtreeIfNeeded()
@@ -3212,6 +3218,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard sortHoldPending, !sortHeld else { return }
         sortHoldPending = false
         applyRows(allRows, changed: .empty)
+    }
+
+    /// Select `ids` again after a full reload, the rows still drawn only, and
+    /// repaint them and the bulk bar from that selection.
+    private func restoreSelection(ids: [UUID]) {
+        let restored = IndexSet(ids.compactMap(tableRow(forAgentId:)))
+        guard !restored.isEmpty else { return }
+        tableView.selectRowIndexes(restored, byExtendingSelection: false)
+        selectedRowsForEmphasis = restored
+        tableView.reloadData(forRowIndexes: restored, columnIndexes: IndexSet(integer: 0))
+        updateBulkBar()
     }
 
     private func drawnRowMinYs() -> [UUID: CGFloat] {

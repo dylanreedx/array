@@ -275,6 +275,34 @@ enum SidebarSortChecks {
         }
         report.append("pointer hold: push kept 7 rows in place with the new one on top; leaving re-sorted with a slide")
 
+        // 5b. A re-sort with the pointer away keeps a multi-selection and its bulk
+        //     bar: the frozen order never moved rows under a selection, so the
+        //     sorted ones must not drop it either.
+        guard inbox.selectRowsForQA(ids: [uuid(gamma), uuid(foxtrot)]) else {
+            throw Failure(description: "could not select Gamma and Foxtrot")
+        }
+        inbox.layoutForQA()
+        guard inbox.isBulkBarVisibleForQA else { throw Failure(description: "two selected rows raised no bulk bar") }
+        var moved = pushed
+        if let index = moved.firstIndex(where: { $0.id == uuid(foxtrot) }) {
+            moved[index] = row(foxtrot, "Foxtrot recent", project: nil, state: .working, startedMinutesAgo: 0,
+                               activeMinutesAgo: 0, createdMinutesAgo: 50)
+        }
+        inbox.apply(rows: moved, changed: .init(added: [], updated: [uuid(foxtrot)], removed: []))
+        inbox.layoutForQA()
+        guard inbox.drawnSequenceForQA.first == "Foxtrot recent" else {
+            throw Failure(description: "the push did not re-sort Foxtrot to the top: \(inbox.drawnSequenceForQA)")
+        }
+        guard Set(inbox.selectedRowIdsForQA) == [uuid(gamma), uuid(foxtrot)], inbox.isBulkBarVisibleForQA else {
+            throw Failure(description: "a re-sort dropped the selection: \(inbox.selectedRowIdsForQA), "
+                + "bulk bar \(inbox.isBulkBarVisibleForQA)")
+        }
+        inbox.clearSelectionForQA()
+        inbox.apply(rows: pushed, changed: .init(added: [], updated: [uuid(foxtrot)], removed: []))
+        inbox.layoutForQA()
+        try expectSequence(inbox, resorted, "Foxtrot idle again")
+        report.append("selection: a re-sort keeps two selected rows and the bulk bar")
+
         // 6. Held while renaming, even with the pointer away.
         guard inbox.beginRename(agentId: uuid(delta)) else { throw Failure(description: "could not rename Delta") }
         var renamed = pushed
