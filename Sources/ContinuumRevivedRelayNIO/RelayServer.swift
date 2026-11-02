@@ -14,9 +14,12 @@ public struct RelayServerConfiguration: Sendable {
     /// `fly-client-ip`). Unset means the socket's peer address. Only rate
     /// limits read it; nothing authenticates by address.
     public var clientAddressHeader: String?
-    public init(host: String = "0.0.0.0", publicPort: Int = 8080, adminPort: Int = 9090, clientAddressHeader: String? = nil) {
+    /// Bearer token for the admin port's collaboration routes. Nil turns them off.
+    public var adminToken: String?
+    public init(host: String = "0.0.0.0", publicPort: Int = 8080, adminPort: Int = 9090, clientAddressHeader: String? = nil, adminToken: String? = nil) {
         self.host = host; self.publicPort = publicPort; self.adminPort = adminPort
         self.clientAddressHeader = clientAddressHeader?.lowercased()
+        self.adminToken = adminToken
     }
 }
 
@@ -32,6 +35,7 @@ public final class RelayServer: @unchecked Sendable {
 
     /// Read after start and before stop, including an ephemeral port-zero bind.
     public var listeningPublicPort: Int? { channels.first?.localAddress?.port }
+    public var listeningAdminPort: Int? { channels.dropFirst().first?.localAddress?.port }
 
     public init(store: RelayStore, configuration: RelayServerConfiguration = .init(), pushDelivery: (any RelayEventPushDelivering)? = nil, collaboration: CollaborationStore? = nil) {
         self.collaboration = collaboration
@@ -80,7 +84,7 @@ public final class RelayServer: @unchecked Sendable {
             .childChannelInitializer { channel in
                 if admin {
                     return channel.pipeline.configureHTTPServerPipeline().flatMap {
-                        channel.pipeline.addHandler(RelayHTTPHandler(store: store, liveHub: self.liveHub, pushDelivery: self.pushDelivery, collaboration: self.collaboration, admin: true, clientAddressHeader: self.configuration.clientAddressHeader), name: "relay-admin-http")
+                        channel.pipeline.addHandler(RelayHTTPHandler(store: store, liveHub: self.liveHub, pushDelivery: self.pushDelivery, collaboration: self.collaboration, admin: true, clientAddressHeader: self.configuration.clientAddressHeader, adminToken: self.configuration.adminToken), name: "relay-admin-http")
                     }
                 }
                 let collaboration = self.collaboration
@@ -129,10 +133,11 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
     private var requestTask: Task<Void, Never>?
     private var rejectedBody = false
     private let clientAddressHeader: String?
+    private let adminToken: String?
     init(store: RelayStore, liveHub: RelayLiveHub, pushDelivery: (any RelayEventPushDelivering)?, collaboration: CollaborationStore?, admin: Bool,
-         clientAddressHeader: String? = nil) {
+         clientAddressHeader: String? = nil, adminToken: String? = nil) {
         self.collaboration = collaboration; self.store = store; self.liveHub = liveHub; self.pushDelivery = pushDelivery; self.admin = admin
-        self.clientAddressHeader = clientAddressHeader
+        self.clientAddressHeader = clientAddressHeader; self.adminToken = adminToken
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -154,8 +159,8 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
             let contextBox = SendableContext(context)
             let clientAddress = clientAddressHeader.flatMap { head.headers.first(name: $0) }
                 ?? context.channel.remoteAddress?.ipAddress ?? "unknown"
-            requestTask = Task { [store, liveHub, pushDelivery, collaboration, admin] in
-                let response = await Self.route(head: head, body: bytes, store: store, liveHub: liveHub, pushDelivery: pushDelivery, collaboration: collaboration, admin: admin, clientAddress: clientAddress)
+            requestTask = Task { [store, liveHub, pushDelivery, collaboration, admin, adminToken] in
+                let response = await Self.route(head: head, body: bytes, store: store, liveHub: liveHub, pushDelivery: pushDelivery, collaboration: collaboration, admin: admin, adminToken: adminToken, clientAddress: clientAddress)
                 contextBox.context.eventLoop.execute { self.write(response, context: contextBox.context) }
             }
         }
@@ -173,8 +178,9 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
         write(.error(.payloadTooLarge, "payloadTooLarge"), context: context)
     }
 
-    private static func route(head: HTTPRequestHead, body: Data, store: RelayStore, liveHub: RelayLiveHub, pushDelivery: (any RelayEventPushDelivering)?, collaboration: CollaborationStore?, admin: Bool, clientAddress: String) async -> Response {
+    private static func route(head: HTTPRequestHead, body: Data, store: RelayStore, liveHub: RelayLiveHub, pushDelivery: (any RelayEventPushDelivering)?, collaboration: CollaborationStore?, admin: Bool, adminToken: String?, clientAddress: String) async -> Response {
         do {
+            if admin, let response = await CollaborationAdminRoutes.route(head: head, store: collaboration, adminToken: adminToken) { return response }
             if admin { return try await adminRoute(head: head, body: body, store: store) }
             if head.uri.hasPrefix("/collaboration/v1/") {
                 guard let collaboration else { return .error(.notFound, "notFound") }

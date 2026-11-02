@@ -66,17 +66,25 @@ leg runs only when the share made a zone.
   scripts/check-multiplayer-journey.py --skip-build     # reuse the bundles
   scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds   # the kinds alone
 
+Every run deletes the people and areas it created on the relay, through the
+relay's admin port (`RELAY_ADMIN_TOKEN`). A local relay gets its own token. On
+staging the admin port is reached with `fly proxy`, and the token comes from
+ARRAY_RELAY_ADMIN_TOKEN or ~/.config/array/relay-staging-admin-token (0600).
+A run that cannot clean up fails and prints what it left behind.
+
 Never touches /Applications/Array.app, ~/Desktop/Array Dev.app, ~/Documents,
 the default tmux socket, a real CLI login or the Keychain, and never takes focus.
 """
 from __future__ import annotations
-import argparse, base64, json, os, random, shutil, socket, statistics, string, subprocess, sys, time
+import argparse, base64, json, os, random, shutil, socket, statistics, string, subprocess, sys, time, urllib.error, urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = Path(subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True).strip()).parent / ".worktrees/.locks/app-build.sh"
 APPS = Path.home() / "array-scratch/apps"
 STAGING = "https://arrayapp-relay-staging.fly.dev"
+STAGING_APP = "arrayapp-relay-staging"
+STAGING_ADMIN_TOKEN_FILE = Path.home() / ".config/array/relay-staging-admin-token"
 # Set from --name, so two benches can run journeys side by side: each gets its
 # own bundles, identities and state folder.
 STATE = Path.home() / "array-scratch/mp-journey"
@@ -660,6 +668,65 @@ def kinds_journey(host, guest, check, eventually, legs=frozenset({"note", "file"
     pages.shutdown()
 
 
+def free_port():
+    with socket.socket() as s: s.bind(("127.0.0.1", 0)); return s.getsockname()[1]
+
+
+def created_people():
+    """Every person this run's apps signed up as, from their credential files."""
+    people = set()
+    for path in STATE.rglob("*.credential"):
+        try: person = json.loads(path.read_text())["identity"]["person"]
+        except (OSError, ValueError, KeyError, TypeError): continue
+        people.add(person["rawValue"] if isinstance(person, dict) else person)
+    return sorted(people)
+
+
+def admin_call(base, token, method, path):
+    request = urllib.request.Request(f"{base}/collaboration/{path}", method=method, headers={"authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response: return response.status, json.loads(response.read() or b"null")
+    except urllib.error.HTTPError as error:
+        body = error.read()
+        try: return error.code, json.loads(body)
+        except ValueError: return error.code, body.decode(errors="replace")
+
+
+def clean_relay(base, token, people):
+    """Deletes every area these people are in, then the people. Returns what is
+    left behind, as lines to print; empty means the relay holds nothing of the run."""
+    left = []
+    areas = set()
+    for person in people:
+        status, detail = admin_call(base, token, "GET", f"people/{person}")
+        if status == 404: continue
+        if status != 200: left.append(f"person {person}: lookup {status} {detail}"); continue
+        areas.update(m["area"] for m in detail["memberships"])
+    for area in sorted(areas):
+        status, detail = admin_call(base, token, "DELETE", f"areas/{area}")
+        if status not in (200, 404): left.append(f"area {area}: delete {status} {detail}")
+    for person in people:
+        status, detail = admin_call(base, token, "DELETE", f"people/{person}")
+        if status not in (200, 404): left.append(f"person {person}: delete {status} {detail}")
+    print(f"==> cleanup: {len(areas)} area(s) and {len(people)} person(s) deleted from the relay" if not left else
+          f"==> cleanup left {len(left)} thing(s) on the relay", flush=True)
+    return left
+
+
+def staging_admin(token_file=STAGING_ADMIN_TOKEN_FILE):
+    """(base URL, token, proxy process) for staging's admin port, or a reason."""
+    token = os.environ.get("ARRAY_RELAY_ADMIN_TOKEN", "").strip()
+    if not token and token_file.exists(): token = token_file.read_text().strip()
+    if not token: return None, f"no admin token (set ARRAY_RELAY_ADMIN_TOKEN or write {token_file})"
+    port = free_port()
+    proxy = subprocess.Popen(["fly", "proxy", f"{port}:9090", "-a", STAGING_APP], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+    try: wait_for(lambda: socket.socket().connect_ex(("127.0.0.1", port)) == 0, "fly proxy to the staging admin port", 30)
+    except Failed:
+        proxy.terminate(); return None, "fly proxy to the staging admin port did not come up"
+    return (f"http://127.0.0.1:{port}", token, proxy), None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--relay", choices=["staging", "local"], default="staging")
@@ -674,10 +741,30 @@ def main():
                         help="with --only kinds: which legs, comma-separated")
     parser.add_argument("--only", choices=["all", "agent", "kinds"], default="all",
                         help="agent: mode A's twelve steps; kinds: every other tile kind (SHARE-KINDS.md)")
+    parser.add_argument("--cleanup-only", action="store_true",
+                        help="delete what a kept state folder (--keep, or a failed run) left on the relay, and nothing else")
     args = parser.parse_args()
     if not args.name.isalpha(): parser.error("--name takes letters only")
     configure(args.name)
     os.chdir(ROOT)
+    if args.cleanup_only:
+        if args.relay == "local": parser.error("--cleanup-only is for staging; a local relay's data goes with its state folder")
+        people = created_people()
+        admin, reason = staging_admin()
+        if not admin: print(f"cleanup: {reason}; {len(people)} person(s) remain: {people}"); sys.exit(1)
+        try: left = clean_relay(admin[0], admin[1], people)
+        finally: admin[2].terminate()
+        for line in left: print(f"  {line}")
+        sys.exit(1 if left else 0)
+    if args.relay == "staging" and created_people():
+        # A failed earlier run kept its state folder; clean the relay of it
+        # before that folder, and the only record of those people, goes.
+        print("==> an earlier run left people on staging; cleaning them first", flush=True)
+        admin, reason = staging_admin()
+        if not admin: print(f"note: cannot clean the earlier run ({reason}); its people stay on staging", flush=True)
+        else:
+            try: clean_relay(admin[0], admin[1], created_people())
+            finally: admin[2].terminate()
 
     if not args.skip_build:
         # /usr/bin/python3 is an xcrun shim that exports its own SDKROOT; the
@@ -690,13 +777,12 @@ def main():
                             "--name", bundle_name, "--output", str(APPS / f"{bundle_name}.app")], check=True, env=build_env)
 
     shutil.rmtree(STATE, ignore_errors=True); STATE.mkdir(parents=True)
-    relay, env_extra, endpoint = None, {}, STAGING
+    relay, env_extra, endpoint, local_admin = None, {}, STAGING, None
     if args.relay == "local":
-        def free_port():
-            with socket.socket() as s: s.bind(("127.0.0.1", 0)); return s.getsockname()[1]
-        port, data = free_port(), STATE / "relay"; data.mkdir()
+        port, admin_port, data = free_port(), free_port(), STATE / "relay"; data.mkdir()
+        local_admin = (f"http://127.0.0.1:{admin_port}", base64.urlsafe_b64encode(os.urandom(32)).decode())
         renv = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE") and not k.startswith(("APNS_", "RELAY_"))}
-        renv.update(RELAY_HOST="127.0.0.1", PORT=str(port), RELAY_ADMIN_PORT=str(free_port()),
+        renv.update(RELAY_HOST="127.0.0.1", PORT=str(port), RELAY_ADMIN_PORT=str(admin_port), RELAY_ADMIN_TOKEN=local_admin[1],
                     RELAY_DATABASE_PATH=str(data / "relay.sqlite"), RELAY_MASTER_KEY=base64.b64encode(os.urandom(32)).decode(),
                     RELAY_COLLABORATION_DATABASE_PATH=str(data / "collaboration.sqlite"),
                     RELAY_COLLABORATION_MASTER_KEY=base64.b64encode(os.urandom(32)).decode())
@@ -942,6 +1028,20 @@ def main():
             if (folder / "tmux").exists():
                 subprocess.run(["tmux", "kill-server"], env={**{k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")},
                                "TMUX_TMPDIR": str(folder / "tmux")}, capture_output=True)
+        # Delete what this run created on the relay, apps already quit so
+        # nothing re-creates it. A run that cannot is a failed run.
+        people = created_people()
+        if local_admin: admin, reason = (*local_admin, None), None
+        else: admin, reason = staging_admin()
+        if not admin:
+            failures.append("cleanup"); print(f"FAIL journey: cleanup: {reason}; {len(people)} person(s) remain: {people}", flush=True)
+        else:
+            try: left = clean_relay(admin[0], admin[1], people)
+            except OSError as error: left = [f"admin port unreachable: {error}"]
+            finally:
+                if admin[2]: admin[2].terminate()
+            check(not left, "cleanup: the relay holds none of this run's people or areas", "; ".join(left))
+            if left: print(f"==> rerun with --cleanup-only --name {args.name} once fixed; the state folder is kept", flush=True)
         if relay: relay.terminate()
         if not failures and not args.keep: shutil.rmtree(STATE, ignore_errors=True)
         elif failures: print(f"==> logs kept in {STATE}/*/app.log")

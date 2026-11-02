@@ -103,6 +103,10 @@ check --cli-update-settings-check
 check --codex-appserver-parity-check
 check --codex-appserver-runner-check
 check --codex-hook-bridge-check
+check --collaboration-cursor-motion-check
+check --collaboration-full-access-check
+check --collaboration-native-check
+check --collaboration-usage-telemetry-check
 check --command-center-check
 check --companion-agent-destination-check
 check --companion-sync-health-check
@@ -193,6 +197,7 @@ check --managed-mode-hooks-check
 check --managed-mode-launch-check
 check --managed-mode-persistence-check
 check --managed-setting-check
+check --menu-contract-check
 check --multi-zone-render-check
 check --nav-mode-check
 check --nav-overlay-visible-check
@@ -254,6 +259,7 @@ check --shared-agent-migration-check
 check --shared-agent-render-check
 check --shared-portal-migration-check
 check --shared-portal-render-check
+check --shared-area-zone-check
 check --shell-open-as-agent-check
 check --shell-tool-row-check
 check --sidebar-agent-status-line-check
@@ -410,6 +416,8 @@ leg run swift build --disable-sandbox --skip-update --product Array
 leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp
 leg run swift build --disable-sandbox --skip-update --product continuum-relay
 leg run swift build --disable-sandbox --skip-update --product continuum-relay-legacy
+leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks
+leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationServiceChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
@@ -503,6 +511,9 @@ leg run_app_check .build/debug/Array --child-crash-isolation-check
 leg run_app_check .build/debug/Array --choice-geometry-check
 leg run_app_check .build/debug/Array --claude-adopted-turn-check
 leg run_app_check .build/debug/Array --cli-update-settings-check
+leg run_app_check .build/debug/Array --collaboration-cursor-motion-check
+leg run_app_check .build/debug/Array --collaboration-full-access-check
+leg run_app_check .build/debug/Array --collaboration-native-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
 leg run_app_check .build/debug/Array --companion-task-host-check
 leg run_app_check .build/debug/Array --completion-awareness-check
@@ -576,6 +587,7 @@ leg run_app_check .build/debug/Array --managed-mode-hooks-check
 leg run_app_check .build/debug/Array --managed-mode-launch-check
 leg run_app_check .build/debug/Array --managed-mode-persistence-check
 leg run_app_check .build/debug/Array --managed-setting-check
+leg run_app_check .build/debug/Array --menu-contract-check
 leg run_app_check .build/debug/Array --multi-zone-render-check
 leg run_app_check .build/debug/Array --nav-mode-check
 leg run_app_check .build/debug/Array --nav-overlay-visible-check
@@ -632,6 +644,7 @@ leg run_app_check .build/debug/Array --shared-agent-migration-check
 leg run_app_check .build/debug/Array --shared-agent-render-check
 leg run_app_check .build/debug/Array --shared-portal-migration-check
 leg run_app_check .build/debug/Array --shared-portal-render-check
+leg run_app_check .build/debug/Array --shared-area-zone-check
 leg run_app_check .build/debug/Array --shell-open-as-agent-check
 leg run_app_check .build/debug/Array --shell-tool-row-check
 leg run_app_check .build/debug/Array --sidebar-agent-status-line-check
@@ -774,6 +787,8 @@ leg run_app_check .build/debug/Array --zone-tile-detach-sweep-check
 leg run_app_check .build/debug/Array --zone-tile-hydration-check
 leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
+leg run_leg .build/debug/ContinuumRevivedCollaborationChecks
+leg run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-usage-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
@@ -795,6 +810,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --cli-update-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-parity-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --command-center-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --companion-agent-destination-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --companion-task-ledger-check
@@ -827,6 +843,8 @@ leg run_leg bash scripts/check-relay-linux.sh
 leg run_leg node Tools/IOSPreviewProof/check-bridge.cjs
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
+leg run_leg python3 scripts/check-collaboration-pair-features.py
+leg run_leg python3 scripts/check-collaboration-pair.py
 leg run_leg python3 scripts/check-notification-map.py --self-test
 leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 leg run_leg scripts/capture-cli-fixtures.sh check
@@ -843,6 +861,8 @@ leg run_leg swift run --skip-build ContinuumRevivedRelayCoreChecks
 leg run_leg swift run --skip-build ContinuumRevivedRelayIntegrationChecks
 leg run_leg swift run ContinuumRevivedAgentContentChecks
 leg run_leg swift run ContinuumRevivedAgentUIChecks
+leg run_leg swift run ContinuumRevivedCollaborationChecks
+leg run_leg swift run ContinuumRevivedCollaborationServiceChecks
 leg run_leg swift run ContinuumRevivedCoreChecks
 leg run_leg swift run ContinuumRevivedFileTreeChecks
 leg run_leg swift run ContinuumRevivedPaletteChecks
@@ -862,13 +882,15 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 22
-count ContinuumRevivedCoreChecks 197
+count ContinuumRevivedCollaborationChecks 22
+count ContinuumRevivedCollaborationServiceChecks 29
+count ContinuumRevivedCoreChecks 199
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
-count ContinuumRevivedRelayChecks 1
+count ContinuumRevivedRelayChecks 2
 count ContinuumRevivedRelayCoreChecks 2
-count ContinuumRevivedRelayIntegrationChecks 3
+count ContinuumRevivedRelayIntegrationChecks 4
 count ContinuumRevivedRelayProtocolChecks 0
 count ContinuumRevivedSyncChecks 12
 count ContinuumRevivedSyncIntegrationChecks 1

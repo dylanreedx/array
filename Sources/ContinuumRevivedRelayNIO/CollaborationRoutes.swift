@@ -91,6 +91,11 @@ enum CollaborationRoutes {
                 if parts.count == 5, parts[4] == "commands", head.method == .POST {
                     return .json(.ok, try await store.apply(token: token, area: area, request: decoder.decode(Collaboration.Mutation.self, from: body)))
                 }
+                // A member leaving on their own; removing someone else is below.
+                if parts.count == 5, parts[4] == "membership", head.method == .DELETE {
+                    try await store.leaveArea(token: token, area: area)
+                    return .json(.ok, Collaboration.ErrorBody(code: "left"))
+                }
                 if parts.count == 6, parts[4] == "members", head.method == .DELETE, let person = UUID(uuidString: parts[5]) {
                     guard let value = head.headers.first(name: "if-match"), let epoch = Int64(value), epoch > 0 else { return .error(.badRequest, "expectedEpochRequired") }
                     try await store.removeMember(token: token, area: area, person: person, expectedEpoch: epoch)

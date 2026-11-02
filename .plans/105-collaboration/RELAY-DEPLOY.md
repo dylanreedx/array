@@ -309,3 +309,46 @@ fly deploy --app arrayapp-relay --config fly.toml \
 
 The Mac-side batch retention (`47043941`'s ledger change) ships with the next
 app build, not with this relay deploy.
+
+## Deleting people and areas (staging v10)
+
+1 November 2026 (2 November UTC). Source: `array/mp-relay-housekeeping` at
+`276c6d6d`, which is 0.7.38 (`b0689628`) plus the admin deletion routes, the
+member self-leave route and the journey cleanup. Production stays on v21 until
+Dylan says go.
+
+**What it adds.** The admin port (9090, never exposed by Fly) deletes a
+person or an area behind a `RELAY_ADMIN_TOKEN` bearer token; with no token set
+those routes refuse. Members leave an area with `DELETE
+/collaboration/v1/areas/<id>/membership`. Every existing route is unchanged.
+How to use them: ALPHA-HANDOFF.md §2, "Deleting people and areas".
+
+**Gates.**
+- `ContinuumRevivedCollaborationServiceChecks`: 534 PASS, 0 FAIL, including
+  the 40 `--deletion-only` lines. Five mutations each turn it red: a table
+  missing from the area list, no history block, leave without an epoch bump,
+  area deletion that skips in-memory cleanup (a waiting request hangs), and an
+  unchecked token.
+- Linux gate (`check-relay-linux.sh`, under the build lock): exit 0, 0 FAIL;
+  the deletion checks pass on Linux.
+- Two-app journey on a local relay: 41 PASS, and the run deleted its area
+  and both people. The relay database afterwards held 0 people, devices,
+  memberships, areas, hosts, operations or links, and passed a foreign key
+  check.
+
+**Staging v10.**
+- Snapshot first: `vs_JbKonMKQYkZXU1ZYY7b1o`. Rollback target: v9 image
+  `registry.fly.io/arrayapp-relay-staging:deployment-01M6CE52KWWN6MM7RF9E9M5WST`.
+- `RELAY_ADMIN_TOKEN` is a staging-only secret. Its only copy is
+  `~/.config/array/relay-staging-admin-token` (0600) on Dylan's Mac, which the
+  journey reads.
+- Health 200, schema 5. All 17 probed public routes answer exactly as before
+  the deploy; the admin paths on the public port still answer 401.
+- Probe over HTTPS plus `fly proxy`, 16/16: two throwaway people sign up, one
+  creates an area and a "Works once" link, the other joins, reads, leaves
+  (200 `left`, then 404), the only owner cannot leave (403), a wrong admin
+  token gets 401, and the journey's cleanup deletes the area and both people
+  (both 404 afterwards, the owner's token 401).
+- Staging still holds 59 older throwaway people (Avery, Blake, Peer A and B,
+  Probe 0-9, Staging Owner…, Staging probe…). Not deleted: nothing records
+  which runs own them.
