@@ -52,19 +52,32 @@ final class SharedTerminalLiveBadge: NSView {
 }
 
 extension AppDelegate {
-    /// One badge on each shared terminal of this canvas; none elsewhere.
-    /// Called with the hosted marks.
-    func refreshTerminalLiveBadges(shared: Set<UUID>, areas: [UUID: UUID]) {
+    /// One badge on each shared terminal of this canvas, on its own or opted
+    /// in inside a portal; none elsewhere. Called with the hosted marks.
+    func refreshTerminalLiveBadges() {
         guard let canvas = canvasView else { return }
+        var areas: [UUID: UUID] = [:]
+        if let model = try? collaborationAccountModel(), let account = model.activeAccount?.id ?? model.selectedAccountID {
+            for entry in hostedAgentShares?.entries(account: account) ?? [] { areas[entry.tile] = entry.area }
+        }
+        let portal = portalLiveTerminals()
+        let shared = Set(areas.keys).union(portal.keys)
         for tile in canvas.allWorkspaceTiles() where tile.kind == .terminal {
             guard let view = canvas.tileView(for: tile.id) else { continue }
             let existing = view.subviews.compactMap { $0 as? SharedTerminalLiveBadge }.first
-            guard shared.contains(tile.id), let area = areas[tile.id] else { existing?.removeFromSuperview(); continue }
+            guard shared.contains(tile.id), let area = areas[tile.id] ?? portal[tile.id] else { existing?.removeFromSuperview(); continue }
+            let inPortal = areas[tile.id] == nil
             let badge = existing ?? SharedTerminalLiveBadge(frame: .zero)
             let width = badge.preferredWidth
             badge.frame = NSRect(x: view.bounds.width - width - 8, y: TileNSView.titleBarHeight + 1, width: width, height: TileNSView.ownershipStripHeight - 2)
             badge.autoresizingMask = [.minXMargin, .maxYMargin]
-            badge.onStop = { [weak self] in Task { await self?.cancelAgentShare(area: area) } }
+            // On its own, Stop ends its share; in a portal, it takes only this
+            // terminal out and leaves the portal going.
+            let id = tile.id
+            badge.onStop = { [weak self] in
+                fputs("terminal badge: Stop sharing pressed (\(inPortal ? "portal" : "own share"))\n", stderr)
+                Task { inPortal ? await self?.stopPortalTerminal(area: area, tile: id) : await self?.cancelAgentShare(area: area) }
+            }
             // Above the strip it sits on.
             view.addSubview(badge, positioned: .above, relativeTo: nil)
         }

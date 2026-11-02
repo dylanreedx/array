@@ -281,7 +281,7 @@ extension AppDelegate {
                                         outlined: false))
         }
         // A shared terminal also carries its Live badge and Stop sharing.
-        refreshTerminalLiveBadges(shared: shared, areas: Dictionary(entries.map { ($0.tile, $0.area) }, uniquingKeysWith: { _, last in last }))
+        refreshTerminalLiveBadges()
         // An agent shared in a portal keeps that mark instead.
         refreshHostedPortalMarks()
         guard hostedAgentAccessTask == nil, !entries.isEmpty, Self.reachesRelay(model) else { return }

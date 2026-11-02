@@ -1140,6 +1140,12 @@ class TileNSView: NSView, TokenThemed {
         if let pill = subviews.last(where: { $0 is SharedPortalAddPill && !$0.isHidden }), pill.frame.contains(local) {
             return pill
         }
+        // A shared terminal's Live badge (`.plans/114-terminal-sharing`) sits on
+        // the ownership strip, which the grab strip covers at low zoom: its
+        // Stop sharing wins its own press too.
+        if let badge = subviews.last(where: { $0 is SharedTerminalLiveBadge && !$0.isHidden }), badge.frame.contains(local) {
+            return badge.hitTest(local) ?? badge
+        }
         // Keep the visible close glyph usable when the enlarged corner target
         // overlaps it at low zoom. The outer resize edge still takes precedence.
         let edge = resizeMarginInLocalCoordinates

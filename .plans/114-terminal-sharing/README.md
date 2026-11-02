@@ -208,6 +208,8 @@ Production (`arrayapp-relay`) is untouched; it needs Dylan's go.
 | `check-multiplayer-journey.py --relay local --mode terminal` (and `--relay staging`) | two real apps, a relay, tmux in the host's own namespace: everything in section 2, asserted | 32 PASS on both |
 | `check-multiplayer-journey.py --relay local --only kinds --kinds terminal` | the existing leg (tmux off): the text fallback | 12 PASS |
 | `--live-tile-only`, `--shared-tile-render-check`, `--portal-kinds-check` | regressions in the shared live-tile code | PASS |
+| `Array --shared-terminal-tmux-unresponsive-check` | starting a share against a tmux that never answers: no main-thread stall, the text fallback at the 3 s deadline, no client left behind | RED before, 7 PASS after |
+| `check-multiplayer-journey.py --relay local --mode b` | the portal, with B6c: one terminal's Live badge and Stop sharing | 70 PASS |
 
 The journey's terminal mode starts the host's tmux server itself with
 `-f /dev/null`: a user's `~/.tmux.conf` can block a new server's first client
@@ -238,9 +240,43 @@ lane. Journey mode B, steps B1a and B6b, on a local relay: the row's two
 presses and the forgotten opt-in, the pill's two presses, the live tile in the
 area, what ran before it was added and new output on the guest, the host's
 grid, the host's pane line for line, and the never-opted terminal still a
-card. 61 PASS. Not yet in a portal: the host's Live badge (the portal's own
-"shared" mark is there) and Stop sharing for one terminal (revoke stops the
-portal).
+card. 61 PASS.
+
+**The Live badge and Stop sharing for one terminal.** An opted-in terminal in a
+portal carries the host's red **Live** badge, like a terminal shared on its
+own. Its **Stop sharing** takes out that terminal only
+(`SharedPortalHostSession.stopStreaming`): in one revision its live tile
+leaves the area and a card takes its place, where it sat. The relay closes the
+stream lane with the tile, this Mac stops reading the pane, and the guest's item
+is "Terminal stays on Dylan's Mac" again. The notes, browsers, agent and the
+portal itself stay live. Journey mode B, step B6c, 70 PASS in all.
+
+Two press bugs came up getting there, and both are fixed:
+
+- An "Add to share" pill could reappear on the terminal while it was being
+  added (a tile change arrives before the index knows the tile is shared). It
+  sat exactly over Stop sharing for its 12 s and took the press. A tile in the
+  share now loses any Add pill when the portal's marks refresh.
+- At low zoom the tile's grab strip covers the ownership strip the badge sits
+  on, so the press became a tile drag. The badge now wins its own press, as the
+  Add pill already did (`TileNSView.hitTest`). B6c checks a press resolves to
+  Stop sharing at the resting zoom (0.35) before framing the tile.
+
+## 8a. When tmux doesn't answer
+
+Starting a share looks up the tile's tmux pane. It used to do that on the main
+thread with no deadline, and a brand-new tmux server can hold its first client
+for as long as nobody answers: Dylan's `~/.tmux.conf` runs tpm, and a consent
+prompt for a config in ~/Documents does the same. The whole app froze. The
+journeys never met it because they start tmux with `-f /dev/null`.
+
+Now the lookup runs off the main thread, and each tmux command it runs stops
+at 3 s. A tmux that misses that leaves the share on the visible-text mirror,
+with "tmux not answering" in its state, and it tries again every 10 s.
+`--shared-terminal-tmux-unresponsive-check` drives `LiveTileHost.start()`
+against a stand-in tmux that never answers. Before the fix, the main thread
+froze and the watchdog failed it. After: start returns at once, the main thread
+never stalls, and no tmux client is left behind.
 
 ## 9. Open
 

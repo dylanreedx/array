@@ -434,6 +434,39 @@ def mode_b(host, guest, check, eventually, endpoint, env_extra, people):
     check(item_of(terminal).get("facts", {}).get("message") == f"Terminal stays on {host.name}'s Mac",
           "B6b: the terminal that was never opted in is still its card", json.dumps(item_of(terminal).get("facts")))
 
+    # B6c (.plans/114). The opted-in terminal carries the host's Live badge;
+    # its Stop sharing takes out that terminal only: the guest's item is its
+    # card again, and the rest of the portal keeps going.
+    h = host.call("termHost", tile=live)
+    check(h.get("badge") == "Live" and h.get("stopControl"), "B6c: the opted-in terminal carries the Live badge with Stop sharing",
+          json.dumps({k: h.get(k) for k in ("badge", "stopControl", "tab")}))
+    check(not host.call("termHost", tile=terminal).get("badge"), "B6c: the terminal that was never opted in has no Live badge")
+    stop = host.call("termStopSharing", tile=live)
+    check(stop.get("pressReachedStopAtRest"), f"B6c: Stop sharing takes its own press at the resting zoom ({stop.get('restingZoom', 0):.2f})",
+          json.dumps(stop))
+    hs = host.call("hostPortal")
+    card_object = next((x["object"] for x in hs["shared"] if x["tile"] == live), None)
+    check(card_object and card_object != live_object and not any(i["kind"] == "liveTile" for i in hs["areaItems"])
+          and any(i["object"] == card_object and i["kind"] == "artifact" for i in hs["areaItems"]),
+          "B6c: Stop sharing replaces its live tile with a card on the relay", json.dumps(hs["areaItems"]))
+    def stopped_view():
+        snap = guest.call("portal")
+        objects = {i["object"]: i for i in snap.get("items", [])}
+        card = objects.get(card_object, {}).get("facts", {})
+        return live_object not in objects and card.get("message") == f"Terminal stays on {host.name}'s Mac"
+    eventually(stopped_view, "B6c: the guest's item goes back to the \"stays on\" card", DELIVERY_WINDOW,
+               lambda: json.dumps([i for i in guest.call("portal").get("items", []) if i["object"] in (live_object, card_object)])[:500])
+    check(not host.call("termHost", tile=live).get("badge"), "B6c: the host's Live badge is gone")
+    eventually(lambda: "streamTap" not in host.call("termHost", tile=live), "B6c: this Mac stops reading the terminal's pane", DELIVERY_WINDOW,
+               lambda: json.dumps({k: v for k, v in host.call("termHost", tile=live).items() if k.startswith("stream")})[:300])
+    after_stop = f"Edited after one terminal stopped {token}"
+    host.call("editNote", tile=notes[1], text=after_stop)
+    eventually(lambda: after_stop in item_of(notes[1]).get("facts", {}).get("text", ""), "B6c: the rest of the portal keeps going: a note edit still arrives",
+               DELIVERY_WINDOW, lambda: json.dumps(item_of(notes[1]).get("facts")))
+    g6 = guest.call("portal")
+    check(item_of(agent, g6) and "Live" in g6.get("portalTab", "") and item_of(public_browser, g6).get("facts", {}).get("mode") == "live",
+          "B6c: the agent, the browsers and the portal stay live", json.dumps({"tab": g6.get("portalTab"), "agent": bool(item_of(agent, g6))}))
+
     # B7. Open beside.
     beside = guest.call("openBeside", kind="agent")
     g7 = guest.call("portal")
