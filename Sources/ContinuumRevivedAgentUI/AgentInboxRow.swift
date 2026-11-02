@@ -1028,6 +1028,13 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     public let hasTile: Bool
     /// A popped-out helper the user pinned, so it never folds back on its own.
     public let isPinned: Bool
+    /// What the agent's character acts out (plan 110): the latest step's action,
+    /// its quiet clock and its last outcome. nil — the default — holds the
+    /// state's still frame.
+    public var characterActivity: AgentCharacterActivity?
+    /// The agent's chosen character by name (`AgentRecord.characterName`); nil
+    /// is the pick hashed from its id.
+    public var characterName: String?
     /// Whether the card's upper metadata band has something to draw. These
     /// predicates intentionally inspect only the content slots, never a row's
     /// semantic importance or lifecycle. The AppKit cell uses the same facts to
@@ -1147,7 +1154,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         whereMarker: InboxWhereMarker? = nil,
         externalSession: InboxExternalSession? = nil,
         hasTile: Bool = true,
-        isPinned: Bool = false
+        isPinned: Bool = false,
+        characterActivity: AgentCharacterActivity? = nil,
+        characterName: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -1190,6 +1199,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.externalSession = externalSession
         self.hasTile = hasTile
         self.isPinned = isPinned
+        self.characterActivity = characterActivity
+        self.characterName = characterName
     }
 
     /// The same row, placed where its PARENT is: a subagent travels with the agent
@@ -1216,7 +1227,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
             closingSince: closingSince, hasLiveRunner: hasLiveRunner,
             identityColor: identityColor, selfReport: selfReport, whereMarker: whereMarker,
-            externalSession: externalSession, hasTile: hasTile, isPinned: isPinned)
+            externalSession: externalSession, hasTile: hasTile, isPinned: isPinned,
+            characterActivity: characterActivity, characterName: characterName)
     }
 
     /// The line under the name for `selfReport`, by the row's state: a declared
@@ -1280,7 +1292,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
             closingSince: closingSince, hasLiveRunner: hasLiveRunner,
             identityColor: identityColor, selfReport: selfReport,
-            hasTile: hasTile, isPinned: isPinned)
+            hasTile: hasTile, isPinned: isPinned, characterActivity: characterActivity,
+            characterName: characterName)
     }
 
     /// Equal but for `elapsed`, when both rows carry the same live turn start: the

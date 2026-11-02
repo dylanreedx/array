@@ -170,6 +170,20 @@ class TileNSView: NSView, TokenThemed {
     var qaActionsMenuController: ChoiceMenuController? { titleBar?.actionsMenuControllerForQA }
     var titleBarActionsButtonForQA: NSView? { titleBar?.actionsButtonForQA }
     var titleBarUsesCustomOverflowForQA: Bool { titleBar?.usesCustomActionsForQA ?? false }
+
+    // MARK: Agent character (plan 110)
+
+    /// Show `agentID`'s character in the header for `snapshot`, or none (nil).
+    /// Called by the agent tile when its status or turn changes; cheap to repeat.
+    func setAgentCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, characterName: String? = nil,
+                           now: Date = Date()) {
+        titleBar?.setCharacter(agentID: agentID, snapshot: snapshot, characterName: characterName, now: now)
+    }
+    var qaCharacterLayer: CharacterSpriteLayer? { titleBar?.characterLayer }
+    var qaCharacterRect: NSRect? { titleBar?.qaCharacterRect }
+    var qaProviderMarkRect: NSRect? { titleBar?.qaProviderMarkRect }
+    func qaTitleRectInBar() -> NSRect? { titleBar?.qaTitleRect() }
+    func qaStatusPillRectInBar() -> NSRect? { agentStatus.flatMap { titleBar?.qaStatusPillRect(for: $0) } }
     var titleBarActionsFrameForQA: NSRect? { titleBar?.actionsFrameForQA.map { titleBar!.convert($0, to: self) } }
 
     /// ARRAY_TRANSCRIPT_RENDERER=canvas: while true the title bar's controls are
@@ -629,6 +643,8 @@ class TileNSView: NSView, TokenThemed {
         parkedBody = body
         surfaceResidency = .surfaced
         isFarParked = true
+        // Plan 110: nobody can see a far-parked tile; its character holds still.
+        titleBar?.setCharacterHeld(true)
         return true
     }
 
@@ -643,6 +659,7 @@ class TileNSView: NSView, TokenThemed {
         Self.qaPromoteMs += (ProcessInfo.processInfo.systemUptime - start) * 1_000
         parkedBody = nil
         isFarParked = false
+        titleBar?.setCharacterHeld(false)
         // `surfaceHost` tracks what is INSTALLED; `retainedSurfaceHost` keeps the
         // view and its uploaded texture alive for the next gesture.
         surfaceHost = nil
@@ -2042,7 +2059,7 @@ private final class BandActionControl: NSControl {
 /// than `hitTest = nil` fall-through because it is independent of subview
 /// ordering and `super.hitTest` walking semantics.
 @MainActor
-private final class TitleBarView: NSView, TokenThemed {
+private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting {
     /// Painted first in `draw(_:)`, over the `tileChrome` layer fill and under
     /// everything the bar draws. A user-chosen zone colour, like a zone's tint.
     var identityTint: NSColor? {
@@ -2098,6 +2115,15 @@ private final class TitleBarView: NSView, TokenThemed {
         return host.surface.width * host.surface.height * 4
     }
     private let providerMarkView = NSImageView(frame: .zero)
+    /// Plan 110: the agent's character, between the provider mark and the title.
+    /// A sublayer of the bar, never drawn in `draw(_:)`: a sprite frame never
+    /// invalidates the chrome, and it survives the controls being drawn inline.
+    let characterLayer = CharacterSpriteLayer()
+    private var characterInput: (id: UUID, snapshot: AgentCharacterSnapshot, name: String?)?
+    /// The character's size at chrome scale 1 (1 pt per art pixel); nil for none.
+    private var characterSize: NSSize?
+    /// Held still by the tile (far parked).
+    private var characterHeld = false
     private var displayTitleOverride: String?
     private var closeActionTitle = "Close tile"
     private var stopActionTitle = "Stop run"
@@ -2400,13 +2426,93 @@ private final class TitleBarView: NSView, TokenThemed {
             at: NSPoint(x: rect.minX + side + CGFloat(Space.xs) * chromeScale, y: rect.minY), withAttributes: attributes)
     }
 
-    /// Where the title starts: past the provider mark when there is one.
+    /// Where the title starts: past the character, else past the provider mark.
     private var titleLeadingX: CGFloat {
         let scale = chromeScale
+        if let character = characterRect { return character.maxX + CGFloat(Space.s) * scale }
         return providerMarkView.isHidden
             ? CGFloat(Space.m) * scale
             : providerMarkView.frame.maxX + CGFloat(Space.s) * scale
     }
+
+    /// The character's slot: 4 pt (scaled) right of the mark, centred, scaled with
+    /// the chrome so it holds its size on screen as the title does.
+    private var characterRect: NSRect? {
+        guard let size = characterSize else { return nil }
+        let scale = chromeScale
+        let x = providerMarkView.isHidden
+            ? CGFloat(Space.m) * scale
+            : providerMarkView.frame.maxX + 4 * scale
+        let height = size.height * scale
+        return NSRect(x: x, y: (bounds.height - height) / 2, width: size.width * scale, height: height)
+    }
+    var qaCharacterRect: NSRect? { characterLayer.isHidden ? nil : characterRect }
+    var qaProviderMarkRect: NSRect? { providerMarkView.isHidden ? nil : providerMarkView.frame }
+
+    func setCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, characterName: String?, now: Date) {
+        if let agentID, let snapshot { characterInput = (agentID, snapshot, characterName) } else { characterInput = nil }
+        refreshCharacter(now: now)
+    }
+
+    /// Resolve and show the character; lays out only when the slot appears or goes.
+    func refreshCharacter(now: Date) {
+        let controller = AgentCharacterController.shared
+        guard let input = characterInput,
+              let atlas = controller.atlas(for: input.id, appearance: AgentCharacterController.appearance(of: self),
+                                           name: input.name) else {
+            controller.scheduleRevisit(for: self, at: nil)
+            if characterSize != nil {
+                characterSize = nil
+                characterLayer.clear()
+                characterLayer.isHidden = true
+                needsLayout = true
+                invalidateChrome()
+            }
+            return
+        }
+        let plan = controller.plan(for: input.snapshot, now: now)
+        characterLayer.show(plan, sprite: atlas, phase: controller.phase(for: input.id), now: now)
+        controller.scheduleRevisit(for: self, at: plan.revisitAt)
+        let scale = CGFloat(controller.theme?.scale ?? 1)
+        let size = NSSize(width: CGFloat(atlas.atlas.frameWidth) / scale, height: CGFloat(atlas.atlas.frameHeight) / scale)
+        if characterSize != size {
+            characterSize = size
+            needsLayout = true
+            invalidateChrome()
+        }
+        reconcileCharacterVisibility()
+    }
+
+    func revisitCharacter(now: Date) { refreshCharacter(now: now) }
+
+    func setCharacterHeld(_ held: Bool) {
+        guard held != characterHeld else { return }
+        characterHeld = held
+        reconcileCharacterVisibility()
+    }
+
+    func reconcileCharacterVisibility() {
+        let visible = window.map { AgentCharacterController.shared.windowIsVisible($0) } ?? false
+        characterLayer.setPaused(characterHeld || !visible || isHiddenOrHasHiddenAncestor)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        reconcileCharacterVisibility()
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        reconcileCharacterVisibility()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        reconcileCharacterVisibility()
+    }
+
+    @objc private func agentCharactersDidChange() { refreshCharacter(now: Date()) }
+    @objc private func agentCharacterVisibilityDidChange() { reconcileCharacterVisibility() }
 
     /// The leftmost band control on screen — what the pill and title stop at.
     private var leadingBandControlX: CGFloat {
@@ -2507,6 +2613,15 @@ private final class TitleBarView: NSView, TokenThemed {
 
         super.init(frame: .zero)
         wantsLayer = true
+        characterLayer.isHidden = true
+        characterLayer.hostIsFlipped = isFlipped
+        layer?.addSublayer(characterLayer)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(agentCharactersDidChange),
+            name: AgentCharacterController.didChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(agentCharacterVisibilityDidChange),
+            name: AgentCharacterController.visibilityDidChangeNotification, object: nil)
         providerMarkView.imageScaling = .scaleProportionallyDown
         providerMarkView.setAccessibilityElement(false)
         providerMarkView.isHidden = true
@@ -2546,6 +2661,7 @@ private final class TitleBarView: NSView, TokenThemed {
             for control in inlineControls where control.superview == nil { control.appearance = effectiveAppearance }
         }
         applyTokens()
+        if characterInput != nil { refreshCharacter(now: Date()) }
     }
 
     /// One bitmap × image per bucketed glyph point size, shared across every
@@ -2592,6 +2708,16 @@ private final class TitleBarView: NSView, TokenThemed {
             width: markSize,
             height: markSize
         )
+        // The character's frame, only when it moved (a zoom step can move it; a
+        // sprite frame never does).
+        if let rect = characterRect {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            if characterLayer.frame != rect { characterLayer.frame = rect }
+            if characterLayer.isHidden { characterLayer.isHidden = false }
+            CATransaction.commit()
+            characterLayer.refreshOrientation()
+        }
         var trailingEdge = closeButton.frame.minX
         if let actionsButton {
             // ⋯ sits left of × and never on it. It used to hang off the drag-dot

@@ -766,6 +766,19 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             self?.setIdentityColorName(name)
         }
         setIdentityColorName(supervisor.records[agentID]?.identityColor)
+        // Plan 110: the header's character from the moment the agent is attached,
+        // not only after its first event, and again when its pick changes.
+        refreshAgentCharacter()
+        characterNameObserver.map(NotificationCenter.default.removeObserver)
+        characterNameObserver = NotificationCenter.default.addObserver(
+            forName: AgentSupervisor.characterNameDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            let changed = note.object as? UUID
+            MainActor.assumeIsolated {
+                guard let self, changed == (self.attachedAgentID ?? self.projectedAgentID)?.rawValue else { return }
+                self.refreshAgentCharacter()
+            }
+        }
         locationProjectName = projectName
         applyBranchContext(supervisor.branchContext(for: agentID))
         refreshLocationStatus()
@@ -1234,7 +1247,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let locationItems = location?.items ?? []
         locationItems.forEach { location?.removeItem($0) }
         return makeFaceMenuItems() + locationItems + (locationItems.isEmpty ? [] : [.separator()]) + makePageZoomMenuItems() + [root]
-            + makeRenameMenuItems() + makeIdentityColorMenuItems() + makeWorkspaceToolsMenuItems() + makeBackgroundProcessesMenuItems()
+            + makeRenameMenuItems() + makeIdentityColorMenuItems() + makeCharacterMenuItems() + makeWorkspaceToolsMenuItems() + makeBackgroundProcessesMenuItems()
     }
 
     // MARK: - Terminal face (.plans/79-session-handoff)
@@ -1835,6 +1848,41 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// vocabulary and order as a zone's Color submenu, so an agent and the zone
     /// it sits in can be matched by name. ABSENT for a tile with no agent: the
     /// colour belongs to the agent's record, never to the tile.
+    private var characterNameObserver: NSObjectProtocol?
+
+    /// Plan 110: pick this agent's character from the selected set, or let the
+    /// hash choose (Automatic). Offered only while characters show.
+    private func makeCharacterMenuItems() -> [NSMenuItem] {
+        let controller = AgentCharacterController.shared
+        guard controller.isEnabled, let theme = controller.theme, let agentID = attachedAgentID,
+              let record = agentSource?.records[agentID] else { return [] }
+        let root = NSMenuItem(title: "Character", action: nil, keyEquivalent: "")
+        root.identifier = NSUserInterfaceItemIdentifier("agentTile.character")
+        let menu = NSMenu(title: "Character")
+        let current = record.characterName.flatMap { AgentCharacterController.index(of: $0, in: theme) }
+        let automatic = NSMenuItem(title: "Automatic", action: #selector(selectCharacter(_:)), keyEquivalent: "")
+        automatic.target = self
+        automatic.representedObject = ""
+        automatic.state = current == nil ? .on : .off
+        menu.addItem(automatic)
+        menu.addItem(.separator())
+        for (index, character) in theme.characters.enumerated() {
+            let item = NSMenuItem(title: character.name, action: #selector(selectCharacter(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = character.name
+            item.state = current == index ? .on : .off
+            menu.addItem(item)
+        }
+        root.submenu = menu
+        return [root]
+    }
+
+    @objc private func selectCharacter(_ sender: NSMenuItem) {
+        guard let agentID = attachedAgentID, let supervisor = agentSource,
+              let raw = sender.representedObject as? String else { return }
+        _ = supervisor.setCharacterName(agentID: agentID, raw.isEmpty ? nil : raw)
+    }
+
     private func makeIdentityColorMenuItems() -> [NSMenuItem] {
         guard let agentID = attachedAgentID,
               let record = agentSource?.records[agentID] else { return [] }
@@ -3434,6 +3482,26 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         refreshTranscriptThinkingIndicator()
     }
 
+    /// Plan 110: the header's character, from the same facts and the same state
+    /// projection the sidebar row uses, so the two always show one pose.
+    private func refreshAgentCharacter(now: Date = Date()) {
+        guard let agentID = attachedAgentID ?? projectedAgentID else {
+            setAgentCharacter(agentID: nil, snapshot: nil, now: now)
+            return
+        }
+        let record = agentSource?.records[agentID]
+        let state = v2TurnSnapshot.map(InboxState.state(forSnapshot:))
+            ?? (record?.latestTerminalEvent.map { $0.outcome == .failed || $0.outcome == .runtimeError } == true
+                ? .failed : .ready)
+        let activity = AgentCharacterActivityProjection.activity(
+            presence: currentPresence, terminalEvent: record?.latestTerminalEvent, latestPromptAt: record?.latestPromptAt)
+        setAgentCharacter(
+            agentID: agentID.rawValue,
+            snapshot: AgentCharacterSnapshot(state: state, activity: activity, title: headerAgentName ?? tile.title),
+            characterName: record?.characterName,
+            now: now)
+    }
+
     /// This tile's own layer fills, on top of the base tile's (P1.9), now on
     /// `DesignTokens` (P1.10): the content area is `tileBody` and the header and
     /// compose strip are `tileChrome`, which the palette defines as "one step off
@@ -4536,6 +4604,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private func applyHeader(status: AgentStatus) {
         refreshTitleBarIdentity()
         applyAgentHeader(status: status)
+        refreshAgentCharacter()
     }
 
     private func refreshTitleBarIdentity() {

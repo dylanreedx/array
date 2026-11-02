@@ -331,6 +331,9 @@ struct SettingsFieldRow: View {
                 SettingsHarnessRows(model: model)
             case .custom("agentAccounts", _):
                 SettingsAccountRows(model: model)
+            case .custom("agentCharacters", _):
+                AgentCharacterSettingsRows(model: AgentCharacterSettingsModel(defaults: model.defaults))
+                    .settingsAnchor(SettingsRegistry.anchor(for: field) ?? field.label, model: model)
             case .shortcuts:
                 EmptyView()
             default:

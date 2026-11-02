@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import Foundation
 
 /// The one answer to "is my message being worked on, and what is it doing?"
@@ -134,6 +135,10 @@ public struct AgentTurnPresence: Equatable, Sendable {
     /// the caller), if it failed.
     public private(set) var errorText: String?
     public private(set) var retry: Retry?
+    /// When a tool step of this submission last completed as failed. A failed
+    /// search is a miss, not a failure, so it does not count (plan 110: the
+    /// character flinches at this).
+    public private(set) var lastStepFailedAt: Date?
     /// What a `starting` submission is waiting on, when Array knows ("Waiting
     /// for Claude Code to finish starting"). Cleared once the turn moves on.
     public private(set) var startupDetail: String?
@@ -188,6 +193,7 @@ public struct AgentTurnPresence: Equatable, Sendable {
         errorText = nil
         retry = nil
         startupDetail = nil
+        lastStepFailedAt = nil
         openTools = []
         stopRequested = false
     }
@@ -269,10 +275,14 @@ public struct AgentTurnPresence: Equatable, Sendable {
                 default: break
                 }
             }
-        case let .itemCompleted(_, itemID, _, _):
+        case let .itemCompleted(_, itemID, _, status):
             guard isLive else { return }
             lastProviderActivityAt = now
-            guard openTools.contains(where: { $0.tool.itemID == itemID }) else { return }
+            guard let closing = openTools.last(where: { $0.tool.itemID == itemID }) else { return }
+            if status == .failed,
+               AgentCharacterActivityProjection.action(kind: closing.tool.kind, title: closing.tool.title) != .dabble {
+                lastStepFailedAt = now
+            }
             openTools.removeAll { $0.tool.itemID == itemID }
             if let open = openTools.last {
                 phase = .tool(open.tool)

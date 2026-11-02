@@ -996,6 +996,11 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --pi-provider-failure-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --board-task-transcript-check
+# Plan 110 (agent characters): the theme format against the reference parser's
+# recorded corpus, the built-in set with its MIT notice, and the atlas pixels.
+run_leg .build/debug/ContinuumRevivedCoreChecks --agent-character-theme-check
+# Plan 110, slice 2: which loop, clip or still each agent state plays.
+run_leg .build/debug/ContinuumRevivedCoreChecks --agent-character-pose-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --cli-install-owner-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --cli-update-runner-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
@@ -1620,6 +1625,8 @@ run_app_check .build/debug/Array --workspace-api-grants-check
 # preset, other-agent approval, byte caps, zero lifecycle side effects.
 # Agent colour: durable record update through the real workspace API.
 run_app_check .build/debug/Array --workspace-api-agent-colour-check
+# Plan 110: a per-agent character through agent.update and the tile's own menu.
+run_app_check .build/debug/Array --workspace-api-agent-character-check
 # Agent rename: agent.update displayName — self without approval, another agent
 # under the canvas-write grant, a proactive rename refused on a name the user
 # typed, a requested one allowed, the titler yielding to an agent-set name.
@@ -2023,6 +2030,28 @@ run_app_check .build/debug/Array --persistence-crash-safe-check
 run_app_check .build/debug/Array --ticket-queue-tile-check
 run_app_check .build/debug/Array --conductor-queue-tile-check
 run_app_check .build/debug/Array --agent-input-check
+# Plan 110 (agent characters), slice 3: 100 sprites for 10 s cause no layout or
+# draw, install one animation per plan change, share one atlas per character, and
+# show the parser's exact pixels in unflipped and flipped hosts.
+run_app_check .build/debug/Array --character-sprite-check
+# Plan 110, slice 4: characters on the real sidebar, light and dark: placement
+# beside the mark, hover fade, recycled cells, scroll layouts on = off, occlusion.
+run_app_check .build/debug/Array --sidebar-character-check
+# Plan 110, slice 5: the agent tile header, driven by supervisor events: slot at
+# every chrome scale, title clear of the pill, far park / out of window hold still,
+# and a ⌘-scroll zoom through the window costs the bar nothing extra.
+run_app_check .build/debug/Array --tile-character-check
+# Plan 110, slice 6: Settings › Appearance › Agent characters: import copies one
+# file, a bad file shows its problems and imports nothing, discovery uses a fixture
+# home only, and the preview grid renders in both appearances (still under RM).
+run_app_check .build/debug/Array --character-settings-check
+# Plan 110: agent-made sets in the themes folder reach the row and the tile header
+# live (new, edited, half-written, removed), and the validator binary's verdicts.
+run_app_check .build/debug/Array --character-themes-live-check
+# Plan 110, slice 8: characters on vs off at 80 agent tiles + 60 sidebar rows,
+# idle / pan / zoom through window dispatch: equal bar and card layout and draw
+# counts, no sprite install during gestures (times printed, not gated).
+run_app_check .build/debug/Array --character-perf-check
 run_app_check .build/debug/Array --diff-tile-check
 run_app_check .build/debug/Array --diff-review-off-main-check
 run_app_check .build/debug/Array --attention-notification-check

@@ -30,6 +30,18 @@ if CommandLine.arguments.contains("--browser-profile-registry-check") {
     Foundation.exit(0)
 }
 
+// Plan 110 (agent characters), slice 1: the theme format against the reference
+// parser's recorded corpus, the built-in set and its notice, and the atlas pixels.
+if CommandLine.arguments.contains("--agent-character-theme-check") {
+    runAgentCharacterThemeChecks()
+    Foundation.exit(0)
+}
+// Plan 110, slice 2: the pose state machine and the step-to-action projection.
+if CommandLine.arguments.contains("--agent-character-pose-check") {
+    runAgentCharacterPoseChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--tile-selection-geometry-check") {
     runTileSelectionGeometryChecks()
     print("TileSelectionGeometryChecks passed")
@@ -9046,9 +9058,10 @@ do {
     // ContextWindows.json (3954fa393) and TestedCLIVersions.json (abc6fb0bb)
     // are data tables Core reads at runtime; pinning them keeps a dropped or
     // renamed resource red alongside the dependency list.
-    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")],resources:[.copy("Resources/PiExtensions"),.copy("Resources/ContextWindows.json"),.copy("Resources/TestedCLIVersions.json")]),"#
+    // AgentCharacters (plan 110) is the built-in character set and its MIT notice.
+    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")],resources:[.copy("Resources/PiExtensions"),.copy("Resources/ContextWindows.json"),.copy("Resources/TestedCLIVersions.json"),.copy("Resources/AgentCharacters")]),"#
     expect(compactDeclaration == expectedDeclaration,
-           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, GRDB, and the pinned PiExtensions, ContextWindows and TestedCLIVersions resources, found: \(declaration)")
+           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, GRDB, and the pinned PiExtensions, ContextWindows, TestedCLIVersions and AgentCharacters resources, found: \(declaration)")
     print("dependencies guard: ContinuumRevivedCore target has only AgentContent + AgentUI + GRDB dependencies, plus the pinned resources")
 }
 

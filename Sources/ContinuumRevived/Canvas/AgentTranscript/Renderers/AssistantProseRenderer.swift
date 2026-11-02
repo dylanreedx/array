@@ -186,6 +186,12 @@ final class AssistantProseView: NSView {
     /// the width moved (or the row count did), and 30,000 CoreText samples during a
     /// camera gesture came through here without anything saying what moved.
     static private(set) var qaLastMeasureTrigger = "-"
+    /// Full re-measures by cause, for the motion harness: the width moved past
+    /// the hysteresis, or the row count changed. Every trigger of the guard below.
+    static private(set) var qaWidthRemeasures = 0
+    static private(set) var qaRowRemeasures = 0
+    /// The widths that triggered width re-measures, last 16 (from -> to).
+    static private(set) var qaRecentWidthTriggers: [String] = []
 
 
     private func invalidateRowHeights() {
@@ -217,6 +223,13 @@ final class AssistantProseView: NSView {
                 format: "prose %.1f->%.1f rows %d->%d", cachedWidth, availableWidth,
                 cachedRowHeights.count, rows.count
             )
+            if cachedRowHeights.count != rows.count {
+                Self.qaRowRemeasures += 1
+            } else {
+                Self.qaWidthRemeasures += 1
+                Self.qaRecentWidthTriggers = Array((Self.qaRecentWidthTriggers + [String(
+                    format: "%.2f->%.2f at backing scale %.1f", cachedWidth, availableWidth, Double(window?.backingScaleFactor ?? 0))]).suffix(16))
+            }
             cachedRowHeights = rows.map { row in
                 Self.qaMeasurementCount += 1
                 return RichInlineTextView.measuredHeight(

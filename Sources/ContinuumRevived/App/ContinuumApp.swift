@@ -806,9 +806,27 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        // Plan 110: the character-set validator agents call. First, so it never
+        // touches the app's state, a window or a lock; prints JSON and exits.
+        if let index = CommandLine.arguments.firstIndex(of: AgentCharacterValidator.flag) {
+            let paths = Array(CommandLine.arguments.dropFirst(index + 1)).filter { !$0.hasPrefix("-") }
+            let folder = WorkspaceStore.defaultApplicationSupportDirectory().appendingPathComponent("characters", isDirectory: true)
+            guard !paths.isEmpty else {
+                fputs("usage: Array \(AgentCharacterValidator.flag) <theme file or folder> [...]\nthemes folder: \(folder.path)\n", stderr)
+                Foundation.exit(2)
+            }
+            let report = AgentCharacterValidator.report(paths: paths, themesFolder: folder)
+            print(report.json)
+            Foundation.exit(report.valid ? 0 : 1)
+        }
         // Before anything can order a window or activate: a check run never takes
         // the user's focus or screen (CheckFocusGuard).
         CheckFocusGuard.installIfQARun()
+        // Plan 110: Dylan's agent-characters preview bundle (never prod, never a check).
+        if AgentCharactersPreview.isRequested {
+            AgentCharactersPreview.run()
+            return
+        }
         if (ProcessInfo.processInfo.environment["ARRAY_SIDEBAR_PREVIEW"] == "1"
             || Bundle.main.bundleIdentifier == "dev.arrayapp.macos.sidebar-preview"),
            Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier,
@@ -1979,6 +1997,17 @@ enum ContinuumApp {
         // CX-01 Phase 2a: agent.find ranking/ambiguity and agent.inspect evidence,
         // self-inspect in the preset, other-agent inspect through the trusted
         // prompt, byte caps, and zero lifecycle/presentation side effects.
+        // Plan 110: agent.update's character, through production dispatch and views.
+        if CommandLine.arguments.contains("--workspace-api-agent-character-check") {
+            do {
+                _ = NSApplication.shared
+                print(try WorkspaceAPIAgentCharacterChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-api-agent-colour-check") {
             do {
                 _ = NSApplication.shared
@@ -2369,6 +2398,86 @@ enum ContinuumApp {
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        // Plan 110: the preview's offscreen recording (not a matrix leg).
+        if let index = CommandLine.arguments.firstIndex(of: "--agent-characters-recording-check") {
+            _ = NSApplication.shared
+            let out = CommandLine.arguments.dropFirst(index + 1).first.map { URL(fileURLWithPath: $0) }
+                ?? URL(fileURLWithPath: "qa-runs/agent-characters/preview.mp4")
+            do {
+                print(try AgentCharactersPreview.record(to: out))
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL agent characters recording: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        // Plan 110: sets agents write into the themes folder show live; the validator.
+        if CommandLine.arguments.contains("--character-themes-live-check") {
+            _ = NSApplication.shared
+            do {
+                print(try CharacterThemesLiveChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL character themes live: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        // Plan 110, slice 8: characters on vs off at 80 tiles + 60 rows (counts gated).
+        if CommandLine.arguments.contains("--character-perf-check") {
+            _ = NSApplication.shared
+            do {
+                print(try CharacterPerfChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL character perf: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        // Plan 110, slice 6: Settings › Appearance › Agent characters.
+        if CommandLine.arguments.contains("--character-settings-check") {
+            _ = NSApplication.shared
+            do {
+                print(try CharacterSettingsChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL character settings: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        // Plan 110, slice 5: characters in the agent tile header.
+        if CommandLine.arguments.contains("--tile-character-check") {
+            _ = NSApplication.shared
+            do {
+                print(try TileCharacterChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL tile character: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        // Plan 110, slice 4: characters on the real sidebar.
+        if CommandLine.arguments.contains("--sidebar-character-check") {
+            _ = NSApplication.shared
+            do {
+                print(try SidebarCharacterChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL sidebar character: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        // Plan 110 (agent characters), slice 3: the sprite layer's cost model.
+        if CommandLine.arguments.contains("--character-sprite-check") {
+            _ = NSApplication.shared
+            do {
+                try CharacterSpriteChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL character sprite: \(error)\n", stderr)
                 Foundation.exit(1)
             }
         }
@@ -6912,6 +7021,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) {
             CornerStyleController.adoptSavedStyle(defaults: settingsDefaults)
             AppThemeController.adoptSavedTheme(defaults: settingsDefaults)
+            // Plan 110: agent characters follow Settings (off by default).
+            AgentCharacterController.shared.adopt(defaults: settingsDefaults)
         }
 
         // Ticket 87: headless component snapshot for Layer-2 vision QA. Renders
@@ -22629,6 +22740,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // colour picked on a tile only needs the rows rebuilt — the same re-push
         // a rename from the inbox does.
         agentSupervisor.onIdentityColorChanged = { [weak self] _, _ in
+            self?.reloadWorkspaceSidebar()
+        }
+        // Plan 110: a character pick is read from the record on every row build too.
+        agentSupervisor.onCharacterNameChanged = { [weak self] _, _ in
             self?.reloadWorkspaceSidebar()
         }
         // An agent's own status or report is drawn under its name in the sidebar

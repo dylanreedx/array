@@ -6902,6 +6902,31 @@ final class AgentSupervisor {
         return true
     }
 
+    /// Plan 110: posted with the agent's UUID when its character pick changes.
+    static let characterNameDidChangeNotification = Notification.Name("array.agentCharacters.characterNameChanged")
+    var onCharacterNameChanged: ((AgentID, String?) -> Void)?
+
+    /// The agent's chosen character, by name, or nil for the hashed pick. Saved
+    /// on the RECORD like the colour, so every tile and row that draws the agent
+    /// agrees and it survives a relaunch. Returns true when the record changed.
+    @discardableResult
+    func setCharacterName(agentID id: AgentID, _ name: String?) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.setCharacterName: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        let normalized = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = normalized?.isEmpty == true ? nil : normalized
+        if let value, value.count > 30 { return false }
+        guard record.characterName != value else { return false }
+        record.characterName = value
+        // Publish only a durable pick. persist updates the live record on success.
+        guard persist(record) else { return false }
+        NotificationCenter.default.post(name: Self.characterNameDidChangeNotification, object: id.rawValue)
+        onCharacterNameChanged?(id, value)
+        return true
+    }
+
     // MARK: - Derived name refresh (harness title, then generated fallback)
 
     /// Give one agent the best title currently available to it. Called when the
