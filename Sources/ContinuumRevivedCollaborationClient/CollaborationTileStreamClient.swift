@@ -64,6 +64,13 @@ extension CollaborationAPI {
         let task = session.webSocketTask(with: request)
         task.maximumMessageSize = 1 << 20
         task.resume()
+        // Reading starts before the ping: a watcher's lane opens with the
+        // relay's replay, which arrives ahead of the pong over a real network,
+        // and a pong queued behind unread frames never completes the ping.
+        let client = CollaborationTileStreamClient(task: task)
+        // A ping that never returns is a lane that never opened.
+        let timeout = Task { try await Task.sleep(for: .seconds(10)); task.cancel() }
+        defer { timeout.cancel() }
         do {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
                 task.sendPing { error in
@@ -76,7 +83,7 @@ extension CollaborationAPI {
             if let status, status != 101 { throw CollaborationClientError.server(status: status, code: "tileStreamRefused") }
             throw error
         }
-        return CollaborationTileStreamClient(task: task)
+        return client
         #endif
     }
 }
