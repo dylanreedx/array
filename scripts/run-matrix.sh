@@ -1690,6 +1690,12 @@ run_app_check .build/debug/Array --sidebar-ownership-check
 # of the Snoozed and History headings and History's "Show 25 more" footer, and
 # asserts each opens or pages its rows.
 run_app_check .build/debug/Array --sidebar-fold-expand-check
+# .plans/113: the header's sort list (Most active, By project, Newest first)
+# picked through its real popover: the drawn order and project headings in
+# each mode, the project filter in two of them, the stored choice restored by
+# the app's own sidebar wiring, and a re-sort held while the pointer is over
+# the list or a row is being renamed, then sliding into place.
+run_app_check .build/debug/Array --sidebar-sort-check
 # The sidebar's project icon: `.array/icon.*` beats a shipped favicon; static/,
 # website/public/, Packaging/*.icns and an xcassets AppIcon resolve; a miss is
 # cached, and an added override or an edited winning file still shows.
