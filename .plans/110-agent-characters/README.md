@@ -680,6 +680,24 @@ no model variants, no sounds.
 | 6 | Settings › Appearance › Agent characters | `--character-settings-check`: folder import, bad file, discovery in a fixture home, preview in both appearances, still under Reduce Motion |
 | 8 | the on/off measurement | `--character-perf-check` (counts gated, times printed) |
 
+### Round 2 (Dylan's newer decisions, same day)
+
+Rebased onto 0.7.38 (`b0689628`). 0.7.38 draws sidebar rows as two-line lead cards
+and one-line helper rows; the character sits left of the mark in both.
+
+| what | witness |
+|---|---|
+| Per-agent pick: `AgentRecord.characterName` (a character's name in the selected set; unknown names fall back to the hash), the tile's ⋯ › Character menu, and `agent.update` `character` for agents. Classified `exposed(agent.update)` | `--workspace-api-agent-character-check`: production dispatch, header and row, fresh store, replay, refusal listing the allowed names, null clears, the tile menu via `performActionForItem` |
+| The themes folder (`<app support>/characters`) takes files agents write (`*.theme.json`) as well as imports; one FSEvents stream reloads it; a broken edit keeps the last good set and Settings lists the file's problems | `--character-themes-live-check`: real file writes, new / edited / half-written / removed, no rescans while quiet, the validator binary's verdicts |
+| `Array --validate-agent-character-theme <file or folder>`: JSON report, exit 0 / 1, handled before boot | the same check runs the real binary |
+| `docs/internals/agent-characters-authoring.md` | — |
+| The row and the tile show one pose for one agent | `--tile-character-check` builds the row with the production builder from the supervisor's snapshot and compares |
+| The preview (`PREVIEW.md`) and its recording | `--agent-characters-recording-check` (not a matrix leg) |
+| Motion harness arms, characters on vs off | `scripts/canvas-motion/character-arms.sh` (needs an unlocked, idle display; not run, see below) |
+
+The per-agent pick is offered from the tile's menu, not a list in Settings: per-agent
+identity (name, colour) already lives there, and Settings points to it.
+
 ### Departures from the design, and why
 
 - **No identity-colour tint** (§4.3). Tinting the hat per agent needs an atlas per
@@ -710,6 +728,22 @@ back), all dispatched through the window. Bar layouts and draws, card layouts an
 installs are equal on and off (card layouts within one tick of the list's own
 one-second elapsed clock); gestures install nothing. Main-thread CPU and step times
 are equal within noise. The numbers are in the slice 8 commit message.
+
+**Motion harness (round 2):** `character-arms.sh` is ready but was not run: at the
+end of the round the screen was locked (idle 1 h 44 min), and a locked session makes
+ScreenCaptureKit capture blank or fail. Run it with the display unlocked and idle.
+
+**Full matrix (round 2, locked display, from an agent shell):** 431 legs, the 10
+documented KNOWN-RED, 20 failed. One was this branch's (`--agent-supervisor-check`: the
+preview spelled the default agent name a second time), fixed in `f15c84e0`. The film
+scenes failed in 0.7.38's own release matrix too. The other 18 (every Ghostty terminal
+surface leg, the face and onboarding legs, session resume, the app-bundle launch smoke,
+tile-project-scope, tile-chrome-canvas, composer-outline, throbber-timeline and
+cli-update-settings) fail with identical messages on an unmodified 0.7.38 build in the
+same session, so the cause is the locked display and agent shell, not this branch. The
+Core dependency guard inside the KNOWN-RED bare CoreChecks run was already red on 0.7.38
+(Collaboration dependencies); it now also pins `Resources/AgentCharacters`. Run the
+matrix again with the display unlocked before landing.
 
 **Not measured: WindowServer and presented frames.** The motion harness
 (`scripts/canvas-motion/`, on `array/0732-canvas-parity`, not on integration)
