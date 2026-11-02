@@ -86,6 +86,10 @@ public enum SharedPortal {
 
     // MARK: Payloads
 
+    // Making a revision is the sharer's work, on a Mac, like the artifact
+    // producer whose `Draft` it returns. Reading one (below) is every
+    // platform's, iOS included.
+    #if os(macOS)
     /// A portal payload revision: named entries under `entryPrefix`. Binary
     /// content (a still picture) travels base64-encoded in an entry whose name
     /// ends `.b64`, because artifact entries are `text/plain` or `text/x-diff`.
@@ -111,6 +115,10 @@ public enum SharedPortal {
         entries[name + ".json"] = try encoder.encode(value)
         return try payloadDraft(entries, at: date)
     }
+    public static func manifestDraft(_ manifest: Manifest, at date: Date = Date()) throws -> SharedArtifactProducer.Draft {
+        try jsonDraft(manifest, name: "portal", at: date)
+    }
+    #endif
     /// The payload entries of a fetched revision, by name without the prefix.
     /// Empty for a real git capture (a file or diff published as itself).
     public static func payload(_ bytes: [String: Data]) -> [String: Data] {
@@ -121,9 +129,6 @@ public enum SharedPortal {
     public static func decode<T: Decodable>(_ type: T.Type, name: String, from bytes: [String: Data]) -> T? {
         guard let data = payload(bytes)[name + ".json"] else { return nil }
         return try? JSONDecoder().decode(type, from: data)
-    }
-    public static func manifestDraft(_ manifest: Manifest, at date: Date = Date()) throws -> SharedArtifactProducer.Draft {
-        try jsonDraft(manifest, name: "portal", at: date)
     }
     public static func decodeManifest(_ bytes: [String: Data]) -> Manifest? {
         guard let manifest = decode(Manifest.self, name: "portal", from: bytes), manifest.schema == 1 else { return nil }
