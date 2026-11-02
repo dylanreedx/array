@@ -1245,7 +1245,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // marked) but a row you read and then left lying there forever. That one is
         // the settle nudge's job, and it is a different row entirely.
         statusGlyph.setPulsing(false)
-        applyThrobber(isWorking: row.state == .working)
+        applyThrobber(isWorking: Self.showsWorkingGlyph(row, rollup: rollup))
         // A folded parent's rollup keeps the lane; otherwise what the agent said
         // about this turn takes it from the branch.
         let line = rollupSummary == nil ? row.selfReportLine : nil
@@ -1288,7 +1288,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             return
         }
         let snapshot = AgentCharacterSnapshot(
-            state: row.state, attention: row.attention, activity: row.characterActivity ?? .init(),
+            state: Self.showsWorkingGlyph(row, rollup: shown?.rollup) ? .working : row.state,
+            attention: row.attention, activity: row.characterActivity ?? .init(),
             title: row.title, allowsMotion: !prefersReducedMotion())
         sprite.show(controller.plan(for: snapshot, now: now), sprite: atlas,
                     phase: controller.phase(for: row.id), now: now)
@@ -1518,6 +1519,16 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             case .cancelled: return "xmark.circle.fill"
             }
         }
+    }
+
+    // Plan: .plans/113-sidebar-sort
+    /// Whether the row shows the working gyro (and a working character): the
+    /// agent's own turn, or, on a lead, any helper under it working, folded or
+    /// not. That is the rollup the lead card's sweep reads
+    /// (`AgentInboxView.ownershipSlices`), so the outline and the glyph come and
+    /// go together.
+    static func showsWorkingGlyph(_ row: AgentInboxRow, rollup: ChildRollup?) -> Bool {
+        row.state == .working || (row.depth == 0 && (rollup?.working ?? 0) > 0)
     }
 
     /// Install, re-key or remove the row's throbber. Re-keying a recycled cell
@@ -1945,6 +1956,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var isTitleShimmeringForQA: Bool { titleShimmer.isShimmeringForQA }
     var isPulsingForQA: Bool { pulseDots.isPulsingForQA }
     var isSweepingForQA: Bool { ownershipChrome.sweep.isMovingForQA }
+    var showsWorkingGlyphForQA: Bool { throbber != nil }
     var titleTextForQA: String { titleLabel.stringValue }
     var visibleTextForQA: [String] {
         [titleLabel, stateLabel, placementLabel, tailLabel, branchLabel, modelLabel]
