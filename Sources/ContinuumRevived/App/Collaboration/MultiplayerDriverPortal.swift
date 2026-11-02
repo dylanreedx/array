@@ -208,8 +208,28 @@ extension MultiplayerDriver {
             try await eventually("the area popover") { delegate.shareEntry.isPresented }
             guard let popover = delegate.shareEntry.presentedView else { throw Failure(description: "no popover") }
             popover.layoutSubtreeIfNeeded()
-            let rows = popover.qaItemRows, title = popover.titleLabelText
+            var rows = popover.qaItemRows
+            let title = popover.titleLabelText
             let target = popover.session.target.tileIDs.map(\.uuidString)
+            // `.plans/114`: a terminal row's Share live…, pressed twice where a
+            // person presses it: the warning, then the opt-in.
+            var optIn: [String: Any] = [:]
+            for id in ((request["liveTerminals"] as? [String]) ?? []).compactMap(UUID.init(uuidString:)) {
+                guard let first = popover.qaTerminalButtons[id] else { throw Failure(description: "no Share live… on the terminal's row") }
+                let firstTitle = first.accessory.title ?? ""
+                try ShareEntryChecks.click(first)
+                popover.layoutSubtreeIfNeeded()
+                let warning = popover.qaMessageText
+                guard let second = popover.qaTerminalButtons[id] else { throw Failure(description: "the row lost its button") }
+                let secondTitle = second.accessory.title ?? ""
+                let optedAfterFirst = popover.session.liveTerminals.contains(id)
+                try ShareEntryChecks.click(second)
+                popover.layoutSubtreeIfNeeded()
+                optIn = ["firstTitle": firstTitle, "warning": warning, "secondTitle": secondTitle, "optedAfterFirst": optedAfterFirst,
+                         "opted": popover.session.liveTerminals.contains(id), "rowsAfter": popover.qaItemRows,
+                         "thenTitle": popover.qaTerminalButtons[id]?.accessory.title ?? ""]
+            }
+            rows = request["liveTerminals"] == nil ? rows : (optIn["rowsAfter"] as? [String] ?? rows)
             let worldBefore = canvas.allTilesInWorldFrames().map { [$0.id.uuidString: frameJSON($0.frame) ?? [:]] }
             if request["copy"] as? Bool ?? true {
                 if let slug = request["slug"] as? String { popover.slugField.stringValue = slug; popover.session.setSlug(slug) }
@@ -223,10 +243,25 @@ extension MultiplayerDriver {
                 try await eventually("the portal host started", timeout: 30) {
                     delegate.hostedPortalSessions.values.first.map { $0.publishedRevisions > 0 } ?? false
                 }
-                return ["rows": rows, "title": title, "target": target, "url": link.url.absoluteString,
+                return ["rows": rows, "title": title, "target": target, "optIn": optIn, "url": link.url.absoluteString,
                         "pasteboard": pasteboard.string(forType: .string) ?? "", "worldBefore": worldBefore]
             }
-            return ["rows": rows, "title": title, "target": target]
+            if request["dismiss"] as? Bool == true { delegate.shareEntry.dismiss() }
+            return ["rows": rows, "title": title, "target": target, "optIn": optIn]
+
+        case "addTerminalToShare":
+            // A terminal's "Add to share", pressed twice: the warning, then live.
+            guard let tile = tileArg, let view = canvas.tileView(for: tile),
+                  let pill = view.subviews.compactMap({ $0 as? SharedPortalAddPill }).first else {
+                throw Failure(description: "no Add to share on the terminal")
+            }
+            let firstTitle = pill.title
+            try ShareEntryChecks.click(pill)
+            let warningTitle = pill.title
+            let addedAfterFirst = delegate.hostedPortalArea(forTile: tile) != nil
+            try ShareEntryChecks.click(pill)
+            try await eventually("the terminal joined the portal", timeout: 60) { delegate.hostedPortalArea(forTile: tile) != nil }
+            return ["firstTitle": firstTitle, "warningTitle": warningTitle, "addedAfterFirst": addedAfterFirst]
 
         case "hostPortal":
             return await hostPortalSnapshot()

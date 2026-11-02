@@ -215,7 +215,9 @@ class Person:
             # ~/.tmux.conf can block a new server's first client (a plugin
             # manager's `run`), and this namespace's server is always new.
             tenv = {**env, "TMUX_TMPDIR": str(self.tmux)}
-            subprocess.run(["tmux", "-f", "/dev/null", "new-session", "-d", "-s", "journey-hold"], env=tenv, check=True, timeout=10)
+            # A relaunch finds it running already.
+            if subprocess.run(["tmux", "has-session", "-t", "journey-hold"], env=tenv, capture_output=True, timeout=10).returncode != 0:
+                subprocess.run(["tmux", "-f", "/dev/null", "new-session", "-d", "-s", "journey-hold"], env=tenv, check=True, timeout=10)
             sock = subprocess.run(["tmux", "display-message", "-p", "-t", "journey-hold", "#{socket_path}"], env=tenv,
                                   capture_output=True, text=True, timeout=10).stdout.strip()
             if not os.path.realpath(sock).startswith(os.path.realpath(self.tmux) + "/"):
@@ -341,6 +343,16 @@ def mode_b(host, guest, check, eventually, endpoint, env_extra, people):
     before_world = {t: host.call("snapshot", tile=t)["tileWorld"] for t in tiles}
     h0 = host.call("snapshot")
 
+    # B1a (.plans/114). The popover's terminal row opts a terminal in, one
+    # press for the warning and a second to share it live; nothing is shared
+    # until Copy, and this popover is dismissed without one.
+    row = host.call("portalShare", tiles=tiles, copy=False, dismiss=True, liveTerminals=[terminal], timeout=150).get("optIn", {})
+    check(row.get("firstTitle") == "Share live…" and "secrets" in row.get("warning", "") and row.get("secondTitle") == "Share anyway"
+          and not row.get("optedAfterFirst") and row.get("opted") and row.get("thenTitle") == "Keep private"
+          and any(r.startswith("Terminal") and r.endswith("· Live") for r in row.get("rowsAfter", [])),
+          "B1a: a terminal row's Share live… warns on the first press and opts it in on the second", json.dumps(row))
+    check(not host.call("hostPortal").get("hosting"), "B1a: a dismissed popover shares nothing")
+
     # B1. The Share tool over the six tiles.
     slug = "portal-" + "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(8))
     shared = host.call("portalShare", tiles=tiles, slug=slug, timeout=150)
@@ -436,6 +448,41 @@ def mode_b(host, guest, check, eventually, endpoint, env_extra, people):
     check(pub.get("mode") == "live" and pub.get("url") == public_url, "B6: the public browser loads the same URL on the guest", json.dumps(pub))
     check(loc.get("mode") == "still" and loc.get("badge") == "Still", "B6: the localhost browser is a still marked \"Still\"", json.dumps(loc))
     check(term.get("message") == f"Terminal stays on {host.name}'s Mac", "B6: the terminal shows its \"stays on\" card", json.dumps(term))
+
+    # B6b (.plans/114). A terminal opted in with "Add to share", pressed twice
+    # past its warning, streams live inside the portal, like a terminal shared
+    # on its own. The terminal above, never opted in, stays a card.
+    live = host.call("spawnKind", kind="terminal")["tile"]
+    eventually(lambda: host_pane_text(host, live) is not None, "B6b: the new terminal runs in the host's own tmux namespace", 45)
+    host.call("termSend", tile=live, text="exec env -i HOME=\"$HOME\" TERM=\"$TERM\" PATH=/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin "
+              "PS1='avery$ ' /bin/bash --noprofile --norc")
+    eventually(lambda: (host_pane_text(host, live) or "").rstrip().endswith("avery$"), "B6b: a plain bash runs in it", 20)
+    host.call("termSend", tile=live, text=f"printf '\033[31mP%s\033[0m\n' ORTAL-{token}")
+    host.call("moveTileTo", tile=live, x=region["x"] + 60, y=region["y"] + 60)
+    opted = host.call("addTerminalToShare", tile=live)
+    check(opted.get("firstTitle", "").startswith("Add to share") and "secrets" in opted.get("warningTitle", "") and not opted.get("addedAfterFirst"),
+          "B6b: a terminal's Add to share warns on the first press and shares on the second", json.dumps(opted))
+    hb = host.call("hostPortal")
+    live_object = next((x["object"] for x in hb["shared"] if x["tile"] == live), None)
+    check(any(i["object"] == live_object and i["kind"] == "liveTile" for i in hb["areaItems"]),
+          "B6b: the opted-in terminal is a live tile in the portal's area", json.dumps(hb["areaItems"]))
+    def live_item():
+        return next((i for i in guest.call("portal").get("items", []) if i["object"] == live_object), {}).get("facts", {})
+    eventually(lambda: live_item().get("mode") == "live" and f"PORTAL-{token}" in live_item().get("text", ""),
+               "B6b: the guest's portal shows the opted-in terminal live, with what ran before it was added", DELIVERY_WINDOW,
+               lambda: json.dumps(live_item())[-400:])
+    marker_sent = time.time()
+    host.call("termSend", tile=live, text=f"printf 'L%s\n' IVE-{token}")
+    eventually(lambda: f"LIVE-{token}" in live_item().get("text", ""), "B6b: new output reaches the portal's terminal", DELIVERY_WINDOW,
+               lambda: json.dumps(live_item())[-400:])
+    print(f"PORTAL TERMINAL: new output in the guest's portal {1000 * (time.time() - marker_sent):.0f} ms after the keystrokes "
+          f"(polled through the driver's mailbox, so an upper bound); lane {live_item().get('lane')}")
+    f = live_item()
+    check(f.get("grid") and f.get("grid") == f.get("hostGrid"), "B6b: the portal's terminal has the host's grid", json.dumps(f)[-300:])
+    check(same_screen(f.get("text"), host_pane_text(host, live)), "B6b: the portal's terminal is the host's pane, line for line",
+          json.dumps([screen_lines(f.get("text")), screen_lines(host_pane_text(host, live))]))
+    check(item_of(terminal).get("facts", {}).get("message") == f"Terminal stays on {host.name}'s Mac",
+          "B6b: the terminal that was never opted in is still its card", json.dumps(item_of(terminal).get("facts")))
 
     # B7. Open beside.
     beside = guest.call("openBeside", kind="agent")
@@ -1142,7 +1189,7 @@ def main():
         try: wait_for(probe, label, timeout); check(True, label); return True
         except Failed: check(False, label, detail()); return False
     try:
-        host = Person("a", endpoint, env_extra, tmux=args.mode == "terminal"); guest = Person("b", endpoint, env_extra)
+        host = Person("a", endpoint, env_extra, tmux=args.mode in ("terminal", "b")); guest = Person("b", endpoint, env_extra)
         people = [host, guest]
         print(f"==> {host.name} (host) and {guest.name} (guest) are running, off every display")
         if args.mode == "b":
