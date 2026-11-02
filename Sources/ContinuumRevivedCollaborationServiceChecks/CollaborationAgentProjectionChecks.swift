@@ -21,6 +21,13 @@ private func projectionRefuses(_ expected: Int, _ label: String, _ action: () as
     }
 }
 
+private final class TranscriptTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = Date(timeIntervalSince1970: 1_800_000_000)
+    func now() -> Date { lock.withLock { value } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { value = value.addingTimeInterval(seconds) } }
+}
+
 private typealias P = Collaboration.AgentProjection
 
 /// COL-15. The portable reducer/log/replica contract the host, the service and
@@ -31,6 +38,18 @@ func runCollaborationAgentProjectionChecks() async throws {
 }
 
 private func runProjectionContractChecks() throws {
+    let transcriptHost = SharedArea.ID<SharedArea.Host>()
+    let largeCheckpoint = Collaboration.AgentTranscript.Checkpoint(generation: 1, through: 0, body: Data(repeating: 1, count: Collaboration.AgentTranscript.maxCheckpointBytes))
+    var transcriptLog: Collaboration.AgentTranscript.Log? = try Collaboration.AgentTranscript.Log.publish(.init(epoch: 1, host: transcriptHost, stream: "main", checkpoint: largeCheckpoint, frames: []), onto: nil)
+    for sequence in 1...3 {
+        transcriptLog = try Collaboration.AgentTranscript.Log.publish(.init(epoch: 1, host: transcriptHost, stream: "main", checkpoint: nil,
+            frames: [.init(generation: 1, sequence: UInt64(sequence), body: Data(repeating: 2, count: Collaboration.AgentTranscript.maxFrameBytes))]), onto: transcriptLog)
+    }
+    guard case .resnapshot(_, let firstPage, true) = transcriptLog!.read(after: nil), firstPage.count == 1,
+          case .frames(_, let nextPage, false) = transcriptLog!.read(after: .init(generation: 1, through: 1)), nextPage.count == 2 else {
+        throw ProjectionCheckFailure(message: "transcript response byte budget failed to paginate contiguously")
+    }
+    print("PASS transcript: response pages stay byte-bounded and contiguous")
     let host = SharedArea.ID<SharedArea.Host>(), object = SharedArea.ID<SharedArea.Object>()
     let caps = P.Capabilities(locallyManaged: true, canSend: true, canQueue: false, canSteer: false, canInterrupt: false)
     func frame(_ generation: UInt64, _ sequence: UInt64, _ payload: P.Payload) -> P.Frame {
@@ -200,7 +219,8 @@ private func runProjectionHTTPChecks() async throws {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
     let key = Data(repeating: 71, count: 32)
-    let store = try CollaborationStore(path: root.appendingPathComponent("collaboration.sqlite").path, masterKey: key)
+    let transcriptClock = TranscriptTestClock()
+    let store = try CollaborationStore(path: root.appendingPathComponent("collaboration.sqlite").path, masterKey: key, clock: { transcriptClock.now() })
     let companion = try RelayStore(path: root.appendingPathComponent("companion.sqlite").path, masterKey: key)
     let server = RelayServer(store: companion, configuration: .init(host: "127.0.0.1", publicPort: 0, adminPort: 0), collaboration: store)
     try await server.start()
@@ -223,6 +243,101 @@ private func runProjectionHTTPChecks() async throws {
         _ = try await aa.apply(area: area, mutation: .init(epoch: 1, command: .init(area: state.document.id, expectedRevision: 0,
             edits: [.admit(item, placement)])))
         let object = item.id
+        // The optional transcript lane is never delivered to a legacy client.
+        let transcriptCheckpoint = Collaboration.AgentTranscript.Checkpoint(generation: 1, through: 0, body: Data("checkpoint".utf8))
+        let transcriptReport = Collaboration.AgentTranscript.Publish(epoch: 1, host: host.id, stream: "main", checkpoint: transcriptCheckpoint, frames: [])
+        try await aa.publishAgentTranscript(area: area, object: object.rawValue, report: transcriptReport)
+        let transcriptRequest = Collaboration.AgentTranscript.ReadRequest(stream: "main", cursor: nil, waitMilliseconds: 0)
+        let transcriptRead = try await bb.readAgentTranscript(area: area, object: object.rawValue, request: transcriptRequest)
+        guard case .resnapshot(let checkpoint, _, _) = transcriptRead, checkpoint == transcriptCheckpoint else {
+            throw ProjectionCheckFailure(message: "transcript checkpoint not delivered through HTTP")
+        }
+        try await projectionRefuses(400, "oversized transcript frame is rejected") {
+            try await aa.publishAgentTranscript(area: area, object: object.rawValue, report: .init(epoch: 1, host: host.id, stream: "main", checkpoint: nil,
+                frames: [.init(generation: 1, sequence: 1, body: Data(repeating: 65, count: Collaboration.AgentTranscript.maxFrameBytes + 1))]))
+        }
+        let afterOversized = try await store.readAgentTranscript(token: b.token, area: area, object: object.rawValue, request: transcriptRequest)
+        guard case .resnapshot(let unchangedCheckpoint, let unchangedFrames, _) = afterOversized,
+              unchangedCheckpoint == transcriptCheckpoint, unchangedFrames.isEmpty else {
+            throw ProjectionCheckFailure(message: "rejected frame changed store")
+        }
+        var legacyTranscript = URLRequest(url: endpoint.appendingPathComponent("collaboration/v1/areas/\(area)/agents/\(object.rawValue)/transcript/read"))
+        legacyTranscript.httpMethod = "POST"
+        legacyTranscript.setValue("Bearer \(b.token)", forHTTPHeaderField: "authorization")
+        legacyTranscript.httpBody = try JSONEncoder().encode(transcriptRequest)
+        let (legacyTranscriptBytes, legacyTranscriptResponse) = try await URLSession.shared.data(for: legacyTranscript)
+        try projectionCheck((legacyTranscriptResponse as? HTTPURLResponse)?.statusCode == 426 && !String(decoding: legacyTranscriptBytes, as: UTF8.self).contains("Y2hlY2twb2ludA"),
+            "legacy transcript request receives update required and no checkpoint bytes")
+        // A tile's child streams and publisher work must remain bounded.
+        transcriptClock.advance(10)
+        for i in 1..<16 {
+            try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
+                report: .init(epoch: 1, host: host.id, stream: "child:\(i)", checkpoint: transcriptCheckpoint, frames: []))
+        }
+        do {
+            try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
+                report: .init(epoch: 1, host: host.id, stream: "child:overflow", checkpoint: transcriptCheckpoint, frames: []))
+            throw ProjectionCheckFailure(message: "tile stream count was unbounded")
+        } catch CollaborationStoreError.rateLimited { }
+        transcriptClock.advance(10)
+        let batch = (1...32).map { Collaboration.AgentTranscript.Frame(generation: 1, sequence: UInt64($0), body: Data("p".utf8)) }
+        try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
+            report: .init(epoch: 1, host: host.id, stream: "main", checkpoint: nil, frames: batch))
+        try await projectionRefuses(429, "transcript patch burst receives HTTP backpressure") {
+            try await aa.publishAgentTranscript(area: area, object: object.rawValue,
+                report: .init(epoch: 1, host: host.id, stream: "main", checkpoint: nil,
+                              frames: [.init(generation: 1, sequence: 33, body: Data("p".utf8))]))
+        }
+        transcriptClock.advance(1)
+        try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
+            report: .init(epoch: 1, host: host.id, stream: "main", checkpoint: nil,
+                          frames: [.init(generation: 1, sequence: 33, body: Data("p".utf8))]))
+        let afterBackpressure = try await bb.readAgentTranscript(area: area, object: object.rawValue,
+            request: .init(stream: "main", cursor: .init(generation: 1, through: 32), waitMilliseconds: 0))
+        guard case .frames(1, let resumedFrames, _) = afterBackpressure, resumedFrames.map(\.sequence) == [33] else {
+            throw ProjectionCheckFailure(message: "rate-limited frame did not retry contiguously")
+        }
+        print("PASS transcript: bounded streams and rate; retry preserves sequence")
+        try await projectionRefuses(409, "a transcript sequence gap is refused") {
+            try await aa.publishAgentTranscript(area: area, object: object.rawValue,
+                report: .init(epoch: 1, host: host.id, stream: "main", checkpoint: nil,
+                              frames: [.init(generation: 1, sequence: 35, body: Data("gap".utf8))]))
+        }
+        try await projectionRefuses(403, "a teammate cannot publish another host's transcript") {
+            try await bb.publishAgentTranscript(area: area, object: object.rawValue,
+                report: .init(epoch: 1, host: host.id, stream: "main", checkpoint: nil,
+                              frames: [.init(generation: 1, sequence: 34, body: Data("forged".utf8))]))
+        }
+        try await projectionRefuses(404, "an excluded person cannot read a transcript") {
+            _ = try await cc.readAgentTranscript(area: area, object: object.rawValue, request: transcriptRequest)
+        }
+        // Checkpoint bodies and frame metadata count toward the tile budget.
+        let bulky = Collaboration.AgentTranscript.Checkpoint(generation: 1, through: 0,
+            body: Data(repeating: 65, count: Collaboration.AgentTranscript.maxCheckpointBytes))
+        for i in 1..<16 {
+            transcriptClock.advance(1)
+            try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
+                report: .init(epoch: 1, host: host.id, stream: "child:\(i)", checkpoint: bulky, frames: []))
+        }
+        var hitTileBudget = false
+        for i in 1..<16 {
+            for sequence in 1...3 {
+                transcriptClock.advance(1)
+                let oversizedTileReport = Collaboration.AgentTranscript.Publish(epoch: 1, host: host.id, stream: "child:\(i)", checkpoint: nil,
+                    frames: [.init(generation: 1, sequence: UInt64(sequence), body: Data(repeating: 66, count: Collaboration.AgentTranscript.maxFrameBytes))])
+                do { try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue, report: oversizedTileReport) }
+                catch CollaborationStoreError.rateLimited {
+                    transcriptClock.advance(10)
+                    do {
+                        try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue, report: oversizedTileReport)
+                        throw ProjectionCheckFailure(message: "tile budget replenished like a rate limit")
+                    } catch CollaborationStoreError.rateLimited { hitTileBudget = true }
+                    break
+                }
+            }
+            if hitTileBudget { break }
+        }
+        try projectionCheck(hitTileBudget, "retained bytes across child streams are bounded per tile")
         func frame(_ generation: UInt64, _ sequence: UInt64, _ payload: P.Payload, host frameHost: SharedArea.ID<SharedArea.Host>? = nil) -> P.Frame {
             .init(host: frameHost ?? host.id, object: object, generation: generation, sequence: sequence, payload: payload)
         }
@@ -349,6 +464,9 @@ private func runProjectionHTTPChecks() async throws {
         // Unpublish removes the retained projection for everyone.
         let revision = try await aa.state(area: area).document.revision
         _ = try await aa.apply(area: area, mutation: .init(epoch: 1, command: .init(area: state.document.id, expectedRevision: revision, edits: [.remove(object)])))
+        try await projectionRefuses(404, "after unpublishing, B cannot read the transcript") {
+            _ = try await bb.readAgentTranscript(area: area, object: object.rawValue, request: transcriptRequest)
+        }
         try await projectionRefuses(404, "after unpublishing, B can no longer read the projection") {
             _ = try await bb.readAgentProjection(area: area, object: object.rawValue, cursor: nil)
         }

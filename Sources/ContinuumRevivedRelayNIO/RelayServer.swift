@@ -4,6 +4,7 @@ import NIOFoundationCompat
 import NIOHTTP1
 import NIOPosix
 import NIOWebSocket
+import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedCollaborationService
 import ContinuumRevivedRelayCore
 import ContinuumRevivedRelayProtocol
@@ -144,6 +145,7 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
     private var head: HTTPRequestHead?; private var body = ByteBuffer()
     private var requestTask: Task<Void, Never>?
     private var rejectedBody = false
+    private var requestBodyLimit = RelayWire.maximumRequestBodyBytes
     private let clientAddressHeader: String?
     private let adminToken: String?
     init(store: RelayStore, liveHub: RelayLiveHub, pushDelivery: (any RelayEventPushDelivering)?, collaboration: CollaborationStore?, admin: Bool,
@@ -156,12 +158,13 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
         switch unwrapInboundIn(data) {
         case .head(let value):
             head = value; body.clear(); rejectedBody = false
-            if let length = value.headers.first(name: "content-length").flatMap(Int.init), length > RelayWire.maximumRequestBodyBytes {
+            requestBodyLimit = Self.bodyLimit(value, admin: admin)
+            if let length = value.headers.first(name: "content-length").flatMap(Int.init), length > requestBodyLimit {
                 rejectOversizedBody(context)
             }
         case .body(var chunk):
             guard !rejectedBody else { return }
-            guard chunk.readableBytes <= RelayWire.maximumRequestBodyBytes - body.readableBytes else {
+            guard chunk.readableBytes <= requestBodyLimit - body.readableBytes else {
                 rejectOversizedBody(context); return
             }
             body.writeBuffer(&chunk)
@@ -184,9 +187,16 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
         context.fireChannelInactive()
     }
 
+    private static func bodyLimit(_ head: HTTPRequestHead, admin: Bool) -> Int {
+        guard !admin, head.uri.hasPrefix("/collaboration/v1/") else { return RelayWire.maximumRequestBodyBytes }
+        let parts = head.uri.split(separator: "/")
+        let blob = head.method == .PUT && parts.count == 8 && parts[2] == "areas" && parts[4] == "artifacts" && parts[6] == "blobs"
+        return blob ? Collaboration.Artifact.Limits.blobBytes : 262_144
+    }
+
     private func rejectOversizedBody(_ context: ChannelHandlerContext) {
         rejectedBody = true; body.clear()
-        FileHandle.standardError.write(Data("{\"event\":\"publish_rejected\",\"path\":\"PUB-05\",\"reason\":\"requestBodyTooLarge\",\"limit_bytes\":\(RelayWire.maximumRequestBodyBytes)}\n".utf8))
+        FileHandle.standardError.write(Data("{\"event\":\"publish_rejected\",\"path\":\"PUB-05\",\"reason\":\"requestBodyTooLarge\",\"limit_bytes\":\(requestBodyLimit)}\n".utf8))
         write(.error(.payloadTooLarge, "payloadTooLarge"), context: context)
     }
 

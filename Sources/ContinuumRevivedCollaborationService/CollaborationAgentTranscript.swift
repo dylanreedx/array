@@ -6,6 +6,7 @@ import ContinuumRevivedCollaborationProtocol
 struct CollaborationAgentTranscriptEntry {
     var host: String
     var log: Collaboration.AgentTranscript.Log
+    var charge: Int
 }
 struct CollaborationAgentTranscriptWaiter {
     let key: String
@@ -13,9 +14,15 @@ struct CollaborationAgentTranscriptWaiter {
     let timeout: Task<Void, Never>
 }
 /// Memory only, like the live tile lane: nothing durable, no migration.
+struct CollaborationAgentTranscriptRate {
+    var tokens: Double
+    var bytes: Double
+    var at: Date
+}
 struct CollaborationAgentTranscriptTable {
     var entries: [String: CollaborationAgentTranscriptEntry] = [:]
     var waiters: [UUID: CollaborationAgentTranscriptWaiter] = [:]
+    var rates: [String: CollaborationAgentTranscriptRate] = [:]
     static let maxWaiters = 1024
     static func key(_ area: UUID, _ object: UUID, _ stream: String) -> String {
         area.uuidString + "/" + object.uuidString + "/" + stream
@@ -51,7 +58,30 @@ extension CollaborationStore {
         catch .checkpointRequired { throw CollaborationStoreError.invalidCursor }
         catch .stale { throw SharedArea.Failure.conflict }
         catch { throw CollaborationStoreError.invalidRequest }
-        agentTranscripts.entries[key] = .init(host: report.host.rawValue.uuidString, log: next)
+        let tile = area.uuidString + "/" + object.uuidString + "/"
+        let tileEntries = agentTranscripts.entries.filter { $0.key.hasPrefix(tile) }
+        guard agentTranscripts.entries[key] != nil ||
+                (tileEntries.count < Collaboration.AgentTranscript.maxStreamsPerTile && agentTranscripts.entries.count < Collaboration.AgentTranscript.maxStreamsTotal)
+        else { throw CollaborationStoreError.rateLimited }
+        func size(_ log: Collaboration.AgentTranscript.Log) -> Int {
+            // Charge bounded metadata too, including empty frames and streams.
+            512 + log.checkpoint.body.count + log.retainedBytes + 128 * log.frames.count
+        }
+        let oldBytes = agentTranscripts.entries[key]?.charge ?? 0
+        let nextBytes = size(next)
+        let tileBytes = tileEntries.values.reduce(0) { $0 + $1.charge } - oldBytes + nextBytes
+        let totalBytes = agentTranscripts.entries.values.reduce(0) { $0 + $1.charge } - oldBytes + nextBytes
+        guard tileBytes <= Collaboration.AgentTranscript.maxBytesPerTile,
+              totalBytes <= Collaboration.AgentTranscript.maxBytesTotal else { throw CollaborationStoreError.rateLimited }
+        // Per-tile token buckets bound both patch rate and bytes, including batches.
+        let now = clock(), previous = agentTranscripts.rates[tile] ?? .init(tokens: 32, bytes: 2_097_152, at: now)
+        let elapsed = max(0, now.timeIntervalSince(previous.at))
+        let tokens = min(32, previous.tokens + elapsed * 16)
+        let bytes = min(2_097_152, previous.bytes + elapsed * 1_048_576)
+        let cost = Double(max(1, report.frames.count)), byteCost = Double(report.bodyBytes)
+        guard tokens >= cost, bytes >= byteCost else { throw CollaborationStoreError.rateLimited }
+        agentTranscripts.rates[tile] = .init(tokens: tokens - cost, bytes: bytes - byteCost, at: now)
+        agentTranscripts.entries[key] = .init(host: report.host.rawValue.uuidString, log: next, charge: nextBytes)
         wakeAgentTranscript(key)
     }
 
@@ -62,11 +92,13 @@ extension CollaborationStore {
               Collaboration.AgentTranscript.validStream(request.stream) else { throw CollaborationStoreError.invalidRequest }
         let key = CollaborationAgentTranscriptTable.key(area, object, request.stream)
         var page = try agentTranscriptPage(token: token, area: area, object: object, key: key, request: request)
-        guard case let .frames(_, frames, _) = page, frames.isEmpty, request.waitMilliseconds > 0,
-              agentTranscripts.waiters.count < CollaborationAgentTranscriptTable.maxWaiters else { return page }
+        guard case let .frames(_, frames, _) = page, frames.isEmpty, request.waitMilliseconds > 0 else { return page }
+        guard agentTranscripts.waiters.count < CollaborationAgentTranscriptTable.maxWaiters,
+              agentTranscripts.waiters.values.filter({ $0.key == key }).count < 32 else { throw CollaborationStoreError.rateLimited }
         let id = UUID(), milliseconds = request.waitMilliseconds
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else { continuation.resume(); return }
                 let timer = Task { [weak self] in
                     try? await Task.sleep(for: .milliseconds(milliseconds))
                     await self?.finishAgentTranscriptWaiter(id)
@@ -117,5 +149,16 @@ extension CollaborationStore {
                 wakeAgentTranscript(key)
             }
         }
+        let liveTiles = Set(agentTranscripts.entries.keys.map { $0.split(separator: "/").prefix(2).joined(separator: "/") + "/" })
+        agentTranscripts.rates = agentTranscripts.rates.filter { liveTiles.contains($0.key) }
+    }
+
+    func forgetAgentTranscripts(area: UUID) {
+        let prefix = area.uuidString + "/"
+        for key in agentTranscripts.entries.keys.filter({ $0.hasPrefix(prefix) }) {
+            agentTranscripts.entries.removeValue(forKey: key)
+            wakeAgentTranscript(key)
+        }
+        agentTranscripts.rates = agentTranscripts.rates.filter { !$0.key.hasPrefix(prefix) }
     }
 }

@@ -27,6 +27,12 @@ extension Collaboration {
         public static let maxStreamBytes = 64
         public static let maxFramesPerRead = 64
         public static let maxWaitMilliseconds = 25_000
+        public static let maxStreamsPerTile = 16
+        public static let maxBytesPerTile = 4 * 1024 * 1024
+        public static let maxBytesTotal = 64 * 1024 * 1024
+        public static let maxStreamsTotal = 4096
+        public static let maxFramesPerPublish = 32
+        public static let maxReadBodyBytes = 224 * 1024
 
         public static func validStream(_ stream: String) -> Bool {
             !stream.isEmpty && stream.utf8.count <= maxStreamBytes
@@ -104,6 +110,7 @@ extension Collaboration {
             public static func publish(_ publish: Publish, onto log: Log?) throws(Failure) -> Log {
                 guard AgentTranscript.validStream(publish.stream), publish.bodyBytes <= maxPublishBytes,
                       publish.checkpoint.map({ $0.body.count <= maxCheckpointBytes && $0.generation > 0 }) ?? true,
+                      publish.frames.count <= maxFramesPerPublish,
                       publish.frames.allSatisfy({ $0.body.count <= maxFrameBytes }),
                       publish.checkpoint != nil || !publish.frames.isEmpty else { throw .invalid }
                 var next: Log
@@ -125,7 +132,8 @@ extension Collaboration {
                     guard frame.generation >= next.generation else { throw .stale }
                     guard frame.generation == next.generation else { throw .checkpointRequired }
                     if frame.sequence <= next.through { continue }
-                    guard frame.sequence == next.through + 1 else { throw .checkpointRequired }
+                    let (expected, overflow) = next.through.addingReportingOverflow(1)
+                    guard !overflow, frame.sequence == expected else { throw .checkpointRequired }
                     next.frames.append(frame)
                 }
                 guard next.frames.count <= maxRetainedFrames, next.retainedBytes <= maxRetainedBytes else { throw .checkpointRequired }
@@ -133,15 +141,18 @@ extension Collaboration {
             }
 
             public func read(after cursor: Cursor?, limit: Int = maxFramesPerRead) -> Read {
-                let limit = max(1, limit)
-                guard let cursor, cursor.generation == generation,
-                      cursor.through >= checkpoint.through, cursor.through <= through else {
-                    let page = Array(frames.prefix(limit))
-                    return .resnapshot(checkpoint, frames: page, more: page.count < frames.count)
+                let limit = max(1, min(limit, maxFramesPerRead))
+                let resnapshot = cursor == nil || cursor!.generation != generation
+                    || cursor!.through < checkpoint.through || cursor!.through > through
+                let available = resnapshot ? frames : frames.filter { $0.sequence > cursor!.through }
+                var page: [Frame] = []
+                var bytes = resnapshot ? checkpoint.body.count : 0
+                for frame in available.prefix(limit) {
+                    guard frame.body.count <= maxReadBodyBytes - bytes else { break }
+                    page.append(frame); bytes += frame.body.count
                 }
-                let after = frames.filter { $0.sequence > cursor.through }
-                let page = Array(after.prefix(limit))
-                return .frames(generation: generation, frames: page, more: page.count < after.count)
+                if resnapshot { return .resnapshot(checkpoint, frames: page, more: page.count < available.count) }
+                return .frames(generation: generation, frames: page, more: page.count < available.count)
             }
         }
     }

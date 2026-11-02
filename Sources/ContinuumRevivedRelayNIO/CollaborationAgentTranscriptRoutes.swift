@@ -11,6 +11,9 @@ enum CollaborationAgentTranscriptRoutes {
         let p = head.uri.split(separator: "/").map(String.init)
         guard p.count >= 7, p[2] == "areas", let area = UUID(uuidString: p[3]), p[4] == "agents",
               let object = UUID(uuidString: p[5]), p[6] == "transcript", head.method == .POST else { return nil }
+        let readsTranscript = head.headers.first(name: Collaboration.LiveTile.capabilityHeader)?
+            .split(separator: ",").contains { $0.trimmingCharacters(in: .whitespaces) == Collaboration.AgentTranscript.capability } ?? false
+        guard readsTranscript else { return .error(.upgradeRequired, "updateRequired") }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         switch p.count {

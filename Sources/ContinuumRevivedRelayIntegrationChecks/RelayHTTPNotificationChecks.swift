@@ -19,7 +19,7 @@ private func require(_ condition: Bool, _ message: String) throws {
 
 // Read the early 413 directly: URLSession can discard that response when it is
 // still uploading a body to a connection the server has already closed.
-private func oversizedIngressResponse(port: Int, chunked: Bool) throws -> String {
+private func oversizedIngressResponse(port: Int, chunked: Bool, collaboration: Bool = false) throws -> String {
     #if canImport(Darwin)
     let fd = socket(AF_INET, SOCK_STREAM, 0)
     var noSignal: Int32 = 1
@@ -53,12 +53,13 @@ private func oversizedIngressResponse(port: Int, chunked: Bool) throws -> String
             return true
         }
     }
-    let framing = chunked ? "Transfer-Encoding: chunked" : "Content-Length: 25165825"
-    try require(writeBytes(Data("POST /v2/events HTTP/1.1\r\nHost: localhost\r\n\(framing)\r\n\r\n".utf8)), "ingress probe header")
+    let framing = chunked ? "Transfer-Encoding: chunked" : "Content-Length: \(collaboration ? 262145 : 25165825)"
+    let path = collaboration ? "/collaboration/v1/areas/fixture/transcript" : "/v2/events"
+    try require(writeBytes(Data("POST \(path) HTTP/1.1\r\nHost: localhost\r\n\(framing)\r\n\r\n".utf8)), "ingress probe header")
     if chunked {
         var chunk = Data("10000\r\n".utf8)
         chunk.append(Data(repeating: 32, count: 65536)); chunk.append(Data("\r\n".utf8))
-        for _ in 0..<385 { if !writeBytes(chunk) { break } }
+        for _ in 0..<(collaboration ? 5 : 385) { if !writeBytes(chunk) { break } }
     }
     var bytes = [UInt8](repeating: 0, count: 4096)
     let received = recv(fd, &bytes, bytes.count, 0)
@@ -184,6 +185,15 @@ func runRelayHTTPNotificationChecks() async throws {
         for chunked in [false, true] {
             try require(try oversizedIngressResponse(port: port, chunked: chunked).hasPrefix("HTTP/1.1 413"),
                         "declared and chunked HTTP ingress above 24 MiB must reject before decoding")
+        }
+        try require(try await request("POST", "/collaboration/v1/fixture", body: Data(repeating: 32, count: 262_144)) == 404,
+                    "collaboration body at the 256 KiB limit reaches routing")
+        try require(try await request("PUT", "/collaboration/v1/areas/fixture/artifacts/fixture/blobs/digest",
+                                      body: Data(repeating: 32, count: 262_145)) == 404,
+                    "artifact blob uploads retain their larger ingress allowance")
+        for chunked in [false, true] {
+            try require(try oversizedIngressResponse(port: port, chunked: chunked, collaboration: true).hasPrefix("HTTP/1.1 413"),
+                        "collaboration ingress above 256 KiB must reject before the body completes")
         }
         try require(try await request("GET", "/health") == 200, "relay remains healthy after oversized ingress")
         try await store.savePushToken(auth: try await store.authenticate(replayPhone.credential), kind: .apns, token: Data("task-fixture-token".utf8))

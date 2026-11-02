@@ -163,6 +163,7 @@ extension CollaborationStore {
     /// wake (and then find the area gone).
     private func forgetArea(_ area: UUID, people: [UUID]) {
         for person in people { invalidateMember(area: area, person: person) }
+        forgetAgentTranscripts(area: area)
         closeCursorLanes { $0.area == area }
         closeTileStreams { $0.area == area }
         for key in presenceEntries.keys.filter({ $0.area == area }) {
