@@ -50,6 +50,10 @@ final class TerminalLiveSource: LiveTileSource {
     // Stream
     private var tap: TerminalTmuxTap?
     private var tapRetry: Task<Void, Never>?
+    /// Looking for the tile's pane, off the main thread.
+    private var locating: Task<Void, Never>?
+    /// After tmux left a lookup unanswered, the next try waits this long.
+    static let unresponsiveRetry: Duration = .seconds(10)
     private var stream = UUID()
     private var sequence: UInt64 = 0
     private var columns = 0, rows = 0
@@ -126,6 +130,7 @@ final class TerminalLiveSource: LiveTileSource {
 
     func stop() {
         tapRetry?.cancel(); tapRetry = nil
+        locating?.cancel(); locating = nil
         tap?.stop(); tap = nil
         flushTask?.cancel(); flushTask = nil
         sends?.finish(); sends = nil
@@ -136,13 +141,40 @@ final class TerminalLiveSource: LiveTileSource {
 
     // MARK: Tap
 
+    /// Finds the tile's pane off the main thread, then attaches the tap. A
+    /// tmux that doesn't answer never holds the app: the share carries the
+    /// visible text meanwhile, and tries again shortly.
     private func startTap() {
-        guard tap == nil, let target = tapTarget(), let located = TerminalTmuxTap.locate(tileID: target.tile, tmuxPath: target.tmux) else {
-            tapState = tapTarget() == nil ? "no tmux" : "no pane"
+        guard tap == nil, locating == nil else { return }
+        guard let target = tapTarget() else { tapState = "no tmux"; return }
+        tapState = "locating"
+        locating = Task { [weak self] in
+            let location = await TerminalTmuxTap.locate(tileID: target.tile, tmuxPath: target.tmux)
+            guard !Task.isCancelled, let self else { return }
+            self.locating = nil
+            self.attachTap(location, tmux: target.tmux)
+        }
+    }
+
+    private func attachTap(_ location: TerminalTmuxTap.Location, tmux: String) {
+        guard tap == nil else { return }
+        let located: (session: String, pane: String)
+        switch location {
+        case .found(let session, let pane): located = (session, pane)
+        case .notInTmux: tapState = "no pane"; return
+        case .unresponsive:
+            tapState = "tmux not answering"
+            note("tmux did not answer; streaming the visible text until it does")
+            fputs("terminal share: tmux did not answer within \(Int(TerminalTmuxTap.locateDeadline)) s; showing the visible text until it does\n", stderr)
+            tapRetry = Task { [weak self] in
+                try? await Task.sleep(for: Self.unresponsiveRetry)
+                guard !Task.isCancelled else { return }
+                self?.startTap()
+            }
             return
         }
         do {
-            tap = try TerminalTmuxTap(tmuxPath: target.tmux, session: located.session, pane: located.pane) { events in
+            tap = try TerminalTmuxTap(tmuxPath: tmux, session: located.session, pane: located.pane) { events in
                 DispatchQueue.main.async { MainActor.assumeIsolated { [weak self] in self?.handle(events) } }
             }
         } catch {

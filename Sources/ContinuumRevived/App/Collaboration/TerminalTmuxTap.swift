@@ -68,16 +68,43 @@ final class TerminalTmuxTap: @unchecked Sendable {
         + "#{scroll_region_upper} #{scroll_region_lower} #{origin_flag} #{wrap_flag} #{insert_flag} #{history_size} "
         + "#{cursor_shape} #{cursor_blinking}"
 
+    /// Where a tile's pane is, or why it can't be read now.
+    enum Location: Sendable, Equatable {
+        case found(session: String, pane: String)
+        /// The tile does not run in local tmux (tmux off, or on another machine).
+        case notInTmux
+        /// tmux did not answer before the deadline: a brand-new server can sit
+        /// on its first client (a `~/.tmux.conf` running tpm, or a macOS consent
+        /// prompt for a config in ~/Documents) for as long as nobody answers.
+        case unresponsive
+    }
+
+    /// How long one lookup may take. Nothing waits on it on the main thread.
+    static let locateDeadline: TimeInterval = 3
+
     /// The tile's tmux session and its active pane: the view session a
-    /// project terminal shows, else the tile's own session. Nil when the tile
-    /// does not run in local tmux (tmux off, or on another machine).
-    static func locate(tileID: UUID, tmuxPath: String) -> (session: String, pane: String)? {
-        for session in [TmuxSession.viewSessionName(tileId: tileID), TmuxSession.sessionName(tileId: tileID)] {
-            guard let out = run(tmuxPath, ["display-message", "-p", "-t", "=" + session + ":", "#{pane_id}"]) else { continue }
-            let pane = out.trimmingCharacters(in: .whitespacesAndNewlines)
-            if TmuxSession.isValidPaneId(pane) { return (session, pane) }
+    /// project terminal shows, else the tile's own session. Runs off the main
+    /// thread, and every tmux command it runs has `deadline`.
+    static func locate(tileID: UUID, tmuxPath: String, deadline: TimeInterval = locateDeadline) async -> Location {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: locateWaiting(tileID: tileID, tmuxPath: tmuxPath, deadline: deadline))
+            }
         }
-        return nil
+    }
+
+    private static func locateWaiting(tileID: UUID, tmuxPath: String, deadline: TimeInterval) -> Location {
+        precondition(!Thread.isMainThread, "a tmux lookup must never wait on the main thread")
+        for session in [TmuxSession.viewSessionName(tileId: tileID), TmuxSession.sessionName(tileId: tileID)] {
+            switch run(tmuxPath, ["display-message", "-p", "-t", "=" + session + ":", "#{pane_id}"], deadline: deadline) {
+            case .timedOut: return .unresponsive
+            case .failed: continue
+            case .output(let out):
+                let pane = out.trimmingCharacters(in: .whitespacesAndNewlines)
+                if TmuxSession.isValidPaneId(pane) { return .found(session: session, pane: pane) }
+            }
+        }
+        return .notInTmux
     }
 
     static var environment: [String: String] {
@@ -86,17 +113,40 @@ final class TerminalTmuxTap: @unchecked Sendable {
         return env
     }
 
-    private static func run(_ path: String, _ arguments: [String]) -> String? {
+    private enum RunResult { case output(String), failed, timedOut }
+
+    /// One tmux command, stopped at `deadline`. Its output is drained while it
+    /// runs, so a large reply can't wedge it either.
+    private static func run(_ path: String, _ arguments: [String], deadline: TimeInterval) -> RunResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments
         process.environment = environment
         let pipe = Pipe()
         process.standardOutput = pipe; process.standardError = FileHandle.nullDevice; process.standardInput = FileHandle.nullDevice
-        do { try process.run() } catch { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do { try process.run() } catch { return .failed }
+        let drained = DispatchSemaphore(value: 0)
+        let output = Output()
+        DispatchQueue.global(qos: .userInitiated).async {
+            output.set(pipe.fileHandleForReading.readDataToEndOfFile()); drained.signal()
+        }
+        guard exited.wait(timeout: .now() + deadline) == .success else {
+            process.terminate()
+            if exited.wait(timeout: .now() + 1) != .success { kill(process.processIdentifier, SIGKILL) }
+            _ = drained.wait(timeout: .now() + 1)
+            return .timedOut
+        }
+        _ = drained.wait(timeout: .now() + 2)
+        return process.terminationStatus == 0 ? .output(String(decoding: output.value, as: UTF8.self)) : .failed
+    }
+
+    private final class Output: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+        func set(_ value: Data) { lock.lock(); data = value; lock.unlock() }
+        var value: Data { lock.lock(); defer { lock.unlock() }; return data }
     }
 
     init(tmuxPath: String, session: String, pane: String, deliver: @escaping @Sendable ([Event]) -> Void) throws {

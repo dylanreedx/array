@@ -615,6 +615,7 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   # dark, and two real apps through a local relay.
   run_leg .build/debug/ContinuumRevivedCollaborationChecks --terminal-stream-only
   run_app_check .build/debug/Array --shared-terminal-render-check
+  run_app_check .build/debug/Array --shared-terminal-tmux-unresponsive-check
   run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --no-lock
   run_app_check .build/debug/Array --ui-probe-check
   run_app_check .build/debug/Array --menu-contract-check
@@ -1543,6 +1544,9 @@ run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds 
 # dark, and two real apps through a local relay.
 run_leg .build/debug/ContinuumRevivedCollaborationChecks --terminal-stream-only
 run_app_check .build/debug/Array --shared-terminal-render-check
+# Sharing a terminal whose tmux never answers must not freeze the app; a
+# stand-in tmux, never a real server.
+run_app_check .build/debug/Array --shared-terminal-tmux-unresponsive-check
 run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --no-lock
 run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
 run_leg python3 scripts/check-collaboration-pair.py
