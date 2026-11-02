@@ -61,6 +61,8 @@ final class IOSPreviewRuntime {
     private var automationRetained = false
     private var automationBuildActive = false
     private(set) var automationController: String?
+    /// The controlling agent's identity colour name, for the header chip swatch.
+    private(set) var automationControllerColour: String?
     private(set) var connectionID = UUID()
     private(set) var controlGeneration: UInt64 = 0
     var onAutomationInvalidated: (() -> Void)?
@@ -78,9 +80,9 @@ final class IOSPreviewRuntime {
         disconnect(); self.deviceID = deviceID; orientation = 1; onChange?()
     }
 
-    func connect(allowBoot: Bool = true, retainingForAutomation: Bool = false, controllerName: String? = nil) {
+    func connect(allowBoot: Bool = true, retainingForAutomation: Bool = false, controllerName: String? = nil, controllerColour: String? = nil) {
         disconnect()
-        if retainingForAutomation { automationRetained = true; automationController = controllerName }
+        if retainingForAutomation { automationRetained = true; automationController = controllerName; automationControllerColour = controllerColour }
         guard let deviceID, UUID(uuidString: deviceID) != nil else {
             state = .failed("Choose a simulator first."); return
         }
@@ -125,7 +127,7 @@ final class IOSPreviewRuntime {
 
     func disconnect() {
         connectionID = UUID()
-        automationRetained = false; automationBuildActive = false; automationController = nil
+        automationRetained = false; automationBuildActive = false; automationController = nil; automationControllerColour = nil
         let invalidated = onAutomationInvalidated; onAutomationInvalidated = nil
         onHumanTakeover = nil; invalidated?()
         generation += 1; task?.cancel(); task = nil
@@ -158,10 +160,11 @@ final class IOSPreviewRuntime {
         updateCaptureDemand()
         if wantsConnection, state != .connected, state != .connecting { connect(allowBoot: false) }
     }
-    func setAutomationRetained(_ retained: Bool, controllerName: String? = nil) {
+    func setAutomationRetained(_ retained: Bool, controllerName: String? = nil, controllerColour: String? = nil) {
         guard automationRetained != retained else { return }
         automationRetained = retained
         automationController = retained ? controllerName : nil
+        automationControllerColour = retained ? controllerColour : nil
         updateCaptureDemand()
         defer { onChange?() }
         if !retained, suspended {

@@ -11,6 +11,11 @@ final class IOSPreviewTileNSView: TileNSView {
     private let actions = ChoiceButton(title: "Preview")
     private let connectButton: ComposerActionButton
     private let status = NSTextField(labelWithString: "")
+    /// Who drives the simulator, shared with browser tiles.
+    private let driver = AgentControlChip.make(toolTip: "Simulator control")
+    private var driverWidth: CGFloat = 0
+    /// Kept after takeover so "You're driving" still carries the agent's swatch, as in browser tiles.
+    private var driverColour: NSColor?
     var buildProjectRoot: URL?
     private let builder = IOSPreviewBuild()
     private var buildTask: Task<Void, Never>?
@@ -19,6 +24,11 @@ final class IOSPreviewTileNSView: TileNSView {
     private var buildGeneration = 0
     var qaStatusText: String { status.stringValue }
     var qaActionIDs: [String] { actions.items.map(\.id) }
+    private var driverTitle: String?
+    var qaDriverTitle: String? { driver.isHidden ? nil : driverTitle }
+    var qaDriverActionIDs: [String] { driver.isHidden ? [] : driver.items.map(\.id) }
+    /// Chooses through the driver chip's real popover list, as a click would.
+    @discardableResult func qaChooseDriver(_ id: String) -> Bool { !driver.isHidden && driver.chooseForQA(id: id) }
     /// Chooses through the Preview menu's real popover list, as a click would.
     @discardableResult func qaChooseAction(_ id: String) -> Bool { actions.chooseForQA(id: id) }
     private var buildChoices: [IOSPreviewBuildChoice] = []
@@ -78,7 +88,15 @@ final class IOSPreviewTileNSView: TileNSView {
             default: self.refreshDevices()
             }
         }
-        for view in [screen, devices, actions, connectButton, status] { body.addSubview(view) }
+        driver.onSelection = { [weak self] item in
+            guard let self else { return }
+            switch item.id {
+            case AgentControlChip.takeControl.id: self.recordHumanInput(); self.screen.releaseInput()
+            case AgentControlChip.allowAgentControl.id: self.runtime.allowAutomationHandover()
+            default: break
+            }
+        }
+        for view in [screen, devices, actions, connectButton, status, driver] { body.addSubview(view) }
         setContentView(body)
         runtime.onChange = { [weak self] in self?.refresh() }
         runtime.onFrame = { [weak self] image in
@@ -123,7 +141,9 @@ final class IOSPreviewTileNSView: TileNSView {
         place(actions, NSRect(x: width - 112, y: top, width: 100, height: 32))
         place(connectButton, NSRect(x: actions.frame.minX - 8 - connectWidth, y: top, width: connectWidth, height: 32))
         place(devices, NSRect(x: 12, y: top, width: max(40, connectButton.frame.minX - 20), height: 32))
-        place(status, NSRect(x: 16, y: top + 40, width: max(0, width - 32), height: 38))
+        let statusX: CGFloat = driver.isHidden ? 16 : 12 + driverWidth + 8
+        place(driver, NSRect(x: 12, y: top + 43, width: driverWidth, height: 32))
+        place(status, NSRect(x: statusX, y: top + 40, width: max(0, width - statusX - 16), height: 38))
         place(screen, NSRect(x: 12, y: top + 82, width: max(0, width - 24), height: max(0, body.bounds.height - top - 94)))
     }
     @objc func toggleConnection() {
@@ -180,8 +200,23 @@ final class IOSPreviewTileNSView: TileNSView {
             actions.items.insert(ChoiceItem(id: "allow-agent", title: "Allow Agent Control"), at: 0)
         }
         actions.setPresentationTitle("Preview")
+        refreshDriver()
         screen.orientation = runtime.orientation
         screen.needsDisplay = true
+    }
+    private func refreshDriver() {
+        let agentDriving = runtime.automationController != nil
+        let userDriving = !agentDriving && IOSPreviewAutomationSessions.shared.isReclaimed(deviceID: runtime.deviceID)
+        if let name = runtime.automationControllerColour { driverColour = ZoneChromeNSView.color(named: name) }
+        else if agentDriving { driverColour = nil }
+        driverTitle = AgentControlChip.title(agentName: runtime.automationController ?? "Agent", engaged: agentDriving, userDriving: userDriving)
+        driver.isHidden = driverTitle == nil
+        guard let driverTitle else { if driverWidth != 0 { driverWidth = 0; needsLayout = true }; return }
+        driver.leadingSwatches = driverColour.map { [$0] } ?? []
+        driver.items = agentDriving ? [AgentControlChip.takeControl] : [AgentControlChip.allowAgentControl]
+        driver.setPresentationTitle(driverTitle)
+        let width = ceil(driver.intrinsicContentSize.width)
+        if width != driverWidth { driverWidth = width; needsLayout = true }
     }
     static func statusText(state: IOSPreviewRuntime.State, buildMessage: String?, controllerName: String? = nil) -> String {
         switch state {

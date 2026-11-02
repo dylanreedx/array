@@ -45,7 +45,7 @@ final class IOSPreviewAutomationSessions {
         takenOver = takenOver.filter { $0.value.deviceID != deviceID }
     }
 
-    func attach(runtime: IOSPreviewRuntime, scope: Scope, displayName: String = "Agent") throws -> Attachment {
+    func attach(runtime: IOSPreviewRuntime, scope: Scope, displayName: String = "Agent", colourName: String? = nil) throws -> Attachment {
         sweep()
         guard !isReclaimed(deviceID: runtime.deviceID) else { throw Failure.handoverRequired }
         if let current = attachments.values.first(where: { $0.runtime.tileID == runtime.tileID }) {
@@ -56,7 +56,7 @@ final class IOSPreviewAutomationSessions {
         guard attachments.count < 2, !attachments.values.contains(where: { $0.scope.principal == scope.principal }) else { throw Failure.busy }
         let entry = Attachment(scope: scope, runtime: runtime, now: now())
         attachments[entry.id] = entry
-        runtime.setAutomationRetained(true, controllerName: String(displayName.prefix(100)))
+        runtime.setAutomationRetained(true, controllerName: String(displayName.prefix(100)), controllerColour: colourName)
         let attachmentID = entry.id
         runtime.onAutomationInvalidated = { [weak self] in self?.release(id: attachmentID) }
         let deviceID = runtime.deviceID!, tileID = runtime.tileID

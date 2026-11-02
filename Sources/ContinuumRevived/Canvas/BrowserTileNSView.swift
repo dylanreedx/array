@@ -70,7 +70,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         self.forwardButton = NSButton(title: "›", target: nil, action: nil)
         self.reloadButton = NSButton(title: "↻", target: nil, action: nil)
         self.profileMenuButton = ChoiceButton(title: "Default")
-        self.agentControlButton = ChoiceButton(title: "Agent")
+        self.agentControlButton = AgentControlChip.make(toolTip: "Browser control")
         self.faviconLabel = NSTextField(labelWithString: "◌")
         self.progressIndicator = NSProgressIndicator()
         self.findField = NSSearchField()
@@ -119,10 +119,6 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         profileMenuButton.toolTip = "Browser profiles"
         profileMenuButton.translatesAutoresizingMaskIntoConstraints = false
 
-        agentControlButton.isHidden = true
-        agentControlButton.popoverPresentation = .commands
-        agentControlButton.keepsSelectionForItem = { _ in true }
-        agentControlButton.toolTip = "Browser control"
         agentControlButton.translatesAutoresizingMaskIntoConstraints = false
 
         urlField.delegate = self
@@ -574,9 +570,9 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         let visible = engaged || userDriving || !browserActivityLines.isEmpty
         agentControlButton.isHidden = !visible
         guard visible else { agentControlTitleForQA = nil; return }
-        let title = userDriving ? "You’re driving" : (engaged ? "Driven by \(name)" : "Browser activity")
+        let title = AgentControlChip.title(agentName: name, engaged: engaged, userDriving: userDriving) ?? "Browser activity"
         agentControlTitleForQA = title
-        agentControlActions = (userDriving || !engaged ? [] : [ChoiceItem(id: "take", title: "Take control")]) + [
+        agentControlActions = (userDriving || !engaged ? [] : [AgentControlChip.takeControl]) + [
             ChoiceItem(id: "reveal", title: "Reveal agent"), ChoiceItem(id: "close", title: "Close browser", destructive: true)
         ]
         agentControlButton.leadingSwatches = colour.map { [$0] } ?? []

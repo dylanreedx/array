@@ -294,7 +294,8 @@ extension WorkspaceAPIService {
         let controlAtStart = preview.controlGeneration
         if preview.state != .connected && preview.state != .connecting {
             preview.connect(allowBoot: request.allowBoot == true, retainingForAutomation: true,
-                controllerName: supervisor.records[AgentID(rawValue: scope.principal)]?.displayName ?? "Agent")
+                controllerName: supervisor.records[AgentID(rawValue: scope.principal)]?.displayName ?? "Agent",
+                controllerColour: supervisor.records[AgentID(rawValue: scope.principal)]?.identityColor)
         }
         let deadline = ContinuousClock.now.advanced(by: .seconds(90))
         while preview.state == .connecting, ContinuousClock.now < deadline {
@@ -319,7 +320,8 @@ extension WorkspaceAPIService {
         }
         guard authorized() else { preview.disconnect(); throw IOSPreviewAutomationSessions.Failure.permissionDenied }
         let attachment = try deviceAPI.sessions.attach(runtime: preview, scope: scope,
-            displayName: supervisor.records[AgentID(rawValue: scope.principal)]?.displayName ?? "Agent")
+            displayName: supervisor.records[AgentID(rawValue: scope.principal)]?.displayName ?? "Agent",
+            colourName: supervisor.records[AgentID(rawValue: scope.principal)]?.identityColor)
         return deviceResult(["tileId": preview.tileID.uuidString, "deviceId": deviceID, "sessionId": attachment.id.uuidString,
             "idleSeconds": IOSPreviewAutomationSessions.idleSeconds, "scope": "whole_simulator", "managedSimulator": existing.map { $0.metadata.iosPreviewAutomationOwnership?.managedSimulator == true } ?? true])
     }

@@ -239,6 +239,8 @@ enum WorkspaceAPIDeviceChecks {
         try expect(native[0].extended.count == 6, "takeover witness must reach an in-flight native swipe")
         try expect(view.qaStatusText.contains("controls this simulator") && view.qaActionIDs.contains("stop-agent")
             && !view.qaActionIDs.contains("allow-agent"), "while the agent holds control the tile must name it and offer Take Control, got \(view.qaStatusText) \(view.qaActionIDs)")
+        try expect(view.qaDriverTitle?.hasPrefix("Driven by ") == true && view.qaDriverActionIDs == ["take"],
+            "while the agent drives, the header chip must say who drives and offer Take control, got \(String(describing: view.qaDriverTitle)) \(view.qaDriverActionIDs)")
         try renderTakeover(view, name: "agent-in-control")
         let point = view.screen.convert(CGPoint(x: view.screen.screenRect.midX, y: view.screen.screenRect.midY), to: nil)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
@@ -261,6 +263,8 @@ enum WorkspaceAPIDeviceChecks {
         try expect(native[0].count == tapsBeforeTakeover && native[0].extended.count == 6, "a refused action after takeover must reach no native input")
         try expect(!view.qaStatusText.contains("controls this simulator") && view.qaActionIDs.contains("allow-agent")
             && !view.qaActionIDs.contains("stop-agent"), "after takeover the tile must show the user in control and offer Allow Agent Control, got \(view.qaStatusText) \(view.qaActionIDs)")
+        try expect(view.qaDriverTitle == "You’re driving" && view.qaDriverActionIDs == ["allow-agent"],
+            "after takeover the header chip must say the user drives and offer Allow Agent Control, got \(String(describing: view.qaDriverTitle)) \(view.qaDriverActionIDs)")
         try renderTakeover(view, name: "user-took-control")
         var reopen = target; reopen.removeValue(forKey: "sessionId"); reopen["tileId"] = tileID.uuidString
         try expect(code(await call(f.api, agent: f.agentId, op: "device.open", payload: reopen)) == "permission_denied", "agent cannot undo human takeover by reopening")
@@ -285,8 +289,22 @@ enum WorkspaceAPIDeviceChecks {
         try expectTakeoverRefusal(await call(f.api, agent: f.agentId, op: "device.act", payload: afterKey), "after a key press")
         try expect(native[0].count == tapsBeforeTakeover, "a refused action after key takeover must reach no native input")
         try expect(view.qaActionIDs.contains("allow-agent"), "key takeover must offer Allow Agent Control")
-        try expect(view.qaChooseAction("allow-agent"), "Allow Agent Control must be choosable after key takeover")
-        print("PASS: click and key takeover through NSApp.sendEvent refuse the agent's next act, show the user in control, and hand back from the Preview menu")
+        // Handback from the header chip, the same place browser tiles put it.
+        try expect(view.qaChooseDriver("allow-agent"), "Allow Agent Control must be choosable from the header chip")
+        try expect(view.qaDriverTitle == nil, "with nobody's agent attached, the header chip must hide")
+        // Take control from the header chip ends the agent's session the same way.
+        let takeRound = try result(await call(f.api, agent: f.agentId, op: "device.open", payload: reopen))
+        var takeTarget = target; takeTarget["sessionId"] = takeRound["sessionId"]
+        let takeFrame = try result(await call(f.api, agent: f.agentId, op: "device.observe", payload: takeTarget))
+        try expect(view.qaDriverTitle?.hasPrefix("Driven by ") == true, "reopening after handback must show the agent driving")
+        try expect(view.qaChooseDriver("take"), "Take control must be choosable from the header chip")
+        var afterTake = takeTarget
+        afterTake["kind"] = "tap"; afterTake["x"] = 100; afterTake["y"] = 100
+        afterTake["observationId"] = takeFrame["observationId"]; afterTake["idempotencyKey"] = "after-take-control"
+        try expectTakeoverRefusal(await call(f.api, agent: f.agentId, op: "device.act", payload: afterTake), "after Take control")
+        try expect(native[0].count == tapsBeforeTakeover && view.qaDriverTitle == "You’re driving", "Take control must refuse the agent and show the user driving")
+        try expect(view.qaChooseDriver("allow-agent"), "Allow Agent Control must hand back after Take control")
+        print("PASS: click and key takeover through NSApp.sendEvent refuse the agent's next act, show the user in control, and hand back from the Preview menu and header chip")
         let second = try result(await call(f.api, agent: f.agentId, op: "device.open", payload: reopen))
         var secondTarget = target; secondTarget["sessionId"] = second["sessionId"]
         native[0].onObserve = { f.api.revoke(agentId: f.agentId) }
