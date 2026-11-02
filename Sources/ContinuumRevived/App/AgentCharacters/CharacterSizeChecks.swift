@@ -209,7 +209,7 @@ enum CharacterSizeChecks {
                 let titleSize = 12 * max(1 + (factor - 1) / 2, chrome)
                 try expect(abs(view.qaTitleFontWorldSize - titleSize) < 0.01,
                            "\(where_): the title is \(titleSize) pt (half the step, never below Small's), got \(view.qaTitleFontWorldSize)")
-                if zoom == 1 { report.append("\(name): bar \(bar) pt at 100% (\(view.chromeBarHeight) zoomed to 50% next), header \(art * backing) px/art px") }
+                report.append("\(name) at \(Int(zoom * 100))%: bar \(bar) pt, header \(art * CGFloat(zoom) * backing) px/art px")
             }
             canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
             settle()
