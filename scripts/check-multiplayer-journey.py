@@ -70,7 +70,7 @@ Never touches /Applications/Array.app, ~/Desktop/Array Dev.app, ~/Documents,
 the default tmux socket, a real CLI login or the Keychain, and never takes focus.
 """
 from __future__ import annotations
-import argparse, base64, json, os, random, shutil, socket, statistics, string, subprocess, sys, time
+import argparse, base64, json, os, random, shutil, socket, statistics, string, subprocess, sys, tempfile, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -81,6 +81,45 @@ STAGING = "https://arrayapp-relay-staging.fly.dev"
 # own bundles, identities and state folder.
 STATE = Path.home() / "array-scratch/mp-journey"
 PEOPLE: dict = {}
+# --tmux: terminals keep tmux session persistence, as a person's app does.
+# Each app's tmux lives in its own TMUX_TMPDIR under the state folder.
+TMUX_PERSISTENCE = False
+TMUX_DIRS: list = []
+
+
+def tmux_env(folder):
+    """The environment for one app's own tmux server: never the default socket."""
+    env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+    env["TMUX_TMPDIR"] = str(folder)
+    return env
+
+
+def tmux_socket(folder):
+    """The socket a tmux client in this namespace reaches, or "" with no server.
+    A server held on a consent prompt answers nothing: then the socket file it
+    made is the answer."""
+    try:
+        out = subprocess.run(["tmux", "display-message", "-p", "#{socket_path}"], env=tmux_env(folder),
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0: return out.stdout.strip()
+    except subprocess.TimeoutExpired:
+        pass
+    found = list(Path(folder).glob("tmux-*/default"))
+    return str(found[0]) if found else ""
+
+
+def stop_tmux_namespace(folder):
+    """Ends every tmux process of this namespace, and nothing else's: a held
+    server cannot answer kill-server, so its processes are matched by their
+    TMUX_TMPDIR and stopped."""
+    try: subprocess.run(["tmux", "kill-server"], env=tmux_env(folder), capture_output=True, timeout=10)
+    except subprocess.TimeoutExpired: pass
+    pids = subprocess.run(["pgrep", "-x", "tmux"], capture_output=True, text=True).stdout.split()
+    for pid in pids:
+        environment = subprocess.run(["ps", "eww", "-o", "command=", "-p", pid], capture_output=True, text=True).stdout.split()
+        if f"TMUX_TMPDIR={folder}" in environment:
+            try: os.kill(int(pid), 9)
+            except (OSError, ValueError): pass
 
 
 def configure(name: str):
@@ -127,6 +166,9 @@ class Person:
         self.project = project or (self.root / "project")
         self.endpoint, self.env_extra = endpoint, env_extra
         self.mailbox = self.root / "mailbox"
+        # With --tmux, a fresh /tmp namespace for this app's tmux server.
+        self.tmux = Path(tempfile.mkdtemp(prefix="mpj-tmux-", dir="/tmp")) if TMUX_PERSISTENCE else self.root / "tmux"
+        if TMUX_PERSISTENCE: TMUX_DIRS.append(self.tmux)
         self.next = 1
         self.launch()
 
@@ -146,13 +188,14 @@ class Person:
                 "--env", f"CONTINUUM_PROJECT_ROOT={self.project}",
                 "--env", f"CONTINUUM_APP_SUPPORT={self.root / 'support'}",
                 "--env", f"CONTINUUM_MULTIPLAYER_PREVIEW={self.root / 'preview.json'}",
-                "--env", f"TMUX_TMPDIR={self.root / 'tmux'}"]
+                "--env", f"TMUX_TMPDIR={self.tmux}"]
         for key, value in self.env_extra.items(): args += ["--env", f"{key}={value}"]
         args += ["--stdout", str(self.root / "app.log"), "--stderr", str(self.root / "app.log"),
-                 str(self.app), "--args", "-ApplePersistenceIgnoreState", "YES",
-                 # As the matrix's app legs run: no tmux, so a terminal tile
-                 # (mode B shares one as a private card) restores without one.
-                 "-continuum.terminal.tmux.enabled", "NO", "-continuum.terminal.tmux.path", ""]
+                 str(self.app), "--args", "-ApplePersistenceIgnoreState", "YES"]
+        if not TMUX_PERSISTENCE:
+            # As the matrix's app legs run: no tmux, so a terminal tile
+            # (mode B shares one as a private card) restores without one.
+            args += ["-continuum.terminal.tmux.enabled", "NO", "-continuum.terminal.tmux.path", ""]
         subprocess.run(args, env=env, check=True)
         self.ready()
 
@@ -628,6 +671,11 @@ def kinds_journey(host, guest, check, eventually, legs=frozenset({"note", "file"
     if "terminal" in legs:
         terminal = host.call("spawnKind", kind="terminal")["tile"]
         eventually(lambda: host.call("hostKind", tile=terminal).get("text", "").strip() != "", "terminal: the host's shell starts", 45)
+        if TMUX_PERSISTENCE:
+            # Whatever tmux the host started lives in its own /tmp namespace.
+            sock = tmux_socket(host.tmux)
+            check(not sock or os.path.realpath(sock).startswith(os.path.realpath(str(host.tmux)) + "/"),
+                  "terminal: the host's tmux socket is inside its own TMUX_TMPDIR", sock)
         host.call("hostKind", tile=terminal, type=f"echo first-{token}")
         s = host.call("shareKind", tile=terminal, slug=f"kinds-terminal-{token}")
         check("secrets" in s.get("warning", "") and not s.get("publishedAfterFirstPress"),
@@ -668,6 +716,8 @@ def main():
     parser.add_argument("--hold", type=int, default=0, help="on failure, keep the apps running this many seconds")
     parser.add_argument("--name", default="Journey", help="bundle and state name, e.g. ShareJourney (letters only)")
     parser.add_argument("--mode", choices=["a", "b"], default="a", help="a: share one agent; b: the portal")
+    parser.add_argument("--tmux", action="store_true",
+                        help="terminals keep tmux persistence, each app in its own TMUX_TMPDIR (never the default socket)")
     parser.add_argument("--no-lock", action="store_true",
                         help="build without the shared build lock: the caller (the matrix) already serialises builds")
     parser.add_argument("--kinds", default="note,file,diff,browser,public,terminal,excluded",
@@ -677,6 +727,8 @@ def main():
     args = parser.parse_args()
     if not args.name.isalpha(): parser.error("--name takes letters only")
     configure(args.name)
+    global TMUX_PERSISTENCE
+    TMUX_PERSISTENCE = args.tmux
     os.chdir(ROOT)
 
     if not args.skip_build:
@@ -942,6 +994,9 @@ def main():
             if (folder / "tmux").exists():
                 subprocess.run(["tmux", "kill-server"], env={**{k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")},
                                "TMUX_TMPDIR": str(folder / "tmux")}, capture_output=True)
+        for folder in TMUX_DIRS:
+            stop_tmux_namespace(folder)
+            shutil.rmtree(folder, ignore_errors=True)
         if relay: relay.terminate()
         if not failures and not args.keep: shutil.rmtree(STATE, ignore_errors=True)
         elif failures: print(f"==> logs kept in {STATE}/*/app.log")

@@ -2037,6 +2037,9 @@ run_app_check .build/debug/Array --child-crash-isolation-check
 run_app_check .build/debug/Array --sidebar-push-coalescing-check
 run_app_check .build/debug/Array --topology-migration-check
 run_app_check .build/debug/Array --terminal-tmux-persistence-check
+# A terminal spawn whose tmux never answers (a server held on a consent
+# prompt) must not freeze the app; uses a stand-in tmux, never a real server.
+run_app_check .build/debug/Array --terminal-tmux-unresponsive-check
 run_app_check .build/debug/Array --terminal-tmux-no-mirror-check
 run_app_check .build/debug/Array --new-tile-cwd-check
 run_app_check .build/debug/Array --terminal-tmux-delete-lifecycle-check

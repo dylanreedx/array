@@ -357,6 +357,12 @@ final class TileSpawner {
             wrappedProfile = allowTmuxPersistence
                 ? try tmuxWrappedProfileIfAvailable(profile, tileId: tile.id, target: sessionTarget)
                 : TmuxWrappedProfile(profile: profile, windowTarget: nil, createdWindow: false, viewSessionExisted: false)
+        } catch let error as TmuxProcessError where error.timedOut {
+            // tmux did not answer (a consent prompt for its config can hold a
+            // new server indefinitely). The terminal opens without persistence
+            // rather than not at all, and the app was never frozen waiting.
+            fputs("terminal spawn: \(error.stderr); opening this terminal without tmux persistence\n", stderr)
+            wrappedProfile = TmuxWrappedProfile(profile: profile, windowTarget: nil, createdWindow: false, viewSessionExisted: false)
         } catch {
             return .failure(error)
         }

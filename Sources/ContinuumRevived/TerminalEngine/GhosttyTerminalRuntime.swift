@@ -10,7 +10,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
     let title: String
 
     private let ghostty: GhosttyRuntimeContext
-    private let launchProfile: LaunchProfile
+    let launchProfile: LaunchProfile
     private let displayDefaults: UserDefaults
     private let clipboard: TerminalClipboard
     private var state = TerminalRuntimeState()

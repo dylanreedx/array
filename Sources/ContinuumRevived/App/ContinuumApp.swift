@@ -5614,6 +5614,18 @@ enum ContinuumApp {
             }
         }
 
+        // A new terminal must not freeze the app when tmux never answers.
+        if CommandLine.arguments.contains("--terminal-tmux-unresponsive-check") {
+            NSApplication.shared.setActivationPolicy(.accessory)
+            do {
+                try TerminalTmuxUnresponsiveChecks.run()
+                print("TerminalTmuxUnresponsiveChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--terminal-tmux-persistence-check") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)

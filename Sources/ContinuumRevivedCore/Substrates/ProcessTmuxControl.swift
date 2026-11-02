@@ -30,18 +30,53 @@ public struct TmuxProcessError: Error, Equatable {
     public let arguments: [String]
     public let exitCode: Int32
     public let stderr: String
+
+    /// The exit code a command gets when tmux did not answer in time and was stopped.
+    public static let timedOutExitCode: Int32 = -2
+    public var timedOut: Bool { exitCode == Self.timedOutExitCode }
+}
+
+/// A command's stdout and stderr, filled from two reader threads.
+private final class DrainedOutput: @unchecked Sendable {
+    private let lock = NSLock()
+    private var out = Data(), err = Data()
+    func set(out data: Data) { lock.lock(); out = data; lock.unlock() }
+    func set(err data: Data) { lock.lock(); err = data; lock.unlock() }
+    var value: (Data, Data) { lock.lock(); defer { lock.unlock() }; return (out, err) }
+}
+
+/// tmux binaries that just left a command unanswered. A held server holds
+/// every command, so for a short while the next ones fail at once instead of
+/// each waiting out the deadline again.
+private enum UnresponsiveTmux {
+    static let lock = NSLock()
+    nonisolated(unsafe) static var until: [String: Date] = [:]
+    static let coolDown: TimeInterval = 30
+    static func isHeld(_ path: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return (until[path] ?? .distantPast) > Date()
+    }
+    static func mark(_ path: String) { lock.lock(); until[path] = Date().addingTimeInterval(coolDown); lock.unlock() }
 }
 
 public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
     private let tmuxPath: String
     private let reach: RemoteReach
     private let defaults: UserDefaults
+    /// How long one tmux command may take before it is stopped. A tmux server
+    /// starting under a fresh app identity can block on a macOS consent prompt
+    /// (its config in ~/Documents, say) for as long as nobody answers; callers
+    /// wait on this from the main thread, so the wait must end.
+    private let timeout: TimeInterval
+    public static let defaultTimeout: TimeInterval = 5
 
     public init(
         tmuxPath: String,
         reach: RemoteReach = .localhost,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        timeout: TimeInterval = ProcessTmuxControl.defaultTimeout
     ) {
+        self.timeout = timeout
         self.tmuxPath = tmuxPath
         self.reach = reach
         self.defaults = defaults
@@ -176,6 +211,10 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
         } catch {
             return RunResult(exitCode: -1, stdout: "", stderr: String(describing: error))
         }
+        if UnresponsiveTmux.isHeld(invocation.command) {
+            return RunResult(exitCode: TmuxProcessError.timedOutExitCode, stdout: "",
+                             stderr: "tmux left a command unanswered moments ago; not waiting on it again yet")
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: invocation.command)
         process.arguments = invocation.arguments
@@ -183,14 +222,31 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
         let errPipe = Pipe()
         process.standardOutput = outPipe
         process.standardError = errPipe
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
         do {
             try process.run()
         } catch {
             return RunResult(exitCode: -1, stdout: "", stderr: "\(error)")
         }
-        process.waitUntilExit()
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        // Drained while it runs: a reply larger than a pipe's buffer would
+        // otherwise leave tmux blocked writing and this side waiting for exit.
+        let drained = DispatchGroup()
+        let output = DrainedOutput()
+        DispatchQueue.global(qos: .userInitiated).async(group: drained) { output.set(out: outPipe.fileHandleForReading.readDataToEndOfFile()) }
+        DispatchQueue.global(qos: .userInitiated).async(group: drained) { output.set(err: errPipe.fileHandleForReading.readDataToEndOfFile()) }
+        guard exited.wait(timeout: .now() + timeout) == .success else {
+            // Stop the client. A server it started keeps waiting on whatever
+            // held it; nothing here waits for that.
+            process.terminate()
+            UnresponsiveTmux.mark(invocation.command)
+            if exited.wait(timeout: .now() + 1) != .success { kill(process.processIdentifier, SIGKILL) }
+            _ = drained.wait(timeout: .now() + 1)
+            return RunResult(exitCode: TmuxProcessError.timedOutExitCode, stdout: "",
+                             stderr: "tmux did not answer within \(Int(timeout)) s and was stopped")
+        }
+        _ = drained.wait(timeout: .now() + 2)
+        let (outData, errData) = output.value
         return RunResult(
             exitCode: process.terminationStatus,
             stdout: String(data: outData, encoding: .utf8) ?? "",
