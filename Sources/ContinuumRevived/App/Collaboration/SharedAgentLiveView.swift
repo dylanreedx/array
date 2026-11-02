@@ -34,6 +34,17 @@ final class SharedAgentLiveView: NSView {
     private var transcriptObject: SharedArea.ID<SharedArea.Object>?
     private(set) var object: SharedArea.ID<SharedArea.Object>?
     private(set) var replica = Projection.Replica()
+    /// The shared agent's helpers as its host publishes them on the transcript
+    /// lane: the chips' status, message senders and the lead's rollup.
+    let helpers = SharedAgentHelperRoster()
+    /// A helper's own transcript (`childStream`), opened from its chip, drawn
+    /// by the same renderer. The host opens the helper's tile; here, its stream.
+    let helperView = SharedAgentTranscriptView()
+    private let helperBack = ChromeIconButton(symbolName: "chevron.left", accessibilityLabel: "Back to the shared agent")
+    private let helperTitle = NSTextField(labelWithString: "")
+    private(set) var openedHelper: UUID?
+    private var helperTask: Task<Void, Never>?
+    static let helperHeaderHeight: CGFloat = 28
     private(set) var reads = 0
     private(set) var resnapshots = 0
     private var task: Task<Void, Never>?
@@ -105,6 +116,15 @@ final class SharedAgentLiveView: NSView {
         transcriptView.isHidden = true
         transcriptView.onOpenWebLink = { url, _ in NSWorkspace.shared.open(url) }
         addSubview(transcriptView)
+        for view in [transcriptView, helperView] {
+            view.agentStatus = helpers.statusSource
+            view.agentMessageSenders = helpers.senderSource
+            view.onRevealAgent = { [weak self] agent, _ in self?.openHelper(agent) }
+        }
+        helperView.onOpenWebLink = { url, _ in NSWorkspace.shared.open(url) }
+        helperTitle.font = .token(.label); helperTitle.lineBreakMode = .byTruncatingTail
+        helperBack.target = self; helperBack.action = #selector(closeHelper)
+        for view in [helperView, helperBack, helperTitle] as [NSView] { view.isHidden = true; addSubview(view) }
         setAccessibilityRole(.group)
         setAccessibilityLabel("Live agent view")
         applyAppearance()
@@ -140,6 +160,16 @@ final class SharedAgentLiveView: NSView {
         scroll.frame = .init(x: 0, y: 60, width: bounds.width, height: max(0, bottom - 60))
         transcript.frame.size.width = scroll.contentSize.width
         if transcriptView.frame != scroll.frame { transcriptView.frame = scroll.frame }
+        if openedHelper != nil {
+            let area = scroll.frame, header = Self.helperHeaderHeight
+            let backSize = NSSize(width: ChromeIconButton.side, height: ChromeIconButton.side)
+            helperBack.frame = .init(x: area.minX, y: area.minY + ((header - backSize.height) / 2).rounded(),
+                                     width: backSize.width, height: backSize.height)
+            let titleX = helperBack.frame.maxX + CGFloat(Space.s)
+            helperTitle.frame = .init(x: titleX, y: area.minY + ((header - 18) / 2).rounded(), width: max(0, area.maxX - titleX), height: 18)
+            let body = NSRect(x: area.minX, y: area.minY + header, width: area.width, height: max(0, area.height - header))
+            if helperView.frame != body { helperView.frame = body }
+        }
     }
 
     /// Called whenever the scene's selection or document changes.
@@ -151,7 +181,7 @@ final class SharedAgentLiveView: NSView {
         guard selected != object || task == nil else { return }
         stop()
         object = selected; replica = .init(); confirmed = false; unavailable = false; delivery = nil
-        if object != transcriptObject { transcriptView.reset(); setTranscriptLive(false); transcriptObject = object }
+        if object != transcriptObject { transcriptView.reset(); helpers.update(nil); setTranscriptLive(false); transcriptObject = object }
         render()
         let ticket = UUID(); generation = ticket
         task = Task { @MainActor [weak self] in
@@ -183,6 +213,7 @@ final class SharedAgentLiveView: NSView {
             let value = try await readTranscript(selected, request)
             guard generation == ticket else { return false }
             transcriptView.receive(value)
+            helpers.update(transcriptView.mirror.helpers)
             setTranscriptLive(true)
             return true
         } catch {
@@ -197,7 +228,7 @@ final class SharedAgentLiveView: NSView {
     private func setTranscriptLive(_ live: Bool) {
         guard transcriptLive != live else { return }
         transcriptLive = live
-        transcriptView.isHidden = !live
+        transcriptView.isHidden = !live || openedHelper != nil
         scroll.isHidden = live
         needsLayout = true
     }
@@ -206,8 +237,63 @@ final class SharedAgentLiveView: NSView {
         generation = UUID()
         task?.cancel(); task = nil
         transcriptTask?.cancel(); transcriptTask = nil
+        closeHelper()
         object = nil
     }
+
+    // MARK: - Helpers
+
+    /// A chip's reveal: this agent's helper opens its own stream in place.
+    /// Any other agent is not shared from here and does nothing.
+    func openHelper(_ id: UUID) {
+        guard let helper = helpers.helper(id), let object = transcriptObject else { return }
+        closeHelper()
+        openedHelper = id
+        helperTitle.stringValue = helper.name
+        helperView.reset()
+        for view in [helperView, helperBack, helperTitle] as [NSView] { view.isHidden = false }
+        transcriptView.isHidden = true; scroll.isHidden = true
+        needsLayout = true
+        let ticket = generation
+        helperTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let live = await self?.pollHelper(object, id, ticket: ticket), self?.openedHelper == id else { return }
+                if live { continue }
+                do { try await Task.sleep(for: Self.transcriptRetryInterval) } catch { return }
+            }
+        }
+    }
+
+    /// One long-polled read of the opened helper's stream.
+    @discardableResult
+    func pollHelper(_ selected: SharedArea.ID<SharedArea.Object>, _ id: UUID, ticket: UUID, waitMilliseconds: Int? = nil) async -> Bool {
+        let request = Collaboration.AgentTranscript.ReadRequest(stream: Collaboration.AgentTranscript.childStream(id),
+                                                                cursor: helperView.cursor,
+                                                                waitMilliseconds: waitMilliseconds ?? Self.transcriptWaitMilliseconds)
+        do {
+            let value = try await readTranscript(selected, request)
+            guard generation == ticket, openedHelper == id else { return false }
+            helperView.receive(value)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Back to the shared agent's own transcript.
+    @objc func closeHelper() {
+        helperTask?.cancel(); helperTask = nil
+        guard openedHelper != nil else { return }
+        openedHelper = nil
+        helperView.reset()
+        for view in [helperView, helperBack, helperTitle] as [NSView] { view.isHidden = true }
+        transcriptView.isHidden = !transcriptLive; scroll.isHidden = transcriptLive
+        needsLayout = true
+    }
+    func qaCancelHelperPolling() { helperTask?.cancel(); helperTask = nil }
+    /// The Back control, pressed. Checks drive the real control.
+    func qaPressHelperBack() { helperBack.sendAction(helperBack.action, to: helperBack.target) }
+    var helperTitleText: String { helperTitle.stringValue }
 
     /// One read. Returns true when the host has more retained frames ready.
     @discardableResult
@@ -402,5 +488,6 @@ final class SharedAgentLiveView: NSView {
         transcript.backgroundColor = SurfaceToken.tileBody.color.nsColor(in: self)
         scroll.backgroundColor = SurfaceToken.tileBody.color.nsColor(in: self)
         lastPrompt.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        helperTitle.textColor = TextToken.textPrimary.color.nsColor(in: self)
     }
 }

@@ -514,6 +514,20 @@ On the owner's Mac a teammate's prompt draws as their named card
 (`AgentMessagePayload.Origin.teammate`), live and on restore, read back from
 the attribution the agent was given.
 
+A shared agent's helpers (its child agents at any depth, managed or
+provider-run) cross on the transcript lane, inside the opaque body, so the
+relay needs no deploy and an older guest skips them as an unknown op. The main
+stream's checkpoint carries the roster (`SharedAgentTranscriptWire.Helper`) and
+a `helpers` op replaces it when it changes. Each helper is the host's agent id,
+its parent, its name, origin, harness, identity colour token and its state in
+`InboxState` words, at most 32, breadth first. The guest's
+`SharedAgentHelperRoster` feeds the transcript chips (`AgentReferenceStatusSource`),
+the message cards (`AgentMessageSenderSource`) and the lead's rollup, so the
+chips and the working glyph read the same on both Macs. Each helper also has
+its own stream (`child:<id>`), published by the host session for every helper
+in the roster; a chip's reveal opens it in place on the guest, drawn by the same
+renderer, with a Back control. Witness: `--shared-agent-helpers-check`.
+
 Every frame carries host, object, a host generation persisted per object and a
 sequence. The host, the service and each viewer apply the same reducer
 (`Collaboration.AgentProjection`). A late join gets the head snapshot. A cursor

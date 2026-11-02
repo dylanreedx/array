@@ -42,10 +42,13 @@ public enum SharedAgentTranscriptWire {
         /// One top-level block with its whole subtree.
         case block(entry: AgentNodeID, AgentBlock)
         case remove(entry: AgentNodeID)
+        /// The shared agent's whole helper roster, replacing the last one
+        /// (`SharedAgentTranscriptHelpers.swift`). Sent on change.
+        case helpers([Helper])
         /// An op this build does not know (a newer host): decoded and skipped.
         case unknown(String)
 
-        private enum Keys: String, CodingKey { case op, head, after, blocks, entry, block }
+        private enum Keys: String, CodingKey { case op, head, after, blocks, entry, block, helpers }
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: Keys.self)
             let op = try c.decode(String.self, forKey: .op)
@@ -55,6 +58,7 @@ public enum SharedAgentTranscriptWire {
                               blocks: try c.decode([AgentNodeID].self, forKey: .blocks))
             case "block": self = .block(entry: try c.decode(AgentNodeID.self, forKey: .entry), try c.decode(AgentBlock.self, forKey: .block))
             case "remove": self = .remove(entry: try c.decode(AgentNodeID.self, forKey: .entry))
+            case "helpers": self = .helpers(try c.decode([Helper].self, forKey: .helpers))
             default: self = .unknown(op)
             }
         }
@@ -68,6 +72,8 @@ public enum SharedAgentTranscriptWire {
                 try c.encode("block", forKey: .op); try c.encode(entry, forKey: .entry); try c.encode(block, forKey: .block)
             case let .remove(entry):
                 try c.encode("remove", forKey: .op); try c.encode(entry, forKey: .entry)
+            case let .helpers(helpers):
+                try c.encode("helpers", forKey: .op); try c.encode(helpers, forKey: .helpers)
             case let .unknown(op):
                 try c.encode(op, forKey: .op)
             }
@@ -79,8 +85,12 @@ public enum SharedAgentTranscriptWire {
         public let entries: [AgentEntry]
         /// Host entries before the window, which stay on the host's Mac.
         public let omittedEntries: Int
-        public init(entries: [AgentEntry], omittedEntries: Int) {
+        /// The helper roster at this point. Nil from a host that sends none
+        /// (a child stream, or a host before helpers).
+        public let helpers: [Helper]?
+        public init(entries: [AgentEntry], omittedEntries: Int, helpers: [Helper]? = nil) {
             schema = SharedAgentTranscriptWire.schema; self.entries = entries; self.omittedEntries = omittedEntries
+            self.helpers = helpers
         }
     }
     public struct Patch: Codable, Equatable, Sendable {
@@ -148,9 +158,11 @@ public enum SharedAgentTranscriptWire {
     public struct Mirror: Equatable, Sendable {
         public private(set) var document = AgentDocument()
         public private(set) var omittedEntries = 0
+        /// The host's helper roster; nil until a host that sends one has.
+        public private(set) var helpers: [Helper]?
         public init() {}
 
-        public enum Failure: Error, Equatable { case schema, unknownEntry(AgentNodeID), missingBlock(AgentNodeID), unknownAnchor(AgentNodeID) }
+        public enum Failure: Error, Equatable { case schema, unknownEntry(AgentNodeID), missingBlock(AgentNodeID), unknownAnchor(AgentNodeID), invalidHelpers }
         public struct Touched: Equatable, Sendable {
             public var ids: Set<AgentNodeID> = []
             public var structural = false
@@ -159,7 +171,9 @@ public enum SharedAgentTranscriptWire {
 
         public mutating func install(_ checkpoint: Checkpoint) throws -> Touched {
             guard checkpoint.schema <= SharedAgentTranscriptWire.schema else { throw Failure.schema }
+            if let roster = checkpoint.helpers, !SharedAgentTranscriptWire.valid(helpers: roster) { throw Failure.invalidHelpers }
             omittedEntries = checkpoint.omittedEntries
+            helpers = checkpoint.helpers
             var entries = checkpoint.entries
             if checkpoint.omittedEntries > 0 { entries.insert(Self.omittedNotice(checkpoint.omittedEntries), at: 0) }
             document = AgentDocument(version: document.version &+ 1, entries: entries)
@@ -173,6 +187,7 @@ public enum SharedAgentTranscriptWire {
             var touched = Touched()
             var pendingOrder: [AgentNodeID: [AgentNodeID]] = [:]
             var stagedBlocks: [AgentNodeID: [AgentNodeID: AgentBlock]] = [:]
+            var roster = helpers
             func index(_ id: AgentNodeID) -> Int? { entries.firstIndex { $0.id == id } }
             for op in patch.ops {
                 switch op {
@@ -202,6 +217,9 @@ public enum SharedAgentTranscriptWire {
                     guard index(entryID) != nil else { throw Failure.unknownEntry(entryID) }
                     stagedBlocks[entryID, default: [:]][block.id] = block
                     touched.ids.insert(block.id)
+                case let .helpers(list):
+                    guard SharedAgentTranscriptWire.valid(helpers: list) else { throw Failure.invalidHelpers }
+                    roster = list
                 case .unknown:
                     continue
                 }
@@ -223,6 +241,7 @@ public enum SharedAgentTranscriptWire {
                 }
             }
             document = AgentDocument(version: document.version &+ 1, entries: entries)
+            helpers = roster
             return touched
         }
 

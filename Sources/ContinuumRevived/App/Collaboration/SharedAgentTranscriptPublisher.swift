@@ -39,6 +39,13 @@ final class SharedAgentTranscriptPublisher {
     let stream: String
     let generation: UInt64
     private let document: @MainActor () -> AgentDocument?
+    /// The shared agent's helper roster (main stream only; nil sends none).
+    private let helpers: (@MainActor () -> [Wire.Helper])?
+    /// The roster as the guest now holds it.
+    private(set) var publishedHelpers: [Wire.Helper]?
+    /// After a roster reaches the relay: the host session starts and stops
+    /// each helper's own stream from it.
+    var onHelpersPublished: (([Wire.Helper]) -> Void)?
     private let sink: SharedAgentTranscriptSink
     private let budget: SharedAgentTranscriptBudget
     /// Host entries (before the budget) as the guest now holds them.
@@ -57,14 +64,20 @@ final class SharedAgentTranscriptPublisher {
 
     init(agent: AgentID, stream: String = Lane.mainStream, generation: UInt64,
          budget: SharedAgentTranscriptBudget = SharedAgentTranscriptTruncatingBudget(),
-         sink: SharedAgentTranscriptSink, document: @escaping @MainActor () -> AgentDocument?) {
+         sink: SharedAgentTranscriptSink, helpers: (@MainActor () -> [Wire.Helper])? = nil,
+         document: @escaping @MainActor () -> AgentDocument?) {
         self.agent = agent; self.stream = stream; self.generation = generation
-        self.budget = budget; self.sink = sink; self.document = document
+        self.budget = budget; self.sink = sink; self.helpers = helpers; self.document = document
     }
 
+    /// The main stream carries the agent's helper roster; a helper's own
+    /// stream (`childStream`) carries only its transcript.
     convenience init(supervisor: AgentSupervisor, agent: AgentID, stream: String = Lane.mainStream, generation: UInt64,
                      sink: SharedAgentTranscriptSink) {
-        self.init(agent: agent, stream: stream, generation: generation, sink: sink) { [weak supervisor] in
+        let roster: (@MainActor () -> [Wire.Helper])? = stream == Lane.mainStream ? { @MainActor [weak supervisor] in
+            supervisor.map { SharedAgentHelpers.roster($0, lead: agent) } ?? []
+        } : nil
+        self.init(agent: agent, stream: stream, generation: generation, sink: sink, helpers: roster) { [weak supervisor] in
             supervisor?.transcriptDocument(for: agent)
         }
     }
@@ -86,27 +99,31 @@ final class SharedAgentTranscriptPublisher {
     /// One publish of whatever changed. Witnesses call this directly.
     func tick() async {
         guard !publishing, !superseded, !laneUnavailable, let current = document() else { return }
-        if !needsCheckpoint, current.version == lastVersion { return }
+        let roster = helpers?()
+        if !needsCheckpoint, current.version == lastVersion, roster == publishedHelpers { return }
         publishing = true
         defer { publishing = false }
         do {
             if needsCheckpoint || bytesSinceCheckpoint > Lane.checkpointAfterBytes {
-                try await sendCheckpoint(current)
-            } else if let ops = patch(to: current.entries) {
+                try await sendCheckpoint(current, roster: roster)
+            } else if var ops = current.version == lastVersion ? [] : patch(to: current.entries) {
+                ops = ops.map(fitted)
+                if let roster, roster != publishedHelpers { ops.append(.helpers(roster)) }
                 if !ops.isEmpty {
-                    let body = try Wire.encode(Wire.Patch(ops: ops.map(fitted)))
+                    let body = try Wire.encode(Wire.Patch(ops: ops))
                     if body.count > Lane.maxFrameBytes {
-                        try await sendCheckpoint(current)
+                        try await sendCheckpoint(current, roster: roster)
                     } else {
                         let frame = Lane.Frame(generation: generation, sequence: through + 1, body: body)
                         try await sink.publish(stream: stream, checkpoint: nil, frames: [frame])
                         through += 1; frames += 1; bytesSinceCheckpoint += body.count
                         published = window(of: current.entries)
+                        if let roster, roster != publishedHelpers { publishedHelpers = roster; onHelpersPublished?(roster) }
                     }
                 }
                 lastVersion = current.version
             } else {
-                try await sendCheckpoint(current)
+                try await sendCheckpoint(current, roster: roster)
             }
             lastError = nil
         } catch SharedAgentTranscriptRefusal.superseded {
@@ -120,14 +137,18 @@ final class SharedAgentTranscriptPublisher {
         }
     }
 
-    private func sendCheckpoint(_ current: AgentDocument) async throws {
-        let checkpoint = Wire.window(current.entries, maxBytes: Lane.maxCheckpointBytes, budget: budget)
+    private func sendCheckpoint(_ current: AgentDocument, roster: [Wire.Helper]?) async throws {
+        // The roster rides inside the same limit (32 helpers, a few KiB).
+        let rosterBytes = try roster.map { try Wire.encode($0).count + 16 } ?? 0
+        let window = Wire.window(current.entries, maxBytes: Lane.maxCheckpointBytes - rosterBytes, budget: budget)
+        let checkpoint = Wire.Checkpoint(entries: window.entries, omittedEntries: window.omittedEntries, helpers: roster)
         let body = try Wire.encode(checkpoint)
         let next = through + 1
         try await sink.publish(stream: stream, checkpoint: .init(generation: generation, through: next, body: body), frames: [])
         through = next; checkpoints += 1; bytesSinceCheckpoint = 0; needsCheckpoint = false
         published = Array(current.entries.suffix(checkpoint.entries.count))
         lastVersion = current.version
+        if let roster { let changed = roster != publishedHelpers; publishedHelpers = roster; if changed { onHelpersPublished?(roster) } }
     }
 
     /// The current entries from the guest's first one on. Entries before the

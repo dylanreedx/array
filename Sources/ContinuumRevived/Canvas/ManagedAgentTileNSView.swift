@@ -4114,7 +4114,13 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// tiled one.
     private var agentReferenceStatusSource: AgentReferenceStatusSource {
         guard let supervisor = agentSource else { return .unavailable }
-        return AgentReferenceStatusSource(
+        return Self.agentReferenceStatusSource(supervisor)
+    }
+
+    /// The host's chip status seam, by itself, so the shared-agent helper
+    /// witness reads exactly what a host chip reads.
+    static func agentReferenceStatusSource(_ supervisor: AgentSupervisor) -> AgentReferenceStatusSource {
+        AgentReferenceStatusSource(
             current: { [weak supervisor] rawAgentID in
                 guard let supervisor else { return nil }
                 let agentID = AgentID(rawValue: rawAgentID)

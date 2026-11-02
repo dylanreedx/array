@@ -1833,6 +1833,30 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // A shared lead's helpers on the guest: roster, chip status, rollup.
+        if let index = CommandLine.arguments.firstIndex(of: "--shared-agent-helpers-check") {
+            setbuf(stdout, nil)
+            setbuf(stderr, nil)
+            _ = NSApplication.shared
+            let next = CommandLine.arguments.indices.contains(index + 1) ? CommandLine.arguments[index + 1] : nil
+            let directory = URL(fileURLWithPath: next.flatMap { $0.hasPrefix("-") ? nil : $0 }
+                ?? NSTemporaryDirectory() + "shared-agent-helpers")
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(60))
+                fputs("FAIL: shared agent helpers check exceeded its 60-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do {
+                    try await SharedAgentHelperChecks.run(directory: directory)
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         // Mode A of the share redesign, alone: a real header Share and Copy
         // against a local continuum-relay (the same stage the native check
         // runs last but one). Needs `continuum-relay` built beside Array.

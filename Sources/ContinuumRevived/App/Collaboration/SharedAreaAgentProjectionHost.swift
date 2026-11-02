@@ -16,6 +16,9 @@ final class SharedAreaAgentProjectionHost {
     /// The whole transcript beside each projection (`SharedAgentTranscriptPublisher`).
     private let makeTranscriptSink: ((SharedArea.ID<SharedArea.Object>, SharedArea.ID<SharedArea.Host>) -> SharedAgentTranscriptSink)?
     private(set) var transcripts: [SharedArea.ID<SharedArea.Object>: SharedAgentTranscriptPublisher] = [:]
+    /// Each helper's own stream (`childStream`), started and stopped from the
+    /// roster its shared agent's stream last published.
+    private(set) var helperTranscripts: [SharedArea.ID<SharedArea.Object>: [UUID: SharedAgentTranscriptPublisher]] = [:]
     private var scheduled: Task<Void, Never>?
     private(set) var lastError: (any Error)?
 
@@ -47,6 +50,7 @@ final class SharedAreaAgentProjectionHost {
         }
         for (object, publisher) in transcripts where wanted[object].map({ $0.0 != publisher.agent }) ?? true || publisher.superseded {
             publisher.stop(); transcripts[object] = nil
+            stopHelpers(object)
         }
         if let makeTranscriptSink {
             for (object, target) in wanted where transcripts[object] == nil {
@@ -55,6 +59,8 @@ final class SharedAreaAgentProjectionHost {
                     let publisher = SharedAgentTranscriptPublisher(supervisor: supervisor, agent: target.0, generation: generation,
                                                                    sink: makeTranscriptSink(object, target.1))
                     transcripts[object] = publisher
+                    let host = target.1
+                    publisher.onHelpersPublished = { [weak self] roster in self?.syncHelpers(object, host: host, roster) }
                     publisher.start()
                 } catch { lastError = error }
             }
@@ -81,6 +87,35 @@ final class SharedAreaAgentProjectionHost {
         projectors = [:]
         for publisher in transcripts.values { publisher.stop() }
         transcripts = [:]
+        for object in Array(helperTranscripts.keys) { stopHelpers(object) }
+    }
+
+    /// One publisher per helper in `roster`, under the shared agent's object.
+    func syncHelpers(_ object: SharedArea.ID<SharedArea.Object>, host: SharedArea.ID<SharedArea.Host>,
+                     _ roster: [SharedAgentTranscriptWire.Helper]) {
+        guard let makeTranscriptSink else { return }
+        let wanted = Set(roster.map(\.id))
+        var current = helperTranscripts[object] ?? [:]
+        for (id, publisher) in current where !wanted.contains(id) || publisher.superseded {
+            publisher.stop(); current[id] = nil
+        }
+        for id in roster.map(\.id) where current[id] == nil {
+            do {
+                let stream = Collaboration.AgentTranscript.childStream(id)
+                let generation = try SharedAgentProjectionGenerations.next(
+                    directory: directory, object: object, lane: "agent-transcript-child-" + id.uuidString.lowercased())
+                let publisher = SharedAgentTranscriptPublisher(supervisor: supervisor, agent: AgentID(rawValue: id), stream: stream,
+                                                               generation: generation, sink: makeTranscriptSink(object, host))
+                current[id] = publisher
+                publisher.start()
+            } catch { lastError = error }
+        }
+        helperTranscripts[object] = current.isEmpty ? nil : current
+    }
+
+    private func stopHelpers(_ object: SharedArea.ID<SharedArea.Object>) {
+        for publisher in (helperTranscripts[object] ?? [:]).values { publisher.stop() }
+        helperTranscripts[object] = nil
     }
 
     /// Coalesces a burst of streamed frames into one delivery per main-actor turn.
