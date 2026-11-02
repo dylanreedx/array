@@ -2458,39 +2458,110 @@ final class TileSpawner {
         return .spawned(noteId: noteId, tileId: tileId)
     }
 
-    /// KB-01. Spawns a board tile and its backing document.
-    ///
-    /// Follows the `.plans/47` contract exactly: ONE `targetZoneId`, used for all
-    /// four of `makeProjectTilePlacement`, the sibling set the placement dodges,
-    /// `zPositionAbove`, and `installProjectTile`. Framing against one zone while
-    /// installing into another is invisible until the two can differ — which is
-    /// now, because clicking, focusing, creating a zone and panning all re-point
-    /// the armed zone.
+    /// KB-01. Spawns a board tile and its backing document in the creation
+    /// scope's zone, through `installBoardTile` (the `.plans/47` contract).
     func spawnBoard(title: String, at worldPoint: CGPoint? = nil) -> BoardOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         guard let runtime = boardRuntimeProvider?() else {
             return .failure(SpawnError.canvasUnavailable)
         }
         let boardId = UUID()
-        let tileId = UUID()
         // The document FIRST. A tile whose board file was never written would
         // hydrate to a placeholder forever, and the canvas write below is the
         // harder one to undo.
         guard let board = runtime.createBoard(id: boardId, title: title) else {
             return .failure(SpawnError.canvasUnavailable)
         }
-        let targetZoneId = creationScopeProvider?()?.zoneId
-        let frame = makeProjectTilePlacement(
-            worldPoint: worldPoint,
-            size: CanvasEngine.defaultFrame(for: .kanban),
-            in: canvasView,
-            targetZoneId: targetZoneId
-        )
+        // The document remains indexed and closed on failure, ready for Open board.
+        return installBoardTile(
+            board, tileId: UUID(), runtime: runtime, placement: .automatic(worldPoint),
+            targetZoneId: creationScopeProvider?()?.zoneId, in: canvasView)
+    }
+
+    /// `board.manage` create: the board lands in `targetZoneId` — the calling
+    /// agent's own zone, proved by the service — gap-adjacent to `anchorTileId`,
+    /// the way `spawnAgentBrowser` places an agent's browser. Unlike the user's
+    /// spawn, a failed install deletes the new document again: the API reports
+    /// failure, so nothing it made may survive.
+    func spawnAgentBoard(title: String, beside anchorTileId: UUID, targetZoneId: UUID) -> BoardOutcome {
+        guard let canvasView, let runtime = boardRuntimeProvider?(),
+              canvasView.projectId(forZone: targetZoneId) == project.id,
+              canvasView.installedZonePlacement(for: targetZoneId) != nil,
+              canvasView.installedZoneIds(containing: anchorTileId) == [targetZoneId] else {
+            return .failure(SpawnError.canvasUnavailable)
+        }
+        let boardId = UUID()
+        guard let board = runtime.createBoard(id: boardId, title: title) else {
+            return .failure(SpawnError.canvasUnavailable)
+        }
+        let outcome = installBoardTile(
+            board, tileId: UUID(), runtime: runtime, placement: .beside(anchorTileId),
+            targetZoneId: targetZoneId, in: canvasView)
+        if case .failure = outcome { try? runtime.deleteClosedBoard(id: boardId) }
+        return outcome
+    }
+
+    /// Undo of a `board.manage` delete (and redo of a create): reopens a board
+    /// whose document was just restored, at the WORLD frame and in the zone its
+    /// tile had, under the tile id it had. Refused when that zone is no longer
+    /// installed; the board then stays closed in the Boards sidebar.
+    func reopenBoardTile(_ board: Board, tileId: UUID, worldFrame: TileFrame, targetZoneId: UUID) -> BoardOutcome {
+        guard let canvasView, let runtime = boardRuntimeProvider?(),
+              canvasView.projectId(forZone: targetZoneId) == project.id,
+              canvasView.installedZonePlacement(for: targetZoneId) != nil,
+              canvasView.tileRecord(for: tileId) == nil else {
+            return .failure(SpawnError.canvasUnavailable)
+        }
+        // No settle: the tile returns exactly where it was, and the zone's
+        // own settle stays a separate, still-valid history step.
+        return installBoardTile(
+            board, tileId: tileId, runtime: runtime, placement: .worldFrame(worldFrame),
+            targetZoneId: targetZoneId, arranges: false, in: canvasView)
+    }
+
+    private enum BoardTilePlacement {
+        case automatic(CGPoint?)
+        case beside(UUID)
+        case worldFrame(TileFrame)
+    }
+
+    /// The one install path for a board tile whose document already exists.
+    /// Follows the `.plans/47` contract exactly: ONE `targetZoneId`, used for all
+    /// four of the placement, the sibling set it dodges, `zPositionAbove`, and
+    /// `installProjectTile`. Framing against one zone while installing into
+    /// another is invisible until the two can differ — which is now, because
+    /// clicking, focusing, creating a zone and panning all re-point the armed zone.
+    private func installBoardTile(
+        _ board: Board, tileId: UUID, runtime: BoardRuntime, placement: BoardTilePlacement,
+        targetZoneId: UUID?, arranges: Bool = true, in canvasView: CanvasNSView
+    ) -> BoardOutcome {
+        let boardId = board.id
+        let size = CanvasEngine.defaultFrame(for: .kanban)
+        func zoneLocal(_ world: TileFrame) -> TileFrame {
+            targetZoneId
+                .flatMap { canvasView.installedZonePlacement(for: $0) }
+                .map { CanvasEngine.worldToZoneLocal(world, zoneOrigin: $0.origin) }
+                ?? world
+        }
+        let frame: TileFrame
+        switch placement {
+        case let .automatic(worldPoint):
+            frame = makeProjectTilePlacement(
+                worldPoint: worldPoint, size: size, in: canvasView, targetZoneId: targetZoneId)
+        case let .beside(anchorTileId):
+            let siblings = targetZoneId.flatMap { canvasView.tilesInWorldFrames(forZoneId: $0) } ?? []
+            guard let anchor = siblings.first(where: { $0.id == anchorTileId }) else {
+                return .failure(SpawnError.canvasUnavailable)
+            }
+            frame = zoneLocal(Self.anchoredFrame(size: size, anchor: anchor.frame, siblings: siblings))
+        case let .worldFrame(world):
+            frame = zoneLocal(world)
+        }
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let tile = Tile(
             id: tileId,
             kind: .kanban,
-            title: title,
+            title: board.title,
             frame: frame,
             zPosition: nextZ,
             runtimeRef: nil,
@@ -2508,11 +2579,10 @@ final class TileSpawner {
                 do { try persistProjectCanvas(after: target, in: canvasView) }
                 catch { return .failure(BoardLibraryError.rollbackFailed(error.localizedDescription)) }
             }
-            // The document remains indexed and closed, ready for Open board.
             return .failure(cause)
         }
         runtime.attach(view, to: boardId)
-        if case let .zoneLayer(zoneId) = target {
+        if arranges, case let .zoneLayer(zoneId) = target {
             canvasView.arrangeAutoLayoutAfterSpawn(zoneId: zoneId, spawnedTileId: tileId)
         }
         return .spawned(boardId: boardId, tileId: tileId)

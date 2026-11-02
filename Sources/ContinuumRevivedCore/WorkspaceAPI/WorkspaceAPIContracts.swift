@@ -68,6 +68,9 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     // says about its own work. Self-only. Appended last.
     case agentReport = "agent.report"
     case agentStatus = "agent.status"
+    // KB-01 board lifecycle (`WorkspaceAPIContracts+Board.swift`): create,
+    // rename or delete a whole board. Appended last.
+    case boardManage = "board.manage"
 }
 
 // MARK: - Identity

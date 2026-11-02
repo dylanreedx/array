@@ -29,7 +29,7 @@ public extension WorkspaceAPIOp {
     /// the trusted approval UI on first use (`canvas.apply`, `agent.delegate`,
     /// `agent.message`), and "allow for session" covers the rest.
     static let approvalGatedOperations: Set<WorkspaceAPIOp> = [
-        .canvasApply, .agentDelegate, .agentMessage,
+        .canvasApply, .agentDelegate, .agentMessage, .boardManage,
         .deviceList, .deviceOpen, .deviceObserve, .deviceAct, .deviceClose, .deviceBuildRun,
         .browserOpen, .browserNavigate,
         .browserClick, .browserType, .browserPressKey, .browserScroll, .browserWaitFor, .browserEvaluate,

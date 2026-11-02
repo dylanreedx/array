@@ -69,6 +69,9 @@ final class WorkspaceAPIService {
     let supervisor: AgentSupervisor
     let registryStoreProvider: () -> RegistryStore?
     var boardRuntimeProvider: (UUID) -> BoardRuntime?
+    /// Production: `AppDelegate.closeBoardTileForWorkspaceAPI` — the tile's own
+    /// close, minus its prompt and focus hand-off. True when the tile is gone.
+    var boardTileCloser: (UUID) -> Bool
     let epoch: String
     /// Production: an NSAlert (`AppDelegate.presentWorkspaceToolApproval`). Checks
     /// inject a deterministic decision. This is the ONLY place a grant beyond the
@@ -135,6 +138,9 @@ final class WorkspaceAPIService {
     struct CachedBoardApply { let payloadHash: String; let result: BoardApplyResult }
     var boardApplyIdempotency: [AgentID: [String: CachedBoardApply]] = [:]
     var boardApplyIdempotencyOrder: [AgentID: [String]] = [:]
+    struct CachedBoardManage { let payloadHash: String; let result: BoardManageResult }
+    var boardManageIdempotency: [AgentID: [String: CachedBoardManage]] = [:]
+    var boardManageIdempotencyOrder: [AgentID: [String]] = [:]
     struct CachedAgentUpdate { let payloadHash: String; let result: AgentUpdateResult }
     var agentUpdateIdempotency: [AgentID: [String: CachedAgentUpdate]] = [:]
     var agentUpdateIdempotencyOrder: [AgentID: [String]] = [:]
@@ -224,6 +230,7 @@ final class WorkspaceAPIService {
         supervisor: AgentSupervisor,
         registryStore: @escaping () -> RegistryStore?,
         boardRuntime: @escaping (UUID) -> BoardRuntime? = { _ in nil },
+        boardTileCloser: @escaping (UUID) -> Bool = { _ in false },
         epoch: String,
         approvalHandler: @escaping ApprovalHandler,
         tileWiring: ((UUID, AgentID) -> Void)? = nil,
@@ -241,6 +248,7 @@ final class WorkspaceAPIService {
         self.supervisor = supervisor
         self.registryStoreProvider = registryStore
         self.boardRuntimeProvider = boardRuntime
+        self.boardTileCloser = boardTileCloser
         self.epoch = epoch
         self.approvalHandler = approvalHandler
         self.tileWiring = tileWiring
@@ -481,6 +489,10 @@ final class WorkspaceAPIService {
             return boardApply(agentId: agentId, record: record, ownHandle: ownHandle,
                               requestId: requestId, payload: payload, runtime: runtime,
                               isCancelled: isCancelled)
+        case .boardManage:
+            return boardManage(agentId: agentId, record: record, ownHandle: ownHandle,
+                               requestId: requestId, payload: payload, runtime: runtime,
+                               canvas: canvas, isCancelled: isCancelled)
         case .browserOpen, .browserNavigate, .browserSnapshot, .browserClick, .browserType,
              .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole:
             return .error(WorkspaceAPIError(code: .unsupported, message: "Browser tools are not available yet."))

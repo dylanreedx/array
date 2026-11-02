@@ -52,5 +52,39 @@ func runWorkspaceAPIBoardContractChecks() {
         outcome: .applied, undoRegistered: true, revision: 8, card: card)
     expect(try! JSONDecoder().decode(BoardApplyResult.self, from: encoder.encode(result)) == result,
            "KB-01 API: board apply result round-trips operation, durability, revision and card")
+
+    // board.manage: whole-board lifecycle.
+    expect(WorkspaceAPIOp(rawValue: "board.manage") == .boardManage
+           && !WorkspaceAPIOp.sessionPresetOperations.contains(.boardManage)
+           && WorkspaceAPIOp.approvalGatedOperations.contains(.boardManage),
+           "board.manage keeps its wire name and asks under Ask first (outside the preset, approval gated)")
+    if case .allowed = WorkspaceToolGrantEvaluator.evaluate(
+        agentId: principal, op: .boardManage, checkout: own, requested: .preserveAll,
+        grants: [preset], currentGeneration: 0) {
+        expect(false, "the session preset alone never allows a board create or delete")
+    } else {
+        expect(true, "the session preset alone never allows a board create or delete")
+    }
+    let manage = BoardManageRequest(op: .create, idempotencyKey: "qa-2", title: "Release QA", nextToTileId: UUID())
+    expect(try! JSONDecoder().decode(BoardManageRequest.self, from: encoder.encode(manage)) == manage,
+           "board.manage request round-trips")
+    let manageResult = BoardManageResult(
+        operationId: "op-2", op: .create, boardId: boardID, tileId: UUID(), zoneId: UUID(),
+        title: "Release QA", revision: 0,
+        columns: [BoardQueryColumn(columnId: UUID(), name: "To Do", cardCount: 0)], undoRegistered: true)
+    expect(try! JSONDecoder().decode(BoardManageResult.self, from: encoder.encode(manageResult)) == manageResult
+           && manageResult.durability == .committed,
+           "board.manage result round-trips board, tile, zone, columns and undo")
+    let tool = WorkspaceMCPToolCatalog.tool(named: "array_board_manage")
+    var required: [String] = []
+    if case .array(let values)? = tool?.inputSchema["required"] {
+        required = values.compactMap { if case .string(let name) = $0 { return name } else { return nil } }
+    }
+    expect(tool?.operation == .boardManage && required == ["op", "idempotencyKey"]
+           && ArrayWorkspaceTool(toolName: "mcp__array_workspace__array_board_manage") == .boardManage,
+           "the shared MCP/pi catalog publishes array_board_manage for board.manage")
+    expect(WorkspaceAPIExposure.decisions["board.title"] == .exposed(.boardManage)
+           && WorkspaceAPIExposure.decisions["board.cards"] == .exposed(.boardApply),
+           "board titles are exposed through board.manage, tasks through board.apply")
     print("WorkspaceAPIBoardContractChecks passed")
 }

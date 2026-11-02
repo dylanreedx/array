@@ -1698,6 +1698,46 @@ final class CanvasNSView: NSView, TokenThemed {
         return canvasHistories[workspaceId]?.undoManager
     }
 
+    /// One non-geometry step on the active workspace's canvas history — the
+    /// stack Edit ▸ Undo reaches when no text or board is focused. Used by the
+    /// workspace API's board create/delete, which change which tiles exist
+    /// rather than where they are. `token` lets a failed `withCanvasUndoGroup`
+    /// take the step back. False when no workspace history exists.
+    @discardableResult
+    func registerCanvasUndo(actionName: String, token: AnyObject? = nil, _ body: @escaping (CanvasNSView) -> Void) -> Bool {
+        guard let undoManager = activeCanvasUndoManager else { return false }
+        // During a replay, or inside `withCanvasUndoGroup`, a group is already open.
+        let grouped = !undoManager.isUndoing && !undoManager.isRedoing && undoManager.groupingLevel == 0
+        if grouped { undoManager.beginUndoGrouping() }
+        let target: AnyObject = token ?? self
+        // The manager does not retain a target; the handler keeps it alive.
+        undoManager.registerUndo(withTarget: target) { [weak self] _ in
+            _ = target
+            guard let self else { return }
+            body(self)
+        }
+        undoManager.setActionName(actionName)
+        if grouped { undoManager.endUndoGrouping() }
+        return true
+    }
+
+    /// Runs `work` inside ONE canvas undo group named `actionName`, so a spawn's
+    /// auto-layout settle and the caller's own step undo together. Undo runs a
+    /// group's steps newest first, so a step registered before the spawn runs
+    /// after its settle is undone. When `work` returns false, the steps
+    /// registered with `token` are withdrawn.
+    @discardableResult
+    func withCanvasUndoGroup(actionName: String, token: AnyObject, _ work: () -> Bool) -> Bool {
+        guard let undoManager = activeCanvasUndoManager,
+              !undoManager.isUndoing, !undoManager.isRedoing else { return work() }
+        undoManager.beginUndoGrouping()
+        let kept = work()
+        if !kept { undoManager.removeAllActions(withTarget: token) }
+        undoManager.setActionName(actionName)
+        undoManager.endUndoGrouping()
+        return kept
+    }
+
     private var focusedTextUndoManager: UndoManager? {
         guard let editor = window?.firstResponder as? NSTextView,
               editor.isEditable else { return nil }

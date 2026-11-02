@@ -151,6 +151,12 @@ public struct Board: Codable, Equatable, Sendable {
     public var columns: [BoardColumn]
     public var cards: [BoardCard]
 
+    /// Spelled out (the synthesized coding is unchanged) so the workspace-API
+    /// exposure census can classify every persisted board field.
+    public enum CodingKeys: String, CodingKey, CaseIterable {
+        case schemaVersion, id, title, revision, columns, cards
+    }
+
     public init(
         schemaVersion: Int = Board.currentSchemaVersion,
         id: UUID,

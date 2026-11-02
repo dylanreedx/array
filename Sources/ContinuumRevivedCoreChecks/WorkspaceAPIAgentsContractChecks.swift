@@ -68,6 +68,7 @@ private func checkAgentOpsAndPreset() {
         .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole,
         .agentNotify,
         .agentReport, .agentStatus,
+        .boardManage,
     ], "ops are appended to the enum, never reordered: \(WorkspaceAPIOp.allCases.map(\.rawValue))")
     expect(WorkspaceAPIOp(rawValue: "agent.message") == .agentMessage
             && !WorkspaceAPIOp.sessionPresetOperations.contains(.agentMessage),
@@ -77,7 +78,7 @@ private func checkAgentOpsAndPreset() {
     expect(preset.operations == WorkspaceAPIOp.sessionPresetOperations
             && preset.operations.isSuperset(of: [.workspaceContext, .artifactOpen, .agentFind, .agentInspect])
             && preset.operations.isSuperset(of: [.boardQuery, .boardApply])
-            && preset.operations.isDisjoint(with: [.canvasApply, .agentDelegate]),
+            && preset.operations.isDisjoint(with: [.canvasApply, .agentDelegate, .boardManage]),
            "the preset lists its ops explicitly (find + self-inspect in, apply/delegate out), got \(preset.operations)")
     expect(preset.inspectableAgentIds == [me], "the preset lets an agent inspect only ITSELF, got \(preset.inspectableAgentIds)")
     let data = try! agentsEncoder.encode(preset)

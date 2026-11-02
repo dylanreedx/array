@@ -6889,6 +6889,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let controller = workspace.controller(for: projectId) else { return nil }
             return self.configuredBoardRuntime(controller)
         },
+        boardTileCloser: { [weak self] tileId in self?.closeBoardTileForWorkspaceAPI(tileId) ?? false },
         epoch: hostEpoch,
         approvalHandler: { [weak self] prompt in self?.presentWorkspaceToolApproval(prompt) ?? .deny },
         tileWiring: { [weak self] tileId, agentId in self?.wireManagedAgentTile(tileId, agentID: agentId) },
@@ -9110,7 +9111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         } else { deleteTileAfterEditorBarrier(id: id, parksAgent: parksAgent) }
     }
 
-    private func deleteTileAfterEditorBarrier(id: UUID, parksAgent: Bool = true, automaticBrowserSweep: Bool = false) {
+    private func deleteTileAfterEditorBarrier(id: UUID, parksAgent: Bool = true, unattended: Bool = false) {
         guard let canvasView else { return }
         // `projectTiles()`, not the flat collection: once the active project's tiles
         // live in a ZoneLayer, looking a tile up here found nothing and deleteTile
@@ -9166,7 +9167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let policy = DeleteConfirmPolicy.current
-        if !automaticBrowserSweep, !zoneDeleteConfirmed, policy.requiresConfirmation(for: tile.kind) {
+        if !unattended, !zoneDeleteConfirmed, policy.requiresConfirmation(for: tile.kind) {
             let configuration = policy.alertConfiguration(for: tile.kind)
             let alert = NSAlert()
             alert.messageText = configuration.message
@@ -9318,7 +9319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?.detach()
         }
 
-        if automaticBrowserSweep {
+        if unattended {
             canvasView.removeTile(id: id)
         } else {
             canvasView.closeTile(id: id)
@@ -9339,6 +9340,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         refreshAgentSurfaces()
     }
 
+    /// `board.manage` delete and its Undo: closes a board tile the way its ×
+    /// does, without the confirmation or the focus hand-off. The workspace API
+    /// has already refused a focused or selected tile.
+    func closeBoardTileForWorkspaceAPI(_ tileId: UUID) -> Bool {
+        guard canvasView?.tileRecord(for: tileId)?.kind == .kanban else { return false }
+        deleteTileAfterEditorBarrier(id: tileId, unattended: true)
+        return canvasView?.tileRecord(for: tileId) == nil
+    }
+
     /// Never sweep user tiles, focused or selected tiles, or browsers with an
     /// inspector. A non-live project is left alone until it is hydrated again.
     private func closeIdleAgentBrowser(tileId: UUID, agentId: AgentID) -> Bool {
@@ -9349,7 +9359,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               !canvasView.isGeometryGestureActive, let owner = controller(owningTile: tileId),
               let state = try? owner.projectStore.loadBrowserState(),
               !state.inspectorStates.contains(where: { $0.inspectedBrowserTileId == tileId }) else { return false }
-        deleteTileAfterEditorBarrier(id: tileId, automaticBrowserSweep: true)
+        deleteTileAfterEditorBarrier(id: tileId, unattended: true)
         return canvasView.tileRecord(for: tileId) == nil
     }
 
@@ -22117,6 +22127,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // move/resize of the agent's OWN checkout lands here.
             alert.messageText = "Allow \(prompt.agentDisplayName) to arrange tiles and change agent colours in \(prompt.checkoutDisplayName)?"
             detail = "This grants canvas writes in this checkout: moving or resizing tiles, and changing another agent’s identity colour or name. Geometry changes use the same undo history as a drag. These operations preserve the camera, focus and selection."
+        } else if prompt.op == .boardManage {
+            // board.manage create/delete change which tiles exist; renames ride
+            // the board.apply preset and never land here.
+            alert.messageText = "Allow \(prompt.agentDisplayName) to create and delete boards in \(prompt.checkoutDisplayName)?"
+            detail = "The agent can create a board beside itself in its own zone, and delete boards that have no tasks. Edit ▸ Undo reverses either. These operations preserve the camera, focus and selection."
         } else {
             alert.messageText = "Allow \(prompt.agentDisplayName) to open files in \(prompt.checkoutDisplayName)?"
             detail = "The agent asked Array to open a document outside its own checkout."

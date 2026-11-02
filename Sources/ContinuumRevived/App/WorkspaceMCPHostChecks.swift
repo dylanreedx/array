@@ -109,7 +109,8 @@ func runWorkspaceMCPHostCheck() throws {
 
     // 1. Discovery and an immediate, authenticated answer.
     guard text.contains("\"protocolVersion\":\"2024-11-05\""),
-          text.contains("\"name\":\"array_board_query\"") && text.contains("\"name\":\"array_board_apply\""),
+          text.contains("\"name\":\"array_board_query\"") && text.contains("\"name\":\"array_board_apply\"")
+            && text.contains("\"name\":\"array_board_manage\""),
           receivedAgentIDs == [agentID.rawValue.uuidString],
           Set(receivedOperations) == [WorkspaceAPIOp.boardQuery.rawValue, WorkspaceAPIOp.canvasQuery.rawValue,
                                       WorkspaceAPIOp.workspaceContext.rawValue],

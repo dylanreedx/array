@@ -213,6 +213,8 @@ enum WorkspaceAPIBoardChecks {
                    "accepted send leaves a one-column board unchanged")
 
         try runComposerHandoff()
+        // Whole-board lifecycle (`board.manage`): create, rename, delete.
+        try WorkspaceAPIBoardManageChecks.run()
     }
 
     /// The film's RST-41 shot: an agent assigns a card to ITSELF through

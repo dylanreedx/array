@@ -27,6 +27,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     case messageAgent = "array_message_agent"
     case boardQuery = "array_board_query"
     case boardApply = "array_board_apply"
+    case boardManage = "array_board_manage"
     case updateAgent = "array_update_agent"
     case deviceList = "array_device_list"
     case deviceOpen = "array_device_open"
@@ -65,7 +66,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     public var kind: AgentToolKind {
         switch self {
         case .workspaceContext, .openDocument, .canvasQuery, .inspectAgent, .getOperation, .boardQuery, .deviceList, .deviceObserve: return .read
-        case .canvasApply, .boardApply, .updateAgent, .deviceOpen, .deviceAct, .deviceClose, .deviceBuildRun, .report, .status: return .edit
+        case .canvasApply, .boardApply, .boardManage, .updateAgent, .deviceOpen, .deviceAct, .deviceClose, .deviceBuildRun, .report, .status: return .edit
         case .findAgent: return .search
         case .delegate: return .delegate
         case .revealAgent, .messageAgent, .browserOpen, .browserNavigate, .browserSnapshot,
@@ -83,7 +84,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .workspaceContext: return "scope"
         case .openDocument, .canvasQuery: return "eye"
         case .canvasApply: return "arrow.up.and.down.and.arrow.left.and.right"
-        case .boardQuery, .boardApply: return "rectangle.split.3x1"
+        case .boardQuery, .boardApply, .boardManage: return "rectangle.split.3x1"
         case .findAgent, .inspectAgent, .revealAgent, .updateAgent: return "person.crop.circle"
         case .delegate: return "person.2"
         case .messageAgent: return "bubble.left"
@@ -124,6 +125,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .messageAgent: return "Messaged an agent"
         case .boardQuery: return "Read the board"
         case .boardApply: return "Updated the board"
+        case .boardManage: return "Changed a board"
         case .updateAgent: return "Changed an agent’s colour"
         case .browserOpen: return "Opened a browser"
         case .browserNavigate: return "Navigated in a browser"

@@ -1,6 +1,6 @@
 import Foundation
 
-/// An explicit API decision for every persisted agent/tile/zone field. The
+/// An explicit API decision for every persisted agent/tile/zone/board field. The
 /// census comes from the models' actual Codable keys, including tile metadata;
 /// adding a key forces a decision even for runtime state and legacy wire keys.
 public enum WorkspaceAPIExposure {
@@ -14,7 +14,8 @@ public enum WorkspaceAPIExposure {
         Set(AgentRecord.CodingKeys.allCases.map { "agent.\($0.rawValue)" }
             + Tile.CodingKeys.allCases.map { "tile.\($0.rawValue)" }
             + TileMetadata.CodingKeys.allCases.map { "tile.metadata.\($0.rawValue)" }
-            + ZonePlacement.CodingKeys.allCases.map { "zone.\($0.rawValue)" })
+            + ZonePlacement.CodingKeys.allCases.map { "zone.\($0.rawValue)" }
+            + Board.CodingKeys.allCases.map { "board.\($0.rawValue)" })
     }
 
     // No fallback classification: a new field must be considered deliberately.
@@ -80,7 +81,7 @@ public enum WorkspaceAPIExposure {
 
         "tile.id": .internal,
         "tile.kind": .internal,
-        "tile.title": .notExposed("Renaming existing tiles is native UI only."),
+        "tile.title": .notExposed("Renaming existing tiles is native UI only; a board tile's title follows its board's (board.title)."),
         "tile.frame": .exposed(.canvasApply),
         "tile.zPosition": .notExposed("Direct stacking edits are native UI only."),
         "tile.zIndex": .internal, // Legacy decode-only rank.
@@ -132,6 +133,13 @@ public enum WorkspaceAPIExposure {
         "zone.navKey": .notExposed("Navigation-key assignment is native UI only."),
         "zone.zPosition": .notExposed("Zone stacking is native UI only."),
         "zone.sharedAreaId": .internal, // Host-owned anchor of a shared area's zone.
+
+        "board.schemaVersion": .internal,
+        "board.id": .internal, // Minted by board.manage create; never caller-chosen.
+        "board.title": .exposed(.boardManage), // create and rename.
+        "board.revision": .internal, // Concurrency token, bumped only by BoardEngine.
+        "board.columns": .notExposed("Column structure stays user-managed; board.manage create uses the default columns."),
+        "board.cards": .exposed(.boardApply),
     ]
 
     public static func violations(

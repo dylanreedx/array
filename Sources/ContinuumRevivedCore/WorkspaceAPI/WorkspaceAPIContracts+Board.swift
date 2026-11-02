@@ -258,3 +258,81 @@ public struct BoardApplyResult: Codable, Equatable, Sendable {
         self.assigneeName = assigneeName
     }
 }
+
+// MARK: - board.manage
+
+/// One whole-board lifecycle change: the Boards sidebar's New, Rename and
+/// Delete. Tasks stay `board.apply`'s.
+///
+/// - `create` takes an optional `title` (default: the zone's board name, as the
+///   UI does) and an optional `nextToTileId` in the caller's own zone (default:
+///   the caller's tile). It has no `boardId` or `expectedRevision`: there is no
+///   board yet, and the idempotency key alone keeps a retry from making two.
+/// - `rename` takes `boardId`, `expectedRevision` and `title`.
+/// - `delete` takes `boardId` and `expectedRevision`, and refuses a board that
+///   still holds tasks (`target_conflict`, `board_not_empty`).
+public struct BoardManageRequest: Codable, Equatable, Sendable {
+    public enum Op: String, Codable, Sendable { case create, rename, delete }
+
+    public var op: Op
+    public var checkoutHandle: CheckoutHandle?
+    public var boardId: UUID?
+    public var expectedRevision: UInt64?
+    public var idempotencyKey: String
+    public var title: String?
+    public var nextToTileId: UUID?
+
+    public init(
+        op: Op, idempotencyKey: String, checkoutHandle: CheckoutHandle? = nil,
+        boardId: UUID? = nil, expectedRevision: UInt64? = nil,
+        title: String? = nil, nextToTileId: UUID? = nil
+    ) {
+        self.op = op
+        self.checkoutHandle = checkoutHandle
+        self.boardId = boardId
+        self.expectedRevision = expectedRevision
+        self.idempotencyKey = idempotencyKey
+        self.title = title
+        self.nextToTileId = nextToTileId
+    }
+}
+
+public struct BoardManageResult: Codable, Equatable, Sendable {
+    public enum Durability: String, Codable, Sendable { case committed }
+
+    public var schema: String = WorkspaceAPISchema.v1
+    public var operationId: String
+    public var op: BoardManageRequest.Op
+    public var boardId: UUID
+    /// The board's tile after the change: the new tile for `create`, the open
+    /// tile (if any) for `rename`, nil for `delete`.
+    public var tileId: UUID?
+    /// The zone the new tile was installed in (`create` only).
+    public var zoneId: UUID?
+    /// The board's title after the change; for `delete`, the title it had.
+    public var title: String
+    /// The board's revision after the change; for `delete`, the revision it had.
+    public var revision: UInt64
+    public var columns: [BoardQueryColumn]
+    public var durability: Durability = .committed
+    /// Whether Edit ▸ Undo can reverse this change. `rename` uses the board's
+    /// own history (the focused board tile's Undo); `create` and `delete` use
+    /// the canvas history, named "New Board" / "Delete Board".
+    public var undoRegistered: Bool
+
+    public init(
+        operationId: String, op: BoardManageRequest.Op, boardId: UUID, tileId: UUID?,
+        zoneId: UUID? = nil, title: String, revision: UInt64, columns: [BoardQueryColumn],
+        undoRegistered: Bool
+    ) {
+        self.operationId = operationId
+        self.op = op
+        self.boardId = boardId
+        self.tileId = tileId
+        self.zoneId = zoneId
+        self.title = title
+        self.revision = revision
+        self.columns = columns
+        self.undoRegistered = undoRegistered
+    }
+}

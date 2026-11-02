@@ -94,7 +94,18 @@ final class BoardRuntime {
     /// spawn path; returns nil only if the store refuses the write, in which case
     /// the caller must not create the tile either.
     func createBoard(id: UUID, title: String, now: Date = Date()) -> Board? {
-        let board = Board.makeDefault(id: id, title: title, now: now)
+        insertBoard(Board.makeDefault(id: id, title: title, now: now), now: now)
+    }
+
+    /// Undo of a `board.manage` delete: the document comes back exactly as it
+    /// was deleted — id, title, columns and revision — closed, with no tile.
+    func restoreBoard(_ board: Board, now: Date = Date()) -> Board? {
+        insertBoard(board, now: now)
+    }
+
+    private func insertBoard(_ board: Board, now: Date) -> Board? {
+        let id = board.id
+        let title = board.title
         do {
             var state = try projectStore.tryLoadBoardState() ?? BoardState(boards: [])
             guard !state.boards.contains(where: { $0.id == id }) else { return nil }

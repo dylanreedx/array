@@ -518,6 +518,61 @@
       }
     },
     {
+      "name": "array_board_manage",
+      "label": "Array Board Manage",
+      "op": "board.manage",
+      "description": "Create, rename or delete a whole board in your project, the same as the Boards sidebar. create makes a board with the default To Do, Doing and Done columns and opens its tile in your own zone beside your tile (or beside nextToTileId, a tile in your zone); it returns boardId, tileId, zoneId and the column ids. rename changes a board's title everywhere it shows. delete removes a board that has no tasks, closing its tile; a board that still has tasks is refused with board_not_empty. Every change can be undone in Array's Edit menu and never moves the camera, focus or selection. Under Agent permissions Ask first, the first create or delete in a session asks the user (scope_approval_required if declined); rename and everything under Free do not ask.",
+      "promptSnippet": "Create, rename or delete an Array task board",
+      "promptGuidelines": [
+        "Create a board only when the user asked for one; to add work, add tasks to an existing board with array_board_apply.",
+        "rename and delete need the board's current revision from array_board_query as expectedRevision; create takes none.",
+        "Reuse the identical idempotencyKey only when recovering the same uncertain call; a different intent needs a new key.",
+        "Delete only empty boards the user asked you to remove. Move or delete each task with array_board_apply first, or leave the board for the user."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string",
+            "enum": [
+              "create",
+              "rename",
+              "delete"
+            ]
+          },
+          "checkoutHandle": {
+            "type": "string"
+          },
+          "boardId": {
+            "type": "string",
+            "description": "The board to rename or delete. Omit for create."
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The board revision from array_board_query. Required for rename and delete; omit for create."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "The board's name. Required for rename; optional for create (default: the zone's board name)."
+          },
+          "nextToTileId": {
+            "type": "string",
+            "description": "create only: a tile in your own zone to place the new board beside. Default: your own tile."
+          }
+        },
+        "required": [
+          "op",
+          "idempotencyKey"
+        ]
+      }
+    },
+    {
       "name": "array_delegate",
       "label": "Array Delegate To Agent",
       "op": "agent.delegate",
@@ -550,7 +605,11 @@
           },
           "harness": {
             "type": "string",
-            "enum": ["Claude Code", "Codex", "Pi"],
+            "enum": [
+              "Claude Code",
+              "Codex",
+              "Pi"
+            ],
             "description": "Child CLI; omit to inherit yours. Must be installed and signed in."
           },
           "retryOf": {
@@ -1907,11 +1966,30 @@
             "items": {
               "type": "object",
               "properties": {
-                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
-                "owner": { "type": "string", "description": "lead, you, or helper ID/name", "minLength": 1, "maxLength": 160 },
-                "state": { "type": "string", "enum": ["waiting", "done"], "description": "Lead/you only" }
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "owner": {
+                  "type": "string",
+                  "description": "lead, you, or helper ID/name",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "waiting",
+                    "done"
+                  ],
+                  "description": "Lead/you only"
+                }
               },
-              "required": ["title", "owner"]
+              "required": [
+                "title",
+                "owner"
+              ]
             }
           }
         },
