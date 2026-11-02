@@ -26,7 +26,7 @@ extension MultiplayerDriver {
             if let theme = (view.runtime as? GhosttyTerminalRuntime)?.resolvedThemeSnapshot {
                 result["palette"] = Array(theme.paletteHex.prefix(16)); result["background"] = theme.backgroundHex ?? ""
             }
-            if let badge = view.subviews.compactMap({ $0 as? SharedTerminalLiveBadge }).first {
+            if let badge = view.liveBadge {
                 result["badge"] = SharedTerminalLiveBadge.text
                 result["stopControl"] = badge.stopButton.superview === badge && !badge.stopButton.isHidden
             }
@@ -42,7 +42,7 @@ extension MultiplayerDriver {
             // The badge's Stop sharing, pressed where a person presses it.
             guard let tile = (request["tile"] as? String).flatMap(UUID.init(uuidString:)),
                   let view = delegate?.canvasView?.tileView(for: tile),
-                  let badge = view.subviews.compactMap({ $0 as? SharedTerminalLiveBadge }).first else { throw Failure(description: "no Live badge") }
+                  let badge = view.liveBadge else { throw Failure(description: "no Live badge") }
             // Where a press at the button lands, as AppKit resolves it.
             var diagnosis: [String] = []
             func pressReachesStop() -> Bool {
@@ -73,7 +73,7 @@ extension MultiplayerDriver {
             badge.onStop = { pressed = true; onStop?() }
             try ShareEntryChecks.click(badge.stopButton)
             do {
-                try await eventually("the share stops", timeout: 20) { view.subviews.compactMap({ $0 as? SharedTerminalLiveBadge }).isEmpty }
+                try await eventually("the share stops", timeout: 20) { (view.liveBadge == nil) }
             } catch {
                 throw Failure(description: "\(error); pressed \(pressed); framed press reaches Stop \(reachedFramed); " + diagnosis.joined(separator: " | "))
             }

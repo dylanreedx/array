@@ -12,8 +12,8 @@ import Foundation
 /// What it holds:
 /// - with the switch off nothing changes: the body is the content view;
 /// - a resting tile is at most `restingViewBudget` views, all of them drawing
-///   views (tile, chrome canvas, transcript canvas, title bar, corner overlay,
-///   awareness border);
+///   views (tile, chrome canvas, transcript canvas, title bar, under-bar with
+///   its pills drawn, corner overlay, awareness border);
 /// - the resting picture and the live picture of the same tile differ by at most
 ///   `restVersusLiveBudget` of their pixels, and the resting picture and TODAY's
 ///   tile (switch off) differ by at most `restVersusTodayBudget` outside the
@@ -43,7 +43,7 @@ enum TileChromeCanvasChecks {
 
     /// tile + chrome canvas + transcript canvas + title bar + corner overlay +
     /// awareness border. Each one draws; nothing below them is in the window.
-    static let restingViewBudget = 6
+    static let restingViewBudget = 7
     /// Share of pixels allowed to differ by more than `channelTolerance`.
     /// Measured: 0.006% resting vs live and 0.014% resting vs today (antialiasing
     /// at a few glyph and ring edges). 0.03% is ~300 pixels of a 920x1120 render:

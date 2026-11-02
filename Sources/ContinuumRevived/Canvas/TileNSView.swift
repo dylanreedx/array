@@ -961,6 +961,7 @@ class TileNSView: NSView, TokenThemed {
         }
         titleBar?.applyCloseButtonSizing(buttonSize: closeButtonWorldSize, glyphPointSize: closeGlyphWorldPointSize)
         titleBar?.applyOverflowGlyphWidth(overflowGlyphWorldWidth)
+        layoutUnderBar()
         // Repair the bar-above-body z-order only when it is actually wrong.
         // `addSubview(_:positioned:)` is a remove+insert that reorders the
         // backing sublayers even when the order is already correct, and this
@@ -1140,11 +1141,11 @@ class TileNSView: NSView, TokenThemed {
         if let pill = subviews.last(where: { $0 is SharedPortalAddPill && !$0.isHidden }), pill.frame.contains(local) {
             return pill
         }
-        // A shared terminal's Live badge (`.plans/114-terminal-sharing`) sits on
-        // the ownership strip, which the grab strip covers at low zoom: its
-        // Stop sharing wins its own press too.
-        if let badge = subviews.last(where: { $0 is SharedTerminalLiveBadge && !$0.isHidden }), badge.frame.contains(local) {
-            return badge.hitTest(local) ?? badge
+        // The under-bar's controls (a shared terminal's Stop sharing,
+        // `.plans/114-terminal-sharing`) win their own press, ahead of the
+        // resize band at the tile's sides. Its background passes through.
+        if let underBar, !underBar.isHidden, underBar.frame.contains(local), let hit = underBar.hitTest(local) {
+            return hit
         }
         // Keep the visible close glyph usable when the enlarged corner target
         // overlaps it at low zoom. The outer resize edge still takes precedence.
@@ -1537,8 +1538,14 @@ class TileNSView: NSView, TokenThemed {
     /// reflowed the document. At low zoom the enlarged grab strip therefore overlays
     /// the top of the body rather than pushing it down — chrome geometry is
     /// unchanged, only what it covers.
+    ///
+    /// The under-bar's share is reserved at the zoom-1 chrome scale
+    /// (`minScreenGrabPx / titleBarHeight`), the scale it draws at in the common
+    /// case, so at 100% it meets the body exactly; zoomed in it leaves a few
+    /// points of body colour, zoomed out it overlays the body like the bar does.
     var contentTopInsetWorldHeight: CGFloat {
-        Self.titleBarHeight + (ownershipMark == nil ? 0 : Self.ownershipStripHeight)
+        let under = underBarWorldHeight
+        return Self.titleBarHeight + (under == 0 ? 0 : (under * Self.minScreenGrabPx / Self.titleBarHeight).rounded(.up))
     }
 
     // MARK: - Ownership mark (`.plans/105-collaboration/SHARE-REDESIGN.md`, mode A)
@@ -1558,19 +1565,123 @@ class TileNSView: NSView, TokenThemed {
     }
     static let ownershipStripHeight: CGFloat = 22
     private(set) var ownershipMark: OwnershipMark?
-    private var ownershipStrip: TileOwnershipStripView?
     private var ownershipOutline: TileOwnershipOutlineView?
-    var qaOwnershipTabText: String? { ownershipStrip?.text }
+    var qaOwnershipTabText: String? { ownershipMark == nil ? nil : underBar?.indicatorText }
+
+    // MARK: - Under-bar
+    //
+    // One row directly under the title bar: the live collaboration indicator at
+    // its far left, then the kind's accessory (an agent's branch and managed
+    // pills), then a trailing control (a shared terminal's Live badge). It is
+    // chrome, like the bar: it sits at `chromeBarHeight`, never under the bar,
+    // and draws at the bar's `chromeScale` (its bounds are its unscaled world
+    // size), so the two grow together when zoomed out. It used to be two
+    // pieces: the ownership strip, pinned at `titleBarHeight` in world units,
+    // and the agent's pills inside the body. Neither followed the bar's
+    // low-zoom floor, so the bar grew down over them and they shrank with it.
+
+    private var underBar: TileUnderBarView?
+    private(set) var underBarAccessoryHeight: CGFloat = 0
+
+    /// The under-bar's height before chrome scale; 0 when it has nothing to show.
+    var underBarWorldHeight: CGFloat {
+        var height: CGFloat = ownershipMark != nil || underBar?.trailing != nil ? Self.ownershipStripHeight : 0
+        if let accessory = underBar?.accessory, !accessory.isHidden { height = max(height, underBarAccessoryHeight) }
+        return height
+    }
+
+    private func ensureUnderBar() -> TileUnderBarView {
+        if let underBar { return underBar }
+        let bar = TileUnderBarView(frame: .zero)
+        addSubview(bar)
+        underBar = bar
+        return bar
+    }
+
+    /// An agent's checkout row (branch, managed, status) rides the under-bar.
+    func setUnderBarAccessory(_ view: NSView, height: CGFloat) {
+        underBarAccessoryHeight = height
+        ensureUnderBar().accessory = view
+        underBarDidChange()
+    }
+
+    func setUnderBarAccessoryHeight(_ height: CGFloat) {
+        guard height != underBarAccessoryHeight else { return }
+        underBarAccessoryHeight = height
+        underBarDidChange()
+    }
+
+    /// A resting agent tile draws its pills as a picture (the accessory moves
+    /// to the hidden resting host, `AgentTileChromeCanvasView.restingHost`),
+    /// so the row costs one drawing view, not the pills' dozen.
+    func setUnderBarAccessoryResting(_ resting: Bool) {
+        guard let underBar else { return }
+        if resting {
+            underBar.restAccessory(in: AgentTileChromeCanvasView.restingHost(matching: window).contentView)
+        } else {
+            underBar.wakeAccessory()
+        }
+    }
+
+    /// The resting accessory's content changed: lay it out and draw it again.
+    func invalidateUnderBarPicture() {
+        guard let underBar, underBar.accessoryIsResting else { return }
+        underBar.needsLayout = true
+        underBar.needsDisplay = true
+    }
+
+    var liveBadge: SharedTerminalLiveBadge? { underBar?.trailing as? SharedTerminalLiveBadge }
+
+    func installLiveBadge(_ badge: SharedTerminalLiveBadge?) {
+        guard badge !== liveBadge else { return }
+        if badge == nil, underBar == nil { return }
+        ensureUnderBar().setTrailing(badge, width: badge?.preferredWidth ?? 0)
+        underBarDidChange()
+    }
+
+    /// What the row shows changed: its height may move the body.
+    func underBarDidChange() {
+        needsLayout = true
+        underBar?.needsLayout = true
+        underBar?.needsDisplay = true
+        layoutUnderBar()
+    }
+
+    /// A rect in a view inside the accessory, in this tile's space, whether the
+    /// accessory is live on the under-bar or resting in the hidden host.
+    func qaUnderBarRect(_ rect: NSRect, in view: NSView) -> NSRect? {
+        guard let underBar, let accessory = underBar.accessory else { return nil }
+        let local = NativeViewVectorRenderer.convert(rect, from: view, to: accessory)
+        let y = accessory.isFlipped == underBar.isFlipped ? local.minY : accessory.bounds.height - local.maxY
+        let inBar = NSRect(x: accessory.frame.minX + local.minX, y: accessory.frame.minY + y, width: local.width, height: local.height)
+        return underBar.convert(inBar, to: self)
+    }
+
+    var qaUnderBarFrame: NSRect? { underBar.flatMap { $0.isHidden ? nil : $0.frame } }
+    var qaLiveIndicatorFrame: NSRect? {
+        guard let underBar, !underBar.isHidden, ownershipMark != nil, let rect = underBar.indicatorRect else { return nil }
+        return underBar.convert(rect, to: self)
+    }
+
+    /// Frames only when the chrome bucket or the content changed, so a camera
+    /// step that stays inside one bucket assigns nothing.
+    private func layoutUnderBar() {
+        guard let underBar else { return }
+        let base = underBarWorldHeight
+        if underBar.isHidden != (base == 0) { underBar.isHidden = base == 0 }
+        guard base > 0 else { return }
+        let bar = chromeBarHeight
+        // The bar's chrome scale, until the row's essentials (the indicator's
+        // dot, a Stop sharing control) would no longer fit across the tile.
+        let scale = max(1, min(bar / Self.titleBarHeight, bounds.width / underBar.minimumContentWidth))
+        underBar.place(frame: NSRect(x: 0, y: bar, width: bounds.width, height: base * scale), unscaledHeight: base)
+    }
 
     func setOwnershipMark(_ mark: OwnershipMark?) {
         guard mark != ownershipMark else { return }
-        let insetChanged = (mark == nil) != (ownershipMark == nil)
         ownershipMark = mark
         if let mark {
-            let strip = ownershipStrip ?? TileOwnershipStripView(frame: .zero)
-            if strip.superview == nil { addSubview(strip) }
-            ownershipStrip = strip
-            strip.apply(text: mark.text, colour: mark.colour)
+            ensureUnderBar().setIndicator(text: mark.text, colour: mark.colour)
             if mark.outlined {
                 let outline = ownershipOutline ?? TileOwnershipOutlineView(frame: bounds)
                 if outline.superview == nil { addSubview(outline) }
@@ -1580,23 +1691,21 @@ class TileNSView: NSView, TokenThemed {
                 ownershipOutline?.removeFromSuperview(); ownershipOutline = nil
             }
         } else {
-            ownershipStrip?.removeFromSuperview(); ownershipStrip = nil
+            underBar?.setIndicator(text: nil, colour: nil)
             ownershipOutline?.removeFromSuperview(); ownershipOutline = nil
         }
         setAccessibilityHelp(mark?.text)
-        if insetChanged { needsLayout = true }
+        underBarDidChange()
         layoutOwnershipMark()
     }
 
     private func layoutOwnershipMark() {
-        guard let strip = ownershipStrip else { return }
-        let frame = NSRect(x: 0, y: Self.titleBarHeight, width: bounds.width, height: Self.ownershipStripHeight)
-        if strip.frame != frame { strip.frame = frame }
+        layoutUnderBar()
         if let outline = ownershipOutline, outline.frame != bounds { outline.frame = bounds }
         // Above the body; the outline above everything but the corner overlay.
-        if let contentView, let index = subviews.firstIndex(of: strip),
+        if let underBar, let contentView, let index = subviews.firstIndex(of: underBar),
            let body = subviews.firstIndex(of: contentView), index < body {
-            addSubview(strip, positioned: .above, relativeTo: contentView)
+            addSubview(underBar, positioned: .above, relativeTo: contentView)
         }
         if let outline = ownershipOutline, subviews.last !== outline, subviews.last !== affordanceOverlay {
             addSubview(outline, positioned: affordanceOverlay == nil ? .above : .below, relativeTo: affordanceOverlay)
@@ -3556,35 +3665,160 @@ extension TitleBarView: NSTextFieldDelegate {
 }
 
 
-/// The ownership mark's strip: one quiet tab under the header.
+/// The row under a tile's title bar (see `TileNSView` › Under-bar): the live
+/// collaboration indicator, the kind's accessory and a trailing control.
 @MainActor
-final class TileOwnershipStripView: NSView {
-    private(set) var text = ""
-    private var colour: NSColor = .systemOrange
+final class TileUnderBarView: NSView {
+    private(set) var indicatorText: String?
+    private var indicatorColour: NSColor = .systemOrange
+    private(set) var trailing: NSView?
+    private var trailingWidth: CGFloat = 0
     override var isFlipped: Bool { true }
 
-    func apply(text: String, colour: NSColor) {
-        guard text != self.text || colour != self.colour else { return }
-        self.text = text; self.colour = colour
-        setAccessibilityElement(true); setAccessibilityRole(.staticText); setAccessibilityLabel(text)
+    private(set) var accessoryIsResting = false
+
+    func restAccessory(in host: NSView?) {
+        guard let accessory, let host, !accessoryIsResting else { return }
+        accessoryIsResting = true
+        accessory.appearance = effectiveAppearance
+        host.addSubview(accessory)
+        needsLayout = true; needsDisplay = true
+    }
+
+    func wakeAccessory() {
+        guard let accessory, accessoryIsResting else { return }
+        accessoryIsResting = false
+        accessory.appearance = nil
+        addSubview(accessory)
+        needsLayout = true; needsDisplay = true
+    }
+
+    /// Fills the space between the indicator and the trailing control.
+    var accessory: NSView? {
+        didSet {
+            guard accessory !== oldValue else { return }
+            accessoryIsResting = false
+            oldValue?.removeFromSuperview()
+            if let accessory {
+                accessory.translatesAutoresizingMaskIntoConstraints = true
+                accessory.autoresizingMask = []
+                addSubview(accessory)
+            }
+            needsLayout = true
+        }
+    }
+
+    func setIndicator(text: String?, colour: NSColor?) {
+        indicatorText = text
+        if let colour { indicatorColour = colour }
+        setAccessibilityElement(text != nil); setAccessibilityRole(.group); setAccessibilityLabel(text)
+        toolTip = text
+        needsLayout = true; needsDisplay = true
+    }
+
+    func setTrailing(_ view: NSView?, width: CGFloat) {
+        if trailing !== view { trailing?.removeFromSuperview() }
+        trailing = view; trailingWidth = width
+        if let view, view.superview !== self { addSubview(view) }
+        needsLayout = true
+    }
+
+    /// `frame` is the scaled world rect in the tile; the bounds keep the row's
+    /// unscaled height, so everything inside draws at the bar's chrome scale.
+    func place(frame next: NSRect, unscaledHeight: CGFloat) {
+        if frame != next { frame = next }
+        let size = NSSize(width: next.width * unscaledHeight / max(next.height, 1), height: unscaledHeight)
+        if abs(bounds.width - size.width) > 0.01 || abs(bounds.height - size.height) > 0.01 {
+            setBoundsSize(size)
+            needsLayout = true; needsDisplay = true
+        }
+    }
+
+    static let indicatorFont = NSFont.token(.caption)
+
+    static let compactIndicatorWidth: CGFloat = 20
+    /// What an accessory (an agent's pills, with the row's insets) keeps
+    /// before the indicator's text gives way.
+    static let accessoryMinimumWidth: CGFloat = 150
+
+    /// The narrowest row that still shows everything that must stay: the
+    /// indicator's dot and the trailing control. The tile caps the row's
+    /// scale at its width over this.
+    var minimumContentWidth: CGFloat {
+        var width: CGFloat = 8
+        if indicatorText != nil { width += Self.compactIndicatorWidth + 8 }
+        if trailing != nil { width += trailingWidth + 8 }
+        if let accessory, !accessory.isHidden { width += Self.accessoryMinimumWidth }
+        return max(width, 1)
+    }
+
+    /// The indicator pill, far left, in bounds space; nil when unshared. Its
+    /// text truncates, then gives way to the dot alone when the row is narrow.
+    var indicatorRect: NSRect? {
+        guard let text = indicatorText else { return nil }
+        let textWidth = ceil((text as NSString).size(withAttributes: [.font: Self.indicatorFont]).width)
+        var cap = bounds.width - 16 - (trailing == nil ? 0 : trailingWidth + 8)
+        if let accessory, !accessory.isHidden {
+            cap = min(cap, bounds.width * 0.45, bounds.width - Self.accessoryMinimumWidth - 12)
+        }
+        let width = textWidth + 26 <= cap ? textWidth + 26 : (cap >= 64 ? cap : Self.compactIndicatorWidth)
+        let height = Self.indicatorPillHeight
+        return NSRect(x: 8, y: (bounds.height - height) / 2, width: width, height: height)
+    }
+
+    static let indicatorPillHeight: CGFloat = 16
+
+    override func layout() {
+        super.layout()
+        var right = bounds.width
+        if let trailing {
+            let height = TileNSView.ownershipStripHeight - 2
+            let frame = NSRect(x: bounds.width - trailingWidth - 8, y: (bounds.height - height) / 2, width: trailingWidth, height: height)
+            if trailing.frame != frame { trailing.frame = frame }
+            right = frame.minX
+        }
+        if let accessory {
+            let left = indicatorRect.map { $0.maxX + 4 } ?? 0
+            let frame = NSRect(x: left, y: 0, width: max(0, right - left), height: bounds.height)
+            if accessory.frame != frame { accessory.frame = frame }
+            // Out of the window while resting: nothing else lays it out.
+            if accessoryIsResting { accessory.layoutSubtreeIfNeeded() }
+        }
+    }
+
+    /// The row's own background never takes a click; its controls do.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit === self ? nil : hit
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        if accessoryIsResting { accessory?.appearance = effectiveAppearance; needsLayout = true }
         needsDisplay = true
     }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
 
     override func draw(_ dirtyRect: NSRect) {
         let theme = effectiveTokenTheme
         SurfaceToken.tileBody.color.nsColor(for: theme).setFill()
         bounds.fill()
-        let font = NSFont.token(.caption)
-        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: TextToken.textSecondary.color.nsColor(for: theme)]
+        if accessoryIsResting, let accessory, let context = NSGraphicsContext.current?.cgContext {
+            NativeViewVectorRenderer.draw(accessory, in: context, parentIsFlipped: isFlipped)
+            NativeViewVectorRenderer.markDrawn(accessory)
+        }
+        guard let text = indicatorText, let pill = indicatorRect else { return }
+        let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byTruncatingTail
+        let attributes: [NSAttributedString.Key: Any] = [.font: Self.indicatorFont, .paragraphStyle: paragraph,
+                                                         .foregroundColor: TextToken.textSecondary.color.nsColor(for: theme)]
         let size = (text as NSString).size(withAttributes: attributes)
-        let pill = NSRect(x: 8, y: 3, width: min(bounds.width - 16, ceil(size.width) + 26), height: bounds.height - 6)
-        guard pill.width > 24 else { return }
         let path = NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2)
         AgentSurfaceRole.rowHover.color.nsColor(for: theme).setFill(); path.fill()
-        colour.withAlphaComponent(0.6).setStroke(); path.lineWidth = 1; path.stroke()
-        colour.setFill()
+        indicatorColour.withAlphaComponent(0.6).setStroke(); path.lineWidth = 1; path.stroke()
+        indicatorColour.setFill()
+        guard pill.width > Self.compactIndicatorWidth else {
+            NSBezierPath(ovalIn: NSRect(x: pill.midX - 4, y: pill.midY - 4, width: 8, height: 8)).fill()
+            return
+        }
         NSBezierPath(ovalIn: NSRect(x: pill.minX + 6, y: pill.midY - 4, width: 8, height: 8)).fill()
         (text as NSString).draw(in: NSRect(x: pill.minX + 18, y: pill.midY - size.height / 2, width: pill.width - 22, height: size.height),
                                 withAttributes: attributes)

@@ -110,7 +110,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// reached. A witness that asserts "the title bar did not move" is vacuous
     /// if the walk reached nothing.
     private(set) var qaPageZoomScaledViewCount = 0
-    private var agentHeaderHeight: NSLayoutConstraint?
     private var compactStatusRowHeight: NSLayoutConstraint?
     private var providerFooterHeight: NSLayoutConstraint?
     private var actionButtonHeight: NSLayoutConstraint?
@@ -472,6 +471,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             NotificationCenter.default.addObserver(self, selector: #selector(managedModeChanged(_:)), name: name, object: nil)
         }
         agentHeader.showsElapsedTime = false
+        agentHeader.onVisibilityChange = { [weak self] in self?.underBarDidChange() }
         agentHeader.installStatusBadge(awarenessBadge)
         enableTitleBarActions()
         compactStatusRow.hideLocationActions()
@@ -1123,7 +1123,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         defer { chromeCanvas?.forceRestingRedraw(); chromeDidChange() }
         let zoom = pageZoom
         leadPlanView.zoom = zoom
-        agentHeaderHeight?.constant = AgentTileHeaderView.preferredHeight(zoom: zoom)
+        setUnderBarAccessoryHeight(AgentTileHeaderView.preferredHeight(zoom: zoom))
         compactStatusRowHeight?.constant = AgentCompactStatusRowView.preferredHeight(zoom: zoom)
         providerFooterHeight?.constant = AgentComposerFooterView.height(zoom: zoom)
         actionButtonHeight?.constant = ComposerActionButton.controlHeight(zoom: zoom)
@@ -1136,6 +1136,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         v2ComposeColumn?.edgeInsets = NSEdgeInsets(Inset.row, zoom: zoom)
         v2FooterRow?.spacing = CGFloat(zoom.scaled(Space.m))
         qaPageZoomScaledViewCount = AgentPageZoomScaling.apply(zoom, in: contentBackdrop)
+            + AgentPageZoomScaling.apply(zoom, in: agentHeader)
         // The transcript is not on the scalable walk: it is a renderer host, and
         // its rung travels in the render context so that a REUSED row adopts the
         // current rung when it materializes. This is also the transaction that
@@ -3653,7 +3654,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         }() : nil
         let transcriptInStack: NSView = slot ?? transcript
         let layout = NSStackView(views: [
-            agentHeader, locationStatus, transcriptInStack, pendingDock, faceFlipBanner, sessionHandoffBanner,
+            locationStatus, transcriptInStack, pendingDock, faceFlipBanner, sessionHandoffBanner,
             leadPlanView, composeBackdrop,
         ])
         layout.orientation = .vertical
@@ -3663,8 +3664,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // WS5: every constraint whose constant is a METRIC is held, because a
         // literal baked into an activated anchor constraint is a number nothing
         // can rescale afterwards.
-        let headerHeight = agentHeader.heightAnchor.constraint(
-            equalToConstant: AgentTileHeaderView.preferredHeight(zoom: pageZoom))
+        // The checkout row (branch, managed, status) is tile chrome now, on the
+        // under-bar beside the live indicator, so it scales with the title bar.
+        setUnderBarAccessory(agentHeader, height: AgentTileHeaderView.preferredHeight(zoom: pageZoom))
         let statusHeight = compactStatusRow.heightAnchor.constraint(
             equalToConstant: AgentCompactStatusRowView.preferredHeight(zoom: pageZoom))
         let footerHeight = providerFooter.heightAnchor.constraint(
@@ -3680,7 +3682,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let statusWidth = compactStatusRow.widthAnchor.constraint(
             equalTo: composeColumn.widthAnchor,
             constant: -CGFloat(pageZoom.scaled(Inset.row).horizontal))
-        agentHeaderHeight = headerHeight
         compactStatusRowHeight = statusHeight
         providerFooterHeight = footerHeight
         actionButtonHeight = actionHeight
@@ -3692,8 +3693,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             layout.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             layout.topAnchor.constraint(equalTo: root.topAnchor),
             layout.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            headerHeight,
-            agentHeader.widthAnchor.constraint(equalTo: layout.widthAnchor),
             locationStatus.widthAnchor.constraint(equalTo: layout.widthAnchor),
             transcriptInStack.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeBackdrop.widthAnchor.constraint(equalTo: layout.widthAnchor),
@@ -4755,7 +4754,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     var qaPageZoomComposerView: AgentComposerView? { v2Composer }
     var qaPageZoomActionButton: ComposerActionButton? { v2ActionButton }
     /// The constants Auto Layout is currently solving with.
-    var qaPageZoomHeaderHeightConstant: CGFloat { agentHeaderHeight?.constant ?? -1 }
+    var qaPageZoomHeaderHeightConstant: CGFloat { underBarAccessoryHeight }
     var qaPageZoomStatusHeightConstant: CGFloat { compactStatusRowHeight?.constant ?? -1 }
     var qaPageZoomFooterHeightConstant: CGFloat { providerFooterHeight?.constant ?? -1 }
     var qaPageZoomActionHeightConstant: CGFloat { actionButtonHeight?.constant ?? -1 }
@@ -5303,6 +5302,7 @@ extension ManagedAgentTileNSView {
         guard let chromeCanvas, chromeCanvas.isResting else { return }
         qaChromeWakeCount += 1
         chromeCanvas.wake()
+        setUnderBarAccessoryResting(false)
         setTitleBarControlsDrawn(false)
     }
 
@@ -5347,6 +5347,7 @@ extension ManagedAgentTileNSView {
         if titleBarActionsMenuIsPresented || Self.presentsChoices(contentBackdrop) { return false }
         if forCameraMotion { qaChromeMotionRestCount += 1 }
         chromeCanvas.rest()
+        setUnderBarAccessoryResting(true)
         setTitleBarControlsDrawn(true) { [weak self] event in
             self?.redeliverRestingPress(event) ?? false
         }
@@ -5395,6 +5396,7 @@ extension ManagedAgentTileNSView {
         if chromeIsAnimating { wakeChrome(); return }
         if chromeCanvas.isResting {
             chromeCanvas.invalidateRestingChrome()
+            invalidateUnderBarPicture()
         } else if chromeRestWork == nil {
             scheduleChromeRest()
         }

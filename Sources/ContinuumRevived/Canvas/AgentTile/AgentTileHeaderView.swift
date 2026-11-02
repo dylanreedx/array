@@ -71,9 +71,16 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         updateVisibility()
     }
 
+    /// The tile's under-bar sizes itself to this view, so it hears when the
+    /// view as a whole appears or goes.
+    var onVisibilityChange: (() -> Void)?
+
     func updateVisibility() {
         updateManagedVisibility()
-        isHidden = branchChip.isHidden && managedBadge.isHidden && statusBadge?.isHidden != false && !showsElapsed
+        let hidden = branchChip.isHidden && managedBadge.isHidden && statusBadge?.isHidden != false && !showsElapsed
+        guard hidden != isHidden else { return }
+        isHidden = hidden
+        onVisibilityChange?()
     }
 
 

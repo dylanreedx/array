@@ -3,7 +3,7 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 /// On the host's own terminal while it is shared (`.plans/114-terminal-sharing`):
-/// a "Live" badge at the right of the tile's ownership strip, and Stop sharing,
+/// a "Live" badge at the right of the tile's under-bar, and Stop sharing,
 /// which takes the terminal out of its share at once. Typing in the terminal
 /// is unaffected; the badge only says that what it shows is being sent.
 @MainActor
@@ -64,13 +64,10 @@ extension AppDelegate {
         let shared = Set(areas.keys).union(portal.keys)
         for tile in canvas.allWorkspaceTiles() where tile.kind == .terminal {
             guard let view = canvas.tileView(for: tile.id) else { continue }
-            let existing = view.subviews.compactMap { $0 as? SharedTerminalLiveBadge }.first
-            guard shared.contains(tile.id), let area = areas[tile.id] ?? portal[tile.id] else { existing?.removeFromSuperview(); continue }
+            let existing = view.liveBadge
+            guard shared.contains(tile.id), let area = areas[tile.id] ?? portal[tile.id] else { view.installLiveBadge(nil); continue }
             let inPortal = areas[tile.id] == nil
             let badge = existing ?? SharedTerminalLiveBadge(frame: .zero)
-            let width = badge.preferredWidth
-            badge.frame = NSRect(x: view.bounds.width - width - 8, y: TileNSView.titleBarHeight + 1, width: width, height: TileNSView.ownershipStripHeight - 2)
-            badge.autoresizingMask = [.minXMargin, .maxYMargin]
             // On its own, Stop ends its share; in a portal, it takes only this
             // terminal out and leaves the portal going.
             let id = tile.id
@@ -78,8 +75,8 @@ extension AppDelegate {
                 fputs("terminal badge: Stop sharing pressed (\(inPortal ? "portal" : "own share"))\n", stderr)
                 Task { inPortal ? await self?.stopPortalTerminal(area: area, tile: id) : await self?.cancelAgentShare(area: area) }
             }
-            // Above the strip it sits on.
-            view.addSubview(badge, positioned: .above, relativeTo: nil)
+            // At the right of the tile's under-bar, which scales with the title bar.
+            view.installLiveBadge(badge)
         }
     }
 }
