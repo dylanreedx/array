@@ -371,6 +371,13 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
                 let delivered = await waitUntil(timeout: 5, pollInterval: 0.02) { fixtureRunners[childId]?.prompts.contains(where: { $0.contains("follow up") }) == true }
                 try expect(delivered, "cross child's runner receives the message")
                 _ = try failure(api.dispatch(agentId: parent, requestId: handle + "-bad", op: "agent.delegate", payload: ["task": "bad", "idempotencyKey": handle + "-bad", "model": "unknown/model"]), .unsupported, "unknown model")
+                // Live 2026-11-02: a Managed lead sent bare ids ("claude-haiku-5-5")
+                // three times and could not find the exact ones. The refusal must
+                // name every id the selected catalogue offers, verbatim.
+                let offered = AgentModelCatalog.shared.snapshot(for: source).models
+                let bare = String(offered.last!.split(separator: "/").last!)
+                let refusedBare = try failure(api.dispatch(agentId: parent, requestId: handle + "-bare", op: "agent.delegate", payload: ["task": "bare", "idempotencyKey": handle + "-bare", "model": bare]), .unsupported, "bare model id")
+                try expect(offered.allSatisfy { refusedBare.message.contains($0) }, "model refusal must list the exact catalogue ids \(offered): \(refusedBare.message)")
             }
         }
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .codex, readiness: .loggedOut, models: []))

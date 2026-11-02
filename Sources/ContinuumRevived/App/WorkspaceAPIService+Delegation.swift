@@ -106,7 +106,10 @@ extension WorkspaceAPIService {
         guard let childModel = request.model ?? (childHarness == parentHarness ? record.model : catalog.seedModel),
               catalog.models.contains(childModel),
               (request.model == nil && childHarness == parentHarness || childModel.contains("/")) else {
-            return fail(.unsupported, "\(childHarness.rawValue) does not offer the requested child model. Use an exact fully qualified id from its live catalogue; no other CLI was tried.")
+            // Name the offered ids verbatim: the caller cannot see the catalogue
+            // otherwise, and a guessed bare id ("claude-haiku-5-5") never matches.
+            let offered = catalog.models.prefix(24).joined(separator: ", ")
+            return fail(.unsupported, "\(childHarness.rawValue) does not offer the requested child model. Use an exact fully qualified id from its live catalogue: \(offered.isEmpty ? "none offered" : offered). No other CLI was tried.")
         }
 
         // 4. Grant (§14.1). Delegation is outside the Phase 1 preset: the first
