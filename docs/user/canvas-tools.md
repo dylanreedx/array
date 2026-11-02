@@ -82,3 +82,5 @@ This scopes the workspace API. It is not an operating-system sandbox for all pro
 | `outcome_unknown` | Recover the original operation’s outcome before repeating it. |
 
 For uncertain writes, `array_get_operation` and recent operations help recover the outcome. Reusing the same idempotency key for the same request prevents a dropped reply from creating a second agent or delivering a message twice. An expired outcome is not permission to repeat it blindly.
+
+For the full tool catalog and inputs, see the [workspace tools reference](/docs/workspace-api/).
