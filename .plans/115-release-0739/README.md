@@ -364,3 +364,98 @@ An installed 0.7.38 should see the update (Check for Updates…).
    in a quiet window. It takes the screen for a few minutes; on and off should
    match.
 2. Dylan's go for the production relay, then steps 1-7 above.
+
+## Shipped (2 November 2026)
+
+Dylan's go, in the orchestrator's transcript at 16:40 UTC: "yep run it and
+SHIP IT", answering a plan that listed the relay update, the deletions,
+notarization, publishing and the push.
+
+### Characters motion harness
+
+`scripts/canvas-motion/character-arms.sh`, 11:41-11:44 EST, Mac idle. The
+Release "Array Motion" bundle was the preview's, built at 04:34 from
+`5ca9f761`. No characters source changed between that and the release tip;
+only the sidebar header, sort-selection, terminal palette and share-page files
+did. The summaries are in `motion/`. The probe scene has 14 tiles, 8 visible.
+
+| Arm | main-thread CPU per camera commit | instructions | camera states/s | gaps >33 ms |
+|---|---|---|---|---|
+| zoom off 1 / 2 | 8.03 / 8.19 ms | 127.2 / 128.7 M | 84 / 82 | 0 / 0 |
+| zoom on 1 / 2 | 8.33 / 8.38 ms | 129.5 / 133.3 M | 83 / 83 | 0 / 1 |
+| pan off 1 / 2 | 4.20 / 4.25 ms | 53.0 / 46.7 M | 88 / 90 | 0 / 0 |
+| pan on 1 / 2 | 4.10 / 3.86 ms | 51.4 / 46.7 M | 94 / 94 | 0 / 0 |
+
+Characters cost nothing measurable.
+- Zoom costs about 0.25 ms (3%) more with them on; the two off runs differ
+  from each other by 0.16 ms. The picture rate is the same.
+- Pan is no costlier with characters on.
+
+### Production relay: v22
+
+- Snapshot of `relay_data`: `vs_0RZjMjgoqNQAhwgV4XGDKmY` (306 MiB).
+- `RELAY_ADMIN_TOKEN` staged as a secret. Its only copy is
+  `~/.config/array/relay-production-admin-token` (0600); it was never printed.
+- `fly deploy . --app arrayapp-relay --config fly.toml --dockerfile Dockerfile`
+  from `22687213` gave **v22**, image
+  `registry.fly.io/arrayapp-relay:deployment-01M6EJECB0Y4MYYJ40SJVFEE05`. The
+  relay code is the same as staging v12.
+- Rollback target: v21,
+  `registry.fly.io/arrayapp-relay:deployment-01M6CJTY26P3GTSX2AFHX31WM5`.
+- After the deploy:
+  - Health 200, schema 5.
+  - 48 route probes (24 public paths, GET and an empty POST) are identical to
+    the pre-deploy baseline. That includes `/collaboration/v1/self` 401 and
+    the admin paths on the public port 401.
+  - 120 of 120 health calls in 10 minutes returned 200, with no timeouts,
+    median 0.13 s and max 0.28 s.
+  - The Mac's event sequence kept advancing (122840 to 122850 at 16:49 UTC).
+
+### Deleted on production (admin port, through `fly proxy`)
+
+First, a check that no real person's area was touched. Dylan and Adrianna
+Boese share only their own two areas, `68EE1462…` and `B639116E…`.
+
+- Areas, all 200:
+  - `A0924B21-6E6C-4E6E-B454-80C02E4EE9B8`, the deploy probe's;
+  - `531291E6-CE15-4FB5-931A-C1383F11A0D5`, `FBC4E464-B311-4685-880B-FC0CC0063770`
+    and `88C9009B-230C-41F8-87FD-D19464844697`, one per Peer A/B pair.
+- People, all 200:
+  - Deploy probe (throwaway) `A1FE6237…`;
+  - Deploy probe joiner `AC39D4BA…`;
+  - Peer A `0A3CA3D6…`, `F53368A9…` and `F8CDC31D…`;
+  - Peer B `16B2057F…`, `90407949…` and `CB0DD50F…`.
+- Left: Dylan, Adrianna Boese, and a second probe pair, "Deploy probe v20
+  (throwaway)" and its joiner, in area `E0F8869B…`. The second pair was not in
+  the asked list, so it is still there.
+
+### App, GitHub release and feed
+
+- `scripts/release-app.sh --identity "Developer ID Application: Dylan Reed (46TTB6J9DZ)" --notary-profile array-notary --set-version 0.7.39 --set-build 90`
+  at `22687213`: the app and DMG were notarized and stapled, and Gatekeeper
+  accepts both.
+  - The app is 0.7.39, build 90, `dev.arrayapp.macos`.
+  - Artifacts: `qa-runs/20261102T170011Z/release/`.
+- `scripts/check-app-bundle.sh --configuration release --channel prod`:
+  every self-check, codesign sign and codesign verify passed. Then it exited 1
+  on its last guard, "real Array/Continuum defaults plists changed", twice.
+  - The cause: Dylan's /Applications Array (pid 28153, running since
+    1 November) rewrites `continuum.sidebar.hiddenExternalSessions` in
+    `dev.arrayapp.macos.plist` every 5-10 s, with nothing else running.
+  - A key-level diff of all four watched domains around the second run found
+    only that one key changed. The bundle under test changed nothing.
+  - The guard compares whole files, so it cannot pass while his app runs, and
+    quitting his app is not allowed. Shipped on that evidence.
+  - Worth fixing in the guard: compare keys, or ignore the keys a running prod
+    app owns.
+- Both DMG names have SHA-256
+  `efb67fb15faaf011b734e4e73eb2e2867b3cfb1549e810fee4b4d656698ebe46`. They are in
+  the main checkout's `releases/`, and on
+  https://github.com/dylanreedx/array-releases/releases/tag/v0.7.39 (not a draft,
+  not a prerelease) as `Array.dmg` and `Array-0.7.39.dmg`, 65,445,386 bytes each.
+- `scripts/generate-appcast.sh /Users/dylan/Documents/personal/Array/releases`
+  dropped 0.2.0 again, leaving 88 items. `reinsert-0.2.0.py` put it back.
+  - The feed now has 89 items: exactly one new (build 90, 0.7.39, EdDSA-signed,
+    the v0.7.39 asset URL) and none removed.
+  - `git diff`: 10 added lines.
+- The ledger row is appended to `docs/VERSIONING.md`.
