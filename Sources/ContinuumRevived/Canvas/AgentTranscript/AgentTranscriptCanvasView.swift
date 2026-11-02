@@ -33,7 +33,7 @@ import ContinuumRevivedCore
 /// Witness: `--transcript-canvas-check` (`TranscriptCanvasChecks`).
 @MainActor
 final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuItemValidation, CornerStyled,
-    DrawnCornerReporting, ToolRowLiveClockTicking {
+    DrawnCornerReporting, ToolRowLiveClockTicking, AgentCharacterRevisiting {
     // MARK: Switch
 
     static let rendererEnvironmentKey = "ARRAY_TRANSCRIPT_RENDERER"
@@ -97,9 +97,16 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         /// An attachment drawn from its full-resolution source, or its state
         /// label until that source arrives.
         case image(AgentImageAttachmentID, CGRect, placeholder: CTLine?)
+        /// Plan 110: another agent's character in an icon slot. A sprite layer
+        /// covers `rect` while one shows; otherwise the mark's fallback icon draws.
+        case character(CharacterMark, CGRect)
 
         func shifted(dx: CGFloat, dy: CGFloat) -> Decoration {
             switch self {
+            case let .character(mark, rect):
+                var moved = mark
+                moved.fallbackRect = mark.fallbackRect.offsetBy(dx: dx, dy: dy)
+                return .character(moved, rect.offsetBy(dx: dx, dy: dy))
             case let .fill(rect, color, radius): return .fill(rect.offsetBy(dx: dx, dy: dy), color, radius: radius)
             case let .stroke(rect, color, radius, width):
                 return .stroke(rect.offsetBy(dx: dx, dy: dy), color, radius: radius, width: width)
@@ -108,6 +115,16 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             case let .image(id, rect, placeholder): return .image(id, rect.offsetBy(dx: dx, dy: dy), placeholder: placeholder)
             }
         }
+    }
+
+    /// Whose character a slot shows, and today's icon for when none can.
+    struct CharacterMark {
+        let agentID: UUID
+        /// A pose fixed by the document (a provider's own subagent row); nil
+        /// resolves the agent's live state through `AgentRenderContext.agentCharacters`.
+        let snapshot: AgentCharacterSnapshot?
+        let fallback: NSImage?
+        var fallbackRect: CGRect
     }
 
     /// A clipped, independently scrolled part of a block: a code body or a tool's
@@ -264,6 +281,11 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let index: Int
     }
 
+    struct CharacterSlotKey: Hashable {
+        let blockID: AgentNodeID
+        let agentID: UUID
+    }
+
     struct RegionKey: Hashable {
         let blockID: AgentNodeID
         let index: Int
@@ -298,6 +320,10 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     private var tailLine: (line: CTLine, top: CGFloat, baseline: CGFloat, x: CGFloat)?
     private var turnInFlight = false
     private let gyro = AgentTranscriptCanvasGyroLayer()
+    /// Plan 110: one sprite per character slot on screen now, and none for a
+    /// slot scrolled out of the viewport (`AgentTranscriptCanvasCharacters.swift`).
+    var characterSprites: [CharacterSlotKey: CharacterSpriteLayer] = [:]
+    var characterObservers: [NSObjectProtocol] = []
 
     /// Selection in document text offsets: `anchor` is where the press began.
     private var selectionAnchor: Int?
@@ -371,6 +397,21 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         NotificationCenter.default.addObserver(
             self, selector: #selector(accessibilityDisplayOptionsDidChange),
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(agentCharactersDidChange),
+            name: AgentCharacterController.didChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(agentCharacterVisibilityDidChange),
+            name: AgentCharacterController.visibilityDidChangeNotification, object: nil)
+    }
+
+    @objc private func agentCharactersDidChange(_ notification: Notification) {
+        // The slot width is in every block's signature: re-lay them, then re-sync.
+        preservingTail { rebuild() }
+    }
+
+    @objc private func agentCharacterVisibilityDidChange(_ notification: Notification) {
+        syncCharacters()
     }
 
     @objc private func accessibilityDisplayOptionsDidChange(_ notification: Notification) {
@@ -389,6 +430,12 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         return !isHiddenOrHasHiddenAncestor && !visibleRect.isEmpty
     }
 
+    /// Far parking moves the body into an off-screen park view in the same window.
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        syncCharacters()
+    }
+
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow == nil { updateScheduler.flush() }
         super.viewWillMove(toWindow: newWindow)
@@ -397,16 +444,19 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         reconcileGyro()
+        syncCharacters()
     }
 
     override func viewDidHide() {
         super.viewDidHide()
         reconcileGyro()
+        syncCharacters()
     }
 
     override func viewDidUnhide() {
         super.viewDidUnhide()
         reconcileGyro()
+        syncCharacters()
     }
 
     private func contextWithDisclosureState(_ context: AgentRenderContext) -> AgentRenderContext {
@@ -427,6 +477,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         for (key, block) in cache where block.containedIDs.contains(id) { cache.removeValue(forKey: key) }
         rebuild()
         scrollOffset = min(scrollOffset, maximumScrollOffset)
+        syncCharacters()
         needsDisplay = true
     }
 
@@ -617,6 +668,13 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         // Every drawn radius is resolved from `CornerRole` at layout time, so a
         // laid block is only valid for the corner style it was laid out in.
         hasher.combine(CornerStyle.current.rawValue)
+        // Plan 110: a character slot is as wide as the selected set's art while
+        // characters show; on, off or a new set re-lays every block once.
+        let characters = AgentCharacterController.shared
+        hasher.combine(characters.isEnabled)
+        hasher.combine(characters.theme?.frameWidth)
+        hasher.combine(characters.theme?.frameHeight)
+        hasher.combine(characters.theme?.scale)
         return hasher.finalize()
     }
 
@@ -897,7 +955,10 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         }
     }
 
+    /// Every scroll, resize and rebuild comes through here: the gyro and the
+    /// character sprites follow the drawn document together.
     private func positionGyro() {
+        syncCharacters()
         guard let tail = tailLine, !gyro.isHidden else { return }
         let side = DualPlaneGyroIndicatorModel.side
         CATransaction.begin()
@@ -905,6 +966,107 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         gyro.frame = CGRect(x: insets.left, y: tail.top - scrollOffset, width: side, height: side)
         CATransaction.commit()
     }
+
+    // MARK: Characters (plan 110)
+
+    /// A character sprite on screen now: whose, in which block, where (view space).
+    struct QACharacterSprite {
+        let blockID: AgentNodeID
+        let agentID: UUID
+        let layer: CharacterSpriteLayer
+    }
+
+    var qaCharacterSprites: [QACharacterSprite] {
+        characterSprites.map { QACharacterSprite(blockID: $0.key.blockID, agentID: $0.key.agentID, layer: $0.value) }
+    }
+
+    /// Every icon slot drawn as a character slot, laid out anywhere in the document.
+    var qaCharacterSlotCount: Int {
+        placed.reduce(0) { count, item in
+            count + item.block.decorations.filter { if case .character = $0 { return true } else { return false } }.count
+        }
+    }
+
+    /// The drawn SF Symbol icons, in view space, of every placed block.
+    var qaSymbolRects: [CGRect] {
+        placed.flatMap { item in
+            item.block.decorations.compactMap { decoration -> CGRect? in
+                guard case let .symbol(_, rect) = decoration else { return nil }
+                return rect.offsetBy(dx: insets.left, dy: item.y - scrollOffset)
+            }
+        }
+    }
+
+    /// Put one sprite on every character slot inside the viewport, posed from
+    /// the agent's state now, and drop the rest: a slot scrolled away owns no
+    /// layer and costs nothing. Sprites move only when the document does (the
+    /// gyro's path); their animation runs on the render server.
+    func syncCharacters(now: Date = Date()) {
+        let controller = AgentCharacterController.shared
+        guard controller.isEnabled, window != nil, bounds.width > 0 else {
+            if !characterSprites.isEmpty {
+                characterSprites.values.forEach { $0.clear(); $0.removeFromSuperlayer() }
+                characterSprites.removeAll()
+                needsDisplay = true
+            }
+            controller.scheduleRevisit(for: self, at: nil)
+            return
+        }
+        let appearance: AgentCharacterAtlas.Appearance = theme == .light ? .light : .dark
+        let viewport = CGRect(x: 0, y: scrollOffset, width: bounds.width, height: bounds.height)
+        let paused = !controller.windowIsVisible(window!) || isHiddenOrHasHiddenAncestor || visibleRect.isEmpty
+        var seen: Set<CharacterSlotKey> = []
+        var revisit: Date?
+        var changedFallback = false
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        var index = firstPlaced(atOrBelow: viewport.minY)
+        while index < placed.count {
+            let item = placed[index]
+            index += 1
+            if item.y > viewport.maxY { break }
+            for decoration in item.block.decorations {
+                guard case let .character(mark, rect) = decoration else { continue }
+                let docRect = rect.offsetBy(dx: insets.left, dy: item.y)
+                guard docRect.intersects(viewport) else { continue }
+                let key = CharacterSlotKey(blockID: item.blockID, agentID: mark.agentID)
+                let live = mark.snapshot == nil ? renderContext.agentCharacters.current(mark.agentID) : nil
+                guard let atlas = controller.atlas(for: mark.agentID, appearance: appearance, name: live?.characterName) else { continue }
+                // Nothing known about the agent: its own character, standing idle.
+                let snapshot = mark.snapshot ?? live?.snapshot ?? AgentCharacterSnapshot(state: .ready)
+                let plan = controller.plan(for: snapshot, now: now)
+                let sprite: CharacterSpriteLayer
+                if let existing = characterSprites[key] {
+                    sprite = existing
+                } else {
+                    sprite = CharacterSpriteLayer()
+                    sprite.hostIsFlipped = true
+                    layer?.addSublayer(sprite)
+                    characterSprites[key] = sprite
+                    changedFallback = true
+                }
+                let frame = docRect.offsetBy(dx: 0, dy: -scrollOffset)
+                if sprite.frame != frame { sprite.frame = frame }
+                let opacity = Float(item.block.alpha)
+                if sprite.opacity != opacity { sprite.opacity = opacity }
+                sprite.show(plan, sprite: atlas, phase: controller.phase(for: mark.agentID), now: now)
+                sprite.setPaused(paused, now: now)
+                seen.insert(key)
+                if let at = plan.revisitAt { revisit = min(revisit ?? at, at) }
+            }
+        }
+        for (key, sprite) in characterSprites where !seen.contains(key) {
+            sprite.clear()
+            sprite.removeFromSuperlayer()
+            characterSprites[key] = nil
+            changedFallback = true
+        }
+        CATransaction.commit()
+        controller.scheduleRevisit(for: self, at: revisit)
+        if changedFallback { needsDisplay = true }
+    }
+
+    func revisitCharacter(now: Date) { syncCharacters(now: now) }
 
     // MARK: Drawing
 
@@ -1028,6 +1190,13 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                 case let .symbol(image, rect):
                     guard rect.intersects(localVisible) else { continue }
                     image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                case let .character(mark, rect):
+                    // A sprite layer shows the character; with none, today's icon.
+                    guard rect.intersects(localVisible), let image = mark.fallback,
+                          characterSprites[CharacterSlotKey(blockID: item.blockID, agentID: mark.agentID)] == nil
+                    else { continue }
+                    image.draw(in: mark.fallbackRect, from: .zero, operation: .sourceOver, fraction: 1,
+                               respectFlipped: true, hints: nil)
                 case let .image(attachmentID, rect, placeholder):
                     guard rect.intersects(localVisible) else { continue }
                     if let source = imageSources[attachmentID]?.image {
@@ -1744,6 +1913,8 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                     switch decoration {
                     case let .symbol(_, rect) where reveal.rect.contains(CGPoint(x: rect.midX, y: rect.midY)):
                         glyph = rect
+                    case let .character(_, rect) where reveal.rect.contains(CGPoint(x: rect.midX, y: rect.midY)):
+                        glyph = rect
                     case let .stroke(rect, _, radius, width) where rect == reveal.rect:
                         stroke = (radius, width)
                     default:
@@ -1908,6 +2079,8 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         for decoration in item.block.decorations {
             switch decoration {
             case let .symbol(_, rect) where icon == nil:
+                icon = rect.offsetBy(dx: origin.x, dy: origin.y)
+            case let .character(_, rect) where icon == nil:
                 icon = rect.offsetBy(dx: origin.x, dy: origin.y)
             case let .text(ctLine, baseline) where status == nil:
                 var ascent: CGFloat = 0, descent: CGFloat = 0

@@ -4086,6 +4086,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             imageResources: managedImageResourceProvider,
             agentStatus: agentReferenceStatusSource,
             agentMessageSenders: agentMessageSenderSource,
+            agentCharacters: agentCharacterSource,
             // TR-06 — read LIVE from the supervisor, exactly like
             // `updateV2ComposerPresentation` does, and never from the cached
             // `v2TurnSnapshot` alone: the cache is what latched a stale
@@ -4133,6 +4134,27 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 supervisor?.removeTurnCapabilitiesObserver(token)
             }
         )
+    }
+
+    /// Plan 110: another agent's character in this transcript (a child's chip, a
+    /// message sender), from the same facts and projection as that agent's own
+    /// tile header and sidebar row, so all three show one pose.
+    private var agentCharacterSource: AgentCharacterSource {
+        guard let supervisor = agentSource else { return .unavailable }
+        return AgentCharacterSource(current: { [weak supervisor] rawAgentID in
+            guard let supervisor else { return nil }
+            let agentID = AgentID(rawValue: rawAgentID)
+            let record = supervisor.records[agentID]
+            let turn = supervisor.turnSnapshot(for: agentID)
+            guard record != nil || turn != nil else { return nil }
+            let state = turn.map(InboxState.state(forSnapshot:))
+                ?? (record?.latestTerminalEvent.map { $0.outcome == .failed || $0.outcome == .runtimeError } == true
+                    ? .failed : .ready)
+            let activity = AgentCharacterActivityProjection.activity(
+                presence: turn?.presence, terminalEvent: record?.latestTerminalEvent, latestPromptAt: record?.latestPromptAt)
+            return .init(snapshot: AgentCharacterSnapshot(state: state, activity: activity, title: record?.displayName ?? ""),
+                         characterName: record?.characterName)
+        })
     }
 
     /// Read from the supervisor's records when a card is drawn, so a sender's

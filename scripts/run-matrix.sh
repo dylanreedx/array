@@ -2066,6 +2066,10 @@ run_app_check .build/debug/Array --sidebar-character-check
 # every chrome scale, title clear of the pill, far park / out of window hold still,
 # and a ⌘-scroll zoom through the window costs the bar nothing extra.
 run_app_check .build/debug/Array --tile-character-check
+# Plan 110: other agents' characters in a lead's drawn transcript: each child's
+# chip in that child's pose, a sender's card, a Task row, off-viewport slots own
+# no sprite, and off restores today's icons at the same chip height.
+run_app_check .build/debug/Array --transcript-character-check
 # Plan 110, slice 6: Settings › Appearance › Agent characters: import copies one
 # file, a bad file shows its problems and imports nothing, discovery uses a fixture
 # home only, and the preview grid renders in both appearances (still under RM).

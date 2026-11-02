@@ -283,7 +283,8 @@ extension AgentTranscriptCanvasView {
             attributedTitle: shell.map { ToolCallView.shellTitle($0, zoom: zoom, primary: primary, secondary: secondary) },
             status: status, statusAttention: needsAttention,
             symbolName: ToolCallView.symbolName(forToolNamed: tool.presentedToolNameText ?? tool.name),
-            disclosure: hasDetail ? (block.id, expanded) : nil)
+            disclosure: hasDetail ? (block.id, expanded) : nil,
+            character: Self.providerSubagentCharacter(block, tool: tool))
         body.builder.toolStatus = (status, !tool.status.agentToolIsTerminal)
         let inset = ToolCallView.horizontalInset(zoom: zoom)
         let indent = ToolCallView.detailIndent(zoom: zoom)
@@ -388,7 +389,8 @@ extension AgentTranscriptCanvasView {
     @discardableResult
     func headerRow(into builder: inout Builder, width: CGFloat, title: String, titleFont: NSFont,
                    attributedTitle: NSAttributedString? = nil, status: String,
-                   statusAttention: Bool, symbolName: String, disclosure: (AgentNodeID, Bool)?) -> CGFloat {
+                   statusAttention: Bool, symbolName: String, disclosure: (AgentNodeID, Bool)?,
+                   character: (agentID: UUID, snapshot: AgentCharacterSnapshot)? = nil) -> CGFloat {
         let rowHeight = ToolCallView.rowHeight(zoom: zoom)
         let inset = ToolCallView.horizontalInset(zoom: zoom)
         let buttonSide = S(Space.xxl)
@@ -399,11 +401,11 @@ extension AgentTranscriptCanvasView {
                 action: .toggle(id, expanded: !expanded)))
         }
         let iconX = inset + buttonSide + S(Space.s)
-        if let icon = Self.symbol(symbolName, pointSize: S(13), color: secondary) {
-            builder.decorations.append(.symbol(icon, CGRect(
-                x: iconX + (buttonSide - icon.size.width) / 2, y: (rowHeight - icon.size.height) / 2,
-                width: icon.size.width, height: icon.size.height)))
-        }
+        let icon = Self.symbol(symbolName, pointSize: S(13), color: secondary)
+        let iconRect = icon.map { CGRect(x: iconX + (buttonSide - $0.size.width) / 2, y: (rowHeight - $0.size.height) / 2,
+                                         width: $0.size.width, height: $0.size.height) } ?? .zero
+        appendIcon(icon, at: iconRect, character: character?.agentID, snapshot: character?.snapshot,
+                   slot: CGRect(x: iconX, y: 0, width: buttonSide, height: rowHeight), into: &builder)
         let captionFont = NSFont.token(.caption, zoom: zoom)
         let statusLine = Self.line(status, font: captionFont,
                                    color: statusAttention ? AgentLineRole.attention.color.nsColor(for: theme) : secondary)
@@ -419,6 +421,65 @@ extension AgentTranscriptCanvasView {
             titleString, x: titleX, top: 0, height: rowHeight,
             maxWidth: max(1, statusX - titleX - S(Space.m)), font: titleFont)], links: []))
         return rowHeight
+    }
+
+    // MARK: Characters (plan 110)
+
+    /// The selected set's character size at this page zoom, while characters show.
+    var characterSlot: CGSize? {
+        let controller = AgentCharacterController.shared
+        guard controller.isEnabled, let theme = controller.theme else { return nil }
+        let scale = CGFloat(theme.scale)
+        return CGSize(width: S(Double(CGFloat(theme.frameWidth) / scale)), height: S(Double(CGFloat(theme.frameHeight) / scale)))
+    }
+
+    /// An icon slot: `character`'s character, centred in `slot`, while characters
+    /// show (today's icon draws only if no sprite can); otherwise today's icon.
+    func appendIcon(_ icon: NSImage?, at iconRect: CGRect, character agentID: UUID?, snapshot: AgentCharacterSnapshot?,
+                    slot: CGRect, into builder: inout Builder) {
+        guard let agentID, let size = characterSlot else {
+            if let icon { builder.decorations.append(.symbol(icon, iconRect)) }
+            return
+        }
+        // Whole points, so 1 pt art pixels land on device pixels.
+        let rect = CGRect(x: (slot.midX - size.width / 2).rounded(), y: (slot.midY - size.height / 2).rounded(),
+                          width: size.width, height: size.height)
+        builder.decorations.append(.character(
+            CharacterMark(agentID: agentID, snapshot: snapshot, fallback: icon, fallbackRect: iconRect), rect))
+    }
+
+    /// A subagent the provider runs itself (Claude's Task/Agent tool, a codex or
+    /// pi spawn) has no Array agent: its character is chosen from the row's id
+    /// and posed by the tool's own status. Array's own workspace tools are not
+    /// one: their children have chips.
+    static func providerSubagentCharacter(_ block: AgentBlock, tool: AgentToolCallPayload)
+        -> (agentID: UUID, snapshot: AgentCharacterSnapshot)? {
+        let name = tool.presentedToolNameText ?? tool.name
+        guard ArrayWorkspaceTool(toolName: name) == nil, AgentToolKind.resolve(toolName: name) == .delegate else { return nil }
+        let title = tool.summary ?? ""
+        let snapshot: AgentCharacterSnapshot
+        switch tool.status {
+        case .pending, .inProgress: snapshot = AgentCharacterSnapshot(state: .working, title: title)
+        case .completed: snapshot = AgentCharacterSnapshot(state: .ready, activity: .init(outcome: .succeeded))
+        case .failed: snapshot = AgentCharacterSnapshot(state: .failed)
+        case .cancelled, .interrupted: snapshot = AgentCharacterSnapshot(state: .ready, activity: .init(outcome: .stopped))
+        }
+        return (stableUUID(block.id.rawValue), snapshot)
+    }
+
+    /// A UUID from a string that is the same in every process (Swift's `Hasher`
+    /// is seeded per launch): FNV-1a, twice, into 16 bytes.
+    static func stableUUID(_ string: String) -> UUID {
+        func fnv(_ seed: UInt64) -> UInt64 {
+            var hash = seed
+            for byte in string.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100000001b3 }
+            return hash
+        }
+        let a = fnv(0xcbf29ce484222325), b = fnv(0x84222325cbf29ce4)
+        var bytes = [UInt8](repeating: 0, count: 16)
+        for i in 0..<8 { bytes[i] = UInt8((a >> (8 * UInt64(i))) & 0xff); bytes[8 + i] = UInt8((b >> (8 * UInt64(i))) & 0xff) }
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
     }
 
     // MARK: Boundaries (SessionBoundaryRenderer, CompactionRenderer)
@@ -990,15 +1051,21 @@ extension AgentTranscriptCanvasView {
             if let status = info.status {
                 title.append(NSAttributedString(string: "  ·  \(status)", attributes: [.font: label, .foregroundColor: secondary]))
             }
+            // The chip keeps its own size: a character wider than the icon is
+            // centred on the icon's slot, over the padding either side.
             let glyphBox = S(14)
             let titleWidth = min(ceil(Self.width(of: CTLineCreateWithAttributedString(Self.coreTextString(title)))),
                                  chip.width - glyphBox - S(Space.s) - 2 * S(Space.l))
             let contentX = chip.minX + (chip.width - (glyphBox + S(Space.s) + titleWidth)) / 2
-            if let glyph = Self.symbol("person.2.fill", pointSize: S(11), color: info.accent ?? secondary, weight: .semibold) {
-                body.builder.decorations.append(.symbol(glyph, CGRect(
-                    x: contentX + (glyphBox - glyph.size.width) / 2, y: chip.midY - glyph.size.height / 2,
-                    width: glyph.size.width, height: glyph.size.height)))
-            }
+            let glyph = Self.symbol("person.2.fill", pointSize: S(11), color: info.accent ?? secondary, weight: .semibold)
+            let glyphRect = glyph.map { CGRect(x: contentX + (glyphBox - $0.size.width) / 2, y: chip.midY - $0.size.height / 2,
+                                               width: $0.size.width, height: $0.size.height) } ?? .zero
+            // Right-aligned on the slot: the art's spare width goes into the
+            // leading padding, and the gap to the name stays the icon's.
+            let artWidth = max(glyphBox, characterSlot?.width ?? 0)
+            appendIcon(glyph, at: glyphRect, character: reference.payload.agentID, snapshot: nil,
+                       slot: CGRect(x: contentX + glyphBox - artWidth, y: chip.minY, width: artWidth, height: chip.height),
+                       into: &body.builder)
             body.builder.rows.append(TextRow(string: title, lines: [Self.singleLine(
                 title, x: contentX + glyphBox + S(Space.s), top: chip.minY, height: chip.height,
                 maxWidth: max(1, titleWidth), font: label)], links: []))
@@ -1081,12 +1148,16 @@ extension AgentTranscriptCanvasView {
                                               (accent ?? renderContext.tokens.decorativeLine.color.nsColor(for: theme)).cgColor, radius: 0))
         body.builder.decorations.append(.stroke(card, renderContext.tokens.decorativeLine.color.cgColor(for: theme), radius: radius, width: hairline))
         var x = contentX
-        if let glyph = Self.symbol("bubble.left.fill", pointSize: S(11), color: accent ?? secondary, weight: .semibold) {
-            body.builder.decorations.append(.symbol(glyph, CGRect(x: x + (S(12) - glyph.size.width) / 2,
-                                                                  y: headerTop + (headerHeight - glyph.size.height) / 2,
-                                                                  width: glyph.size.width, height: glyph.size.height)))
-        }
-        x += S(12) + S(Space.xs)
+        // Plan 110: an Array sender's own character, else the bubble.
+        let senderCharacter = message.origin == .array ? message.senderAgentID : nil
+        let glyphBox = senderCharacter == nil ? S(12) : max(S(12), characterSlot?.width ?? 0)
+        let glyph = Self.symbol("bubble.left.fill", pointSize: S(11), color: accent ?? secondary, weight: .semibold)
+        let glyphRect = glyph.map { CGRect(x: x + (glyphBox - $0.size.width) / 2, y: headerTop + (headerHeight - $0.size.height) / 2,
+                                           width: $0.size.width, height: $0.size.height) } ?? .zero
+        appendIcon(glyph, at: glyphRect, character: senderCharacter, snapshot: nil,
+                   slot: CGRect(x: x, y: headerTop, width: glyphBox, height: headerHeight), into: &body.builder)
+        if let senderCharacter, characterSlot != nil { subscribeStatus(senderCharacter, blockID: block.id) }
+        x += glyphBox + (glyphBox > S(12) ? S(Space.s) : S(Space.xs))
         let header = NSMutableAttributedString(string: message.senderName, attributes: [
             .font: NSFont.systemFont(ofSize: label.pointSize, weight: .semibold), .foregroundColor: primary])
         header.append(NSAttributedString(string: "  ·  \(AgentMessageCardView.caption(message.origin))",

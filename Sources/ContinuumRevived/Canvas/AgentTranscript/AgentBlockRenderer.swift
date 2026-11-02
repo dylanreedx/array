@@ -351,6 +351,8 @@ struct AgentRenderContext {
     /// An agent-message card's sender as it is now: its identity colour and
     /// whether its tile can be opened. Outside the document for the same reason.
     var agentMessageSenders: AgentMessageSenderSource = .unavailable
+    /// Plan 110: the character of an agent a chip or card stands for.
+    var agentCharacters: AgentCharacterSource = .unavailable
     /// TR-06: whether the BOUND RUNNER can carry a response back to a provider
     /// request. Live capability, deliberately outside the semantic document for
     /// the same reason `agentStatus` is — the document records what the provider

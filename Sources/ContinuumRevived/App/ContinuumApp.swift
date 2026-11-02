@@ -2496,6 +2496,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // Plan 110: other agents' characters in a lead's transcript (chips, cards, Task rows).
+        if CommandLine.arguments.contains("--transcript-character-check") {
+            _ = NSApplication.shared
+            do {
+                print(try TranscriptCharacterChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL transcript character: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         // Plan 110, slice 4: characters on the real sidebar.
         if CommandLine.arguments.contains("--sidebar-character-check") {
             _ = NSApplication.shared

@@ -24,6 +24,24 @@ struct AgentReferenceStatusSource: @unchecked Sendable {
     )
 }
 
+/// Plan 110: another agent's character as the transcript draws it (a child's
+/// chip, a message sender): who it is and what it is doing now. Resolved at
+/// render time and outside the document, for the reason `AgentReferenceStatusSource`
+/// is. The host builds it from the supervisor; a shared agent's guest builds it
+/// from what the wire carries. nil: nothing known, and the chip shows the
+/// agent's own character standing idle.
+struct AgentCharacterSource: @unchecked Sendable {
+    struct Input: Equatable {
+        var snapshot: AgentCharacterSnapshot
+        /// The agent's chosen character, by name; nil lets its id choose.
+        var characterName: String?
+    }
+
+    let current: (UUID) -> Input?
+
+    static let unavailable = AgentCharacterSource(current: { _ in nil })
+}
+
 /// A transcript milestone for one real child agent. The block owns only stable
 /// identity; the host resolves current status and tile placement when activated.
 ///
