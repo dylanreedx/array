@@ -99,8 +99,13 @@ enum SharedPortalLiveKindChecks {
         try require(noteItem.qaFacts["text"] == "Plan: wallets first" && noteItem.qaFacts["editable"] == "false",
                     "note: the guest shows the host's text, read only in the portal")
         noteView.textView.insertText(" · then Apple Pay", replacementRange: NSRange(location: (noteView.textView.string as NSString).length, length: 0))
-        try require(try await observed(noteKind, tile: note, object: noteObject, into: noteItem) { noteItem.qaFacts["text"]?.hasSuffix("then Apple Pay") == true },
+        try require(try await observed(noteKind, tile: note, object: noteObject, into: noteItem) { noteItem.qaFacts["text"] == "Plan: wallets first · then Apple Pay" },
                     "note: a host edit reaches the portal through observe")
+        // A rewrite, not an append: each revision replaces the text whole.
+        noteView.textView.string = "Rewritten on the host"
+        noteView.textView.didChangeText()
+        try require(try await observed(noteKind, tile: note, object: noteObject, into: noteItem) { noteItem.qaFacts["text"] == "Rewritten on the host" },
+                    "note: a whole rewrite on the host shows exactly in the portal: \(noteItem.qaFacts["text"] ?? "")")
 
         let (fileItem, fileKind, fileObject) = try await show(.file, tile: file, title: "README.md")
         try require(fileItem.qaFacts["text"]?.contains("changed for the diff") == true, "file: the guest shows the saved file (a real git capture)")

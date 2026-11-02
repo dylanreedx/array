@@ -432,9 +432,7 @@ extension AppDelegate {
             defer { view?.attaching = false }
             guard let self, let view, view.session == nil else { return }
             guard let model = try? collaborationAccountModel() else { return }
-            if model.status != .ready, let remembered = model.selectedAccountID ?? (model.accounts.count == 1 ? model.accounts.first?.id : nil) {
-                _ = try? await model.select(accountID: remembered)
-            }
+            await Self.awaitRememberedAccount(model)
             guard view.session == nil, model.status == .ready, let account = model.activeAccount,
                   reference.accountId == nil || reference.accountId == account.id,
                   account.knownAreas.contains(where: { $0.id == reference.areaId }),
