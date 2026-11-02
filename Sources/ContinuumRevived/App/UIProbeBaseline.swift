@@ -266,8 +266,15 @@ enum UIProbeBaseline {
     /// which gates every static card it renders against the same committed bytes —
     /// so the Lab check and this leg can never drift into two different comparisons.
     static func mismatch(of probe: UIProbe.Probed, name: String, size: NSSize) throws -> (failure: String?, fraction: Double) {
-        let actual = try canvas(of: probe.hostRep, size: size, label: name)
-        let url = try baselineDirectory().appendingPathComponent(name)
+        try mismatch(of: probe.hostRep, name: name, size: size, in: baselineDirectory())
+    }
+
+    /// The same comparison for a render outside the Lab catalogue, against
+    /// `directory/name`. Such gates keep their baselines in a subdirectory: the
+    /// stale-baseline sweep in `runBaselineChecks` reads only top-level PNGs.
+    static func mismatch(of rep: NSBitmapImageRep, name: String, size: NSSize, in directory: URL) throws -> (failure: String?, fraction: Double) {
+        let actual = try canvas(of: rep, size: size, label: name)
+        let url = directory.appendingPathComponent(name)
         guard FileManager.default.fileExists(atPath: url.path) else {
             return ("\(name): no committed baseline", 0)
         }
@@ -301,6 +308,17 @@ enum UIProbeBaseline {
     }
 
     static var isUpdating: Bool { ProcessInfo.processInfo.environment[updateEnvironmentKey] == "1" }
+
+    /// Writes `rep` as the baseline `directory/name` under `CONTINUUM_UPDATE_BASELINES=1`;
+    /// true when the committed bytes changed.
+    static func bless(_ rep: NSBitmapImageRep, name: String, size: NSSize, in directory: URL) throws -> Bool {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(name)
+        let data = try pngData(for: canvas(of: rep, size: size, label: name), label: name)
+        guard (try? Data(contentsOf: url)) != data else { return false }
+        try data.write(to: url)
+        return true
+    }
 
     // MARK: - Check
 

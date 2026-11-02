@@ -100,8 +100,17 @@ enum SharedAgentAppearance {
 
     /// `--shared-agent-render-check <dir>`: the surface in light and dark, once
     /// the live views have read their projection, as PNGs. Off-screen.
+    ///
+    /// Each render is also compared with its committed baseline in
+    /// `<UIProbeBaseline.baselineRelativePath>/shared-agent/` (red on a mismatch or
+    /// a missing baseline), blessed only by `CONTINUUM_UPDATE_BASELINES=1`. The
+    /// comparison is display-dependent like the other baseline legs, so
+    /// `CONTINUUM_SKIP_UI_BASELINES=1` skips it and still writes the PNGs.
     static func render(to directory: URL) async throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let skipBaselines = ProcessInfo.processInfo.environment["CONTINUUM_SKIP_UI_BASELINES"] == "1"
+        let baselines = try skipBaselines ? nil : UIProbeBaseline.baselineDirectory().appendingPathComponent("shared-agent")
+        var failures: [String] = []
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             let view = try surface()
             let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
@@ -120,6 +129,21 @@ enum SharedAgentAppearance {
             try png.write(to: directory.appendingPathComponent(name))
             print("WROTE \(directory.appendingPathComponent(name).path)")
             window.orderOut(nil)
+            guard let baselines else { continue }
+            let baseline = UIProbeBaseline.baselineName(id: "shared-agent", size: size, appearance: appearance)
+            if UIProbeBaseline.isUpdating {
+                if try UIProbeBaseline.bless(rep, name: baseline, size: size, in: baselines) { print("BLESSED \(baseline)") }
+                continue
+            }
+            let (failure, fraction) = try UIProbeBaseline.mismatch(of: rep, name: baseline, size: size, in: baselines)
+            if let failure { failures.append(failure) } else { print(String(format: "MATCHED %@ (%.4f%% differ)", baseline, fraction * 100)) }
+        }
+        if skipBaselines {
+            print("MATRIX-NOTE: shared agent baseline comparison skipped with display-dependent checks; the light and dark PNGs were still written.")
+        }
+        guard failures.isEmpty else {
+            throw SharedAreaCheckRig.Failure(description: failures.joined(separator: "\n")
+                + "\nIf intended, bless with \(UIProbeBaseline.updateEnvironmentKey)=1 and review the baseline diff.")
         }
     }
 }
