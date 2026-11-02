@@ -19,7 +19,8 @@ enum SharedTileAppearance {
     static func page() -> Data {
         let image = NSImage(size: NSSize(width: 800, height: 520), flipped: true) { rect in
             NSColor.white.setFill(); rect.fill()
-            NSColor(calibratedRed: 0.95, green: 0.95, blue: 0.97, alpha: 1).setFill()
+            // A stand-in web page's header band, not Array chrome.
+            NSColor.systemGray.withAlphaComponent(0.1).setFill()
             NSRect(x: 0, y: 0, width: 800, height: 64).fill()
             ("localhost:3000 · Checkout" as NSString).draw(at: NSPoint(x: 24, y: 22),
                 withAttributes: [.font: NSFont.systemFont(ofSize: 18, weight: .semibold), .foregroundColor: NSColor.black])

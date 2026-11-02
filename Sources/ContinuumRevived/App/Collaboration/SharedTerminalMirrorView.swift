@@ -265,10 +265,8 @@ final class SharedTerminalMirrorView: NSView {
 
     /// The host's background, else Array's tile body.
     var hostBackground: NSColor {
-        if let hex = palette?.background?.trimmingCharacters(in: CharacterSet(charactersIn: "#")), hex.count == 6, let raw = Int(hex, radix: 16) {
-            return NSColor(srgbRed: CGFloat((raw >> 16) & 0xff) / 255, green: CGFloat((raw >> 8) & 0xff) / 255, blue: CGFloat(raw & 0xff) / 255, alpha: 1)
-        }
-        return SurfaceToken.tileBody.color.nsColor(in: self)
+        // The host's Ghostty palette, read the way Array reads its own.
+        palette?.background.flatMap(GhosttyThemeSnapshot.color(hex:)) ?? SurfaceToken.tileBody.color.nsColor(in: self)
     }
 
     // MARK: QA

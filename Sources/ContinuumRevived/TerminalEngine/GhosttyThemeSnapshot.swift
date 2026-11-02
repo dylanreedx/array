@@ -65,7 +65,9 @@ struct GhosttyThemeSnapshot: Equatable {
         value ?? NSNull()
     }
 
-    private static func color(hex: String) -> NSColor? {
+    /// A terminal palette colour from its `#rrggbb`: the one place Array turns
+    /// a Ghostty (or a teammate's shared Ghostty) palette entry into a colour.
+    static func color(hex: String) -> NSColor? {
         let trimmed = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#").union(.whitespacesAndNewlines))
         guard trimmed.count == 6, let raw = UInt32(trimmed, radix: 16) else { return nil }
         return NSColor(
