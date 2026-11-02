@@ -1,0 +1,10 @@
+        <item>
+            <title>0.2.0</title>
+            <pubDate>Wed, 09 Sep 2026 11:01:10 -0400</pubDate>
+            <link>https://arrayapp.dev</link>
+            <sparkle:version>2</sparkle:version>
+            <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/dylanreedx/array-releases/releases/download/v0.2.0/Array-0.2.0.dmg" length="20797132" type="application/octet-stream" />
+        <sparkle:releaseNotesLink>https://github.com/dylanreedx/array-releases/releases/tag/v0.2.0</sparkle:releaseNotesLink></item>

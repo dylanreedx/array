@@ -163,36 +163,204 @@ health was 200 with schema 5, still v12.
 | Journey | Local relay | Staging v12 |
 |---|---|---|
 | Portal, `--mode b` | 70 / 70 | 70 / 70 |
-| Live terminal, `--mode terminal` | 32 / 32 | 31 / 32, then 32 / 32 twice |
+| Live terminal, `--mode terminal` | 32 / 32 | 31 / 32 once, then 32 / 32 four times |
 | One agent + every kind, `--mode a` | 94 / 94 | 98 / 98 (with `--old-guest ReleaseJourney`, the real 0.7.38 guest) |
 
-The staging terminal miss: "the guest's screen is the host's pane, line for
-line". The guest held the host's lines, but with six blank rows where the
-first lines should be, and the second printf wrapped differently. That was one
-look at a screen over the real internet, mid-redraw. Every other terminal step
-in that run passed (latency median 62 ms, 400 of 400 lines in order, the
-flood within 1 s). The next two runs passed 32 / 32. Every run's cleanup left
-nothing on the relay.
 
-## Remaining gate steps
+**The staging terminal miss is a known flake, not a guest glitch.** One run
+in five failed "screen: the guest's screen is the host's pane, line for line".
+That step compares the two screens once, 0.4 s after the coloured line first
+reaches the guest; it does not wait for them to agree. The guest held the
+host's lines, with six blank rows where the top lines should be and the long
+command wrapped at another place: a scroll still on its way over the
+internet. Nothing stayed wrong. Later in the same run, both other
+line-for-line checks passed: after the 100,000-line flood, and after the
+full-screen program exited. Every other step passed too (echo median 62 ms,
+400 of 400 lines in order, the flood's end within 1 s). The four reruns
+passed 32 / 32. Every run's cleanup left nothing on the relay. The fix for
+the flake belongs in the journey: poll that comparison for a second, as the
+other screen steps do, rather than reading once.
 
-1. **Fold in the "no agent responses" fix** when it lands, then rebuild and
-   rerun the legs above. The matrix needs a rerun only if that fix touches
-   more than the agent path.
-2. **Characters motion harness**, `scripts/canvas-motion/character-arms.sh`.
-   It takes the screen for a few minutes, so run it with the Mac left alone.
-   On and off should match.
-3. **Linux relay gate**, `scripts/check-relay-linux.sh`.
-4. **Production relay deploy, with Dylan's go.** Snapshot `relay_data`
-   first. The rollback target is recorded in
-   `.plans/105-collaboration/RELAY-DEPLOY.md`. Staging v12 already runs this
-   relay code.
-5. **RELEASE.md**, build 90:
-   - Check `xcrun notarytool history --keychain-profile array-notary` first.
-   - `scripts/release-app.sh … --set-version 0.7.39 --set-build 90`, then
-     `scripts/check-app-bundle.sh --configuration release --channel prod`.
-   - Both DMGs.
-   - The appcast: run it with the main checkout's `releases/` path. It drops
-     0.2.0, so re-insert it.
-   - The ledger row.
-   - The push: brace `${T}` in zsh refspecs.
+## Third round (2 November afternoon)
+
+- The "no agent responses" report was the preview's fake claude sending a
+  whole message, which the app only draws as a stream. Not a product bug;
+  nothing to fold in. The preview's `--real` commits `98a1c3d7` and
+  `adbeaa00` are in the branch.
+- **Folded in** `d50fffc7`: `array/sidebar-sort` `1b945bea`, "fix(sidebar): keep the
+  selection when a re-sort moves rows". It merged with no conflict. It is the
+  likely cause of the matrix's `v2-day-check` miss: a re-sort that dropped
+  the selection leaves the bulk bar nothing to act on.
+  - Debug and film builds: exit 0.
+  - `--sidebar-sort-check`: passed, with the new step "a re-sort keeps two
+    selected rows and the bulk bar".
+  - `--sidebar-screenshot-check`: passed, 48 images.
+  - `ARRAY_FILM_SCENE=…/v2-day-check.json --film-scene-check`: 3 of 3 passed.
+  - Release configuration (`swift build -c release --product Array`): exit 0, no errors, 759 s.
+- **Linux relay gate** (`bash scripts/check-relay-linux.sh`): exit 0, 533 PASS,
+  0 FAIL, deletion checks included. The script is committed as mode 644, so
+  `scripts/check-relay-linux.sh` on its own answers "permission denied"; run it
+  through `bash`.
+- **Notary profile**: `xcrun notarytool history --keychain-profile array-notary`
+  answers; its newest entry is `Array-0.7.38.dmg`.
+
+## Release notes draft
+
+The text to paste starts on the line after this one.
+
+Array 0.7.39
+
+- Share part of your canvas. Press S, or pick Share in the toolbar, and drag over some tiles. Your teammate gets one window onto that part of your canvas, live. Nothing on your canvas moves. Drag another tile into the shared region and an "Add to share" button appears on it; nothing is shared until you press it.
+- Share notes, files, diffs, browsers and terminals, not just agents. A note shared on its own can be edited by both of you at once. Files and diffs update when you save, and your teammate can Approve or Request changes on a diff. A browser on a public page follows your navigation; on a localhost page your teammate sees pictures of it, and their clicks and scrolls land on your page.
+- Shared terminals are live and read-only. Your teammate sees your terminal as you do: your colours, cursor and grid, live as you type. They can never type into it. Array warns before sharing a terminal, because its output may contain secrets. A shared terminal shows a Live badge with a Stop sharing button.
+- Stop sharing at any time from the Share popover: remove one person or revoke everyone. If your Mac goes offline, your teammate's view dims and their prompts wait until you are back.
+- In a shared region, each of you sees the other's pointer over the shared tiles.
+- Agent characters. Each agent can have a small animated duck in its sidebar row and tile header, acting out what it is doing. Turn them on in Settings › Appearance › Agent characters; pick another duck for one agent from its tile's ⋯ menu.
+- Sidebar sort. The sort button in the search field orders agents by Most active, By project or Newest first. Rows wait while the pointer is over the sidebar, and a selection survives a re-sort. Filter by project from the scope list.
+- A lead agent shows it is working while any of its helpers works.
+- Teammates on 0.7.38 need to update to open a shared note, file, diff, browser or terminal. Shared agents still open for them.
+
+## Prepared commands (nothing below has been run)
+
+Run from the bench, `.worktrees/release-0739`, at the final tip, on Dylan's
+"ship it". In zsh, keep the `${T}` braces in refspecs.
+
+### 1. Production relay, first
+
+The production relay is v21 today, image
+`registry.fly.io/arrayapp-relay:deployment-01M6CJTY26P3GTSX2AFHX31WM5`,
+volume `relay_data` `vol_vgnxq0m5d1nmy514`. It has no `RELAY_ADMIN_TOKEN`
+secret, so the deletion routes refuse until this deploy sets one. The relay
+code is what staging v12 has run since this morning. A 0.7.38 app degrades
+against it: its live tiles get a 426 "update" instead of a broken tile. The
+Linux gate and the old-guest journey cover that.
+
+Snapshot first, and note the snapshot id:
+
+fly volumes snapshots create vol_vgnxq0m5d1nmy514 -a arrayapp-relay
+fly volumes snapshots list vol_vgnxq0m5d1nmy514 -a arrayapp-relay
+
+A production admin token, kept beside the staging one (0600), staged as a
+secret so the deploy applies it:
+
+umask 077; openssl rand -hex 32 > ~/.config/array/relay-production-admin-token
+fly secrets set RELAY_ADMIN_TOKEN="$(cat ~/.config/array/relay-production-admin-token)" --stage -a arrayapp-relay
+
+Deploy:
+
+git status --short
+fly deploy . --app arrayapp-relay --config fly.toml --dockerfile Dockerfile
+
+Roll back if needed:
+
+fly deploy --app arrayapp-relay --config fly.toml --image registry.fly.io/arrayapp-relay:deployment-01M6CJTY26P3GTSX2AFHX31WM5
+
+After the deploy, check:
+- health is 200 with schema 5;
+- the companion route baseline in RELAY-DEPLOY.md is unchanged;
+- `/collaboration/v1/self` answers 401;
+- the admin paths on the public port answer 401;
+- a 10-minute health watch has zero timeouts;
+- the live Mac event sequence is still advancing.
+
+The checks as commands:
+
+curl -s -m 10 -w ' %{http_code} %{time_total}\n' https://relay.arrayapp.dev/health
+curl -s -o /dev/null -w '%{http_code}\n' https://relay.arrayapp.dev/collaboration/v1/self
+curl -s -o /dev/null -w '%{http_code}\n' https://relay.arrayapp.dev/collaboration/people
+for i in $(seq 120); do curl -s -o /dev/null -m 5 -w '%{http_code} %{time_total}\n' https://relay.arrayapp.dev/health; sleep 5; done | sort | uniq -c | sort -rn | head
+
+### 2. Delete the Peer A/B and deploy-probe leftovers on production
+
+The admin port is reached through `fly proxy`, never the public port. List
+first, and delete only throwaway labels: "Peer A", "Peer B", "Deploy probe
+(throwaway)", "Deploy probe joiner". Also delete the inert probe area
+`A0924B21-6E6C-4E6E-B454-80C02E4EE9B8`. Delete areas before people: a person
+with an area that stays answers 409 `personHasAreas` and lists those areas.
+Delete such an area only if every member in it is a throwaway.
+
+fly proxy 19090:9090 -a arrayapp-relay
+
+In a second shell:
+
+T=$(cat ~/.config/array/relay-production-admin-token)
+curl -s -H "Authorization: Bearer ${T}" http://127.0.0.1:19090/collaboration/people | python3 -c 'import json,sys; [print(p["id"], p["devices"], p["areas"], p["label"]) for p in json.load(sys.stdin) if p["label"] in ("Peer A","Peer B","Deploy probe (throwaway)","Deploy probe joiner")]'
+curl -s -X DELETE -H "Authorization: Bearer ${T}" http://127.0.0.1:19090/collaboration/areas/A0924B21-6E6C-4E6E-B454-80C02E4EE9B8
+curl -s -H "Authorization: Bearer ${T}" http://127.0.0.1:19090/collaboration/people/<id>
+curl -s -X DELETE -H "Authorization: Bearer ${T}" http://127.0.0.1:19090/collaboration/people/<id>
+
+Repeat the last two for each id the list printed, then list again; none of
+those labels should remain.
+
+### 3. App, build 90
+
+The version is set in the build, never committed to Packaging:
+
+scripts/release-app.sh --identity "Developer ID Application: Dylan Reed (46TTB6J9DZ)" --notary-profile array-notary --set-version 0.7.39 --set-build 90
+scripts/check-app-bundle.sh --configuration release --channel prod
+
+The artifacts land in `qa-runs/<stamp>/release/`.
+
+### 4. DMGs and the GitHub release
+
+D=$(ls -td qa-runs/*/release | head -1)
+cp "${D}/Array-0.7.39.dmg" /Users/dylan/Documents/personal/Array/releases/
+cp "${D}/Array-0.7.39.dmg" /tmp/Array.dmg
+shasum -a 256 /tmp/Array.dmg /Users/dylan/Documents/personal/Array/releases/Array-0.7.39.dmg
+gh release create v0.7.39 --repo dylanreedx/array-releases --title "Array 0.7.39" --notes-file .plans/115-release-0739/notes.txt /tmp/Array.dmg /Users/dylan/Documents/personal/Array/releases/Array-0.7.39.dmg
+
+`notes.txt` is the release notes draft above, saved as plain text.
+
+### 5. Appcast
+
+Use the main checkout's `releases/`, not the bench's. Then put 0.2.0 back
+with the saved item; `reinsert-0.2.0.py` round-trips the current feed
+exactly. Then confirm the feed:
+
+scripts/generate-appcast.sh /Users/dylan/Documents/personal/Array/releases
+python3 -I .plans/115-release-0739/reinsert-0.2.0.py
+grep -c '<item>' website/public/appcast.xml
+git diff --stat website/public/appcast.xml
+
+What to see: 89 items (88 today plus build 90), and the diff adds exactly
+one build-90 item.
+
+### 6. Ledger, merge and pushes
+
+Append the `| 0.7.39  | 90    | <date> | \`v0.7.39\` | … |` row to
+`docs/VERSIONING.md`, with what shipped, the source tip, the gate results
+above and the relay record. Commit it with the appcast:
+
+git add docs/VERSIONING.md website/public/appcast.xml
+git commit -m "chore(release): ship 0.7.39 (build 90)"
+
+`origin/array/integration` is `b0689628`, an ancestor of this branch, so
+the push is a fast-forward:
+
+T=$(git rev-parse HEAD)
+git merge-base --is-ancestor origin/array/integration ${T} && echo fast-forward
+git push origin ${T}:refs/heads/array/integration
+git fetch origin main
+git merge-base --is-ancestor origin/main ${T} && git push origin ${T}:refs/heads/main
+
+If `main` received a direct push since 0.7.38, merge it into the release
+branch first, then push both. Never force. Vercel deploys the feed from
+`main`.
+
+The main checkout's local `array/integration` (`982d241e`) is stale. Reset it
+to the release tip once that checkout is clean, or leave it alone. Don't
+merge it: its 8 commits shipped in 0.7.35.
+
+### 7. Spot-check
+
+curl -s https://arrayapp.dev/appcast.xml | grep -c '<sparkle:version>90<'
+curl -sL -o /tmp/Array-latest.dmg https://github.com/dylanreedx/array-releases/releases/latest/download/Array.dmg && shasum -a 256 /tmp/Array-latest.dmg
+
+An installed 0.7.38 should see the update (Check for Updates…).
+
+## Still before "ship it"
+
+1. **Characters motion harness**, `scripts/canvas-motion/character-arms.sh`,
+   in a quiet window. It takes the screen for a few minutes; on and off should
+   match.
+2. Dylan's go for the production relay, then steps 1-7 above.

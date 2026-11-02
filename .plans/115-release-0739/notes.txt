@@ -1,0 +1,11 @@
+Array 0.7.39
+
+- Share part of your canvas. Press S, or pick Share in the toolbar, and drag over some tiles. Your teammate gets one window onto that part of your canvas, live. Nothing on your canvas moves. Drag another tile into the shared region and an "Add to share" button appears on it; nothing is shared until you press it.
+- Share notes, files, diffs, browsers and terminals, not just agents. A note shared on its own can be edited by both of you at once. Files and diffs update when you save, and your teammate can Approve or Request changes on a diff. A browser on a public page follows your navigation; on a localhost page your teammate sees pictures of it, and their clicks and scrolls land on your page.
+- Shared terminals are live and read-only. Your teammate sees your terminal as you do: your colours, cursor and grid, live as you type. They can never type into it. Array warns before sharing a terminal, because its output may contain secrets. A shared terminal shows a Live badge with a Stop sharing button.
+- Stop sharing at any time from the Share popover: remove one person or revoke everyone. If your Mac goes offline, your teammate's view dims and their prompts wait until you are back.
+- In a shared region, each of you sees the other's pointer over the shared tiles.
+- Agent characters. Each agent can have a small animated duck in its sidebar row and tile header, acting out what it is doing. Turn them on in Settings › Appearance › Agent characters; pick another duck for one agent from its tile's ⋯ menu.
+- Sidebar sort. The sort button in the search field orders agents by Most active, By project or Newest first. Rows wait while the pointer is over the sidebar, and a selection survives a re-sort. Filter by project from the scope list.
+- A lead agent shows it is working while any of its helpers works.
+- Teammates on 0.7.38 need to update to open a shared note, file, diff, browser or terminal. Shared agents still open for them.
