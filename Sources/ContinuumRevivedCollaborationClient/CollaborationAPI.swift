@@ -79,6 +79,8 @@ public struct CollaborationAPI: Sendable {
         request.httpMethod = method; request.timeoutInterval = 35
         request.cachePolicy = .reloadIgnoringLocalCacheData; request.httpShouldHandleCookies = false
         request.setValue("application/json", forHTTPHeaderField: "accept")
+        // Additive: which areas this client can read (`Collaboration.LiveTile`).
+        request.setValue(Collaboration.LiveTile.capability, forHTTPHeaderField: Collaboration.LiveTile.capabilityHeader)
         if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "authorization") }
         if let epoch { request.setValue(String(epoch), forHTTPHeaderField: "if-match") }
         if let body { let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601; request.httpBody = try encoder.encode(body); request.setValue("application/json", forHTTPHeaderField: "content-type") }

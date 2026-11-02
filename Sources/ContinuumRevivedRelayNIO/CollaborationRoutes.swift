@@ -20,7 +20,8 @@ enum CollaborationRoutes {
                 return .json(.created, try await store.selfEnroll(decoder.decode(Collaboration.SelfEnroll.self, from: body), from: clientAddress))
             }
             if head.method == .POST, head.uri == "/collaboration/v1/links/join" {
-                return .json(.created, try await store.joinShareLink(decoder.decode(Collaboration.JoinShareLink.self, from: body), from: clientAddress))
+                return .json(.created, try await store.joinShareLink(decoder.decode(Collaboration.JoinShareLink.self, from: body), from: clientAddress,
+                    readsLiveTiles: Collaboration.LiveTile.clientReadsLiveTiles(head.headers.first(name: Collaboration.LiveTile.capabilityHeader))))
             }
             guard let header = head.headers.first(name: "authorization"), header.hasPrefix("Bearer ") else { return .error(.unauthorized, "unauthorized") }
             let token = String(header.dropFirst(7))
@@ -41,7 +42,8 @@ enum CollaborationRoutes {
             if head.method == .POST, head.uri == "/collaboration/v1/hosts" { return .json(.created, try await store.registerHost(token: token)) }
             if head.method == .POST, head.uri == "/collaboration/v1/areas" { return .json(.created, try await store.createArea(token: token)) }
             if head.method == .POST, head.uri == "/collaboration/v1/links/accept" {
-                return .json(.ok, try await store.acceptShareLink(token: token, request: decoder.decode(Collaboration.AcceptShareLink.self, from: body)))
+                return .json(.ok, try await store.acceptShareLink(token: token, request: decoder.decode(Collaboration.AcceptShareLink.self, from: body),
+                    readsLiveTiles: Collaboration.LiveTile.clientReadsLiveTiles(head.headers.first(name: Collaboration.LiveTile.capabilityHeader))))
             }
             if head.method == .POST, head.uri == "/collaboration/v1/invitations/accept" {
                 return .json(.ok, try await store.accept(token: token, code: decoder.decode(Collaboration.AcceptInvitation.self, from: body).code))
@@ -106,6 +108,9 @@ enum CollaborationRoutes {
         catch CollaborationStoreError.invalidInvitation { return .error(.gone, "invalidInvitation") }
         catch CollaborationStoreError.slugTaken { return .error(.conflict, "slugTaken") }
         catch CollaborationStoreError.rateLimited { return .error(.tooManyRequests, "rateLimited") }
+        // 0.7.38 shows this as "the relay … answered with an error (426)";
+        // newer clients say "update Array".
+        catch CollaborationStoreError.clientTooOld { return .error(.upgradeRequired, "updateRequired") }
         catch CollaborationStoreError.invalidCursor { return .error(.conflict, "resyncRequired") }
         catch CollaborationStoreError.compacted { return .error(.conflict, "snapshotRequired") }
         catch CollaborationStoreError.tooManySubscriptions { return .error(.tooManyRequests, "subscriptionLimit") }

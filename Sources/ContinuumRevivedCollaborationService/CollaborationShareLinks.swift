@@ -95,11 +95,13 @@ extension CollaborationStore {
     /// Admits the caller as an editor. The person a link already admitted can
     /// open it again to recover their membership; nobody can use a spent,
     /// revoked or orphaned link, and a removed person cannot return through it.
-    public func acceptShareLink(token: String, request: Collaboration.AcceptShareLink) throws -> Collaboration.Scope {
+    public func acceptShareLink(token: String, request: Collaboration.AcceptShareLink,
+                                readsLiveTiles: Bool = true) throws -> Collaboration.Scope {
         guard ShareLinkURL.isValidSlug(request.slug), ShareLinkURL.isValidToken(request.token) else { throw CollaborationStoreError.invalidInvitation }
         return try database.write { db in
             let caller = try authenticate(db, token), person = caller.person.rawValue.uuidString
             let link = try liveLink(db, slug: request.slug, token: request.token)
+            try requireReadable(db, area: link.area, readsLiveTiles: readsLiveTiles)
             if let removed = try Int.fetchOne(db, sql: "SELECT removed FROM share_link_admissions WHERE link=? AND person=?", arguments: [link.id, person]) {
                 guard removed == 0, let current = try? scope(db, caller, link.area) else { throw CollaborationStoreError.invalidInvitation }
                 return current
@@ -114,7 +116,8 @@ extension CollaborationStore {
     /// The link's token doubles as an enrollment for someone with no account
     /// on this relay: it creates the person and their first device, admitted
     /// to this one area. Nothing else on the relay is granted.
-    public func joinShareLink(_ request: Collaboration.JoinShareLink, from address: String) throws -> Collaboration.ShareLinkJoin {
+    public func joinShareLink(_ request: Collaboration.JoinShareLink, from address: String,
+                              readsLiveTiles: Bool = true) throws -> Collaboration.ShareLinkJoin {
         guard ShareLinkURL.isValidSlug(request.slug), ShareLinkURL.isValidToken(request.token) else { throw CollaborationStoreError.invalidInvitation }
         for label in [request.displayName, request.deviceLabel] {
             guard !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, label.utf8.count <= 120 else { throw CollaborationStoreError.invalidRequest }
@@ -124,6 +127,7 @@ extension CollaborationStore {
         return try database.write { db in
             let link = try liveLink(db, slug: request.slug, token: request.token)
             guard !link.spent else { throw CollaborationStoreError.invalidInvitation }
+            try requireReadable(db, area: link.area, readsLiveTiles: readsLiveTiles)
             let since = now - joinLimits.window
             try db.execute(sql: "DELETE FROM share_link_joins WHERE joined<=?", arguments: [since])
             guard try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM share_link_joins WHERE link=? AND joined>?", arguments: [link.id, since])! < joinLimits.perLink,
@@ -137,6 +141,16 @@ extension CollaborationStore {
             let identity = Collaboration.Identity(person: person, device: device)
             return .init(credential: .init(identity: identity, token: secret), scope: try scope(db, identity, link.area))
         }
+    }
+
+    /// A client from before live tiles cannot decode an area holding one: it
+    /// would be admitted, spend a "Works once" link, and then fail to load.
+    /// Refused first, so nothing is created, admitted or spent.
+    private func requireReadable(_ db: Database, area: UUID, readsLiveTiles: Bool) throws {
+        guard !readsLiveTiles else { return }
+        guard let state = try Data.fetchOne(db, sql: "SELECT snapshot FROM areas WHERE id=?", arguments: [area.uuidString]) else { return }
+        let document = try unseal(SharedArea.Document.self, state)
+        if document.items.contains(where: { $0.kind == .liveTile }) { throw CollaborationStoreError.clientTooOld }
     }
 
     private struct LiveLink { let id: String; let area: UUID; let role: String; let lifetime: String; let spent: Bool }

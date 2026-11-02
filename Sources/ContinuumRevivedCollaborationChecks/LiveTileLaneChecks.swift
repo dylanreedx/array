@@ -127,6 +127,59 @@ func runLiveTileLaneChecks() async throws {
         try await refused("a removed tile cannot be read", status: 404) {
             _ = try await guest.readLiveTile(area: area, object: browser.rawValue, request: .init(generation: nil, revision: nil, eventsAfter: nil, waitMilliseconds: 0))
         }
+
+        // A client from before live tiles (0.7.38) sends no capability header.
+        // Opening a link to a live-tile area must be refused before anything
+        // happens, so the link still works for whoever updates.
+        func raw(_ path: String, body: [String: String], token: String? = nil, capable: Bool) async throws -> (Int, String) {
+            var request = URLRequest(url: url.appendingPathComponent("collaboration/v1/" + path))
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization") }
+            if capable { request.setValue(Collaboration.LiveTile.capability, forHTTPHeaderField: Collaboration.LiveTile.capabilityHeader) }
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+            return ((response as? HTTPURLResponse)?.statusCode ?? 0, String(decoding: data, as: UTF8.self))
+        }
+        func status(of link: Collaboration.ShareLink, area: UUID) async throws -> (Collaboration.ShareLinkAccess.Status, Int) {
+            guard let row = try await owner.shareLinks(area: area).first(where: { $0.id == link.id }) else { throw CheckFailure(label: "link row") }
+            return (row.status, row.people.count)
+        }
+        let liveArea = area
+        let once = try await owner.createShareLink(area: liveArea, request: .init(slug: "live-\(UUID().uuidString.prefix(8).lowercased())", lifetime: .once))
+        let joinBody = ["slug": once.slug, "token": once.token, "displayName": "Old Mac", "deviceLabel": "0.7.38"]
+        let old = try await raw("links/join", body: joinBody, capable: false)
+        try check(old.0 == 426 && old.1.contains("updateRequired"), "an old client joining a live-tile share is told to update (426), not admitted: \(old)")
+        let afterOld = try await status(of: once, area: liveArea)
+        try check(afterOld == (.active, 0), "the Works once link survives the old client, and nobody was admitted: \(afterOld)")
+        // An old client that already has an account on this relay.
+        let oldAccept = try await raw("links/accept", body: ["slug": once.slug, "token": once.token], token: viewerCredential.token, capable: false)
+        let viewerStill = try await viewer.state(area: liveArea).scope.role
+        let afterAccept = try await status(of: once, area: liveArea)
+        try check(oldAccept.0 == 426 && viewerStill == .viewer && afterAccept == (.active, 0),
+                  "an old client with an account is refused the same way; its role and the link are untouched")
+        // The same link, from a client that reads live tiles.
+        let fresh = try await CollaborationAPI(baseURL: url, allowsInsecureLoopback: true).joinShareLink(
+            .init(slug: once.slug, token: once.token, displayName: "New Mac", deviceLabel: "0.7.39"))
+        let joined = try await CollaborationAPI(baseURL: url, credential: fresh.credential.token, allowsInsecureLoopback: true).state(area: liveArea)
+        let afterNew = try await status(of: once, area: liveArea)
+        try check(joined.document.items.contains { $0.kind == .liveTile } && afterNew == (.used, 1),
+                  "a new client joins through the same link and reads the live tile")
+
+        // An area with no live tile (one agent; a portal's agents and artifacts)
+        // still opens for 0.7.38.
+        let agentArea = try await owner.createArea().document.id.rawValue
+        let plain = try await owner.state(area: agentArea)
+        let agent = SharedArea.Item(id: .init(), kind: .agentObservation, source: .init(owner: ownerCredential.identity.person, host: host, binding: .init()))
+        let manifest = SharedArea.Item(id: .init(), kind: .artifact, source: .init(owner: ownerCredential.identity.person, host: host, binding: .init()))
+        _ = try await owner.apply(area: agentArea, mutation: .init(epoch: plain.scope.epoch, command: .init(area: plain.document.id, expectedRevision: plain.document.revision, edits: [
+            .admit(agent, .init(id: .init(), object: agent.id, rect: .init(x: 0, y: 0, width: 400, height: 300))),
+            .admit(manifest, .init(id: .init(), object: manifest.id, rect: .init(x: 0, y: 0, width: 1, height: 1)))])))
+        let agentLink = try await owner.createShareLink(area: agentArea, request: .init(slug: "agent-\(UUID().uuidString.prefix(8).lowercased())", lifetime: .once))
+        let oldAgent = try await raw("links/join", body: ["slug": agentLink.slug, "token": agentLink.token, "displayName": "Old Mac", "deviceLabel": "0.7.38"], capable: false)
+        let afterAgent = try await status(of: agentLink, area: agentArea)
+        try check(oldAgent.0 == 201 && afterAgent == (.used, 1),
+                  "an old client still joins an area with agents and artifacts but no live tile: \(oldAgent.0)")
         try await server.stop()
     } catch {
         try? await server.stop()

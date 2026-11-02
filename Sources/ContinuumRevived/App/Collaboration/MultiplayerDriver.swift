@@ -605,6 +605,17 @@ final class MultiplayerDriver {
             result["tab"] = delegate.canvasView?.tileView(for: tile)?.qaOwnershipTabText ?? ""
             return result
 
+        case "linkState":
+            // The link on this tile's share as the relay lists it now: whether
+            // a "Works once" link is still unspent, and who it admitted.
+            guard let tile = tileArg else { throw Failure(description: "missing tile") }
+            let popover = try await Self.openHeaderShare(tile: tile, delegate: delegate)
+            await popover.session.refreshAccess()
+            let result: [String: Any] = ["phase": "\(popover.session.phase)", "people": popover.session.people.map(\.label),
+                                         "rows": popover.session.accessRows.map { "\($0.status)" }]
+            delegate.shareEntry.dismiss()
+            return result
+
         case "areaShareTarget":
             // What an area share of these tiles would publish, and what it
             // lists as left out: every selected tile is one or the other.

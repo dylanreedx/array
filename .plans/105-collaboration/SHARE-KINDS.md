@@ -69,9 +69,34 @@ what did.
   most 240 KiB, an event 128 KiB. No new transport.
 
 **Backwards compatibility.** Every route, table and document field that
-existed is unchanged. `.liveTile` is a new `SharedArea.Kind` case: a 0.7.38
-client cannot decode an area that holds one, so it cannot open such a link
-(it reports the area unavailable). It never affects an area without one.
+existed is unchanged. `.liveTile` is a new `SharedArea.Kind` case, and a
+0.7.38 client cannot decode an area that holds one.
+
+- **What 0.7.38 sends.** Nothing that names its version or what it can read:
+  no header, and no field in `links/join` or `links/accept`. The default
+  User-Agent carries the build number, but every dev build reports build 1,
+  so it cannot tell old from new.
+- **The signal.** Every client from this branch sends
+  `x-array-collaboration-capabilities: live-tile` with every request
+  (`Collaboration.LiveTile.capabilityHeader`). Old relays ignore it.
+- **The refusal.** `links/join` and `links/accept` to an area that holds a
+  live tile, without that header, answer **426 `updateRequired`**. The check
+  sits inside the join transaction, before anyone is created or admitted and
+  before a "Works once" link is spent.
+- **What a 0.7.38 user sees.** 0.7.38 words relay errors by status only, and
+  its own sentences for 404, 410 and 429 would all be untrue here. So it shows
+  its generic line: "Array could not open the link: the relay at … answered
+  with an error (426). Try it again later." Before this it was admitted, the
+  link was spent, and it then said "You were admitted, but the shared
+  workspace could not load."
+- **Newer clients** that meet a 426 say "This share needs a newer version of
+  Array. Update Array, then open the link again. The link still works."
+- Areas with no live tile (one agent, or a portal's agents and artifacts)
+  open for 0.7.38 exactly as before.
+- **Witnesses.** `--live-tile-only` drives raw old-style joins and accepts at
+  the real routes; it fails if the refusal is removed. Driven by hand,
+  `check-multiplayer-journey.py --old-guest ReleaseJourney` opens a live-tile
+  link in the real 0.7.38 app (bundles built at b0689628) against a local relay.
 
 ### On the host: `SharedAreaHostSession` hosts every kind
 
