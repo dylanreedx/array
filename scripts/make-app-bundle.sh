@@ -190,6 +190,10 @@ if [[ "$CHANNEL" == "dev" ]]; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName "Array Dev"' "$OUTPUT/Contents/Info.plist"
   # Share links: only Prod answers array://; Dev answers array-dev://.
   /usr/libexec/PlistBuddy -c 'Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 array-dev' "$OUTPUT/Contents/Info.plist"
+  # Web links: only Prod may appear as a default-browser choice. A dev build
+  # that claimed http/https would sit in that list beside Prod under the same
+  # name family, and picking it would route every link into a throwaway build.
+  /usr/libexec/PlistBuddy -c 'Delete :CFBundleURLTypes:1' "$OUTPUT/Contents/Info.plist"
 fi
 # The film bundle's own identity, stamped BEFORE signing so the signature seals
 # the id it runs under.

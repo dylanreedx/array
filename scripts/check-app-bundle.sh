@@ -140,6 +140,14 @@ if [[ "$CHANNEL" == "prod" ]]; then
 else
   assert_eq "array-dev" "$url_scheme" "share-link URL scheme"
 fi
+# Web links: Prod offers itself as a default browser (http and https); a dev
+# bundle must never appear in that list beside it.
+web_schemes=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:1:CFBundleURLSchemes' "$PLIST" 2>/dev/null | tr -d ' ' | grep -E '^https?$' | sort | tr '\n' ' ' || true)
+if [[ "$CHANNEL" == "prod" ]]; then
+  assert_eq "http https " "$web_schemes" "web-link URL schemes"
+else
+  assert_eq "" "$web_schemes" "web-link URL schemes (dev must not claim http/https)"
+fi
 # Composer dictation: without a usage string macOS terminates the app the
 # first time it touches the microphone.
 for usage_key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription; do

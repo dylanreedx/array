@@ -4242,6 +4242,23 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--web-link-open-check") {
+            do {
+                _ = NSApplication.shared
+                let outputDir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["CONTINUUM_QA_OUTPUT_DIR"] ?? NSTemporaryDirectory())
+                    .appendingPathComponent("web-link-open", isDirectory: true)
+                let result = try WebLinkOpenChecks.run(outputDir: outputDir)
+                let json = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+                try json.write(to: outputDir.appendingPathComponent("result.json"))
+                print(String(decoding: json, as: UTF8.self))
+                print("ContinuumRevivedWebLinkOpenChecks passed: \(outputDir.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-passkey-notice-check") {
             do {
                 _ = NSApplication.shared
@@ -7081,6 +7098,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// The share-link controller (IN-CANVAS.md, Round 2): the popover's API and
     /// the one entry point for array:// and arrayapp.dev/s/ links.
     private(set) lazy var shareLinks = makeShareLinkCoordinator()
+    private var pendingWebLinks: [URL] = []
+    private var webLinksReady = false
     var sharedAreaHostSessions: [String: SharedAreaHostSession] = [:]
     /// Mode A (`SharedAgentShare.swift`): the shared agent tiles this canvas
     /// shows, by tile, and the agents this Mac shares, with who has access.
@@ -12556,8 +12575,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// array://s/<slug>#<token> and https://arrayapp.dev/s/<slug>#<token> both
     /// land in the share-link controller. Other URLs are not Array's to open.
     func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls where Self.isShareLink(url) { Task { @MainActor in await shareLinks.open(url) } }
+        for url in urls {
+            if Self.isShareLink(url) { Task { @MainActor in await shareLinks.open(url) } }
+            else if Self.isWebLink(url) { openWebLink(url) }
+        }
     }
+    /// An http(s) link from another app, with Array chosen as the default
+    /// browser. Prod only declares those schemes (the dev bundle strips them).
+    static func isWebLink(_ url: URL) -> Bool {
+        ["http", "https"].contains(url.scheme?.lowercased() ?? "") && url.host?.isEmpty == false
+    }
+    /// A link that arrives during a cold launch waits for the workspace scene;
+    /// after that, each link opens in a new browser tile in the armed zone,
+    /// exactly as given.
+    func openWebLink(_ url: URL) {
+        guard webLinksReady else { pendingWebLinks.append(url); return }
+        _ = spawnBrowserFromPalette(url: url.absoluteString)
+    }
+    private func drainPendingWebLinks() {
+        webLinksReady = true
+        let links = pendingWebLinks
+        pendingWebLinks = []
+        links.forEach(openWebLink)
+    }
+    var pendingWebLinksForQA: [URL] { pendingWebLinks }
     static func isShareLink(_ url: URL) -> Bool {
         switch url.scheme?.lowercased() {
         case ShareLinkURL.appScheme?, ShareLinkURL.devAppScheme?: return url.host?.lowercased() == "s"
@@ -22879,6 +22920,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasState: CanvasState,
         installsGlobalEventMonitors: Bool = true
     ) throws {
+        // Links that launched Array open once boot has made the window. Both
+        // mount paths below return early, hence the defer.
+        defer { RunLoop.main.perform(inModes: [.common]) { [weak self] in MainActor.assumeIsolated { self?.drainPendingWebLinks() } } }
         workspaceRuntime?.lifecycleObserver?(.processLaunched)
         var persistedWorkspaceRegistry: Registry?
         if let runtime = workspaceRuntime, let registryStore {

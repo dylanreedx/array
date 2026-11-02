@@ -345,6 +345,7 @@ check --ui-tour-check
 check --unified-model-boot-check
 check --unreadable-canvas-store-check
 check --viewport-sanitize-check
+check --web-link-open-check
 check --window-chrome-check
 check --workspace-agent-report-check
 check --workspace-api-agent-colour-check
@@ -736,6 +737,7 @@ leg run_app_check .build/debug/Array --ui-test-support-check
 leg run_app_check .build/debug/Array --ui-tour-check || ui_tour_status=$?
 leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
+leg run_app_check .build/debug/Array --web-link-open-check
 leg run_app_check .build/debug/Array --window-chrome-check
 leg run_app_check .build/debug/Array --workspace-agent-report-check
 leg run_app_check .build/debug/Array --workspace-api-agent-colour-check
