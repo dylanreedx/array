@@ -17,6 +17,10 @@
 #   from Finder is refused instead of falling onto the shared "Array Dev" store.
 # - Agents run on the check fakes: no real model, login or usage.
 # - Agent characters are switched on in both apps' defaults.
+# - Terminals keep tmux persistence, each app with its own tmux server in
+#   ~/array-scratch/preview-0739/{a,b}/tmux (TMUX and TMUX_PANE unset), never
+#   the default socket. A brand-new server can stall on a ~/.tmux.conf that runs
+#   tpm; the app opens the terminal without persistence after 5 s instead.
 #
 # Never touches /Applications/Array.app, ~/Desktop/Array Dev.app, ~/Documents,
 # the default tmux socket, a real CLI login or the Keychain.
@@ -95,6 +99,8 @@ fresh_state() {
   for id in "$ID_A" "$ID_B"; do
     defaults delete "$id" >/dev/null 2>&1 || true
     defaults write "$id" agentCharacters.enabled -bool YES
+    # Terminals keep tmux persistence, in this app's own TMUX_TMPDIR.
+    defaults write "$id" continuum.terminal.tmux.enabled -bool YES
   done
 }
 
