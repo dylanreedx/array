@@ -735,7 +735,7 @@ ScreenCaptureKit capture blank or fail. Run it with the display unlocked and idl
 
 **Full matrix (round 2, locked display, from an agent shell):** 431 legs, the 10
 documented KNOWN-RED, 20 failed. One was this branch's (`--agent-supervisor-check`: the
-preview spelled the default agent name a second time), fixed in `f15c84e0`. The film
+preview spelled the default agent name a second time), fixed in `63114a93`. The film
 scenes failed in 0.7.38's own release matrix too. The other 18 (every Ghostty terminal
 surface leg, the face and onboarding legs, session resume, the app-bundle launch smoke,
 tile-project-scope, tile-chrome-canvas, composer-outline, throbber-timeline and
