@@ -19,8 +19,9 @@
 # - Agent characters are switched on in both apps' defaults.
 # - Terminals keep tmux persistence, each app with its own tmux server in
 #   ~/array-scratch/preview-0739/{a,b}/tmux (TMUX and TMUX_PANE unset), never
-#   the default socket. A brand-new server can stall on a ~/.tmux.conf that runs
-#   tpm; the app opens the terminal without persistence after 5 s instead.
+#   the default socket. The script starts that server itself with no config
+#   (-f /dev/null) before the app: a brand-new server reading a ~/.tmux.conf
+#   that runs tpm can stop answering, and sharing a terminal then waits on it.
 #
 # Never touches /Applications/Array.app, ~/Desktop/Array Dev.app, ~/Documents,
 # the default tmux socket, a real CLI login or the Keychain.
@@ -62,7 +63,7 @@ stop() {
   fi
   for side in a b; do
     pkill -f "$STATE/$side/bin/" 2>/dev/null || true
-    if [[ -d "$STATE/$side/tmux" ]] && command -v tmux >/dev/null; then
+    if [[ -S "$STATE/$side/tmux/tmux-$(id -u)/default" ]] && command -v tmux >/dev/null; then
       env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$STATE/$side/tmux" tmux kill-server >/dev/null 2>&1 || true
     fi
   done
@@ -149,6 +150,23 @@ json.dump({"label": label, "role": role, "endpoint": endpoint, "enrollmentCode":
 PY
 }
 
+start_tmux() { # side: this app's own tmux server, with no user config
+  local dir="$STATE/$1/tmux" sockfile sock
+  # Only ever these two folders: an empty or relative TMUX_TMPDIR would send
+  # tmux to the default socket, which runs your own terminals.
+  [[ "$dir" == "$HOME/array-scratch/preview-0739/a/tmux" || "$dir" == "$HOME/array-scratch/preview-0739/b/tmux" ]] \
+    || { echo "refusing tmux namespace $dir" >&2; exit 1; }
+  mkdir -p "$dir"
+  sockfile="$dir/tmux-$(id -u)/default"
+  if [[ ! -S "$sockfile" ]] || ! env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$dir" tmux display-message -p '#{socket_path}' >/dev/null 2>&1; then
+    rm -f "$sockfile"
+    env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$dir" tmux -f /dev/null new-session -d -s preview-hold
+  fi
+  sock="$(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$dir" tmux display-message -p '#{socket_path}')"
+  [[ "$(cd "$(dirname "$sock")/.." && pwd -P)" == "$(cd "$dir" && pwd -P)" ]] \
+    || { echo "tmux socket $sock is outside $dir; not launching" >&2; exit 1; }
+}
+
 launch() { # side
   local side="$1" app
   app="$(side_app "$side")"
@@ -159,6 +177,7 @@ launch() { # side
   # shellcheck disable=SC1091
   source "$STATE/relay.env"
   rm -f "$STATE/$side/ready.json"
+  start_tmux "$side"
   env -u TMUX -u TMUX_PANE open -n \
     --env "CONTINUUM_PROJECT_ROOT=$STATE/$side/project" \
     --env "CONTINUUM_APP_SUPPORT=$STATE/$side/support" \
