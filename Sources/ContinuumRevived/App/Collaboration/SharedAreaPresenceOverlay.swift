@@ -291,7 +291,7 @@ final class SharedAreaPresenceOverlay: NSView {
     }
     /// The arrow and its name label.
     private static func cursorRect(at point: NSPoint) -> NSRect {
-        NSRect(x: point.x - 4, y: point.y - 10, width: 260, height: 34)
+        NSRect(x: point.x - 6, y: point.y - 12, width: 280, height: 42)
     }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -304,11 +304,10 @@ final class SharedAreaPresenceOverlay: NSView {
         for peer in visiblePeers {
             guard let point = cursorPoint(peer), bounds.insetBy(dx: -20, dy: -20).contains(point) else { continue }
             drawnCursors[peer.identity.device] = point
-            let cursor = NSBezierPath()
-            cursor.move(to: point); cursor.line(to: .init(x: point.x + 5, y: point.y + 17))
-            cursor.line(to: .init(x: point.x + 10, y: point.y + 11)); cursor.line(to: .init(x: point.x + 17, y: point.y + 10)); cursor.close()
-            (cursorColour?(peer) ?? AccentToken.accentWorking.color.nsColor(in: self)).setFill(); cursor.fill()
-            drawText(label(peer), at: .init(x: point.x + 20, y: point.y - 4), primary: true)
+            SharedCursorDrawing.draw(at: point, name: label(peer),
+                colour: cursorColour?(peer) ?? AccentToken.accentWorking.color.nsColor(in: self),
+                surface: SurfaceToken.overlay.color.nsColor(in: self),
+                ink: TextToken.textPrimary.color.nsColor(in: self), font: NSFont.token(.label))
         }
         if let banner = followBanner, let frame = bannerFrame {
             let path = NSBezierPath(roundedRect: frame, xRadius: frame.height / 2, yRadius: frame.height / 2)
