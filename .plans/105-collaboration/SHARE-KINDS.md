@@ -1,7 +1,8 @@
 # Share every tile kind
 
 1 November 2026. Bench `.worktrees/multiplayer-share-browser-termin-55d526a6`,
-branch `array/mp-share-kinds`, on `origin/array/integration` b0689628 (0.7.38).
+branch `array/mp-share-kinds`, on `array/mp-portal` (99b6782e), itself on
+`origin/array/integration` b0689628 (0.7.38).
 
 Before this, only agents shared. A shared browser was dropped silently in
 0.7.37, and the shared format knew only agent, file or diff snapshot,
@@ -37,9 +38,8 @@ selected tile as "<kind> · <title> can't be shared yet: <reason>"
 - run artifacts: they stay on this Mac;
 - someone else's shared agent or tile: only its owner can share it.
 
-In an area share (the 0.7.37 shared zone, until the portal replaces it)
-browsers and terminals are listed with a reason too, because the zone cannot
-show them. Nothing is dropped silently any more: `ShareTarget.excluded` holds
+In an area share (the portal) browsers go as their page or a still, and
+terminals as a card that carries nothing. Nothing is dropped silently any more: `ShareTarget.excluded` holds
 every selected tile that does not go, and `ShareLinkSession.publishedTileIDs`
 what did.
 
@@ -84,6 +84,16 @@ client cannot decode an area that holds one, so it cannot open such a link
   sets it, so a portal that hosts its area through that call gets every kind.
   Heartbeats, liveness and relaunch resume are the agent's.
 
+### Inside a portal
+
+Rebased onto `array/mp-portal`. The portal keeps its own contract
+([PORTAL-CONTRACT.md](PORTAL-CONTRACT.md)): every non-agent tile is an
+`artifact` item, read only for the guest. `Portal/SharedPortalLiveKinds.swift`
+implements its note, file, diff and browser kinds and draws them with the same
+`LiveTileBodyView` (read only, "Still" for a private page). Terminals are the
+portal's "stays on Dylan's Mac" card. Live two-way editing and browser input
+are what sharing a tile on its own adds.
+
 ### On the guest: `LiveTileBodyView` renders one item
 
 - `LiveTileBodyView(kind:hostName:)`, then `attach(controller:object:)` with a
@@ -120,6 +130,8 @@ client cannot decode an area that holds one, so it cannot open such a link
   note ops and browser input accepted, cursor, floor, and removal.
 - `Array --shared-tile-render-check`: each kind's guest body rendered in light
   and dark, off screen.
+- `Array --portal-kinds-check`: the note, file, diff and browser kinds through
+  the portal contract on a mounted canvas, light and dark.
 
 ## Honest limits
 

@@ -12,10 +12,10 @@ enum SharedPortalKinds {
     static func kind(for itemKind: SharedPortal.ItemKind) -> any SharedPortalKind {
         switch itemKind {
         case .agent: return SharedPortalAgentKind()
-        case .note: return SharedPortalFallbackKind(itemKind: .note)
-        case .file: return SharedPortalFallbackKind(itemKind: .file)
-        case .diff: return SharedPortalFallbackKind(itemKind: .diff)
-        case .browser: return SharedPortalFallbackKind(itemKind: .browser)
+        case .note: return SharedPortalNoteKind()
+        case .file: return SharedPortalCaptureKind(itemKind: .file)
+        case .diff: return SharedPortalCaptureKind(itemKind: .diff)
+        case .browser: return SharedPortalBrowserKind()
         case .terminal: return SharedPortalFallbackKind(itemKind: .terminal)
         case .unknown: return SharedPortalFallbackKind(itemKind: .unknown)
         }

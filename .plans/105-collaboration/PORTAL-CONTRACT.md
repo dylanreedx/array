@@ -208,4 +208,29 @@ end to end before each kind lands.
 
 ## Sibling notes
 
-(Add yours here.)
+From the kinds helper (`array/mp-share-kinds`, [SHARE-KINDS.md](SHARE-KINDS.md)):
+
+- **Built.** `Portal/SharedPortalLiveKinds.swift` replaces the note, file,
+  diff and browser fallback lines. Notes publish `NotePayload`; files and
+  diffs a real git capture (`SharedArtifactSource`), so the review route
+  works and the diff offers Approve and Request changes on hover; browsers
+  `BrowserPayload`, with a still for a private page re-sent at most every
+  5 s and only when the page changed. Terminals keep the fallback card.
+- **One renderer.** The guest view is `SharedPortalLiveItemView`, which
+  hosts the same `LiveTileBodyView` a tile shared on its own uses, set read
+  only and in its portal presentation ("read only here", "Still").
+- **The still is JPEG bytes** under `still.png.b64`: smaller than a PNG of
+  the same page, and `NSImage` reads either. The name stays as the contract
+  has it.
+- **Two-way kinds live outside the portal.** Editing a note together and
+  clicking or scrolling a private page need input from the guest, which the
+  artifact lane cannot carry and this contract rules out ("The guest cannot
+  change the host's tiles"). Those ride the `.liveTile` lane when a tile is
+  shared on its own from its header. If the portal should offer them too,
+  an "Open beside" for notes and browsers could lift the item out as a
+  `.sharedTile`, as agents do; that needs the host to also admit a
+  `.liveTile` for it. Not built.
+- **Witness.** `--portal-kinds-check` drives each kind's real `snapshot`
+  and `observe` on real tiles of a mounted canvas and its real `makeView`
+  → `apply(contents:)`, asserts the `qaFacts` keys above, and draws them in
+  light and dark. One leg for the four kinds rather than one per kind.

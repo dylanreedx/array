@@ -33,6 +33,8 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
     private(set) var lastUpdate: Date?
     /// Nothing more is sent: sharing stopped, or this install may not.
     var inputEnabled = true { didSet { applyEditability() } }
+    /// Inside a portal: read only, and a private page is a still, not a stream.
+    var inPortal = false { didSet { renderCaption() } }
 
     // Note
     private var replica: Collaboration.NoteText.Replica?
@@ -343,7 +345,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         var text: String
         switch state?.payload {
         case .note(let note)?: text = note.title.isEmpty ? "Note" : note.title
-            text += " · you and \(hostName) can both edit"
+            text += inPortal ? " · live · read only here" : " · you and \(hostName) can both edit"
         case .file(let file)?: text = file.name + " · " + ByteCountFormatter.string(fromByteCount: Int64(file.byteCount), countStyle: .file)
             + " · follows \(hostName)'s saves · read only"
         case .diff(let diff)?: text = diff.title + " · \(diff.files) file\(diff.files == 1 ? "" : "s")" + (diff.truncated ? " · cut short" : "")
@@ -353,7 +355,8 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
             let where_ = browser.url ?? "a page"
             switch browserMode {
             case .follow: text = "\(hostName)'s browser · \(where_) · loaded on your Mac, following \(hostName)"
-            case .frames: text = "\(hostName)'s browser · \(where_) · live from \(hostName)'s Mac · clicks and scrolls go to it"
+            case .frames: text = inPortal ? "Still · \(hostName)'s browser · \(where_)"
+                : "\(hostName)'s browser · \(where_) · live from \(hostName)'s Mac · clicks and scrolls go to it"
             case .waiting: text = "\(hostName)'s browser · \(where_) · waiting for a picture"
             }
         case nil: text = "Connecting to \(hostName)'s \(Self.noun(kind))…"

@@ -1670,6 +1670,24 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // The note, file, diff and browser kinds through the portal contract.
+        if let index = CommandLine.arguments.firstIndex(of: "--portal-kinds-check") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            let next = CommandLine.arguments.indices.contains(index + 1) ? CommandLine.arguments[index + 1] : nil
+            let directory = URL(fileURLWithPath: next.flatMap { $0.hasPrefix("-") ? nil : $0 }
+                ?? NSTemporaryDirectory() + "portal-kinds")
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(120))
+                fputs("FAIL: portal kinds check exceeded its 120-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do { try await SharedPortalLiveKindChecks.run(directory: directory); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         // Every other shared kind as the guest sees it, light and dark, as PNGs.
         if let index = CommandLine.arguments.firstIndex(of: "--shared-tile-render-check") {
             setbuf(stdout, nil)

@@ -608,6 +608,7 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_leg .build/debug/ContinuumRevivedCollaborationChecks --note-text-only
   run_leg .build/debug/ContinuumRevivedCollaborationChecks --live-tile-only
   run_app_check .build/debug/Array --shared-tile-render-check
+  run_app_check .build/debug/Array --portal-kinds-check
   run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
   run_app_check .build/debug/Array --ui-probe-check
   run_app_check .build/debug/Array --menu-contract-check
@@ -1524,6 +1525,7 @@ run_app_check .build/debug/Array --shared-portal-render-check
 run_leg .build/debug/ContinuumRevivedCollaborationChecks --note-text-only
 run_leg .build/debug/ContinuumRevivedCollaborationChecks --live-tile-only
 run_app_check .build/debug/Array --shared-tile-render-check
+run_app_check .build/debug/Array --portal-kinds-check
 run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
 run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
 run_leg python3 scripts/check-collaboration-pair.py
