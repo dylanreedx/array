@@ -24,6 +24,11 @@ final class SharedAreaHostSession {
     /// A portal with no agent still keeps its host's liveness beating, so a
     /// guest sees "offline" when this Mac goes away (mode B).
     var fallbackHost: SharedArea.ID<SharedArea.Host>? { didSet { if fallbackHost != oldValue { ensureCollector() } } }
+    /// Builds what a hosted `.liveTile` item reads its tile through
+    /// (`AppDelegate.makeLiveTileSource`). Nil: this session hosts agents only.
+    var liveTileSources: ((SharedAreaLocalSourceBinding) -> LiveTileSource?)?
+    /// One publisher per shared note, file, diff, browser or terminal.
+    private(set) var liveTileHosts: [SharedArea.ID<SharedArea.Object>: LiveTileHost] = [:]
 
     convenience init(account: CollaborationAccountController, area: UUID, supervisor: AgentSupervisor) throws {
         let controller = try account.makeSharedAreaController(area: area)
@@ -85,6 +90,8 @@ final class SharedAreaHostSession {
         generation = UUID()
         pump?.cancel(); pump = nil; collector?.stop(); handoff.stopHosting(); heartbeat?.end()
         projections?.stop(); projections = nil
+        for host in liveTileHosts.values { host.stop() }
+        liveTileHosts = [:]
         collector = nil; host = nil; lastReported = nil; lastUsage = nil
         if let changeObserver { controller.removeChangeObserver(changeObserver) }; changeObserver = nil
         let precedingClose = closing
@@ -110,6 +117,20 @@ final class SharedAreaHostSession {
             lastReported = snapshot.sequence; lastError = nil
         } catch { if ticket == generation { lastError = error } }
     }
+    /// Hosts every `.liveTile` item this Mac owns, and stops the ones that left.
+    private func syncLiveTiles(_ bindings: [SharedAreaLocalSourceBinding], document: SharedArea.Document) {
+        let wanted = bindings.filter { binding in document.items.contains { $0.id == binding.object && $0.kind == .liveTile } }
+        let objects = Set(wanted.map(\.object))
+        for (object, host) in liveTileHosts where !objects.contains(object) { host.stop(); liveTileHosts[object] = nil }
+        guard let factory = liveTileSources else { return }
+        for binding in wanted where liveTileHosts[binding.object] == nil {
+            guard let source = factory(binding) else { continue }
+            let host = LiveTileHost(binding: binding, source: source, controller: controller)
+            liveTileHosts[binding.object] = host
+            host.start()
+        }
+    }
+
     private func ensureCollector() {
         guard let document = controller.document else { return }
         let bindings = controller.sourceBindings.filter { binding in
@@ -118,6 +139,7 @@ final class SharedAreaHostSession {
         heartbeat?.track(host: bindings.first?.host ?? fallbackHost)
         if projections == nil { projections = SharedAreaAgentProjectionHost(supervisor: supervisor, controller: controller) }
         projections?.sync(bindings)
+        syncLiveTiles(bindings, document: document)
         guard let host = bindings.first?.host else {
             collector?.stop(); collector = nil; self.host = nil; lastReported = nil; lastUsage = nil; return
         }

@@ -57,6 +57,10 @@ public enum SharedAreaPublication {
         /// is `SharedArtifactProducer.Draft.contentDigest`; confirmation
         /// re-captures, so changed bytes refuse instead of publishing.
         case artifact(digest: String)
+        /// A note, file, diff, browser or terminal shared live through its
+        /// own lane (`Collaboration.LiveTile`); its owner's host publishes
+        /// what it shows. A terminal reaches here only after its own warning.
+        case liveTile
         case omit
     }
     public struct Choice: Equatable, Sendable {
@@ -66,6 +70,7 @@ public enum SharedAreaPublication {
     }
     public enum Unsupported: String, Sendable {
         case tileKind, requiresManagedAgent, unavailableAgent, requiresNote, unavailableContentRevision, requiresDiffOrFile, unavailableArtifact
+        case requiresLiveKind
     }
     public enum Disposition: Equatable, Sendable {
         case ready(SharedArea.Kind)
@@ -233,7 +238,7 @@ public enum SharedAreaPublication {
             rows.append(Row(source: source.key, localTitle: tile.title, tileKind: tile.kind, disposition: disposition, previewText: preview))
             guard case .ready(let kind) = disposition else { continue }
             let allocation = allocations[source.key] ?? Allocation(); allocations[source.key] = allocation
-            let publishedSource: SharedArea.Source? = kind == .agentObservation || kind == .artifact
+            let publishedSource: SharedArea.Source? = kind == .agentObservation || kind == .artifact || kind == .liveTile
                 ? .init(owner: configuration.author, host: configuration.host, binding: allocation.binding) : nil
             let item = SharedArea.Item(id: allocation.object, kind: kind, source: publishedSource)
             entries.append(.init(tile: tile, publication: item, placement: allocation.placement))
@@ -242,7 +247,7 @@ public enum SharedAreaPublication {
                 contentEdits.append(.context(.init(id: allocation.context, object: item.id, parent: nil, author: configuration.author, text: text)))
             case .discussion(let text):
                 contentEdits.append(.post(.init(id: allocation.post, object: item.id, author: configuration.author, text: text)))
-            case .agentObservation, .artifact:
+            case .agentObservation, .artifact, .liveTile:
                 bindings.append(.init(object: item.id, binding: allocation.binding, host: configuration.host,
                     projectID: source.projectID, tileID: tile.id, agentID: source.agentID))
             default: break
@@ -274,6 +279,9 @@ public enum SharedAreaPublication {
         }
         switch content {
         case .omit: return .omitted
+        case .liveTile:
+            guard liveKind(for: source.tile.kind) != nil else { return .unsupported(.requiresLiveKind) }
+            return .ready(.liveTile)
         case .artifact(let digest):
             guard source.tile.kind == .diffReview || source.tile.kind == .file else { return .unsupported(.requiresDiffOrFile) }
             guard Collaboration.Artifact.isDigest(digest) else { return .unsupported(.unavailableArtifact) }
@@ -290,6 +298,18 @@ public enum SharedAreaPublication {
             guard source.tile.kind == .note else { return .unsupported(.requiresNote) }
             guard validContentRevision(source.contentRevision) else { return .unsupported(.unavailableContentRevision) }
             return .ready(.discussion)
+        }
+    }
+    /// Which tile kinds share live, and as what. Everything else is listed in
+    /// the Share popover as not shareable yet, with its reason.
+    public static func liveKind(for kind: TileKind) -> Collaboration.LiveTile.Kind? {
+        switch kind {
+        case .note: .note
+        case .file: .file
+        case .diffReview: .diff
+        case .browser: .browser
+        case .terminal: .terminal
+        default: nil
         }
     }
     private static func validContentRevision(_ value: String?) -> Bool {

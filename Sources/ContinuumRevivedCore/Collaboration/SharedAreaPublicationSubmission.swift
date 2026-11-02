@@ -19,10 +19,12 @@ extension SharedAreaPublication.Confirmed {
                 return nil
             }.first
             // An agent binding names its local agent; an artifact binding
-            // (COL-16) names only its source tile and never an agent.
+            // (COL-16) and a live tile's (SHARE-KINDS.md) name only their
+            // source tile and never an agent.
             guard binding.host == host, binding.tileID != nil,
                   let item = admittedItem,
-                  (item.kind == .agentObservation && binding.agentID != nil) || (item.kind == .artifact && binding.agentID == nil),
+                  (item.kind == .agentObservation && binding.agentID != nil)
+                    || ((item.kind == .artifact || item.kind == .liveTile) && binding.agentID == nil),
                   item.source == .init(owner: person, host: host, binding: binding.binding) else {
                 throw SharedAreaLocalStoreError.invalidState
             }

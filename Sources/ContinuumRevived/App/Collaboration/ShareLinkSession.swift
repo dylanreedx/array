@@ -15,7 +15,17 @@ struct ShareTarget: Equatable {
         /// Mode B: what the portal does with it ("Live", "Still", "Stays private").
         var badge: String? = nil
     }
-    enum Origin: Equatable { case agent, area }
+    /// A selected tile that this share leaves out, and why: the popover lists
+    /// it as "can't be shared yet", so nothing is ever dropped silently.
+    struct Excluded: Equatable {
+        let tileID: UUID
+        let title: String
+        let kind: TileKind
+        let reason: String
+    }
+    /// `agent` and `tile` are the header's Share on one tile; `area` is the
+    /// Share tool or a multi-tile selection.
+    enum Origin: Equatable { case agent, tile, area }
 
     let workspaceID: UUID
     let origin: Origin
@@ -23,14 +33,22 @@ struct ShareTarget: Equatable {
     /// The area these tiles are already lent to, when they are: Share then
     /// opens that area's links and people instead of starting a new share.
     var area: UUID? = nil
+    var excluded: [Excluded] = []
 
     var keys: Set<SharedAreaPublication.SourceKey> { Set(items.map(\.key)) }
     var tileIDs: [UUID] { items.map(\.key.tileID) }
     /// Mode A: one agent is shared on its own, with no zone and nothing moved.
     var isSingleAgent: Bool { items.count == 1 && items.first?.kind == .managedAgent }
+    /// One note, file, diff, browser or terminal, shared live on its own.
+    var isSingleLiveTile: Bool {
+        origin != .area && items.count == 1 && items.first.map { SharedAreaPublication.liveKind(for: $0.kind) != nil } == true
+    }
+    /// A terminal's output may hold secrets: sharing it needs a second press.
+    /// A portal shows a terminal as a card and sends none of it.
+    var needsTerminalConfirmation: Bool { origin != .area && items.contains { $0.kind == .terminal } }
     /// One agent's zone is named after the agent; an area's after its slug.
     var name: String {
-        if origin == .agent, let agent = items.first { return agent.title }
+        if origin != .area, let agent = items.first { return agent.title }
         return "Shared area"
     }
 }
@@ -71,6 +89,9 @@ protocol SharedZoneCreating: AnyObject {
     /// area where they sit, as one portal, with no zone and no tile moved.
     func sharePortal(tiles: [UUID], name: String) async throws -> UUID
     func cancelPortalShare(area: UUID) async
+    /// The same for a note, file, diff, browser or terminal
+    /// (`.plans/105-collaboration/SHARE-KINDS.md`): one live tile, its own area.
+    func shareLiveTile(tile: UUID, name: String) async throws -> UUID
 }
 
 extension SharedZoneCreating {
@@ -110,12 +131,17 @@ final class ShareLinkSession {
     var liveRows: [Collaboration.ShareLinkAccess] { accessRows.filter { $0.status == .active } }
     /// The link on the pasteboard is the current one.
     private(set) var copied = false
+    /// A terminal share's first Copy shows the warning; the second shares.
+    private(set) var confirmingTerminal = false
+    /// The tiles the first Copy actually published, for the check that every
+    /// selected tile was either published or listed as left out.
+    private(set) var publishedTileIDs: [UUID] = []
     private(set) var failure: String?
     var onChange: (() -> Void)?
 
     init(target: ShareTarget, links: ShareLinkServing, zones: SharedZoneCreating, pasteboard: NSPasteboard) {
         self.target = target; self.links = links; self.zones = zones; self.pasteboard = pasteboard
-        slug = ShareLinkURL.suggestedSlug(from: target.origin == .agent ? target.name : target.items.first?.title ?? "shared area")
+        slug = ShareLinkURL.suggestedSlug(from: target.origin != .area ? target.name : target.items.first?.title ?? "shared area")
         if let area = target.area { phase = .existing(area: area) }
     }
 
@@ -166,6 +192,13 @@ final class ShareLinkSession {
         if case .live(let link) = phase, link.slug == slug, link.lifetime == lifetime {
             write(link); return
         }
+        if target.needsTerminalConfirmation, phase == .draft, !confirmingTerminal {
+            // Nothing is published: the popover now says what a terminal can
+            // show, and the same button shares on its second press.
+            confirmingTerminal = true
+            onChange?()
+            return
+        }
         await run {
             if case .live(let stale) = self.phase {
                 try await self.links.revokeLink(area: stale.area.rawValue, link: stale.id)
@@ -175,7 +208,18 @@ final class ShareLinkSession {
                 return
             }
             let link: Collaboration.ShareLink
-            if self.target.isSingleAgent, let tile = self.target.tileIDs.first {
+            if self.target.isSingleLiveTile, let tile = self.target.tileIDs.first {
+                // One note, file, diff, browser or terminal: the same as one
+                // agent. Nothing moves, no zone is made.
+                let area = try await self.zones.shareLiveTile(tile: tile, name: self.zoneName)
+                do {
+                    link = try await self.links.createShareLink(area: area, slug: self.slug, lifetime: self.lifetime)
+                } catch {
+                    await self.zones.cancelAgentShare(area: area)
+                    throw error
+                }
+                self.publishedTileIDs = [tile]
+            } else if self.target.isSingleAgent, let tile = self.target.tileIDs.first {
                 // One agent: nothing on this canvas moves and no zone is made.
                 let area = try await self.zones.shareAgent(tile: tile, name: self.zoneName)
                 do {
@@ -184,6 +228,7 @@ final class ShareLinkSession {
                     await self.zones.cancelAgentShare(area: area)
                     throw error
                 }
+                self.publishedTileIDs = [tile]
             } else {
                 // Mode B: one portal. Nothing on this canvas moves, no zone is made.
                 let area = try await self.zones.sharePortal(tiles: self.target.tileIDs, name: self.zoneName)
@@ -193,6 +238,8 @@ final class ShareLinkSession {
                     await self.zones.cancelPortalShare(area: area)
                     throw error
                 }
+                // Every listed tile goes in; a terminal as a card that carries nothing.
+                self.publishedTileIDs = self.target.tileIDs
             }
             self.phase = .live(link)
             self.write(link)
@@ -264,7 +311,7 @@ final class ShareLinkSession {
         }
     }
 
-    private var zoneName: String { target.origin == .agent ? target.name : Self.title(fromSlug: slug) }
+    private var zoneName: String { target.origin != .area ? target.name : Self.title(fromSlug: slug) }
 
     private func write(_ link: Collaboration.ShareLink) {
         pasteboard.clearContents()

@@ -24,6 +24,11 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
     private let subtitleLabel = NSTextField(wrappingLabelWithString: "")
     private var itemLabels: [NSTextField] = []
     private var itemIcons: [NSImageView] = []
+    /// "<kind> can't be shared yet: <reason>", one per selected tile left out.
+    private var excludedLabels: [NSTextField] = []
+    var qaExcludedRows: [String] { excludedLabels.map(\.stringValue) }
+    var qaMessageText: String { messageLabel.isHidden ? "" : messageLabel.stringValue }
+    var qaCopyTitle: String { copyButton.presentation.title }
     private let prefixLabel = NSTextField(labelWithString: ShareLinkURL.webPrefix)
     let slugField = NSTextField(string: "")
     private let usedLabel = NSTextField(labelWithString: "Used")
@@ -115,11 +120,19 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
     func render() {
         let target = session.target
         let count = target.items.count
-        _ = count
-        titleLabel.stringValue = target.origin == .agent ? "Share this agent" : "Share this part of your canvas"
-        subtitleLabel.stringValue = target.origin == .agent
-            ? "Anyone who opens the link can prompt it and move it. It keeps running on this Mac."
-            : "Whoever opens the link sees these tiles live, where they sit on your canvas. Nothing here moves, and everything keeps running on this Mac."
+        let kind = target.items.first?.kind
+        switch target.origin {
+        case .agent:
+            titleLabel.stringValue = "Share this agent"
+            subtitleLabel.stringValue = "Anyone who opens the link can prompt it and move it. It keeps running on this Mac."
+        case .tile:
+            titleLabel.stringValue = "Share this " + (kind.map(Self.noun(for:)) ?? "tile")
+            subtitleLabel.stringValue = kind.map(Self.tileDetail(for:)) ?? ""
+        case .area:
+            _ = count
+            titleLabel.stringValue = "Share this part of your canvas"
+            subtitleLabel.stringValue = "Whoever opens the link sees these tiles live, where they sit on your canvas. Nothing here moves, and everything keeps running on this Mac."
+        }
         if slugField.currentEditor() == nil { slugField.stringValue = session.slug }
         let phase = session.phase
         slugField.isEditable = phase != .working
@@ -131,6 +144,10 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
             copyButton.presentation = Self.copyPresentation(title: "Sharing…", symbol: "hourglass", enabled: false, loading: true)
         case .revoked, .existing:
             copyButton.presentation = Self.copyPresentation(title: "New link", symbol: "plus", enabled: true)
+        case .draft where session.target.needsTerminalConfirmation:
+            copyButton.presentation = session.confirmingTerminal
+                ? Self.copyPresentation(title: "Share anyway", symbol: "exclamationmark.triangle", enabled: true)
+                : Self.copyPresentation(title: "Share output…", symbol: "link", enabled: true)
         default:
             copyButton.presentation = session.copied
                 ? Self.copyPresentation(title: "Copied", symbol: "checkmark", enabled: true)
@@ -149,6 +166,11 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
         revokeEveryoneButton.isHidden = !revocable || session.people.isEmpty
         if let failure = session.failure {
             messageLabel.stringValue = failure
+        } else if session.confirmingTerminal, case .draft = phase {
+            messageLabel.stringValue = "This terminal's output may contain secrets: tokens, keys, passwords and environment values. "
+                + "Whoever opens the link sees everything it prints from now on. Press Share anyway to share it."
+        } else if session.confirmingTerminal, session.link != nil {
+            messageLabel.stringValue = "Sharing this terminal's output, read only. Typing stays on this Mac."
         } else if case .revoked = phase {
             messageLabel.stringValue = "The link no longer works, and nobody it let in has access."
         } else if case .existing = phase {
@@ -173,7 +195,35 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
     /// The Revoke control on show.
     var currentRevokeButton: ChoiceAccessoryButton { revokeButton.isHidden ? revokeEveryoneButton : revokeButton }
 
+    static func noun(for kind: TileKind) -> String {
+        switch kind {
+        case .note: return "note"
+        case .file: return "file"
+        case .diffReview: return "diff"
+        case .browser: return "browser"
+        case .terminal: return "terminal"
+        default: return kind.displayName.lowercased()
+        }
+    }
+    static func tileDetail(for kind: TileKind) -> String {
+        switch kind {
+        case .note: return "Anyone who opens the link can edit it with you, live. It stays on this Mac."
+        case .file: return "Anyone who opens the link sees this file, and every change to it, live. Only you edit it."
+        case .diffReview: return "Anyone who opens the link sees these changes, re-read as the files change."
+        case .browser: return "A public page loads on their Mac. A local or signed-in page is streamed from this one, and they can click and scroll it."
+        case .terminal: return "A live, read-only mirror of this terminal's output. Typing stays with you."
+        default: return ""
+        }
+    }
+
     private func buildItems() {
+        for item in session.target.excluded {
+            let label = NSTextField(wrappingLabelWithString: "\(item.kind.displayName) · \(item.title) can't be shared yet: \(item.reason)")
+            label.font = .token(.caption)
+            label.maximumNumberOfLines = 2
+            excludedLabels.append(label)
+            addSubview(label)
+        }
         guard session.target.origin == .area else { return }
         // A terminal is always listed, marked private: the person sees it
         // goes as a card with nothing of it, however long the list is.
@@ -265,6 +315,14 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
             }
             y += CGFloat(Space.l)
         }
+        if !excludedLabels.isEmpty {
+            for label in excludedLabels {
+                let height = wrappedHeight(label, width: width)
+                place(label, NSRect(x: inset, y: y, width: width, height: height))
+                y += height + CGFloat(Space.xs)
+            }
+            y += CGFloat(Space.m)
+        }
 
         let controlHeight = ComposerActionButton.controlHeight
         let buttonWidth = max(96, copyButton.intrinsicContentSize.width)
@@ -344,7 +402,9 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
         for label in itemLabels { label.textColor = primary }
         for icon in itemIcons { icon.contentTintColor = secondary }
         for label in [subtitleLabel, prefixLabel, usedLabel, lifetimeLabel, lifetimeDetail, peopleHeader] { label.textColor = secondary }
-        messageLabel.textColor = session.failure == nil ? secondary : AccentToken.accentFailed.color.nsColor(for: theme)
+        for label in excludedLabels { label.textColor = secondary }
+        let warning = session.failure != nil || (session.confirmingTerminal && session.link == nil)
+        messageLabel.textColor = warning ? AccentToken.accentFailed.color.nsColor(for: theme) : secondary
         needsDisplay = true
     }
 

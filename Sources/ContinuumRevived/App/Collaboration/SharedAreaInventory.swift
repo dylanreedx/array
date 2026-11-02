@@ -33,7 +33,7 @@ enum SharedAreaInventory {
     }
     /// `artifactWithUntracked` is the explicit opt-in that adds untracked
     /// files to a working-tree diff snapshot; plain `artifact` never does.
-    enum Mode: Sendable { case agentObservation, agreement, discussion, artifact, artifactWithUntracked, omit }
+    enum Mode: Sendable { case agentObservation, agreement, discussion, artifact, artifactWithUntracked, liveTile, omit }
 
     struct Snapshot {
         let inventory: Publication.Inventory
@@ -53,6 +53,7 @@ enum SharedAreaInventory {
                 case .agentObservation: content = .agentObservation
                 case .artifact, .artifactWithUntracked: content = .artifact(digest: drafts[key]?.contentDigest ?? "")
                 case .omit: content = .omit
+                case .liveTile: content = .liveTile
                 case .agreement, .discussion:
                     guard let text = noteTexts[key] else { throw Failure.unavailableContent(key) }
                     content = switch mode {

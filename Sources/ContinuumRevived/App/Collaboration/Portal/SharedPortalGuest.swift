@@ -186,6 +186,10 @@ final class SharedPortalTileSession {
                     applied[item.id] = contents.record.manifest.id
                     body.item(item.id)?.apply(contents: contents)
                 }
+            case .liveTile:
+                // A tile shared on its own (SHARE-KINDS.md) reads its own lane;
+                // a portal never admits one.
+                break
             }
         }
     }
@@ -232,6 +236,7 @@ final class SharedPortalTileSession {
         case .agentObservation: return .init(object: item.id, kind: .agent, title: "Agent")
         case .discussion, .agreement: return .init(object: item.id, kind: .note, title: "Note")
         case .artifact: return .init(object: item.id, kind: .file, title: "File")
+        case .liveTile: return .init(object: item.id, kind: .unknown, title: "Shared tile")
         }
     }
     static func legacyText(of item: SharedArea.Item, in document: SharedArea.Document) -> String? {

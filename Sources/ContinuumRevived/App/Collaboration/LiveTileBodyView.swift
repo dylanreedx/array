@@ -1,0 +1,471 @@
+import AppKit
+import WebKit
+import ContinuumRevivedAgentUI
+import ContinuumRevivedCore
+import ContinuumRevivedCollaborationProtocol
+import ContinuumRevivedCollaborationClient
+
+/// What a teammate sees of someone's shared note, file, diff, browser or
+/// terminal (`.plans/105-collaboration/SHARE-KINDS.md`). Self-contained: give
+/// it a connected `SharedAreaController` and the item's object, and it reads
+/// the lane, draws the kind and sends this person's input. The `.sharedTile`
+/// tile hosts one; the portal hosts one per item at its own size.
+///
+/// - note: an editor; both people's keystrokes merge (`Collaboration.NoteText`).
+/// - file, diff: read only, re-drawn whenever the owner's copy changes.
+/// - browser: a public page loads here and follows the owner's navigation; a
+///   private one (or a public one that would not load) shows the owner's page
+///   as pictures, and a click or scroll on it reaches the owner's page.
+/// - terminal: a read-only mirror. Typing stays on the owner's Mac.
+@MainActor
+final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
+    enum BrowserMode: String { case waiting, follow, frames }
+
+    let kind: Collaboration.LiveTile.Kind
+    var hostName: String { didSet { if hostName != oldValue { renderCaption() } } }
+    private weak var controller: SharedAreaController?
+    private var object: SharedArea.ID<SharedArea.Object>?
+    private let replicaID: String
+    private var reader: Task<Void, Never>?
+    private var flusher: Task<Void, Never>?
+    private(set) var state: Collaboration.LiveTile.State?
+    private var eventCursor: UInt64?
+    private(set) var lastUpdate: Date?
+    /// Nothing more is sent: sharing stopped, or this install may not.
+    var inputEnabled = true { didSet { applyEditability() } }
+
+    // Note
+    private var replica: Collaboration.NoteText.Replica?
+    private var outbox: [Collaboration.LiveTile.EventBody] = []
+    private var applyingRemote = false
+
+    // Views
+    private let caption = NSTextField(labelWithString: "")
+    private let scroll = NSScrollView()
+    private let textView = NSTextView()
+    private let frameView = LiveTileFrameView()
+    private var webView: WKWebView?
+    private(set) var browserMode: BrowserMode = .waiting
+    private(set) var followedURL: String?
+    private var followFailed: String?
+    private var scrollAccumulator = CGPoint.zero
+    private var scrollFlush: Task<Void, Never>?
+
+    override var isFlipped: Bool { true }
+
+    init(kind: Collaboration.LiveTile.Kind, hostName: String, replicaID: String = UUID().uuidString) {
+        self.kind = kind; self.hostName = hostName; self.replicaID = replicaID
+        super.init(frame: .zero)
+        caption.font = .token(.caption); caption.lineBreakMode = .byTruncatingTail
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.font = kind == .note ? .token(.body) : .token(.bodyMono)
+        textView.drawsBackground = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.delegate = self
+        scroll.documentView = textView
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        frameView.onClick = { [weak self] x, y in self?.send(.browserClick(x: x, y: y)) }
+        frameView.onScroll = { [weak self] dx, dy in self?.accumulateScroll(dx: dx, dy: dy) }
+        frameView.isHidden = true
+        addSubview(caption); addSubview(scroll); addSubview(frameView)
+        applyEditability()
+        renderCaption()
+        applyAppearance()
+        setAccessibilityElement(true); setAccessibilityRole(.group)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    // MARK: Lane
+
+    /// Start reading `object` through `controller`. Calling it again with
+    /// another controller (a new link's access) restarts the reader.
+    func attach(controller: SharedAreaController, object: SharedArea.ID<SharedArea.Object>) {
+        if self.controller === controller, self.object == object, reader != nil { return }
+        stop()
+        self.controller = controller; self.object = object
+        reader = Task { [weak self] in
+            while let self, !Task.isCancelled {
+                let failed = await self.readOnce()
+                if failed { try? await Task.sleep(for: .seconds(1)) }
+            }
+        }
+        flushSoon()
+    }
+    var isReading: Bool { reader != nil }
+
+    func stop() {
+        reader?.cancel(); reader = nil
+        flusher?.cancel(); flusher = nil
+        scrollFlush?.cancel(); scrollFlush = nil
+    }
+
+    /// One long-poll. Returns true when it failed and the loop should back off.
+    private func readOnce() async -> Bool {
+        guard let controller, let object, controller.status == .connected else { return true }
+        // A note reader behind the log's floor takes the whole state again.
+        let request = Collaboration.LiveTile.ReadRequest(generation: state?.generation, revision: state?.revision,
+                                                         eventsAfter: eventCursor, waitMilliseconds: state == nil ? 0 : 20_000)
+        do {
+            let read = try await controller.readLiveTile(object: object, request: request)
+            // A relay that restarted counts events from zero again.
+            if let cursor = eventCursor, read.eventHead < cursor { eventCursor = read.eventHead }
+            if let next = read.state { apply(state: next) }
+            if kind == .note, let cursor = eventCursor, cursor < read.eventFloor {
+                // Missed events: ask again for the state, which covers them.
+                self.state = nil; eventCursor = nil
+                return false
+            }
+            if !read.events.isEmpty { apply(events: read.events) }
+            if let last = read.events.last?.sequence { eventCursor = max(eventCursor ?? 0, last) }
+            else if eventCursor == nil, state != nil, kind != .note { eventCursor = read.eventHead }
+            if state == nil { return true }
+            return false
+        } catch {
+            return true
+        }
+    }
+
+    private func apply(state next: Collaboration.LiveTile.State) {
+        guard next.kind == kind else { return }
+        state = next
+        lastUpdate = Date()
+        switch next.payload {
+        case .note(let note):
+            if replica == nil {
+                replica = Collaboration.NoteText.Replica(snapshot: note.snapshot, replica: replicaID)
+                eventCursor = note.eventsThrough
+                applyEditability()
+            } else {
+                replica?.merge(note.snapshot)
+            }
+            // Edits typed before the first state arrived are folded in now.
+            showReplicaText()
+        case .file(let file):
+            setReadOnlyText(file.text ?? file.notice ?? "", attributed: nil)
+        case .diff(let diff):
+            setReadOnlyText(diff.diff, attributed: Self.colouredDiff(diff.diff, in: self))
+        case .terminal(let terminal):
+            setReadOnlyText(terminal.text, attributed: nil, scrollToEnd: true)
+        case .browser(let browser):
+            applyBrowser(browser)
+        }
+        renderCaption()
+    }
+
+    private func apply(events: [Collaboration.LiveTile.Event]) {
+        guard kind == .note, replica != nil else { return }
+        var ops: [Collaboration.NoteText.Op] = []
+        for event in events { if case .noteOps(let batch) = event.body { ops += batch } }
+        guard !ops.isEmpty else { return }
+        replica?.apply(ops)
+        lastUpdate = Date()
+        showReplicaText()
+    }
+
+    /// Show a state that came another way: a portal item's revision, or the
+    /// render check's fixture. Nothing is read or sent.
+    func show(_ state: Collaboration.LiveTile.State) { apply(state: state) }
+
+    // MARK: Note editing
+
+    func textDidChange(_ notification: Notification) {
+        guard kind == .note, !applyingRemote, inputEnabled, var replica else { return }
+        let ops = replica.edit(to: textView.string)
+        self.replica = replica
+        guard !ops.isEmpty else { return }
+        for batch in Collaboration.NoteText.batches(ops, maxBytes: 96 * 1024) { outbox.append(.noteOps(batch)) }
+        flushSoon()
+    }
+
+    private func showReplicaText() {
+        guard let replica else { return }
+        let next = replica.text
+        guard next != textView.string else { return }
+        // Replace only what changed, so the caret and selection stay put
+        // around a teammate's edit, as they would around a local one.
+        applyingRemote = true
+        LiveTileTextSplice.replace(in: textView, with: next)
+        applyingRemote = false
+    }
+
+    private func send(_ body: Collaboration.LiveTile.EventBody) {
+        guard inputEnabled else { return }
+        outbox.append(body)
+        flushSoon()
+    }
+
+    private func flushSoon() {
+        guard flusher == nil, !outbox.isEmpty else { return }
+        flusher = Task { [weak self] in
+            while let self, !Task.isCancelled, !self.outbox.isEmpty {
+                guard let controller = self.controller, let object = self.object, controller.status == .connected, self.inputEnabled else {
+                    try? await Task.sleep(for: .milliseconds(500)); continue
+                }
+                let body = self.outbox[0]
+                do {
+                    _ = try await controller.appendLiveTileEvent(object: object, body: body)
+                    if !self.outbox.isEmpty { self.outbox.removeFirst() }
+                    self.sentEvents += 1
+                } catch {
+                    self.lastSendError = "\(error)"
+                    // A refusal (read-only, stopped) drops it; a network failure retries.
+                    if case CollaborationClientError.server(let status, _)? = error as? CollaborationClientError,
+                       (400..<500).contains(status), status != 409 {
+                        self.outbox.removeFirst()
+                    } else {
+                        try? await Task.sleep(for: .milliseconds(500))
+                    }
+                }
+            }
+            self?.flusher = nil
+        }
+    }
+    private(set) var sentEvents = 0
+    private(set) var lastSendError: String?
+
+    // MARK: Read-only kinds
+
+    private func setReadOnlyText(_ text: String, attributed: NSAttributedString?, scrollToEnd: Bool = false) {
+        guard textView.string != text || attributed != nil else { return }
+        let visible = scroll.contentView.bounds.origin
+        if let attributed { textView.textStorage?.setAttributedString(attributed) }
+        else {
+            textView.string = text
+            textView.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        }
+        if scrollToEnd { textView.scrollToEndOfDocument(nil) }
+        else { scroll.contentView.scroll(to: visible); scroll.reflectScrolledClipView(scroll.contentView) }
+    }
+
+    static func colouredDiff(_ diff: String, in view: NSView) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        let font = NSFont.token(.bodyMono)
+        let primary = TextToken.textPrimary.color.nsColor(in: view)
+        let secondary = TextToken.textSecondary.color.nsColor(in: view)
+        let added = AccentToken.accentDone.color.nsColor(in: view)
+        let removed = AccentToken.accentFailed.color.nsColor(in: view)
+        for line in diff.split(separator: "\n", omittingEmptySubsequences: false) {
+            let colour: NSColor
+            if line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("diff ") || line.hasPrefix("index ") || line.hasPrefix("@@") {
+                colour = secondary
+            } else if line.hasPrefix("+") { colour = added }
+            else if line.hasPrefix("-") { colour = removed }
+            else { colour = primary }
+            result.append(NSAttributedString(string: line + "\n", attributes: [.font: font, .foregroundColor: colour]))
+        }
+        return result
+    }
+
+    // MARK: Browser
+
+    private func applyBrowser(_ browser: Collaboration.LiveTile.Browser) {
+        let follow = browser.reach == .public && browser.url != nil && followFailed == nil
+        if follow, let url = browser.url {
+            browserMode = .follow
+            let web = ensureWebView()
+            if followedURL != url, let target = URL(string: url) {
+                followedURL = url
+                web.load(URLRequest(url: target))
+            }
+        } else {
+            browserMode = browser.frame == nil ? .waiting : .frames
+            if let frame = browser.frame { frameView.show(frame) }
+        }
+        webView?.isHidden = browserMode != .follow
+        frameView.isHidden = browserMode != .frames
+        scroll.isHidden = true
+        needsLayout = true
+    }
+
+    private func ensureWebView() -> WKWebView {
+        if let webView { return webView }
+        let web = WKWebView(frame: bounds, configuration: WKWebViewConfiguration())
+        web.navigationDelegate = self
+        addSubview(web)
+        webView = web
+        return web
+    }
+
+    /// A public page that does not load here (signed in, or blocked) falls
+    /// back to the owner's pictures.
+    nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        MainActor.assumeIsolated { fallBackToFrames("\(error.localizedDescription)") }
+    }
+    nonisolated func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                             decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
+        let status = (navigationResponse.response as? HTTPURLResponse)?.statusCode ?? 200
+        MainActor.assumeIsolated {
+            if navigationResponse.isForMainFrame, status == 401 || status == 403 { fallBackToFrames("HTTP \(status)") }
+            decisionHandler(.allow)
+        }
+    }
+    private func fallBackToFrames(_ reason: String) {
+        guard followFailed == nil else { return }
+        followFailed = reason
+        if case .browser(let browser)? = state?.payload { applyBrowser(browser) }
+        renderCaption()
+    }
+
+    private func accumulateScroll(dx: CGFloat, dy: CGFloat) {
+        scrollAccumulator.x += dx; scrollAccumulator.y += dy
+        guard scrollFlush == nil else { return }
+        scrollFlush = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(100))
+            guard let self else { return }
+            let delta = self.scrollAccumulator
+            self.scrollAccumulator = .zero; self.scrollFlush = nil
+            if delta != .zero { self.send(.browserScroll(dx: Double(delta.x), dy: Double(delta.y))) }
+        }
+    }
+
+    // MARK: Chrome
+
+    private func applyEditability() {
+        // A note is editable once its text has arrived: before that there is
+        // nothing for a keystroke to land in.
+        let editable = kind == .note && inputEnabled && replica != nil
+        textView.isEditable = editable
+        textView.isSelectable = true
+        frameView.acceptsInput = kind == .browser && inputEnabled
+    }
+
+    private func renderCaption() {
+        var text: String
+        switch state?.payload {
+        case .note(let note)?: text = note.title.isEmpty ? "Note" : note.title
+            text += " · you and \(hostName) can both edit"
+        case .file(let file)?: text = file.name + " · " + ByteCountFormatter.string(fromByteCount: Int64(file.byteCount), countStyle: .file)
+            + " · follows \(hostName)'s saves · read only"
+        case .diff(let diff)?: text = diff.title + " · \(diff.files) file\(diff.files == 1 ? "" : "s")" + (diff.truncated ? " · cut short" : "")
+            + " · live"
+        case .terminal(let terminal)?: text = (terminal.title.isEmpty ? "Terminal" : terminal.title) + " · read only · typing stays on \(hostName)'s Mac"
+        case .browser(let browser)?:
+            let where_ = browser.url ?? "a page"
+            switch browserMode {
+            case .follow: text = "\(hostName)'s browser · \(where_) · loaded on your Mac, following \(hostName)"
+            case .frames: text = "\(hostName)'s browser · \(where_) · live from \(hostName)'s Mac · clicks and scrolls go to it"
+            case .waiting: text = "\(hostName)'s browser · \(where_) · waiting for a picture"
+            }
+        case nil: text = "Connecting to \(hostName)'s \(Self.noun(kind))…"
+        }
+        if caption.stringValue != text { caption.stringValue = text }
+        setAccessibilityLabel(text)
+    }
+
+    static func noun(_ kind: Collaboration.LiveTile.Kind) -> String {
+        switch kind { case .note: "note"; case .file: "file"; case .diff: "diff"; case .browser: "browser"; case .terminal: "terminal" }
+    }
+
+    override func layout() {
+        super.layout()
+        let inset: CGFloat = 10
+        caption.frame = NSRect(x: inset, y: 6, width: max(0, bounds.width - 2 * inset), height: 16)
+        let body = NSRect(x: 0, y: 26, width: bounds.width, height: max(0, bounds.height - 26))
+        scroll.frame = body
+        frameView.frame = body
+        webView?.frame = body
+    }
+
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyAppearance() }
+    private func applyAppearance() {
+        caption.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        if kind == .diff, case .diff(let diff)? = state?.payload {
+            textView.textStorage?.setAttributedString(Self.colouredDiff(diff.diff, in: self))
+        } else {
+            textView.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        }
+        textView.insertionPointColor = TextToken.textPrimary.color.nsColor(in: self)
+        needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        SurfaceToken.tileBody.color.nsColor(in: self).setFill()
+        bounds.fill()
+        LineToken.separator.color.nsColor(in: self).setFill()
+        NSRect(x: 0, y: 25, width: bounds.width, height: 1).fill()
+    }
+
+    // MARK: QA
+
+
+    var qaText: String { textView.string }
+    var qaCaption: String { caption.stringValue }
+    var qaEditable: Bool { textView.isEditable }
+    var qaFrameSequence: UInt64 { frameView.frame_?.sequence ?? 0 }
+    var qaFrameView: LiveTileFrameView { frameView }
+    var qaTextView: NSTextView { textView }
+    var qaPendingEvents: Int { outbox.count }
+}
+
+/// The owner's page as a picture, fitted to the tile. A click or a scroll on
+/// it is mapped to the same point of the owner's page.
+@MainActor
+final class LiveTileFrameView: NSView {
+    var onClick: ((Double, Double) -> Void)?
+    var onScroll: ((CGFloat, CGFloat) -> Void)?
+    var acceptsInput = true
+    private(set) var frame_: Collaboration.LiveTile.Frame?
+    private var image: NSImage?
+    override var isFlipped: Bool { true }
+
+    func show(_ frame: Collaboration.LiveTile.Frame) {
+        guard frame.sequence != frame_?.sequence || frame.jpeg != frame_?.jpeg else { return }
+        frame_ = frame
+        image = NSImage(data: frame.jpeg)
+        needsDisplay = true
+    }
+
+    /// Where the page sits in this view, aspect-fitted.
+    var imageRect: NSRect {
+        guard let frame = frame_, frame.width > 0, frame.height > 0 else { return .zero }
+        let scale = min(bounds.width / frame.width, bounds.height / frame.height)
+        let size = NSSize(width: frame.width * scale, height: frame.height * scale)
+        return NSRect(x: (bounds.width - size.width) / 2, y: 0, width: size.width, height: size.height)
+    }
+    /// A point in this view, as a point of the owner's page.
+    func pagePoint(for point: NSPoint) -> (Double, Double)? {
+        let rect = imageRect
+        guard let frame = frame_, rect.contains(point), rect.width > 0 else { return nil }
+        return (Double((point.x - rect.minX) / rect.width) * frame.width, Double((point.y - rect.minY) / rect.height) * frame.height)
+    }
+    /// The inverse, for a check that clicks a known point of the page.
+    func viewPoint(forPage x: Double, _ y: Double) -> NSPoint? {
+        let rect = imageRect
+        guard let frame = frame_, frame.width > 0 else { return nil }
+        return NSPoint(x: rect.minX + CGFloat(x / frame.width) * rect.width, y: rect.minY + CGFloat(y / frame.height) * rect.height)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        guard acceptsInput, let point = pagePoint(for: convert(event.locationInWindow, from: nil)) else { return }
+        onClick?(point.0, point.1)
+    }
+    override func scrollWheel(with event: NSEvent) {
+        guard acceptsInput, let frame = frame_, imageRect.width > 0 else { return }
+        let scale = frame.width / Double(imageRect.width)
+        onScroll?(-event.scrollingDeltaX * scale, -event.scrollingDeltaY * scale)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        SurfaceToken.tileBody.color.nsColor(in: self).setFill()
+        bounds.fill()
+        guard let image else {
+            let text = "Waiting for a picture of the page…" as NSString
+            let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.token(.caption),
+                                                             .foregroundColor: TextToken.textSecondary.color.nsColor(in: self)]
+            let size = text.size(withAttributes: attributes)
+            text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: bounds.midY - size.height / 2), withAttributes: attributes)
+            return
+        }
+        image.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
+    }
+}

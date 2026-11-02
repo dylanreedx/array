@@ -50,6 +50,8 @@ final class ShareLinkCoordinator {
     /// keeps those links on the zone path (checks that predate mode B).
     typealias OpenPortal = @MainActor (CollaborationAccountController, UUID, SharedArea.Document) async throws -> Void
     var openPortal: OpenPortal?
+    /// A link to one note, file, diff, browser or terminal lands as one tile too.
+    var openTile: OpenAgent?
     private let inventory: InventoryProvider
     /// Shows a refusal to the person. Production presents it on the canvas window.
     var presentRefusal: @MainActor (String) -> Void
@@ -84,12 +86,17 @@ final class ShareLinkCoordinator {
         let outcome: ShareLinkOpenOutcome
         do {
             let model = try accountProvider()
-            let opener = ShareLinkOpener(account: model, signIn: signIn, askName: askName, open: { [openArea, openAgent, openPortal] state, model in
+            let opener = ShareLinkOpener(account: model, signIn: signIn, askName: askName, open: { [openArea, openAgent, openPortal, openTile] state, model in
                 guard let person = model.activeAccount?.identity.person else { throw CollaborationAccountFailure.notConnected }
                 let area = state.document.id.rawValue
                 // Mode A: a link to one agent lands as one tile, never a zone.
                 if let openAgent, let item = AppDelegate.sharedAgentItem(in: state.document, me: person) {
                     try await openAgent(model, area, item)
+                    return
+                }
+                // One note, file, diff, browser or terminal lands as one tile.
+                if let openTile, let item = AppDelegate.sharedLiveTileItem(in: state.document, me: person) {
+                    try await openTile(model, area, item)
                     return
                 }
                 // Mode B: a portal, or a 0.7.37 area, lands as one portal tile.
@@ -201,11 +208,21 @@ final class ShareLinkCoordinator {
     /// snapshots; terminals and other kinds stay private. Returns the source
     /// tile -> published object for every source-bound item (agents and
     /// snapshots). Discussion items carry no source binding in the domain.
+    /// `live`: the share-kinds path (`.plans/105-collaboration/SHARE-KINDS.md`).
+    /// Agents still go as observations; notes, files, diffs, browsers and
+    /// terminals go as live tiles their host keeps publishing. The portal and
+    /// a single tile's Share use it; the 0.7.37 shared zone does not.
+    static func liveMode(for kind: TileKind) -> SharedAreaInventory.Mode? {
+        if kind == .managedAgent { return .agentObservation }
+        return SharedAreaPublication.liveKind(for: kind) != nil ? .liveTile : nil
+    }
+
     @discardableResult
-    func publish(selection: SharedAreaPublication.Selection, intoArea area: UUID) async throws -> [UUID: SharedArea.ID<SharedArea.Object>] {
+    func publish(selection: SharedAreaPublication.Selection, intoArea area: UUID, live: Bool = false) async throws -> [UUID: SharedArea.ID<SharedArea.Object>] {
         let model = try await signedInAccount()
         let snapshot = try inventory(selection)
-        guard snapshot.inventory.sources.contains(where: { Self.mode(for: $0.tile.kind) != nil }) else { throw ShareLinkFailure.nothingToShare }
+        let modeFor: (TileKind) -> SharedAreaInventory.Mode? = live ? Self.liveMode(for:) : Self.mode(for:)
+        guard snapshot.inventory.sources.contains(where: { modeFor($0.tile.kind) != nil }) else { throw ShareLinkFailure.nothingToShare }
         guard let person = model.activeAccount?.identity.person else { throw ShareLinkFailure.notSignedIn }
         let host = try await model.registerHost()
         let controller = try model.makeSharedAreaController(area: area)
@@ -215,8 +232,8 @@ final class ShareLinkCoordinator {
             let coordinator = try SharedAreaCaptureCoordinator(selection: selection, controller: controller, person: person, host: host,
                 inventoryProvider: { [inventory] in try inventory(selection) },
                 submitter: { await controller.submitPublication($0) })
-            for row in coordinator.review.rows where row.disposition == .needsReview {
-                try coordinator.setMode(Self.mode(for: row.tileKind) ?? .omit, for: row.source)
+            for row in coordinator.review.rows where row.disposition == .needsReview || live {
+                try coordinator.setMode(modeFor(row.tileKind) ?? .omit, for: row.source)
             }
             for _ in 0..<1500 where !coordinator.capturing.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
             guard coordinator.canConfirm else { throw ShareLinkFailure.publishFailed(coordinator.message) }

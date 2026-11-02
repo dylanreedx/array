@@ -236,7 +236,7 @@ final class SharedAreaCaptureView: NSView, TokenThemed, NSTextViewDelegate {
         }
     }
     private static func modeID(_ value: SharedAreaInventory.Mode) -> String {
-        switch value { case .agentObservation: "agent"; case .agreement: "agreement"; case .discussion: "discussion"; case .artifact: "artifact"; case .artifactWithUntracked: "artifact-untracked"; case .omit: "omit" }
+        switch value { case .agentObservation: "agent"; case .agreement: "agreement"; case .discussion: "discussion"; case .artifact: "artifact"; case .artifactWithUntracked: "artifact-untracked"; case .liveTile: "live"; case .omit: "omit" }
     }
     private static func disposition(_ row: SharedAreaPublication.Row) -> String {
         switch row.disposition {

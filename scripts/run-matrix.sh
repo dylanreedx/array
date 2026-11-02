@@ -602,6 +602,13 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --shared-agent-render-check
   run_app_check .build/debug/Array --shared-portal-migration-check
   run_app_check .build/debug/Array --shared-portal-render-check
+  # Every other tile kind (.plans/105-collaboration/SHARE-KINDS.md): the note
+  # CRDT, the live-tile relay lane, the guest's tiles in light and dark, and two
+  # real apps sharing a note, file, diff, browser and terminal on a local relay.
+  run_leg .build/debug/ContinuumRevivedCollaborationChecks --note-text-only
+  run_leg .build/debug/ContinuumRevivedCollaborationChecks --live-tile-only
+  run_app_check .build/debug/Array --shared-tile-render-check
+  run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
   run_app_check .build/debug/Array --ui-probe-check
   run_app_check .build/debug/Array --menu-contract-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
@@ -1513,6 +1520,11 @@ run_app_check .build/debug/Array --shared-agent-render-check
 # load, and the portal in light and dark.
 run_app_check .build/debug/Array --shared-portal-migration-check
 run_app_check .build/debug/Array --shared-portal-render-check
+# Every other tile kind (.plans/105-collaboration/SHARE-KINDS.md).
+run_leg .build/debug/ContinuumRevivedCollaborationChecks --note-text-only
+run_leg .build/debug/ContinuumRevivedCollaborationChecks --live-tile-only
+run_app_check .build/debug/Array --shared-tile-render-check
+run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
 run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
 run_leg python3 scripts/check-collaboration-pair.py
 # M1.10 (.plans/46): WorkspaceRuntime.canvasView is written in exactly one place,

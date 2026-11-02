@@ -83,6 +83,13 @@ enum ShareEntryChecks {
             return area
         }
         func cancelAgentShare(area: UUID) async { cancelledAgentShares.append(area) }
+        /// One note, file, diff, browser or terminal, the same way.
+        var liveTileShares: [(tile: UUID, name: String, area: UUID)] = []
+        func shareLiveTile(tile: UUID, name: String) async throws -> UUID {
+            let area = UUID()
+            liveTileShares.append((tile, name, area))
+            return area
+        }
     }
 
     // MARK: Run

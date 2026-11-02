@@ -184,6 +184,10 @@ public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
     /// owner's chosen tiles at their positions on the owner's canvas; this
     /// canvas holds only `TileMetadata.sharedPortal`, a reference.
     case sharedPortal
+    /// Someone else's note, file, diff, browser or terminal, shared with this
+    /// person by link (`.plans/105-collaboration/SHARE-KINDS.md`). It lives on
+    /// its owner's Mac; this canvas holds only `TileMetadata.sharedTile`.
+    case sharedTile
 
     /// Human label for chrome. `rawValue.capitalized` produced "Managedagent",
     /// "Filetree", "Browserinspector" — camelCase gets lowercased after the
@@ -205,6 +209,7 @@ public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
         case .kanban: return "Board"
         case .sharedAgent: return "Shared agent"
         case .sharedPortal: return "Shared canvas"
+        case .sharedTile: return "Shared tile"
         }
     }
 }
@@ -342,6 +347,9 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     /// `.sharedPortal` only: which shared canvas the tile shows, and this
     /// person's camera inside it. A reference, never a path, record or credential.
     public var sharedPortal: SharedPortalTileReference?
+    /// `.sharedTile` only: which shared note, file, diff, browser or terminal
+    /// the tile shows, with `liveKind` set. A reference, nothing more.
+    public var sharedTile: SharedAgentTileReference?
 
     public init(
         launchProfileId: String? = nil,
@@ -373,7 +381,8 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         boardViewState: BoardViewState? = nil,
         boardId: UUID? = nil,
         sharedAgent: SharedAgentTileReference? = nil,
-        sharedPortal: SharedPortalTileReference? = nil
+        sharedPortal: SharedPortalTileReference? = nil,
+        sharedTile: SharedAgentTileReference? = nil
     ) {
         self.launchProfileId = launchProfileId
         self.projectRelativeCwd = projectRelativeCwd
@@ -405,6 +414,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.boardId = boardId
         self.sharedAgent = sharedAgent
         self.sharedPortal = sharedPortal
+        self.sharedTile = sharedTile
     }
 
     enum CodingKeys: String, CodingKey, CaseIterable {
@@ -438,6 +448,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case boardId
         case sharedAgent
         case sharedPortal
+        case sharedTile
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -472,6 +483,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(boardId, forKey: .boardId)
         try container.encodeIfPresent(sharedAgent, forKey: .sharedAgent)
         try container.encodeIfPresent(sharedPortal, forKey: .sharedPortal)
+        try container.encodeIfPresent(sharedTile, forKey: .sharedTile)
     }
 
     /// The agent that may drive this browser without a hand-over. The owner
@@ -495,10 +507,14 @@ public struct SharedAgentTileReference: Codable, Equatable, Sendable {
     public var hostPerson: UUID?
     /// `CollaborationLocalAccount.id` of the account that joined.
     public var accountId: String?
+    /// `.sharedTile` only: `Collaboration.LiveTile.Kind`'s raw value (note,
+    /// file, diff, browser, terminal). Absent on a shared agent.
+    public var liveKind: String?
 
-    public init(areaId: UUID, objectId: UUID, hostName: String, hostPerson: UUID? = nil, accountId: String? = nil) {
+    public init(areaId: UUID, objectId: UUID, hostName: String, hostPerson: UUID? = nil, accountId: String? = nil,
+                liveKind: String? = nil) {
         self.areaId = areaId; self.objectId = objectId; self.hostName = hostName
-        self.hostPerson = hostPerson; self.accountId = accountId
+        self.hostPerson = hostPerson; self.accountId = accountId; self.liveKind = liveKind
     }
 }
 

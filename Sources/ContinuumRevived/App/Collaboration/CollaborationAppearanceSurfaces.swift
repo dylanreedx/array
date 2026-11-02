@@ -31,7 +31,9 @@ enum CollaborationAppearanceSurfaces {
             .init(id: "sharedAreaZoneFollow", size: .init(width: 1440, height: 900), view: try sharedZone(offline: false, following: true)),
             .init(id: "sharedAreaZoneEnded", size: .init(width: 1440, height: 900), view: try sharedZone(offline: false, following: false, ended: true)),
             .init(id: "sharedAgentTile", size: SharedAgentAppearance.size, view: try SharedAgentAppearance.surface()),
-            .init(id: "sharedPortalTile", size: SharedPortalAppearance.size, view: try SharedPortalAppearance.surface())
+            .init(id: "sharedPortalTile", size: SharedPortalAppearance.size, view: try SharedPortalAppearance.surface()),
+            // Every other kind (SHARE-KINDS.md): note, file, diff, browser, terminal, stopped, placeholder.
+            .init(id: "sharedTiles", size: SharedTileAppearance.size, view: SharedTileAppearance.surface().0)
         ]
     }
 

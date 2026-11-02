@@ -227,6 +227,8 @@ extension AppDelegate {
         if let existing = sharedAreaHostSessions[key] { existing.start(); return }
         do {
             let host = try SharedAreaHostSession(account: model, area: area, supervisor: agentSupervisor)
+            let storage = host.controller.storageDirectory
+            host.liveTileSources = { [weak self] binding in self?.makeLiveTileSource(binding, storage: storage) }
             sharedAreaHostSessions[key] = host
             host.start()
         } catch {
@@ -266,7 +268,7 @@ extension AppDelegate {
               let account = model.activeAccount?.id ?? model.selectedAccountID else { return }
         let entries = hostedAgentShares?.entries(account: account) ?? []
         let shared = Set(entries.map(\.tile))
-        for tile in canvas.allWorkspaceTiles() where tile.kind == .managedAgent {
+        for tile in canvas.allWorkspaceTiles() where tile.kind == .managedAgent || TileNSView.sharesLive(tile.kind) {
             guard let view = canvas.tileView(for: tile.id) else { continue }
             guard shared.contains(tile.id), let entry = entries.last(where: { $0.tile == tile.id }) else {
                 if view.ownershipMark != nil { view.setOwnershipMark(nil) }
