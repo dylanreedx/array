@@ -100,6 +100,38 @@ invitations are addressed by that ID.
 Witness: `ContinuumRevivedCollaborationServiceChecks --backup-restore-only`
 drives every command above as a real `continuum-relay` process.
 
+### Deleting people and areas (admin port)
+
+Test runs leave throwaway people and areas behind. The relay deletes them
+through its admin port (9090), never the public one, and only with the bearer
+token in the `RELAY_ADMIN_TOKEN` secret (32+ characters). With no token set
+these routes answer 403 `adminTokenNotConfigured`. The admin port is not
+exposed by Fly; reach it with `fly proxy 19090:9090 -a <app>` and send requests
+to `http://127.0.0.1:19090`.
+
+| Purpose | Request |
+| --- | --- |
+| List people, IDs, device and area counts | `GET /collaboration/people` |
+| One person and every area they are in | `GET /collaboration/people/<id>` |
+| Delete an area and everything in it | `DELETE /collaboration/areas/<id>` |
+| Delete a person, their memberships, devices and hosts | `DELETE /collaboration/people/<id>` |
+
+A person is refused (409 `personHasAreas`, with the area IDs) while an area
+that stays holds their history, or has them as its only owner. Delete those
+areas first; a person never takes a teammate's work with them. Deleting a
+member moves their areas' epoch on, as removing them does.
+
+A member leaves an area on their own with `DELETE
+/collaboration/v1/areas/<id>/membership` on the public port, with their own
+token (`CollaborationAPI.leaveArea`). The only owner cannot leave (403).
+
+`scripts/check-multiplayer-journey.py` deletes every person and area it made at
+the end of each run. On staging it uses `fly proxy` and reads the token from
+`ARRAY_RELAY_ADMIN_TOKEN` or `~/.config/array/relay-staging-admin-token` (0600).
+`--cleanup-only --name <Name>` cleans a kept state folder.
+
+Witness: `ContinuumRevivedCollaborationServiceChecks --deletion-only`.
+
 ## 3. Real two-person, two-Mac test
 
 Use two people with two Macs, each on their own project root, never a shared

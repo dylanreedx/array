@@ -879,7 +879,7 @@ bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 22
 count ContinuumRevivedCollaborationChecks 22
-count ContinuumRevivedCollaborationServiceChecks 27
+count ContinuumRevivedCollaborationServiceChecks 29
 count ContinuumRevivedCoreChecks 199
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0

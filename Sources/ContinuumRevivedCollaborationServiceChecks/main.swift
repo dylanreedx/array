@@ -203,6 +203,8 @@ do {
         try await runCollaborationCapabilityChecks()
     } else if CommandLine.arguments.contains("--cursor-lane-only") {
         try await runCollaborationCursorLaneChecks()
+    } else if CommandLine.arguments.contains("--deletion-only") {
+        try await runCollaborationDeletionChecks()
     } else {
         if !CommandLine.arguments.contains("--updates-only") && !CommandLine.arguments.contains("--client-boundaries-only") { try await run() }
         if CommandLine.arguments.contains("--client-boundaries-only") {
@@ -221,5 +223,6 @@ do {
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationBoundaryAuditChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationBackupRestoreChecks(); try await runCollaborationOperatorRecoveryChecks() }
         if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationHostLivenessChecks() }
+        if !CommandLine.arguments.contains("--client-boundaries-only") { try await runCollaborationDeletionChecks() }
     }
 } catch { print("FAIL: \(error)"); exit(1) }

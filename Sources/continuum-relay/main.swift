@@ -75,6 +75,11 @@ let configuration = RelayProcessConfiguration()
 guard let masterKey = configuration.masterKey, masterKey.count >= 32 else {
     log("error", "invalid_configuration", fields: ["field": "RELAY_MASTER_KEY"]); exit(2)
 }
+// Optional; unset leaves the admin port's collaboration routes refusing.
+let adminToken = ProcessInfo.processInfo.environment["RELAY_ADMIN_TOKEN"]
+if let adminToken, adminToken.utf8.count < 32 {
+    log("error", "invalid_configuration", fields: ["field": "RELAY_ADMIN_TOKEN"]); exit(2)
+}
 do {
     let parent = URL(fileURLWithPath: configuration.databasePath).deletingLastPathComponent()
     try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
@@ -107,7 +112,7 @@ do {
     }
     let pushDelivery: (any RelayEventPushDelivering)? = try configuration.apns.map { try RelayAPNSService(store: store, configuration: $0, transport: RelayURLSessionAPNSTransport()) }
     let server = RelayServer(store: store, configuration: .init(host: configuration.host, publicPort: configuration.port, adminPort: configuration.adminPort,
-        clientAddressHeader: ProcessInfo.processInfo.environment["RELAY_CLIENT_ADDRESS_HEADER"]), pushDelivery: pushDelivery, collaboration: collaboration)
+        clientAddressHeader: ProcessInfo.processInfo.environment["RELAY_CLIENT_ADDRESS_HEADER"], adminToken: adminToken), pushDelivery: pushDelivery, collaboration: collaboration)
     try await server.start()
     log("info", "ready", fields: ["public_port": "\(configuration.port)", "admin_port": "\(configuration.adminPort)"])
 
