@@ -137,3 +137,27 @@ final class SharedAgentTranscriptView: NSView {
         }
     }
 }
+
+extension SharedAgentTranscriptView {
+    /// The guest's transcript as the appearance census renders it: a prompt,
+    /// a reply with markup and a tool call, rebuilt from a checkpoint the way
+    /// a lane read delivers one.
+    static func appearanceFixture(size: NSSize) -> SharedAgentTranscriptView {
+        let thread = "appearance"
+        var model = ManagedAgentTranscriptModel(threadId: thread)
+        model.appendUserPrompt("Map every state the checkout can be in.")
+        model.ingest(.turnStarted(threadId: thread, turnId: "t1"))
+        model.ingest(.itemStarted(threadId: thread, itemId: "cmd-1", kind: .commandExecution, title: "rg -n \"enum CheckoutState\" Sources"))
+        model.ingest(.itemCompleted(threadId: thread, itemId: "cmd-1", kind: .commandExecution, status: .completed))
+        model.ingest(.contentDelta(threadId: thread, turnId: "t1", streamKind: .assistant,
+                                   delta: "**Seven states.** `Cart`, `Address`, `Payment`, plus:\n\n- Declined\n- Abandoned\n"))
+        model.ingest(.turnCompleted(threadId: thread, turnId: "t1", outcome: .completed, errorMessage: nil))
+        _ = model.flushPendingStreamingMarkup()
+        let view = SharedAgentTranscriptView(frame: NSRect(origin: .zero, size: size))
+        let checkpoint = Wire.Checkpoint(entries: model.document.entries, omittedEntries: 0)
+        if let body = try? Wire.encode(checkpoint) {
+            view.receive(.resnapshot(.init(generation: 1, through: 1, body: body), frames: [], more: false))
+        }
+        return view
+    }
+}

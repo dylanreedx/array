@@ -43,6 +43,8 @@ enum SharedTileParityChecks {
         private var logs: [UUID: Collaboration.AgentProjection.Log] = [:]
         private var tiles: [UUID: Collaboration.LiveTile.State] = [:]
         private var events: [UUID: [Collaboration.LiveTile.Event]] = [:]
+        /// The agent transcript lane, run by the relay's own `Log`.
+        private var transcripts: [String: Collaboration.AgentTranscript.Log] = [:]
         private(set) var crossings = 0
 
         func wire<T: Codable>(_ value: T) throws -> T {
@@ -65,6 +67,29 @@ enum SharedTileParityChecks {
         func read(object: UUID, cursor: Collaboration.AgentProjection.Cursor?) throws -> Collaboration.AgentProjection.Read {
             guard let log = logs[object] else { throw CollaborationClientError.server(status: 404, code: "notFound") }
             return try wire(log.read(after: cursor))
+        }
+
+        func publishTranscript(object: UUID, report: Collaboration.AgentTranscript.Publish) throws {
+            let report = try wire(report)
+            let key = object.uuidString + "/" + report.stream
+            do { transcripts[key] = try Collaboration.AgentTranscript.Log.publish(report, onto: transcripts[key]) }
+            catch .stale { throw CollaborationClientError.server(status: 409, code: "revisionConflict") }
+            catch .checkpointRequired { throw CollaborationClientError.server(status: 409, code: "resyncRequired") }
+            catch { throw CollaborationClientError.server(status: 400, code: "invalidRequest") }
+        }
+        func readTranscript(object: UUID, request: Collaboration.AgentTranscript.ReadRequest) async throws -> Collaboration.AgentTranscript.Read {
+            let request = try wire(request)
+            let key = object.uuidString + "/" + request.stream
+            // A short long-poll, as the relay holds a current reader.
+            var waited = 0
+            while waited < min(request.waitMilliseconds, 250) {
+                guard let log = transcripts[key] else { break }
+                if case let .frames(_, frames, _) = log.read(after: request.cursor), frames.isEmpty {
+                    try await Task.sleep(for: .milliseconds(25)); waited += 25
+                } else { break }
+            }
+            guard let log = transcripts[key] else { throw CollaborationClientError.server(status: 404, code: "notFound") }
+            return try wire(log.read(after: request.cursor))
         }
 
         func publishTile(object: UUID, report: Collaboration.LiveTile.PublishState) throws {
@@ -113,6 +138,12 @@ enum SharedTileParityChecks {
         }
         func publishLiveTileState(object: UUID, report: Collaboration.LiveTile.PublishState) async throws {
             try await loop.publishTile(object: object, report: report)
+        }
+        func publishAgentTranscript(object: UUID, report: Collaboration.AgentTranscript.Publish) async throws {
+            try await loop.publishTranscript(object: object, report: report)
+        }
+        func readAgentTranscript(object: UUID, request: Collaboration.AgentTranscript.ReadRequest) async throws -> Collaboration.AgentTranscript.Read {
+            try await loop.readTranscript(object: object, request: request)
         }
         func appendLiveTileEvent(object: UUID, body: Collaboration.LiveTile.EventBody) async throws -> Collaboration.LiveTile.Appended {
             try await loop.append(object: object, body: body, author: base.identityValue.person)
@@ -403,6 +434,15 @@ enum SharedTileParityChecks {
         try await SharedAreaCheckRig.eventually("the guest's agent view holds the host's projection", attempts: 1600) {
             session.live.replica.state != nil && session.live.replica.state == head
         }
+        // The whole transcript, on its own lane: the guest holds the owner's document.
+        let ownDocument = { supervisor.transcriptDocument(for: agent)?.entries.map(\.id) ?? [] }
+        do {
+            try await SharedAreaCheckRig.eventually("the guest's transcript lane holds the owner's document", attempts: 1600) {
+                session.live.transcriptLive && session.live.transcriptView.qaMirrorDocument.entries.map(\.id) == ownDocument()
+            }
+        } catch {
+            notes.append("transcript lane: guest \(session.live.transcriptView.qaMirrorDocument.entries.count) entries, owner \(ownDocument().count), live \(session.live.transcriptLive)")
+        }
 
         let blocks = hostTile.qaDocumentForChecks.entries.flatMap { entry in entry.blocks.map { "\(entry.role)/\($0.kind)" } }
         notes.append("host blocks: " + blocks.joined(separator: ", "))
@@ -411,7 +451,7 @@ enum SharedTileParityChecks {
                     guestRegion: { [weak guestTile] in
                         guard let guestTile else { return nil }
                         let all = SharedAreaCheckRig.descendants(guestTile)
-                        if let surface = all.first(where: { $0 is any AgentTranscriptSurface }) { return surface }
+                        if let surface = all.first(where: { $0 is any AgentTranscriptSurface && !$0.isHiddenOrHasHiddenAncestor }) { return surface }
                         // Today's guest: a plain text view inside the live view.
                         return all.first { $0 is SharedAgentLiveView }.flatMap { live in
                             SharedAreaCheckRig.descendants(live).first { $0 is NSScrollView }
