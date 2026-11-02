@@ -228,7 +228,7 @@ final class AssistantProseView: NSView {
             } else {
                 Self.qaWidthRemeasures += 1
                 Self.qaRecentWidthTriggers = Array((Self.qaRecentWidthTriggers + [String(
-                    format: "%.2f->%.2f zoom %.3f", cachedWidth, availableWidth, Double(window?.backingScaleFactor ?? 0))]).suffix(16))
+                    format: "%.2f->%.2f at backing scale %.1f", cachedWidth, availableWidth, Double(window?.backingScaleFactor ?? 0))]).suffix(16))
             }
             cachedRowHeights = rows.map { row in
                 Self.qaMeasurementCount += 1
