@@ -62,18 +62,18 @@ final class MultiplayerDriver {
     }
 
     private let preview: MultiplayerPreview
-    private weak var delegate: AppDelegate?
-    private let window: NSWindow
+    weak var delegate: AppDelegate?
+    let window: NSWindow
     private let mailbox: URL
     private var activity: NSObjectProtocol?
-    private var shareSession: ShareLinkSession?
+    var shareSession: ShareLinkSession?
     private var observed: (controller: SharedAreaController, token: UUID)?
     private var lastRemote: [UUID: Collaboration.Point] = [:]
     /// Every teammate cursor position this person's controller received, with
     /// the wall-clock time (both apps share this Mac's clock).
     private var arrivals: [[String: Any]] = []
     /// The share links' private pasteboard: the journey never touches the user's.
-    private let pasteboard = NSPasteboard(name: .init("dev.arrayapp.multiplayer-driver.\(UUID().uuidString)"))
+    let pasteboard = NSPasteboard(name: .init("dev.arrayapp.multiplayer-driver.\(UUID().uuidString)"))
 
     private init(preview: MultiplayerPreview, delegate: AppDelegate, window: NSWindow) {
         self.preview = preview; self.delegate = delegate; self.window = window
@@ -163,7 +163,7 @@ final class MultiplayerDriver {
     }
     private var liveView: SharedAgentLiveView? { sharedTile?.live ?? zone?.scene.zoneAgentViews.values.first?.live }
 
-    private func eventually(_ label: String, timeout: TimeInterval = 30, _ value: () -> Bool) async throws {
+    func eventually(_ label: String, timeout: TimeInterval = 30, _ value: () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while !value() {
             guard Date() < deadline else { throw Failure(description: "timeout: \(label)") }
@@ -171,7 +171,7 @@ final class MultiplayerDriver {
         }
     }
 
-    private func frameJSON(_ frame: TileFrame?) -> [String: Double]? {
+    func frameJSON(_ frame: TileFrame?) -> [String: Double]? {
         frame.map { ["x": $0.x, "y": $0.y, "width": $0.width, "height": $0.height] }
     }
 
@@ -301,6 +301,10 @@ final class MultiplayerDriver {
             try await eventually("the link finished opening", timeout: 90) { delegate.shareLinks.openCount > opens }
             guard case .opened? = delegate.shareLinks.lastOutcome else {
                 return ["outcome": "\(delegate.shareLinks.lastOutcome.map { "\($0)" } ?? "none")"]
+            }
+            if request["expectPortal"] as? Bool ?? false {
+                try await eventually("the portal tile is live", timeout: 60) { portalReady(minimumItems: request["items"] as? Int ?? 1) }
+                return ["outcome": "opened"]
             }
             if request["expectTile"] as? Bool ?? true {
                 do { try await eventually("the shared agent tile is live") { liveView?.offersComposer == true } }
@@ -444,7 +448,8 @@ final class MultiplayerDriver {
             return [:]
 
         default:
-            throw Failure(description: "unknown op \(op)")
+            // Mode B ops (`MultiplayerDriverPortal.swift`).
+            return try await performPortal(op, request)
         }
     }
 }

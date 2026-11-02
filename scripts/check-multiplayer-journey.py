@@ -35,6 +35,28 @@ The steps are mode A of `.plans/105-collaboration/SHARE-REDESIGN.md`
 Cursors are not in mode A (the spec: "None in mode A"); the cursor-latency
 leg runs only when the share made a zone.
 
+`--mode b` runs mode B instead: the portal (`.plans/105-collaboration/PORTAL-CONTRACT.md`).
+
+   B1. the Share tool over an agent, two notes, a public and a localhost
+       browser and a terminal: the popover lists them, the terminal marked
+       private
+   B2. Copy: no tile moved, no zone; the relay holds the agent, the notes and
+       both browsers, and no terminal data
+   B3. the guest opens it: one sharedPortal tile in the armed zone; item frames
+       match the host's relative world frames within 1 pt at the portal's scale
+   B4. the host moves a note: the portal follows; a private tile dragged into
+       the region publishes nothing until "Add to share" is pressed
+   B5. the host edits a note: it shows in the portal; the guest cannot edit it
+   B6. the public browser loads its URL; the localhost one is a "Still"; the
+       terminal is its "stays on" card
+   B7. Open beside: a sharedAgent tile beside the portal; mode A steps 5-8
+       pass through it
+   B8. cursors both ways over the shared agent; the guest pans and zooms
+       without moving the host's tiles, and follows the host
+   B9. revoke: the portal and the agent beside it stop; nothing new arrives
+  B10. the host quits: the portal dims, dashed; it recovers on relaunch
+  B11. the guest relaunches: the portal is back at the same world frame
+
   scripts/check-multiplayer-journey.py --relay local    # a local continuum-relay from this tree
   scripts/check-multiplayer-journey.py                  # staging relay
   scripts/check-multiplayer-journey.py --skip-build     # reuse the bundles
@@ -122,7 +144,10 @@ class Person:
                 "--env", f"TMUX_TMPDIR={self.root / 'tmux'}"]
         for key, value in self.env_extra.items(): args += ["--env", f"{key}={value}"]
         args += ["--stdout", str(self.root / "app.log"), "--stderr", str(self.root / "app.log"),
-                 str(self.app), "--args", "-ApplePersistenceIgnoreState", "YES"]
+                 str(self.app), "--args", "-ApplePersistenceIgnoreState", "YES",
+                 # As the matrix's app legs run: no tmux, so a terminal tile
+                 # (mode B shares one as a private card) restores without one.
+                 "-continuum.terminal.tmux.enabled", "NO", "-continuum.terminal.tmux.path", ""]
         subprocess.run(args, env=env, check=True)
         self.ready()
 
@@ -201,6 +226,242 @@ def intersects(a, b):
     return a["x"] < b["x"] + b["width"] and b["x"] < a["x"] + a["width"] and a["y"] < b["y"] + b["height"] and b["y"] < a["y"] + a["height"]
 
 
+def near(a, b, tolerance=1.0):
+    return all(abs(a[k] - b[k]) <= tolerance for k in ("x", "y", "width", "height") if k in a and k in b)
+
+
+def mode_b(host, guest, check, eventually, endpoint, env_extra, people):
+    """Mode B of SHARE-REDESIGN.md: the portal. Steps B1-B11 (see the docstring)."""
+    token = "".join(random.choice(string.ascii_lowercase) for _ in range(6))
+    public_url, local_url = "https://example.com/", "http://127.0.0.1:9/"
+    spawned = host.call("spawnPortalTiles", notes=[f"First note {token}", f"Second note {token}"],
+                        publicURL=public_url, localURL=local_url)
+    agent, notes = spawned["agent"], spawned["notes"]
+    public_browser, local_browser, terminal = spawned["publicBrowser"], spawned["localBrowser"], spawned["terminal"]
+    tiles = [agent, *notes, public_browser, local_browser, terminal]
+    before_world = {t: host.call("snapshot", tile=t)["tileWorld"] for t in tiles}
+    h0 = host.call("snapshot")
+
+    # B1. The Share tool over the six tiles.
+    slug = "portal-" + "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(8))
+    shared = host.call("portalShare", tiles=tiles, slug=slug, timeout=150)
+    rows = shared["rows"]
+    terminal_rows = [r for r in rows if r.startswith("Terminal")]
+    check(shared["title"] == "Share this part of your canvas" and sorted(shared["target"]) == sorted(tiles),
+          "B1: the Share tool's marquee selects the six tiles and opens the popover", json.dumps(shared["target"]))
+    check(len(rows) == 6 and len(terminal_rows) == 1 and terminal_rows[0].endswith("Stays private")
+          and not any("Stays private" in r for r in rows if not r.startswith("Terminal")),
+          "B1: the popover lists everything, the terminal marked \"Stays private\"", json.dumps(rows))
+
+    # B2. Copy.
+    url = shared["url"]
+    check(bool(url) and shared["pasteboard"] == url, "B2: a link is on the pasteboard")
+    after_world = {t: host.call("snapshot", tile=t)["tileWorld"] for t in tiles}
+    h2 = host.call("snapshot")
+    check(after_world == before_world, "B2: no tile has moved", json.dumps({t: (before_world[t], after_world[t]) for t in tiles if before_world[t] != after_world[t]}))
+    check(h2["zones"] == h0["zones"] and h2["sharedZoneSessions"] == 0, "B2: no zone was created")
+    hp = wait_for(lambda: (lambda v: v if v.get("hosting") and v.get("revisions") is not None else None)(host.call("hostPortal")), "host portal", 30)
+    by_tile = {s["tile"]: s for s in hp["shared"]}
+    kinds = sorted(i["kind"] for i in hp["areaItems"])
+    check(kinds.count("agentObservation") == 1 and kinds.count("artifact") == 6,
+          "B2: the relay holds the agent, two notes, two browsers, the terminal's card and the manifest", json.dumps(kinds))
+    term_object = by_tile[terminal]["object"]
+    check(hp["revisions"].get(term_object, -1) == 0 and not hp["payloadPaths"].get(term_object),
+          "B2: the relay carries no terminal data", json.dumps({"revisions": hp["revisions"].get(term_object), "paths": hp["payloadPaths"].get(term_object)}))
+    def content_on_relay():
+        v = host.call("hostPortal")
+        if all(v["revisions"].get(by_tile[t]["object"], 0) >= 1 for t in [*notes, public_browser, local_browser]): return v
+    eventually(content_on_relay, "B2: the notes and both browsers have their content on the relay", 30,
+               lambda: json.dumps(host.call("hostPortal").get("revisions")))
+    check(any(p.endswith("portal.json") for p in hp["payloadPaths"].get(hp["area"], [])),
+          "B2: the manifest is on the relay", json.dumps(hp["payloadPaths"].get(hp["area"])))
+
+    # B3. Open on the guest.
+    g0 = guest.call("portal")
+    opened = guest.call("open", url=url, expectPortal=True, items=6, timeout=150)
+    g3 = guest.call("portal")
+    new_kinds = list(g3["tileKinds"]); [new_kinds.remove(k) for k in g0["tileKinds"] if k in new_kinds]
+    check(opened["outcome"] == "opened" and new_kinds == ["sharedPortal"] and len(g3["portalTiles"]) == 1,
+          "B3: exactly one new tile appears, of kind sharedPortal", json.dumps(new_kinds))
+    world, zone_rect = g3.get("portalWorld") or {}, g3.get("portalZoneWorld") or {}
+    check(g3.get("portalZone") == g3["armedZone"] and world and zone_rect and inside(world, zone_rect) and intersects(world, g3["visibleWorld"]),
+          "B3: in the guest's armed zone, inside it and in view", f"{world} in {zone_rect}, view {g3['visibleWorld']}")
+    check(g3["zones"] == g0["zones"] and g3["agentRecords"] == g0["agentRecords"], "B3: no zone and no AgentRecord on the guest")
+    check(f"{host.name}'s canvas" in g3.get("portalTab", "") and "Live" in g3.get("portalTab", ""),
+          "B3: the header names the host's canvas, live", g3.get("portalTab", ""))
+    origin, camera = hp["origin"], g3["camera"]
+    items = {i["object"]: i for i in g3["items"]}
+    mismatches = []
+    for t in tiles:
+        obj, w = by_tile[t]["object"], after_world[t]
+        expected_area = {"x": w["x"] - origin["x"], "y": w["y"] - origin["y"], "width": w["width"], "height": w["height"]}
+        expected_shown = {k: v * camera["zoom"] for k, v in {"x": expected_area["x"] - camera["x"], "y": expected_area["y"] - camera["y"],
+                                                               "width": w["width"], "height": w["height"]}.items()}
+        item = items.get(obj)
+        if not item or not near(item.get("area", {}), expected_area, 0.5) or not near(item.get("shown", {}), expected_shown, 1.0):
+            mismatches.append({"tile": t, "item": item and {k: item.get(k) for k in ("area", "shown")}, "expected": expected_shown})
+    check(not mismatches, "B3: item frames match the host's relative world frames, within 1 pt at the portal's scale", json.dumps(mismatches)[:600])
+
+    def item_of(tile, snap=None):
+        snap = snap or guest.call("portal")
+        return next((i for i in snap.get("items", []) if i["object"] == by_tile[tile]["object"]), {})
+
+    # B4. The host moves a note; a private tile dragged in publishes nothing.
+    note_area = item_of(notes[0], g3)["area"]
+    host.call("moveTile", tile=notes[0], dx=120.0, dy=40.0)
+    eventually(lambda: near(item_of(notes[0]).get("area", {}), {**note_area, "x": note_area["x"] + 120, "y": note_area["y"] + 40}, 0.5),
+               "B4: the portal's note moves by the same relative amount", DELIVERY_WINDOW, lambda: json.dumps(item_of(notes[0]).get("area")))
+    late = host.call("spawnNote", title=f"Late note {token}")["tile"]
+    region = {"x": min(w["x"] for w in after_world.values()), "y": min(w["y"] for w in after_world.values())}
+    moved = host.call("moveTileTo", tile=late, x=region["x"] + 30, y=region["y"] + 30)
+    time.sleep(5)
+    h4 = host.call("hostPortal"); g4 = guest.call("portal")
+    check(len(h4["areaItems"]) == len(hp["areaItems"]) and len(g4["items"]) == 6,
+          "B4: a private tile dragged into the region publishes nothing; the portal is unchanged",
+          f"relay {len(h4['areaItems'])} items, portal {len(g4['items'])}")
+    check(moved.get("addPill", "").startswith("Add to share"), "B4: the host is offered \"Add to share\" on it", moved.get("addPill", ""))
+    host.call("addToShare", tile=late)
+    eventually(lambda: any(i["title"] == f"Late note {token}" for i in guest.call("portal").get("items", [])),
+               "B4: \"Add to share\" adds it to the portal", DELIVERY_WINDOW, lambda: json.dumps([i["title"] for i in guest.call("portal").get("items", [])]))
+
+    # B5. The host edits a note.
+    edited = f"Edited on the host {token}"
+    host.call("editNote", tile=notes[1], text=edited)
+    eventually(lambda: edited in item_of(notes[1]).get("facts", {}).get("text", ""), "B5: the host's edit shows in the portal",
+               DELIVERY_WINDOW, lambda: json.dumps(item_of(notes[1]).get("facts")))
+    check(item_of(notes[1]).get("facts", {}).get("editable") == "false", "B5: the guest has no way to edit it",
+          json.dumps(item_of(notes[1]).get("facts")))
+
+    # B6. Browsers and the terminal.
+    pub = item_of(public_browser).get("facts", {}); loc = item_of(local_browser).get("facts", {}); term = item_of(terminal).get("facts", {})
+    check(pub.get("mode") == "live" and pub.get("url") == public_url, "B6: the public browser loads the same URL on the guest", json.dumps(pub))
+    check(loc.get("mode") == "still" and loc.get("badge") == "Still", "B6: the localhost browser is a still marked \"Still\"", json.dumps(loc))
+    check(term.get("message") == f"Terminal stays on {host.name}'s Mac", "B6: the terminal shows its \"stays on\" card", json.dumps(term))
+
+    # B7. Open beside.
+    beside = guest.call("openBeside", kind="agent")
+    g7 = guest.call("portal")
+    bw, pw = g7.get("besideWorld") or {}, g7.get("portalWorld") or {}
+    # Beside: in the portal's zone, next to it and not over it. The canvas's
+    # own layout picks the side.
+    gap = lambda a, b: max(b["x"] - (a["x"] + a["width"]), a["x"] - (b["x"] + b["width"]), b["y"] - (a["y"] + a["height"]), a["y"] - (b["y"] + b["height"]))
+    check(bool(beside.get("tile")) and len(g7["sharedAgentTiles"]) == 1 and g7.get("besideZone") == g7.get("portalZone")
+          and bw and not intersects(bw, pw) and gap(bw, pw) <= 200,
+          "B7: a sharedAgent tile appears beside the portal", f"beside {bw}, portal {pw}")
+    p1 = f"TOOL guest asks {token}"
+    guest.call("prompt", text=p1)
+    def host_shows_guest():
+        t = host.call("transcript", tile=agent)
+        text, cards = t.get("host", ""), t.get("hostSenderCards", [])
+        if p1 in text and any(guest.name in c for c in cards) and "[Bash]" in text.split(p1, 1)[1]: return t
+    eventually(host_shows_guest, f"B7 (A5): the host runs P1, tagged {guest.name}", DELIVERY_WINDOW,
+               lambda: json.dumps(host.call("transcript", tile=agent))[-400:])
+    eventually(lambda: (lambda sh: f"You: {p1}" in sh and "Command" in sh.split(p1, 1)[1])(guest.call("transcript").get("shared", "")),
+               "B7 (A5): the guest's tile tags P1 \"You\", with the reply", DELIVERY_WINDOW, lambda: guest.call("transcript").get("shared", "")[-300:])
+    check(host.call("transcript", tile=agent).get("host", "").count(p1) == 1, "B7 (A5): exactly one turn for P1")
+    wait_for(lambda: not host.call("transcript", tile=agent).get("agentRunning", True), "P1's turn finished", 30)
+    p2 = f"TOOLFAIL host says {token}"
+    host.call("prompt", tile=agent, text=p2)
+    eventually(lambda: (lambda sh: f"{host.name}: {p2}" in sh and "Command" in sh.split(p2, 1)[1])(guest.call("transcript").get("shared", "")),
+               f"B7 (A6): the guest shows P2 tagged {host.name}, with the reply", DELIVERY_WINDOW,
+               lambda: guest.call("transcript").get("shared", "")[-300:])
+    retry = guest.call("resendLast"); time.sleep(6)
+    check(retry["sameCommand"] and retry["firstID"] == retry["secondID"] and host.call("transcript", tile=agent).get("host", "").count(p1) == 1,
+          "B7 (A7): a resend with the same request ID runs nothing new", json.dumps(retry))
+    controls = [c.lower() for c in guest.call("snapshot").get("sharedControls", [])]
+    check(not any("stop" in c or "approve" in c or "allow" in c or "deny" in c for c in controls),
+          "B7 (A8): the guest has no Stop and no approval control", json.dumps(controls))
+    agent_item = item_of(agent)
+    check(agent_item.get("facts", {}).get("editable") == "false" and "Open beside" in agent_item.get("hover", []),
+          "B7: inside the portal the agent is watched, not typed into; it offers Open beside", json.dumps(agent_item.get("hover")))
+
+    # B8. Cursors, the guest's own camera, and Follow.
+    hovered = host.call("hostHover", tile=agent)["area"]
+    def guest_sees_host_cursor():
+        for peer in guest.call("portal").get("peers", []):
+            c = peer.get("cursor")
+            if c and abs(c["x"] - hovered["x"]) <= 2 and abs(c["y"] - hovered["y"]) <= 2: return peer
+    eventually(guest_sees_host_cursor, "B8: the host's cursor over the shared agent appears in the portal at the mapped point",
+               ACCESS_WINDOW, lambda: json.dumps(guest.call("portal").get("peers")))
+    pointed = guest.call("portalHover", kind="agent")["area"]
+    agent_area = item_of(agent).get("area", {})
+    def host_sees_guest_cursor():
+        for peer in host.call("hostPortal").get("peers", []):
+            c = peer.get("cursor")
+            if c and abs(c["x"] - pointed["x"]) <= 2 and abs(c["y"] - pointed["y"]) <= 2 \
+               and agent_area["x"] <= c["x"] <= agent_area["x"] + agent_area["width"]: return peer
+    eventually(host_sees_guest_cursor, "B8: the guest's cursor inside the portal appears on the host's canvas over the same tile",
+               ACCESS_WINDOW, lambda: json.dumps(host.call("hostPortal").get("peers")))
+    hw_before = {s["tile"]: s["world"] for s in host.call("hostPortal")["shared"]}
+    cam_before = guest.call("portal")["camera"]
+    panned = guest.call("portalPan", dx=80.0, dy=40.0, zoom=1.25)["camera"]
+    time.sleep(3)
+    g8 = guest.call("portal")
+    hw_after = {s["tile"]: s["world"] for s in host.call("hostPortal")["shared"]}
+    check(panned != cam_before and g8["cameraPersisted"] and abs(g8["cameraPersisted"]["zoom"] - panned["zoom"]) < 1e-6,
+          "B8: the guest pans and zooms inside the portal, and it is remembered", f"{cam_before} -> {panned}; saved {g8['cameraPersisted']}")
+    check(hw_after == hw_before, "B8: and none of the host's tiles moved")
+    guest.call("portalFollow")
+    target = {"x": origin["x"] + 100.0, "y": origin["y"] + 60.0}
+    host.call("hostCamera", x=target["x"], y=target["y"])
+    def follows():
+        v, g = host.call("hostPortal")["viewport"], guest.call("portal")
+        cam, body = g["camera"], g["bodySize"]
+        host_cx = v["x"] - origin["x"] + v["width"] / 2; guest_cx = cam["x"] + body["width"] / cam["zoom"] / 2
+        host_cy = v["y"] - origin["y"] + v["height"] / 2; guest_cy = cam["y"] + body["height"] / cam["zoom"] / 2
+        if g["following"] and abs(host_cx - guest_cx) <= 4 and abs(host_cy - guest_cy) <= 4: return g
+    eventually(follows, "B8: the guest follows the host's view inside the portal", ACCESS_WINDOW,
+               lambda: json.dumps({"host": host.call("hostPortal")["viewport"], "guest": guest.call("portal")["camera"]}))
+
+    # B9. Revoke.
+    access = host.call("portalAccess", tile=agent)
+    check(any(guest.name in r and "full access" in r for r in access["rows"]) and access["area"] == hp["area"],
+          "B9: Share on a shared tile opens the portal's popover, listing the guest", json.dumps(access))
+    host.call("remove")
+    eventually(lambda: "stopped" in guest.call("portal").get("portalState", ""), "B9: the portal shows the stopped state", ACCESS_WINDOW,
+               lambda: json.dumps(guest.call("portal").get("portalState")))
+    eventually(lambda: "stopped" in guest.call("snapshot").get("sharedState", ""), "B9: so does the agent opened beside it", ACCESS_WINDOW,
+               lambda: json.dumps(guest.call("snapshot").get("sharedState")))
+    check(f"{host.name} stopped sharing" in guest.call("portal").get("portalFooter", ""), "B9: it says the host stopped sharing",
+          guest.call("portal").get("portalFooter", ""))
+    after_revoke = f"After revoke {token}"
+    host.call("editNote", tile=notes[1], text=after_revoke)
+    time.sleep(8)
+    check(after_revoke not in item_of(notes[1]).get("facts", {}).get("text", ""), "B9: no further updates arrive")
+    fresh = host.call("newLink", tile=agent, previous=url)
+    rejoined = guest.call("open", url=fresh["url"], expectPortal=True, items=6, timeout=150)
+    g9 = guest.call("portal")
+    check(rejoined["outcome"] == "opened" and g9["portalTiles"] == g3["portalTiles"] and "live" in g9.get("portalState", ""),
+          "B9: a new link reconnects the same portal", json.dumps({k: g9.get(k) for k in ("portalTiles", "portalState")}))
+
+    # B10. Host offline.
+    host.quit()
+    eventually(lambda: "offline" in guest.call("portal").get("portalState", ""), "B10: the portal dims when the host's Mac goes offline",
+               LIVENESS_WINDOW, lambda: json.dumps(guest.call("portal").get("portalState")))
+    g10 = guest.call("portal")
+    check(g10.get("portalOutlineDashed") and "offline" in g10.get("portalTab", ""), "B10: with a dashed edge, and its header says so",
+          g10.get("portalTab", ""))
+    host.launch()
+    eventually(lambda: "live" in guest.call("portal").get("portalState", ""), "B10: it recovers when the host relaunches",
+               DELIVERY_WINDOW + 30, lambda: json.dumps(guest.call("portal").get("portalState")))
+    late_edit = f"Back online {token}"
+    host.call("editNote", tile=notes[1], text=late_edit)
+    eventually(lambda: late_edit in item_of(notes[1]).get("facts", {}).get("text", ""), "B10: and updates flow again",
+               DELIVERY_WINDOW, lambda: json.dumps(item_of(notes[1]).get("facts")))
+
+    # B11. Guest relaunch.
+    before11 = guest.call("portal")
+    guest.quit(); guest.launch()
+    eventually(lambda: "live" in guest.call("portal").get("portalState", ""), "B11: after relaunch the portal reconnects",
+               DELIVERY_WINDOW, lambda: json.dumps(guest.call("portal").get("portalState")))
+    after11 = guest.call("portal")
+    check(after11["portalTiles"] == before11["portalTiles"] and after11.get("portalWorld") == before11.get("portalWorld"),
+          "B11: the portal comes back at the same world frame", f"{before11.get('portalWorld')} -> {after11.get('portalWorld')}")
+    check(after11.get("cameraPersisted") == before11.get("cameraPersisted"), "B11: with the guest's own camera inside it")
+    try: host.call("revoke")
+    except Failed as error: print(f"note: revoking the link failed: {error}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--relay", choices=["staging", "local"], default="staging")
@@ -208,6 +469,7 @@ def main():
     parser.add_argument("--keep", action="store_true", help="leave the state folder for inspection")
     parser.add_argument("--hold", type=int, default=0, help="on failure, keep the apps running this many seconds")
     parser.add_argument("--name", default="Journey", help="bundle and state name, e.g. ShareJourney (letters only)")
+    parser.add_argument("--mode", choices=["a", "b"], default="a", help="a: share one agent; b: the portal")
     args = parser.parse_args()
     if not args.name.isalpha(): parser.error("--name takes letters only")
     configure(args.name)
@@ -252,207 +514,210 @@ def main():
         host = Person("a", endpoint, env_extra); guest = Person("b", endpoint, env_extra)
         people = [host, guest]
         print(f"==> {host.name} (host) and {guest.name} (guest) are running, off every display")
-
-        tile = host.call("spawnAgent")["tile"]
-        before = host.call("snapshot", tile=tile)
-
-        # 1. Header share.
-        s1 = host.call("headerShare", tile=tile)
-        after1 = host.call("snapshot", tile=tile)
-        check(s1["presented"] and s1["anchoredToTile"], "step 1: the header Share opens the popover, anchored to T")
-        check(not s1["published"] and after1["tileWorld"] == before["tileWorld"] and after1["tileZone"] == before["tileZone"],
-              "step 1: nothing is published, and T has not moved")
-
-        # 2. Sidebar share.
-        s2 = host.call("sidebarShare", tile=tile)
-        check(s2["presented"] and s2["anchoredToTile"] and s2["target"] == [tile],
-              "step 2: the sidebar row's Share opens the same popover, anchored to T on the canvas", json.dumps(s2))
-
-        # 3. Copy.
-        shared = share_step(host, tile)
-        url = shared["url"]
-        after3 = host.call("snapshot", tile=tile)
-        check(bool(url) and shared["pasteboard"] == url, "step 3: a link is on the pasteboard")
-        check(shared["areaItems"] == ["agentObservation"], "step 3: the relay area holds exactly one item, T's agent observation",
-              json.dumps(shared["areaItems"]))
-        check(after3["tileWorld"] == before["tileWorld"] and after3["tileZone"] == before["tileZone"],
-              "step 3: T's zone and world frame are unchanged", f"{before['tileWorld']} -> {after3['tileWorld']}")
-        check(after3["zones"] == before["zones"] and after3["sharedZoneSessions"] == 0, "step 3: the workspace document has no new zone")
-        check(after3.get("tab") == "Yours · shared", "the host's tile says it is shared", after3.get("tab", ""))
-
-        # 4. Open on the guest.
-        g0 = guest.call("snapshot")
-        opened = guest.call("open", url=url, timeout=150)
-        g4 = guest.call("snapshot")
-        new_kinds = list(g4["tileKinds"]); [new_kinds.remove(k) for k in g0["tileKinds"] if k in new_kinds]
-        check(opened["outcome"] == "opened" and new_kinds == ["sharedAgent"] and len(g4["sharedAgentTiles"]) == 1,
-              "step 4: exactly one new tile appears, of kind sharedAgent", json.dumps(new_kinds))
-        world, zone_rect = g4.get("sharedTileWorld") or {}, g4.get("sharedTileZoneWorld") or {}
-        check(g4.get("sharedTileZone") == g4["armedZone"] and world and zone_rect and inside(world, zone_rect)
-              and intersects(world, g4["visibleWorld"]),
-              "step 4: in the guest's armed zone, its world frame inside that zone and in view",
-              f"zone {g4.get('sharedTileZone')} armed {g4['armedZone']} frame {world} zone {zone_rect} view {g4['visibleWorld']}")
-        check(g4["zones"] == g0["zones"] and g4["sharedZoneSessions"] == 0, "step 4: no zone is created")
-        check(g4["agentRecords"] == g0["agentRecords"], "step 4: no AgentRecord is created on the guest",
-              f"{g0['agentRecords']} -> {g4['agentRecords']}")
-        check(host.name in g4.get("sharedTab", ""), "step 4: the tile's tab names the host", g4.get("sharedTab", ""))
-
-        token = "".join(random.choice(string.ascii_lowercase) for _ in range(6))
-        # 5. Guest prompts.
-        # The fake answers a plain prompt with one whole message, which the
-        # Claude runner (partial-message deltas) does not render. TOOL and
-        # TOOLFAIL turns render a tool step on both sides: that is the reply.
-        p1 = f"TOOL guest asks {token}"
-        guest.call("prompt", text=p1)
-        def host_shows_guest():
-            t = host.call("transcript", tile=tile)
-            text, cards = t.get("host", ""), t.get("hostSenderCards", [])
-            if p1 in text and any(guest.name in c for c in cards) and "[Bash]" in text.split(p1, 1)[1]: return t
-        def guest_shows_own():
-            shared = guest.call("transcript").get("shared", "")
-            if f"You: {p1}" in shared and "Command" in shared.split(p1, 1)[1]: return shared
-        eventually(host_shows_guest, f"step 5: the host transcript tags P1 with {guest.name}'s name, and the reply follows",
-                   DELIVERY_WINDOW, lambda: json.dumps(host.call("transcript", tile=tile))[-500:])
-        eventually(guest_shows_own, "step 5: the guest's transcript tags P1 \"You\", and the reply follows", DELIVERY_WINDOW,
-                   lambda: json.dumps(guest.call("transcript"))[-500:])
-        host_text = host.call("transcript", tile=tile).get("host", "")
-        check(host_text.count(p1) == 1, "step 5: the host runs exactly one turn for P1", f"seen {host_text.count(p1)} times")
-
-        # 6. Host prompts.
-        p2 = f"TOOLFAIL host says {token}"
-        # After P1's turn, so P2 is an ordinary send, not a steer (the fakes
-        # answer a steer only with text; --collaboration-full-access-check
-        # witnesses steers reaching teammates).
-        wait_for(lambda: not host.call("transcript", tile=tile).get("agentRunning", True), "P1's turn finished", 30)
-        host.call("prompt", tile=tile, text=p2)
-        def guest_shows_host():
-            shared = guest.call("transcript").get("shared", "")
-            if f"{host.name}: {p2}" in shared and "Command" in shared.split(p2, 1)[1]: return shared
-        eventually(guest_shows_host, f"step 6: the guest shows P2 tagged {host.name}, then its reply", DELIVERY_WINDOW,
-                   lambda: json.dumps(guest.call("transcript"))[-500:])
-        def host_shows_both():
-            text = host.call("transcript", tile=tile).get("host", "")
-            if p1 in text and p2 in text and "[Bash]" in text.split(p2, 1)[1]: return text
-        eventually(host_shows_both, "the host's tile still shows P1, then its own P2 and the reply", 30,
-                   lambda: host.call("transcript", tile=tile).get("host", "")[-300:])
-
-        # 7. A retry runs once.
-        retry = guest.call("resendLast")
-        time.sleep(6)
-        host_text = host.call("transcript", tile=tile).get("host", "")
-        check(retry["sameCommand"] and retry["firstID"] == retry["secondID"] and host_text.count(p1) == 1,
-              "step 7: resending P1 with the same request ID runs nothing new; the receipt matches the first",
-              f"{json.dumps(retry)}; P1 seen {host_text.count(p1)} times")
-
-        # 8. Controls.
-        g8 = guest.call("snapshot"); h8 = host.call("snapshot", tile=tile)
-        controls = [c.lower() for c in g8.get("sharedControls", [])]
-        check(not any("stop" in c or "approve" in c or "allow" in c or "deny" in c for c in controls)
-              and "Approvals stay with its owner" in g8.get("controlsText", ""),
-              "step 8: the guest has no Stop and no approval control", json.dumps(controls))
-        check(h8.get("hostIsManagedAgentTile") and h8.get("hostHasRunner"),
-              "step 8: the host's own agent tile, with its runner, keeps Stop and approvals")
-
-        # 9. Access list and Remove.
-        access = host.call("access", tile=tile)
-        check(any(guest.name in r and "full access" in r for r in access["rows"]) and access["removeButtons"] >= 1,
-              f"step 9: the host's popover lists {guest.name} with \"full access\" and Remove", json.dumps(access["rows"]))
-        h9 = host.call("snapshot", tile=tile)
-        check(h9.get("tab") == f"Yours · shared with {guest.name}", "the host's tab names who it is shared with", h9.get("tab", ""))
-        host.call("remove")
-        eventually(lambda: "stopped" in guest.call("snapshot").get("sharedState", ""),
-                   "step 9: within the window the guest's tile shows the stopped state", ACCESS_WINDOW,
-                   lambda: json.dumps(guest.call("snapshot"))[-400:])
-        g9 = guest.call("snapshot")
-        check(f"{host.name} stopped sharing" in g9.get("sharedFooter", ""), "step 9: it says the host stopped sharing",
-              g9.get("sharedFooter", ""))
-        p_refused = f"PLAIN refused {token}"
-        refused = guest.call("promptDirect", text=p_refused)
-        time.sleep(4)
-        host_text = host.call("transcript", tile=tile).get("host", "")
-        check(refused["outcome"] == "refused" and p_refused not in host_text,
-              "step 9: a guest prompt is refused, and nothing runs on the host", json.dumps(refused))
-
-        # 10. Works once.
-        fresh = host.call("newLink", tile=tile, previous=url)
-        check(fresh["lifetime"] == "once", "step 10: the host re-shares with a Works once link")
-        rejoined = guest.call("open", url=fresh["url"], timeout=150)
-        g10 = guest.call("snapshot")
-        check(rejoined["outcome"] == "opened" and len(g10["sharedAgentTiles"]) == 1 and "live" in g10.get("sharedState", ""),
-              "step 10: the guest joins again, into the same tile, live", json.dumps({k: g10.get(k) for k in ("sharedAgentTiles", "sharedState")}))
-        third = Person("c", endpoint, env_extra); people.append(third)
-        refusal = third.call("open", url=fresh["url"], expectTile=False, timeout=150)
-        t10 = third.call("snapshot")
-        check(refusal["outcome"] != "opened" and not t10["sharedAgentTiles"],
-              f"step 10: a third app opening the same link is refused", json.dumps(refusal))
-        third.quit(); people.remove(third)
-
-        # 11. Host offline.
-        host.quit()
-        quit_at = time.monotonic()
-        eventually(lambda: "offline" in guest.call("snapshot").get("sharedState", ""),
-                   "step 11: within the liveness window the guest's tile shows the offline state", LIVENESS_WINDOW,
-                   lambda: json.dumps(guest.call("snapshot"))[-400:])
-        print(f"    offline shown {time.monotonic() - quit_at:.1f} s after the host quit")
-        g11 = guest.call("snapshot")
-        check(g11.get("sharedOutlineDashed") and f"{host.name}'s Mac is offline" in g11.get("sharedFooter", ""),
-              "step 11: dimmed, with a dashed edge and the offline footer", g11.get("sharedFooter", ""))
-        p3 = f"TOOL while away {token}"
-        guest.call("prompt", text=p3)
-        g11b = guest.call("snapshot")
-        check("Queued" in g11b.get("controlsText", ""), "step 11: a guest prompt is accepted as queued", g11b.get("controlsText", ""))
-        host.launch()
-        def host_ran_queued():
-            text = host.call("transcript", tile=tile).get("host", "")
-            if p3 in text and "[Bash]" in text.split(p3, 1)[1]: return text
-        eventually(host_ran_queued, "step 11: the relaunched host runs the queued prompt", DELIVERY_WINDOW + 30,
-                   lambda: json.dumps(host.call("transcript", tile=tile))[-500:])
-        time.sleep(4)
-        host_text = host.call("transcript", tile=tile).get("host", "")
-        check(host_text.count(p3) == 1, "step 11: exactly once", f"seen {host_text.count(p3)} times")
-        eventually(lambda: "live" in guest.call("snapshot").get("sharedState", ""), "step 11: the guest's tile is live again",
-                   DELIVERY_WINDOW, lambda: json.dumps(guest.call("snapshot"))[-400:])
-
-        # 12. Guest relaunch.
-        before12 = guest.call("snapshot")
-        guest.quit(); guest.launch()
-        eventually(lambda: "live" in guest.call("snapshot").get("sharedState", ""), "step 12: after relaunch the tile reconnects",
-                   DELIVERY_WINDOW, lambda: json.dumps(guest.call("snapshot"))[-400:])
-        after12 = guest.call("snapshot")
-        check(after12["sharedAgentTiles"] == before12["sharedAgentTiles"] and after12.get("sharedTileWorld") == before12.get("sharedTileWorld"),
-              "step 12: the tile comes back at the same world frame", f"{before12.get('sharedTileWorld')} -> {after12.get('sharedTileWorld')}")
-        guest.quit(); people.remove(guest)
-        # Another install that knows this root's workspace but has no
-        # collaboration account: the guest's app state without its account
-        # list or credential vault. (A fresh install has its own workspace, whose
-        # zones do not include the tile's, and leaves the tile alone entirely.)
-        second_root = STATE / "b-second-install"
-        shutil.copytree(guest.root / "support", second_root / "support",
-                        ignore=shutil.ignore_patterns("collaboration-support"), symlinks=True)
-        second = Person("b", endpoint, env_extra, folder="b-second-install", project=guest.project); people.append(second)
-        def placeholder():
-            snap = second.call("snapshot")
-            if snap.get("sharedPlaceholder"): return snap
-        eventually(placeholder, "step 12: a second install on the guest's root with no account shows the placeholder", 30,
-                   lambda: json.dumps(second.call("snapshot"))[-400:])
-        s12 = second.call("snapshot")
-        check(s12["agentRecords"] == 0 and "sharedAgent" in s12["tileKinds"] and "managedAgent" not in s12["tileKinds"]
-              and host.name in s12.get("sharedPlaceholder", ""),
-              "step 12: not a broken agent: no record, still a sharedAgent tile, naming whose it is", s12.get("sharedPlaceholder", ""))
-        check(not s12.get("sharedHasSession"), "step 12: and it opens no connection without the account")
-
-        if after3["sharedZoneSessions"]:
-            for sender, receiver in [(guest, host), (host, guest)]:
-                direction = f"{sender.name} -> {receiver.name}"
-                median, final = latency(sender, receiver, direction)
-                check(median is not None and median <= MEDIAN_BUDGET_MS, f"{direction}: median cursor delay within {MEDIAN_BUDGET_MS} ms",
-                      f"median {median}")
-                check(final is not None and final <= FINAL_BUDGET_MS, f"{direction}: the final cursor position lands within {FINAL_BUDGET_MS} ms",
-                      f"final {final}")
+        if args.mode == "b":
+            mode_b(host, guest, check, eventually, endpoint, env_extra, people)
         else:
-            print("NOTE journey: no cursor leg: mode A shares one agent with no zone, and the spec gives it no cursors")
-        try: host.call("revoke")
-        except Failed as error: print(f"note: revoking the link failed: {error}")
+
+            tile = host.call("spawnAgent")["tile"]
+            before = host.call("snapshot", tile=tile)
+
+            # 1. Header share.
+            s1 = host.call("headerShare", tile=tile)
+            after1 = host.call("snapshot", tile=tile)
+            check(s1["presented"] and s1["anchoredToTile"], "step 1: the header Share opens the popover, anchored to T")
+            check(not s1["published"] and after1["tileWorld"] == before["tileWorld"] and after1["tileZone"] == before["tileZone"],
+                  "step 1: nothing is published, and T has not moved")
+
+            # 2. Sidebar share.
+            s2 = host.call("sidebarShare", tile=tile)
+            check(s2["presented"] and s2["anchoredToTile"] and s2["target"] == [tile],
+                  "step 2: the sidebar row's Share opens the same popover, anchored to T on the canvas", json.dumps(s2))
+
+            # 3. Copy.
+            shared = share_step(host, tile)
+            url = shared["url"]
+            after3 = host.call("snapshot", tile=tile)
+            check(bool(url) and shared["pasteboard"] == url, "step 3: a link is on the pasteboard")
+            check(shared["areaItems"] == ["agentObservation"], "step 3: the relay area holds exactly one item, T's agent observation",
+                  json.dumps(shared["areaItems"]))
+            check(after3["tileWorld"] == before["tileWorld"] and after3["tileZone"] == before["tileZone"],
+                  "step 3: T's zone and world frame are unchanged", f"{before['tileWorld']} -> {after3['tileWorld']}")
+            check(after3["zones"] == before["zones"] and after3["sharedZoneSessions"] == 0, "step 3: the workspace document has no new zone")
+            check(after3.get("tab") == "Yours · shared", "the host's tile says it is shared", after3.get("tab", ""))
+
+            # 4. Open on the guest.
+            g0 = guest.call("snapshot")
+            opened = guest.call("open", url=url, timeout=150)
+            g4 = guest.call("snapshot")
+            new_kinds = list(g4["tileKinds"]); [new_kinds.remove(k) for k in g0["tileKinds"] if k in new_kinds]
+            check(opened["outcome"] == "opened" and new_kinds == ["sharedAgent"] and len(g4["sharedAgentTiles"]) == 1,
+                  "step 4: exactly one new tile appears, of kind sharedAgent", json.dumps(new_kinds))
+            world, zone_rect = g4.get("sharedTileWorld") or {}, g4.get("sharedTileZoneWorld") or {}
+            check(g4.get("sharedTileZone") == g4["armedZone"] and world and zone_rect and inside(world, zone_rect)
+                  and intersects(world, g4["visibleWorld"]),
+                  "step 4: in the guest's armed zone, its world frame inside that zone and in view",
+                  f"zone {g4.get('sharedTileZone')} armed {g4['armedZone']} frame {world} zone {zone_rect} view {g4['visibleWorld']}")
+            check(g4["zones"] == g0["zones"] and g4["sharedZoneSessions"] == 0, "step 4: no zone is created")
+            check(g4["agentRecords"] == g0["agentRecords"], "step 4: no AgentRecord is created on the guest",
+                  f"{g0['agentRecords']} -> {g4['agentRecords']}")
+            check(host.name in g4.get("sharedTab", ""), "step 4: the tile's tab names the host", g4.get("sharedTab", ""))
+
+            token = "".join(random.choice(string.ascii_lowercase) for _ in range(6))
+            # 5. Guest prompts.
+            # The fake answers a plain prompt with one whole message, which the
+            # Claude runner (partial-message deltas) does not render. TOOL and
+            # TOOLFAIL turns render a tool step on both sides: that is the reply.
+            p1 = f"TOOL guest asks {token}"
+            guest.call("prompt", text=p1)
+            def host_shows_guest():
+                t = host.call("transcript", tile=tile)
+                text, cards = t.get("host", ""), t.get("hostSenderCards", [])
+                if p1 in text and any(guest.name in c for c in cards) and "[Bash]" in text.split(p1, 1)[1]: return t
+            def guest_shows_own():
+                shared = guest.call("transcript").get("shared", "")
+                if f"You: {p1}" in shared and "Command" in shared.split(p1, 1)[1]: return shared
+            eventually(host_shows_guest, f"step 5: the host transcript tags P1 with {guest.name}'s name, and the reply follows",
+                       DELIVERY_WINDOW, lambda: json.dumps(host.call("transcript", tile=tile))[-500:])
+            eventually(guest_shows_own, "step 5: the guest's transcript tags P1 \"You\", and the reply follows", DELIVERY_WINDOW,
+                       lambda: json.dumps(guest.call("transcript"))[-500:])
+            host_text = host.call("transcript", tile=tile).get("host", "")
+            check(host_text.count(p1) == 1, "step 5: the host runs exactly one turn for P1", f"seen {host_text.count(p1)} times")
+
+            # 6. Host prompts.
+            p2 = f"TOOLFAIL host says {token}"
+            # After P1's turn, so P2 is an ordinary send, not a steer (the fakes
+            # answer a steer only with text; --collaboration-full-access-check
+            # witnesses steers reaching teammates).
+            wait_for(lambda: not host.call("transcript", tile=tile).get("agentRunning", True), "P1's turn finished", 30)
+            host.call("prompt", tile=tile, text=p2)
+            def guest_shows_host():
+                shared = guest.call("transcript").get("shared", "")
+                if f"{host.name}: {p2}" in shared and "Command" in shared.split(p2, 1)[1]: return shared
+            eventually(guest_shows_host, f"step 6: the guest shows P2 tagged {host.name}, then its reply", DELIVERY_WINDOW,
+                       lambda: json.dumps(guest.call("transcript"))[-500:])
+            def host_shows_both():
+                text = host.call("transcript", tile=tile).get("host", "")
+                if p1 in text and p2 in text and "[Bash]" in text.split(p2, 1)[1]: return text
+            eventually(host_shows_both, "the host's tile still shows P1, then its own P2 and the reply", 30,
+                       lambda: host.call("transcript", tile=tile).get("host", "")[-300:])
+
+            # 7. A retry runs once.
+            retry = guest.call("resendLast")
+            time.sleep(6)
+            host_text = host.call("transcript", tile=tile).get("host", "")
+            check(retry["sameCommand"] and retry["firstID"] == retry["secondID"] and host_text.count(p1) == 1,
+                  "step 7: resending P1 with the same request ID runs nothing new; the receipt matches the first",
+                  f"{json.dumps(retry)}; P1 seen {host_text.count(p1)} times")
+
+            # 8. Controls.
+            g8 = guest.call("snapshot"); h8 = host.call("snapshot", tile=tile)
+            controls = [c.lower() for c in g8.get("sharedControls", [])]
+            check(not any("stop" in c or "approve" in c or "allow" in c or "deny" in c for c in controls)
+                  and "Approvals stay with its owner" in g8.get("controlsText", ""),
+                  "step 8: the guest has no Stop and no approval control", json.dumps(controls))
+            check(h8.get("hostIsManagedAgentTile") and h8.get("hostHasRunner"),
+                  "step 8: the host's own agent tile, with its runner, keeps Stop and approvals")
+
+            # 9. Access list and Remove.
+            access = host.call("access", tile=tile)
+            check(any(guest.name in r and "full access" in r for r in access["rows"]) and access["removeButtons"] >= 1,
+                  f"step 9: the host's popover lists {guest.name} with \"full access\" and Remove", json.dumps(access["rows"]))
+            h9 = host.call("snapshot", tile=tile)
+            check(h9.get("tab") == f"Yours · shared with {guest.name}", "the host's tab names who it is shared with", h9.get("tab", ""))
+            host.call("remove")
+            eventually(lambda: "stopped" in guest.call("snapshot").get("sharedState", ""),
+                       "step 9: within the window the guest's tile shows the stopped state", ACCESS_WINDOW,
+                       lambda: json.dumps(guest.call("snapshot"))[-400:])
+            g9 = guest.call("snapshot")
+            check(f"{host.name} stopped sharing" in g9.get("sharedFooter", ""), "step 9: it says the host stopped sharing",
+                  g9.get("sharedFooter", ""))
+            p_refused = f"PLAIN refused {token}"
+            refused = guest.call("promptDirect", text=p_refused)
+            time.sleep(4)
+            host_text = host.call("transcript", tile=tile).get("host", "")
+            check(refused["outcome"] == "refused" and p_refused not in host_text,
+                  "step 9: a guest prompt is refused, and nothing runs on the host", json.dumps(refused))
+
+            # 10. Works once.
+            fresh = host.call("newLink", tile=tile, previous=url)
+            check(fresh["lifetime"] == "once", "step 10: the host re-shares with a Works once link")
+            rejoined = guest.call("open", url=fresh["url"], timeout=150)
+            g10 = guest.call("snapshot")
+            check(rejoined["outcome"] == "opened" and len(g10["sharedAgentTiles"]) == 1 and "live" in g10.get("sharedState", ""),
+                  "step 10: the guest joins again, into the same tile, live", json.dumps({k: g10.get(k) for k in ("sharedAgentTiles", "sharedState")}))
+            third = Person("c", endpoint, env_extra); people.append(third)
+            refusal = third.call("open", url=fresh["url"], expectTile=False, timeout=150)
+            t10 = third.call("snapshot")
+            check(refusal["outcome"] != "opened" and not t10["sharedAgentTiles"],
+                  f"step 10: a third app opening the same link is refused", json.dumps(refusal))
+            third.quit(); people.remove(third)
+
+            # 11. Host offline.
+            host.quit()
+            quit_at = time.monotonic()
+            eventually(lambda: "offline" in guest.call("snapshot").get("sharedState", ""),
+                       "step 11: within the liveness window the guest's tile shows the offline state", LIVENESS_WINDOW,
+                       lambda: json.dumps(guest.call("snapshot"))[-400:])
+            print(f"    offline shown {time.monotonic() - quit_at:.1f} s after the host quit")
+            g11 = guest.call("snapshot")
+            check(g11.get("sharedOutlineDashed") and f"{host.name}'s Mac is offline" in g11.get("sharedFooter", ""),
+                  "step 11: dimmed, with a dashed edge and the offline footer", g11.get("sharedFooter", ""))
+            p3 = f"TOOL while away {token}"
+            guest.call("prompt", text=p3)
+            g11b = guest.call("snapshot")
+            check("Queued" in g11b.get("controlsText", ""), "step 11: a guest prompt is accepted as queued", g11b.get("controlsText", ""))
+            host.launch()
+            def host_ran_queued():
+                text = host.call("transcript", tile=tile).get("host", "")
+                if p3 in text and "[Bash]" in text.split(p3, 1)[1]: return text
+            eventually(host_ran_queued, "step 11: the relaunched host runs the queued prompt", DELIVERY_WINDOW + 30,
+                       lambda: json.dumps(host.call("transcript", tile=tile))[-500:])
+            time.sleep(4)
+            host_text = host.call("transcript", tile=tile).get("host", "")
+            check(host_text.count(p3) == 1, "step 11: exactly once", f"seen {host_text.count(p3)} times")
+            eventually(lambda: "live" in guest.call("snapshot").get("sharedState", ""), "step 11: the guest's tile is live again",
+                       DELIVERY_WINDOW, lambda: json.dumps(guest.call("snapshot"))[-400:])
+
+            # 12. Guest relaunch.
+            before12 = guest.call("snapshot")
+            guest.quit(); guest.launch()
+            eventually(lambda: "live" in guest.call("snapshot").get("sharedState", ""), "step 12: after relaunch the tile reconnects",
+                       DELIVERY_WINDOW, lambda: json.dumps(guest.call("snapshot"))[-400:])
+            after12 = guest.call("snapshot")
+            check(after12["sharedAgentTiles"] == before12["sharedAgentTiles"] and after12.get("sharedTileWorld") == before12.get("sharedTileWorld"),
+                  "step 12: the tile comes back at the same world frame", f"{before12.get('sharedTileWorld')} -> {after12.get('sharedTileWorld')}")
+            guest.quit(); people.remove(guest)
+            # Another install that knows this root's workspace but has no
+            # collaboration account: the guest's app state without its account
+            # list or credential vault. (A fresh install has its own workspace, whose
+            # zones do not include the tile's, and leaves the tile alone entirely.)
+            second_root = STATE / "b-second-install"
+            shutil.copytree(guest.root / "support", second_root / "support",
+                            ignore=shutil.ignore_patterns("collaboration-support"), symlinks=True)
+            second = Person("b", endpoint, env_extra, folder="b-second-install", project=guest.project); people.append(second)
+            def placeholder():
+                snap = second.call("snapshot")
+                if snap.get("sharedPlaceholder"): return snap
+            eventually(placeholder, "step 12: a second install on the guest's root with no account shows the placeholder", 30,
+                       lambda: json.dumps(second.call("snapshot"))[-400:])
+            s12 = second.call("snapshot")
+            check(s12["agentRecords"] == 0 and "sharedAgent" in s12["tileKinds"] and "managedAgent" not in s12["tileKinds"]
+                  and host.name in s12.get("sharedPlaceholder", ""),
+                  "step 12: not a broken agent: no record, still a sharedAgent tile, naming whose it is", s12.get("sharedPlaceholder", ""))
+            check(not s12.get("sharedHasSession"), "step 12: and it opens no connection without the account")
+
+            if after3["sharedZoneSessions"]:
+                for sender, receiver in [(guest, host), (host, guest)]:
+                    direction = f"{sender.name} -> {receiver.name}"
+                    median, final = latency(sender, receiver, direction)
+                    check(median is not None and median <= MEDIAN_BUDGET_MS, f"{direction}: median cursor delay within {MEDIAN_BUDGET_MS} ms",
+                          f"median {median}")
+                    check(final is not None and final <= FINAL_BUDGET_MS, f"{direction}: the final cursor position lands within {FINAL_BUDGET_MS} ms",
+                          f"final {final}")
+            else:
+                print("NOTE journey: no cursor leg: mode A shares one agent with no zone, and the spec gives it no cursors")
+            try: host.call("revoke")
+            except Failed as error: print(f"note: revoking the link failed: {error}")
     except Failed as error:
         failures.append(str(error)); print(f"FAIL journey: {error}", flush=True)
     finally:
