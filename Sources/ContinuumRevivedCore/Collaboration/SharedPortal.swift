@@ -26,7 +26,9 @@ public enum SharedPortal {
     /// What a shared item is on the guest. Unknown raw values decode as
     /// `.unknown`, so a newer host never breaks an older guest's portal.
     public enum ItemKind: String, Codable, Sendable, CaseIterable {
-        case agent, note, file, diff, browser, terminal, unknown
+        /// A board (Kanban) tile. A guest older than 0.7.40 decodes it as
+        /// `.unknown` and draws its title-only card.
+        case agent, note, file, diff, browser, terminal, board, unknown
 
         public init(from decoder: Decoder) throws {
             self = ItemKind(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
@@ -42,6 +44,7 @@ public enum SharedPortal {
             case .diffReview: return .diff
             case .browser: return .browser
             case .terminal: return .terminal
+            case .kanban: return .board
             default: return nil
             }
         }
@@ -160,6 +163,71 @@ public enum SharedPortal {
         public init(url: String, title: String, mode: Mode) { self.url = url; self.title = title; self.mode = mode }
         public static let name = "browser"
         public static let stillEntry = "still.png.b64"
+    }
+
+    /// `board.json`: the ONE board a shared board tile showed when it was
+    /// shared, and the names its cards need. Nothing else in the project's
+    /// board library travels. Built by `BoardPayload.make`, which keeps every
+    /// path inside the project and drops URL secrets.
+    public struct BoardPayload: Codable, Equatable, Sendable {
+        public struct Agent: Codable, Equatable, Sendable {
+            public var id: AgentID
+            public var name: String
+            /// The portal item for this agent when the host shares it in the
+            /// same portal; nil means it stays on the host's Mac.
+            public var object: UUID?
+            public init(id: AgentID, name: String, object: UUID? = nil) { self.id = id; self.name = name; self.object = object }
+        }
+        public var board: Board
+        /// Display names for each assignee and agent link, as the host shows them.
+        public var agents: [Agent]
+        public init(board: Board, agents: [Agent]) { self.board = board; self.agents = agents }
+        public static let name = "board"
+
+        /// One card picture travels as a small PNG, `thumb-<attachment>.png.b64`.
+        /// Each revision costs its bytes again against the area's 64 MiB, so
+        /// pictures are bounded hard: at most `thumbnailCount` a revision, each
+        /// at most `thumbnailBytes`.
+        public static func thumbnailEntry(_ attachment: UUID) -> String { "thumb-\(attachment.uuidString.lowercased()).png.b64" }
+        public static let thumbnailCount = 16
+        public static let thumbnailBytes = 48 * 1024
+        public static let thumbnailPixels = 256
+
+        /// The host's board as a guest may see it. Document links keep only
+        /// their path inside the project (a file outside it is dropped), URL
+        /// links lose any sign-in and, when a query or fragment names a
+        /// secret, the query and fragment.
+        public static func make(board: Board, agentName: (AgentID) -> String?) -> BoardPayload {
+            var shared = board
+            shared.cards = board.cards.map { card in
+                var card = card
+                card.links = card.links.compactMap(scrub)
+                return card
+            }
+            var ids: [AgentID] = []
+            for card in shared.cards {
+                if let assignee = card.assignee, !ids.contains(assignee) { ids.append(assignee) }
+                for case .agent(let id) in card.links where !ids.contains(id) { ids.append(id) }
+            }
+            return .init(board: shared, agents: ids.map { .init(id: $0, name: agentName($0) ?? "Agent") })
+        }
+        static func scrub(_ link: CardLink) -> CardLink? {
+            switch link {
+            case .agent, .tile: return link
+            case .document(let location):
+                guard let relative = location.relativePath, !relative.hasPrefix("/"), !relative.split(separator: "/").contains("..") else { return nil }
+                return .document(.init(path: relative, scope: .checkout(projectId: nil, rootPath: "", relativePath: relative)))
+            case .url(let raw):
+                guard var parts = URLComponents(string: raw) else { return nil }
+                parts.user = nil; parts.password = nil
+                let secret = ["token", "key", "code", "session", "sig", "secret", "password", "auth"]
+                let named = (parts.queryItems?.map(\.name) ?? []) + [parts.fragment ?? ""]
+                if named.contains(where: { name in secret.contains { name.lowercased().contains($0) } }) {
+                    parts.query = nil; parts.fragment = nil
+                }
+                return parts.string.map(CardLink.url)
+            }
+        }
     }
 
     // MARK: Geometry

@@ -620,6 +620,7 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   # Host vs guest of each shared kind through the production share path
   # (view classes, elements, pixels; light and dark). KNOWN-RED below.
   run_app_check .build/debug/Array --shared-tile-parity-check
+  run_app_check .build/debug/Array --portal-board-check
   run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
   # A shared terminal streamed from its tmux pane (.plans/114-terminal-sharing):
   # the follower and the stream lane, the guest's Ghostty mirror in light and
@@ -1554,6 +1555,7 @@ run_app_check .build/debug/Array --portal-kinds-check
 # Host vs guest of each shared kind through the production share path: view
 # classes, rendered elements and pixels, light and dark (KNOWN-RED below).
 run_app_check .build/debug/Array --shared-tile-parity-check
+run_app_check .build/debug/Array --portal-board-check
 run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
 # A shared terminal streamed from its tmux pane (.plans/114-terminal-sharing):
 # the follower and the stream lane, the guest's Ghostty mirror in light and

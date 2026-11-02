@@ -228,6 +228,7 @@ check --persistence-crash-safe-check
 check --pi-extension-load-check
 check --pi-provider-failure-check
 check --picker-epoch-fence-check
+check --portal-board-check
 check --portal-kinds-check
 check --project-file-operation-check
 check --project-icon-check
@@ -625,6 +626,7 @@ leg run_app_check .build/debug/Array --perf-budget-zoom-check
 leg run_app_check .build/debug/Array --persistence-crash-safe-check
 leg run_app_check .build/debug/Array --pi-extension-load-check
 leg run_app_check .build/debug/Array --picker-epoch-fence-check
+leg run_app_check .build/debug/Array --portal-board-check
 leg run_app_check .build/debug/Array --portal-kinds-check
 leg run_app_check .build/debug/Array --project-file-operation-check
 leg run_app_check .build/debug/Array --project-icon-check

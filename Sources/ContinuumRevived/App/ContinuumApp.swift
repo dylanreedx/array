@@ -1743,6 +1743,24 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // A board tile through the portal contract, host reducer to guest view.
+        if let index = CommandLine.arguments.firstIndex(of: "--portal-board-check") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            let next = CommandLine.arguments.indices.contains(index + 1) ? CommandLine.arguments[index + 1] : nil
+            let directory = URL(fileURLWithPath: next.flatMap { $0.hasPrefix("-") ? nil : $0 }
+                ?? NSTemporaryDirectory() + "portal-board")
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(120))
+                fputs("FAIL: portal board check exceeded its 120-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do { try await SharedPortalBoardChecks.run(directory: directory); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         // Every other shared kind as the guest sees it, light and dark, as PNGs.
         if let index = CommandLine.arguments.firstIndex(of: "--shared-tile-render-check") {
             setbuf(stdout, nil)
