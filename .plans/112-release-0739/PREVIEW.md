@@ -17,10 +17,10 @@ Terminals keep tmux persistence. Each app runs its own tmux server in its own
 folder (~/array-scratch/preview-0739/a/tmux and b/tmux), never the default
 socket your own terminals use. `launch` starts that server itself, without
 your ~/.tmux.conf. The reason: your config runs tpm, which can stall a
-brand-new tmux server. Opening a terminal survives that (the app gives up
-after 5 seconds and opens it without persistence), but sharing a terminal
-does not yet: it waits on the stalled server and freezes the host. So in the
-preview, terminals use tmux's defaults rather than your config.
+brand-new tmux server. The app now survives that: a terminal opens without
+persistence after 5 seconds, and sharing it falls back to a plain text mirror
+after 3. But you'd be trying the fallback, not the real shared terminal. So in
+the preview, terminals use tmux's defaults rather than your config.
 
 The local relay and staging both run the same relay code. Staging (v12) is
 deployed from this branch; production is untouched.
@@ -95,7 +95,10 @@ have something to show.
    the share popover has "Share live…", which warns once ("Share anyway")
    and then marks it Live. Dragging a terminal into a portal works the same
    way: the Add to share pill warns first. An opted-in terminal is live in
-   B's portal, drawn the same way.
+   B's portal, drawn the same way, and A's terminal shows a "Live" badge
+   with a Stop sharing button beside it, at the right of its top strip.
+   **Stop sharing one terminal:** press that Stop sharing. That terminal turns back into a card in B's portal;
+   the rest of the portal keeps going.
 7. **File and diff, with Approve.** In A, open greet.js (palette: "Editor") and a
    diff (palette: "Diff review"). Share them. B sees the
    file's text and the coloured diff, updated when A saves. In a portal,
@@ -152,17 +155,17 @@ have something to show.
 - **B draws terminal glyphs in its own font.** The grid, colours and cursor
   are A's; the letters come from B's Ghostty font. (These preview apps don't
   read either person's Ghostty config, so both use the default palette.)
-- **In a portal, an opted-in terminal has no Live badge on A's side and no
-  per-terminal Stop.** Revoke stops the whole portal. An opt-in also lasts
-  one popover: reopen it and it asks again.
+- **An opt-in lasts one popover.** Reopen the share popover and it asks
+  again for each terminal.
 - **A 0.7.38 friend can't open a shared note, file, diff, browser or
   terminal.** They see "the relay answered with an error (426). Try it again
   later." and must update. The link isn't spent and nothing lands on their
   canvas. A shared agent and a portal still open for them, unless
   a terminal in the portal was opted in live (that makes it a live share too).
-- **Sharing a terminal can freeze the host if its tmux server is stuck.**
-  The preview avoids it (see above). It is a real bug for the release:
-  sharing asks tmux for the pane on the main thread with no timeout.
+- **A stuck tmux server gives the plain text mirror, not the live
+  terminal.** Sharing used to freeze the host here; it now gives up after
+  3 seconds and sends the visible text instead. The preview starts tmux
+  itself so you won't hit it.
 - Note cursors and selections of the other person are not drawn.
 - B's pictures of a private page stop while A's tile is off screen; B keeps
   the last one.
