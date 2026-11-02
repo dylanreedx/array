@@ -34,12 +34,19 @@ extension AgentSupervisor {
                 $0.parentAgentID == id && ($0.id.rawValue.uuidString.caseInsensitiveCompare(owner) == .orderedSame
                     || $0.humanDisplayName == owner)
             }
+            // "Plan first": a step for a helper not started yet ("helper A") is
+            // kept as written and shown waiting until the lead names its ID.
+            if matches.isEmpty, Self.isUnstartedHelperOwner(owner) { continue }
             guard matches.count == 1, let helper = matches.first else {
                 return .failure(.init(code: .invalidRequest, message: "Plan owner must name one of your helpers (use its ID if names repeat). Nothing was recorded."))
             }
             resolved[i].owner = helper.id.rawValue.uuidString
         }
         return .success(resolved)
+    }
+
+    static func isUnstartedHelperOwner(_ owner: String) -> Bool {
+        UUID(uuidString: owner) == nil && owner.lowercased().hasPrefix("helper")
     }
 
     func leadPlan(for id: AgentID) -> LeadPlanPresentation? {
@@ -52,6 +59,7 @@ extension AgentSupervisor {
             }
             guard let uuid = UUID(uuidString: step.owner), let helper = records[AgentID(rawValue: uuid)],
                   helper.parentAgentID == id else {
+                if Self.isUnstartedHelperOwner(step.owner) { return .init(title: step.title, owner: step.owner, state: .waiting) }
                 return .init(title: step.title, owner: "Helper unavailable", state: .waiting)
             }
             let model = helper.harness.flatMap { AgentModelCatalog.shared.displayName(for: helper.model, harness: $0) } ?? helper.model

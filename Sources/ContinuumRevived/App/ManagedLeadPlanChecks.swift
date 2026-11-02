@@ -43,6 +43,15 @@ enum ManagedLeadPlanChecks {
             throw WorkspaceAgentReportChecks.Failure(description: "production spawn did not mount lead tile")
         }
         try expect(tile.qaLeadPlanView.isHidden, "unposted plan visible")
+        // Live 2026-11-02, verbatim: the brief says "plan first", so a real lead
+        // posts its plan BEFORE any helper exists. It must be kept, not refused.
+        let early = try await WorkspaceAgentReportChecks.call(b.configuration(for: lead), "array_status", ["now": "Delegating two independent jobs in parallel",
+            "plan": [["title": "Job A: greeting.txt + make test", "owner": "helper A"], ["title": "Job B: notes.txt + sleep 100", "owner": "helper B"],
+                     ["title": "Collect reports", "owner": "lead"]]])
+        try expect(!early.isError, "plan posted before delegating was refused: \(early.reply)")
+        try expect(tile.qaLeadPlanView.presentation?.steps.map(\.owner) == ["helper A", "helper B", "Lead"]
+            && tile.qaLeadPlanView.presentation?.steps.allSatisfy { $0.state == .waiting } == true,
+            "early plan did not render its unstarted helper steps: \(String(describing: tile.qaLeadPlanView.presentation))")
         let helper = try await delegateHelper(b, label: "HOLD-login")
         let failed = try await delegateHelper(b, label: "Compare error screen")
         try await ManagedModeChecks.settled(b, failed)
