@@ -735,6 +735,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private let whereLabel = NSTextField(labelWithString: "")
 
     private let placementLabel = NSTextField(labelWithString: "")
+    /// Set by the list before `apply`: the row sits under its own project
+    /// heading (`By project`), so a chip naming that project is not drawn.
+    var placementRepeatsHeading = false
+    /// The project the chip would have named, still read by VoiceOver.
+    private var placementSpokenOnly: String?
     private let projectIcon = NSImageView(frame: .zero)
     private static let metadataIconSide: CGFloat = 12
     private static var metadataSymbols: [String: NSImage] = [:]
@@ -1196,7 +1201,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             workspaceLabel.toolTip = "Workspace: \(workspaceName)"
             workspaceLabelNaturalWidth = Self.width(of: workspaceLabel)
         }
-        let placement = row.directoryName ?? row.projectName ?? ""
+        let fullPlacement = row.directoryName ?? row.projectName ?? ""
+        // .plans/113: under its own project heading the chip only repeats it.
+        let repeatsHeading = placementRepeatsHeading && !fullPlacement.isEmpty
+            && fullPlacement == InboxSort.projectGroupName(for: row)
+        placementSpokenOnly = repeatsHeading ? fullPlacement : nil
+        let placement = repeatsHeading ? "" : fullPlacement
         placementLabel.stringValue = placement
         whereLabel.stringValue = row.whereMarker?.text ?? ""
         whereIcon.image = row.whereMarker.flatMap {
@@ -1245,7 +1255,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // marked) but a row you read and then left lying there forever. That one is
         // the settle nudge's job, and it is a different row entirely.
         statusGlyph.setPulsing(false)
-        applyThrobber(isWorking: row.state == .working)
+        applyThrobber(isWorking: Self.showsWorkingGlyph(row, rollup: rollup))
         // A folded parent's rollup keeps the lane; otherwise what the agent said
         // about this turn takes it from the branch.
         let line = rollupSummary == nil ? row.selfReportLine : nil
@@ -1288,7 +1298,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             return
         }
         let snapshot = AgentCharacterSnapshot(
-            state: row.state, attention: row.attention, activity: row.characterActivity ?? .init(),
+            state: Self.showsWorkingGlyph(row, rollup: shown?.rollup) ? .working : row.state,
+            attention: row.attention, activity: row.characterActivity ?? .init(),
             title: row.title, allowsMotion: !prefersReducedMotion())
         sprite.show(controller.plan(for: snapshot, now: now), sprite: atlas,
                     phase: controller.phase(for: row.id), now: now)
@@ -1520,6 +1531,16 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
     }
 
+    // Plan: .plans/113-sidebar-sort
+    /// Whether the row shows the working gyro (and a working character): the
+    /// agent's own turn, or, on a lead, any helper under it working, folded or
+    /// not. That is the rollup the lead card's sweep reads
+    /// (`AgentInboxView.ownershipSlices`), so the outline and the glyph come and
+    /// go together.
+    static func showsWorkingGlyph(_ row: AgentInboxRow, rollup: ChildRollup?) -> Bool {
+        row.state == .working || (row.depth == 0 && (rollup?.working ?? 0) > 0)
+    }
+
     /// Install, re-key or remove the row's throbber. Re-keying a recycled cell
     /// onto another agent re-anchors it to THAT agent's phase; re-applying the
     /// same agent changes nothing, so a reload never restarts it.
@@ -1732,7 +1753,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let parts = [
             titleLabel.stringValue,
             stateLabel.isHidden ? nil : stateLabel.stringValue,
-            placementLabel.stringValue.isEmpty ? nil : placementLabel.stringValue,
+            placementLabel.stringValue.isEmpty ? placementSpokenOnly : placementLabel.stringValue,
             selfReportLabel.isHidden ? nil : selfReportLabel.stringValue,
             proposal.isTwoLine ? selfReportTextForQA?.string : nil,
             branchLabel.stringValue.isEmpty ? nil : "branch \(branchLabel.stringValue)",
@@ -1861,6 +1882,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             facts.append(run("\(failed) failed", failedInk))
         }
         guard !facts.isEmpty else { return nil }
+        // .plans/113: the leading dot separates the tail from the chip or where
+        // marker before it; with neither (a heading names the project) it goes.
+        if placementLabel.stringValue.isEmpty, whereLabel.isHidden { text.setAttributedString(NSAttributedString()) }
         for (index, fact) in facts.enumerated() {
             if index > 0 { text.append(separator) }
             text.append(fact)
@@ -1945,6 +1969,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var isTitleShimmeringForQA: Bool { titleShimmer.isShimmeringForQA }
     var isPulsingForQA: Bool { pulseDots.isPulsingForQA }
     var isSweepingForQA: Bool { ownershipChrome.sweep.isMovingForQA }
+    var showsWorkingGlyphForQA: Bool { throbber != nil }
+    var placementTextForQA: String { placementLabel.stringValue }
+    var projectIconShownForQA: Bool { projectIcon.image != nil && projectIcon.frame.width > 0 }
     var titleTextForQA: String { titleLabel.stringValue }
     var visibleTextForQA: [String] {
         [titleLabel, stateLabel, placementLabel, tailLabel, branchLabel, modelLabel]

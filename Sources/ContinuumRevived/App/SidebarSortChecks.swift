@@ -59,8 +59,8 @@ enum SidebarSortChecks {
         override var isKeyWindow: Bool { true }
     }
 
-    static func build(dark: Bool, rows: [AgentInboxRow] = fixture(), height: CGFloat = 460)
-        -> (AgentInboxView, NSWindow)
+    static func build(dark: Bool, rows: [AgentInboxRow] = fixture(), height: CGFloat = 460,
+                      leadOpen: Bool = true) -> (AgentInboxView, NSWindow)
     {
         let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 340, height: height))
         inbox.clock = { now }
@@ -76,7 +76,7 @@ enum SidebarSortChecks {
         inbox.currentWorkspaceId = workspaceId
         inbox.currentWorkspaceName = "personal"
         inbox.setScope(.all)
-        inbox.restoreParentFolds([uuid(epsilon): true])
+        inbox.restoreParentFolds([uuid(epsilon): leadOpen])
         inbox.reload(rows: rows)
         inbox.layoutForQA()
         return (inbox, window)
@@ -152,7 +152,29 @@ enum SidebarSortChecks {
         guard inbox.projectHeadingTitlesForQA == ["Array (2)", "Film (2)", "Site (1)", "No project (1)"] else {
             throw Failure(description: "the project headings read \(inbox.projectHeadingTitlesForQA)")
         }
+        // Under its own heading a row draws no project chip; VoiceOver still names it.
+        func chip(_ n: Int, in view: AgentInboxView) throws -> AgentInbox96CellView {
+            guard let cell = view.ownershipCellForQA(id: uuid(n)) else {
+                throw Failure(description: "no row for \(String(n, radix: 16))")
+            }
+            cell.layoutSubtreeIfNeeded()
+            return cell
+        }
+        for (n, project) in [(alpha, "Array"), (gamma, "Array"), (beta, "Film"), (epsilon, "Film"), (delta, "Site")] {
+            let cell = try chip(n, in: inbox)
+            guard cell.placementTextForQA.isEmpty, !cell.projectIconShownForQA,
+                  cell.accessibilityLabel()?.contains(project) == true else {
+                throw Failure(description: "By project: \(String(n, radix: 16)) draws chip "
+                    + "'\(cell.placementTextForQA)', icon \(cell.projectIconShownForQA), "
+                    + "spoken '\(cell.accessibilityLabel() ?? "")'")
+            }
+        }
 
+        // With no chip before it, the lead's tail opens on its words, not a dot.
+        let asking = try chip(gamma, in: inbox)
+        guard asking.tailTextForQA?.hasPrefix("Needs you") == true else {
+            throw Failure(description: "By project: Gamma's tail reads '\(asking.tailTextForQA ?? "nil")'")
+        }
         // 4. The project filter is the scope's `Projects ›` pick, in either sort.
         guard inbox.pickScopeForQA(.project("Film")) else {
             throw Failure(description: "the Film project is not pickable from the scope list")
@@ -166,10 +188,34 @@ enum SidebarSortChecks {
         guard inbox.pickScopeForQA(.all) else { throw Failure(description: "All agents is not pickable") }
         inbox.layoutForQA()
         try expectSequence(inbox, mostActive, "Most active, all projects again")
+        for (n, project) in [(alpha, "Array"), (beta, "Film"), (delta, "Site")] {
+            let cell = try chip(n, in: inbox)
+            guard cell.placementTextForQA == project, cell.projectIconShownForQA else {
+                throw Failure(description: "Most active: \(String(n, radix: 16)) lost its project chip: "
+                    + "'\(cell.placementTextForQA)', icon \(cell.projectIconShownForQA)")
+            }
+        }
+        // A chip naming another folder than the heading is not a repeat, and stays.
+        var worktree = row(0x99, "Worktree lead", project: "Array", activeMinutesAgo: 1, createdMinutesAgo: 5)
+        worktree = AgentInboxRow(
+            id: worktree.id, title: worktree.title, projectName: "Array", projectId: worktree.projectId,
+            directoryName: "array-sidebar-sort", workspaceName: "personal", workspaceId: workspaceId,
+            state: .ready, lastActiveAt: worktree.lastActiveAt, createdAt: worktree.createdAt)
+        let (folders, foldersWindow) = build(dark: false, rows: [worktree])
+        defer { foldersWindow.orderOut(nil) }
+        folders.setSortMode(.byProject)
+        folders.layoutForQA()
+        let folderCell = try chip(0x99, in: folders)
+        guard folders.projectHeadingTitlesForQA == ["Array (1)"],
+              folderCell.placementTextForQA == "array-sidebar-sort", folderCell.projectIconShownForQA else {
+            throw Failure(description: "a worktree folder under its project's heading drew "
+                + "'\(folderCell.placementTextForQA)' under \(folders.projectHeadingTitlesForQA)")
+        }
         guard picked == [.mostActive, .byProject, .mostActive] else {
             throw Failure(description: "each pick is reported once for the host to store: \(picked.map(\.title))")
         }
-        report.append("orders: newest, most active, by project with 4 headings; Film filter in both")
+        report.append("orders: newest, most active, by project with 4 headings; Film filter in both; "
+            + "chips hidden under their own heading (still spoken), kept in Most active and for a worktree folder")
 
         // 5. Held under the pointer. Alpha starts working and a new agent arrives:
         //    rows already drawn stay put, the new one goes on top.
@@ -263,7 +309,55 @@ enum SidebarSortChecks {
         }
         report.append("persistence: first launch Most active, a pick stored and restored by the host, junk reads Most active")
 
-        // 8. Stills.
+        // 8. The working glyph on a lead whose helper works, open or folded, beside
+        //    the outline it shares a fact with; gone once the helper finishes.
+        for open in [true, false] {
+            let shape = open ? "open" : "folded"
+            let (leads, leadWindow) = build(dark: false, leadOpen: open)
+            defer { leadWindow.orderOut(nil) }
+            leads.setSortMode(.mostActive)
+            leads.layoutForQA()
+            func lead(_ n: Int) throws -> AgentInbox96CellView {
+                guard let cell = leads.ownershipCellForQA(id: uuid(n)) else {
+                    throw Failure(description: "\(shape): no row for \(String(n, radix: 16))")
+                }
+                cell.layoutSubtreeIfNeeded()
+                return cell
+            }
+            guard open == leads.drawnSequenceForQA.contains("Epsilon helper") else {
+                throw Failure(description: "\(shape): the helper's fold is wrong: \(leads.drawnSequenceForQA)")
+            }
+            let busyLead = try lead(epsilon)
+            guard busyLead.showsWorkingGlyphForQA, busyLead.isSweepingForQA else {
+                throw Failure(description: "\(shape): an idle lead with a working helper draws glyph "
+                    + "\(busyLead.showsWorkingGlyphForQA), outline \(busyLead.isSweepingForQA)")
+            }
+            guard try lead(beta).showsWorkingGlyphForQA, try !lead(alpha).showsWorkingGlyphForQA else {
+                throw Failure(description: "\(shape): a working lead must show the glyph and an idle one must not")
+            }
+            var finished = fixture()
+            if let index = finished.firstIndex(where: { $0.id == uuid(helper) }) {
+                finished[index] = row(helper, "Epsilon helper", project: "Film", activeMinutesAgo: 0.1,
+                                      createdMinutesAgo: 15, parent: epsilon)
+            }
+            leads.apply(rows: finished, changed: .init(added: [], updated: [uuid(helper)], removed: []))
+            leads.layoutForQA()
+            let restingLead = try lead(epsilon)
+            guard !restingLead.showsWorkingGlyphForQA, !restingLead.isSweepingForQA else {
+                throw Failure(description: "\(shape): the lead kept glyph \(restingLead.showsWorkingGlyphForQA), "
+                    + "outline \(restingLead.isSweepingForQA) after its last helper finished")
+            }
+        }
+        // The character reads the same fact: a lead with a working helper poses as working.
+        let rows = fixture()
+        guard let idleLead = rows.first(where: { $0.id == uuid(epsilon) }),
+              AgentInbox96CellView.showsWorkingGlyph(idleLead, rollup: ChildRollup(children: 1, working: 1, needsYou: 0, failed: 0)),
+              !AgentInbox96CellView.showsWorkingGlyph(idleLead, rollup: ChildRollup(children: 1, working: 0, needsYou: 0, failed: 0)) else {
+            throw Failure(description: "the lead's working fact does not follow its helpers")
+        }
+        report.append("lead glyph: on with a working helper (open and folded) beside the outline, off when it finishes")
+
+        // 9. Stills.
         if let outputDirectory {
             try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
             for dark in [false, true] {
@@ -276,6 +370,11 @@ enum SidebarSortChecks {
                 still.setSortMode(.byProject)
                 still.layoutForQA()
                 try SidebarOwnershipChecks.write(still, to: outputDirectory.appendingPathComponent("by-project-\(label).png"))
+                let (folded, foldedWindow) = build(dark: dark, height: 300, leadOpen: false)
+                defer { foldedWindow.orderOut(nil) }
+                folded.setSortMode(.mostActive)
+                folded.layoutForQA()
+                try SidebarOwnershipChecks.write(folded, to: outputDirectory.appendingPathComponent("lead-glyph-\(label).png"))
                 still.openSortMenuForQA()
                 pump(0.2)
                 guard let surface = still.sortPopoverForQA.panel?.contentView else {

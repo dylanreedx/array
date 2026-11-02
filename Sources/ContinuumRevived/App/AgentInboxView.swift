@@ -3872,6 +3872,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let rowDisclosure = disclosure(for: model)
         let rowRollup = rollupsByParent[model.id]
         let renderNow = clock()
+        // .plans/113: only a lead in the live block is drawn under a project heading.
+        (cell as? AgentInbox96CellView)?.placementRepeatsHeading = sortMode == .byProject
+            && model.depth == 0 && InboxSort.section(for: model.lifecycle, now: renderNow) == .active
         cell.apply(
             model,
             emphasis: AgentInboxRow.emphasis(
