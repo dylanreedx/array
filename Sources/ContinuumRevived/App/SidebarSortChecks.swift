@@ -59,10 +59,10 @@ enum SidebarSortChecks {
         override var isKeyWindow: Bool { true }
     }
 
-    static func build(dark: Bool, rows: [AgentInboxRow] = fixture(), height: CGFloat = 460,
+    static func build(dark: Bool, rows: [AgentInboxRow] = fixture(), width: CGFloat = 340, height: CGFloat = 460,
                       leadOpen: Bool = true) -> (AgentInboxView, NSWindow)
     {
-        let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 340, height: height))
+        let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         inbox.clock = { now }
         inbox.prefersReducedMotion = { false }
         inbox.hoverCardEnabled = false
@@ -122,13 +122,42 @@ enum SidebarSortChecks {
                                    "Epsilon helper", "Alpha idle lead", "Beta working"],
                            "a bare view draws newest spawned first")
         guard inbox.sortButtonForQA.toolTip == "Sort: Newest first", !inbox.sortButtonForQA.isHidden,
-              inbox.sortButtonForQA.frame.width == AgentInboxView.headerIconButtonSide else {
+              inbox.sortButtonForQA.frame.width == AgentInboxView.sortButtonSide else {
             throw Failure(description: "the header's sort button is missing or unlabelled: "
                 + "\(inbox.sortButtonForQA.toolTip ?? "nil") \(inbox.sortButtonForQA.frame)")
         }
         guard (inbox.accessibilityChildren() as? [NSView])?.contains(where: { $0 === inbox.sortButtonForQA }) == true,
               inbox.sortButtonForQA.accessibilityLabel() == "Sort agents" else {
             throw Failure(description: "VoiceOver cannot reach the sort button")
+        }
+
+        // 1b. The header keeps its three controls and their widths: the sort
+        //     button sits inside the search field's trailing slot, and typing
+        //     swaps it for the clear button. At the sidebar's default and minimum.
+        for width in [CGFloat(WorkspaceSidebarConfig.defaultWidth), CGFloat(WorkspaceSidebarConfig.minWidth)] {
+            let (header, headerWindow) = build(dark: false, width: width, height: 200)
+            defer { headerWindow.orderOut(nil) }
+            header.layoutForQA()
+            let field = header.searchFieldViewForQA.frame
+            let scope = header.scopeControlFrameForQA
+            let sort = header.sortButtonForQA.frame
+            guard field.width > scope.width, field.maxX <= scope.minX,
+                  !header.sortButtonForQA.isHidden, field.contains(sort),
+                  abs((field.maxX - sort.maxX) - (sort.minY - field.minY)) <= 1,
+                  abs(sort.midY - field.midY) <= 1 else {
+                throw Failure(description: "at \(width)pt the header squeezes: field \(field), scope \(scope), sort \(sort)")
+            }
+            header.setSearchForQA("alp")
+            header.layoutForQA()
+            guard header.sortButtonForQA.isHidden, header.searchClearShownForQA else {
+                throw Failure(description: "at \(width)pt typing left the sort button up or the clear button down")
+            }
+            header.setSearchForQA("")
+            header.layoutForQA()
+            guard !header.sortButtonForQA.isHidden, !header.searchClearShownForQA,
+                  header.searchFieldViewForQA.frame == field else {
+                throw Failure(description: "at \(width)pt clearing the search did not bring the sort button back")
+            }
         }
 
         // 2. Most active: working and asking first, newest turn first (a lead
@@ -355,6 +384,7 @@ enum SidebarSortChecks {
               !AgentInbox96CellView.showsWorkingGlyph(idleLead, rollup: ChildRollup(children: 1, working: 0, needsYou: 0, failed: 0)) else {
             throw Failure(description: "the lead's working fact does not follow its helpers")
         }
+        report.append("header: search wider than scope with the sort button inside it at 280 and 220 pt; typing swaps it for clear")
         report.append("lead glyph: on with a working helper (open and folded) beside the outline, off when it finishes")
 
         // 9. Stills.
@@ -370,6 +400,14 @@ enum SidebarSortChecks {
                 still.setSortMode(.byProject)
                 still.layoutForQA()
                 try SidebarOwnershipChecks.write(still, to: outputDirectory.appendingPathComponent("by-project-\(label).png"))
+                let (header, headerWindow) = build(dark: dark, width: CGFloat(WorkspaceSidebarConfig.defaultWidth), height: 120)
+                defer { headerWindow.orderOut(nil) }
+                header.setSortMode(.mostActive)
+                header.layoutForQA()
+                try SidebarOwnershipChecks.write(header, to: outputDirectory.appendingPathComponent("header-\(label).png"))
+                header.setSearchForQA("alp")
+                header.layoutForQA()
+                try SidebarOwnershipChecks.write(header, to: outputDirectory.appendingPathComponent("header-typing-\(label).png"))
                 let (folded, foldedWindow) = build(dark: dark, height: 300, leadOpen: false)
                 defer { foldedWindow.orderOut(nil) }
                 folded.setSortMode(.mostActive)

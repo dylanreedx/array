@@ -1606,11 +1606,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             scopeButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
             searchFloor,
-            sortButton.leadingAnchor.constraint(equalTo: scopeButton.trailingAnchor, constant: Space.xs),
+            // .plans/113: the sort button sits in the field's reserved trailing
+            // slot, inset from the edge as far as from the top and bottom, so the
+            // row keeps its three controls and their widths. Typing swaps it for
+            // the clear button.
+            // The field's trailing anchor is its ALIGNMENT edge, inset from the
+            // painted frame, so that inset is given back.
+            sortButton.trailingAnchor.constraint(
+                equalTo: searchField.trailingAnchor,
+                constant: -((ChoiceButton.controlHeight - Self.sortButtonSide) / 2
+                    - searchField.alignmentRectInsets.right)),
             sortButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            sortButton.widthAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
-            sortButton.heightAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
-            newAgentButton.leadingAnchor.constraint(equalTo: sortButton.trailingAnchor, constant: Space.xs),
+            sortButton.widthAnchor.constraint(equalToConstant: Self.sortButtonSide),
+            sortButton.heightAnchor.constraint(equalToConstant: Self.sortButtonSide),
+            newAgentButton.leadingAnchor.constraint(equalTo: scopeButton.trailingAnchor, constant: Space.xs),
             newAgentButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
             newAgentButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             newAgentButton.widthAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
@@ -1770,7 +1779,21 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         searchIcon.isHidden = false
         searchClearButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         searchClearButton.isHidden = searchField.stringValue.isEmpty
+        updateSortButtonVisibility()
     }
+
+    /// .plans/113: one-row header only, and only while the field is empty — the
+    /// clear button takes the same slot while there is text to clear.
+    private func updateSortButtonVisibility() {
+        let shown = headerStyleOverride?.oneRow == true && searchField.stringValue.isEmpty
+        guard sortButton.isHidden == shown else { return }
+        sortButton.isHidden = !shown
+        if !shown, sortPopover.isPresented { sortPopover.dismiss(); sortButton.isActive = false }
+        updateAccessibilityHierarchy()
+    }
+
+    /// Fits the field's 32 pt height with room around its hover fill.
+    static let sortButtonSide: CGFloat = 24
 
     /// Whether a caret is genuinely in the search field.
     ///
@@ -1822,7 +1845,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             defaultHeaderConstraints + stackedHeaderConstraints + oneRowHeaderConstraints)
         NSLayoutConstraint.activate(chosen)
         newAgentButton.isHidden = !oneRow
-        sortButton.isHidden = !oneRow
+        updateSortButtonVisibility()
         // In one row the scope control holds its title against everything but
         // the search field's floor: below that its label truncates, rather than
         // the row forcing the sidebar wider than it is.
@@ -6768,6 +6791,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var scopeControlWidthForQA: CGFloat { scopeButton.bounds.width }
     var scopeButtonForQA: ChoiceButton { scopeButton }
     var searchFieldViewForQA: NSTextField { searchField }
+    var searchClearShownForQA: Bool { !searchClearButton.isHidden }
     var searchFieldFrameForQA: NSRect { searchField.frame }
     var searchTextDrawingRectForQA: NSRect {
         searchField.cell?.drawingRect(forBounds: searchField.bounds) ?? .zero
