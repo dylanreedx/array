@@ -254,6 +254,7 @@ final class SharedPortalHostSession {
                 do {
                     outcome = try await transport.publishArtifact(epoch: epoch, capture: capture).revision
                 } catch {
+                    fputs("portal: publishing \(object.rawValue) failed: \(error)\n", stderr)
                     conflicted = true
                     // Someone (this Mac, before a relaunch) moved the head on:
                     // chain onto it next time.
@@ -590,7 +591,8 @@ extension AppDelegate {
               hostedPortalIndex?.entries(account: remembered).isEmpty == false else { return }
         Task { [weak self] in
             guard let self else { return }
-            if model.status != .ready { _ = try? await model.select(accountID: remembered) }
+            await Self.awaitPortalAccount(model)
+            _ = remembered
             guard model.status == .ready, let account = model.activeAccount?.id,
                   let entries = hostedPortalIndex?.entries(account: account), !entries.isEmpty else { return }
             for entry in entries { startHostingPortal(entry, model: model) }

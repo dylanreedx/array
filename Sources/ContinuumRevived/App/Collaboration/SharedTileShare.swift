@@ -258,14 +258,25 @@ extension AppDelegate {
         Task { [weak self, weak view] in
             defer { view?.attaching = false }
             guard let self, let view, view.session == nil, let model = try? collaborationAccountModel() else { return }
-            if model.status != .ready, let remembered = model.selectedAccountID ?? (model.accounts.count == 1 ? model.accounts.first?.id : nil) {
-                _ = try? await model.select(accountID: remembered)
-            }
+            await Self.awaitRememberedAccount(model)
             guard view.session == nil, model.status == .ready, let account = model.activeAccount,
                   reference.accountId == nil || reference.accountId == account.id,
                   account.knownAreas.contains(where: { $0.id == reference.areaId }),
                   let controller = try? model.makeSharedAreaController(area: reference.areaId) else { return }
             startSharedTileSession(view, reference: reference, controller: controller)
+        }
+    }
+
+    /// Selects the account this Mac remembers and waits until it is ready.
+    /// Every shared tile restored at launch asks at once, and the account runs
+    /// one request at a time and answers the rest "busy": a tile that gave up
+    /// there never reconnected. No remembered account returns at once.
+    static func awaitRememberedAccount(_ model: CollaborationAccountController) async {
+        guard let remembered = model.selectedAccountID ?? (model.accounts.count == 1 ? model.accounts.first?.id : nil) else { return }
+        for _ in 0..<150 where model.status != .ready {
+            do { _ = try await model.select(accountID: remembered) }
+            catch CollaborationAccountFailure.busy, CollaborationAccountFailure.superseded { try? await Task.sleep(for: .milliseconds(200)) }
+            catch { return }
         }
     }
 

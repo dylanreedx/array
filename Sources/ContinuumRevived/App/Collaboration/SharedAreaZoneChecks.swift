@@ -701,7 +701,7 @@ extension SharedAreaZoneChecks {
         try expect(canvas.zoneId(containing: first.agentTileB) == nil && canvas.lentTile(first.agentTileB) != nil,
             "an edge drag on a lent tile resizes it in the area and shares a .resize; it stays lent")
 
-        print("STAGE shared area zone: a workspace switch closes the area and reopens it")
+        print("STAGE shared area zone: a workspace switch closes the area; coming back makes it a portal")
         guard delegate.qaSwitchWorkspaceFromSidebar(first.workspaceWB) else { throw Failure(description: "switch to B refused") }
         try expect(session.isClosed && !delegate.qaSharedAreaZoneSessions.contains(where: { !$0.isClosed })
             && canvas.lentTile(first.agentTileB) == nil && canvas.sharedAreaZonePlacement(anchor.zoneId) == nil
@@ -710,16 +710,17 @@ extension SharedAreaZoneChecks {
         try await SharedAreaCheckRig.eventually("the departing controller closes") { session.controller.status == .closed }
         guard delegate.qaSwitchWorkspaceFromSidebar(first.workspaceWA) else { throw Failure(description: "switch back refused") }
         await delegate.sharedAreaReopenTask?.value
-        guard let reopened = delegate.qaSharedAreaZoneSessions.first(where: { $0.areaId == share.areaId && !$0.isClosed }) else {
-            throw Failure(description: "switching back did not reopen the area")
-        }
+        // Since mode B (SHARE-REDESIGN.md) no shared zone reopens as a zone:
+        // the sharer's tiles stay home and this Mac hosts the area as a portal.
+        try expect(!delegate.qaSharedAreaZoneSessions.contains(where: { $0.areaId == share.areaId && !$0.isClosed })
+            && runtime.sharedAreaZone(for: share.areaId) == nil,
+            "switching back opens no zone for the area, and its zone leaves the workspace document")
         canvas.layoutSubtreeIfNeeded()
-        let position = reopened.controller.document?.positions.last(where: { $0.object == object })?.rect
-        let zone = canvas.sharedAreaZonePlacement(anchor.zoneId)
-        try expect(reopened !== session && reopened.zoneId == anchor.zoneId && zone?.origin == anchor.origin
-            && canvas.lentTile(first.agentTileB)?.tile.object == object.rawValue && canvas.tileView(for: first.agentTileB) === agentView
-            && position.map { close(world(agentView, first), TileFrame(x: zone!.origin.x + $0.x, y: zone!.origin.y + $0.y, width: $0.width, height: $0.height)) } == true,
-            "switching back reopens the area in its zone at its saved place, and lends its agent tile back where the area has it")
+        try expect(canvas.lentTile(first.agentTileB) == nil && canvas.zoneId(containing: first.agentTileB) != nil
+            && canvas.tileView(for: first.agentTileB) === agentView,
+            "the agent tile stays home in its own zone, with its own view")
+        try expect(delegate.hostedPortalArea(forTile: first.agentTileB) == share.areaId,
+            "and this Mac hosts the same area as a portal holding it")
         let viewport = canvas.viewport
 
         // Second launch of the same Mac: the same account, a workspace whose
@@ -727,7 +728,7 @@ extension SharedAreaZoneChecks {
         firstWindow.orderOut(nil); delegate.closeSharedAreaSessions()
         first.runtime.closeAll(); first.tearDown()
 
-        print("STAGE shared area zone: at launch, areas reopen as zones")
+        print("STAGE shared area zone: at launch, a saved shared zone becomes a portal")
         let second = try launch(seedAnchor: anchor)
         defer { second.delegate.closeSharedAreaSessions(); second.runtime.closeAll(); second.tearDown() }
         let secondWindow = host(second)
@@ -745,24 +746,15 @@ extension SharedAreaZoneChecks {
         }
         let cameraAtLaunch = second.canvas.viewport
         await second.delegate.sharedAreaReopenTask?.value
-        guard let relaunched = second.delegate.qaSharedAreaZoneSessions.first(where: { $0.areaId == share.areaId && !$0.isClosed }) else {
-            throw Failure(description: "launch did not reopen the area (document shared zones \(second.runtime.document.zones.filter(\.isSharedArea).count), account \(account.status), known \(account.activeAccount?.knownAreas.map(\.id) ?? []) wants \(share.areaId), task \(second.delegate.sharedAreaReopenTask != nil), sessions \(second.delegate.qaSharedAreaZoneSessions.count))")
-        }
-        try expect(relaunched.zoneId == anchor.zoneId && second.canvas.sharedAreaZonePlacement(anchor.zoneId)?.origin == anchor.origin
-            && relaunched.scene.superview === second.canvas.worldPlane && second.canvas.viewport == cameraAtLaunch,
-            "launch reopens the area in its zone at the saved local anchor, without moving the camera")
-        try expect(second.canvas.lentTile(second.agentTileB)?.tile.object == object.rawValue,
-            "and the agent tile this Mac shared is lent to it again")
-        // The walkthrough's relaunch drew only its header: no body, no runner.
+        try expect(!second.delegate.qaSharedAreaZoneSessions.contains(where: { $0.areaId == share.areaId && !$0.isClosed })
+            && second.runtime.sharedAreaZone(for: share.areaId) == nil && second.canvas.viewport == cameraAtLaunch,
+            "launch opens no zone for the saved area and takes it out of the document, without moving the camera")
+        try expect(second.canvas.lentTile(second.agentTileB) == nil && second.delegate.hostedPortalArea(forTile: second.agentTileB) == share.areaId,
+            "the agent tile stays home, and this Mac hosts the area as a portal")
         second.canvas.layoutSubtreeIfNeeded(); second.canvas.displayIfNeeded()
-        guard let relent = second.canvas.tileView(for: second.agentTileB) as? ManagedAgentTileNSView else {
-            throw Failure(description: "the relaunched shared agent tile is not an agent tile view (\(String(describing: second.canvas.tileView(for: second.agentTileB).map { type(of: $0) })))")
-        }
         let record = second.delegate.qaAgentSupervisor.records.values.first(where: { $0.tileId == second.agentTileB })
-        try expect(record != nil && relent.attachedAgentID == record?.id && relent.qaComposerForChecks?.window != nil
-            && !relent.isFarParked && relent.surfaceResidency == .native && relent.window === secondWindow
-            && second.canvas.viewport == cameraAtLaunch,
-            "after relaunch the shared agent tile is whole: bound to its agent, with its body and composer in the window (attached \(String(describing: relent.attachedAgentID)) record \(String(describing: record?.id)) composer \(relent.qaComposerForChecks != nil)/\(relent.qaComposerForChecks?.window != nil) parked \(relent.isFarParked) residency \(relent.surfaceResidency))")
+        try expect(record != nil && (second.canvas.tileView(for: second.agentTileB) as? ManagedAgentTileNSView)?.attachedAgentID == record?.id,
+            "and it is still its own agent tile, bound to its agent")
         _ = viewport
     }
 }

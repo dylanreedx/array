@@ -18,6 +18,9 @@ enum SharedPortalLiveKindChecks {
         print("PASS portal kinds: \(label)")
     }
 
+    /// The newest draft an observation handed over.
+    @MainActor final class DraftBox { var draft: SharedArtifactProducer.Draft? }
+
     static func run(directory: URL) async throws {
         let scene = try ShareEntryChecks.mountScene("portal-kinds")
         defer { scene.close() }
@@ -84,12 +87,12 @@ enum SharedPortalLiveKindChecks {
         }
         func observed(_ kind: any SharedPortalKind, tile: UUID, object: SharedArea.ID<SharedArea.Object>, into view: SharedPortalLiveItemView,
                       until done: () -> Bool) async throws -> Bool {
-            var latest: SharedArtifactProducer.Draft?
-            let observation = kind.observe(tile: tile, host: host) { latest = $0 }
+            let latest = DraftBox()
+            let observation = kind.observe(tile: tile, host: host) { latest.draft = $0 }
             defer { observation?.cancel() }
             for _ in 0..<60 {
                 try await Task.sleep(for: .milliseconds(100))
-                if let draft = latest { view.apply(contents: try contents(draft, object: object)); latest = nil }
+                if let draft = latest.draft { view.apply(contents: try contents(draft, object: object)); latest.draft = nil }
                 if done() { return true }
             }
             return false
@@ -99,8 +102,13 @@ enum SharedPortalLiveKindChecks {
         try require(noteItem.qaFacts["text"] == "Plan: wallets first" && noteItem.qaFacts["editable"] == "false",
                     "note: the guest shows the host's text, read only in the portal")
         noteView.textView.insertText(" · then Apple Pay", replacementRange: NSRange(location: (noteView.textView.string as NSString).length, length: 0))
-        try require(try await observed(noteKind, tile: note, object: noteObject, into: noteItem) { noteItem.qaFacts["text"]?.hasSuffix("then Apple Pay") == true },
+        try require(try await observed(noteKind, tile: note, object: noteObject, into: noteItem) { noteItem.qaFacts["text"] == "Plan: wallets first · then Apple Pay" },
                     "note: a host edit reaches the portal through observe")
+        // A rewrite, not an append: each revision replaces the text whole.
+        noteView.textView.string = "Rewritten on the host"
+        noteView.textView.didChangeText()
+        try require(try await observed(noteKind, tile: note, object: noteObject, into: noteItem) { noteItem.qaFacts["text"] == "Rewritten on the host" },
+                    "note: a whole rewrite on the host shows exactly in the portal: \(noteItem.qaFacts["text"] ?? "")")
 
         let (fileItem, fileKind, fileObject) = try await show(.file, tile: file, title: "README.md")
         try require(fileItem.qaFacts["text"]?.contains("changed for the diff") == true, "file: the guest shows the saved file (a real git capture)")
