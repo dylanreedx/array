@@ -5768,6 +5768,22 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // Sharing a terminal must not freeze the app when tmux never answers.
+        if CommandLine.arguments.contains("--shared-terminal-tmux-unresponsive-check") {
+            setbuf(stdout, nil)
+            NSApplication.shared.setActivationPolicy(.accessory)
+            Task { @MainActor in
+                do {
+                    try await SharedTerminalTmuxUnresponsiveChecks.run()
+                    print("SharedTerminalTmuxUnresponsiveChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--terminal-tmux-persistence-check") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)

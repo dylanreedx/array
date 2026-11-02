@@ -262,6 +262,7 @@ check --shared-portal-migration-check
 check --shared-portal-render-check
 check --shared-area-zone-check
 check --shared-terminal-render-check
+check --shared-terminal-tmux-unresponsive-check
 check --shared-tile-render-check
 check --shell-open-as-agent-check
 check --shell-tool-row-check
@@ -652,6 +653,7 @@ leg run_app_check .build/debug/Array --shared-portal-migration-check
 leg run_app_check .build/debug/Array --shared-portal-render-check
 leg run_app_check .build/debug/Array --shared-area-zone-check
 leg run_app_check .build/debug/Array --shared-terminal-render-check
+leg run_app_check .build/debug/Array --shared-terminal-tmux-unresponsive-check
 leg run_app_check .build/debug/Array --shared-tile-render-check
 leg run_app_check .build/debug/Array --shell-open-as-agent-check
 leg run_app_check .build/debug/Array --shell-tool-row-check

@@ -43,9 +43,42 @@ extension MultiplayerDriver {
             guard let tile = (request["tile"] as? String).flatMap(UUID.init(uuidString:)),
                   let view = delegate?.canvasView?.tileView(for: tile),
                   let badge = view.subviews.compactMap({ $0 as? SharedTerminalLiveBadge }).first else { throw Failure(description: "no Live badge") }
+            // Where a press at the button lands, as AppKit resolves it.
+            var diagnosis: [String] = []
+            func pressReachesStop() -> Bool {
+                guard let root = badge.window?.contentView?.superview else { diagnosis.append("no window"); return false }
+                let button = badge.stopButton
+                let point = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+                let hit = root.hitTest(root.convert(point, from: nil))
+                diagnosis.append("zoom \(String(format: "%.2f", delegate?.canvasView?.viewport.zoom ?? 0)) point \(point) in window \(root.bounds.size) "
+                    + "hit \(hit.map { String(describing: type(of: $0)) } ?? "nil") key \(badge.window?.isKeyWindow ?? false) "
+                    + "badge \(badge.frame) in tile \(view.bounds.size)")
+                return hit === button || hit?.isDescendant(of: button) == true
+            }
+            // At the resting camera first: the badge must win its own press
+            // even where the low-zoom grab strip covers it.
+            let canvas = delegate?.canvasView
+            let before = canvas?.viewport
+            let restingZoom = before?.zoom ?? 0
+            let reachedAtRest = pressReachesStop()
+            // Then framed as a jump frames it, as a person brings a small
+            // control up to press it.
+            if let canvas, let framed = canvas.framedViewportForTileJump(tile) {
+                canvas.setViewport(framed)
+                canvas.layoutSubtreeIfNeeded()
+            }
+            let reachedFramed = pressReachesStop()
+            var pressed = false
+            let onStop = badge.onStop
+            badge.onStop = { pressed = true; onStop?() }
             try ShareEntryChecks.click(badge.stopButton)
-            try await eventually("the share stops", timeout: 20) { view.subviews.compactMap({ $0 as? SharedTerminalLiveBadge }).isEmpty }
-            return [:]
+            do {
+                try await eventually("the share stops", timeout: 20) { view.subviews.compactMap({ $0 as? SharedTerminalLiveBadge }).isEmpty }
+            } catch {
+                throw Failure(description: "\(error); pressed \(pressed); framed press reaches Stop \(reachedFramed); " + diagnosis.joined(separator: " | "))
+            }
+            if let canvas, let before { canvas.setViewport(before) }
+            return ["restingZoom": restingZoom, "pressReachedStopAtRest": reachedAtRest]
 
         case "termWatch":
             // Polls the guest's screen every 2 ms until `marker` shows, so the

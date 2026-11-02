@@ -18,6 +18,9 @@ final class HostedPortalIndex {
         let tile: UUID
         let object: UUID
         let kind: SharedPortal.ItemKind
+        /// A terminal opted in to stream live (`.plans/114-terminal-sharing`).
+        /// Absent for every other tile, and in an index written before.
+        var live: Bool? = nil
     }
     struct Entry: Codable, Equatable {
         let account: String
@@ -343,6 +346,44 @@ final class SharedPortalHostSession {
         app.refreshHostedPortalMarks()
     }
 
+    // MARK: Stopping one terminal
+
+    /// Stop sharing one opted-in terminal and nothing else: its live tile
+    /// leaves the area (the relay closes its stream lane with it, and this
+    /// Mac stops reading its pane), and a card takes its place, where it sat,
+    /// in one command. The rest of the portal is untouched.
+    func stopStreaming(tile: UUID) async throws {
+        guard let index = entry.tiles.firstIndex(where: { $0.tile == tile && $0.live == true }) else {
+            fputs("stopping the portal terminal: \(tile) is not live in this portal\n", stderr); return
+        }
+        let old = Object(entry.tiles[index].object)
+        var card: Object?
+        for _ in 0..<20 {
+            guard controller.canSubmit, let document = controller.document,
+                  let item = document.items.first(where: { $0.id == old }), let source = item.source,
+                  let position = document.positions.last(where: { $0.object == old }) else {
+                try await Task.sleep(for: .milliseconds(250)); continue
+            }
+            let object = Object()
+            let edits: [SharedArea.Edit] = [
+                .remove(old),
+                .admit(.init(id: object, kind: .artifact, source: .init(owner: source.owner, host: source.host, binding: .init())),
+                       .init(id: .init(), object: object, rect: position.rect, z: position.z)),
+            ]
+            switch await controller.submit(.init(area: document.id, expectedRevision: document.revision, edits: edits)) {
+            case .accepted: card = object
+            case .rejected(.conflict), .rejected(.busy): try await Task.sleep(for: .milliseconds(250)); continue
+            default: throw ShareLinkFailure.publishFailed("The terminal could not be taken out of the share.")
+            }
+            break
+        }
+        guard let card else { throw ShareLinkFailure.publishFailed("The terminal could not be taken out of the share.") }
+        entry.tiles[index] = .init(tile: tile, object: card.rawValue, kind: .terminal)
+        try app?.hostedPortalIndex?.put(entry)
+        publishManifest()
+        app?.refreshHostedPortalMarks()
+    }
+
     // MARK: Cursors on this canvas
 
     private func installSurface() {
@@ -548,7 +589,8 @@ extension AppDelegate {
                     guard let object = objects[entry.tile.id],
                           let position = document.positions.last(where: { $0.object == object }) else { continue }
                     edits.append(.place(.init(id: position.id, object: object, rect: rect, z: z)))
-                    next.append(.init(tile: entry.tile.id, object: object.rawValue, kind: entry.kind))
+                    next.append(.init(tile: entry.tile.id, object: object.rawValue, kind: entry.kind,
+                                      live: entry.kind == .terminal ? true : nil))
                 } else {
                     let object = SharedArea.ID<SharedArea.Object>()
                     edits.append(.admit(.init(id: object, kind: .artifact, source: .init(owner: person, host: hostID, binding: .init())),
@@ -643,12 +685,33 @@ extension AppDelegate {
                 marked.insert(shared.tile)
                 let mark = TileNSView.OwnershipMark(text: text, colour: colour, outlined: false)
                 if view.ownershipMark != mark { view.setOwnershipMark(mark) }
+                // A tile that is in the share is offered no "Add to share": one
+                // put up while it was being added would sit over its Live
+                // badge's Stop sharing.
+                view.subviews.filter { $0 is SharedPortalAddPill }.forEach { $0.removeFromSuperview() }
             }
         }
         for tile in index.markedTiles.subtracting(marked) {
             canvas.tileView(for: tile)?.setOwnershipMark(nil)
         }
         index.markedTiles = marked
+        refreshTerminalLiveBadges()
+    }
+
+    /// The opted-in terminals this Mac streams in its portals: tile to area.
+    func portalLiveTerminals() -> [UUID: UUID] {
+        guard let index = hostedPortalIndex, let model = try? collaborationAccountModel(),
+              let account = model.activeAccount?.id ?? model.selectedAccountID else { return [:] }
+        var live: [UUID: UUID] = [:]
+        for entry in index.entries(account: account) { for shared in entry.tiles where shared.live == true { live[shared.tile] = entry.area } }
+        return live
+    }
+
+    /// The badge's Stop sharing on a terminal in a portal: that terminal only.
+    func stopPortalTerminal(area: UUID, tile: UUID) async {
+        if hostedPortalSession(area: area) == nil { fputs("stopping the portal terminal: no hosted portal \(area)\n", stderr) }
+        do { try await hostedPortalSession(area: area)?.stopStreaming(tile: tile) }
+        catch { fputs("stopping the portal terminal failed: \(error)\n", stderr) }
     }
 
     /// Camera moves reach every host surface, so cursors stay on their tiles.
