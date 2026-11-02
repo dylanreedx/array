@@ -17,7 +17,10 @@ public enum SharedArea {
     public enum Operation: Sendable {}
     public enum Revision: Sendable {}
     public enum Message: Sendable {}
-    public enum Kind: String, Codable, Sendable { case agentObservation, artifact, discussion, agreement }
+    /// `liveTile` (a note, file, diff, browser or terminal shared live,
+    /// `Collaboration.LiveTile`) is additive: a client from before it cannot
+    /// decode an area that holds one, and never receives such a link.
+    public enum Kind: String, Codable, Sendable { case agentObservation, artifact, discussion, agreement, liveTile }
     public struct Rect: Codable, Equatable, Sendable {
         public let x: Double
         public let y: Double

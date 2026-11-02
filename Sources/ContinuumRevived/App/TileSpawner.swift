@@ -1241,6 +1241,24 @@ final class TileSpawner {
         return .success(view)
     }
 
+    /// Someone else's note, file, diff, browser or terminal, the same way:
+    /// one target zone for frame, siblings, z and install (hazard 9).
+    func spawnSharedTile(_ reference: SharedAgentTileReference, title: String,
+                         targetZoneId explicitZoneID: UUID? = nil) -> Result<SharedTileNSView, Error> {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let targetZoneID = explicitZoneID ?? creationScopeProvider?()?.zoneId
+        let frame = makeProjectTilePlacement(worldPoint: nil, size: CanvasEngine.defaultFrame(for: .sharedTile),
+                                             in: canvasView, targetZoneId: targetZoneID)
+        let tile = Tile(id: UUID(), kind: .sharedTile, title: title, frame: frame,
+                        zPosition: CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneID)),
+                        zoneId: targetZoneID, runtimeRef: nil, metadata: TileMetadata(sharedTile: reference))
+        let view = SharedTileNSView(tile: tile)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneID)
+        do { try persistThenArrange(tile.id, after: target, in: canvasView) }
+        catch { withdrawFailedSpawn(tile.id, target: target, in: canvasView); return .failure(error) }
+        return .success(view)
+    }
+
     func restoreIOSPreviewTile(tileID: UUID) -> IOSPreviewRuntime? {
         guard let canvasView, let tile = canvasView.tileRecord(for: tileID), tile.kind == .iosPreview else { return nil }
         let runtime = IOSPreviewAutomationSessions.shared.retainedRuntime(tileID: tile.id, deviceID: tile.metadata.iosPreviewDeviceID)

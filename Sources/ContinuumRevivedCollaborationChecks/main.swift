@@ -14,8 +14,14 @@ typealias S = SharedArea
 if let flag = CommandLine.arguments.firstIndex(of: "--kill-child"), CommandLine.arguments.count > flag + 1 {
     await runKillChild(CommandLine.arguments[flag + 1])
 }
+if CommandLine.arguments.contains("--note-text-only") {
+    do { try runNoteTextCRDTChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
+}
 if CommandLine.arguments.contains("--artifacts-only") {
     do { try await runSharedArtifactProducerChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
+}
+if CommandLine.arguments.contains("--live-tile-only") {
+    do { try await runLiveTileLaneChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }
 }
 if CommandLine.arguments.contains("--host-liveness-only") {
     do { try await runSharedAreaHostLivenessChecks(); exit(0) } catch { print("FAIL: \(error)"); exit(1) }

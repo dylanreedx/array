@@ -10,7 +10,11 @@ for a second install on the guest's root. Each is driven through
 click takes.
 
 The steps are mode A of `.plans/105-collaboration/SHARE-REDESIGN.md`
-("Acceptance test"): share one agent.
+("Acceptance test"): share one agent. Before them, `kinds_journey` shares
+every other tile kind the same way (`.plans/105-collaboration/SHARE-KINDS.md`):
+a note edited by both, a live file, a live diff, a localhost browser streamed
+as pictures and clicked by the guest, a public browser that loads on the guest,
+and a terminal shared after its warning as a read-only mirror.
 
    1. header Share: the popover opens on T; nothing published, T unmoved
    2. sidebar Share: the same popover, on T
@@ -60,6 +64,7 @@ leg runs only when the share made a zone.
   scripts/check-multiplayer-journey.py --relay local    # a local continuum-relay from this tree
   scripts/check-multiplayer-journey.py                  # staging relay
   scripts/check-multiplayer-journey.py --skip-build     # reuse the bundles
+  scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds   # the kinds alone
 
 Never touches /Applications/Array.app, ~/Desktop/Array Dev.app, ~/Documents,
 the default tmux socket, a real CLI login or the Keychain, and never takes focus.
@@ -462,6 +467,199 @@ def mode_b(host, guest, check, eventually, endpoint, env_extra, people):
     except Failed as error: print(f"note: revoking the link failed: {error}")
 
 
+PAGE = """<!doctype html><html><head><title>clicks 0</title><style>
+body { margin: 0; font: 16px -apple-system; background: #fff; }
+#go { position: absolute; left: 40px; top: 60px; width: 220px; height: 90px; font-size: 22px; }
+</style></head><body><h1 style="margin:8px 40px">Journey page %s</h1>
+<button id="go" onclick="window.clicks=(window.clicks||0)+1; document.title='clicks '+window.clicks; this.textContent='clicked '+window.clicks;">Press</button>
+<div style="height:3000px"></div></body></html>"""
+
+
+def serve_pages(folder: Path):
+    """A localhost page server: an address the guest cannot reach."""
+    import http.server, threading, functools
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "page.html").write_text(PAGE % "one")
+    (folder / "two.html").write_text(PAGE % "two")
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(folder))
+    handler.log_message = lambda *a, **k: None
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, server.server_address[1]
+
+
+def git(project, *args):
+    subprocess.run(["git", "-C", str(project), *args], check=True, capture_output=True,
+                   env={**os.environ, "GIT_AUTHOR_NAME": "Journey", "GIT_AUTHOR_EMAIL": "journey@example.invalid",
+                        "GIT_COMMITTER_NAME": "Journey", "GIT_COMMITTER_EMAIL": "journey@example.invalid"})
+
+
+def kinds_journey(host, guest, check, eventually, legs=frozenset({"note", "file", "diff", "browser", "public", "terminal", "excluded"})):
+    """`.plans/105-collaboration/SHARE-KINDS.md`: every other tile kind, shared
+    from its own header Share. For each: the host shares it, the guest sees it,
+    a host change reaches the guest, and the guest's action reaches the host
+    (a note edit merges both ways, a browser click lands, a terminal is read
+    only). Then a selection holding a kind that cannot be shared lists it with
+    its reason instead of dropping it."""
+    token = "".join(random.choice(string.ascii_lowercase) for _ in range(6))
+    project = Path(host.project)
+    readme = project / "README.md"
+    if not (project / ".git").exists():
+        git(project, "init", "-q")
+        readme.write_text("# Journey\n\nfirst line\n")
+        git(project, "add", "README.md"); git(project, "commit", "-q", "-m", "start")
+    pages, port = serve_pages(STATE / "www")
+    page = f"http://127.0.0.1:{port}/page.html"
+
+    def guest_kind(kind, **fields):
+        return guest.call("guestKind", kind=kind, **fields)
+    def opened(url, kind):
+        result = guest.call("open", url=url, expectTile=False, timeout=150)
+        check(result["outcome"] == "opened", f"{kind}: the guest opens the link", json.dumps(result))
+        eventually(lambda: guest_kind(kind).get("present"), f"{kind}: exactly one shared tile lands on the guest's canvas", 60,
+                   lambda: json.dumps(guest_kind(kind)))
+        g = guest_kind(kind)
+        check(host.name in g.get("tab", ""), f"{kind}: its tab names the host", g.get("tab", ""))
+        return g
+    def shared(tile, kind, **fields):
+        s = host.call("shareKind", tile=tile, slug=f"kinds-{kind}-{token}", **fields)
+        check(s.get("areaItems") == ["liveTile"], f"{kind}: the relay area holds exactly one live tile", json.dumps(s.get("areaItems")))
+        check(s.get("selected") == [tile] and s.get("published") == [tile],
+              f"{kind}: what was selected is what was published", json.dumps({k: s.get(k) for k in ("selected", "published")}))
+        return s
+
+    note = browser = None
+    # Note: both people edit; both edits survive, in one order on both Macs.
+    if "note" in legs:
+        note = host.call("spawnKind", kind="note", title="Journey note")["tile"]
+        host.call("hostKind", tile=note, type=f"Plan {token}: ")
+        s = shared(note, "note")
+        opened(s["url"], "note")
+        host_text = lambda: host.call("hostKind", tile=note)["text"]
+        eventually(lambda: guest_kind("note").get("text") == host_text(), "note: the guest sees the host's text", 45,
+                   lambda: json.dumps([guest_kind("note").get("text"), host_text()]))
+        check(guest_kind("note").get("editable"), "note: the guest can edit it")
+        host.call("hostKind", tile=note, type=" host-edit")
+        eventually(lambda: "host-edit" in guest_kind("note").get("text", ""), "note: a host edit appears on the guest", 45,
+                   lambda: json.dumps(guest_kind("note")))
+        guest.call("guestKind", kind="note", type="guest-edit ", at=0)
+        eventually(lambda: "guest-edit" in host_text(), "note: a guest edit merges into the host's note", 45,
+                   lambda: json.dumps([host_text(), guest_kind("note")]))
+        # The same spot, both at once: neither edit is lost.
+        at = len(f"Plan {token}")
+        guest.call("guestKind", kind="note", type="[G]", at=at + len("guest-edit "))
+        host.call("hostKind", tile=note, type="[H]", at=at + len("guest-edit "))
+        def converged():
+            h, g = host_text(), guest_kind("note").get("text", "")
+            if h == g and "[G]" in h and "[H]" in h: return h
+        eventually(converged, "note: two edits at the same spot both survive, identically on both Macs", 45,
+                   lambda: json.dumps([host_text(), guest_kind("note").get("text")]))
+
+    # File: live, read only on the guest.
+    if "file" in legs:
+        readme.write_text(f"# Journey\n\nfirst line {token}\n")
+        file_tile = host.call("spawnKind", kind="file", path=str(readme))["tile"]
+        s = shared(file_tile, "file")
+        opened(s["url"], "file")
+        eventually(lambda: f"first line {token}" in guest_kind("file").get("text", ""), "file: the guest sees its text", 45,
+                   lambda: json.dumps(guest_kind("file")))
+        host.call("writeFile", path=str(readme), text=f"# Journey\n\nfirst line {token}\nsaved again {token}\n")
+        eventually(lambda: f"saved again {token}" in guest_kind("file").get("text", ""), "file: a save on the host appears on the guest", 45,
+                   lambda: json.dumps(guest_kind("file")))
+        g = guest.call("guestKind", kind="file", type="typed by guest")
+        check(not g.get("editable") and "typed by guest" not in readme.read_text(), "file: the guest cannot change it", json.dumps(g))
+
+    # Diff: re-read as the files change.
+    if "diff" in legs:
+        readme.write_text(f"# Journey\n\nfirst line {token}\nsaved again {token}\n")
+        diff_tile = host.call("spawnKind", kind="diff")["tile"]
+        s = shared(diff_tile, "diff")
+        opened(s["url"], "diff")
+        eventually(lambda: f"+saved again {token}" in guest_kind("diff").get("text", ""), "diff: the guest sees the host's diff", 45,
+                   lambda: json.dumps(guest_kind("diff"))[-400:])
+        readme.write_text(readme.read_text() + f"diff follows {token}\n")
+        eventually(lambda: f"+diff follows {token}" in guest_kind("diff").get("text", ""), "diff: a change on the host re-publishes the diff", 45,
+                   lambda: json.dumps(guest_kind("diff"))[-400:])
+
+    # Browser, private: pictures, and the guest's click lands on the host's page.
+    if "browser" in legs:
+        page = f"http://127.0.0.1:{port}/page.html"
+        browser = host.call("spawnKind", kind="browser", url=page)["tile"]
+        eventually(lambda: host.call("hostKind", tile=browser, eval="document.title").get("eval") == "clicks 0", "browser: the host's page loads", 45)
+        s = shared(browser, "browser (localhost)")
+        g = opened(s["url"], "browser")
+        eventually(lambda: guest_kind("browser").get("browserMode") == "frames" and guest_kind("browser").get("frameSequence", 0) > 0,
+                   "browser (localhost): the guest sees the host's page as pictures", 45, lambda: json.dumps(guest_kind("browser")))
+        g = guest_kind("browser")
+        check(f"{host.name}'s browser" in g.get("tab", "") and f"{host.name}'s browser" in g.get("caption", ""),
+              "browser: it is marked as the host's browser", json.dumps([g.get("tab"), g.get("caption")]))
+        first = g.get("frameSequence", 0)
+        rect = json.loads(host.call("hostKind", tile=browser, eval="JSON.stringify(document.getElementById('go').getBoundingClientRect())")["eval"])
+        guest.call("guestKind", kind="browser", clickPage=[rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] / 2])
+        eventually(lambda: host.call("hostKind", tile=browser, eval="document.title").get("eval") == "clicks 1",
+                   "browser: the guest's click lands on the host's page", 30,
+                   lambda: json.dumps(host.call("hostKind", tile=browser, eval="document.title")))
+        eventually(lambda: guest_kind("browser").get("frameSequence", 0) > first, "browser: the host's change reaches the guest as a new picture", 30,
+                   lambda: json.dumps(guest_kind("browser")))
+        host.call("hostKind", tile=browser, navigate=f"http://127.0.0.1:{port}/two.html")
+        eventually(lambda: "two.html" in guest_kind("browser").get("caption", ""), "browser: the guest follows the host's navigation", 30,
+                   lambda: json.dumps(guest_kind("browser")))
+
+    # Browser, public: the guest's own browser loads the same URL and follows.
+    if "public" in legs:
+        public = host.call("spawnKind", kind="browser", url="https://example.com/")["tile"]
+        try: wait_for(lambda: "example.com" in host.call("hostKind", tile=public).get("url", ""), "public page", 30); reachable = True
+        except Failed: reachable = False
+        if reachable:
+            s = shared(public, "browser (public)")
+            guest.call("open", url=s["url"], expectTile=False, timeout=150)
+            def follows(url):
+                g = [t for t in [guest_kind("browser")] if t.get("followedURL", "").startswith(url)]
+                return g[0] if g and g[0].get("browserMode") == "follow" else None
+            eventually(lambda: follows("https://example.com"), "browser (public): the guest's browser loads the same URL", 45,
+                       lambda: json.dumps(guest_kind("browser")))
+            host.call("hostKind", tile=public, navigate="https://example.org/")
+            eventually(lambda: follows("https://example.org"), "browser (public): the guest follows the host's navigation", 45,
+                       lambda: json.dumps(guest_kind("browser")))
+        else:
+            print("NOTE journey: browser (public): no network here, so the public-URL leg did not run")
+
+    # Terminal: an explicit opt-in, then a read-only mirror.
+    if "terminal" in legs:
+        terminal = host.call("spawnKind", kind="terminal")["tile"]
+        eventually(lambda: host.call("hostKind", tile=terminal).get("text", "").strip() != "", "terminal: the host's shell starts", 45)
+        host.call("hostKind", tile=terminal, type=f"echo first-{token}")
+        s = host.call("shareKind", tile=terminal, slug=f"kinds-terminal-{token}")
+        check("secrets" in s.get("warning", "") and not s.get("publishedAfterFirstPress"),
+              "terminal: the first Copy warns that output may contain secrets, and shares nothing", json.dumps(s.get("warning")))
+        check(s.get("areaItems") == ["liveTile"] and s.get("published") == [terminal], "terminal: the confirm shares it",
+              json.dumps({k: s.get(k) for k in ("areaItems", "published")}))
+        opened(s["url"], "terminal")
+        eventually(lambda: f"first-{token}" in guest_kind("terminal").get("text", ""), "terminal: the guest sees its output", 45,
+                   lambda: json.dumps(guest_kind("terminal"))[-400:])
+        host.call("hostKind", tile=terminal, type=f"echo second-{token}")
+        eventually(lambda: f"second-{token}" in guest_kind("terminal").get("text", ""), "terminal: new output reaches the guest", 45,
+                   lambda: json.dumps(guest_kind("terminal"))[-400:])
+        g = guest.call("guestKind", kind="terminal", type=f"echo guest-{token}", appendDirect="terminalInput")
+        time.sleep(3)
+        check(not g.get("editable") and not g.get("typed"), "terminal: the guest has nowhere to type", json.dumps(g)[-300:])
+        check("forbidden" in g.get("direct", "") or "403" in g.get("direct", ""), "terminal: the relay refuses input sent straight at it",
+              g.get("direct", ""))
+        check(f"guest-{token}" not in host.call("hostKind", tile=terminal).get("text", ""), "terminal: nothing the guest typed reached the host")
+
+    # Kinds that cannot be shared yet are listed, never dropped.
+    if "excluded" in legs:
+        tree = host.call("spawnKind", kind="fileTree")["tile"]
+        note = note or host.call("spawnKind", kind="note", title="Left in")["tile"]
+        browser = browser or host.call("spawnKind", kind="browser", url=page)["tile"]
+        t = host.call("areaShareTarget", tiles=[tree, note, browser])
+        listed = {i[0] for i in t["items"]} | {e[0] for e in t["excluded"]}
+        reasons = {e[0]: e[2] for e in t["excluded"]}
+        check(listed == {tree, note, browser}, "every selected tile is either shared or listed as left out", json.dumps(t))
+        check(bool(reasons.get(tree)), "a file tree is listed as \"can't be shared yet\", with its reason", json.dumps(reasons))
+    pages.shutdown()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--relay", choices=["staging", "local"], default="staging")
@@ -470,6 +668,12 @@ def main():
     parser.add_argument("--hold", type=int, default=0, help="on failure, keep the apps running this many seconds")
     parser.add_argument("--name", default="Journey", help="bundle and state name, e.g. ShareJourney (letters only)")
     parser.add_argument("--mode", choices=["a", "b"], default="a", help="a: share one agent; b: the portal")
+    parser.add_argument("--no-lock", action="store_true",
+                        help="build without the shared build lock: the caller (the matrix) already serialises builds")
+    parser.add_argument("--kinds", default="note,file,diff,browser,public,terminal,excluded",
+                        help="with --only kinds: which legs, comma-separated")
+    parser.add_argument("--only", choices=["all", "agent", "kinds"], default="all",
+                        help="agent: mode A's twelve steps; kinds: every other tile kind (SHARE-KINDS.md)")
     args = parser.parse_args()
     if not args.name.isalpha(): parser.error("--name takes letters only")
     configure(args.name)
@@ -479,9 +683,10 @@ def main():
         # /usr/bin/python3 is an xcrun shim that exports its own SDKROOT; the
         # build lock pins Xcode's SDK only when none is inherited.
         build_env = {k: v for k, v in os.environ.items() if k != "SDKROOT"}
-        subprocess.run([str(LOCK), "swift", "build", "--product", "continuum-relay"], check=True, env=build_env)
+        lock = [] if args.no_lock else [str(LOCK)]
+        subprocess.run([*lock, "swift", "build", "--product", "continuum-relay"], check=True, env=build_env)
         for bundle_name, bundle_id, _, _ in PEOPLE.values():
-            subprocess.run([str(LOCK), "scripts/make-app-bundle.sh", "--configuration", "debug", "--bundle-id", bundle_id,
+            subprocess.run([*lock, "scripts/make-app-bundle.sh", "--configuration", "debug", "--bundle-id", bundle_id,
                             "--name", bundle_name, "--output", str(APPS / f"{bundle_name}.app")], check=True, env=build_env)
 
     shutil.rmtree(STATE, ignore_errors=True); STATE.mkdir(parents=True)
@@ -516,8 +721,9 @@ def main():
         print(f"==> {host.name} (host) and {guest.name} (guest) are running, off every display")
         if args.mode == "b":
             mode_b(host, guest, check, eventually, endpoint, env_extra, people)
-        else:
-
+        if args.mode == "a" and args.only in ("all", "kinds"):
+            kinds_journey(host, guest, check, eventually, set(args.kinds.split(",")))
+        if args.mode == "a" and args.only in ("all", "agent"):
             tile = host.call("spawnAgent")["tile"]
             before = host.call("snapshot", tile=tile)
 

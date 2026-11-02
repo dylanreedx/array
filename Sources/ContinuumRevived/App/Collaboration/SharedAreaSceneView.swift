@@ -1017,6 +1017,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
                 ? "This is an observation of an agent on its publishing host. Transcript history and execution controls are not available in this shared view yet."
                 : "History is not shared. Prompts from anyone in the area run on the publishing host, in order; approvals stay with its owner. Hand over says who is driving.")]
         case .artifact: entries = ["This artifact's content is not available in this view."]
+        case .liveTile: entries = ["A live tile. Open its own link to see it."]
         }
         if followsLatestEntry { readerIndex = max(0, entries.count - 1) }
         readerIndex = min(max(0, readerIndex), max(0, entries.count - 1))
@@ -1133,7 +1134,7 @@ final class SharedAreaSceneView: NSView, TokenThemed, NSTextViewDelegate {
     }
     private func setFrame(_ view: NSView, _ frame: NSRect) { if view.frame != frame { view.frame = frame } }
     static func title(for kind: SharedArea.Kind) -> String {
-        switch kind { case .agentObservation: return "Agent observation"; case .artifact: return "Artifact"; case .discussion: return "Discussion"; case .agreement: return "Working agreement" }
+        switch kind { case .agentObservation: return "Agent observation"; case .artifact: return "Artifact"; case .discussion: return "Discussion"; case .agreement: return "Working agreement"; case .liveTile: return "Live tile" }
     }
 }
 
@@ -1212,6 +1213,7 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
             case .artifact: body = "Artifact content unavailable."
             case .discussion: body = posts[item.id]?.last?.text ?? "No messages yet."
             case .agreement: body = contexts[item.id]?.last?.text ?? "No agreement revision yet."
+            case .liveTile: body = "A live tile from its owner's Mac."
             }
             return Card(position: position, title: SharedAreaSceneView.title(for: item.kind), preview: String(body.prefix(800)), kind: item.kind)
         }
