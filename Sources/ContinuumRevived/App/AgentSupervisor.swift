@@ -8741,6 +8741,18 @@ final class AgentSupervisor {
         notifyTurnCapabilitiesChanged(id)
     }
 
+    /// The supervisor-owned semantic document, the one every tile installs on
+    /// attach: what a published agent sends a teammate (`SharedAgentTranscriptPublisher`).
+    ///
+    /// Nothing here runs the streaming-parse clock (`scheduleTranscriptPersist`
+    /// flushes only at boundaries), so a reader that is drawn elsewhere parses
+    /// what has streamed first. The publisher reads at most four times a second,
+    /// the supervisor's own parse rate.
+    func transcriptDocument(for id: AgentID) -> AgentDocument? {
+        _ = transcriptProjections[id]?.flushPendingStreamingMarkup()
+        return transcriptProjections[id]?.document
+    }
+
     /// Atomically snapshot the complete transcript and register its live tail.
     /// `AgentSupervisor` is main-actor isolated, so no delivery can interleave the
     /// snapshot read and continuation registration.

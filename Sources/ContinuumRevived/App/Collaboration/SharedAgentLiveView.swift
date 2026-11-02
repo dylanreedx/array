@@ -13,10 +13,25 @@ import ContinuumRevivedCollaborationProtocol
 final class SharedAgentLiveView: NSView {
     typealias Projection = Collaboration.AgentProjection
     typealias Reader = @MainActor (SharedArea.ID<SharedArea.Object>, Projection.Cursor?) async throws -> Projection.Read
+    typealias TranscriptReader = @MainActor (SharedArea.ID<SharedArea.Object>, Collaboration.AgentTranscript.ReadRequest) async throws
+        -> Collaboration.AgentTranscript.Read
 
     static let pollInterval: Duration = .seconds(1)
+    /// How long the transcript lane holds a read open, and how soon a view on
+    /// the rows fallback asks again whether the host now publishes the lane.
+    static let transcriptWaitMilliseconds = 20_000
+    static let transcriptRetryInterval: Duration = .seconds(10)
     let controller: SharedAreaController
     private let read: Reader
+    private let readTranscript: TranscriptReader
+    /// The owner's whole transcript, drawn by the host tile's renderer. Shown
+    /// once the host publishes the lane; until then the projection rows stand in.
+    let transcriptView = SharedAgentTranscriptView()
+    private var transcriptTask: Task<Void, Never>?
+    private(set) var transcriptLive = false
+    /// The poll generation, for a check that drives `pollTranscript` itself.
+    var qaTicket: UUID { generation }
+    private var transcriptObject: SharedArea.ID<SharedArea.Object>?
     private(set) var object: SharedArea.ID<SharedArea.Object>?
     private(set) var replica = Projection.Replica()
     private(set) var reads = 0
@@ -62,11 +77,15 @@ final class SharedAgentLiveView: NSView {
     private var delivery: String?
     override var isFlipped: Bool { true }
 
-    init(controller: SharedAreaController, read: Reader? = nil) {
+    init(controller: SharedAreaController, read: Reader? = nil, readTranscript: TranscriptReader? = nil) {
         self.controller = controller
         self.read = read ?? { [weak controller] object, cursor in
             guard let controller else { throw CancellationError() }
             return try await controller.readAgentProjection(object: object, cursor: cursor)
+        }
+        self.readTranscript = readTranscript ?? { [weak controller] object, request in
+            guard let controller else { throw CancellationError() }
+            return try await controller.readAgentTranscript(object: object, request: request)
         }
         super.init(frame: .zero)
         isHidden = true
@@ -83,6 +102,9 @@ final class SharedAgentLiveView: NSView {
         // The composer joins the view the first time it is offered, so a view
         // with no route to its host carries no composer subtree at all.
         for view in [status, controls, scroll, lastPrompt] { addSubview(view) }
+        transcriptView.isHidden = true
+        transcriptView.onOpenWebLink = { url, _ in NSWorkspace.shared.open(url) }
+        addSubview(transcriptView)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Live agent view")
         applyAppearance()
@@ -117,6 +139,7 @@ final class SharedAgentLiveView: NSView {
         }
         scroll.frame = .init(x: 0, y: 60, width: bounds.width, height: max(0, bottom - 60))
         transcript.frame.size.width = scroll.contentSize.width
+        if transcriptView.frame != scroll.frame { transcriptView.frame = scroll.frame }
     }
 
     /// Called whenever the scene's selection or document changes.
@@ -128,6 +151,7 @@ final class SharedAgentLiveView: NSView {
         guard selected != object || task == nil else { return }
         stop()
         object = selected; replica = .init(); confirmed = false; unavailable = false; delivery = nil
+        if object != transcriptObject { transcriptView.reset(); setTranscriptLive(false); transcriptObject = object }
         render()
         let ticket = UUID(); generation = ticket
         task = Task { @MainActor [weak self] in
@@ -138,11 +162,50 @@ final class SharedAgentLiveView: NSView {
                 do { try await Task.sleep(for: Self.pollInterval) } catch { return }
             }
         }
+        transcriptTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let outcome = await self?.pollTranscript(selected, ticket: ticket), self?.generation == ticket else { return }
+                if outcome { continue }
+                do { try await Task.sleep(for: Self.transcriptRetryInterval) } catch { return }
+            }
+        }
+    }
+
+    /// One long-polled read of the transcript lane. Returns false when the
+    /// lane is not there (an older host or relay): the rows view stays, and the
+    /// lane is asked again after `transcriptRetryInterval`.
+    @discardableResult
+    func pollTranscript(_ selected: SharedArea.ID<SharedArea.Object>, ticket: UUID, waitMilliseconds: Int? = nil) async -> Bool {
+        let request = Collaboration.AgentTranscript.ReadRequest(stream: Collaboration.AgentTranscript.mainStream,
+                                                                cursor: transcriptView.cursor,
+                                                                waitMilliseconds: waitMilliseconds ?? Self.transcriptWaitMilliseconds)
+        do {
+            let value = try await readTranscript(selected, request)
+            guard generation == ticket else { return false }
+            transcriptView.receive(value)
+            setTranscriptLive(true)
+            return true
+        } catch {
+            guard generation == ticket else { return false }
+            // Keep what was drawn; a relay restart answers "unavailable" until
+            // the host's next checkpoint.
+            if transcriptView.mirror.document.entries.isEmpty { setTranscriptLive(false) }
+            return false
+        }
+    }
+
+    private func setTranscriptLive(_ live: Bool) {
+        guard transcriptLive != live else { return }
+        transcriptLive = live
+        transcriptView.isHidden = !live
+        scroll.isHidden = live
+        needsLayout = true
     }
 
     func stop() {
         generation = UUID()
         task?.cancel(); task = nil
+        transcriptTask?.cancel(); transcriptTask = nil
         object = nil
     }
 

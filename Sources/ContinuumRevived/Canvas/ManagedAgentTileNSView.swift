@@ -256,7 +256,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private var managedImageBindingGeneration: UInt64 = 0
     private let imagePreviewController = AgentImageQuickPreviewController()
     private let statusRowPlacement: AgentStatusRowPlacement
-    private var v2RenderedDocument = AgentDocument()
+    private var v2Feed = AgentTranscriptDocumentFeed()
     private var v2RenderError: Error?
     /// Version of the reducer document this tile has already forwarded. The
     /// reducer advances it exactly once per accepted mutation, so it is an O(1)
@@ -442,9 +442,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // the default until the canvas renderer covers every block.
         let canvasRenderer = AgentTranscriptCanvasView.isSelected
         self.drawsRestingChrome = canvasRenderer
-        self.transcriptCollectionFixture = canvasRenderer
-            ? AgentTranscriptCanvasView(toolDetailStore: toolDetailStore)
-            : AgentTranscriptListView(toolDetailStore: toolDetailStore)
+        self.transcriptCollectionFixture = AgentTranscriptDocumentFeed.makeSurface(toolDetailStore: toolDetailStore)
         self.v2Composer = AgentComposerView(frame: .zero, variant: .fullTurn)
         self.v2ActionButton = ComposerActionButton(
             presentation: .resolve(
@@ -4209,7 +4207,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         refreshReplyOptions(from: document)
         guard document.version != lastForwardedDocumentVersion else { return }
         lastForwardedDocumentVersion = document.version
-        let next = AgentDocument(version: v2RenderedDocument.version &+ 1, entries: document.entries)
         do {
             // The patch carries the REDUCER'S OWN changed set, drained from the
             // model. `enqueue` gates presentation at 30Hz and unions these across
@@ -4228,17 +4225,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             // in a new place: this asks the reducer, which already computed it,
             // and costs a set union per chunk.
             let touched = model.drainTouchedNodes()
-            let patch: AgentDocumentPatch
-            if touched.isStructural || touched.ids.isEmpty {
-                patch = try AgentDocumentPatch.empty(fromVersion: v2RenderedDocument.version)
-            } else {
-                patch = try AgentDocumentPatch(
-                    fromVersion: v2RenderedDocument.version,
-                    toVersion: next.version,
-                    updated: Array(touched.ids))
-            }
-            try transcript.enqueue(document: next, patch: patch, final: final)
-            v2RenderedDocument = next
+            try v2Feed.present(document.entries, touched: touched.ids, structural: touched.isStructural,
+                               final: final, to: transcript)
             v2RenderError = nil
             if case .needsAction = v2TurnSnapshot?.state {
                 // A pending request is an interaction boundary, not a streaming

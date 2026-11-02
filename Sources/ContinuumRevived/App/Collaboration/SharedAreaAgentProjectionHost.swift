@@ -13,17 +13,24 @@ final class SharedAreaAgentProjectionHost {
     private let makeSink: (SharedArea.ID<SharedArea.Object>) -> SharedAgentProjectionSink
     private let owner: SharedArea.ID<SharedArea.Person>?
     private(set) var projectors: [SharedArea.ID<SharedArea.Object>: SharedAgentProjector] = [:]
+    /// The whole transcript beside each projection (`SharedAgentTranscriptPublisher`).
+    private let makeTranscriptSink: ((SharedArea.ID<SharedArea.Object>, SharedArea.ID<SharedArea.Host>) -> SharedAgentTranscriptSink)?
+    private(set) var transcripts: [SharedArea.ID<SharedArea.Object>: SharedAgentTranscriptPublisher] = [:]
     private var scheduled: Task<Void, Never>?
     private(set) var lastError: (any Error)?
 
     init(supervisor: AgentSupervisor, directory: URL, owner: SharedArea.ID<SharedArea.Person>? = nil,
-         makeSink: @escaping (SharedArea.ID<SharedArea.Object>) -> SharedAgentProjectionSink) {
+         makeSink: @escaping (SharedArea.ID<SharedArea.Object>) -> SharedAgentProjectionSink,
+         makeTranscriptSink: ((SharedArea.ID<SharedArea.Object>, SharedArea.ID<SharedArea.Host>) -> SharedAgentTranscriptSink)? = nil) {
         self.supervisor = supervisor; self.directory = directory; self.owner = owner; self.makeSink = makeSink
+        self.makeTranscriptSink = makeTranscriptSink
     }
 
     convenience init(supervisor: AgentSupervisor, controller: SharedAreaController) {
         self.init(supervisor: supervisor, directory: controller.storageDirectory, owner: controller.identity.person) { [weak controller] object in
             SharedAreaControllerProjectionSink(controller: controller, object: object)
+        } makeTranscriptSink: { [weak controller] object, host in
+            SharedAreaControllerTranscriptSink(controller: controller, object: object, host: host)
         }
     }
 
@@ -37,6 +44,20 @@ final class SharedAreaAgentProjectionHost {
         for (object, projector) in projectors where wanted[object].map({ $0.0 != projector.agent || $0.1 != projector.host }) ?? true
             || projector.superseded {
             projector.stop(); projectors[object] = nil
+        }
+        for (object, publisher) in transcripts where wanted[object].map({ $0.0 != publisher.agent }) ?? true || publisher.superseded {
+            publisher.stop(); transcripts[object] = nil
+        }
+        if let makeTranscriptSink {
+            for (object, target) in wanted where transcripts[object] == nil {
+                do {
+                    let generation = try SharedAgentProjectionGenerations.next(directory: directory, object: object, lane: "agent-transcript")
+                    let publisher = SharedAgentTranscriptPublisher(supervisor: supervisor, agent: target.0, generation: generation,
+                                                                   sink: makeTranscriptSink(object, target.1))
+                    transcripts[object] = publisher
+                    publisher.start()
+                } catch { lastError = error }
+            }
         }
         for (object, target) in wanted where projectors[object] == nil {
             do {
@@ -58,6 +79,8 @@ final class SharedAreaAgentProjectionHost {
         scheduled?.cancel(); scheduled = nil
         for projector in projectors.values { projector.stop() }
         projectors = [:]
+        for publisher in transcripts.values { publisher.stop() }
+        transcripts = [:]
     }
 
     /// Coalesces a burst of streamed frames into one delivery per main-actor turn.

@@ -353,9 +353,9 @@ final class SharedAgentProjector {
 /// A monotonic per-object generation counter on the host. A relaunched host
 /// therefore always supersedes its previous session in the log and replicas.
 enum SharedAgentProjectionGenerations {
-    static func next(directory: URL, object: SharedArea.ID<SharedArea.Object>) throws -> UInt64 {
+    static func next(directory: URL, object: SharedArea.ID<SharedArea.Object>, lane: String = "agent-projection") throws -> UInt64 {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = directory.appendingPathComponent("agent-projection-\(object.rawValue.uuidString).generation")
+        let file = directory.appendingPathComponent("\(lane)-\(object.rawValue.uuidString).generation")
         let prior = (try? String(contentsOf: file, encoding: .utf8)).flatMap { UInt64($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
         let next = prior + 1
         try Data(String(next).utf8).write(to: file, options: .atomic)
