@@ -7,7 +7,17 @@ order: 21
 
 Agent characters show an agent’s activity in sidebar rows and the tile header. They are off by default. To turn them on, open **Settings › Appearance › Agent characters** and enable **Show agent characters**. Choose a **Character set** there. To choose a character for one agent, use its tile’s **⋯ › Character** menu. Turn off **Show agent characters** to hide them.
 
+Choose **Character size** in the same settings group: **Small** is the default, with **Medium** and **Large** available. The tile header and sidebar row grow with the character and provider logo; the tile header title grows too. On a Retina display, Large draws the pixel art at 2.5 times Small’s scale to keep it crisp. Zoomed far out, every size draws like Small. Transcript chips stay at text size.
+
 Motion can be limited to working agents or set to **Never (still poses)**. macOS Reduce Motion also shows still poses.
+
+In the default drawn transcript, characters also appear on delegated agent chips, agent message cards, and provider subagent rows. Turning characters off restores their icons.
+
+## Characters in a pack
+
+The top agent in a pack shows the set’s lead art while it has helpers. Only the top agent becomes the lead; a helper that delegates stays a helper. The lead’s direct helpers get different characters in the order they started and keep them across restarts. Characters repeat when the set runs out.
+
+A choice made with **⋯ › Character** always wins, including for the lead. If the set has no lead art, the lead keeps its own character.
 
 ## What the poses mean
 
@@ -179,3 +189,18 @@ Array --validate-agent-character-theme path/to/my-set.theme.json
 ```
 
 The validator prints a JSON report and exits with 0 for a valid theme or 1 for an invalid one.
+
+## Add lead art
+
+A custom set can include lead art. Add `leadSize` at the top level and a `lead` object with `rest`, `rising`, and one to four `levels`. Each is a list of frames, except `levels`, which is a list of frame lists. For example, these fields add one two-by-four frame for each state to the set above:
+
+```json
+"leadSize": [2, 4],
+"lead": {
+  "rest": [["AA", "AA", "AA", "AA"]],
+  "rising": [["AA", "AA", "AA", "AA"]],
+  "levels": [[["AA", "AA", "AA", "AA"]]]
+}
+```
+
+Lead frames use the top-level palette. If `leadSize` is omitted, it defaults to 28 by 16 pixels at scale 1.
