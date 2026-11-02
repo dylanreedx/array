@@ -16,17 +16,26 @@ enum SharedTileAppearance {
         override func draw(_ dirtyRect: NSRect) { SurfaceToken.canvas.color.nsColor(in: self).setFill(); bounds.fill() }
     }
 
+    /// A stand-in for the host's page: a light web page with a header bar and
+    /// a button, drawn from tokens resolved for the light theme (a page keeps
+    /// its own look whatever the viewer's appearance).
     static func page() -> Data {
+        let theme = TokenTheme.light
+        let surface = SurfaceToken.tileBody.color.nsColor(for: theme)
+        let bar = SurfaceToken.tileChrome.color.nsColor(for: theme)
+        let ink = TextToken.textPrimary.color.nsColor(for: theme)
+        let button = AccentToken.accentWorking.color.nsColor(for: theme)
+        let onButton = SurfaceToken.tileBody.color.nsColor(for: theme)
         let image = NSImage(size: NSSize(width: 800, height: 520), flipped: true) { rect in
-            NSColor.white.setFill(); rect.fill()
-            NSColor(calibratedRed: 0.95, green: 0.95, blue: 0.97, alpha: 1).setFill()
+            surface.setFill(); rect.fill()
+            bar.setFill()
             NSRect(x: 0, y: 0, width: 800, height: 64).fill()
             ("localhost:3000 · Checkout" as NSString).draw(at: NSPoint(x: 24, y: 22),
-                withAttributes: [.font: NSFont.systemFont(ofSize: 18, weight: .semibold), .foregroundColor: NSColor.black])
-            NSColor.systemBlue.setFill()
+                withAttributes: [.font: NSFont.systemFont(ofSize: 18, weight: .semibold), .foregroundColor: ink])
+            button.setFill()
             NSBezierPath(roundedRect: NSRect(x: 40, y: 120, width: 220, height: 64), xRadius: 10, yRadius: 10).fill()
             ("Pay now" as NSString).draw(at: NSPoint(x: 104, y: 140),
-                withAttributes: [.font: NSFont.systemFont(ofSize: 20, weight: .medium), .foregroundColor: NSColor.white])
+                withAttributes: [.font: NSFont.systemFont(ofSize: 20, weight: .medium), .foregroundColor: onButton])
             return true
         }
         guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
