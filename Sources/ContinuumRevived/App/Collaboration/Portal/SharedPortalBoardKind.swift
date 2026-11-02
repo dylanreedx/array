@@ -110,7 +110,9 @@ final class SharedPortalBoardItemView: SharedPortalItemView {
     private let pictureRoot = FileManager.default.temporaryDirectory
         .appendingPathComponent("array-shared-boards", isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
     private var written: Set<String> = []
-    static let headerHeight: CGFloat = 33
+    /// The host tile's title bar height, so the board below it gets exactly
+    /// the host's content size.
+    static let headerHeight: CGFloat = TileNSView.titleBarHeight
 
     override init(entry: SharedPortal.Entry, guest: SharedPortalGuestContext) {
         let placeholder = Board(id: UUID(), title: entry.title, columns: [], cards: [])
@@ -194,8 +196,8 @@ final class SharedPortalBoardItemView: SharedPortalItemView {
     override func layout() {
         super.layout()
         let header = Self.headerHeight
-        title.frame = NSRect(x: 14, y: 10, width: max(0, bounds.width - 140), height: 18)
-        badge.frame = NSRect(x: bounds.width - 124, y: 11, width: 110, height: 16)
+        title.frame = NSRect(x: 12, y: (header - 18) / 2, width: max(0, bounds.width - 140), height: 18)
+        badge.frame = NSRect(x: bounds.width - 124, y: (header - 16) / 2, width: 110, height: 16)
         clip.frame = NSRect(x: 0, y: header, width: bounds.width, height: max(0, bounds.height - header))
         // The tile's own title bar sits above the clip, out of sight and reach.
         let bar = TileNSView.titleBarHeight

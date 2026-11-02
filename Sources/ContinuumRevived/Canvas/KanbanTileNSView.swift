@@ -175,6 +175,9 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
         horizontalScroll.scrollerStyle = .overlay
         horizontalScroll.drawsBackground = false
         horizontalScroll.documentView = body
+        // The lane surface is painted on this layer: own it from the start, so
+        // a board hosted outside the canvas (a guest's portal) paints it too.
+        body.wantsLayer = true
 
         emptyBoardLabel.font = NSFont.token(.body)
         emptyBoardLabel.alignment = .center
@@ -521,7 +524,10 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
         if !bounds.isEmpty { hasLaidOutBoard = true }
         // Recompute the grab-strip inset every layout: it is zoom-dependent, and
         // the canvas rescales chrome without re-creating the tile.
-        grabStripInset = max(0, grabHeightInLocalCoordinates - contentTopInsetWorldHeight)
+        // A read-only board outside a canvas (a guest's portal) keeps the
+        // owner's zoom-1 inset, so its lanes sit where the owner's do.
+        let grabHeight = isReadOnly && canvas == nil ? max(Self.titleBarHeight, Self.minScreenGrabPx) : grabHeightInLocalCoordinates
+        grabStripInset = max(0, grabHeight - contentTopInsetWorldHeight)
         horizontalScroll.frame = NSRect(x: 0, y: 0, width: contentContainer.bounds.width,
                                         height: max(0, contentContainer.bounds.height - 30))
         gestureHint.frame = NSRect(x: 20, y: max(0, contentContainer.bounds.height - 24),
