@@ -317,6 +317,53 @@ enum SharedTileParityChecks {
                               guestRegion: { [weak guestTile] in guestTile?.contentView }))
         }
 
+        // MARK: Board, through the portal (a board shares only inside one)
+
+        guard case .spawned(let boardID, let boardTile) = spawner.spawnBoard(title: "Checkout launch") else {
+            throw Failure(description: "the board did not spawn")
+        }
+        canvas.layoutSubtreeIfNeeded()
+        guard let hostBoard = canvas.tileView(for: boardTile) as? KanbanTileNSView, let boards = hostBoard.boardRuntime,
+              let lanes = boards.board(id: boardID)?.orderedColumns.map(\.id), lanes.count == 3 else {
+            throw Failure(description: "no host board with three lanes")
+        }
+        for command in [
+            BoardCommand.createTask(id: UUID(), columnId: lanes[0], title: "Wallets first", body: "## Plan\n\n- **Apple Pay** first",
+                                    links: [.url("https://example.com/pr/12"), .agent(scene.agents[0])], assignee: scene.agents[0], after: nil, before: nil),
+            .createTask(id: UUID(), columnId: lanes[1], title: "Receipt email", body: "", links: [], assignee: scene.agents[1], after: nil, before: nil),
+            .createCard(id: UUID(), columnId: lanes[2], title: "Polish the toggle", after: nil, before: nil),
+        ] {
+            guard case .applied = boards.apply(command, to: boardID) else { throw Failure(description: "the host reducer refused a board fixture") }
+        }
+        let portalHost = SharedPortalHostContext(app: app, area: UUID())
+        let boardKind = SharedPortalKinds.kind(for: .board)
+        guard let boardRecord = portalHost.tile(boardTile), let boardDraft = try await boardKind.snapshot(tile: boardRecord, host: portalHost) else {
+            throw Failure(description: "board: the portal kind published nothing")
+        }
+        let boardObject = SharedArea.ID<SharedArea.Object>()
+        let capture = try boardDraft.capture(object: boardObject, parent: nil)
+        var boardBytes: [String: Data] = [:]
+        for entry in capture.manifest.entries where entry.coverage == .included {
+            if let digest = entry.blob, let data = capture.blobs[digest] { boardBytes[entry.path] = data }
+        }
+        let boardRevision = Collaboration.Artifact.Record(manifest: capture.manifest, sequence: 1, publisher: dylan.person, host: hostID,
+                                                          publishedAt: Date(), contentDigest: boardDraft.contentDigest)
+        let boardGuestController = try controller(root: rigRoot.appendingPathComponent("guest-board"), identity: sam, label: "Sam",
+                                                  authority: authority, loop: loop, document: document)
+        let portalGuest = SharedPortalGuestContext(controller: boardGuestController, hostName: "Dylan", hostColour: .systemPurple)
+        guard let boardItem = boardKind.makeView(entry: .init(object: boardObject, kind: .board, title: hostBoard.tile.title),
+                                                 guest: portalGuest) as? SharedPortalBoardItemView else {
+            throw Failure(description: "board: the guest draws a fallback card")
+        }
+        boardItem.frame = NSRect(origin: .zero, size: hostBoard.frame.size)
+        boardItem.apply(contents: .init(record: try await loop.wire(boardRevision), bytes: try await loop.wire(boardBytes)))
+        _ = window(for: boardItem)
+        boardItem.layoutSubtreeIfNeeded()
+        pairs.append(Pair(kind: "board", host: hostBoard, guest: boardItem.board,
+                          hostRegion: { [weak hostBoard] in hostBoard?.contentView },
+                          guestRegion: { [weak boardItem] in boardItem?.board.contentView },
+                          notes: ["guest is a portal item: the host's KanbanTileNSView, read only (no add row, grip, chip menu glyph; hint says read only)"]))
+
         // Let every lane deliver: the guest bodies show their first state.
         try await SharedAreaCheckRig.eventually("every guest tile shows the host's content", attempts: 1600) {
             pairs.allSatisfy { pair in
