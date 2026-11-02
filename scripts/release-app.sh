@@ -17,6 +17,7 @@ NOTARY_PROFILE="${ARRAY_NOTARY_PROFILE:-}"
 SKIP_NOTARIZE=0
 SET_VERSION=""
 SET_BUILD=""
+PASSKEYS_PROFILE="${ARRAY_PASSKEYS_PROFILE:-}"
 
 usage() {
   cat <<'USAGE'
@@ -32,6 +33,12 @@ Options:
   --skip-notarize                 Stop after signed DMG (no notarization/stapling)
   --set-version <x.y.z>           Stamp CFBundleShortVersionString in the bundle
   --set-build <n>                 Stamp CFBundleVersion in the bundle
+  --passkeys-profile <path>       Developer ID provisioning profile that grants
+                                  com.apple.developer.web-browser.public-key-credential
+                                  (or ARRAY_PASSKEYS_PROFILE). Embeds it and signs
+                                  the app with that entitlement. Omit until Apple
+                                  grants it: a restricted entitlement with no
+                                  matching profile gets the app killed at launch.
   -h, --help                      Show this help
 
 Typical release:
@@ -51,6 +58,7 @@ while [[ $# -gt 0 ]]; do
     --skip-notarize) SKIP_NOTARIZE=1; shift ;;
     --set-version)   [[ $# -ge 2 ]] || { echo "missing value for $1" >&2; exit 2; }; SET_VERSION="$2"; shift 2 ;;
     --set-build)     [[ $# -ge 2 ]] || { echo "missing value for $1" >&2; exit 2; }; SET_BUILD="$2"; shift 2 ;;
+    --passkeys-profile) [[ $# -ge 2 ]] || { echo "missing value for $1" >&2; exit 2; }; PASSKEYS_PROFILE="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -88,6 +96,34 @@ if [[ "$SKIP_NOTARIZE" == 0 && -z "$NOTARY_PROFILE" ]]; then
   echo "notarization requested but no --notary-profile / ARRAY_NOTARY_PROFILE set" >&2
   echo "(create one with: xcrun notarytool store-credentials array-notary --apple-id <id> --team-id <team>)" >&2
   exit 2
+fi
+
+PASSKEYS_ENTITLEMENT=com.apple.developer.web-browser.public-key-credential
+SIGNING_ENTITLEMENTS="$ROOT_DIR/Packaging/Array.entitlements"
+if [[ -n "$PASSKEYS_PROFILE" ]]; then
+  # Browser passkeys are a managed entitlement: it only holds when the signature
+  # claims it AND an embedded Developer ID profile for this team and bundle id
+  # grants it. Check the profile before building anything.
+  [[ "$ADHOC" == 0 ]] || { echo "--passkeys-profile needs a Developer ID --identity" >&2; exit 2; }
+  [[ -f "$PASSKEYS_PROFILE" ]] || { echo "passkeys profile not found: $PASSKEYS_PROFILE" >&2; exit 2; }
+  PROFILE_PLIST="$OUTPUT_DIR/passkeys-profile.plist"
+  security cms -D -i "$PASSKEYS_PROFILE" >"$PROFILE_PLIST" 2>>"$LOG" \
+    || { echo "cannot decode passkeys profile: $PASSKEYS_PROFILE" >&2; exit 2; }
+  profile_value() { /usr/libexec/PlistBuddy -c "Print :$1" "$PROFILE_PLIST" 2>/dev/null; }
+  [[ "$(profile_value "Entitlements:$PASSKEYS_ENTITLEMENT")" == "true" ]] \
+    || { echo "passkeys profile does not grant $PASSKEYS_ENTITLEMENT" >&2; exit 2; }
+  TEAM_ID=$(profile_value "Entitlements:com.apple.developer.team-identifier")
+  APP_IDENTIFIER=$(profile_value "Entitlements:com.apple.application-identifier")
+  [[ -n "$TEAM_ID" && "$APP_IDENTIFIER" == "$TEAM_ID.dev.arrayapp.macos" ]] \
+    || { echo "passkeys profile is for '$APP_IDENTIFIER', not $TEAM_ID.dev.arrayapp.macos" >&2; exit 2; }
+  [[ "$IDENTITY" == *"($TEAM_ID)"* ]] \
+    || { echo "identity '$IDENTITY' is not from the profile's team $TEAM_ID" >&2; exit 2; }
+  SIGNING_ENTITLEMENTS="$OUTPUT_DIR/signing-entitlements.plist"
+  cp "$ROOT_DIR/Packaging/Array.entitlements" "$SIGNING_ENTITLEMENTS"
+  /usr/libexec/PlistBuddy -c "Add :com.apple.application-identifier string $APP_IDENTIFIER" "$SIGNING_ENTITLEMENTS"
+  /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string $TEAM_ID" "$SIGNING_ENTITLEMENTS"
+  /usr/libexec/PlistBuddy -c "Add :$PASSKEYS_ENTITLEMENT bool true" "$SIGNING_ENTITLEMENTS"
+  log "passkeys: profile grants $PASSKEYS_ENTITLEMENT for $APP_IDENTIFIER"
 fi
 
 log "==> build + assemble bundle ($CONFIGURATION, prod channel)"
@@ -132,10 +168,20 @@ if [[ -x "$APP/Contents/MacOS/array-workspace-mcp" ]]; then
   codesign "${SIGN_FLAGS[@]}" "$APP/Contents/MacOS/array-workspace-mcp" >>"$LOG" 2>&1
 fi
 # The outer app alone carries Array's entitlements (today: microphone input for
-# composer dictation). Nested code keeps its own, above.
-codesign "${SIGN_FLAGS[@]}" --entitlements "$ROOT_DIR/Packaging/Array.entitlements" "$APP" >>"$LOG" 2>&1
+# composer dictation, plus browser passkeys when a profile is supplied). Nested
+# code keeps its own, above.
+if [[ -n "$PASSKEYS_PROFILE" ]]; then
+  cp "$PASSKEYS_PROFILE" "$APP/Contents/embedded.provisionprofile"
+fi
+codesign "${SIGN_FLAGS[@]}" --entitlements "$SIGNING_ENTITLEMENTS" "$APP" >>"$LOG" 2>&1
 codesign --verify --deep --strict --verbose=2 "$APP" >>"$LOG" 2>&1
 log "codesign verify: OK"
+if [[ -n "$PASSKEYS_PROFILE" ]]; then
+  signed_entitlements=$(codesign -d --entitlements :- "$APP" 2>/dev/null)
+  grep -Fq "$PASSKEYS_ENTITLEMENT" <<<"$signed_entitlements" \
+    || { echo "FAIL: signed app does not claim $PASSKEYS_ENTITLEMENT" >&2; exit 1; }
+  log "passkeys: entitlement signed and profile embedded"
+fi
 
 if [[ "$SKIP_NOTARIZE" == 0 ]]; then
   log "==> notarize app"
