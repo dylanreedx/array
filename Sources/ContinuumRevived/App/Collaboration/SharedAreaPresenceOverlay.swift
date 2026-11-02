@@ -9,7 +9,7 @@ import ContinuumRevivedCollaborationProtocol
 /// card offers Follow; only that button and the follow banner take clicks.
 @MainActor
 final class SharedAreaPresenceOverlay: NSView {
-    weak var scene: SharedAreaSceneView?
+    weak var scene: (any SharedAreaPresenceSurface)?
     var peers: [Collaboration.Presence] = [] { didSet { retarget(); refreshGeometry() } }
     var onPointerExit: (() -> Void)?
     var onFollow: ((UUID) -> Void)?
@@ -169,7 +169,7 @@ final class SharedAreaPresenceOverlay: NSView {
         return NSRect(x: (bounds.width - width) / 2, y: 12, width: max(0, width), height: 28)
     }
 
-    init(scene: SharedAreaSceneView) {
+    init(scene: any SharedAreaPresenceSurface) {
         self.scene = scene
         super.init(frame: scene.areaCanvasView.bounds)
         autoresizingMask = [.width, .height]

@@ -2,12 +2,44 @@ import AppKit
 import ContinuumRevivedCore
 import ContinuumRevivedCollaborationProtocol
 
+/// What a cursor publisher and its overlay need from the surface they draw
+/// on: the 0.7.37 shared scene, a portal tile's body on the guest, or the
+/// host's own canvas under a portal (`.plans/105-collaboration/PORTAL-CONTRACT.md`).
+/// "Screen" points are in the surface's own coordinates.
+@MainActor
+protocol SharedAreaPresenceSurface: NSView {
+    var controller: SharedAreaController { get }
+    /// The view the overlay covers.
+    var areaCanvasView: NSView { get }
+    var isZone: Bool { get }
+    var localViewCamera: SharedAreaLocalView { get }
+    var cameraViewportSize: CGSize { get }
+    var reduceMotion: () -> Bool { get }
+    var onCanvasTransformChange: (() -> Void)? { get set }
+    var onLocalCameraNavigation: (() -> Void)? { get set }
+    var onFollowTeammate: ((UUID?) -> Void)? { get set }
+    func areaPoint(forScreenPoint point: CGPoint) -> CGPoint
+    func screenPoint(forAreaPoint point: CGPoint) -> CGPoint
+    func setFollowTargets(_ targets: [SharedAreaSceneView.FollowTarget], followed: UUID?)
+    func applyFollowedCamera(_ value: SharedAreaLocalView) -> Bool
+    func persistFollowedCamera() throws
+    /// Whether this person's pointer at an area point is published. A portal
+    /// sends it only over a shared tile.
+    func publishesCursor(at area: CGPoint) -> Bool
+}
+
+extension SharedAreaPresenceSurface {
+    func publishesCursor(at area: CGPoint) -> Bool { true }
+}
+
+extension SharedAreaSceneView: SharedAreaPresenceSurface {}
+
 /// One human view owns one ephemeral cursor session. Closing it stops presence,
 /// never source execution or the separately owned durable usage/host session.
 @MainActor
 final class SharedAreaPresencePublisher {
     let overlay: SharedAreaPresenceOverlay
-    private let scene: SharedAreaSceneView
+    private let scene: any SharedAreaPresenceSurface
     private let controller: SharedAreaController
     private var observer: UUID?
     private var cursorObserver: UUID?
@@ -39,7 +71,7 @@ final class SharedAreaPresencePublisher {
     var onFollowChange: ((UUID?, String) -> Void)?
     var followedLabelText: String { followedLabel }
 
-    init(scene: SharedAreaSceneView) {
+    init(scene: any SharedAreaPresenceSurface) {
         self.scene = scene; controller = scene.controller
         overlay = SharedAreaPresenceOverlay(scene: scene)
     }
@@ -71,7 +103,7 @@ final class SharedAreaPresencePublisher {
             self.screenCursor = inside ? local : nil
             if inside {
                 let area = self.scene.areaPoint(forScreenPoint: self.scene.convert(event.locationInWindow, from: nil))
-                self.cursor = .init(x: area.x, y: area.y)
+                self.cursor = self.scene.publishesCursor(at: area) ? .init(x: area.x, y: area.y) : nil
             } else { self.cursor = nil }
             self.cursorSampledAt = ProcessInfo.processInfo.systemUptime
             self.send(force: false)
@@ -201,7 +233,7 @@ final class SharedAreaPresencePublisher {
         if let screenCursor {
             if overlay.bounds.contains(screenCursor) {
                 let area = scene.areaPoint(forScreenPoint: overlay.convert(screenCursor, to: scene))
-                cursor = .init(x: area.x, y: area.y)
+                cursor = scene.publishesCursor(at: area) ? .init(x: area.x, y: area.y) : nil
             } else { cursor = nil; self.screenCursor = nil; overlay.pointerMoved(to: nil) }
             cursorSampledAt = ProcessInfo.processInfo.systemUptime
         }

@@ -88,7 +88,8 @@ public enum CanvasSceneGlyph {
         case .conductorQueue: return "list.bullet.rectangle"
         case .diffReview: return "arrow.triangle.branch"
         case .runArtifacts: return "shippingbox"
-        case .managedAgent, .sharedAgent: return "person.crop.square"
+        case .managedAgent, .sharedAgent, .sharedTile: return "person.crop.square"
+        case .sharedPortal: return "rectangle.on.rectangle"
         case .kanban: return "rectangle.split.3x1"
         }
     }

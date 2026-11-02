@@ -1,4 +1,5 @@
 import AppKit
+import WebKit
 import ContinuumRevivedCore
 import ContinuumRevivedCollaborationProtocol
 
@@ -42,13 +43,29 @@ final class MultiplayerDriver {
         canvas.centerOnTile(tile)
         // The click lands where the tile is once the camera has arrived.
         for _ in 0..<150 where canvas.isCameraInMotion { try await Task.sleep(for: .milliseconds(16)) }
+        // A tile wider than the parked window (a browser) is zoomed out to fit,
+        // as a person would before reaching for its header.
+        if let world = canvas.allTilesInWorldFrames().first(where: { $0.id == tile })?.frame,
+           world.width * canvas.viewport.zoom > Double(canvas.bounds.width) - 40 {
+            let zoom = (Double(canvas.bounds.width) - 80) / world.width
+            canvas.setViewport(CanvasViewport(x: world.x - 40 / zoom, y: world.y - 40 / zoom, zoom: zoom))
+        }
         canvas.layoutSubtreeIfNeeded()
         guard let view = canvas.tileView(for: tile), let button = view.qaTitleBarShareControl else {
             throw Failure(description: "the agent header shows no Share")
         }
         try ShareEntryChecks.click(button, drawnIn: view.qaTitleBarView)
         guard delegate.shareEntry.isPresented, let popover = delegate.shareEntry.presentedView else {
-            throw Failure(description: "the header Share opened no popover")
+            let target = delegate.shareTarget(tileIds: [tile], origin: view.tile.kind == .managedAgent ? .agent : .tile)
+            let anchor: NSView? = button.window == nil ? view.qaTitleBarView : button
+            let point = anchor.map { $0 === button ? button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+                                                   : $0.convert(NSPoint(x: button.frame.midX, y: button.frame.midY), to: nil) }
+            let hit = point.flatMap { p in view.window?.contentView?.hitTest(view.window!.contentView!.convert(p, from: nil)) }
+            fputs("share probe: hit \(hit.map { String(describing: type(of: $0)) } ?? "none") at \(point.map { "\($0)" } ?? "-") "
+                + "button \(button.frame) in window \(button.window != nil)\n", stderr)
+            throw Failure(description: "the header Share opened no popover (handler \(view.onShareRequested != nil), "
+                + "target \(target.map { "\($0.items.count) items, \($0.excluded.map(\.reason))" } ?? "none"), "
+                + "closed: \(delegate.shareEntry.qaLastSelfDismissal ?? "never opened"), hit \(hit.map { String(describing: type(of: $0)) } ?? "none"))")
         }
         popover.layoutSubtreeIfNeeded()
         return popover
@@ -62,18 +79,18 @@ final class MultiplayerDriver {
     }
 
     private let preview: MultiplayerPreview
-    private weak var delegate: AppDelegate?
-    private let window: NSWindow
+    weak var delegate: AppDelegate?
+    let window: NSWindow
     private let mailbox: URL
     private var activity: NSObjectProtocol?
-    private var shareSession: ShareLinkSession?
+    var shareSession: ShareLinkSession?
     private var observed: (controller: SharedAreaController, token: UUID)?
     private var lastRemote: [UUID: Collaboration.Point] = [:]
     /// Every teammate cursor position this person's controller received, with
     /// the wall-clock time (both apps share this Mac's clock).
     private var arrivals: [[String: Any]] = []
     /// The share links' private pasteboard: the journey never touches the user's.
-    private let pasteboard = NSPasteboard(name: .init("dev.arrayapp.multiplayer-driver.\(UUID().uuidString)"))
+    let pasteboard = NSPasteboard(name: .init("dev.arrayapp.multiplayer-driver.\(UUID().uuidString)"))
 
     private init(preview: MultiplayerPreview, delegate: AppDelegate, window: NSWindow) {
         self.preview = preview; self.delegate = delegate; self.window = window
@@ -163,7 +180,7 @@ final class MultiplayerDriver {
     }
     private var liveView: SharedAgentLiveView? { sharedTile?.live ?? zone?.scene.zoneAgentViews.values.first?.live }
 
-    private func eventually(_ label: String, timeout: TimeInterval = 30, _ value: () -> Bool) async throws {
+    func eventually(_ label: String, timeout: TimeInterval = 30, _ value: () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while !value() {
             guard Date() < deadline else { throw Failure(description: "timeout: \(label)") }
@@ -171,7 +188,7 @@ final class MultiplayerDriver {
         }
     }
 
-    private func frameJSON(_ frame: TileFrame?) -> [String: Double]? {
+    func frameJSON(_ frame: TileFrame?) -> [String: Double]? {
         frame.map { ["x": $0.x, "y": $0.y, "width": $0.width, "height": $0.height] }
     }
 
@@ -224,6 +241,107 @@ final class MultiplayerDriver {
                 result["statusText"] = live.statusText
             }
         }
+        return result
+    }
+
+    /// The one `.sharedTile` on this canvas, optionally of a kind.
+    private func sharedKindTile(_ kind: String?) -> SharedTileNSView? {
+        guard let canvas = delegate?.canvasView else { return nil }
+        let records = canvas.allWorkspaceTiles().filter { $0.kind == .sharedTile && (kind == nil || $0.metadata.sharedTile?.liveKind == kind) }
+        // The newest: each lands above its siblings.
+        return records.max { $0.zPosition < $1.zPosition }.flatMap { canvas.tileView(for: $0.id) as? SharedTileNSView }
+    }
+
+    private func spawnKind(_ request: [String: Any], delegate: AppDelegate) async throws -> [String: Any] {
+        guard let canvas = delegate.canvasView, let spawner = delegate.spawnerForFilesystemCreation() else { throw Failure(description: "no canvas") }
+        let before = Set(canvas.allWorkspaceTiles().map(\.id))
+        let kind = request["kind"] as? String ?? ""
+        switch kind {
+        case "note":
+            guard case .spawned(_, let tile) = spawner.spawnNote(title: request["title"] as? String ?? "Journey note") else {
+                throw Failure(description: "note did not spawn")
+            }
+            return ["tile": tile.uuidString]
+        case "file":
+            guard let path = request["path"] as? String, case .spawned(let tile) = spawner.spawnFile(path: path) else {
+                throw Failure(description: "file did not spawn")
+            }
+            return ["tile": tile.uuidString]
+        case "diff":
+            guard case .spawned(let tile) = spawner.spawnDiffReview(sendCommentsToAgent: { _ in }) else {
+                throw Failure(description: "diff did not spawn")
+            }
+            return ["tile": tile.uuidString]
+        case "browser":
+            guard case .spawned = spawner.spawnBrowser(url: request["url"] as? String) else { throw Failure(description: "browser did not spawn") }
+        case "terminal":
+            guard delegate.spawnShellTerminalForMultiplayer() else { throw Failure(description: "terminal did not spawn") }
+        case "fileTree":
+            guard case .spawned = spawner.spawnFileTreeForCreationScope() else { throw Failure(description: "file tree did not spawn") }
+        default:
+            throw Failure(description: "unknown kind \(kind)")
+        }
+        try await eventually("the \(kind) tile") { canvas.allWorkspaceTiles().contains { !before.contains($0.id) } }
+        guard let tile = canvas.allWorkspaceTiles().first(where: { !before.contains($0.id) }) else { throw Failure(description: "no new tile") }
+        return ["tile": tile.id.uuidString]
+    }
+
+    private func guestKind(_ request: [String: Any]) async throws -> [String: Any] {
+        let kind = request["kind"] as? String
+        guard let view = sharedKindTile(kind) else {
+            return ["present": false, "sharedTiles": delegate?.canvasView?.allWorkspaceTiles().filter { $0.kind == .sharedTile }.count ?? 0]
+        }
+        var result: [String: Any] = ["present": true, "tile": view.tile.id.uuidString, "liveKind": view.reference?.liveKind ?? "",
+                                     "state": "\(view.state)", "tab": view.qaOwnershipTabText ?? "", "footer": view.qaFooterText,
+                                     "placeholder": view.qaPlaceholderText ?? ""]
+        guard let body = view.body else { return result }
+        if let text = request["type"] as? String {
+            // Typing, as the text system delivers it.
+            let length = (body.qaTextView.string as NSString).length
+            let at = min(request["at"] as? Int ?? length, length)
+            body.window?.makeFirstResponder(body.qaTextView)
+            body.qaTextView.setSelectedRange(NSRange(location: at, length: 0))
+            if body.qaTextView.isEditable {
+                body.qaTextView.insertText(text, replacementRange: NSRange(location: at, length: 0))
+                result["typed"] = true
+            } else {
+                // A read-only body: a key press goes nowhere.
+                if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                windowNumber: window.windowNumber, context: nil, characters: text, charactersIgnoringModifiers: text,
+                                                isARepeat: false, keyCode: 0) {
+                    NSApp.sendEvent(event)
+                }
+                result["typed"] = false
+            }
+        }
+        if let point = request["clickPage"] as? [Double], point.count == 2 {
+            // A click on the owner's picture, through the app's own event path.
+            let frameView = body.qaFrameView
+            guard let local = frameView.viewPoint(forPage: point[0], point[1]), let target = frameView.window else {
+                throw Failure(description: "no picture to click")
+            }
+            let location = frameView.convert(local, to: nil)
+            NSApp.postEvent(try ShareEntryChecks.mouse(.leftMouseUp, location, in: target), atStart: false)
+            NSApp.sendEvent(try ShareEntryChecks.mouse(.leftMouseDown, location, in: target))
+            while let pending = NSApp.nextEvent(matching: [.leftMouseUp], until: Date(), inMode: .default, dequeue: true) { NSApp.sendEvent(pending) }
+            result["clicked"] = true
+        }
+        if let body = request["appendDirect"] as? String, body == "terminalInput",
+           let session = delegate?.sharedTileSessions[view.tile.id], let item = session.item {
+            // What the relay says to input sent straight at a terminal.
+            do { _ = try await session.controller.appendLiveTileEvent(object: item.id, body: .browserClick(x: 1, y: 1)); result["direct"] = "accepted" }
+            catch { result["direct"] = "\(error)" }
+        }
+        result["text"] = body.qaText
+        result["caption"] = body.qaCaption
+        result["editable"] = body.qaEditable
+        result["browserMode"] = body.browserMode.rawValue
+        result["followedURL"] = body.followedURL ?? ""
+        result["frameSequence"] = Int(body.qaFrameSequence)
+        result["pending"] = body.qaPendingEvents
+        result["sent"] = body.sentEvents
+        result["sendError"] = body.lastSendError ?? ""
+        result["reading"] = body.isReading
         return result
     }
 
@@ -301,6 +419,10 @@ final class MultiplayerDriver {
             try await eventually("the link finished opening", timeout: 90) { delegate.shareLinks.openCount > opens }
             guard case .opened? = delegate.shareLinks.lastOutcome else {
                 return ["outcome": "\(delegate.shareLinks.lastOutcome.map { "\($0)" } ?? "none")"]
+            }
+            if request["expectPortal"] as? Bool ?? false {
+                try await eventually("the portal tile is live", timeout: 60) { portalReady(minimumItems: request["items"] as? Int ?? 1) }
+                return ["outcome": "opened"]
             }
             if request["expectTile"] as? Bool ?? true {
                 do { try await eventually("the shared agent tile is live") { liveView?.offersComposer == true } }
@@ -436,6 +558,108 @@ final class MultiplayerDriver {
         case "cursors":
             return ["arrivals": arrivals]
 
+        // MARK: Every other kind (`.plans/105-collaboration/SHARE-KINDS.md`)
+
+        case "spawnKind":
+            return try await spawnKind(request, delegate: delegate)
+
+        case "shareKind":
+            // The tile's header Share, then Copy; a terminal's first Copy
+            // only warns, and the second shares.
+            guard let tile = tileArg else { throw Failure(description: "missing tile") }
+            let popover = try await Self.openHeaderShare(tile: tile, delegate: delegate)
+            let slug = request["slug"] as? String ?? "journey"
+            popover.slugField.stringValue = slug
+            popover.session.setSlug(slug)
+            var result: [String: Any] = ["title": popover.titleLabelText, "excluded": popover.qaExcludedRows,
+                                         "firstCopyTitle": popover.qaCopyTitle]
+            let session = popover.session
+            if session.target.needsTerminalConfirmation {
+                try ShareEntryChecks.click(popover.copyButton)
+                try await eventually("the terminal warning", timeout: 10) { session.confirmingTerminal }
+                popover.layoutSubtreeIfNeeded()
+                result["warning"] = popover.qaMessageText
+                result["publishedAfterFirstPress"] = session.area != nil || session.phase != .draft
+                result["confirmTitle"] = popover.qaCopyTitle
+                if request["confirm"] as? Bool == false { delegate.shareEntry.dismiss(); return result }
+            }
+            try ShareEntryChecks.click(popover.copyButton)
+            let deadline = Date().addingTimeInterval(60)
+            while session.isWorking || (session.phase == .draft && session.failure == nil) {
+                guard Date() < deadline else { throw Failure(description: "Copy did not finish") }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            guard let link = session.link else { throw Failure(description: "share failed: \(session.failure ?? "no link")") }
+            delegate.shareEntry.dismiss()
+            var items: [String] = []
+            if let area = session.area, let model = try? delegate.collaborationAccountModel() {
+                let controller = try model.makeSharedAreaController(area: area)
+                await controller.open()
+                items = controller.document?.items.map(\.kind.rawValue) ?? []
+                await controller.close()
+            }
+            result["url"] = link.url.absoluteString
+            result["areaItems"] = items
+            result["selected"] = session.target.tileIDs.map(\.uuidString) + session.target.excluded.map(\.tileID.uuidString)
+            result["published"] = session.publishedTileIDs.map(\.uuidString)
+            result["tab"] = delegate.canvasView?.tileView(for: tile)?.qaOwnershipTabText ?? ""
+            return result
+
+        case "areaShareTarget":
+            // What an area share of these tiles would publish, and what it
+            // lists as left out: every selected tile is one or the other.
+            let ids = (request["tiles"] as? [String] ?? []).compactMap(UUID.init(uuidString:))
+            let origin: ShareTarget.Origin = request["origin"] as? String == "tile" ? .tile : .area
+            guard let target = delegate.shareTarget(tileIds: ids, origin: origin) else { return ["items": [], "excluded": []] }
+            return ["items": target.items.map { [$0.key.tileID.uuidString, $0.kind.rawValue] },
+                    "excluded": target.excluded.map { [$0.tileID.uuidString, $0.kind.rawValue, $0.reason] }]
+
+        case "hostKind":
+            // What the host's own tile shows, and what the host's lane did.
+            guard let tile = tileArg, let view = delegate.canvasView?.tileView(for: tile) else { throw Failure(description: "no host tile") }
+            var result: [String: Any] = ["kind": view.tile.kind.rawValue]
+            if let note = view as? NoteTileNSView {
+                if let text = request["type"] as? String {
+                    let at = min(request["at"] as? Int ?? (note.textView.string as NSString).length, (note.textView.string as NSString).length)
+                    note.window?.makeFirstResponder(note.textView)
+                    note.textView.setSelectedRange(NSRange(location: at, length: 0))
+                    note.textView.insertText(text, replacementRange: NSRange(location: at, length: 0))
+                }
+                result["text"] = note.textView.string
+            }
+            if let terminal = view as? TerminalTileNSView {
+                if let text = request["type"] as? String {
+                    _ = terminal.runtime.sendInsertedText(text)
+                    terminal.runtime.sendReturn()
+                }
+                result["text"] = terminal.runtime.visibleText()
+            }
+            if let browser = view as? BrowserTileNSView {
+                if let url = request["navigate"] as? String { browser.runtime.loadURL(url) }
+                result["url"] = browser.runtime.url
+                if let script = request["eval"] as? String, let runtime = browser.runtime as? WKWebViewBrowserRuntime {
+                    let value = try? await runtime.webView.evaluateJavaScript(script)
+                    result["eval"] = value.map { "\($0)" } ?? ""
+                }
+            }
+            if let host = delegate.sharedAreaHostSessions.values.compactMap({ session in
+                session.liveTileHosts.values.first { $0.binding.tileID == tile } }).first {
+                result["published"] = host.publishedCount
+                result["received"] = host.receivedEvents
+                result["hostError"] = host.lastError ?? ""
+                if let browser = host.source as? BrowserLiveSource { result["appliedInput"] = browser.appliedInput.count }
+            }
+            return result
+
+        case "guestKind":
+            return try await guestKind(request)
+
+        case "writeFile":
+            // A host-side save: the same bytes an editor writes.
+            guard let path = request["path"] as? String, let text = request["text"] as? String else { throw Failure(description: "missing path") }
+            try text.write(toFile: path, atomically: true, encoding: .utf8)
+            return [:]
+
         case "revoke":
             await shareSession?.revoke()
             return [:]
@@ -444,7 +668,8 @@ final class MultiplayerDriver {
             return [:]
 
         default:
-            throw Failure(description: "unknown op \(op)")
+            // Mode B ops (`MultiplayerDriverPortal.swift`).
+            return try await performPortal(op, request)
         }
     }
 }

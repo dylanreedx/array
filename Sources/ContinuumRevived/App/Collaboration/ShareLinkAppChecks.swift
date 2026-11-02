@@ -159,7 +159,7 @@ enum ShareLinkAppChecks {
 
         // Receivers: AppKit hands the URL to the delegate.
         // A receiver is a Mac with a workspace open: the link lands the area
-        // as a zone on that canvas.
+        // as one portal tile on that canvas (mode B), never a zone.
         typealias Receiver = (AppDelegate, NSWindow, CollaborationAccountController, WorkspaceInvariantsFixture)
         func receiverMac(_ identity: Collaboration.Identity, _ name: String) throws -> Receiver {
             let workspace = try WorkspaceInvariantsFixture(label: "share-link-\(name)")
@@ -178,6 +178,9 @@ enum ShareLinkAppChecks {
         }
         func openZones(_ mac: Receiver) -> [SharedAreaZoneSession] {
             mac.0.qaSharedAreaZoneSessions.filter { !$0.isClosed && $0.controller.document?.id.rawValue == area }
+        }
+        func portals(_ mac: Receiver) -> [Tile] {
+            mac.0.canvasView?.allWorkspaceTiles().filter { $0.kind == .sharedPortal && $0.metadata.sharedPortal?.areaId == area } ?? []
         }
         func deliver(_ url: URL, to mac: Receiver, name: String? = nil) async throws -> ShareLinkOpenOutcome? {
             let (delegate, window, model, _) = mac
@@ -207,17 +210,16 @@ enum ShareLinkAppChecks {
         try expect(joined == .opened(area: area) && newcomer.2.status == .ready && newcomer.2.activeAccount?.label == "Sam"
             && names == ["Sam"] && redeemed == redeemedBefore && newcomer.0.qaCollaborationHub == nil,
             "a signed-out Mac joins from an https://arrayapp.dev/s/ link alone: one name sheet, no hub, no enrollment code")
-        try await SharedAreaCheckRig.eventually("receiver area open") { !openZones(newcomer).isEmpty }
-        let landed = newcomer.3.mounted?.runtime.sharedAreaZone(for: area)
-        try expect(openZones(newcomer).count == 1 && landed?.projectId == nil
-            && openZones(newcomer).first?.scene.superview === newcomer.3.mounted?.canvas.worldPlane,
-            "the URL handler opens the admitted area as a zone on the receiver's canvas")
-        for session in openZones(newcomer) { session.close() }
+        try await SharedAreaCheckRig.eventually("receiver portal open") { !portals(newcomer).isEmpty }
+        let landed = portals(newcomer).first
+        let landedZone = landed?.zoneId.flatMap { id in newcomer.3.mounted?.runtime.document.zones.first { $0.zoneId == id } }
+        try expect(portals(newcomer).count == 1 && landedZone?.projectId != nil && openZones(newcomer).isEmpty
+            && newcomer.3.mounted?.runtime.sharedAreaZone(for: area) == nil,
+            "the URL handler opens the admitted area as one portal tile in a project zone on the receiver's canvas, not a zone")
 
         let appForm = try await deliver(link.appURL, to: newcomer)
-        try await SharedAreaCheckRig.eventually("receiver area reopen") { !openZones(newcomer).isEmpty }
-        try expect(newcomer.3.mounted?.runtime.sharedAreaZone(for: area)?.zoneId == landed?.zoneId,
-            "reopening lands the area in the same zone, at the receiver's own place for it")
+        try expect(portals(newcomer).map(\.id) == [landed?.id].compactMap { $0 },
+            "reopening reveals the same portal tile, at the receiver's own place for it")
         let devForm = try await deliver(ShareLinkURL.app(slug: link.slug, token: link.token, relay: link.relay, scheme: ShareLinkURL.devAppScheme), to: newcomer)
         let namesAfter = await links.joinedNames
         try expect(appForm == .opened(area: area) && devForm == .opened(area: area) && namesAfter == ["Sam"],
@@ -228,7 +230,7 @@ enum ShareLinkAppChecks {
         let sheet = newcomer.1.attachedSheet
         let shown = sheet.map { textFields(in: $0.contentView).map(\.stringValue) } ?? []
         try expect(wrong == .refused(ShareLinkOpener.refusedMessage) && shown.contains(ShareLinkOpener.refusedMessage)
-            && openZones(newcomer).isEmpty, "a wrong token is refused and the refusal is shown on the canvas window")
+            && openZones(newcomer).isEmpty && portals(newcomer).count == 1, "a wrong token is refused and the refusal is shown on the canvas window")
         if let sheet { newcomer.1.endSheet(sheet) }
 
         let before = newcomer.0.shareLinks.openCount

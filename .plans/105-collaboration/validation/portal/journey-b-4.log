@@ -1,0 +1,50 @@
+==> relay http://127.0.0.1:52876
+==> Avery (host) and Blake (guest) are running, off every display
+PASS journey: B1: the Share tool's marquee selects the six tiles and opens the popover
+PASS journey: B1: the popover lists everything, the terminal marked "Stays private"
+PASS journey: B2: a link is on the pasteboard
+PASS journey: B2: no tile has moved
+PASS journey: B2: no zone was created
+PASS journey: B2: the relay holds the agent, two notes, two browsers, the terminal's card and the manifest
+PASS journey: B2: the relay carries no terminal data
+FAIL journey: B2: the notes and both browsers have their content on the relay — {"3B0A2E36-6C5E-406C-B833-A308133D581A": 0, "9A479012-DF87-413D-BA28-ED907FD3C7F9": 0, "61FA2314-6754-4EB3-8DD5-7A71FE5A6C18": 1, "89F58381-6B19-4BA3-84CA-920645E64C06": 0, "93AE5B70-7B2E-4F26-9548-CC8CDF907EFF": 0, "114492A0-A1D5-4142-A856-114B510756F0": 0}
+PASS journey: B2: the manifest is on the relay
+PASS journey: B3: exactly one new tile appears, of kind sharedPortal
+PASS journey: B3: in the guest's armed zone, inside it and in view
+PASS journey: B3: no zone and no AgentRecord on the guest
+PASS journey: B3: the header names the host's canvas, live
+PASS journey: B3: item frames match the host's relative world frames, within 1 pt at the portal's scale
+PASS journey: B4: the portal's note moves by the same relative amount
+PASS journey: B4: a private tile dragged into the region publishes nothing; the portal is unchanged
+PASS journey: B4: the host is offered "Add to share" on it
+PASS journey: B4: "Add to share" adds it to the portal
+FAIL journey: B5: the host's edit shows in the portal — {"editable": "false", "message": "Avery shared this. It shows in a newer Array."}
+PASS journey: B5: the guest has no way to edit it
+FAIL journey: B6: the public browser loads the same URL on the guest — {"editable": "false", "message": "Avery shared this. It shows in a newer Array."}
+FAIL journey: B6: the localhost browser is a still marked "Still" — {"editable": "false", "message": "Avery shared this. It shows in a newer Array."}
+PASS journey: B6: the terminal shows its "stays on" card
+FAIL journey: B7: a sharedAgent tile appears beside the portal — beside {'height': 520, 'width': 640, 'x': 344, 'y': -454}, portal {'height': 620, 'width': 960, 'x': 24, 'y': 74}
+PASS journey: B7 (A5): the host runs P1, tagged Blake
+PASS journey: B7 (A5): the guest's tile tags P1 "You", with the reply
+PASS journey: B7 (A5): exactly one turn for P1
+PASS journey: B7 (A6): the guest shows P2 tagged Avery, with the reply
+PASS journey: B7 (A7): a resend with the same request ID runs nothing new
+PASS journey: B7 (A8): the guest has no Stop and no approval control
+PASS journey: B7: inside the portal the agent is watched, not typed into; it offers Open beside
+PASS journey: B8: the host's cursor over the shared agent appears in the portal at the mapped point
+PASS journey: B8: the guest's cursor inside the portal appears on the host's canvas over the same tile
+PASS journey: B8: the guest pans and zooms inside the portal, and it is remembered
+PASS journey: B8: and none of the host's tiles moved
+PASS journey: B8: the guest follows the host's view inside the portal
+PASS journey: B9: Share on a shared tile opens the portal's popover, listing the guest
+PASS journey: B9: the portal shows the stopped state
+PASS journey: B9: so does the agent opened beside it
+PASS journey: B9: it says the host stopped sharing
+PASS journey: B9: no further updates arrive
+PASS journey: B9: a new link reconnects the same portal
+PASS journey: B10: the portal dims when the host's Mac goes offline
+PASS journey: B10: with a dashed edge, and its header says so
+FAIL journey: timeout: Avery's app ready
+==> logs kept in /Users/dylan/array-scratch/mp-portaljourney/*/app.log
+Multiplayer journey: 6 failed: ['B2: the notes and both browsers have their content on the relay', "B5: the host's edit shows in the portal", 'B6: the public browser loads the same URL on the guest', 'B6: the localhost browser is a still marked "Still"', 'B7: a sharedAgent tile appears beside the portal', "timeout: Avery's app ready"]
+exit=1

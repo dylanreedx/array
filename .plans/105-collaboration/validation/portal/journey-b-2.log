@@ -1,0 +1,23 @@
+==> relay http://127.0.0.1:62949
+==> Avery (host) and Blake (guest) are running, off every display
+PASS journey: B1: the Share tool's marquee selects the six tiles and opens the popover
+FAIL journey: B1: the popover lists everything, the terminal marked "Stays private" — ["Note \u00b7 Note 2 \u00b7 Title only", "Browser \u00b7 Browser \u00b7 Title only", "Browser \u00b7 Browser \u00b7 Title only", "Agent \u00b7 New agent \u00b7 Live", "Note \u00b7 Note 1 \u00b7 Title only", "and 1 more"]
+PASS journey: B2: a link is on the pasteboard
+PASS journey: B2: no tile has moved
+PASS journey: B2: no zone was created
+PASS journey: B2: the relay holds the agent, two notes, two browsers, the terminal's card and the manifest
+PASS journey: B2: the relay carries no terminal data
+FAIL journey: B2: the notes and both browsers have their content on the relay — {"7F35FCFB-7193-46FE-BEFA-CD7B19ED097A": 0, "36FE87BA-D02B-48A2-ACC5-9F81EF37122E": 0, "BEE052E0-D711-4A50-B627-E973466D71EF": 0, "D2CB3D18-867E-4C82-9D2D-551E0662B92A": 0, "D85D3F19-CE66-4F11-95DD-E56A741E38EB": 1, "FE96F31F-6C15-4814-AF96-41D488FB57C1": 0}
+PASS journey: B2: the manifest is on the relay
+PASS journey: B3: exactly one new tile appears, of kind sharedPortal
+PASS journey: B3: in the guest's armed zone, inside it and in view
+PASS journey: B3: no zone and no AgentRecord on the guest
+PASS journey: B3: the header names the host's canvas, live
+PASS journey: B3: item frames match the host's relative world frames, within 1 pt at the portal's scale
+PASS journey: B4: the portal's note moves by the same relative amount
+PASS journey: B4: a private tile dragged into the region publishes nothing; the portal is unchanged
+PASS journey: B4: the host is offered "Add to share" on it
+FAIL journey: Avery: addToShare failed: timeout: the tile joined the portal
+==> logs kept in /Users/dylan/array-scratch/mp-portaljourney/*/app.log
+Multiplayer journey: 3 failed: ['B1: the popover lists everything, the terminal marked "Stays private"', 'B2: the notes and both browsers have their content on the relay', 'Avery: addToShare failed: timeout: the tile joined the portal']
+exit=1

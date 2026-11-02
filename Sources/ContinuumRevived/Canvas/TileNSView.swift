@@ -227,6 +227,17 @@ class TileNSView: NSView, TokenThemed {
         titleBar?.setShareAction(shown)
     }
     var onShareRequested: ((TileNSView) -> Void)?
+    /// The app's Share for the kinds that share live on their own: a note, a
+    /// file, a diff, a browser or a terminal
+    /// (`.plans/105-collaboration/SHARE-KINDS.md`). Set once by the app; each
+    /// such tile shows the band's Share when it joins a window.
+    static var liveShareHandler: ((TileNSView) -> Void)?
+    static func sharesLive(_ kind: TileKind) -> Bool {
+        switch kind {
+        case .note, .file, .diffReview, .browser, .terminal: return true
+        default: return false
+        }
+    }
     var qaTitleBarShareControl: NSView? { titleBar?.qaShareControl }
     /// Where the band's Share button sits, in this tile's coordinates. A
     /// popover hangs from this rect on the tile itself, never from the button:
@@ -509,6 +520,10 @@ class TileNSView: NSView, TokenThemed {
         guard window != nil else {
             titleBar?.dismissActionsMenu()
             return
+        }
+        if onShareRequested == nil, Self.sharesLive(tile.kind), let handler = Self.liveShareHandler {
+            onShareRequested = handler
+            setTitleBarShareAction(true)
         }
         windowOcclusionChanged(visible: canvas?.windowOcclusionVisible ?? true)
     }
@@ -1102,6 +1117,11 @@ class TileNSView: NSView, TokenThemed {
             qaHitTestPromotionCount &+= 1
             Self.hitTestPromotionTotal &+= 1
             promoteBodyToNative()
+        }
+        // "Add to share" (mode B) sits over the body near the top: it wins its
+        // own press, ahead of the low-zoom grab strip that would make it a drag.
+        if let pill = subviews.last(where: { $0 is SharedPortalAddPill && !$0.isHidden }), pill.frame.contains(local) {
+            return pill
         }
         // Keep the visible close glyph usable when the enlarged corner target
         // overlaps it at low zoom. The outer resize edge still takes precedence.
@@ -2432,7 +2452,7 @@ private final class TitleBarView: NSView, TokenThemed {
             control.action = #selector(handleShare(_:))
             control.apply(title: "Share", symbol: "square.and.arrow.up")
             control.quiet = true
-            control.setAccessibilityHelp("Share this agent by link")
+            control.setAccessibilityHelp("Share this tile by link")
             addSubview(control)
             shareControl = control
         } else {

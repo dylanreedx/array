@@ -34,6 +34,8 @@ extension TileNSView: FocusSurfaceAdapter {
         case .diffReview: return .diffReview
         case .runArtifacts: return .runArtifacts
         case .sharedAgent: return .managedAgent
+        case .sharedPortal: return .runArtifacts
+        case .sharedTile: return .note
         case .managedAgent: return .managedAgent
         }
     }
