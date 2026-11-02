@@ -199,7 +199,9 @@ final class SharedPortalTileSession {
         guard !reading.contains(object), let transport = controller.artifactTransport else { return }
         reading.insert(object)
         Task { [weak self] in
-            let result = try? await transport.readArtifact(object: object.rawValue, revision: revision.rawValue)
+            let result: CollaborationArtifactContents?
+            do { result = try await transport.readArtifact(object: object.rawValue, revision: revision.rawValue) }
+            catch { fputs("portal: reading \(object.rawValue) failed: \(error)\n", stderr); result = nil }
             guard let self, !isClosed else { return }
             reading.remove(object)
             guard let result else {
@@ -342,14 +344,25 @@ extension AppDelegate {
             defer { view?.attaching = false }
             guard let self, let view, view.session == nil else { return }
             guard let model = try? collaborationAccountModel() else { return }
-            if model.status != .ready, let remembered = model.selectedAccountID ?? (model.accounts.count == 1 ? model.accounts.first?.id : nil) {
-                _ = try? await model.select(accountID: remembered)
-            }
+            await Self.awaitPortalAccount(model)
             guard view.session == nil, model.status == .ready, let account = model.activeAccount,
                   reference.accountId == nil || reference.accountId == account.id,
                   account.knownAreas.contains(where: { $0.id == reference.areaId }),
                   let controller = try? model.makeSharedAreaController(area: reference.areaId) else { return }
             startSharedPortalSession(view, reference: reference, controller: controller)
+        }
+    }
+
+    /// Selects the account this Mac remembers and waits until it is ready.
+    /// Every portal restored at launch asks at once; the account serves one
+    /// request at a time and answers the rest "busy", and a tile that gave up
+    /// there never reconnected. No remembered account returns at once.
+    static func awaitPortalAccount(_ model: CollaborationAccountController) async {
+        guard let remembered = model.selectedAccountID ?? (model.accounts.count == 1 ? model.accounts.first?.id : nil) else { return }
+        for _ in 0..<150 where model.status != .ready {
+            do { _ = try await model.select(accountID: remembered) }
+            catch CollaborationAccountFailure.busy, CollaborationAccountFailure.superseded { try? await Task.sleep(for: .milliseconds(200)) }
+            catch { return }
         }
     }
 

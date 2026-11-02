@@ -18,6 +18,9 @@ enum SharedPortalLiveKindChecks {
         print("PASS portal kinds: \(label)")
     }
 
+    /// The newest draft an observation handed over.
+    @MainActor final class DraftBox { var draft: SharedArtifactProducer.Draft? }
+
     static func run(directory: URL) async throws {
         let scene = try ShareEntryChecks.mountScene("portal-kinds")
         defer { scene.close() }
@@ -84,12 +87,12 @@ enum SharedPortalLiveKindChecks {
         }
         func observed(_ kind: any SharedPortalKind, tile: UUID, object: SharedArea.ID<SharedArea.Object>, into view: SharedPortalLiveItemView,
                       until done: () -> Bool) async throws -> Bool {
-            var latest: SharedArtifactProducer.Draft?
-            let observation = kind.observe(tile: tile, host: host) { latest = $0 }
+            let latest = DraftBox()
+            let observation = kind.observe(tile: tile, host: host) { latest.draft = $0 }
             defer { observation?.cancel() }
             for _ in 0..<60 {
                 try await Task.sleep(for: .milliseconds(100))
-                if let draft = latest { view.apply(contents: try contents(draft, object: object)); latest = nil }
+                if let draft = latest.draft { view.apply(contents: try contents(draft, object: object)); latest.draft = nil }
                 if done() { return true }
             }
             return false

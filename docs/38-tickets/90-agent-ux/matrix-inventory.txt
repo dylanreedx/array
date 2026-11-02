@@ -228,6 +228,7 @@ check --persistence-crash-safe-check
 check --pi-extension-load-check
 check --pi-provider-failure-check
 check --picker-epoch-fence-check
+check --portal-kinds-check
 check --project-file-operation-check
 check --project-icon-check
 check --project-lock-check
@@ -260,6 +261,7 @@ check --shared-agent-render-check
 check --shared-portal-migration-check
 check --shared-portal-render-check
 check --shared-area-zone-check
+check --shared-tile-render-check
 check --shell-open-as-agent-check
 check --shell-tool-row-check
 check --sidebar-agent-status-line-check
@@ -618,6 +620,7 @@ leg run_app_check .build/debug/Array --perf-budget-zoom-check
 leg run_app_check .build/debug/Array --persistence-crash-safe-check
 leg run_app_check .build/debug/Array --pi-extension-load-check
 leg run_app_check .build/debug/Array --picker-epoch-fence-check
+leg run_app_check .build/debug/Array --portal-kinds-check
 leg run_app_check .build/debug/Array --project-file-operation-check
 leg run_app_check .build/debug/Array --project-icon-check
 leg run_app_check .build/debug/Array --project-lock-check
@@ -646,6 +649,7 @@ leg run_app_check .build/debug/Array --shared-agent-render-check
 leg run_app_check .build/debug/Array --shared-portal-migration-check
 leg run_app_check .build/debug/Array --shared-portal-render-check
 leg run_app_check .build/debug/Array --shared-area-zone-check
+leg run_app_check .build/debug/Array --shared-tile-render-check
 leg run_app_check .build/debug/Array --shell-open-as-agent-check
 leg run_app_check .build/debug/Array --shell-tool-row-check
 leg run_app_check .build/debug/Array --sidebar-agent-status-line-check
@@ -791,6 +795,8 @@ leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
 leg run_leg .build/debug/ContinuumRevivedCollaborationChecks
 leg run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
+leg run_leg .build/debug/ContinuumRevivedCollaborationChecks --live-tile-only
+leg run_leg .build/debug/ContinuumRevivedCollaborationChecks --note-text-only
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-usage-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
@@ -847,6 +853,7 @@ leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
 leg run_leg python3 scripts/check-collaboration-pair-features.py
 leg run_leg python3 scripts/check-collaboration-pair.py
+leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
 leg run_leg python3 scripts/check-notification-map.py --self-test
 leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 leg run_leg scripts/capture-cli-fixtures.sh check
