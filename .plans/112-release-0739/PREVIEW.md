@@ -1,8 +1,8 @@
 # Try the 0.7.39 preview
 
-Written 1 November 2026. Branch `array/preview-0739`, bench
+Written 1-2 November 2026. Branch `array/preview-0739`, bench
 `.worktrees/preview-0739`. Local only: nothing pushed, nothing published, no
-change to the production or staging relay.
+change to the production relay. No release: this is a preview.
 
 Two Array apps on this Mac play two people, Array Preview A (the host) and
 Array Preview B (the guest). They talk through a relay that runs on this Mac
@@ -12,6 +12,13 @@ TOOL shows a tool step, SLOW gives a long turn, anything else gets a short
 reply.
 
 Both apps are built. Agent characters are switched on in both.
+
+Terminals keep tmux persistence. Each app runs its own tmux server in its own
+folder (~/array-scratch/preview-0739/a/tmux and b/tmux), never the default
+socket your own terminals use. Your ~/.tmux.conf runs tpm, which can stall a
+brand-new tmux server's first client. If that happens, the app gives up after
+5 seconds and opens the terminal without persistence, so a terminal never
+freezes the app. It may just come up as a plain shell the first time.
 
 ## Start, launch, stop
 
@@ -73,10 +80,13 @@ have something to show.
    one on a localhost page: B sees pictures of A's page; clicks and scrolls
    from B land on A's page. In a portal, the localhost page is a still marked
    "Still".
-6. **Terminal opt-in.** Share a terminal on its own. The first Copy warns
+6. **Shared terminals.** Share a terminal on its own. The first Copy warns
    "This terminal's output may contain secrets…" and publishes nothing; the
-   button becomes "Share anyway". B sees a read-only mirror and cannot type
-   into it. In a portal, a terminal is a card: "Terminal stays on A's Mac".
+   button becomes "Share anyway". B now sees A's terminal as A sees it: a real
+   terminal drawn from A's output, with A's colours, cursor and grid, live as
+   A types. Try `ls --color`, `top` or vim in A. B can never type into it: a
+   shield takes B's input, and the relay refuses it too. In a portal, a
+   terminal is still a card: "Terminal stays on A's Mac".
 7. **File and diff, with Approve.** In A, open greet.js (palette: "Editor") and a
    diff (palette: "Diff review"). Share them. B sees the
    file's text and the coloured diff, updated when A saves. In a portal,
@@ -97,12 +107,20 @@ have something to show.
     waiting for you, finished, asleep). Settings › Appearance › Agent
     characters has the switch, Motion, the set picker and a preview grid. The
     tile's ⋯ menu picks a different duck for one agent.
+12. **Sidebar sort and filter.** The sort button sits in the sidebar header,
+    between the scope control and New Agent. Most active (the default) puts
+    working leads and ones that need you first, quiet ones at the bottom. By
+    project groups agents under project headings; a lead under its own
+    project's heading no longer repeats the project chip. Newest first is the
+    old order. Rows don't jump while the pointer is over the sidebar; they
+    slide into place when it leaves. The project filter is the scope list's
+    Projects › entry.
+13. **Lead glyph.** A lead shows the working glyph (and a working duck)
+    while any of its helpers works, even when the lead itself is idle and
+    folded.
 
 ## Known not to work, or left out
 
-- **Sidebar sort and filter is not in this preview.** Its branch
-  (`agent/sidebar-sort-and-filter-c51f6f84`) had no commit when this was
-  built.
 - **The 8 newer commits on array/integration are not in it either** (iOS
   simulators on the canvas, the ten app themes, the group agent drag, one
   phone alert per task). The preview is built on 0.7.38 (`b0689628`), as
@@ -115,6 +133,21 @@ have something to show.
   the relay restarts. Nobody can read it (its members are gone); it is just
   not freed. The share-kinds lane keeps tile content in memory only, and the
   deletion routes were written before it existed.
+- **Signed-in pages** are detected only when they fail for B with a 401 or
+  403 (or don't load). Then B falls back to pictures of A's page.
+- **The public-page check needs network.** Offline, the journey prints a NOTE
+  and skips it.
+- **The first terminal after each rebuild asks for consent.** Each rebuilt
+  preview app is a new identity to macOS, so the first terminal may raise a
+  permission prompt once.
+- **B draws terminal glyphs in its own font.** The grid, colours and cursor
+  are A's; the letters come from B's Ghostty font. (These preview apps don't
+  read either person's Ghostty config, so both use the default palette.)
+- **A terminal inside a portal is still a card,** not the live terminal.
+  Share a terminal on its own to see it live.
+- **0.7.38 can't open these shares.** A 0.7.38 user opening a link to a note,
+  file, diff, browser or terminal gets "This link can't be opened". It only
+  happens on a newer relay; the production relay can't hold these tiles.
 - Note cursors and selections of the other person are not drawn.
 - B's pictures of a private page stop while A's tile is off screen; B keeps
   the last one.
