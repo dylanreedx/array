@@ -88,7 +88,19 @@ message.
   VoiceOver still reads the project. A chip naming a different folder (a
   worktree) stays, and every other mode keeps the chip.
 
+- **Header fit (preview matrix finding).** The sort button had its own slot in
+  the header row, which squeezed search and scope to 102 pt each and failed
+  `--sidebar-screenshot-check`. It now sits inside the search field's reserved
+  trailing slot (24 pt, inset 4 pt like its top and bottom), so the row is back
+  to search, scope and New Agent at their own widths (132 / 102 pt at 280 pt).
+  While text is typed the clear button takes that slot and the sort button
+  hides; clearing the search brings it back. Stills: `header-light.png`,
+  `header-dark.png`, `header-typing-light.png`, `header-typing-dark.png`.
+
 ## Left out on purpose
+
+- Changing the sort while a search is typed: clear the search first (the clear
+  button and the sort button share one slot).
 
 - Project headings do not collapse.
 - The New Agent button is missing from the sidebar's hand-built accessibility
