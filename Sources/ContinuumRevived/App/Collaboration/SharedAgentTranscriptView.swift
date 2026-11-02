@@ -27,6 +27,9 @@ final class SharedAgentTranscriptView: NSView {
     /// message senders. Unavailable until a resolver is supplied.
     var agentStatus: AgentReferenceStatusSource = .unavailable { didSet { refreshRenderContext() } }
     var agentMessageSenders: AgentMessageSenderSource = .unavailable { didSet { refreshRenderContext() } }
+    /// transcript-characters: a chip's or message card's character and pose,
+    /// from the roster's facts. Unavailable still draws the id's own character, idle.
+    var agentCharacters: AgentCharacterSource = .unavailable { didSet { refreshRenderContext() } }
     var onRevealAgent: ((_ agentID: UUID, _ parentAgentID: UUID) -> Void)?
     var onOpenWebLink: ((URL, AgentLinkOpenTarget) -> Void)?
     override var isFlipped: Bool { true }
@@ -119,6 +122,7 @@ final class SharedAgentTranscriptView: NSView {
             appearance: effectiveTokenTheme,
             agentStatus: agentStatus,
             agentMessageSenders: agentMessageSenders,
+            agentCharacters: agentCharacters,
             // No runner answers a provider request from here: approvals and
             // questions read as history, with no buttons that cannot work.
             canRespondToRequests: false))
