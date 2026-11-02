@@ -34,7 +34,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
     /// Nothing more is sent: sharing stopped, or this install may not.
     var inputEnabled = true { didSet { applyEditability() } }
     /// Inside a portal: read only, and a private page is a still, not a stream.
-    var inPortal = false { didSet { renderCaption() } }
+    var inPortal = false { didSet { if inPortal != oldValue { installBrowserChrome() }; renderCaption() } }
 
     // Note
     private var replica: Collaboration.NoteText.Replica?
@@ -52,6 +52,17 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
     private(set) var browserMode: BrowserMode = .waiting
     private(set) var followedURL: String?
     private var followFailed: String?
+    /// The browser's own top: header (in a portal), back, forward, reload,
+    /// the page icon and the address bar, as the owner's tile draws them.
+    private var browserChrome: SharedBrowserChromeView?
+    /// The navigation this view started to follow the owner; any other main
+    /// frame commit is the guest clicking somewhere of their own.
+    private var followNavigation: WKNavigation?
+    /// The guest clicked away from the owner's page. The owner's next new
+    /// address brings them back; so does "Back to <owner>'s page".
+    private(set) var wandered = false
+    /// The title shown when the owner's page has none (the portal item's).
+    var fallbackTitle = "" { didSet { renderCaption() } }
     private var scrollAccumulator = CGPoint.zero
     private var scrollFlush: Task<Void, Never>?
 
@@ -86,6 +97,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         scroll.isHidden = kind == .browser
         addSubview(caption); addSubview(scroll); addSubview(frameView)
         if let terminalMirror { terminalMirror.isHidden = true; addSubview(terminalMirror) }
+        installBrowserChrome()
         applyEditability()
         renderCaption()
         applyAppearance()
@@ -289,9 +301,12 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         if follow, let url = browser.url {
             browserMode = .follow
             let web = ensureWebView()
+            // The owner moving to a new page brings a wandered guest back; a
+            // revision of the same page (a new title) leaves them where they are.
             if followedURL != url, let target = URL(string: url) {
                 followedURL = url
-                web.load(URLRequest(url: target))
+                wandered = false
+                followNavigation = web.load(URLRequest(url: target))
             }
         } else {
             browserMode = browser.frame == nil ? .waiting : .frames
@@ -305,23 +320,53 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
 
     private func ensureWebView() -> WKWebView {
         if let webView { return webView }
-        let web = WKWebView(frame: bounds, configuration: WKWebViewConfiguration())
+        // A store of its own that ends with the view: the owner's cookies never
+        // reach this Mac, and the owner's navigation never runs on the guest's
+        // own signed-in sessions either.
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let web = WKWebView(frame: bounds, configuration: configuration)
         web.navigationDelegate = self
         addSubview(web)
         webView = web
         return web
     }
 
+    /// Leaves the guest's own page for the one the owner is on.
+    @objc func returnToHost() {
+        guard wandered, let url = followedURL, let target = URL(string: url), let webView else { return }
+        wandered = false
+        followNavigation = webView.load(URLRequest(url: target))
+        renderCaption()
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        MainActor.assumeIsolated {
+            guard navigation !== followNavigation, browserMode == .follow, !wandered else { renderCaption(); return }
+            wandered = true
+            renderCaption()
+        }
+    }
+    nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        MainActor.assumeIsolated { renderCaption() }
+    }
+
     /// A public page that does not load here (signed in, or blocked) falls
     /// back to the owner's pictures.
     nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        MainActor.assumeIsolated { fallBackToFrames("\(error.localizedDescription)") }
+        MainActor.assumeIsolated {
+            // Only the owner's page failing here means it cannot load on this Mac.
+            // A load the guest's own click cut short is not a failure.
+            guard navigation === followNavigation, (error as NSError).code != NSURLErrorCancelled else { return }
+            fallBackToFrames("\(error.localizedDescription)")
+        }
     }
     nonisolated func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                              decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
         let status = (navigationResponse.response as? HTTPURLResponse)?.statusCode ?? 200
         MainActor.assumeIsolated {
-            if navigationResponse.isForMainFrame, status == 401 || status == 403 { fallBackToFrames("HTTP \(status)") }
+            if navigationResponse.isForMainFrame, !wandered, navigationResponse.response.url?.absoluteString == followedURL,
+               status == 401 || status == 403 { fallBackToFrames("HTTP \(status)") }
             decisionHandler(.allow)
         }
     }
@@ -377,6 +422,52 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         }
         if caption.stringValue != text { caption.stringValue = text }
         setAccessibilityLabel(text)
+        renderBrowserChrome()
+    }
+
+    private func installBrowserChrome() {
+        guard kind == .browser else { return }
+        browserChrome?.removeFromSuperview()
+        let chrome = SharedBrowserChromeView(showsTitleBar: inPortal)
+        chrome.backToHostButton.target = self
+        chrome.backToHostButton.action = #selector(returnToHost)
+        addSubview(chrome)
+        browserChrome = chrome
+        caption.isHidden = true
+        needsLayout = true
+    }
+
+    /// What the browser's top says: the page's title and address, and whether
+    /// this is the owner's page loading here, a still, or the guest's own page.
+    private func renderBrowserChrome() {
+        guard let browserChrome else { return }
+        var title = fallbackTitle, address = "", hasPage = false, status: String
+        var back: String?
+        if case .browser(let browser)? = state?.payload {
+            if !browser.title.isEmpty { title = browser.title }
+            address = browser.url ?? ""
+        }
+        switch browserMode {
+        case .follow:
+            hasPage = webView?.url != nil
+            if wandered {
+                address = webView?.url?.absoluteString ?? address
+                title = webView?.title.flatMap { $0.isEmpty ? nil : $0 } ?? title
+                status = "Your page"
+                back = "Back to \(hostName)'s page"
+            } else {
+                status = "Following \(hostName)"
+            }
+        case .frames:
+            hasPage = true
+            status = inPortal ? "Still" : "Live from \(hostName)'s Mac"
+        case .waiting:
+            status = state == nil ? "Connecting…" : followFailed != nil ? "Didn't load here" : inPortal ? "Still" : "Waiting"
+        }
+        browserChrome.update(title: title, address: address, hasPage: hasPage, status: status, backTitle: back)
+        frameView.placeholder = followFailed != nil
+            ? "This page didn't load on your Mac, and \(hostName) hasn't sent a picture of it yet."
+            : "The page is on \(hostName)'s Mac. A picture shows here once \(hostName) has it on screen."
     }
 
     static func noun(_ kind: Collaboration.LiveTile.Kind) -> String {
@@ -387,7 +478,9 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         super.layout()
         let inset: CGFloat = 10
         caption.frame = NSRect(x: inset, y: 6, width: max(0, bounds.width - 2 * inset), height: 16)
-        let body = NSRect(x: 0, y: 26, width: bounds.width, height: max(0, bounds.height - 26))
+        let top = browserChrome?.height ?? 26
+        browserChrome?.frame = NSRect(x: 0, y: 0, width: bounds.width, height: top)
+        let body = NSRect(x: 0, y: top, width: bounds.width, height: max(0, bounds.height - top))
         scroll.frame = body
         frameView.frame = body
         terminalMirror?.frame = body
@@ -409,7 +502,8 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         SurfaceToken.tileBody.color.nsColor(in: self).setFill()
         bounds.fill()
         LineToken.separator.color.nsColor(in: self).setFill()
-        NSRect(x: 0, y: 25, width: bounds.width, height: 1).fill()
+        let top = browserChrome?.height ?? 26
+        NSRect(x: 0, y: top - 1, width: bounds.width, height: 1).fill()
     }
 
     // MARK: QA
@@ -423,6 +517,9 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
     var qaTextView: NSTextView { textView }
     var qaTerminalMirror: SharedTerminalMirrorView? { terminalMirror?.isHidden == false ? terminalMirror : nil }
     var qaPendingEvents: Int { outbox.count }
+    var qaWebView: WKWebView? { webView }
+    var qaBackToHost: NSButton? { browserChrome?.backToHostButton }
+    var qaBrowserChrome: SharedBrowserChromeView? { browserChrome }
 }
 
 /// The owner's page as a picture, fitted to the tile. A click or a scroll on
@@ -432,6 +529,8 @@ final class LiveTileFrameView: NSView {
     var onClick: ((Double, Double) -> Void)?
     var onScroll: ((CGFloat, CGFloat) -> Void)?
     var acceptsInput = true
+    /// What shows before the first picture arrives.
+    var placeholder = "Waiting for a picture of the page…" { didSet { if placeholder != oldValue, image == nil { needsDisplay = true } } }
     private(set) var frame_: Collaboration.LiveTile.Frame?
     private var image: NSImage?
     override var isFlipped: Bool { true }
@@ -478,11 +577,14 @@ final class LiveTileFrameView: NSView {
         SurfaceToken.tileBody.color.nsColor(in: self).setFill()
         bounds.fill()
         guard let image else {
-            let text = "Waiting for a picture of the page…" as NSString
-            let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.token(.caption),
+            let text = placeholder as NSString
+            let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center
+            let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.token(.caption), .paragraphStyle: paragraph,
                                                              .foregroundColor: TextToken.textSecondary.color.nsColor(in: self)]
-            let size = text.size(withAttributes: attributes)
-            text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: bounds.midY - size.height / 2), withAttributes: attributes)
+            let width = max(0, min(bounds.width - 48, 320))
+            let size = text.boundingRect(with: NSSize(width: width, height: bounds.height), options: [.usesLineFragmentOrigin], attributes: attributes).size
+            text.draw(with: NSRect(x: (bounds.width - width) / 2, y: bounds.midY - size.height / 2, width: width, height: size.height + 2),
+                      options: [.usesLineFragmentOrigin], attributes: attributes)
             return
         }
         image.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])

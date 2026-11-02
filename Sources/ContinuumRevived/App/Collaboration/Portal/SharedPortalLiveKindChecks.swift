@@ -125,6 +125,61 @@ enum SharedPortalLiveKindChecks {
         try require(browserItem.qaFacts["mode"] == "still" && browserItem.qaFacts["badge"] == "Still"
                     && browserItem.body.qaFrameSequence > 0 && browserItem.qaFacts["url"]?.contains("127.0.0.1") == true,
                     "browser (localhost): the guest shows a still marked Still: \(browserItem.qaFacts)")
+        // The guest sees a browser tile, not a card: the host's title, its
+        // address bar and page icon, and a state that says it is a still.
+        try require(browserItem.qaFacts["chrome"] == "browser" && browserItem.qaFacts["address"] == "http://127.0.0.1:9/portal"
+                    && browserItem.qaFacts["pageTitle"] == "Portal page" && browserItem.qaFacts["status"]?.contains("Still") == true,
+                    "browser: the guest draws the host's browser chrome (title, address, status): \(browserItem.qaFacts)")
+
+        // A URL that carries a sign-in or a secret: nothing of it leaves the
+        // Mac but where the page is, and the guest gets a still, not the link.
+        browserRuntime.webView.loadHTMLString("<html><head><title>Reset</title></head><body><h1>Reset</h1></body></html>",
+                                              baseURL: URL(string: "https://sam:hunter2@shop.example.com/reset?token=abc123&lang=en#step=2"))
+        for _ in 0..<100 where browserRuntime.webView.isLoading || browserRuntime.webView.url?.host != "shop.example.com" {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        guard let secretRecord = host.tile(browser),
+              let secretDraft = try await SharedPortalKinds.kind(for: .browser).snapshot(tile: secretRecord, host: host) else {
+            throw Failure(description: "browser published nothing for a page with a secret in its URL")
+        }
+        let secretObject = SharedArea.ID<SharedArea.Object>()
+        let sent = try contents(secretDraft, object: secretObject)
+        let sentText = sent.bytes.values.compactMap { String(data: $0, encoding: .utf8) }.joined(separator: "\n")
+        let sentPayload = SharedPortal.decode(SharedPortal.BrowserPayload.self, name: SharedPortal.BrowserPayload.name, from: sent.bytes)
+        try require(sentPayload?.url == "https://shop.example.com/reset" && sentPayload?.mode == .still
+                    && !sentText.contains("abc123") && !sentText.contains("hunter2") && !sentText.contains("sam:"),
+                    "browser: a URL's sign-in, token query and fragment never leave the host; it goes as a still: \(sentPayload.map { "\($0.url ?? "nil") \($0.mode)" } ?? "nil")")
+        try require(Collaboration.LiveTile.shareable("https://duckduckgo.com/?q=swift+keyword&author=me").reach == .public
+                    && Collaboration.LiveTile.shareable("https://duckduckgo.com/?q=swift+keyword&author=me").url == "https://duckduckgo.com/?q=swift+keyword&author=me"
+                    && Collaboration.LiveTile.shareable("https://app.example.com/cb#access_token=x").reach == .private
+                    && Collaboration.LiveTile.shareable("https://s3.example.com/f?X-Amz-Signature=1").reach == .private,
+                    "browser: an ordinary query stays public and loads live; token fragments and signed URLs go as stills")
+
+        // A public page: the guest's own browser loads it, in a store of its
+        // own (no cookies of the guest's either), and after the guest clicks
+        // away it offers the way back to the host's page.
+        guard let publicDraft = SharedPortalBrowserKind.draft(.browser(.init(url: "https://example.com/docs?q=swift", title: "Docs", reach: .public, frame: nil)), still: nil),
+              let publicItem = SharedPortalKinds.kind(for: .browser).makeView(entry: .init(object: .init(), kind: .browser, title: "Docs"), guest: guest) as? SharedPortalLiveItemView else {
+            throw Failure(description: "no public browser item")
+        }
+        publicItem.frame = NSRect(x: 0, y: 0, width: 440, height: 460)
+        publicItem.apply(contents: try contents(publicDraft, object: publicItem.entry.object))
+        try require(publicItem.qaFacts["mode"] == "live" && publicItem.qaFacts["url"] == "https://example.com/docs?q=swift"
+                    && publicItem.qaFacts["store"] == "ephemeral" && publicItem.qaFacts["address"] == "https://example.com/docs?q=swift"
+                    && publicItem.qaFacts["status"] == "Following Dylan",
+                    "browser (public): the guest loads the page itself, in an ephemeral store, following the host: \(publicItem.qaFacts)")
+        guard let guestWeb = publicItem.body.qaWebView else { throw Failure(description: "the public page has no web view on the guest") }
+        guestWeb.loadHTMLString("<html><body>elsewhere</body></html>", baseURL: URL(string: "https://example.org/elsewhere"))
+        for _ in 0..<100 where publicItem.qaFacts["wandered"] != "true" { try await Task.sleep(for: .milliseconds(50)) }
+        try require(publicItem.qaFacts["wandered"] == "true" && publicItem.body.qaBackToHost?.isHidden == false
+                    && publicItem.qaFacts["status"] == "Your page",
+                    "browser (public): a click away on the guest offers Back to Dylan's page: \(publicItem.qaFacts)")
+        publicItem.body.qaBackToHost?.performClick(nil)
+        try require(publicItem.qaFacts["wandered"] == "false" && publicItem.body.qaBackToHost?.isHidden == true
+                    && publicItem.qaFacts["status"] == "Following Dylan",
+                    "browser (public): Back to Dylan's page returns to following the host")
+        views.append(publicItem)
+
         let terminal = SharedPortalKinds.kind(for: .terminal)
         try require(terminal.publishedTitle(for: Tile(id: UUID(), kind: .terminal, title: "secret-host:~", frame: .init(x: 0, y: 0, width: 10, height: 10),
                                                       zPosition: .fromLegacyRank(0), runtimeRef: nil, metadata: .init())) == "Terminal",
@@ -132,7 +187,7 @@ enum SharedPortalLiveKindChecks {
 
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
-            let size = NSSize(width: 4 * 460 + 20, height: 500)
+            let size = NSSize(width: CGFloat(views.count) * 460 + 20, height: 500)
             let board = NSView(frame: NSRect(origin: .zero, size: size))
             for (index, view) in views.enumerated() {
                 view.removeFromSuperview()

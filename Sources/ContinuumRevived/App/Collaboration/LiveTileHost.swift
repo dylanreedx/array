@@ -341,11 +341,11 @@ final class BrowserLiveSource: LiveTileSource {
     }
 
     func payload(eventsThrough: UInt64) async -> Collaboration.LiveTile.Payload? {
-        let urlString = address()
-        let url = URL(string: urlString)
-        let reach: Collaboration.LiveTile.Reach = Collaboration.LiveTile.isPrivateAddress(url) ? .private : .public
+        // What leaves this Mac: never a sign-in in the URL, and no query or
+        // fragment for a page the guest cannot load (`LiveTile.shareable`).
+        let shared = Collaboration.LiveTile.shareable(address())
         await captureIfDue()
-        return .browser(.init(url: urlString.isEmpty ? nil : urlString, title: title(), reach: reach, frame: frame))
+        return .browser(.init(url: shared.url, title: title(), reach: shared.reach, frame: frame))
     }
 
     /// A WebKit snapshot, only while the page is in a window and visible, and

@@ -94,7 +94,7 @@ struct SharedPortalBrowserKind: SharedPortalKind {
     static let stillInterval: TimeInterval = 5
 
     func shareRow(for tile: Tile) -> SharedPortalShareRow {
-        Collaboration.LiveTile.isPrivateAddress(URL(string: tile.metadata.url ?? "")) ? .init(included: true, badge: "Still")
+        Collaboration.LiveTile.shareable(tile.metadata.url ?? "").reach == .private ? .init(included: true, badge: "Still")
             : .init(included: true, badge: "Live")
     }
     static func source(tile id: UUID, host: SharedPortalHostContext) -> BrowserLiveSource {
@@ -151,6 +151,7 @@ final class SharedPortalLiveItemView: SharedPortalItemView {
         body = LiveTileBodyView(kind: kind, hostName: guest.hostName)
         body.inputEnabled = false
         body.inPortal = true
+        body.fallbackTitle = entry.title
         super.init(entry: entry, guest: guest)
         addSubview(body)
         setAccessibilityElement(true); setAccessibilityRole(.group)
@@ -227,6 +228,15 @@ final class SharedPortalLiveItemView: SharedPortalItemView {
             facts["mode"] = body.browserMode == .follow ? "live" : "still"
             if body.browserMode != .follow { facts["badge"] = "Still" }
             facts["url"] = body.followedURL ?? body.state.flatMap { if case .browser(let b) = $0.payload { return b.url }; return nil } ?? ""
+            // What the guest sees on top: a browser's own header and address bar.
+            if let chrome = body.qaBrowserChrome {
+                facts["chrome"] = "browser"
+                facts["pageTitle"] = chrome.title
+                facts["address"] = chrome.urlField.stringValue
+                facts["status"] = chrome.statusLabel.stringValue
+            }
+            if let web = body.qaWebView { facts["store"] = web.configuration.websiteDataStore.isPersistent ? "persistent" : "ephemeral" }
+            facts["wandered"] = body.wandered ? "true" : "false"
         }
         return facts
     }
