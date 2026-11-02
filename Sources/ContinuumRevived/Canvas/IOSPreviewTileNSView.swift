@@ -18,6 +18,9 @@ final class IOSPreviewTileNSView: TileNSView {
     private var buildMessage: String?
     private var buildGeneration = 0
     var qaStatusText: String { status.stringValue }
+    var qaActionIDs: [String] { actions.items.map(\.id) }
+    /// Chooses through the Preview menu's real popover list, as a click would.
+    @discardableResult func qaChooseAction(_ id: String) -> Bool { actions.chooseForQA(id: id) }
     private var buildChoices: [IOSPreviewBuildChoice] = []
     private(set) var buildDirectory: URL?
     var onDeviceSelection: ((String?) -> Void)?

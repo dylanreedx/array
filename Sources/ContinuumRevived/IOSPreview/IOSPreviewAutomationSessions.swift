@@ -33,9 +33,17 @@ final class IOSPreviewAutomationSessions {
     var now: () -> ContinuousClock.Instant = { .now }
     private var timer: Timer?
     private var reclaimedDevices: [String: UUID] = [:]
+    /// Sessions the user took over, kept until handback so the agent's next call
+    /// on one is refused as a takeover rather than as an unknown session.
+    private var takenOver: [UUID: (deviceID: String, scope: Scope)] = [:]
+    func takenOverScope(id: UUID) -> Scope? { takenOver[id]?.scope }
     func isReclaimed(deviceID: String?) -> Bool { deviceID.map { reclaimedDevices[$0] != nil } ?? false }
     func reclaim(deviceID: String, tileID: UUID) { reclaimedDevices[deviceID] = tileID }
-    func allowAutomation(deviceID: String?) { if let deviceID { reclaimedDevices[deviceID] = nil } }
+    func allowAutomation(deviceID: String?) {
+        guard let deviceID else { return }
+        reclaimedDevices[deviceID] = nil
+        takenOver = takenOver.filter { $0.value.deviceID != deviceID }
+    }
 
     func attach(runtime: IOSPreviewRuntime, scope: Scope, displayName: String = "Agent") throws -> Attachment {
         sweep()
@@ -54,6 +62,7 @@ final class IOSPreviewAutomationSessions {
         let deviceID = runtime.deviceID!, tileID = runtime.tileID
         runtime.onHumanTakeover = { [weak self] in
             self?.reclaimedDevices[deviceID] = tileID
+            self?.takenOver[attachmentID] = (deviceID, scope)
             self?.release(id: attachmentID)
         }
         if timer == nil {
@@ -67,7 +76,10 @@ final class IOSPreviewAutomationSessions {
         attachments.values.first { $0.runtime.tileID == tileID && $0.runtime.deviceID == deviceID }?.runtime
     }
     func validate(id: UUID, scope: Scope) throws -> Attachment {
-        guard let entry = attachments[id], entry.scope == scope else { throw Failure.notOwned }
+        guard let entry = attachments[id], entry.scope == scope else {
+            if let taken = takenOver[id], taken.scope == scope, isReclaimed(deviceID: taken.deviceID) { throw Failure.handoverRequired }
+            throw Failure.notOwned
+        }
         if entry.inFlight == nil, !entry.observing, entry.touchedAt.duration(to: now()) >= .seconds(Self.idleSeconds) {
             release(id: id); throw Failure.notOwned
         }
@@ -138,6 +150,7 @@ final class IOSPreviewAutomationSessions {
     }
     func revoke(principal: UUID) {
         for entry in Array(attachments.values) where entry.scope.principal == principal { release(id: entry.id) }
+        takenOver = takenOver.filter { $0.value.scope.principal != principal }
     }
     func release(id: UUID) {
         guard let entry = attachments.removeValue(forKey: id) else { return }

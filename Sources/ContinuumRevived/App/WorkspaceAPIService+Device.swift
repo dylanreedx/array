@@ -56,7 +56,8 @@ extension WorkspaceAPIService {
                 }
             } else if op != .deviceOpen && op != .deviceList {
                 guard let sessionID = request.sessionId,
-                      (deviceAPI.sessions.attachments[sessionID]?.scope ?? deviceAPI.ledgers[sessionID]?.scope) == scope else {
+                      (deviceAPI.sessions.attachments[sessionID]?.scope ?? deviceAPI.ledgers[sessionID]?.scope
+                       ?? deviceAPI.sessions.takenOverScope(id: sessionID)) == scope else {
                     throw WorkspaceAPIError(code: .permissionDenied, message: "This device session expired or is not owned by this caller. Open an owned tile again.")
                 }
             }
@@ -154,7 +155,7 @@ extension WorkspaceAPIService {
             }
         } catch let error as WorkspaceAPIError { return .error(error) }
         catch let error as IOSPreviewAutomationSessions.Failure {
-            if error == .handoverRequired { return .error(WorkspaceAPIError(code: .permissionDenied, message: "The user reclaimed this simulator. They can choose Allow Agent Control in its Preview menu to hand it back.")) }
+            if error == .handoverRequired { return .error(WorkspaceAPIError(code: .permissionDenied, message: "The user took control of this simulator. Stop acting on it. They can hand it back with Allow Agent Control in its Preview menu; then call array_device_open again.")) }
             let code: WorkspaceAPIError.Code = error == .busy ? .busy : error == .permissionDenied || error == .notOwned ? .permissionDenied : .targetConflict
             return .error(WorkspaceAPIError(code: code, message: "Device session: \(error). Open an owned tile or obtain a fresh observation before another action."))
         } catch let error as IOSPreviewActionChannel.Failure {

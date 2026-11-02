@@ -7,6 +7,14 @@ enum WorkspaceAPIDeviceChecks {
     private static func expect(_ condition: Bool, _ message: String) throws {
         if !condition { throw Failure(message: message) }
     }
+    /// Off every display. NSApp.sendEvent routes key presses to the key window,
+    /// so the key round makes it keyable; makeKey never activates the app or takes
+    /// the keyboard. It stays unkeyable for clicks, which an inactive app would
+    /// otherwise swallow as activation clicks.
+    private final class KeyableFixtureWindow: NSWindow {
+        var keyable = false
+        override var canBecomeKey: Bool { keyable }
+    }
     private final class Native: IOSPreviewSession {
         var onFrame: ((CGImage) -> Void)?
         var onFailure: ((String) -> Void)?
@@ -53,6 +61,25 @@ enum WorkspaceAPIDeviceChecks {
         return value
     }
     private static func code(_ response: [String: Any]) -> String? { (response["error"] as? [String: Any])?["code"] as? String }
+    private static func expectTakeoverRefusal(_ response: [String: Any], _ when: String) throws {
+        let message = (response["error"] as? [String: Any])?["message"] as? String ?? ""
+        try expect(code(response) == "permission_denied" && message.contains("took control") && message.contains("Allow Agent Control"),
+            "the agent's next act \(when) must be refused as a user takeover naming the handback, got \(response)")
+    }
+    /// Light and dark stills of the tile header, offscreen, when an output dir is set.
+    private static func renderTakeover(_ view: IOSPreviewTileNSView, name: String) throws {
+        guard let directory = ProcessInfo.processInfo.environment["CONTINUUM_QA_OUTPUT_DIR"] else { return }
+        let output = URL(fileURLWithPath: directory)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let original = view.appearance
+        defer { view.appearance = original; view.applyTokens() }
+        for (suffix, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            view.appearance = NSAppearance(named: appearance); view.applyTokens(); view.layoutSubtreeIfNeeded()
+            let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try rep.representation(using: .png, properties: [:])!.write(to: output.appendingPathComponent("takeover-\(name)-\(suffix).png"))
+        }
+    }
     static func run() async throws {
         guard ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] != nil,
               Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else { throw Failure(message: "isolated dev state required") }
@@ -60,7 +87,7 @@ enum WorkspaceAPIDeviceChecks {
         defer { defaults.removePersistentDomain(forName: defaults.suiteDomainName) }
         let f = try WorkspaceAPIChecks.makeFixture(settings: defaults)
         defer { f.tearDown() }
-        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1600, height: 1200), styleMask: [.borderless], backing: .buffered, defer: false)
+        let window = KeyableFixtureWindow(contentRect: CGRect(x: 0, y: 0, width: 1600, height: 1200), styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = f.canvas
         window.orderFrontOffscreenForChecks()
         defer { window.close() }
@@ -210,6 +237,9 @@ enum WorkspaceAPIDeviceChecks {
             try await Task.sleep(for: .milliseconds(5))
         }
         try expect(native[0].extended.count == 6, "takeover witness must reach an in-flight native swipe")
+        try expect(view.qaStatusText.contains("controls this simulator") && view.qaActionIDs.contains("stop-agent")
+            && !view.qaActionIDs.contains("allow-agent"), "while the agent holds control the tile must name it and offer Take Control, got \(view.qaStatusText) \(view.qaActionIDs)")
+        try renderTakeover(view, name: "agent-in-control")
         let point = view.screen.convert(CGPoint(x: view.screen.screenRect.midX, y: view.screen.screenRect.midY), to: nil)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0,
@@ -223,9 +253,40 @@ enum WorkspaceAPIDeviceChecks {
         try expect(code(cancelledReplay) == "outcome_unknown" && native[0].extended.count == 6,
             "retry after takeover must retrieve uncertainty without another native swipe")
         try expect(code(await call(f.api, agent: f.agentId, op: "device.observe", payload: target)) == "permission_denied", "human takeover must invalidate attachment")
+        // The agent's next fresh action is refused, says the user took control and
+        // names the way back, and reaches no native input.
+        let tapsBeforeTakeover = native[0].count
+        var afterClick = action; afterClick["idempotencyKey"] = "after-click-takeover"
+        try expectTakeoverRefusal(await call(f.api, agent: f.agentId, op: "device.act", payload: afterClick), "after a click")
+        try expect(native[0].count == tapsBeforeTakeover && native[0].extended.count == 6, "a refused action after takeover must reach no native input")
+        try expect(!view.qaStatusText.contains("controls this simulator") && view.qaActionIDs.contains("allow-agent")
+            && !view.qaActionIDs.contains("stop-agent"), "after takeover the tile must show the user in control and offer Allow Agent Control, got \(view.qaStatusText) \(view.qaActionIDs)")
+        try renderTakeover(view, name: "user-took-control")
         var reopen = target; reopen.removeValue(forKey: "sessionId"); reopen["tileId"] = tileID.uuidString
         try expect(code(await call(f.api, agent: f.agentId, op: "device.open", payload: reopen)) == "permission_denied", "agent cannot undo human takeover by reopening")
-        view.runtime.allowAutomationHandover() // trusted host handover seam, never a model field
+        // Handback goes through the Preview menu's Allow Agent Control row.
+        try expect(view.qaChooseAction("allow-agent"), "Allow Agent Control must be choosable from the Preview menu")
+        try expect(!view.qaActionIDs.contains("allow-agent"), "handback must clear the Allow Agent Control row")
+        // Typing takes over the same way: a real key press through NSApp.sendEvent.
+        let keyRound = try result(await call(f.api, agent: f.agentId, op: "device.open", payload: reopen))
+        var keyTarget = target; keyTarget["sessionId"] = keyRound["sessionId"]
+        let keyFrame = try result(await call(f.api, agent: f.agentId, op: "device.observe", payload: keyTarget))
+        try expect(view.qaStatusText.contains("controls this simulator"), "handback must restore agent control in the tile")
+        window.keyable = true; window.makeKey(); window.makeFirstResponder(view.screen)
+        try expect(window.firstResponder === view.screen, "the simulator screen must own key focus before the key press")
+        for type in [NSEvent.EventType.keyDown, .keyUp] {
+            NSApp.sendEvent(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, characters: "q", charactersIgnoringModifiers: "q", isARepeat: false, keyCode: 12)!)
+        }
+        var afterKey = keyTarget
+        afterKey["kind"] = "tap"; afterKey["x"] = 100; afterKey["y"] = 100
+        afterKey["observationId"] = keyFrame["observationId"]; afterKey["idempotencyKey"] = "after-key-takeover"
+        try expectTakeoverRefusal(await call(f.api, agent: f.agentId, op: "device.act", payload: afterKey), "after a key press")
+        try expect(native[0].count == tapsBeforeTakeover, "a refused action after key takeover must reach no native input")
+        try expect(view.qaActionIDs.contains("allow-agent"), "key takeover must offer Allow Agent Control")
+        try expect(view.qaChooseAction("allow-agent"), "Allow Agent Control must be choosable after key takeover")
+        print("PASS: click and key takeover through NSApp.sendEvent refuse the agent's next act, show the user in control, and hand back from the Preview menu")
         let second = try result(await call(f.api, agent: f.agentId, op: "device.open", payload: reopen))
         var secondTarget = target; secondTarget["sessionId"] = second["sessionId"]
         native[0].onObserve = { f.api.revoke(agentId: f.agentId) }
