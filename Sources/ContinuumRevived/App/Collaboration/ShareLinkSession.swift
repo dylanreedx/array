@@ -88,6 +88,9 @@ protocol SharedZoneCreating: AnyObject {
     /// Mode B (`Portal/SharedPortalHost.swift`): publish the tiles into a new
     /// area where they sit, as one portal, with no zone and no tile moved.
     func sharePortal(tiles: [UUID], name: String) async throws -> UUID
+    /// The same, with terminals the person opted in to stream live
+    /// (`.plans/114-terminal-sharing`).
+    func sharePortal(tiles: [UUID], name: String, liveTerminals: Set<UUID>) async throws -> UUID
     func cancelPortalShare(area: UUID) async
     /// The same for a note, file, diff, browser or terminal
     /// (`.plans/105-collaboration/SHARE-KINDS.md`): one live tile, its own area.
@@ -98,6 +101,9 @@ extension SharedZoneCreating {
     /// Recorders written before mode B keep the zone path.
     func sharePortal(tiles: [UUID], name: String) async throws -> UUID { try await createSharedZone(fromTiles: tiles, name: name).areaId }
     func cancelPortalShare(area: UUID) async { await cancelSharedZone(areaId: area) }
+    func sharePortal(tiles: [UUID], name: String, liveTerminals: Set<UUID>) async throws -> UUID {
+        try await sharePortal(tiles: tiles, name: name)
+    }
 }
 
 /// One share, from the first Copy to Revoke. Nothing is shared until Copy, so
@@ -133,6 +139,11 @@ final class ShareLinkSession {
     private(set) var copied = false
     /// A terminal share's first Copy shows the warning; the second shares.
     private(set) var confirmingTerminal = false
+    /// Mode B: the terminals opted in to stream live, each past its own
+    /// warning (`.plans/114-terminal-sharing`). Every other terminal is a card.
+    private(set) var liveTerminals: Set<UUID> = []
+    /// The terminal whose row shows the warning, waiting for its second press.
+    private(set) var confirmingLiveTerminal: UUID?
     /// The tiles the first Copy actually published, for the check that every
     /// selected tile was either published or listed as left out.
     private(set) var publishedTileIDs: [UUID] = []
@@ -187,6 +198,23 @@ final class ShareLinkSession {
     /// with it the area), then part 1 mints the link. A link that cannot be
     /// minted, say a taken name, puts the tiles back. Later Copies copy the same
     /// link, or a fresh one on the same area when the name or lifetime changed.
+    /// A terminal row's button, before Copy: the first press shows the
+    /// secrets warning, the second opts the terminal in to stream live, and a
+    /// press on a live one makes it a private card again.
+    /// Before Copy only: what a dismissed popover opted in is forgotten.
+    func forgetTerminalOptIns() {
+        guard phase == .draft else { return }
+        liveTerminals = []; confirmingLiveTerminal = nil
+    }
+
+    func toggleLiveTerminal(_ tile: UUID) {
+        guard phase == .draft, target.origin == .area, target.items.contains(where: { $0.key.tileID == tile && $0.kind == .terminal }) else { return }
+        if liveTerminals.contains(tile) { liveTerminals.remove(tile) }
+        else if confirmingLiveTerminal == tile { liveTerminals.insert(tile); confirmingLiveTerminal = nil }
+        else { confirmingLiveTerminal = tile }
+        onChange?()
+    }
+
     func copy() async {
         guard !isWorking else { return }
         if case .live(let link) = phase, link.slug == slug, link.lifetime == lifetime {
@@ -231,7 +259,8 @@ final class ShareLinkSession {
                 self.publishedTileIDs = [tile]
             } else {
                 // Mode B: one portal. Nothing on this canvas moves, no zone is made.
-                let area = try await self.zones.sharePortal(tiles: self.target.tileIDs, name: self.zoneName)
+                let area = try await self.zones.sharePortal(tiles: self.target.tileIDs, name: self.zoneName,
+                                                            liveTerminals: self.liveTerminals.intersection(self.target.tileIDs))
                 do {
                     link = try await self.links.createShareLink(area: area, slug: self.slug, lifetime: self.lifetime)
                 } catch {

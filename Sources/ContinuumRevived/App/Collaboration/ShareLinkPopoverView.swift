@@ -24,6 +24,9 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
     private let subtitleLabel = NSTextField(wrappingLabelWithString: "")
     private var itemLabels: [NSTextField] = []
     private var itemIcons: [NSImageView] = []
+    /// Mode B: each terminal row's "Share live…" (`.plans/114-terminal-sharing`).
+    private var terminalButtons: [(tile: UUID, label: NSTextField, button: ChoiceAccessoryButton)] = []
+    var qaTerminalButtons: [UUID: ChoiceAccessoryButton] { Dictionary(terminalButtons.map { ($0.tile, $0.button) }, uniquingKeysWith: { a, _ in a }) }
     /// "<kind> can't be shared yet: <reason>", one per selected tile left out.
     private var excludedLabels: [NSTextField] = []
     var qaExcludedRows: [String] { excludedLabels.map(\.stringValue) }
@@ -134,6 +137,7 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
             subtitleLabel.stringValue = "Whoever opens the link sees these tiles live, where they sit on your canvas. Nothing here moves, and everything keeps running on this Mac."
         }
         if slugField.currentEditor() == nil { slugField.stringValue = session.slug }
+        renderTerminalRows()
         let phase = session.phase
         slugField.isEditable = phase != .working
         usedLabel.isHidden = { if case .used = phase { return false }; return true }()
@@ -166,6 +170,9 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
         revokeEveryoneButton.isHidden = !revocable || session.people.isEmpty
         if let failure = session.failure {
             messageLabel.stringValue = failure
+        } else if session.confirmingLiveTerminal != nil, case .draft = phase {
+            messageLabel.stringValue = "This terminal's output may contain secrets: tokens, keys, passwords and environment values. "
+                + "Whoever opens the link sees everything it prints from now on. Press Share anyway beside it to stream it live."
         } else if session.confirmingTerminal, case .draft = phase {
             messageLabel.stringValue = "This terminal's output may contain secrets: tokens, keys, passwords and environment values. "
                 + "Whoever opens the link sees everything it prints from now on. Press Share anyway to share it."
@@ -216,6 +223,28 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
         }
     }
 
+    /// Each terminal row says what goes: "Stays private" until opted in,
+    /// "Live" after; its button reads what the next press does.
+    private func renderTerminalRows() {
+        for (index, row) in terminalButtons.enumerated() {
+            guard let item = session.target.items.first(where: { $0.key.tileID == row.tile }) else { continue }
+            let live = session.liveTerminals.contains(row.tile)
+            row.label.stringValue = "\(item.kind.displayName) · \(item.title) · " + (live ? "Live" : "Stays private")
+            let title = live ? "Keep private" : session.confirmingLiveTerminal == row.tile ? "Share anyway" : "Share live…"
+            row.button.isHidden = session.phase != .draft
+            guard row.button.accessory.title != title else { continue }
+            let button = ChoiceAccessoryButton(accessory: .init(id: "live-" + row.tile.uuidString, title: title, symbol: nil,
+                                                                accessibilityLabel: title + ": this terminal's output"))
+            button.isDestructive = title == "Share anyway"
+            let tile = row.tile
+            button.onPress = { [weak self] _ in self?.session.toggleLiveTerminal(tile) }
+            button.isHidden = row.button.isHidden
+            row.button.removeFromSuperview()
+            addSubview(button)
+            terminalButtons[index] = (row.tile, row.label, button)
+        }
+    }
+
     private func buildItems() {
         for item in session.target.excluded {
             let label = NSTextField(wrappingLabelWithString: "\(item.kind.displayName) · \(item.title) can't be shared yet: \(item.reason)")
@@ -237,6 +266,14 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
             icon.imageScaling = .scaleProportionallyDown
             itemLabels.append(label); itemIcons.append(icon)
             addSubview(icon); addSubview(label)
+            if item.kind == .terminal {
+                let tile = item.key.tileID
+                let button = ChoiceAccessoryButton(accessory: .init(id: "live-" + tile.uuidString, title: "Share live…", symbol: nil,
+                                                                    accessibilityLabel: "Share this terminal's output live"))
+                button.onPress = { [weak self] _ in self?.session.toggleLiveTerminal(tile) }
+                terminalButtons.append((tile, label, button))
+                addSubview(button)
+            }
         }
         if all.count > items.count {
             let more = NSTextField(labelWithString: "and \(all.count - items.count) more")
@@ -310,7 +347,13 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
                 let hasIcon = index < itemIcons.count
                 if hasIcon { place(itemIcons[index], NSRect(x: inset, y: y + (row - glyph) / 2, width: glyph, height: glyph)) }
                 let x = inset + glyph + CGFloat(Space.m)
-                place(label, NSRect(x: x, y: y, width: width - (x - inset), height: row))
+                var labelWidth = width - (x - inset)
+                if let terminal = terminalButtons.first(where: { $0.label === label }) {
+                    let buttonWidth = ChoiceAccessoryButton.width(for: terminal.button.accessory, zoom: .default)
+                    place(terminal.button, NSRect(x: inset + width - buttonWidth, y: y - 2, width: buttonWidth, height: row + 4))
+                    labelWidth -= buttonWidth + CGFloat(Space.s)
+                }
+                place(label, NSRect(x: x, y: y, width: labelWidth, height: row))
                 y += row
             }
             y += CGFloat(Space.l)

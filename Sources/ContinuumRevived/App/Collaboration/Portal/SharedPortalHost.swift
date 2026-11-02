@@ -327,12 +327,12 @@ final class SharedPortalHostSession {
 
     /// "Add to share": the tiles join this portal at their own positions. Its
     /// origin never moves, so nothing already shared moves on the guest.
-    func add(tiles ids: [UUID], model: CollaborationAccountController) async throws {
+    func add(tiles ids: [UUID], model: CollaborationAccountController, liveTerminals: Set<UUID> = []) async throws {
         guard let app, let canvas = app.canvasView else { throw SharedPortalError.notHosted }
         let fresh = ids.filter { id in !entry.tiles.contains { $0.tile == id } }
         guard !fresh.isEmpty else { return }
         let added = try await app.admitPortalTiles(fresh, area: area, origin: entry.origin, model: model, canvas: canvas,
-                                                   controller: controller)
+                                                   controller: controller, liveTerminals: liveTerminals)
         entry.tiles += added
         try app.hostedPortalIndex?.put(entry)
         publishManifest()
@@ -456,6 +456,12 @@ extension AppDelegate {
     /// Copy, for the Share tool: one area holding the chosen tiles, published
     /// where they sit. Nothing on this canvas moves and no zone is made.
     func sharePortal(tiles tileIds: [UUID], name: String) async throws -> UUID {
+        try await sharePortal(tiles: tileIds, name: name, liveTerminals: [])
+    }
+
+    /// The same, with the terminals the person opted in to stream live
+    /// (`.plans/114-terminal-sharing`); every other terminal goes as a card.
+    func sharePortal(tiles tileIds: [UUID], name: String, liveTerminals: Set<UUID>) async throws -> UUID {
         guard let canvas = canvasView else { throw WorkspaceRuntime.SharedZoneError.noCanvas }
         let frames = tileIds.compactMap { id in canvas.tileRecord(for: id).map { canvas.worldFrame(forTileFrame: $0.frame, tileId: id) } }
         guard !frames.isEmpty else { throw SharedPortalError.nothingToShare }
@@ -465,7 +471,8 @@ extension AppDelegate {
         let area = try await ShareLinkCoordinator.waitingOutBusy { try await model.createArea(label: name).scope.area.rawValue }
         let shared: [HostedPortalIndex.Shared]
         do {
-            shared = try await admitPortalTiles(tileIds, area: area, origin: origin, model: model, canvas: canvas, withManifest: true)
+            shared = try await admitPortalTiles(tileIds, area: area, origin: origin, model: model, canvas: canvas, withManifest: true,
+                                                liveTerminals: liveTerminals)
         } catch {
             throw error
         }
@@ -481,7 +488,8 @@ extension AppDelegate {
     /// every other kind as an artifact item, and on first share the manifest.
     func admitPortalTiles(_ tileIds: [UUID], area: UUID, origin: SharedPortal.Origin, model: CollaborationAccountController,
                           canvas: CanvasNSView, withManifest: Bool = false,
-                          controller existing: SharedAreaController? = nil) async throws -> [HostedPortalIndex.Shared] {
+                          controller existing: SharedAreaController? = nil,
+                          liveTerminals: Set<UUID> = []) async throws -> [HostedPortalIndex.Shared] {
         guard let person = model.activeAccount?.identity.person else { throw ShareLinkFailure.notSignedIn }
         var tiles: [(tile: Tile, world: TileFrame, project: UUID, kind: SharedPortal.ItemKind)] = []
         for id in tileIds {
@@ -500,6 +508,17 @@ extension AppDelegate {
             }
             for agent in agents { if let object = published[agent.tile.id] { objects[agent.tile.id] = object } }
         }
+        // An opted-in terminal goes as a live tile, bound to this Mac like a
+        // terminal shared on its own, so it streams on the tile's own lane.
+        let streamed = tiles.filter { $0.kind == .terminal && liveTerminals.contains($0.tile.id) }
+        if !streamed.isEmpty {
+            let published = try await ShareLinkCoordinator.waitingOutBusy {
+                try await self.shareLinks.publish(selection: .tiles(Set(streamed.map { .init(projectID: $0.project, tileID: $0.tile.id) })),
+                                                  intoArea: area, live: true)
+            }
+            for terminal in streamed { if let object = published[terminal.tile.id] { objects[terminal.tile.id] = object } }
+        }
+        let bound = tiles.filter { objects[$0.tile.id] != nil }
         let hostID = try await model.registerHost()
         // A portal already hosted admits through its own open controller: a
         // second one on the same area's store would trip over its writes.
@@ -507,8 +526,8 @@ extension AppDelegate {
         if existing == nil { await controller.open() }
         defer { if existing == nil { Task { await controller.close() } } }
         // The agents' publication just moved the area on: read it again.
-        if existing != nil, !agents.isEmpty {
-            for _ in 0..<50 where !agents.allSatisfy({ agent in objects[agent.tile.id].map { object in controller.document?.items.contains { $0.id == object } == true } ?? true }) {
+        if existing != nil, !bound.isEmpty {
+            for _ in 0..<50 where !bound.allSatisfy({ agent in objects[agent.tile.id].map { object in controller.document?.items.contains { $0.id == object } == true } ?? true }) {
                 try await Task.sleep(for: .milliseconds(100))
             }
         }
@@ -525,11 +544,11 @@ extension AppDelegate {
             }
             for entry in tiles {
                 let rect = SharedPortal.areaRect(world: entry.world, origin: origin)
-                if entry.kind == .agent {
+                if entry.kind == .agent || objects[entry.tile.id] != nil {
                     guard let object = objects[entry.tile.id],
                           let position = document.positions.last(where: { $0.object == object }) else { continue }
                     edits.append(.place(.init(id: position.id, object: object, rect: rect, z: z)))
-                    next.append(.init(tile: entry.tile.id, object: object.rawValue, kind: .agent))
+                    next.append(.init(tile: entry.tile.id, object: object.rawValue, kind: entry.kind))
                 } else {
                     let object = SharedArea.ID<SharedArea.Object>()
                     edits.append(.admit(.init(id: object, kind: .artifact, source: .init(owner: person, host: hostID, binding: .init())),
@@ -575,6 +594,11 @@ extension AppDelegate {
             // The portal's agents and liveness share the area's host session.
             let hostKey = account + "/" + entry.area.uuidString
             let host = try sharedAreaHostSessions[hostKey] ?? SharedAreaHostSession(account: model, area: entry.area, supervisor: agentSupervisor)
+            // An opted-in terminal is a live tile this session hosts.
+            if host.liveTileSources == nil {
+                let storage = host.controller.storageDirectory
+                host.liveTileSources = { [weak self] binding in self?.makeLiveTileSource(binding, storage: storage) }
+            }
             sharedAreaHostSessions[hostKey] = host
             let session = SharedPortalHostSession(entry: entry, host: host, app: self)
             hostedPortalSessions[key] = session
@@ -649,10 +673,18 @@ extension AppDelegate {
         guard !view.subviews.contains(where: { $0 is SharedPortalAddPill }) else { return }
         let pill = SharedPortalAddPill(title: "Add to share · \(session.entry.name)")
         let area = session.area
+        let terminal = record.kind == .terminal
         pill.onPress = { [weak self, weak pill] in
-            pill?.removeFromSuperview()
+            guard let pill else { return }
+            // A terminal streams its output, which may hold secrets: the first
+            // press says so, the second shares it live.
+            if terminal, !pill.confirming {
+                pill.confirm(title: "Output may contain secrets · Share anyway")
+                return
+            }
+            pill.removeFromSuperview()
             Task { @MainActor [weak self] in
-                do { try await self?.addToPortal(area: area, tiles: [tileId]) }
+                do { try await self?.addToPortal(area: area, tiles: [tileId], liveTerminals: terminal ? [tileId] : []) }
                 catch { fputs("Add to share failed: \(error)\n", stderr) }
             }
         }
@@ -668,17 +700,19 @@ extension AppDelegate {
     }
 
     /// "Add to share": the tiles join the portal, at their own positions.
-    func addToPortal(area: UUID, tiles: [UUID]) async throws {
+    func addToPortal(area: UUID, tiles: [UUID], liveTerminals: Set<UUID> = []) async throws {
         guard let session = hostedPortalSession(area: area) else { throw SharedPortalError.notHosted }
         let model = try await shareLinks.readyAccount()
-        try await session.add(tiles: tiles, model: model)
+        try await session.add(tiles: tiles, model: model, liveTerminals: liveTerminals)
     }
 }
 
 /// "Add to share · Checkout": offered on a tile dragged into a shared region.
 @MainActor
 final class SharedPortalAddPill: NSView {
-    let title: String
+    private(set) var title: String
+    /// A terminal's pill after its first press: the warning, waiting for the second.
+    private(set) var confirming = false
     var onPress: (() -> Void)?
     override var isFlipped: Bool { true }
     init(title: String) {
@@ -701,4 +735,12 @@ final class SharedPortalAddPill: NSView {
     }
     override func mouseDown(with event: NSEvent) { onPress?() }
     override func accessibilityPerformPress() -> Bool { onPress?(); return true }
+
+    func confirm(title next: String) {
+        confirming = true; title = next
+        setAccessibilityLabel(next)
+        let size = preferredSize
+        if let superview { frame = NSRect(x: max(8, superview.bounds.width - size.width - 12), y: frame.minY, width: size.width, height: size.height) }
+        needsDisplay = true
+    }
 }

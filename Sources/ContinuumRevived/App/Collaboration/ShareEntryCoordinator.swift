@@ -43,6 +43,9 @@ final class ShareEntryCoordinator {
             ?? sessions[target.keys]
             ?? ShareLinkSession(target: target, links: links(), zones: zones(), pasteboard: pasteboard)
         if target.area == nil { sessions[target.keys] = session }
+        // An opt-in to stream a terminal lasts one popover: reopened, it is
+        // asked for again.
+        session.forgetTerminalOptIns()
         let content = ShareLinkPopoverView(session: session)
         content.lifetimeChoice.presentsOffscreenForQA = presentsOffscreenForQA
         content.onResize = { [weak self] size in self?.popover.resizeContent(to: size) }

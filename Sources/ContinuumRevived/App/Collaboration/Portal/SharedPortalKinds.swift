@@ -16,7 +16,7 @@ enum SharedPortalKinds {
         case .file: return SharedPortalCaptureKind(itemKind: .file)
         case .diff: return SharedPortalCaptureKind(itemKind: .diff)
         case .browser: return SharedPortalBrowserKind()
-        case .terminal: return SharedPortalFallbackKind(itemKind: .terminal)
+        case .terminal: return SharedPortalTerminalKind()
         case .unknown: return SharedPortalFallbackKind(itemKind: .unknown)
         }
     }
