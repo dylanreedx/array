@@ -600,6 +600,8 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --shared-agent-migration-check
   run_app_check .build/debug/Array --share-agent-relay-check
   run_app_check .build/debug/Array --shared-agent-render-check
+  run_app_check .build/debug/Array --shared-portal-migration-check
+  run_app_check .build/debug/Array --shared-portal-render-check
   run_app_check .build/debug/Array --ui-probe-check
   run_app_check .build/debug/Array --menu-contract-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
@@ -1507,6 +1509,10 @@ run_app_check .build/debug/Array --shared-area-zone-check
 run_app_check .build/debug/Array --shared-agent-migration-check
 run_app_check .build/debug/Array --share-agent-relay-check
 run_app_check .build/debug/Array --shared-agent-render-check
+# Mode B (the portal, .plans/105): old shared zones become portal tiles on
+# load, and the portal in light and dark.
+run_app_check .build/debug/Array --shared-portal-migration-check
+run_app_check .build/debug/Array --shared-portal-render-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
 run_leg python3 scripts/check-collaboration-pair.py
 # M1.10 (.plans/46): WorkspaceRuntime.canvasView is written in exactly one place,

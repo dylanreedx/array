@@ -1657,6 +1657,39 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // Mode B's portal tiles, the sharer's tab and Add to share, in light
+        // and dark, as PNGs in <dir>.
+        if let index = CommandLine.arguments.firstIndex(of: "--shared-portal-render-check") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            let directory = URL(fileURLWithPath: CommandLine.arguments.indices.contains(index + 1)
+                ? CommandLine.arguments[index + 1] : NSTemporaryDirectory() + "shared-portal-render")
+            Task { @MainActor in
+                do { try await SharedPortalAppearance.render(to: directory); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
+        if CommandLine.arguments.contains("--shared-portal-migration-check") {
+            setbuf(stdout, nil)
+            setbuf(stderr, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(90))
+                fputs("FAIL: shared portal migration check exceeded its 90-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do {
+                    try await SharedPortalMigrationChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--shared-agent-migration-check") {
             setbuf(stdout, nil)
             setbuf(stderr, nil)
@@ -6716,6 +6749,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Mode A (`SharedAgentShare.swift`): the shared agent tiles this canvas
     /// shows, by tile, and the agents this Mac shares, with who has access.
     var sharedAgentTileSessions: [UUID: SharedAgentTileSession] = [:]
+    /// Mode B (`Portal/`): the portal tiles this canvas shows, by tile, and
+    /// the portals this Mac shares, by account and area.
+    var sharedPortalTileSessions: [UUID: SharedPortalTileSession] = [:]
+    var hostedPortalSessions: [String: SharedPortalHostSession] = [:]
+    var hostedPortalIndexStorage: HostedPortalIndex?
     var hostedAgentSharesStorage: HostedAgentShareIndex?
     var hostedAgentPeople: [UUID: [String]] = [:]
     var hostedAgentAccessTask: Task<Void, Never>?
@@ -8933,6 +8971,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // Closing it forgets it on this canvas only; the owner's agent,
             // and anyone else's access, are untouched.
             sharedAgentTileClosed(id)
+        case .sharedPortal:
+            // Closing it forgets it on this canvas only; the owner's tiles,
+            // and anyone else's access, are untouched.
+            sharedPortalTileClosed(id)
         case .managedAgent:
             // CLOSING A TILE IS CLOSING A WINDOW, NOT ENDING THE WORK (P2A.5, locked
             // decision). Four things happen here and a fifth deliberately does not:
@@ -12191,6 +12233,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self else { throw ShareLinkFailure.noWorkspace }
             try await openSharedAgentLink(model: model, area: area, item: item)
         }
+        coordinator.openPortal = { [weak self] model, area, document in
+            guard let self else { throw ShareLinkFailure.noWorkspace }
+            try await openSharedPortalLink(model: model, area: area, document: document)
+        }
         coordinator.askSignUpName = { [weak self] relay in
             if let preview = MultiplayerPreview.current, preview.driver != nil { return preview.name }
             return await self?.askCollaborationName(title: "Share from Array",
@@ -12590,14 +12636,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                                   title: title(of: loan.tile.home), kind: loan.tile.home.kind))
                 continue
             }
-            guard let tile = canvasView.tileRecord(for: id), tile.kind != .terminal,
+            // An agent alone is mode A; an area is a portal, which shows a
+            // terminal as a private card and carries nothing of it.
+            guard let tile = canvasView.tileRecord(for: id),
+                  origin == .area ? SharedPortal.ItemKind.forTile(tile.kind) != nil : tile.kind != .terminal,
                   let zone = tile.zoneId, let project = canvasView.projectId(forZone: zone) else { continue }
-            items.append(.init(key: .init(projectID: project, tileID: id), title: title(of: tile), kind: tile.kind))
+            let badge = origin == .area ? SharedPortalKinds.kind(forTile: tile.kind)?.shareRow(for: tile).badge : nil
+            items.append(.init(key: .init(projectID: project, tileID: id), title: title(of: tile), kind: tile.kind, badge: badge))
         }
         if let lentArea {
             return ShareTarget(workspaceID: runtime.workspaceId, origin: origin, items: lent, area: lentArea)
         }
-        guard !items.isEmpty else { return nil }
+        // A portal needs one tile that is more than a private card.
+        guard items.contains(where: { $0.kind != .terminal }) else { return nil }
+        // Mode B: Share on any tile in a portal opens that portal's popover.
+        if origin == .agent, items.count == 1, let portal = hostedPortalArea(forTile: items[0].key.tileID) {
+            return ShareTarget(workspaceID: runtime.workspaceId, origin: .area, items: items, area: portal)
+        }
+        // Mode B: tiles already shared through one portal open that portal's
+        // popover (its links and people), not a second share.
+        if origin == .area, let first = items.first, let portal = hostedPortalArea(forTile: first.key.tileID),
+           items.allSatisfy({ hostedPortalArea(forTile: $0.key.tileID) == portal }) {
+            return ShareTarget(workspaceID: runtime.workspaceId, origin: origin, items: items, area: portal)
+        }
         // Mode A: an agent this Mac already shares opens that share's
         // popover (its links and people), not a second share.
         if items.count == 1, items[0].kind == .managedAgent, let hosted = hostedAgentArea(forTile: items[0].key.tileID) {
@@ -12660,7 +12721,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         overlay.onShare = { [weak self, weak overlay, weak canvasView] ids, _ in
             guard let self, let canvasView else { return }
             guard let target = self.shareTarget(tileIds: Array(ids), origin: .area) else {
-                overlay?.showRefusal("Terminals stay private · drag over agents, notes, diffs or files · esc")
+                overlay?.showRefusal("Terminals stay private · drag over agents, notes, browsers, diffs or files · esc")
                 return
             }
             overlay?.removeFromSuperview(); self.shareToolView = nil
@@ -22618,6 +22679,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 let view = SharedAgentTileNSView(tile: tile)
                 canvasView.install(tileView: view, for: tile)
                 attachSharedAgentTile(view)
+            case .sharedPortal:
+                let view = SharedPortalTileNSView(tile: tile)
+                canvasView.install(tileView: view, for: tile)
+                attachSharedPortalTile(view)
             }
         }
 
@@ -22937,6 +23002,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // that joined, or the tile shows its placeholder.
             let view = SharedAgentTileNSView(tile: tile)
             attachSharedAgentTile(view)
+            return view
+
+        case .sharedPortal:
+            // A reference only, like `.sharedAgent`.
+            let view = SharedPortalTileNSView(tile: tile)
+            attachSharedPortalTile(view)
             return view
 
         case .managedAgent:
@@ -23413,6 +23484,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// activation or a raise of a tile in another zone was never written.
     func canvasDidChange(_ canvas: CanvasNSView, tileId: UUID) {
         canvasDidChange(canvas)
+        portalNoticeTileChange(tileId)
         if let owner = controller(owningTile: tileId), owner !== workspaceRuntime?.activeController {
             owner.scheduleCanvasSave()
         }

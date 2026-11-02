@@ -46,6 +46,10 @@ final class ShareLinkCoordinator {
     private let openArea: OpenArea
     /// Nil keeps every link on the zone path (checks that predate mode A).
     var openAgent: OpenAgent?
+    /// Mode B: any other link lands as one portal tile, never a zone. Nil
+    /// keeps those links on the zone path (checks that predate mode B).
+    typealias OpenPortal = @MainActor (CollaborationAccountController, UUID, SharedArea.Document) async throws -> Void
+    var openPortal: OpenPortal?
     private let inventory: InventoryProvider
     /// Shows a refusal to the person. Production presents it on the canvas window.
     var presentRefusal: @MainActor (String) -> Void
@@ -80,12 +84,18 @@ final class ShareLinkCoordinator {
         let outcome: ShareLinkOpenOutcome
         do {
             let model = try accountProvider()
-            let opener = ShareLinkOpener(account: model, signIn: signIn, askName: askName, open: { [openArea, openAgent] state, model in
+            let opener = ShareLinkOpener(account: model, signIn: signIn, askName: askName, open: { [openArea, openAgent, openPortal] state, model in
                 guard let person = model.activeAccount?.identity.person else { throw CollaborationAccountFailure.notConnected }
                 let area = state.document.id.rawValue
                 // Mode A: a link to one agent lands as one tile, never a zone.
                 if let openAgent, let item = AppDelegate.sharedAgentItem(in: state.document, me: person) {
                     try await openAgent(model, area, item)
+                    return
+                }
+                // Mode B: a portal, or a 0.7.37 area, lands as one portal tile.
+                // No link opens a zone any more.
+                if let openPortal {
+                    try await openPortal(model, area, state.document)
                     return
                 }
                 try openArea(try model.makeSharedAreaController(area: area), person, area, model)

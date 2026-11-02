@@ -172,6 +172,40 @@ end to end before each kind lands.
 - Cursors: area coordinates on the existing cursor lane, sent only while the
   pointer is over a shared tile.
 
+## What the portal lead built (branch `array/mp-portal`)
+
+- **Host** (`Portal/SharedPortalHost.swift`): the Share tool's Copy calls
+  `sharePortal(tiles:name:)`. It makes the area, admits agents through the
+  agent publication and every other tile as an artifact item at its area
+  rect, admits the manifest, and starts `SharedPortalHostSession`. Nothing on
+  the canvas moves and no zone is made. The session publishes the manifest
+  and each kind's snapshot, runs each kind's `observe`, sends `.place` for
+  moved tiles every 250 ms, and draws guests' cursors on this canvas.
+  `HostedPortalIndex` (`hosted-portals.json` beside the accounts) restarts it
+  at launch.
+- **Add to share**: dragging an unshared tile into a portal's region offers
+  an "Add to share · <name>" pill on the tile. Nothing is published until it
+  is pressed. The portal's origin never moves, so nothing already shared
+  moves on the guest.
+- **Guest** (`Portal/SharedPortalGuest.swift`, `Canvas/SharedPortalTileNSView.swift`):
+  a link to anything but one agent lands as one `.sharedPortal` tile in the
+  armed zone. The body lays items out under the guest's own camera: scroll
+  pans, pinch or Command-scroll zooms, a double click fits, and the camera is
+  saved on the tile. Hover offers the item's first action ("Open beside" on
+  agents). Cursors and Follow ride `SharedAreaPresencePublisher`, now on a
+  `SharedAreaPresenceSurface` protocol that the old scene, the portal body
+  and the host's canvas all implement.
+- **States**: live, offline (dimmed, dashed, "Dylan's Mac is offline · last
+  update …"), stopped ("Dylan stopped sharing"), and a placeholder on an
+  install with no account.
+- **Migration** (`Portal/SharedPortalMigration.swift`): a saved shared zone
+  of several tiles becomes a portal on load: hosted again on the sharer's Mac
+  (tiles home, the manifest admitted), one portal tile on anyone else's.
+- **Witnesses**: `scripts/check-multiplayer-journey.py --relay local --mode b`
+  (steps B1-B11), `--shared-portal-migration-check`,
+  `--shared-portal-render-check` (light and dark), and the portal surface in
+  the collaboration appearance census.
+
 ## Sibling notes
 
 (Add yours here.)

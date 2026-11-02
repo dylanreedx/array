@@ -179,6 +179,11 @@ public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
     /// owner's Mac; this canvas holds only `TileMetadata.sharedAgent`, a
     /// reference. Never a `.managedAgent`: there is no `AgentRecord` here.
     case sharedAgent
+    /// Part of someone else's canvas, shared with this person by link
+    /// (`.plans/105-collaboration/SHARE-REDESIGN.md`, mode B). It shows the
+    /// owner's chosen tiles at their positions on the owner's canvas; this
+    /// canvas holds only `TileMetadata.sharedPortal`, a reference.
+    case sharedPortal
 
     /// Human label for chrome. `rawValue.capitalized` produced "Managedagent",
     /// "Filetree", "Browserinspector" — camelCase gets lowercased after the
@@ -199,6 +204,7 @@ public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
         case .managedAgent: return "Agent"
         case .kanban: return "Board"
         case .sharedAgent: return "Shared agent"
+        case .sharedPortal: return "Shared canvas"
         }
     }
 }
@@ -333,6 +339,9 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     /// `.sharedAgent` only: which shared agent the tile shows. A reference,
     /// never a path, record or credential.
     public var sharedAgent: SharedAgentTileReference?
+    /// `.sharedPortal` only: which shared canvas the tile shows, and this
+    /// person's camera inside it. A reference, never a path, record or credential.
+    public var sharedPortal: SharedPortalTileReference?
 
     public init(
         launchProfileId: String? = nil,
@@ -363,7 +372,8 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         fileEditorViewState: FileEditorViewState? = nil,
         boardViewState: BoardViewState? = nil,
         boardId: UUID? = nil,
-        sharedAgent: SharedAgentTileReference? = nil
+        sharedAgent: SharedAgentTileReference? = nil,
+        sharedPortal: SharedPortalTileReference? = nil
     ) {
         self.launchProfileId = launchProfileId
         self.projectRelativeCwd = projectRelativeCwd
@@ -394,6 +404,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.boardViewState = boardViewState
         self.boardId = boardId
         self.sharedAgent = sharedAgent
+        self.sharedPortal = sharedPortal
     }
 
     enum CodingKeys: String, CodingKey, CaseIterable {
@@ -426,6 +437,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case boardViewState
         case boardId
         case sharedAgent
+        case sharedPortal
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -459,6 +471,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(boardViewState, forKey: .boardViewState)
         try container.encodeIfPresent(boardId, forKey: .boardId)
         try container.encodeIfPresent(sharedAgent, forKey: .sharedAgent)
+        try container.encodeIfPresent(sharedPortal, forKey: .sharedPortal)
     }
 
     /// The agent that may drive this browser without a hand-over. The owner

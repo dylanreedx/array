@@ -21,6 +21,9 @@ final class SharedAreaHostSession {
     private var lastReported: UInt64?
     private(set) var lastUsage: Collaboration.UsageSnapshot?
     private(set) var lastError: (any Error)?
+    /// A portal with no agent still keeps its host's liveness beating, so a
+    /// guest sees "offline" when this Mac goes away (mode B).
+    var fallbackHost: SharedArea.ID<SharedArea.Host>? { didSet { if fallbackHost != oldValue { ensureCollector() } } }
 
     convenience init(account: CollaborationAccountController, area: UUID, supervisor: AgentSupervisor) throws {
         let controller = try account.makeSharedAreaController(area: area)
@@ -112,7 +115,7 @@ final class SharedAreaHostSession {
         let bindings = controller.sourceBindings.filter { binding in
             document.items.contains { $0.id == binding.object && $0.source?.host == binding.host && $0.source?.owner == controller.identity.person }
         }
-        heartbeat?.track(host: bindings.first?.host)
+        heartbeat?.track(host: bindings.first?.host ?? fallbackHost)
         if projections == nil { projections = SharedAreaAgentProjectionHost(supervisor: supervisor, controller: controller) }
         projections?.sync(bindings)
         guard let host = bindings.first?.host else {

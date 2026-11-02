@@ -298,6 +298,7 @@ extension AppDelegate {
         runtime.onSceneChanged = { [weak self] in self?.reopenSharedAreas(); self?.refreshHostedAgentMarks() }
         reopenSharedAreas()
         resumeHostedAgentShares()
+        resumeHostedPortals()
     }
 
     /// Every open area leaves the canvas: presence ends and each controller
@@ -329,6 +330,8 @@ extension AppDelegate {
                 await session.waitUntilOpen()
                 // 0.7.37 shared one agent as a zone; it is now one tile.
                 if migrateOneAgentZone(session, model: model, person: account.identity.person) { continue }
+                // Anything else shared as a zone is now a portal (mode B).
+                if migrateZoneToPortal(session, model: model, person: account.identity.person) { continue }
                 relendBoundTiles(session)
             }
         }
@@ -433,6 +436,7 @@ extension AppDelegate {
         }
         canvas.onCameraApplied = { [weak self] viewport, user in
             for session in self?.sharedAreaZoneSessions.values.map({ $0 }) ?? [] { session.canvasCameraApplied(viewport, user: user) }
+            self?.portalCameraApplied(user: user)
         }
         canvas.onLentTileMoved = { [weak self] zoneId, tileId, frame, committed in
             self?.sharedAreaZoneSessions.values.first(where: { $0.zoneId == zoneId && !$0.isClosed })?

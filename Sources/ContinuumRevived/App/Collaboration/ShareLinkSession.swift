@@ -12,6 +12,8 @@ struct ShareTarget: Equatable {
         let key: SharedAreaPublication.SourceKey
         let title: String
         let kind: TileKind
+        /// Mode B: what the portal does with it ("Live", "Still", "Stays private").
+        var badge: String? = nil
     }
     enum Origin: Equatable { case agent, area }
 
@@ -65,6 +67,16 @@ protocol SharedZoneCreating: AnyObject {
     /// into a new area and host it, with no zone and no tile moved. Returns the area.
     func shareAgent(tile: UUID, name: String) async throws -> UUID
     func cancelAgentShare(area: UUID) async
+    /// Mode B (`Portal/SharedPortalHost.swift`): publish the tiles into a new
+    /// area where they sit, as one portal, with no zone and no tile moved.
+    func sharePortal(tiles: [UUID], name: String) async throws -> UUID
+    func cancelPortalShare(area: UUID) async
+}
+
+extension SharedZoneCreating {
+    /// Recorders written before mode B keep the zone path.
+    func sharePortal(tiles: [UUID], name: String) async throws -> UUID { try await createSharedZone(fromTiles: tiles, name: name).areaId }
+    func cancelPortalShare(area: UUID) async { await cancelSharedZone(areaId: area) }
 }
 
 /// One share, from the first Copy to Revoke. Nothing is shared until Copy, so
@@ -173,11 +185,12 @@ final class ShareLinkSession {
                     throw error
                 }
             } else {
-                let zone = try await self.zones.createSharedZone(fromTiles: self.target.tileIDs, name: self.zoneName)
+                // Mode B: one portal. Nothing on this canvas moves, no zone is made.
+                let area = try await self.zones.sharePortal(tiles: self.target.tileIDs, name: self.zoneName)
                 do {
-                    link = try await self.links.createShareLink(area: zone.areaId, slug: self.slug, lifetime: self.lifetime)
+                    link = try await self.links.createShareLink(area: area, slug: self.slug, lifetime: self.lifetime)
                 } catch {
-                    await self.zones.cancelSharedZone(areaId: zone.areaId)
+                    await self.zones.cancelPortalShare(area: area)
                     throw error
                 }
             }

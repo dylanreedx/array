@@ -31,8 +31,12 @@ final class SharedPortalAgentItemView: SharedPortalItemView {
     let live: SharedAgentLiveView
     private let title = NSTextField(labelWithString: "")
 
-    override init(entry: SharedPortal.Entry, guest: SharedPortalGuestContext) {
-        live = SharedAgentLiveView(controller: guest.controller)
+    convenience override init(entry: SharedPortal.Entry, guest: SharedPortalGuestContext) {
+        self.init(entry: entry, guest: guest, read: nil)
+    }
+    /// `read` stands in for the relay in the render check only.
+    init(entry: SharedPortal.Entry, guest: SharedPortalGuestContext, read: SharedAgentLiveView.Reader?) {
+        live = SharedAgentLiveView(controller: guest.controller, read: read)
         super.init(entry: entry, guest: guest)
         title.font = .token(.label); title.lineBreakMode = .byTruncatingTail
         title.stringValue = entry.title

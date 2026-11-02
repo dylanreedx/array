@@ -36,6 +36,7 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
     private(set) var removeButtons: [ChoiceAccessoryButton] = []
     var titleLabelText: String { titleLabel.stringValue }
     /// Each person row as drawn: "Sam · opened 10:48 · full access".
+    var qaItemRows: [String] { itemLabels.map(\.stringValue) }
     var qaPeopleRows: [String] { personLabels.map { $0.name.stringValue + " · " + $0.detail.stringValue } }
     private let messageLabel = NSTextField(wrappingLabelWithString: "")
     /// "Revoke link" until someone has access, then "Revoke everyone's access".
@@ -114,11 +115,11 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
     func render() {
         let target = session.target
         let count = target.items.count
-        titleLabel.stringValue = target.origin == .agent ? "Share this agent"
-            : "Share \(count) tile\(count == 1 ? "" : "s") as an area"
+        _ = count
+        titleLabel.stringValue = target.origin == .agent ? "Share this agent" : "Share this part of your canvas"
         subtitleLabel.stringValue = target.origin == .agent
             ? "Anyone who opens the link can prompt it and move it. It keeps running on this Mac."
-            : "Whoever opens the link gets the area on their canvas, with full access. Agents keep running on this Mac."
+            : "Whoever opens the link sees these tiles live, where they sit on your canvas. Nothing here moves, and everything keeps running on this Mac."
         if slugField.currentEditor() == nil { slugField.stringValue = session.slug }
         let phase = session.phase
         slugField.isEditable = phase != .working
@@ -176,7 +177,7 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
         guard session.target.origin == .area else { return }
         let items = session.target.items
         for item in items.prefix(Self.maxListedItems) {
-            let label = NSTextField(labelWithString: "\(item.kind.displayName) · \(item.title)")
+            let label = NSTextField(labelWithString: "\(item.kind.displayName) · \(item.title)" + (item.badge.map { " · \($0)" } ?? ""))
             label.font = .token(.caption)
             label.lineBreakMode = .byTruncatingTail
             let icon = NSImageView(image: CanvasSymbolImage.image(named: Self.symbol(for: item.kind)) ?? NSImage())
@@ -198,6 +199,8 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
         case .note: return "note.text"
         case .diffReview: return "plusminus"
         case .file: return "doc.text"
+        case .browser: return "globe"
+        case .terminal: return "lock"
         default: return "square"
         }
     }

@@ -30,7 +30,8 @@ enum CollaborationAppearanceSurfaces {
             .init(id: "sharedAreaZoneOffline", size: .init(width: 1440, height: 900), view: try sharedZone(offline: true, following: false)),
             .init(id: "sharedAreaZoneFollow", size: .init(width: 1440, height: 900), view: try sharedZone(offline: false, following: true)),
             .init(id: "sharedAreaZoneEnded", size: .init(width: 1440, height: 900), view: try sharedZone(offline: false, following: false, ended: true)),
-            .init(id: "sharedAgentTile", size: SharedAgentAppearance.size, view: try SharedAgentAppearance.surface())
+            .init(id: "sharedAgentTile", size: SharedAgentAppearance.size, view: try SharedAgentAppearance.surface()),
+            .init(id: "sharedPortalTile", size: SharedPortalAppearance.size, view: try SharedPortalAppearance.surface())
         ]
     }
 

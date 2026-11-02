@@ -278,6 +278,8 @@ extension AppDelegate {
             view.setOwnershipMark(.init(text: text, colour: me.map { SharedAreaPersonColour.color(for: $0, host: $0) } ?? .systemPurple,
                                         outlined: false))
         }
+        // An agent shared in a portal keeps that mark instead.
+        refreshHostedPortalMarks()
         guard hostedAgentAccessTask == nil, !entries.isEmpty, Self.reachesRelay(model) else { return }
         // Who has access, re-read on a slow beat while anything is shared, so
         // the tab names someone who joined without the popover open.
