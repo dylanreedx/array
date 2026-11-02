@@ -136,6 +136,32 @@ enum HelperWatchdogChecks {
         try HelperGuardChecks.expect(alerts().isEmpty && supervisor.records[child]?.helperWatchdogNeedsYou == nil,
                                      "completed helper escalated")
 
+        // Live 2026-11-02: an alert queued while the lead was busy still reached
+        // it after the user had stopped that helper, and the lead spent a whole
+        // turn on stale news. Stopping a helper withdraws its queued alert.
+        try? FileManager.default.removeItem(at: cwd.appendingPathComponent("release.flag"))
+        try HelperGuardChecks.expect(supervisor.send("HOLD-parent-again", to: parent), "parent did not restart")
+        let stopped = try bench.delegate("HOLD-stopped")
+        let busy = await waitUntil(timeout: 15, pollInterval: 0.02) { supervisor.isRunning(stopped) && supervisor.isRunning(parent) }
+        try HelperGuardChecks.expect(busy, "stopped-helper control not established")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        func stoppedAlerts() -> Int { alerts().filter { $0.text.contains(stopped.rawValue.uuidString.lowercased()) }.count }
+        await supervisor.sweepHelperWatchdog()
+        now.addTimeInterval(601)
+        await supervisor.sweepHelperWatchdog()
+        try HelperGuardChecks.expect(stoppedAlerts() == 1, "stopped-helper control did not queue its alert")
+        supervisor.stop(stopped)
+        let withdrawn = await waitUntil(timeout: 5, pollInterval: 0.02) { stoppedAlerts() == 0 }
+        try HelperGuardChecks.expect(withdrawn, "an alert about a stopped helper stayed queued for its lead")
+        let drained = Date().addingTimeInterval(15)
+        while Date() < drained && supervisor.isRunning(parent) {
+            try Data().write(to: cwd.appendingPathComponent("release.flag"))
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let delivered = try String(contentsOf: cwd.appendingPathComponent("prompts.log"), encoding: .utf8)
+        try HelperGuardChecks.expect(!supervisor.isRunning(parent) && delivered.components(separatedBy: "has shown no progress").count - 1 == 4,
+                                     "the stopped helper's alert reached the lead's runner")
+
         // A parent missing after a relaunch: retain the spawned child's record
         // in a separate store, exactly as an orphaned record is restored.
         let orphanStore = AgentStore(applicationSupportDirectory: bench.f.tempRoot.appendingPathComponent("orphan-support"))

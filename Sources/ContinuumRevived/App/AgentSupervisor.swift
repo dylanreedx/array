@@ -4211,6 +4211,7 @@ final class AgentSupervisor {
             return
         }
         recoverForcedMessagesAfterStop(id)
+        withdrawQueuedHelperAlert(id)
         killRunner(id)
     }
 
@@ -5765,6 +5766,16 @@ final class AgentSupervisor {
     }
     private var helperProgress: [AgentID: HelperProgress] = [:]
     private var pendingHelperAlerts: [AgentID: (parent: AgentID, text: String)] = [:]
+    /// A "no progress" alert waiting in its lead's queue. Stopping the helper
+    /// withdraws it, so the lead never spends a turn on news already stale.
+    private var queuedHelperAlerts: [AgentID: (parent: AgentID, messageID: UUID)] = [:]
+
+    private func withdrawQueuedHelperAlert(_ id: AgentID) {
+        pendingHelperAlerts[id] = nil
+        guard let queued = queuedHelperAlerts.removeValue(forKey: id),
+              queuedMessages(for: queued.parent).contains(where: { $0.id == queued.messageID }) else { return }
+        cancelQueuedMessage(queued.messageID, for: queued.parent)
+    }
 
     private func startHelperWatchdog() {
         helperWatchdogTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] timer in
@@ -5829,8 +5840,12 @@ final class AgentSupervisor {
             let accepted: Bool
             if isRunning(alert.parent) {
                 let prompt = AgentPrompt(agentMessageText(alert.text, from: child))
+                let before = Set(queuedMessages(for: alert.parent).map(\.id))
                 let result = await accept(.queue(prompt), for: alert.parent)
                 if case .accepted = result { accepted = true } else { accepted = false }
+                if accepted, let queued = queuedMessages(for: alert.parent).last(where: { !before.contains($0.id) }) {
+                    queuedHelperAlerts[child] = (alert.parent, queued.id)
+                }
             } else {
                 accepted = sendAgentMessage(alert.text, from: child, to: alert.parent)
             }
