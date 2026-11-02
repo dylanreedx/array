@@ -6,10 +6,11 @@ change to the production relay. No release: this is a preview.
 
 Two Array apps on this Mac play two people, Array Preview A (the host) and
 Array Preview B (the guest). They talk through a relay that runs on this Mac
-only. Neither is your Array, neither touches ~/Documents, your Keychain or a
-real Claude, Codex or Pi login. Agents run on fake CLIs: a prompt containing
-TOOL shows a tool step, SLOW gives a long turn, anything else gets a short
-reply.
+only. Neither is your Array, and neither touches ~/Documents or your
+Keychain. Launched with --real (as below), agents run your own claude and
+codex, on their own logins; Array stores no credential, and every turn is a
+real one. Without --real they run check fakes, which only the automated
+journeys need: a plain prompt to the Claude fake draws no reply at all.
 
 Both apps are built. Agent characters are switched on in both.
 
@@ -31,12 +32,14 @@ Run these from the bench, in this order. Each start is fresh: nobody has an
 account, as a new person would.
 
 cd ~/Documents/personal/Array/.worktrees/preview-0739
-scripts/preview-0739.sh relay
-scripts/preview-0739.sh launch a
-scripts/preview-0739.sh launch b
 scripts/preview-0739.sh stop
+scripts/preview-0739.sh build
+scripts/preview-0739.sh relay
+scripts/preview-0739.sh launch a --real
+scripts/preview-0739.sh launch b --real
 
-`relay` wipes both apps' state and starts the relay. `stop` quits both apps,
+`build` is needed once after a change to the branch, and only with both apps
+quit (it re-signs them). `relay` wipes both apps' state and starts the relay. `stop` quits both apps,
 stops the relay and leaves nothing running. A takes the left half of the
 screen, B the right.
 
@@ -58,7 +61,8 @@ scripts/preview-0739.sh open-link
 
 ## What to try
 
-A starts with two agents, a Claude Code one and a Codex one. A's project is a
+With --real, A starts with no agents: make one with New Agent. (On the fakes
+it starts with a Claude Code and a Codex agent.) A's project is a
 small git repo with one uncommitted change to greet.js, so files and diffs
 have something to show.
 
@@ -166,6 +170,10 @@ have something to show.
   terminal.** Sharing used to freeze the host here; it now gives up after
   3 seconds and sends the visible text instead. The preview starts tmux
   itself so you won't hit it.
+- **The fakes don't answer plain prompts.** Without --real, the Claude fake
+  replies with one whole message, which the app draws only when it streams,
+  so prompts finish with no reply. That is the fake, not the app: the real
+  claude streams its text.
 - Note cursors and selections of the other person are not drawn.
 - B's pictures of a private page stop while A's tile is off screen; B keeps
   the last one.
