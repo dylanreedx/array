@@ -6,6 +6,7 @@ import ContinuumRevivedCore
 import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedSync
 import Foundation
+import ImageIO
 
 // Ticket: docs/38-tickets/90-agent-ux/P2A.3-agent-supervisor.md
 //
@@ -1077,6 +1078,11 @@ final class AgentSupervisor {
     private let claudeSessionTitle: @Sendable (String, String) -> String?
     private let attachmentStore: AgentComposerAttachmentStore
     private var runtimeObservationObservers: [AgentID: [UUID: (AgentRuntimeObservation) -> Void]] = [:]
+    private var sharedTranscriptDetails: [AgentID: AgentTranscriptCanvasToolDetail] = [:]
+    private var sharedTranscriptDetailRevisions: [AgentID: UInt64] = [:]
+    private var sharedTranscriptDetailObservers: [AgentID: [UUID: () -> Void]] = [:]
+    private var sharedTranscriptImageCache: [AgentID: [AgentImageAttachmentID: (updatedAt: Date, data: Data)]] = [:]
+    private var sharedDiffLineCounts: [AgentID: [AgentNodeID: (revision: UInt64, count: Int)]] = [:]
     /// ST-01 — ACCOUNT quota, keyed by HARNESS rather than by agent.
     ///
     /// Deliberately not a field on `AgentRecord`. A record is per-agent and
@@ -2120,6 +2126,7 @@ final class AgentSupervisor {
         // The projector and the transcript list consume the same sanitized,
         // non-Codable side channel. Observers are host-local and scoped by the
         // immutable agent ID; no raw runtime payload or path enters the event log.
+        sharedTranscriptDetails[id]?.captureRuntimeObservation(observation)
         runtimeObservationObservers[id]?.values.forEach { $0(observation) }
     }
 
@@ -6469,6 +6476,11 @@ final class AgentSupervisor {
         transcriptPersistenceTasks[id]?.cancel()
         transcriptPersistenceTasks.removeValue(forKey: id)
         transcriptProjections.removeValue(forKey: id)
+        sharedTranscriptDetails.removeValue(forKey: id)
+        sharedTranscriptDetailRevisions.removeValue(forKey: id)
+        sharedTranscriptDetailObservers.removeValue(forKey: id)
+        sharedTranscriptImageCache.removeValue(forKey: id)
+        sharedDiffLineCounts.removeValue(forKey: id)
         if let transcriptStore {
             Task.detached { _ = await transcriptStore.quarantineTranscript(agentID: id) }
         }
@@ -8796,6 +8808,115 @@ final class AgentSupervisor {
         return transcriptProjections[id]?.document
     }
 
+    func sharedTranscriptDetailRevision(for id: AgentID) -> UInt64 { sharedTranscriptDetailRevisions[id] ?? 0 }
+
+    func addSharedTranscriptDetailObserver(for id: AgentID, _ observer: @escaping () -> Void) -> UUID {
+        let token = UUID(); sharedTranscriptDetailObservers[id, default: [:]][token] = observer; return token
+    }
+    func removeSharedTranscriptDetailObserver(_ token: UUID, for id: AgentID) {
+        sharedTranscriptDetailObservers[id]?[token] = nil
+        if sharedTranscriptDetailObservers[id]?.isEmpty == true { sharedTranscriptDetailObservers[id] = nil }
+    }
+
+    func sharedTranscriptPresentedBlock(for id: AgentID, block: AgentBlock, entry: AgentEntry) -> AgentBlock? {
+        guard let capture = sharedTranscriptDetails[id] else { return nil }
+        let presented = capture.presented(block, in: entry)
+        return presented == block ? nil : presented
+    }
+
+    func sharedTranscriptToolBlocks(for id: AgentID) -> [AgentNodeID: AgentBlock] {
+        guard let document = transcriptProjections[id]?.document else { return [:] }
+        let capture = sharedTranscriptDetails[id]
+        let hidden = AgentTranscriptCanvasView.foldDelegations(document.entries).superseded
+        var result: [AgentNodeID: AgentBlock] = [:]
+        func visit(_ block: AgentBlock, in entry: AgentEntry) {
+            guard !hidden.contains(block.id) else { return }
+            var presented = capture?.presented(block, in: entry) ?? block
+            if case var .diff(diff) = presented.payload {
+                if !diff.text.isEmpty {
+                    let cached = sharedDiffLineCounts[id]?[block.id]
+                    let count = cached?.revision == block.revision ? cached!.count
+                        : GitDiffParser.parse(diff.text).files.flatMap(\.hunks).reduce(0) { $0 + $1.lines.count }
+                    sharedDiffLineCounts[id, default: [:]][block.id] = (block.revision, count)
+                    diff.presentedTotalLines = count
+                }
+                presented.payload = .diff(diff); result[block.id] = presented
+                return
+            } else if case .toolCall = block.payload {
+                result[block.id] = presented
+                return
+            }
+            block.children.forEach { visit($0, in: entry) }
+        }
+        document.entries.forEach { entry in entry.blocks.forEach { visit($0, in: entry) } }
+        return result
+    }
+    func qaObserveSharedTranscript(_ observation: AgentRuntimeObservation, for id: AgentID) { ingestRuntimeObservation(observation, for: id) }
+
+    /// Resolve only images referenced by this agent's document and owned by
+    /// this agent. Paths and attachment-store manifests never enter the lane.
+    func sharedTranscriptImages(for id: AgentID, document: AgentDocument) async -> [AgentImageAttachmentID: Data] {
+        var ids: [AgentImageAttachmentID] = []
+        func visit(_ block: AgentBlock) {
+            switch block.payload {
+            case let .image(value): ids.append(value.attachment.id)
+            case let .imageGallery(value): ids.append(contentsOf: value.images.map { $0.attachment.id })
+            default: break
+            }
+            block.children.forEach(visit)
+        }
+        document.entries.reversed().forEach { $0.blocks.forEach(visit) }
+        var result: [AgentImageAttachmentID: Data] = [:]
+        var blobs: [String: Data] = [:]
+        let previous = sharedTranscriptImageCache[id] ?? [:]
+        var nextCache: [AgentImageAttachmentID: (updatedAt: Date, data: Data)] = [:]
+        var total = 0
+        var seen: Set<AgentImageAttachmentID> = []
+        for imageID in ids where seen.insert(imageID).inserted {
+            guard seen.count <= 64 else { break }
+            guard let stored = try? await attachmentStore.storedAttachment(for: imageID),
+                  stored.manifest.ownership.agentID == id else { continue }
+            let fileURL = stored.fileURL
+            let data: Data?
+            if let cached = previous[imageID], cached.updatedAt == stored.manifest.updatedAt {
+                data = cached.data
+            } else {
+                data = await Task.detached {
+                guard let url = AgentImageFileValidator.validatedLocalImageFile(fileURL),
+                      let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+                defer { try? handle.close() }
+                guard let bytes = try? handle.read(upToCount: SharedAgentTranscriptImages.maxImageBytes + 1),
+                      !bytes.isEmpty, bytes.count <= SharedAgentTranscriptImages.maxImageBytes,
+                      let source = CGImageSourceCreateWithData(bytes as CFData, nil),
+                      let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                      let width = properties[kCGImagePropertyPixelWidth] as? Int,
+                      let height = properties[kCGImagePropertyPixelHeight] as? Int,
+                      width > 0, height > 0, width <= 4096, height <= 4096 else { return nil }
+                // Re-encode the displayed pixels, with orientation applied,
+                // rather than disclosing EXIF or other invisible metadata.
+                let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: max(width, height)]
+                guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+                let clean = NSMutableData()
+                guard let destination = CGImageDestinationCreateWithData(clean, "public.png" as CFString, 1, nil) else { return nil }
+                CGImageDestinationAddImage(destination, image, nil)
+                guard CGImageDestinationFinalize(destination), clean.length <= SharedAgentTranscriptImages.maxImageBytes else { return nil }
+                return clean as Data
+                }.value
+            }
+            guard let data else { continue }
+            let hash = SharedAgentTranscriptImages.digest(data)
+            let cost = blobs[hash] == nil ? data.count : 0
+            guard total + cost <= SharedAgentTranscriptImages.maxTotalBytes else { continue }
+            if blobs[hash] == nil { blobs[hash] = data }
+            result[imageID] = blobs[hash]; total += cost
+            if let retained = blobs[hash] { nextCache[imageID] = (stored.manifest.updatedAt, retained) }
+        }
+        sharedTranscriptImageCache[id] = nextCache
+        return result
+    }
+
     /// Atomically snapshot the complete transcript and register its live tail.
     /// `AgentSupervisor` is main-actor isolated, so no delivery can interleave the
     /// snapshot read and continuation registration.
@@ -8909,9 +9030,30 @@ final class AgentSupervisor {
     private func ingestTranscriptEvent(_ event: AgentRuntimeEvent, for id: AgentID) {
         guard transcriptStore != nil else { return }
         if transcriptProjections[id] == nil { transcriptProjections[id] = transcriptProjection(for: id) }
+        let capture: AgentTranscriptCanvasToolDetail
+        if let existing = sharedTranscriptDetails[id] { capture = existing }
+        else {
+            capture = AgentTranscriptCanvasToolDetail(store: AgentToolDetailStore())
+            capture.bind(agentID: id)
+            capture.onRefresh = { [weak self] in
+                guard let self else { return }
+                self.sharedTranscriptDetailRevisions[id, default: 0] &+= 1
+                self.sharedTranscriptDetailObservers[id]?.values.forEach { $0() }
+            }
+            sharedTranscriptDetails[id] = capture
+        }
+        let identity = capture.captureRuntimeEvent(event)
+        let previous = identity == nil ? Set<AgentNodeID>() : Set(transcriptProjections[id]!.document.entries.map(\.id))
         // In place: a copy mutated while the dictionary still held the original
         // duplicated the whole transcript's storage on every streamed chunk.
         transcriptProjections[id]!.ingest(event)
+        if let identity, case let .itemStarted(_, itemID, _, _) = event {
+            let candidates = transcriptProjections[id]!.document.entries.filter { entry in
+                guard !previous.contains(entry.id), case let .providerItem(provider, providerID) = entry.provenance else { return false }
+                return provider == identity.scope.provider && providerID == itemID
+            }
+            if candidates.count == 1 { _ = capture.bindIdentity(identity, to: candidates[0].id) }
+        }
         scheduleTranscriptPersist(for: id, final: Self.isTranscriptPersistBoundary(event))
     }
 

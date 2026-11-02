@@ -729,7 +729,7 @@ extension AgentTranscriptCanvasView {
             y += fileRow
         }
         if !diff.text.isEmpty {
-            let model = AgentDiffSummaryView.parsedModel(blockID: block.id, revision: block.revision, text: diff.text)
+            let model = AgentDiffSummaryView.parsedModel(blockID: block.id, revision: block.revision, text: diff.text, sharedPreview: diff.presentedTotalLines != nil)
             let rendered = AgentDiffSummaryView.truncatedBody(model: model, theme: theme)
             if rendered.shown > 0 {
                 y += AgentDiffSummaryView.bodySpacing(zoom: zoom)
@@ -738,10 +738,11 @@ extension AgentTranscriptCanvasView {
                                        fallbackFont: NSFont.token(.bodyMono, zoom: zoom))
                 body.builder.rows.append(TextRow(string: rendered.attributed, lines: set.lines, links: []))
                 y += set.height
-                if rendered.total > rendered.shown {
+                let totalLines = max(rendered.shown, diff.presentedTotalLines ?? rendered.total)
+                if totalLines > rendered.shown {
                     y += S(Space.xs)
                     body.builder.decorations.append(.text(
-                        Self.line("+\(rendered.total - rendered.shown) more lines", font: caption, color: secondary),
+                        Self.line("+\(totalLines - rendered.shown) more lines", font: caption, color: secondary),
                         CGPoint(x: inset, y: Self.centredBaseline(font: caption, top: y, height: fileRow))))
                     y += fileRow
                 }
@@ -967,6 +968,7 @@ extension AgentTranscriptCanvasView {
         case .processing: return "Processing image…"
         case .failed: return "Image failed"
         case .missing: return "Image unavailable on this host"
+        case .tooLargeToShare: return "Image too large to share"
         }
     }
 
@@ -988,6 +990,7 @@ extension AgentTranscriptCanvasView {
         case .processing: parts.append("Processing")
         case .failed: parts.append("Failed")
         case .missing: parts.append("Missing")
+        case .tooLargeToShare: parts.append("Too large to share")
         }
         return parts.joined(separator: " · ")
     }

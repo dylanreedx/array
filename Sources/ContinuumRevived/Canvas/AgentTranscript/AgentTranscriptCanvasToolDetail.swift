@@ -30,6 +30,7 @@ final class AgentTranscriptCanvasToolDetail {
 
     /// Called after a store snapshot lands, so the view can re-present rows.
     var onRefresh: (() -> Void)?
+    var fallbackPresentation: ((AgentBlock) -> AgentBlock?)?
 
     init(store: AgentToolDetailStore?) {
         self.store = store
@@ -220,8 +221,12 @@ final class AgentTranscriptCanvasToolDetail {
         case .toolCall, .diff: break
         default: return block
         }
-        guard let identity = key(for: entry), let detail = details[identity], detail.identity == identity else { return block }
-        if let timeToLive, timeToLive <= 0 || clock().timeIntervalSince(detail.updatedAt) >= timeToLive { return block }
+        guard let identity = key(for: entry), let detail = details[identity], detail.identity == identity else {
+            return fallbackPresentation?(block) ?? block
+        }
+        if let timeToLive, timeToLive <= 0 || clock().timeIntervalSince(detail.updatedAt) >= timeToLive {
+            return fallbackPresentation?(block) ?? block
+        }
         // Every rebuild presents every tool row, and presenting is redaction and
         // string work; a transcript's worth of it ran on each update and at every
         // turn end. The result depends on the block and its detail record only.

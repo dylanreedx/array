@@ -589,6 +589,11 @@ final class AgentImageCellView: NSView {
             imageView.isHidden = true
             stateLabel.stringValue = "Image unavailable on this host"
             stateLabel.isHidden = false
+        case .tooLargeToShare:
+            imageView.image = nil
+            imageView.isHidden = true
+            stateLabel.stringValue = "Image too large to share"
+            stateLabel.isHidden = false
         }
 
         identifier = NSUserInterfaceItemIdentifier("agent.image.\(image.attachment.id.rawValue).\(occurrenceKey.ordinal)")
@@ -789,6 +794,7 @@ final class AgentImageCellView: NSView {
         case .processing: return "Processing"
         case .failed: return "Failed"
         case .missing: return "Missing"
+        case .tooLargeToShare: return "Too large to share"
         }
     }
 

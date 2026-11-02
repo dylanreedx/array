@@ -229,6 +229,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private var localNoticeObserverToken: UUID?
     private var outsideHistoryObserverToken: UUID?
     private var runtimeObservationObserverToken: UUID?
+    private var sharedToolDetailObserverToken: UUID?
     /// .plans/101 — a live account read (no turn involved) repaints the row.
     private var accountUsageObserver: NSObjectProtocol?
     private var displayNameObserverToken: UUID?
@@ -727,6 +728,19 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         projectedAgentID = agentID
         transcriptAttachmentOwnerAgentID = agentID
         transcriptCollectionFixture?.bindToolDetailAgent(agentID)
+        var restoredEntries: [AgentNodeID: AgentEntry] = [:]
+        func indexRestored(_ block: AgentBlock, entry: AgentEntry) {
+            if restoredEntries[block.id] == nil { restoredEntries[block.id] = entry }
+            block.children.forEach { indexRestored($0, entry: entry) }
+        }
+        (supervisor.transcriptDocument(for: agentID)?.entries ?? []).forEach { entry in
+            entry.blocks.forEach { indexRestored($0, entry: entry) }
+        }
+        let entriesAtAttach = restoredEntries
+        transcriptCollectionFixture?.setFallbackToolPresentation { [weak supervisor] block in
+            guard let supervisor, let entry = entriesAtAttach[block.id] else { return nil }
+            return supervisor.sharedTranscriptPresentedBlock(for: agentID, block: block, entry: entry)
+        }
         // The stream is created HERE, not inside the task: the snapshot is taken
         // when `events(for:)` is called, so deferring it to the task's first
         // suspension would widen the window in which events land in neither the
@@ -735,6 +749,15 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // tile can learn which checkout this agent works in — before its first
         // event, and without the tile ever reading a repository itself.
         agentSource = supervisor
+        if restoredEntries.values.contains(where: { entry in
+            entry.blocks.contains { block in
+                switch block.payload { case .toolCall, .diff: return true; default: return false }
+            }
+        }) {
+            sharedToolDetailObserverToken = supervisor.addSharedTranscriptDetailObserver(for: agentID) { [weak self] in
+                self?.transcriptCollectionFixture?.refreshFallbackToolPresentation()
+            }
+        }
         leadPlanObserverToken = supervisor.addLeadPlanObserver(for: agentID) { [weak self] in self?.refreshLeadPlan() }
         leadPlanView.onToggle = { [weak self, weak supervisor] in
             guard let self, let supervisor, let record = supervisor.records[agentID] else { return }
@@ -2055,6 +2078,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             NotificationCenter.default.removeObserver(accountUsageObserver)
             self.accountUsageObserver = nil
         }
+        if let sharedToolDetailObserverToken, let agentID = attachedAgentID {
+            agentSource?.removeSharedTranscriptDetailObserver(sharedToolDetailObserverToken, for: agentID)
+            self.sharedToolDetailObserverToken = nil
+        }
         if let runtimeObservationObserverToken, let agentID = attachedAgentID {
             agentSource?.removeRuntimeObservationObserver(runtimeObservationObserverToken, for: agentID)
             self.runtimeObservationObserverToken = nil
@@ -2094,6 +2121,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // Keep transcript-owned image metadata/capabilities alive while the
         // transcript remains on screen; resetProjection owns their purge.
         transcriptCollectionFixture?.bindToolDetailAgent(nil)
+        transcriptCollectionFixture?.setFallbackToolPresentation(nil)
         v2ActionAdapter = nil
         v2TurnSnapshot = nil
         attachedAgentID = nil

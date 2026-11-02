@@ -157,6 +157,7 @@ enum AgentImageResourceState: Equatable {
     case processing
     case failed
     case missing
+    case tooLargeToShare
 }
 
 /// Cheap, sync-safe presentation state for one opaque image attachment. It is

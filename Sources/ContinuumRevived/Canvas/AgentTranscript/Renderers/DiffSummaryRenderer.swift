@@ -148,8 +148,9 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
     /// (`AgentBlockRendererRegistry.production`), and `measuredHeight` below is
     /// a `static func` with no view to hold instance state. Bounded FIFO so an
     /// arbitrarily long session cannot grow this without limit.
-    private static var parseCache: [AgentNodeID: (revision: UInt64, model: GitDiffModel)] = [:]
-    private static var parseCacheOrder: [AgentNodeID] = []
+    private struct DiffCacheKey: Hashable { let id: AgentNodeID; let sharedPreview: Bool }
+    private static var parseCache: [DiffCacheKey: (revision: UInt64, model: GitDiffModel)] = [:]
+    private static var parseCacheOrder: [DiffCacheKey] = []
     private static let parseCacheCapacity = 128
     private(set) static var qaDiffParsesForChecks = 0
 
@@ -159,20 +160,21 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         qaDiffParsesForChecks = 0
     }
 
-    static func parsedModel(blockID: AgentNodeID, revision: UInt64, text: String) -> GitDiffModel {
-        if let cached = parseCache[blockID], cached.revision == revision {
+    static func parsedModel(blockID: AgentNodeID, revision: UInt64, text: String, sharedPreview: Bool = false) -> GitDiffModel {
+        let key = DiffCacheKey(id: blockID, sharedPreview: sharedPreview)
+        if let cached = parseCache[key], cached.revision == revision {
             return cached.model
         }
         let model = GitDiffParser.parse(text)
         qaDiffParsesForChecks += 1
-        if parseCache[blockID] == nil {
-            parseCacheOrder.append(blockID)
+        if parseCache[key] == nil {
+            parseCacheOrder.append(key)
             if parseCacheOrder.count > parseCacheCapacity {
                 let oldest = parseCacheOrder.removeFirst()
                 parseCache.removeValue(forKey: oldest)
             }
         }
-        parseCache[blockID] = (revision, model)
+        parseCache[key] = (revision, model)
         return model
     }
 
@@ -281,7 +283,7 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         overflowLabel.isHidden = overflow == 0
         openReviewButton.isHidden = !payload.canOpenReview
         identifier = NSUserInterfaceItemIdentifier("agent.diff.\(blockID.rawValue)")
-        syncBody(blockID: blockID, revision: revision, text: payload.text)
+        syncBody(blockID: blockID, revision: revision, text: payload.text, totalOverride: payload.presentedTotalLines)
         applyAccessibility(payload: payload)
         applyTokens()
         needsLayout = true
@@ -318,7 +320,7 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
     /// when there is no text, and skips re-rendering the attributed string
     /// when this exact (blockID, revision, theme) was already the last thing
     /// rendered — the repeated-apply case the count witness asserts against.
-    private func syncBody(blockID: AgentNodeID, revision: UInt64, text: String) {
+    private func syncBody(blockID: AgentNodeID, revision: UInt64, text: String, totalOverride: Int?) {
         guard !text.isEmpty else {
             bodyTextView?.isHidden = true
             bodyOverflowLabel.isHidden = true
@@ -331,14 +333,17 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         }
         let theme = effectiveTokenTheme
         if lastRenderedBodyRevision == revision, lastRenderedBodyTheme == theme, bodyTextView != nil {
+            if let totalOverride { bodyTotalLineCount = max(bodyShownLineCount, totalOverride) }
             bodyTextView?.isHidden = false
+            bodyOverflowLabel.stringValue = bodyTotalLineCount > bodyShownLineCount
+                ? "+\(bodyTotalLineCount - bodyShownLineCount) more lines" : ""
             bodyOverflowLabel.isHidden = bodyTotalLineCount <= bodyShownLineCount
             return
         }
-        let model = Self.parsedModel(blockID: blockID, revision: revision, text: text)
+        let model = Self.parsedModel(blockID: blockID, revision: revision, text: text, sharedPreview: totalOverride != nil)
         let rendered = Self.truncatedBody(model: model, theme: theme)
         bodyShownLineCount = rendered.shown
-        bodyTotalLineCount = rendered.total
+        bodyTotalLineCount = max(rendered.shown, totalOverride ?? rendered.total)
         qaDiffBodyRendersForChecks += 1
         guard rendered.shown > 0 || rendered.total > 0 else {
             // Nothing parsed (a malformed/opaque `text`, or a diff with no
@@ -354,9 +359,9 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         view.textStorage?.setAttributedString(rendered.attributed)
         view.isHidden = false
         bodyHeightCache = nil
-        bodyOverflowLabel.stringValue = rendered.total > rendered.shown
-            ? "+\(rendered.total - rendered.shown) more lines" : ""
-        bodyOverflowLabel.isHidden = rendered.total <= rendered.shown
+        bodyOverflowLabel.stringValue = bodyTotalLineCount > bodyShownLineCount
+            ? "+\(bodyTotalLineCount - bodyShownLineCount) more lines" : ""
+        bodyOverflowLabel.isHidden = bodyTotalLineCount <= bodyShownLineCount
         lastRenderedBodyRevision = revision
         lastRenderedBodyTheme = theme
     }
@@ -538,7 +543,7 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         // `syncBody` so an appearance flip repaints it. The parse stays cached;
         // only the bounded, cheap re-render happens again.
         if let blockID {
-            syncBody(blockID: blockID, revision: revision, text: payload.text)
+            syncBody(blockID: blockID, revision: revision, text: payload.text, totalOverride: payload.presentedTotalLines)
         }
     }
 
@@ -557,12 +562,12 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         result += CGFloat(min(payload.files.count, maximumVisibleFiles)) * fileRowHeight(zoom: zoom)
         if payload.files.count > maximumVisibleFiles { result += fileRowHeight(zoom: zoom) }
         if !payload.text.isEmpty {
-            let model = parsedModel(blockID: blockID, revision: revision, text: payload.text)
+            let model = parsedModel(blockID: blockID, revision: revision, text: payload.text, sharedPreview: payload.presentedTotalLines != nil)
             let rendered = truncatedBody(model: model, theme: .dark)
             if rendered.shown > 0 {
                 let bodyWidth = max(1, width - horizontalInset(zoom: zoom) * 2)
                 result += bodySpacing(zoom: zoom) + measuredBodyHeight(rendered.attributed, width: bodyWidth)
-                if rendered.total > rendered.shown {
+                if (payload.presentedTotalLines ?? rendered.total) > rendered.shown {
                     result += CGFloat(zoom.scaled(Space.xs)) + fileRowHeight(zoom: zoom)
                 }
             }

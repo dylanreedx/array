@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
@@ -18,6 +19,9 @@ final class SharedAgentTranscriptView: NSView {
     let surface: any AgentTranscriptSurface
     private let toolDetailStore = AgentToolDetailStore()
     private var feed = AgentTranscriptDocumentFeed()
+    private let imagePreview = AgentImageQuickPreviewController()
+    private var imageDirectory: URL?
+    private var imageMetadata: [AgentImageAttachmentID: AgentImageAttachmentMetadata] = [:]
     private(set) var mirror = Wire.Mirror()
     private(set) var cursor: Lane.Cursor?
     private(set) var renderError: (any Error)?
@@ -56,6 +60,7 @@ final class SharedAgentTranscriptView: NSView {
 
     /// The document as rendered (what parity compares with the host tile's).
     var qaMirrorDocument: AgentDocument { mirror.document }
+    var qaRenderedDocument: AgentDocument { feed.rendered }
 
     /// Applies one lane read. Returns false when the mirror needs a resnapshot:
     /// the cursor is dropped and the next read starts over. Never guesses.
@@ -99,6 +104,17 @@ final class SharedAgentTranscriptView: NSView {
         return true
     }
 
+    func qaImageState(for id: AgentImageAttachmentID) -> AgentImageResourceState { imageResources.snapshot(id).state }
+
+    func qaImageThumbnail(for id: AgentImageAttachmentID) async -> AgentImageThumbnail? {
+        await withCheckedContinuation { continuation in
+            _ = imageResources.requestThumbnail(id: id, targetPixelSize: NSSize(width: 128, height: 128), revision: 1) { result in
+                if case let .success(thumbnail) = result { continuation.resume(returning: thumbnail) }
+                else { continuation.resume(returning: nil) }
+            }
+        }
+    }
+
     /// Another agent: forget this one's document.
     func reset() {
         guard cursor != nil || !mirror.document.entries.isEmpty else { return }
@@ -108,8 +124,30 @@ final class SharedAgentTranscriptView: NSView {
 
     private func present(_ touched: Wire.Mirror.Touched) {
         do {
-            try feed.present(mirror.document.entries, touched: touched.ids, structural: touched.structural, final: true, to: surface)
+            var metadata: [AgentImageAttachmentID: AgentImageAttachmentMetadata] = [:]
+            func collect(_ block: AgentBlock) {
+                switch block.payload {
+                case let .image(value): metadata[value.attachment.id] = value.attachment
+                case let .imageGallery(value): value.images.forEach { metadata[$0.attachment.id] = $0.attachment }
+                default: break
+                }
+                block.children.forEach(collect)
+            }
+            mirror.document.entries.forEach { $0.blocks.forEach(collect) }
+            imageMetadata = metadata
+            func presented(_ block: AgentBlock) -> AgentBlock {
+                var copy = mirror.toolDetails[block.id]?.applying(to: block) ?? block
+                copy.children = block.children.map(presented)
+                return copy
+            }
+            let entries = mirror.document.entries.map { entry in
+                var copy = entry
+                copy.blocks = entry.blocks.map(presented)
+                return copy
+            }
+            try feed.present(entries, touched: touched.ids, structural: touched.structural, final: true, to: surface)
             renderError = nil
+            refreshRenderContext()
         } catch {
             renderError = error
         }
@@ -120,6 +158,7 @@ final class SharedAgentTranscriptView: NSView {
             actions: AgentRenderActions { [weak self] action in self?.perform(action) },
             tokens: .transcript,
             appearance: effectiveTokenTheme,
+            imageResources: imageResources,
             agentStatus: agentStatus,
             agentMessageSenders: agentMessageSenders,
             agentCharacters: agentCharacters,
@@ -128,11 +167,84 @@ final class SharedAgentTranscriptView: NSView {
             canRespondToRequests: false))
     }
 
+    private var imageResources: AgentImageResourceProvider {
+        AgentImageResourceProvider(snapshot: { [weak self] id in
+            MainActor.assumeIsolated {
+                let available = self?.mirror.images.data(for: id) != nil
+                let metadata = self?.imageMetadata[id]
+                let tooLarge = (metadata?.byteCount ?? 0) > UInt64(SharedAgentTranscriptImages.maxImageBytes)
+                    || (metadata?.pixelWidth ?? 0) > 4096 || (metadata?.pixelHeight ?? 0) > 4096
+                let state: AgentImageResourceState = available ? .available : (tooLarge ? .tooLargeToShare : .missing)
+                return AgentImageResourceSnapshot(attachmentID: id, state: state,
+                    revision: available ? 1 : 0,
+                    pixelSize: metadata.flatMap { value in value.pixelWidth.flatMap { width in value.pixelHeight.map { NSSize(width: CGFloat(width), height: CGFloat($0)) } } },
+                    displayName: metadata?.displayName, contentType: metadata?.contentType, byteCount: metadata?.byteCount,
+                    canPreview: available, canCopy: available, canSave: available, canReveal: false)
+            }
+        }, requestThumbnail: { [weak self] id, target, revision, completion in
+            MainActor.assumeIsolated {
+                let request = AgentImageThumbnailRequest()
+                let data = self?.mirror.images.data(for: id)
+                Task { @MainActor in
+                    guard !request.isCancelled else { return }
+                    guard let data, let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+                        completion(.failed); return
+                    }
+                    let maxDimension = max(1, min(1024, Int(ceil(max(target.width, target.height)))))
+                    let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                        kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: maxDimension]
+                    guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+                        if !request.isCancelled { completion(.failed) }; return
+                    }
+                    guard !request.isCancelled else { return }
+                    let size = NSSize(width: cgImage.width, height: cgImage.height)
+                    completion(.success(AgentImageThumbnail(attachmentID: id, revision: revision,
+                        image: NSImage(cgImage: cgImage, size: size), pixelSize: size)))
+                }
+                return request
+            }
+        })
+    }
+
+    private func imageResource(_ id: AgentImageAttachmentID) -> AgentImageActionResource? {
+        guard let data = mirror.images.data(for: id) else { return nil }
+        let directory = imageDirectory ?? FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-shared-images-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            imageDirectory = directory
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let type = CGImageSourceGetType(source) as String? else { return nil }
+            let suffix: String
+            switch type {
+            case "public.png": suffix = "png"
+            case "public.jpeg": suffix = "jpg"
+            case "com.compuserve.gif": suffix = "gif"
+            case "public.tiff": suffix = "tiff"
+            case "public.heic": suffix = "heic"
+            default: suffix = "image"
+            }
+            let file = directory.appendingPathComponent(SharedAgentTranscriptImages.digest(data) + "." + suffix)
+            if !FileManager.default.fileExists(atPath: file.path) { try data.write(to: file, options: .atomic) }
+            return AgentImageActionResource(attachmentID: id, localFileURL: file)
+        } catch { return nil }
+    }
+
+    deinit {
+        if let imageDirectory { try? FileManager.default.removeItem(at: imageDirectory) }
+    }
+
     /// Read-only. Local paths belong to the owner's Mac and do not open here.
     private func perform(_ action: AgentRenderAction) {
         switch action {
         case let .activateLink(_, url, target): onOpenWebLink?(url, target)
         case let .revealAgent(_, agentID, parentAgentID): onRevealAgent?(agentID, parentAgentID)
+        case let .previewImage(_, attachmentID):
+            if let resource = imageResource(attachmentID) { imagePreview.preview(localFileURL: resource.localFileURL) }
+        case let .copyImage(_, attachmentID):
+            if let resource = imageResource(attachmentID) { AgentImageAppKitActions.copy(resource) }
+        case let .saveImageAs(_, attachmentID):
+            if let resource = imageResource(attachmentID) { AgentImageAppKitActions.saveAs(resource, from: self) }
         default: break
         }
     }

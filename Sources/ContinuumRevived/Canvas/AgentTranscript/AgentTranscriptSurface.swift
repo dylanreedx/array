@@ -15,6 +15,8 @@ protocol AgentTranscriptSurface: NSView {
     func updateRenderContext(_ context: AgentRenderContext) throws
 
     func bindToolDetailAgent(_ agentID: AgentID?)
+    func setFallbackToolPresentation(_ provider: ((AgentBlock) -> AgentBlock?)?)
+    func refreshFallbackToolPresentation()
     func captureRuntimeObservation(_ observation: AgentRuntimeObservation)
     @discardableResult
     func captureRuntimeEvent(_ event: AgentRuntimeEvent) -> AgentToolDetailKey?

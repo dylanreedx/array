@@ -183,6 +183,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// intentionally owned outside the document; this cache contains only the
     /// already-sanitized records used for the current host view.
     private let toolDetailStore: AgentToolDetailStore?
+    private var fallbackToolPresentation: ((AgentBlock) -> AgentBlock?)?
     private let toolDetailProvider: ((AgentToolDetailKey) -> AgentToolDetailRecord?)?
     private var toolDetailsByID: [AgentToolDetailKey: AgentToolDetailRecord] = [:]
     private var toolDetailRefreshTask: Task<Void, Never>?
@@ -1436,6 +1437,12 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// Binds host-local tool detail to the managed agent identity. This is
     /// deliberately separate from semantic entries so the agent ID never enters
     /// Codable transcript state.
+    func setFallbackToolPresentation(_ provider: ((AgentBlock) -> AgentBlock?)?) {
+        fallbackToolPresentation = provider
+    }
+
+    func refreshFallbackToolPresentation() { refreshToolDetailPresentation() }
+
     func bindToolDetailAgent(_ agentID: AgentID?) {
         toolDetailAgentID = agentID
         // The tail gyro rides this agent's own point on the shared cycle, the same
@@ -2487,7 +2494,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             return block
         }
         guard let providerID = toolDetailIDByBlockID[block.id] else {
-            return withClusterMembership(block)
+            return withClusterMembership(fallbackToolPresentation?(block) ?? block)
         }
         if let cached = toolDetailsByID[providerID],
            let timeToLive = toolDetailTimeToLive,
@@ -2503,7 +2510,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             candidate = providerCandidate
             detail = sanitized
         } else {
-            guard let stored = toolDetailsByID[providerID], stored.identity == providerID else { return block }
+            guard let stored = toolDetailsByID[providerID], stored.identity == providerID else {
+                return withClusterMembership(fallbackToolPresentation?(block) ?? block)
+            }
             // Actor-store snapshots have already crossed the sanitizer that
             // validates affected file URLs. Preserve those host-local paths;
             // applying the untrusted-provider boundary again erased the exact
@@ -2518,7 +2527,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         } else {
             candidateIsFresh = true
         }
-        guard candidateIsFresh else { return block }
+        guard candidateIsFresh else { return withClusterMembership(fallbackToolPresentation?(block) ?? block) }
         var presented = block
         let isClusterMember = clusterMemberIDs.contains(block.id)
         switch block.payload {
@@ -3560,6 +3569,14 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 transcriptLayout.qaGapAboveForChecks(index + 1))
     }
     @discardableResult
+    func qaRevealToolRowForChecks(_ id: AgentNodeID) -> Bool {
+        guard let index = displayIndexByID[id] else { return false }
+        collectionView.scrollToItems(at: [IndexPath(item: index, section: 0)], scrollPosition: .top)
+        layoutSubtreeIfNeeded(); collectionView.layoutSubtreeIfNeeded()
+        return true
+    }
+
+    @discardableResult
     func qaPerformToolDisclosureClick(for id: AgentNodeID) -> Bool {
         // DISPLAY index, not the semantic row index: with clustering the two
         // differ the moment anything folds above this row (S4.3).
@@ -3765,6 +3782,12 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     var qaCachedMeasurementCount: Int { measurementCache.cachedMeasurementCount }
     var qaLayoutPreparePassCount: Int { transcriptLayout.preparePassCount }
     var qaShowsJumpToLatest: Bool { !jumpToLatestButton.isHidden }
+    var qaVisibleItemCountForChecks: Int { collectionView.visibleItems().count }
+    var qaCollectionDiagnosticsForChecks: String {
+        let rect = collectionView.visibleRect
+        return "frame=\(collectionView.frame) visible=\(rect) hidden=\(collectionView.isHiddenOrHasHiddenAncestor) window=\(collectionView.window != nil) attributes=\(transcriptLayout.layoutAttributesForElements(in: rect).count)"
+    }
+
     var qaVisibleAccessibilityText: [String] {
         collectionView.visibleItems().compactMap { item in
             guard let item = item as? AgentTranscriptCollectionItem,

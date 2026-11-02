@@ -46,6 +46,16 @@ final class SharedAgentTranscriptPublisher {
     /// After a roster reaches the relay: the host session starts and stops
     /// each helper's own stream from it.
     var onHelpersPublished: (([Wire.Helper]) -> Void)?
+    private let details: @MainActor () -> [AgentNodeID: SharedAgentToolPresentation]
+    private let detailRevision: @MainActor () -> UInt64?
+    private var lastDetailRevision: UInt64?
+    private var lastDetailAudit = Date.distantPast
+    private var publishedDetails: [AgentNodeID: SharedAgentToolPresentation] = [:]
+    private let imageData: @MainActor (AgentDocument) async -> [AgentImageAttachmentID: Data]
+    private var publishedImages: [AgentImageAttachmentID: Data] = [:]
+    private var cachedImages: [AgentImageAttachmentID: Data] = [:]
+    private var lastImageIDs: Set<AgentImageAttachmentID> = []
+    private var lastImageRead = Date.distantPast
     private let sink: SharedAgentTranscriptSink
     private let budget: SharedAgentTranscriptBudget
     /// Host entries (before the budget) as the guest now holds them.
@@ -63,11 +73,15 @@ final class SharedAgentTranscriptPublisher {
     private(set) var frames = 0
 
     init(agent: AgentID, stream: String = Lane.mainStream, generation: UInt64,
-         budget: SharedAgentTranscriptBudget = SharedAgentTranscriptTruncatingBudget(),
+         budget: SharedAgentTranscriptBudget = SharedAgentTranscriptSafeBudget(),
          sink: SharedAgentTranscriptSink, helpers: (@MainActor () -> [Wire.Helper])? = nil,
+         details: @escaping @MainActor () -> [AgentNodeID: SharedAgentToolPresentation] = { [:] },
+         detailRevision: @escaping @MainActor () -> UInt64? = { nil },
+         imageData: @escaping @MainActor (AgentDocument) async -> [AgentImageAttachmentID: Data] = { _ in [:] },
          document: @escaping @MainActor () -> AgentDocument?) {
         self.agent = agent; self.stream = stream; self.generation = generation
         self.budget = budget; self.sink = sink; self.helpers = helpers; self.document = document
+        self.details = details; self.detailRevision = detailRevision; self.imageData = imageData
     }
 
     /// The main stream carries the agent's helper roster; a helper's own
@@ -77,7 +91,13 @@ final class SharedAgentTranscriptPublisher {
         let roster: (@MainActor () -> [Wire.Helper])? = stream == Lane.mainStream ? { @MainActor [weak supervisor] in
             supervisor.map { SharedAgentHelpers.roster($0, lead: agent) } ?? []
         } : nil
-        self.init(agent: agent, stream: stream, generation: generation, sink: sink, helpers: roster) { [weak supervisor] in
+        self.init(agent: agent, stream: stream, generation: generation, sink: sink, helpers: roster, details: { [weak supervisor] in
+            (supervisor?.sharedTranscriptToolBlocks(for: agent) ?? [:]).compactMapValues { SharedAgentToolPresentation(presented: $0) }
+        }, detailRevision: { [weak supervisor] in
+            supervisor?.sharedTranscriptDetailRevision(for: agent)
+        }, imageData: { [weak supervisor] document in
+            await supervisor?.sharedTranscriptImages(for: agent, document: document) ?? [:]
+        }) { [weak supervisor] in
             supervisor?.transcriptDocument(for: agent)
         }
     }
@@ -100,31 +120,57 @@ final class SharedAgentTranscriptPublisher {
     func tick() async {
         guard !publishing, !superseded, !laneUnavailable, let current = document() else { return }
         let roster = helpers?()
-        if !needsCheckpoint, current.version == lastVersion, roster == publishedHelpers { return }
+        let revision = detailRevision()
+        let now = Date()
+        // Detail changes have their own revision; periodic audits still notice
+        // TTL expiry and images that were not ready at the previous read.
+        if !needsCheckpoint, current.version == lastVersion, roster == publishedHelpers, let revision,
+           revision == lastDetailRevision, now.timeIntervalSince(lastDetailAudit) < 5 { return }
         publishing = true
+        let currentDetails = details()
+        let imageIDs = Self.imageIDs(in: current.entries)
+        if imageIDs != lastImageIDs || (cachedImages.count < imageIDs.count && Date().timeIntervalSince(lastImageRead) >= 5) {
+            cachedImages = Self.boundedImages(await imageData(current))
+            lastImageIDs = imageIDs; lastImageRead = Date()
+        }
+        let visible = published.isEmpty && lastVersion == current.version ? [] : window(of: current.entries)
+        let visibleBlocks = Wire.blockIDs(in: visible)
+        let visibleImages = Self.imageIDs(in: visible)
+        if !needsCheckpoint, current.version == lastVersion, roster == publishedHelpers,
+           currentDetails.filter({ visibleBlocks.contains($0.key) }) == publishedDetails,
+           cachedImages.filter({ visibleImages.contains($0.key) }) == publishedImages {
+            lastDetailRevision = revision; lastDetailAudit = now
+            publishing = false; return
+        }
         defer { publishing = false }
         do {
-            if needsCheckpoint || bytesSinceCheckpoint > Lane.checkpointAfterBytes {
-                try await sendCheckpoint(current, roster: roster)
+            if needsCheckpoint || bytesSinceCheckpoint > Lane.checkpointAfterBytes
+                || cachedImages.filter({ visibleImages.contains($0.key) }) != publishedImages {
+                try await sendCheckpoint(current, roster: roster, details: currentDetails, images: cachedImages)
             } else if var ops = current.version == lastVersion ? [] : patch(to: current.entries) {
-                ops = ops.map(fitted)
+                let keptIDs = Wire.blockIDs(in: window(of: current.entries))
+                let nextDetails = currentDetails.filter { keptIDs.contains($0.key) }
+                let changedIDs = Set(publishedDetails.keys).union(nextDetails.keys).filter { publishedDetails[$0] != nextDetails[$0] }
+                let detailOps = changedIDs.sorted { $0.rawValue < $1.rawValue }.map { Wire.Op.toolDetail(block: $0, detail: nextDetails[$0]) }
+                ops = ops.map(fitted) + detailOps
                 if let roster, roster != publishedHelpers { ops.append(.helpers(roster)) }
                 if !ops.isEmpty {
                     let body = try Wire.encode(Wire.Patch(ops: ops))
                     if body.count > Lane.maxFrameBytes {
-                        try await sendCheckpoint(current, roster: roster)
+                        try await sendCheckpoint(current, roster: roster, details: currentDetails, images: cachedImages)
                     } else {
                         let frame = Lane.Frame(generation: generation, sequence: through + 1, body: body)
                         try await sink.publish(stream: stream, checkpoint: nil, frames: [frame])
                         through += 1; frames += 1; bytesSinceCheckpoint += body.count
-                        published = window(of: current.entries)
+                        published = window(of: current.entries); publishedDetails = nextDetails
                         if let roster, roster != publishedHelpers { publishedHelpers = roster; onHelpersPublished?(roster) }
                     }
                 }
                 lastVersion = current.version
             } else {
-                try await sendCheckpoint(current, roster: roster)
+                try await sendCheckpoint(current, roster: roster, details: currentDetails, images: cachedImages)
             }
+            lastDetailRevision = revision; lastDetailAudit = now
             lastError = nil
         } catch SharedAgentTranscriptRefusal.superseded {
             lastError = SharedAgentTranscriptRefusal.superseded; superseded = true; stop()
@@ -137,18 +183,81 @@ final class SharedAgentTranscriptPublisher {
         }
     }
 
-    private func sendCheckpoint(_ current: AgentDocument, roster: [Wire.Helper]?) async throws {
+    private func sendCheckpoint(_ current: AgentDocument, roster: [Wire.Helper]?, details: [AgentNodeID: SharedAgentToolPresentation],
+                                images: [AgentImageAttachmentID: Data]) async throws {
         // The roster rides inside the same limit (32 helpers, a few KiB).
         let rosterBytes = try roster.map { try Wire.encode($0).count + 16 } ?? 0
         let window = Wire.window(current.entries, maxBytes: Lane.maxCheckpointBytes - rosterBytes, budget: budget)
-        let checkpoint = Wire.Checkpoint(entries: window.entries, omittedEntries: window.omittedEntries, helpers: roster)
-        let body = try Wire.encode(checkpoint)
+        var entries = window.entries
+        var omitted = window.omittedEntries
+        var selected: [AgentNodeID: SharedAgentToolPresentation] = [:]
+        var body = Data()
+        while true {
+            let ids = Wire.blockIDs(in: entries)
+            selected = details.filter { ids.contains($0.key) }
+            let items = selected.keys.sorted { $0.rawValue < $1.rawValue }.compactMap { id in
+                selected[id].map { Wire.ToolDetail(block: id, detail: $0) }
+            }
+            body = try Wire.encode(Wire.Checkpoint(entries: entries, omittedEntries: omitted, helpers: roster, toolDetails: items))
+            if body.count <= Lane.maxCheckpointBytes || entries.isEmpty { break }
+            entries.removeFirst(); omitted += 1
+        }
         let next = through + 1
         try await sink.publish(stream: stream, checkpoint: .init(generation: generation, through: next, body: body), frames: [])
-        through = next; checkpoints += 1; bytesSinceCheckpoint = 0; needsCheckpoint = false
-        published = Array(current.entries.suffix(checkpoint.entries.count))
+        through = next; checkpoints += 1; bytesSinceCheckpoint = 0
+        let visibleIDs = Self.imageIDs(in: entries)
+        let selectedImages = images.filter { visibleIDs.contains($0.key) }
+        var sentHashes: Set<String> = []
+        for id in selectedImages.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+            guard let data = selectedImages[id] else { continue }
+            let manifest = SharedAgentTranscriptImages.Manifest(attachment: id, data: data)
+            try await sendImageOp(.imageManifest(manifest))
+        }
+        for id in selectedImages.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+            guard let data = selectedImages[id] else { continue }
+            let hash = SharedAgentTranscriptImages.digest(data)
+            guard sentHashes.insert(hash).inserted else { continue }
+            for chunk in SharedAgentTranscriptImages.chunks(data) { try await sendImageOp(.imageChunk(chunk)) }
+        }
+        needsCheckpoint = false
+        published = Array(current.entries.suffix(entries.count)); publishedDetails = selected; publishedImages = selectedImages
         lastVersion = current.version
         if let roster { let changed = roster != publishedHelpers; publishedHelpers = roster; if changed { onHelpersPublished?(roster) } }
+    }
+
+    private func sendImageOp(_ op: Wire.Op) async throws {
+        let body = try Wire.encode(Wire.Patch(ops: [op]))
+        let frame = Lane.Frame(generation: generation, sequence: through + 1, body: body)
+        try await sink.publish(stream: stream, checkpoint: nil, frames: [frame])
+        through += 1; frames += 1
+    }
+
+    private static func boundedImages(_ images: [AgentImageAttachmentID: Data]) -> [AgentImageAttachmentID: Data] {
+        var selected: [AgentImageAttachmentID: Data] = [:]
+        var hashes: Set<String> = []
+        var bytes = 0
+        for id in images.keys.sorted(by: { $0.rawValue < $1.rawValue }).prefix(64) {
+            guard let data = images[id], !data.isEmpty, data.count <= SharedAgentTranscriptImages.maxImageBytes else { continue }
+            let hash = SharedAgentTranscriptImages.digest(data)
+            let cost = hashes.contains(hash) ? 0 : data.count
+            guard bytes + cost <= SharedAgentTranscriptImages.maxTotalBytes else { continue }
+            selected[id] = data; bytes += cost; hashes.insert(hash)
+        }
+        return selected
+    }
+
+    private static func imageIDs(in entries: [AgentEntry]) -> Set<AgentImageAttachmentID> {
+        var ids: Set<AgentImageAttachmentID> = []
+        func visit(_ block: AgentBlock) {
+            switch block.payload {
+            case let .image(image): ids.insert(image.attachment.id)
+            case let .imageGallery(gallery): gallery.images.forEach { ids.insert($0.attachment.id) }
+            default: break
+            }
+            block.children.forEach(visit)
+        }
+        entries.forEach { $0.blocks.forEach(visit) }
+        return ids
     }
 
     /// The current entries from the guest's first one on. Entries before the

@@ -45,10 +45,13 @@ public enum SharedAgentTranscriptWire {
         /// The shared agent's whole helper roster, replacing the last one
         /// (`SharedAgentTranscriptHelpers.swift`). Sent on change.
         case helpers([Helper])
+        case toolDetail(block: AgentNodeID, detail: SharedAgentToolPresentation?)
+        case imageManifest(SharedAgentTranscriptImages.Manifest)
+        case imageChunk(SharedAgentTranscriptImages.Chunk)
         /// An op this build does not know (a newer host): decoded and skipped.
         case unknown(String)
 
-        private enum Keys: String, CodingKey { case op, head, after, blocks, entry, block, helpers }
+        private enum Keys: String, CodingKey { case op, head, after, blocks, entry, block, helpers, detail, manifest, chunk }
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: Keys.self)
             let op = try c.decode(String.self, forKey: .op)
@@ -59,6 +62,9 @@ public enum SharedAgentTranscriptWire {
             case "block": self = .block(entry: try c.decode(AgentNodeID.self, forKey: .entry), try c.decode(AgentBlock.self, forKey: .block))
             case "remove": self = .remove(entry: try c.decode(AgentNodeID.self, forKey: .entry))
             case "helpers": self = .helpers(try c.decode([Helper].self, forKey: .helpers))
+            case "toolDetail": self = .toolDetail(block: try c.decode(AgentNodeID.self, forKey: .block), detail: try c.decodeIfPresent(SharedAgentToolPresentation.self, forKey: .detail))
+            case "imageManifest": self = .imageManifest(try c.decode(SharedAgentTranscriptImages.Manifest.self, forKey: .manifest))
+            case "imageChunk": self = .imageChunk(try c.decode(SharedAgentTranscriptImages.Chunk.self, forKey: .chunk))
             default: self = .unknown(op)
             }
         }
@@ -74,23 +80,46 @@ public enum SharedAgentTranscriptWire {
                 try c.encode("remove", forKey: .op); try c.encode(entry, forKey: .entry)
             case let .helpers(helpers):
                 try c.encode("helpers", forKey: .op); try c.encode(helpers, forKey: .helpers)
+            case let .toolDetail(block, detail):
+                try c.encode("toolDetail", forKey: .op); try c.encode(block, forKey: .block)
+                try c.encodeIfPresent(detail, forKey: .detail)
+            case let .imageManifest(manifest):
+                try c.encode("imageManifest", forKey: .op); try c.encode(manifest, forKey: .manifest)
+            case let .imageChunk(chunk):
+                try c.encode("imageChunk", forKey: .op); try c.encode(chunk, forKey: .chunk)
             case let .unknown(op):
                 try c.encode(op, forKey: .op)
             }
         }
     }
 
+    public struct ToolDetail: Codable, Equatable, Sendable {
+        public let block: AgentNodeID
+        public let detail: SharedAgentToolPresentation
+        public init(block: AgentNodeID, detail: SharedAgentToolPresentation) {
+            self.block = block; self.detail = detail
+        }
+    }
     public struct Checkpoint: Codable, Equatable, Sendable {
         public let schema: Int
         public let entries: [AgentEntry]
-        /// Host entries before the window, which stay on the host's Mac.
         public let omittedEntries: Int
         /// The helper roster at this point. Nil from a host that sends none
         /// (a child stream, or a host before helpers).
         public let helpers: [Helper]?
-        public init(entries: [AgentEntry], omittedEntries: Int, helpers: [Helper]? = nil) {
-            schema = SharedAgentTranscriptWire.schema; self.entries = entries; self.omittedEntries = omittedEntries
-            self.helpers = helpers
+        public let toolDetails: [ToolDetail]
+        public init(entries: [AgentEntry], omittedEntries: Int, helpers: [Helper]? = nil, toolDetails: [ToolDetail] = []) {
+            schema = SharedAgentTranscriptWire.schema; self.entries = entries
+            self.omittedEntries = omittedEntries; self.helpers = helpers; self.toolDetails = toolDetails
+        }
+        private enum Keys: String, CodingKey { case schema, entries, omittedEntries, helpers, toolDetails }
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            schema = try c.decode(Int.self, forKey: .schema)
+            entries = try c.decode([AgentEntry].self, forKey: .entries)
+            omittedEntries = try c.decode(Int.self, forKey: .omittedEntries)
+            helpers = try c.decodeIfPresent([Helper].self, forKey: .helpers)
+            toolDetails = try c.decodeIfPresent([ToolDetail].self, forKey: .toolDetails) ?? []
         }
     }
     public struct Patch: Codable, Equatable, Sendable {
@@ -151,6 +180,13 @@ public enum SharedAgentTranscriptWire {
         return Checkpoint(entries: kept.reversed(), omittedEntries: entries.count - kept.count)
     }
 
+    public static func blockIDs(in entries: [AgentEntry]) -> Set<AgentNodeID> {
+        var ids: Set<AgentNodeID> = []
+        func visit(_ block: AgentBlock) { ids.insert(block.id); block.children.forEach(visit) }
+        entries.forEach { $0.blocks.forEach(visit) }
+        return ids
+    }
+
     // MARK: - Guest
 
     /// The guest's copy of the host's document. It applies only what it was
@@ -160,6 +196,8 @@ public enum SharedAgentTranscriptWire {
         public private(set) var omittedEntries = 0
         /// The host's helper roster; nil until a host that sends one has.
         public private(set) var helpers: [Helper]?
+        public private(set) var toolDetails: [AgentNodeID: SharedAgentToolPresentation] = [:]
+        public private(set) var images = SharedAgentTranscriptImages.Receiver()
         public init() {}
 
         public enum Failure: Error, Equatable { case schema, unknownEntry(AgentNodeID), missingBlock(AgentNodeID), unknownAnchor(AgentNodeID), invalidHelpers }
@@ -172,6 +210,11 @@ public enum SharedAgentTranscriptWire {
         public mutating func install(_ checkpoint: Checkpoint) throws -> Touched {
             guard checkpoint.schema <= SharedAgentTranscriptWire.schema else { throw Failure.schema }
             if let roster = checkpoint.helpers, !SharedAgentTranscriptWire.valid(helpers: roster) { throw Failure.invalidHelpers }
+            let validIDs = SharedAgentTranscriptWire.blockIDs(in: checkpoint.entries)
+            guard checkpoint.toolDetails.allSatisfy({ validIDs.contains($0.block) }),
+                  Set(checkpoint.toolDetails.map(\.block)).count == checkpoint.toolDetails.count else { throw Failure.schema }
+            toolDetails = Dictionary(uniqueKeysWithValues: checkpoint.toolDetails.map { ($0.block, $0.detail) })
+            images = SharedAgentTranscriptImages.Receiver()
             omittedEntries = checkpoint.omittedEntries
             helpers = checkpoint.helpers
             var entries = checkpoint.entries
@@ -184,6 +227,8 @@ public enum SharedAgentTranscriptWire {
         public mutating func apply(_ patch: Patch) throws -> Touched {
             guard patch.schema <= SharedAgentTranscriptWire.schema else { throw Failure.schema }
             var entries = document.entries
+            var details = toolDetails
+            var receivedImages = images
             var touched = Touched()
             var pendingOrder: [AgentNodeID: [AgentNodeID]] = [:]
             var stagedBlocks: [AgentNodeID: [AgentNodeID: AgentBlock]] = [:]
@@ -220,6 +265,14 @@ public enum SharedAgentTranscriptWire {
                 case let .helpers(list):
                     guard SharedAgentTranscriptWire.valid(helpers: list) else { throw Failure.invalidHelpers }
                     roster = list
+                case let .toolDetail(block, detail):
+                    details[block] = detail
+                    touched.ids.insert(block)
+                case let .imageManifest(manifest):
+                    do { try receivedImages.register(manifest) } catch { throw Failure.schema }
+                case let .imageChunk(chunk):
+                    do { try receivedImages.receive(chunk) } catch { throw Failure.schema }
+                    touched.structural = true
                 case .unknown:
                     continue
                 }
@@ -240,6 +293,10 @@ public enum SharedAgentTranscriptWire {
                     entries[at].blocks[slot] = block
                 }
             }
+            let validIDs = SharedAgentTranscriptWire.blockIDs(in: entries)
+            guard touched.ids.filter({ details[$0] != nil }).allSatisfy(validIDs.contains) else { throw Failure.schema }
+            toolDetails = details.filter { validIDs.contains($0.key) }
+            images = receivedImages
             document = AgentDocument(version: document.version &+ 1, entries: entries)
             helpers = roster
             return touched
@@ -285,6 +342,9 @@ public struct SharedAgentTranscriptTruncatingBudget: SharedAgentTranscriptBudget
         case .commandOutput(var output):
             output.text = Self.cut(output.text, to: limit / 2)
             copy.payload = .commandOutput(output)
+        case .diff(var diff):
+            diff.text = Self.cut(diff.text, to: limit / 2)
+            copy.payload = .diff(diff)
         default:
             break
         }
@@ -301,5 +361,76 @@ public struct SharedAgentTranscriptTruncatingBudget: SharedAgentTranscriptBudget
             out.append(character); used += size
         }
         return out + "\n…"
+    }
+}
+
+/// The host's diff body renders only the first 30 hunk lines. Build the wire
+/// preview from those visible lines, not the raw diff (which may also contain
+/// undisplayed old paths and secret-bearing later hunks). The total travels in
+/// the tool presentation, so the overflow label still tells the truth.
+public struct SharedAgentTranscriptSafeBudget: SharedAgentTranscriptBudget {
+    public init() {}
+    /// The host shows at most eight file names. Keep hidden rows' counts and
+    /// actions for the aggregate, but do not send their undisplayed names.
+    public static func visibleFiles(_ files: [AgentDiffFileSummary]) -> [AgentDiffFileSummary] {
+        files.enumerated().map { index, file in
+            guard index >= 8 else { return file }
+            var safe = file; safe.displayName = "Changed file"; return safe
+        }
+    }
+    public func fit(_ block: AgentBlock, limit: Int) -> AgentBlock {
+        var safe = block
+        switch block.payload {
+        case .toolCall, .diff: safe.children = []
+        default: safe.children = block.children.map { fit($0, limit: limit) }
+        }
+        // The tool renderer never reads the opaque argument object; its
+        // visible disclosure comes from the sanitized presentation op.
+        if case var .toolCall(tool) = safe.payload {
+            // The semantic node can outlive its visible row (a subagent chip
+            // folds the spawning call away). Its actual visible name and body
+            // travel only in the presentation op while the row is visible.
+            tool.name = "Tool"; tool.summary = nil; tool.arguments = nil
+            safe.payload = .toolCall(tool)
+        }
+        if case var .diff(diff) = safe.payload {
+            diff.files = Self.visibleFiles(diff.files)
+            guard !diff.text.isEmpty else {
+                safe.payload = .diff(diff)
+                return SharedAgentTranscriptTruncatingBudget().fit(safe, limit: limit)
+            }
+            let model = GitDiffParser.parse(diff.text)
+            var lines: [String] = []
+            var shown = 0
+            for file in model.files {
+                let path = file.newPath ?? file.oldPath ?? "(unknown)"
+                lines.append("diff --git a/\(path) b/\(path)")
+                switch file.change {
+                case .added: lines.append("new file mode 100644")
+                case .deleted: lines.append("deleted file mode 100644")
+                case .renamed: lines.append("rename from \(path)"); lines.append("rename to \(path)")
+                case .modified, .binary: break
+                }
+                lines.append("--- " + (file.change == .added ? "/dev/null" : "a/\(path)"))
+                lines.append("+++ " + (file.change == .deleted ? "/dev/null" : "b/\(path)"))
+                if file.isBinary { lines.append("Binary files differ"); continue }
+                for hunk in file.hunks where shown < 30 {
+                    lines.append(hunk.header)
+                    for line in hunk.lines.prefix(30 - shown) {
+                        switch line.kind {
+                        case .addition: lines.append("+" + line.text)
+                        case .deletion: lines.append("-" + line.text)
+                        case .context: lines.append(" " + line.text)
+                        case .metadata: lines.append(line.text)
+                        }
+                        shown += 1
+                    }
+                }
+            }
+            diff.text = lines.joined(separator: "\n")
+            diff.canOpenReview = false
+            safe.payload = .diff(diff)
+        }
+        return SharedAgentTranscriptTruncatingBudget().fit(safe, limit: limit)
     }
 }

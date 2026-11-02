@@ -327,6 +327,8 @@ public struct AgentDiffPayload: Codable, Equatable, Sendable {
     /// the ephemeral rendered copy from the host-local detail store and is
     /// never document state (I5).
     public var presentedFilesArePending: Bool = false
+    /// The host-rendered hunk count when a shared preview omits hidden lines.
+    public var presentedTotalLines: Int? = nil
 
     public init(
         text: String,

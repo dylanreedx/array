@@ -547,6 +547,12 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         }
     }
 
+    func setFallbackToolPresentation(_ provider: ((AgentBlock) -> AgentBlock?)?) {
+        toolDetail.fallbackPresentation = provider
+    }
+
+    func refreshFallbackToolPresentation() { preservingTail { rebuild() } }
+
     func captureRuntimeObservation(_ observation: AgentRuntimeObservation) {
         toolDetail.captureRuntimeObservation(observation)
     }
