@@ -97,8 +97,8 @@ have something to show.
    way: the Add to share pill warns first. An opted-in terminal is live in
    B's portal, drawn the same way, and A's terminal shows a "Live" badge
    with a Stop sharing button beside it, at the right of its top strip.
-   **Stop sharing one terminal:** press that Stop sharing. That terminal turns back into a card in B's portal;
-   the rest of the portal keeps going.
+   **Stop sharing one terminal:** press that Stop sharing. That terminal
+   turns back into a card in B's portal; the rest of the portal keeps going.
 7. **File and diff, with Approve.** In A, open greet.js (palette: "Editor") and a
    diff (palette: "Diff review"). Share them. B sees the
    file's text and the coloured diff, updated when A saves. In a portal,
@@ -133,7 +133,7 @@ have something to show.
 
 ## Known not to work, or left out
 
-- **The 8 newer commits on array/integration are not in it either** (iOS
+- **The 8 newer commits on array/integration are not in it** (iOS
   simulators on the canvas, the ten app themes, the group agent drag, one
   phone alert per task). The preview is built on 0.7.38 (`b0689628`), as
   asked; those land with the release.
@@ -173,7 +173,74 @@ have something to show.
   prompts with names, tool steps by kind), not A's full renderer.
 - Links go through `open-link` because these preview apps are not the app
   macOS opens arrayapp.dev links in.
+- **The sidebar's search header is cramped.** Since the sort button
+  arrived, the search field and the scope control are each squeezed to
+  102 pt, and the sidebar screenshot check fails on it. Reported to its
+  owner.
 
 ## What was checked before handing over
 
-RESULTS
+The apps were built from `array/preview-0739` at `5ca9f761`. Later commits
+on the branch are this guide and notes only.
+
+**Two-app journeys** (two real apps, off screen, with agents on fake CLIs).
+Each run deletes the people and areas it made on the relay.
+
+| Journey | Local relay | Staging v12 |
+| --- | --- | --- |
+| Portal (mode B), incl. a live terminal and its Stop | 70 / 70 | 70 / 70 |
+| Live shared terminal | 32 / 32 | 32 / 32 |
+| Kinds with tmux persistence, whose tmux server stalled | 55 / 55 | (not rerun) |
+| One agent + every kind + a real 0.7.38 guest | 98 / 98 | 98 / 98 |
+
+The staging terminal run and both 98-step runs ran one merge earlier,
+before the terminal Stop and the freeze fix. In the tmux run, the app's own
+tmux server really did stall: the terminal opened without persistence after
+5 s, and sharing it fell back to its visible text after 3 s. Before the fix,
+the same run froze the host.
+
+**Targeted checks:** every check the merged branches added, and the
+existing shared-agent checks, all pass. They cover:
+
+- portal render and migration, every kind in a portal, shared tile render;
+- shared terminal render, the terminal stream, and the two tmux-stall checks;
+- the note CRDT and the live-tile lane (incl. the 0.7.38 refusal);
+- relay deletion;
+- characters: theme, pose, sprite, sidebar, tile, settings, live themes,
+  perf, agent.update;
+- sidebar: sort, inbox, liveness, truth.
+
+The iOS app builds.
+
+**Full matrix** (on `2d53f8f9`, one merge before the final tip: the terminal
+freeze fix, the portal Stop and the owner's iOS fix came after it and were
+checked by the legs and journeys above). 449 legs, 12 known-red as expected,
+6 failed:
+
+- 3 because the screen was locked while it ran (`--tile-surface-residency-check`,
+  `--perf-budget-geometry-hold-probe-check`,
+  `--perf-budget-surface-host-slope-check`). They wait for the screen to draw
+  a frame, which a locked screen never does. 0.7.38's own build fails all
+  three the same way tonight.
+- 1 old: the film scenes check, 3 of 12 scenes, the same scenes that have
+  failed since 0.7.36.
+- 2 real, reported to their owners:
+  - colour hygiene: two raw colours, in the shared terminal's palette and in
+    a fake web page used by a shared-tile check;
+  - the sidebar search header (above).
+
+**Relay:** staging is v12, from this branch. Its rollback target is
+recorded in .plans/105-collaboration/RELAY-DEPLOY.md. Production is
+untouched.
+
+**Not done: the characters motion harness.** It needs an unlocked screen,
+and the screen was locked when the proof ran. It takes the screen for a few minutes, so
+run it when you can leave the Mac alone, with nothing covering the window.
+The Release "Array Motion" bundle it uses is already built from this tip.
+From the bench:
+
+scripts/canvas-motion/character-arms.sh
+
+It runs characters off and on, zoom and pan, twice each. Each run's numbers
+are in ~/array-scratch/motion-runs/characters-*/summary.txt; on and off
+should match, as they did at 80 tiles in the characters work.
