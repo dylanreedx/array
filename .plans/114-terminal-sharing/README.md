@@ -215,7 +215,34 @@ The journey's terminal mode starts the host's tmux server itself with
 new. Every tmux command in the journey and the checks runs in a fresh
 `TMUX_TMPDIR` with `TMUX`/`TMUX_PANE` unset, and checks `#{socket_path}`.
 
-## 8. Open
+## 8. In a portal
+
+A terminal in a portal is a card ("Terminal stays on Dylan's Mac") with
+nothing of it on the relay, unless the person opts that terminal in, one at a
+time and past the same secrets warning:
+
+- **The share popover's row.** Each terminal row has "Share live…". The first
+  press shows the warning and turns the button into "Share anyway"; the second
+  marks the row "Live" (its button now "Keep private"). An opt-in lasts one
+  popover: reopened, it is asked for again.
+- **Add to share.** On a terminal dragged into the shared region, the pill's
+  first press reads "Output may contain secrets · Share anyway"; the second
+  adds it live.
+
+An opted-in terminal joins the portal's area as a `.liveTile` item bound to
+this Mac, exactly like a terminal shared on its own: the portal's host session
+hosts it with `TerminalLiveSource`, and the guest's portal item
+(`Portal/SharedPortalTerminalKind.swift`, in `SharedPortalKinds.kind(for:)`)
+draws it with `LiveTileBodyView` and its Ghostty mirror, on the same stream
+lane. Journey mode B, steps B1a and B6b, on a local relay: the row's two
+presses and the forgotten opt-in, the pill's two presses, the live tile in the
+area, what ran before it was added and new output on the guest, the host's
+grid, the host's pane line for line, and the never-opted terminal still a
+card. 61 PASS. Not yet in a portal: the host's Live badge (the portal's own
+"shared" mark is there) and Stop sharing for one terminal (revoke stops the
+portal).
+
+## 9. Open
 
 - Staging was measured with both apps on one Mac. Two Macs on different
   networks add each one's own trip to the relay.
@@ -228,4 +255,3 @@ new. Every tmux command in the journey and the checks runs in a fresh
 - Each guest also long-polls the state lane, which repeats the newest screen
   once a second while output flows (a few KB to ~100 KB a second); it is there
   for recovery and for relays without the stream lane.
-- The stream lane is not in the portal: a portal still shows its terminal card.

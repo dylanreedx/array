@@ -90,7 +90,8 @@ protocol SharedPortalKind {
   `tileView(id)` (the live view when hydrated), `projectRoot(forTile:)` and
   `app` (the `AppDelegate`) for anything else.
 - **Privacy.** A kind decides what leaves the Mac. Terminals send nothing
-  but a position and the title "Terminal". Nothing sends a path outside the
+  but a position and the title "Terminal", unless the person opts one in,
+  past its secrets warning (`SharedPortalTerminalKind`). Nothing sends a path outside the
   project, an environment, a credential or a cookie.
 
 ### Guest side
@@ -131,7 +132,8 @@ Step numbers are SHARE-REDESIGN.md's mode B acceptance steps.
 | Diff | a diff git capture on change | the diff; Approve and Request changes | `revision`, `reviewed` | B2 |
 | Browser, public URL | `{url, mode: "live"}` | the page, loaded on the guest's Mac | `mode: "live"`, `url` | 6 |
 | Browser, localhost or private | `{url, mode: "still"}` + a still picture | the still, marked "Still" | `mode: "still"`, `badge: "Still"` | 6 |
-| Terminal | nothing | "Terminal stays on Dylan's Mac" | `message` | 1, 2, 6 |
+| Terminal | nothing, unless opted in | "Terminal stays on Dylan's Mac" | `message` | 1, 2, 6 |
+| Terminal, opted in | a `.liveTile` item on its own stream lane ([114](../114-terminal-sharing/README.md)) | the host's terminal, live, read only | `mode: "live"`, `text`, `grid`, `hostGrid`, `lane` | 1a, 6b |
 
 "Public" means `http(s)` to a host that is not loopback, not `.local`, not a
 private or link-local address, and has no credentials in the URL. Anything
