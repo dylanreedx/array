@@ -115,11 +115,34 @@ visible; you do not need to draw one.
 Resting agents never move, and with Reduce Motion every state shows its first frame.
 The first frame of each loop is its still pose, so make it a good one.
 
+### The lead
+
+An agent that has delegated helpers is a lead. If the set has `lead` art, the lead
+draws it at `leadSize` (28 x 16 by default, 1 pt per art pixel, so wider and taller
+than a helper). The lead has no loops of its own in the format, so Array maps its
+states onto the lead art:
+
+| the lead is | it shows |
+|---|---|
+| working (any loop) | `levels[n - 1]`, n = its helper count, capped at the number of levels |
+| cheering, or just sent a prompt | `rising` once |
+| waving, idle | `rest`, looping |
+| finished, failed, asleep, startled | the first `rest` frame, held |
+
+Frames play at 150 ms. Lead frames may only use the theme's `palette`: a helper's
+`colors` do not apply to them.
+
+Only one agent per pack leads: the top of a delegation tree. Its helpers take the
+set's characters in the order they were delegated, wrapping once the set runs out;
+a helper's own helpers keep their hashed pick. A set with no `lead` leaves the lead
+on a helper character and starts its helpers just after it. A character picked from
+⋯ › Character always wins.
+
 ### Accepted but not drawn
 
-`lead`, `sounds`, `blink`, `names`, `marks`, `stuck`, `opusMark` and `idleMove` are
-validated (a bad value still fails the file) but Array does not use them yet. Sounds
-are never played.
+`sounds`, `blink`, `names`, `marks`, `stuck`, `opusMark`, `lead.flare` and
+`idleMove` are validated (a bad value still fails the file) but Array does not use
+them yet. Sounds are never played.
 
 ## Rules
 
