@@ -136,9 +136,15 @@ enum HelperRetryWorktreeChecks {
         let b = try bench("helper-worktrees"); defer { b.tearDown() }
         let root = URL(fileURLWithPath: b.supervisor.records[b.f.agentId]!.checkoutRoot)
         try repository(root)
+        // A real Managed lead is Claude or Codex; a Pi lead always stays Free.
+        try expect(b.supervisor.setProviderSettings(agentID: b.f.agentId, harness: .claudeCode, model: ManagedModeChecks.model), "lead harness refused")
         try expect(b.supervisor.setMode(.managed, for: b.f.agentId), "lead mode refused")
         let first = try child(await request(b, task: "HOLD first helper"))
         let firstCapture = try await capture(b, first)
+        // A Managed lead's helper is told to file array_report; a Free one is not.
+        func firstPrompt(_ c: [String: Any]) throws -> String { String(decoding: try JSONSerialization.data(withJSONObject: c["prompt"]!), as: UTF8.self) }
+        let managedPrompt = try firstPrompt(firstCapture)
+        try expect(managedPrompt.contains(ManagedLeadHookState.helperReportLine), "managed helper's first prompt lacks the report line")
         try expect(WorktreeManager.resolved(URL(fileURLWithPath: firstCapture["cwd"] as! String)) == WorktreeManager.resolved(root), "first helper left shared checkout")
         let head = try git(root, ["rev-parse", "HEAD"])
         let secondReply = try await request(b, task: "HOLD second helper", title: "Fix ledger totals")
@@ -179,6 +185,8 @@ enum HelperRetryWorktreeChecks {
         try expect(b.supervisor.setMode(.free, for: b.f.agentId), "free mode refused")
         let free = try child(await request(b, task: "HOLD free helper"))
         let freeCapture = try await capture(b, free)
+        let freePrompt = try firstPrompt(freeCapture)
+        try expect(!freePrompt.contains(ManagedLeadHookState.helperReportLine), "free lead's helper got the managed report line")
         try expect(WorktreeManager.resolved(URL(fileURLWithPath: freeCapture["cwd"] as! String)) == WorktreeManager.resolved(root), "free delegation changed checkout")
         print("Helper worktree checks passed: real runner cwd, first shared, concurrent distinct/title slugs, nested lead HEAD, dirty retention and free unchanged")
         b.supervisor.stopAll()

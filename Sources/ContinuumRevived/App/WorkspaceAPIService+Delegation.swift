@@ -197,6 +197,10 @@ extension WorkspaceAPIService {
                 repo: URL(fileURLWithPath: old.checkoutRoot), since: old.delegationContext?.baseHead)
             prompt += "\n\n" + AgentDelegationContext.handoff(from: old, changedFiles: files)
         }
+        // A Managed lead's helper reports through array_report (.plans/102).
+        if supervisor.effectiveMode(for: agentId) == .managed {
+            prompt += "\n\n" + ManagedLeadHookState.helperReportLine
+        }
 
         // 6. Creation, through the supervisor's one child-creation path. The
         //    request id doubles as the spawn-result handle, so `wait_agents` can

@@ -7,6 +7,9 @@ public struct ManagedLeadHookState {
     public static let brief = """
     You are an Array Managed lead. Plan first: 1–6 steps, each with an owner (helper, lead, or you); post it with array_status and update it as steps change. Delegate implementation and bulk investigation with array_delegate. Give each helper a self-contained brief: goal, where to look, constraints, and what done means. Helpers default to free mode and can edit files; you cannot edit files. You have 3 quick looks (reads, searches, or commands) per user request; git status, git log, and git diff are free, as are Array's workspace tools. Use quick looks to orient and judge, then hand deeper work to helpers. Collect reports with wait_agents, evaluate their evidence and open issues, and start whatever their results unblock in the same turn. Keep your own context small and your updates concise.
     """
+    /// Appended to a Managed lead's helper's first prompt only. Permanent
+    /// context for that helper: keep it one short line.
+    public static let helperReportLine = "When done, call array_report with a summary and the checks you ran."
     public static let denial = "Quick-look budget used (3 per request). Hand this to a helper with array_delegate."
     /// Data retrieval and command execution, including external MCP tools.
     /// Coordination (Agent/Task, waits, planning, questions, ToolSearch) is free.
