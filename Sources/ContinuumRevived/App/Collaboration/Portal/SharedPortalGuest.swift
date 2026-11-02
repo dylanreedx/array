@@ -195,7 +195,9 @@ final class SharedPortalTileSession {
         guard !reading.contains(object), let transport = controller.artifactTransport else { return }
         reading.insert(object)
         Task { [weak self] in
-            let result = try? await transport.readArtifact(object: object.rawValue, revision: revision.rawValue)
+            let result: CollaborationArtifactContents?
+            do { result = try await transport.readArtifact(object: object.rawValue, revision: revision.rawValue) }
+            catch { fputs("portal: reading \(object.rawValue) failed: \(error)\n", stderr); result = nil }
             guard let self, !isClosed else { return }
             reading.remove(object)
             guard let result else {

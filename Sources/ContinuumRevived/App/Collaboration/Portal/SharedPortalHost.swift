@@ -254,6 +254,7 @@ final class SharedPortalHostSession {
                 do {
                     outcome = try await transport.publishArtifact(epoch: epoch, capture: capture).revision
                 } catch {
+                    fputs("portal: publishing \(object.rawValue) failed: \(error)\n", stderr)
                     conflicted = true
                     // Someone (this Mac, before a relaunch) moved the head on:
                     // chain onto it next time.
