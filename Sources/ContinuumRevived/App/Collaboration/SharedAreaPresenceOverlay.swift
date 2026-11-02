@@ -163,7 +163,7 @@ final class SharedAreaPresenceOverlay: NSView {
     /// Each teammate's own colour, in a zone; nil keeps the working accent.
     var cursorColour: ((Collaboration.Presence) -> NSColor?)?
     var showsBanner = true { didSet { if oldValue != showsBanner { refreshGeometry() } } }
-    private var bannerFrame: NSRect? {
+    var bannerFrame: NSRect? {
         guard showsBanner, followBanner != nil else { return nil }
         let width = min(bounds.width - 24, bannerTextWidth + 28)
         return NSRect(x: (bounds.width - width) / 2, y: 12, width: max(0, width), height: 28)
@@ -195,6 +195,11 @@ final class SharedAreaPresenceOverlay: NSView {
         let previous = inspectedDevice
         inspectedDevice = device.flatMap { id in visiblePeers.contains(where: { $0.identity.device == id }) ? id : nil }
         if inspectedDevice == nil { renderedUsageText = nil; cardRect = .zero }
+        else if previous != inspectedDevice, let id = inspectedDevice,
+                let peer = visiblePeers.first(where: { $0.identity.device == id }) {
+            // Keep the geometry as soon as the card opens, even before its first paint.
+            cardRect = cardFrame(for: peer) ?? .zero
+        }
         // No card before or after: nothing on screen changed, so a local mouse
         // move or a gliding cursor does not repaint the whole overlay.
         if previous != nil || inspectedDevice != nil { needsDisplay = true }
@@ -212,8 +217,20 @@ final class SharedAreaPresenceOverlay: NSView {
     }
     private func reevaluatePointer() {
         guard let point = pointer else { setInspected(device: nil); return }
-        if cardRect.contains(point), let id = inspectedDevice, let peer = visiblePeers.first(where: { $0.identity.device == id }),
-           let frame = cardFrame(for: peer), frame.contains(point) { return }
+        if let id = inspectedDevice, let peer = visiblePeers.first(where: { $0.identity.device == id }),
+           let frame = cardFrame(for: peer) {
+            if cardRect.contains(point) && frame.contains(point) { return }
+            // Bridge the small gap between the cursor and its card. Only use
+            // the drawn card's geometry: a moving remote cursor must not drag
+            // a new card underneath a stationary local pointer.
+            if frame == cardRect, let cursor = cursorPoint(peer) {
+                let edge = NSPoint(x: min(max(cursor.x, frame.minX), frame.maxX),
+                                   y: min(max(cursor.y, frame.minY), frame.maxY))
+                let bridge = NSRect(x: min(cursor.x, edge.x), y: min(cursor.y, edge.y),
+                                    width: abs(cursor.x - edge.x), height: abs(cursor.y - edge.y)).insetBy(dx: -6, dy: -6)
+                if bridge.contains(point) { return }
+            }
+        }
         let nearest = visiblePeers.first { peer in
             guard let screen = cursorPoint(peer) else { return false }
             return hypot(screen.x - point.x, screen.y - point.y) <= 18

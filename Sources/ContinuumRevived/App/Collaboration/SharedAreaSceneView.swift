@@ -1270,6 +1270,9 @@ private final class SharedAreaSceneCanvas: NSView, NSUserInterfaceValidations {
     }
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard zoneMode else { return super.hitTest(point) }
+        // The presence overlay only claims its Follow button; let that control
+        // win before the zone canvas routes tile gestures to itself.
+        if let hit = super.hitTest(point), hit is SharedAreaPresenceOverlay { return hit }
         let local = convert(point, from: superview)
         if geometryEnabled, let group = selectedGroupFrame(),
            NSRect(x: group.maxX - 10, y: group.maxY - 10, width: 20, height: 20).contains(local) { return self }

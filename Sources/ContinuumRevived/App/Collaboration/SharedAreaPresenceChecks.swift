@@ -161,6 +161,11 @@ enum SharedAreaPresenceChecks {
         let followerHost = NSView(frame: .init(x: 0, y: 0, width: 1280, height: 700))
         let leader = delegate.mountWorkspaceSceneAtBoot(sharedAreaController: leaderModel, person: leaderID.person, in: leaderHost)
         let follower = delegate.mountWorkspaceSceneAtBoot(sharedAreaController: followerModel, person: followerID.person, in: followerHost)
+        SharedAreaZoneChecks.acceptFirstMouseEverywhere()
+        let window = SharedAreaZoneChecks.KeyWindow(contentRect: followerHost.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = followerHost
+        window.orderFrontOffscreenForChecks()
+        defer { window.orderOut(nil) }
         leaderHost.layoutSubtreeIfNeeded(); followerHost.layoutSubtreeIfNeeded()
         // This witness asserts exact cameras right after each follow step, so it
         // pins the instant path; CollaborationAccessibilityChecks covers the glide.
@@ -206,7 +211,17 @@ enum SharedAreaPresenceChecks {
         try await publishLeader()
 
         // Pointer path: hover the teammate's cursor, then press Follow in its card.
-        followerPublisher.overlay.pointerMoved(to: cursorPoint())
+        let overlay = followerPublisher.overlay
+        NSApp.sendEvent(try mouse(.mouseMoved, at: cursorPoint(), in: overlay))
+        overlay.displayIfNeeded()
+        guard let initialButton = overlay.followButtonFrame else { throw Failure(message: "cursor hover did not open card") }
+        let cursor = cursorPoint()
+        let bridge = NSPoint(x: cursor.x + 20, y: cursor.y + 20)
+        NSApp.sendEvent(try mouse(.mouseMoved, at: bridge, in: overlay))
+        try expect(overlay.inspectedDevice == leaderID.device, "pointer crossing the gap keeps the cursor card open")
+        let cardPoint = NSPoint(x: initialButton.midX, y: initialButton.midY)
+        NSApp.sendEvent(try mouse(.mouseMoved, at: cardPoint, in: overlay))
+        try expect(overlay.inspectedDevice == leaderID.device, "pointer entering the card keeps Follow available")
         guard let button = followerPublisher.overlay.followButtonFrame,
               followerPublisher.overlay.followButtonTitle == "Follow view" else {
             throw Failure(message: "hover card offers no Follow action")
@@ -215,12 +230,15 @@ enum SharedAreaPresenceChecks {
         try expect(followerPublisher.overlay.hitTest(followerPublisher.overlay.convert(press, to: follower.areaCanvasView)) === followerPublisher.overlay
             && followerPublisher.overlay.hitTest(followerPublisher.overlay.convert(NSPoint(x: 4, y: followerPublisher.overlay.bounds.maxY - 4), to: follower.areaCanvasView)) == nil,
             "only the card's Follow button takes the pointer; the rest of the canvas stays interactive")
+        try expect(window.contentView?.superview?.hitTest(overlay.convert(press, to: nil)) === overlay,
+            "the window routes the Follow press to the overlay")
         let followerWritesBefore = follower.privateViewWrites
         StoreFileWriter.install(.init(fault: .none, scope: root,
             matching: { !$0.standardizedFileURL.path.hasPrefix(leaderRoot.standardizedFileURL.path) }))
         defer { StoreFileWriter.uninstall() }
         let census = await Census.take(executors: executors(), authority: authority)
-        followerPublisher.overlay.mouseDown(with: try mouse(.leftMouseDown, at: press, in: followerPublisher.overlay))
+        NSApp.sendEvent(try mouse(.leftMouseDown, at: press, in: followerPublisher.overlay))
+        NSApp.sendEvent(try mouse(.leftMouseUp, at: press, in: followerPublisher.overlay))
         try expect(followerPublisher.followedDevice == leaderID.device && tracksLeader(),
             "Follow from the cursor card centres the leader's area-local viewport at the follower's own size and zoom")
         guard let leaderNear = leader.renderedFrame(for: near.id), let followerNear = follower.renderedFrame(for: near.id) else {
@@ -261,6 +279,18 @@ enum SharedAreaPresenceChecks {
         func refollow(_ how: String) throws {
             try expect(followerPublisher.follow(device: leaderID.device) && tracksLeader(), "follow resumes for the \(how) exit")
         }
+        guard let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+            isARepeat: false, keyCode: 53) else { throw Failure(message: "escape event unavailable") }
+        NSApp.sendEvent(escape)
+        try expect(followerPublisher.followedDevice == nil, "Escape stops following through the window event path")
+        try refollow("banner")
+        guard let banner = overlay.bannerFrame else { throw Failure(message: "following banner missing") }
+        let stop = NSPoint(x: banner.midX, y: banner.midY)
+        NSApp.sendEvent(try mouse(.leftMouseDown, at: stop, in: overlay))
+        NSApp.sendEvent(try mouse(.leftMouseUp, at: stop, in: overlay))
+        try expect(followerPublisher.followedDevice == nil, "the visible following banner stops with one click")
+        try refollow("keyboard")
         canvas.keyDown(with: try arrow(124))
         try expect(followerPublisher.followedDevice == nil && followerPublisher.overlay.followBanner == nil,
             "a keyboard camera pan exits follow immediately")
@@ -278,10 +308,10 @@ enum SharedAreaPresenceChecks {
         try expect(action.handler?() == true && followerPublisher.followedDevice == leaderID.device && tracksLeader(),
             "the accessibility Follow action on the teammate's cursor starts the same follow")
         let empty = NSPoint(x: 6, y: canvas.bounds.maxY - 6)
-        canvas.mouseDown(with: try mouse(.leftMouseDown, at: empty, in: canvas))
-        canvas.mouseDragged(with: try mouse(.leftMouseDragged, at: .init(x: empty.x + 40, y: empty.y - 30), in: canvas))
+        NSApp.sendEvent(try mouse(.leftMouseDown, at: empty, in: canvas))
+        NSApp.sendEvent(try mouse(.leftMouseDragged, at: .init(x: empty.x + 40, y: empty.y - 30), in: canvas))
         try expect(followerPublisher.followedDevice == nil, "a pointer pan exits follow immediately")
-        canvas.mouseUp(with: try mouse(.leftMouseUp, at: .init(x: empty.x + 40, y: empty.y - 30), in: canvas))
+        NSApp.sendEvent(try mouse(.leftMouseUp, at: .init(x: empty.x + 40, y: empty.y - 30), in: canvas))
         try refollow("scroll")
         guard let wheel = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: -24, wheel2: -12, wheel3: 0),
               let scroll = NSEvent(cgEvent: wheel) else { throw Failure(message: "scroll event unavailable") }

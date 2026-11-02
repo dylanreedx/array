@@ -385,6 +385,26 @@ enum SharedAreaZoneChecks {
         let canvas = scene.canvas, runtime = scene.mounted.runtime
         let publisher = scene.session.presencePublisher
 
+        print("STAGE shared area zone: follow from the cursor card")
+        scene.session.reveal(); canvas.layoutSubtreeIfNeeded()
+        let areaScene = scene.session.scene, overlay = publisher.overlay
+        let cursor = overlay.convert(areaScene.screenPoint(forAreaPoint: .init(x: 640, y: 300)), from: areaScene)
+        try send(.mouseMoved, at: overlay.convert(cursor, to: nil), in: scene.window)
+        overlay.displayIfNeeded()
+        guard let follow = overlay.followButtonFrame else { throw Failure(description: "cursor card did not open") }
+        let gap = NSPoint(x: cursor.x + 20, y: cursor.y + 20)
+        try send(.mouseMoved, at: overlay.convert(gap, to: nil), in: scene.window)
+        try expect(overlay.inspectedDevice == scene.mate.device, "cursor card stays open over the gap in a zone")
+        let button = NSPoint(x: follow.midX, y: follow.midY)
+        try send(.mouseMoved, at: overlay.convert(button, to: nil), in: scene.window)
+        try click(overlay, at: button, in: scene.window)
+        try expect(publisher.followedDevice == scene.mate.device, "cursor card Follow takes a real click in a zone")
+        guard let stopPill = canvas.qaFollowIndicator?.pillFrame, let indicator = canvas.qaFollowIndicator else {
+            throw Failure(description: "following indicator missing")
+        }
+        try click(indicator, at: NSPoint(x: stopPill.midX, y: stopPill.midY), in: scene.window)
+        try expect(publisher.followedDevice == nil, "zone indicator stops cursor follow")
+        scene.session.reveal(); canvas.layoutSubtreeIfNeeded()
         print("STAGE shared area zone: follow from the header")
         let headerView = scene.session.scene.zoneHeader
         guard let avatar = headerView.avatarFrames().first(where: { $0.member.device == scene.mate.device })?.frame else {

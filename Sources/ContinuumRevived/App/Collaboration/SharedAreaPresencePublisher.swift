@@ -65,6 +65,7 @@ final class SharedAreaPresencePublisher {
     /// area-local viewport and never writes the shared document or a source.
     private(set) var followedDevice: UUID?
     private var followedLabel = ""
+    private var followEscapeMonitor: Any?
     /// Camera frames actually applied from a followed viewport.
     private(set) var followCameraApplies = 0
     /// Follow started (device, name) or ended (nil). A zone shows it over the canvas.
@@ -95,7 +96,7 @@ final class SharedAreaPresencePublisher {
         scene.window?.acceptsMouseMovedEvents = true
         observer = controller.addChangeObserver { [weak self] in self?.refresh() }
         cursorObserver = controller.addCursorObserver { [weak self] update in self?.cursorArrived(update) }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .mouseExited]) { [weak self] event in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] event in
             guard let self, event.window === self.scene.window else { return event }
             let local = self.overlay.convert(event.locationInWindow, from: nil)
             let inside = self.overlay.bounds.contains(local) && event.type != .mouseExited
@@ -120,6 +121,8 @@ final class SharedAreaPresencePublisher {
         if let cursorObserver { controller.removeCursorObserver(cursorObserver) }; cursorObserver = nil
         if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil
         timer?.invalidate(); timer = nil; task?.cancel(); task = nil
+        if let followEscapeMonitor { NSEvent.removeMonitor(followEscapeMonitor) }
+        followEscapeMonitor = nil
         trailingTimer?.invalidate(); trailingTimer = nil; trailing = false
         scene.onCanvasTransformChange = nil; overlay.onPointerExit = nil
         scene.onLocalCameraNavigation = nil; overlay.onFollow = nil; overlay.onStopFollowing = nil
@@ -158,7 +161,15 @@ final class SharedAreaPresencePublisher {
         }
         followedDevice = device; followedLabel = name
         overlay.followedDevice = device
-        overlay.followBanner = "Following \(name) · pan, scroll or zoom to stop"
+        overlay.followBanner = "Following \(name) · Stop · Esc"
+        if !scene.isZone, followEscapeMonitor == nil {
+            followEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, event.window === self.scene.window, event.keyCode == 53,
+                      self.followedDevice != nil else { return event }
+                self.stopFollowing(notice: nil)
+                return nil
+            }
+        }
         applyFollow(viewport)
         publishFollowTargets()
         onFollowChange?(device, name)
@@ -169,6 +180,8 @@ final class SharedAreaPresencePublisher {
     func stopFollowing(notice: String?) {
         guard followedDevice != nil else { return }
         followedDevice = nil
+        if let followEscapeMonitor { NSEvent.removeMonitor(followEscapeMonitor) }
+        followEscapeMonitor = nil
         overlay.followedDevice = nil; overlay.followBanner = notice
         // One private camera write when following ends, never one per frame.
         try? scene.persistFollowedCamera()
