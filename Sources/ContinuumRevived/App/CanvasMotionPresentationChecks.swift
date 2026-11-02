@@ -345,6 +345,10 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         // variable `character-arms.sh` changes between arms.
         if env["CANVAS_MOTION_CHARACTERS"] == "1", let defaults = UserDefaults(suiteName: "ArrayMotionCharacters.\(UUID().uuidString)") {
             defaults.set(true, forKey: AgentCharacterConfig.enabledKey)
+            // CANVAS_MOTION_CHARACTER_MOTION=never: the layers are there, still.
+            if env["CANVAS_MOTION_CHARACTER_MOTION"] == "never" {
+                defaults.set(AgentCharacterConfig.Motion.never.rawValue, forKey: AgentCharacterConfig.motionKey)
+            }
             AgentCharacterController.shared.adopt(defaults: defaults)
         }
         let markdownCount = max(0, Int(env["CANVAS_MOTION_MARKDOWN_COUNT"] ?? "") ?? 24)
