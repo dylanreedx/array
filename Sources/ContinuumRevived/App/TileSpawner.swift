@@ -2372,7 +2372,7 @@ final class TileSpawner {
         try expect(paletteBody.contains("spawnManagedAgentForSelectedModel("),
                    "⌘K's spawn no longer routes through the seam every rule above is witnessed on:\n\(paletteBody)")
         let revealBody = try appDelegateMethodBody(
-            "private func attachTileToAgentFromInbox(_ agentId: AgentID) -> UUID? {")
+            "private func attachTileToAgentFromInbox(_ agentId: AgentID, popsOutHelper: Bool = true) -> UUID? {")
         try expect(revealBody.contains("spawnManagedAgentForExistingAgent("),
                    "revealing an agent no longer routes through the seam, so its tile is titled from Settings again:\n\(revealBody)")
     }
