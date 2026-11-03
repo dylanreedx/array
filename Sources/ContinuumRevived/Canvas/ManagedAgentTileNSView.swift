@@ -4855,6 +4855,24 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         v2ComposeColumn?.edgeInsets ?? NSEdgeInsets()
     }
     var qaPageZoomComposeColumnSpacing: CGFloat { v2ComposeColumn?.spacing ?? -1 }
+    /// Every control the compose strip shows, by name, with its frame in the
+    /// body root's coordinates (`qaPageZoomContentRoot`). Hidden controls are left out.
+    var qaComposerControlFrames: [(name: String, frame: NSRect)] {
+        let controls: [(String, NSView?)] = [
+            ("prompt", v2Composer), ("harness", providerFooter.harnessButton), ("model", providerFooter.modelButton),
+            ("effort", providerFooter.effortButton), ("mic", v2DictationButton), ("send", v2ActionButton),
+            ("sendChoice", v2SendChoice), ("footerRow", v2FooterRow),
+        ]
+        return controls.compactMap { name, view in
+            guard let view, view.isDescendant(of: contentBackdrop), view.bounds.width > 0 else { return nil }
+            var next: NSView? = view
+            while let current = next, current !== contentBackdrop {
+                if current.isHidden { return nil }
+                next = current.superview
+            }
+            return (name, view.convert(view.bounds, to: contentBackdrop))
+        }
+    }
     /// Every menu item the zoom submenu offers, as (identifier, title, enabled).
     func qaPageZoomMenuEntries() -> [(id: String, title: String, enabled: Bool)] {
         guard let submenu = makeAdditionalTitleBarMenuItems()

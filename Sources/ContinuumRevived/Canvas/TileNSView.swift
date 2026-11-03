@@ -1574,8 +1574,18 @@ class TileNSView: NSView, TokenThemed {
     /// points of body colour, zoomed out it overlays the body like the bar does.
     var contentTopInsetWorldHeight: CGFloat {
         let under = underBarWorldHeight
-        return naturalTitleBarHeight + (under == 0 ? 0 : (under * Self.minScreenGrabPx / Self.titleBarHeight).rounded(.up))
+        return naturalTitleBarHeight + (under == 0 ? 0 : (under * Self.underBarMaximumScale).rounded(.up))
     }
+
+    /// The most the under-bar scales: the chrome's scale at 100% zoom
+    /// (`minScreenGrabPx / titleBarHeight`, 28 / 24). Zoomed further out the
+    /// title bar keeps growing in world units to hold 28 px on screen, but the
+    /// row under it stops here, so its 11 pt pill text is never bigger than the
+    /// bar's own 11 pt secondary text at 100% (both draw at this scale there)
+    /// and the row never outgrows the share of the body reserved for it
+    /// (`contentTopInsetWorldHeight`). Past this it shrinks with the body it
+    /// describes, rather than becoming a tall band with one huge pill in it.
+    static var underBarMaximumScale: CGFloat { minScreenGrabPx / titleBarHeight }
 
     // MARK: - Ownership mark (`.plans/105-collaboration/SHARE-REDESIGN.md`, mode A)
     //
@@ -1687,6 +1697,11 @@ class TileNSView: NSView, TokenThemed {
     }
 
     var qaUnderBarFrame: NSRect? { underBar.flatMap { $0.isHidden ? nil : $0.frame } }
+    /// What the under-bar draws at: its world height over its unscaled height.
+    var qaUnderBarScale: CGFloat? {
+        guard let underBar, !underBar.isHidden, underBar.bounds.height > 0 else { return nil }
+        return underBar.frame.height / underBar.bounds.height
+    }
     var qaLiveIndicatorFrame: NSRect? {
         guard let underBar, !underBar.isHidden, ownershipMark != nil, let rect = underBar.indicatorRect else { return nil }
         return underBar.convert(rect, to: self)
@@ -1701,10 +1716,11 @@ class TileNSView: NSView, TokenThemed {
         guard base > 0 else { return }
         let bar = chromeBarHeight
         // The bar's chrome scale, until the row's essentials (the indicator's
-        // dot, a Stop sharing control) would no longer fit across the tile.
+        // dot, a Stop sharing control) would no longer fit across the tile, and
+        // never past `underBarMaximumScale`.
         // `zoomChromeScale`, not bar / titleBarHeight: a Large character size
         // makes the bar taller without the row needing to grow with it.
-        let scale = max(1, min(zoomChromeScale, bounds.width / underBar.minimumContentWidth))
+        let scale = max(1, min(zoomChromeScale, Self.underBarMaximumScale, bounds.width / underBar.minimumContentWidth))
         underBar.place(frame: NSRect(x: 0, y: bar, width: bounds.width, height: base * scale), unscaledHeight: base)
     }
 

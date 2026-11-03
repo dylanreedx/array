@@ -2642,6 +2642,18 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // 0.7.40: the under-bar's pills stay at their natural size and the
+        // composer stays inside the tile at every zoom and character size.
+        if CommandLine.arguments.contains("--agent-tile-fit-check") {
+            _ = NSApplication.shared
+            do {
+                print(try AgentTileFitChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL agent tile fit: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         // Plan 110 › size: Small / Medium / Large grow the tile bar and the sidebar row.
         if CommandLine.arguments.contains("--character-size-check") {
             _ = NSApplication.shared

@@ -43,6 +43,7 @@ check --agent-tile-binding-check
 check --agent-tile-chrome-consolidation-check
 check --agent-tile-click-focus-check
 check --agent-tile-file-mention-check
+check --agent-tile-fit-check
 check --agent-tile-reference-check
 check --agent-tile-rename-check
 check --agent-tool-detail-store-check
@@ -480,6 +481,7 @@ leg run_app_check .build/debug/Array --agent-tile-binding-check
 leg run_app_check .build/debug/Array --agent-tile-chrome-consolidation-check
 leg run_app_check .build/debug/Array --agent-tile-click-focus-check
 leg run_app_check .build/debug/Array --agent-tile-file-mention-check
+leg run_app_check .build/debug/Array --agent-tile-fit-check
 leg run_app_check .build/debug/Array --agent-tile-reference-check
 leg run_app_check .build/debug/Array --agent-tile-rename-check
 leg run_app_check .build/debug/Array --ambient-tile-frame-space-check

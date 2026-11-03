@@ -6,9 +6,12 @@ import ContinuumRevivedCore
 ///
 /// The title bar grows in world units at low zoom (floored to `minScreenGrabPx`
 /// on screen) and draws at `chromeScale`. The row under it — the live
-/// collaboration indicator, the agent's branch and managed pills — must be the
-/// same scaling unit: it sits BELOW the bar at every zoom (never under it, where
-/// the bar clipped it), and its laid-out height keeps a fixed ratio to the bar's.
+/// collaboration indicator, the agent's branch and managed pills — sits BELOW
+/// the bar at every zoom (never under it, where the bar clipped it) and scales
+/// with it up to the chrome's 100% scale (`underBarMaximumScale`): at 100% and
+/// zoomed in its height keeps a fixed ratio to the bar's; zoomed out it never
+/// grows past its 100% world height, so the bar's growth no longer turns it into
+/// a tall band with one huge pill (0.7.40).
 /// Reads laid-out frames in the tile's world space, and writes stills of the
 /// tile's top in light and dark at each zoom.
 @MainActor
@@ -80,6 +83,7 @@ enum TileUnderBarChecks {
         var ratios: [String: [Double]] = [:]
         var pillRatios: [String: [Double]] = [:]
         var screen: [String: [Double]] = [:]
+        var world: [String: [Double]] = [:]
         var contentTops: [String: Set<Int>] = [:]
         for zoom in zooms {
             canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
@@ -108,6 +112,7 @@ enum TileUnderBarChecks {
                     if entry.name != "agent-full" {
                         ratios[entry.name, default: []].append(Double(under.height / bar.height))
                         screen[entry.name, default: []].append(Double(under.height) * zoom)
+                        world[entry.name, default: []].append(Double(under.height))
                     }
                 } else {
                     try expect(indicator == nil, "\(entry.name) zoom \(zoom): an unshared tile shows a live indicator")
@@ -132,6 +137,7 @@ enum TileUnderBarChecks {
                                                   "\(entry.name) zoom \(zoom): indicator \(indicator) overlaps the managed pill \(pill)") }
                     pillRatios[entry.name, default: []].append(Double(pill.height / bar.height))
                     screen[entry.name + ":managed", default: []].append(Double(pill.height) * zoom)
+                    world[entry.name + ":managed", default: []].append(Double(pill.height))
                 }
                 if entry.name == "agent-full", let agent = view as? ManagedAgentTileNSView, let under {
                     // Every pill whole: shown, inside the row and the tile, below
@@ -178,26 +184,30 @@ enum TileUnderBarChecks {
             }
             try writeStills(canvas: canvas, window: window, views: views.map { ($0.name, $0.view) }, zoom: zoom, to: directory)
         }
-        // One scaling unit: the row's height keeps the bar's ratio (zooms in
-        // order 0.35, 0.6, 1.0, 1.6). At 0.35 a 420-wide row is capped by its
-        // width so Stop sharing still fits: there it may only fall below the
-        // ratio, and must still hold well over half its 100% screen size — before, it
-        // shrank with the camera to 35%.
+        // One scaling unit up to the cap: at 1.0 and 1.6 (zooms in order 0.35,
+        // 0.6, 1.0, 1.6) the bar's chrome scale is within the cap and the row
+        // keeps the bar's ratio. At 0.35 and 0.6 the bar keeps growing and the
+        // row stops at its 100% size, so its ratio may only fall.
         for (name, values) in ratios.merging(pillRatios.mapKeys { $0 + ":managed" }, uniquingKeysWith: { $0 + $1 }) {
             guard values.count == zooms.count else { continue }
-            let scaled = values.dropFirst()
-            guard let low = scaled.min(), let high = scaled.max(), low > 0 else { continue }
             // A pill inside the row is pixel-snapped by Auto Layout in the row's
             // scaled space, which moves it by up to a point either way.
             let tolerance = name.hasSuffix(":managed") ? 1.05 : 1.01
-            try expect(high / low < tolerance, "\(name): height / title-bar height varies with zoom \(values) — it does not scale with the bar")
-            try expect(values[0] <= high * tolerance, "\(name): at 0.35 the row outgrew the bar's ratio \(values)")
+            let atCap = values[2...], zoomedOut = values[..<2]
+            guard let low = atCap.min(), let high = atCap.max(), low > 0 else { continue }
+            try expect(high / low < tolerance, "\(name): height / title-bar height varies between 1.0 and 1.6 \(values) — it does not scale with the bar")
+            try expect(zoomedOut.allSatisfy { $0 <= high * tolerance }, "\(name): zoomed out the row outgrew the bar's ratio \(values)")
+        }
+        for (name, values) in world where values.count == zooms.count {
+            // Never past the 100% world height: the cap.
+            let tolerance = name.hasSuffix(":managed") ? 1.0 : 0.5
+            try expect(values.allSatisfy { $0 <= values[2] + tolerance },
+                       "\(name): world height \(values) exceeds its 100% height \(values[2]) — the row has no ceiling")
         }
         for (name, values) in screen where values.count == zooms.count {
-            // 0.6: a 420-wide tile is 147 px wide at 0.35, so the row trades
-            // some height to keep every pill whole; the old row kept 0.35.
-            try expect(values[0] >= values[2] * 0.6,
-                       "\(name): on-screen height at 0.35 is \(values[0]) against \(values[2]) at 1.0 — it shrinks with the camera")
+            // Zoomed out it shrinks with the body it describes, never faster
+            // than the camera (scale >= 1), and never larger on screen than at 100%.
+            try expect(values[0] <= values[2] + 0.5, "\(name): on screen at 0.35 \(values[0]) is larger than at 1.0 \(values[2])")
         }
         // The body never reflows with the camera.
         for (name, tops) in contentTops {
@@ -207,7 +217,8 @@ enum TileUnderBarChecks {
                    "an unshared terminal's body must start right under the title bar")
 
         let manifest: [String: Any] = ["check": "tile-under-bar", "zooms": zooms, "rows": rows,
-                                       "ratios": ratios, "pillRatios": pillRatios, "screenHeights": screen]
+                                       "ratios": ratios, "pillRatios": pillRatios, "screenHeights": screen,
+                                       "worldHeights": world]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: directory.appendingPathComponent("under-bar.json"), options: .atomic)
     }

@@ -35,6 +35,17 @@ final class AgentManagedBadgeView: NSView, TokenThemed, AgentPageZoomScalable {
         label.frame = NSRect(x: horizontalPadding, y: (bounds.height - label.intrinsicContentSize.height) / 2,
                              width: max(0, bounds.width - 2 * horizontalPadding), height: label.intrinsicContentSize.height)
     }
+    /// The pill's text point size, and whether its text fits inside it to within
+    /// one device pixel at the zoom it is shown at (Auto Layout snaps the pill to
+    /// that grid, which inside a scaled under-bar at 25% is 1.7 pt).
+    var qaTextPointSize: CGFloat { label.font?.pointSize ?? 0 }
+    var qaTextFits: Bool {
+        let pixel = 1 / max(0.01, abs(convertToBacking(NSSize(width: 1, height: 1)).width))
+        return label.intrinsicContentSize.width <= label.frame.width + pixel && label.frame.maxX <= bounds.width + pixel
+    }
+    var qaTextFitDescription: String {
+        "text needs \(label.intrinsicContentSize.width), label \(label.frame), badge \(bounds.size), intrinsic \(intrinsicContentSize.width)"
+    }
     func applyTokens() {
         let maroon = ManagedModeToken.maroon.nsColor(for: effectiveTokenTheme)
         layer?.backgroundColor = maroon.withAlphaComponent(ManagedModeToken.fillOpacity).cgColor

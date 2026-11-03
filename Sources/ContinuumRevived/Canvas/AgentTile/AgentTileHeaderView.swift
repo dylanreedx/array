@@ -48,6 +48,7 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable, Til
     /// The tile's under-bar keeps this header at least this wide, so a low
     /// zoom never costs a pill.
     var minimumWholeWidth: CGFloat { showsManaged ? max(managedFloor, 150) : 150 }
+    var qaManagedBadge: AgentManagedBadgeView? { managedBadge.isHidden ? nil : managedBadge }
     var qaManagedFrame: NSRect? {
         managedBadge.isHidden ? nil : managedBadge.convert(managedBadge.bounds, to: self)
     }
