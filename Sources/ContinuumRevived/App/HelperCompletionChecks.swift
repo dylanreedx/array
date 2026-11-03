@@ -3,6 +3,40 @@ import ContinuumRevivedCore
 
 @MainActor
 enum HelperCompletionChecks {
+    static func runMessages() async throws {
+        let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "helper message check")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
+        let bench = try WorkspaceAgentReportChecks.makeBench(label: "helper-message-result")
+        defer { bench.tearDown() }
+        let s = bench.supervisor, parent = bench.f.agentId
+        let child = try bench.delegate("initial")
+        let idle = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(child) && s.records[child]?.latestTerminalEvent != nil }
+        try HelperGuardChecks.expect(idle, "initial helper did not settle")
+        let config = try bench.configuration(for: parent)
+        for (index, outcome) in [TurnOutcome.completed, .failed, .interrupted].enumerated() {
+            let handle = "message-result-\(index)"
+            let reply = bench.f.api.dispatch(agentId: parent, requestId: handle, op: "agent.message", payload: [
+                "agentId": child.rawValue.uuidString, "text": "HOLD-message-\(index)", "idempotencyKey": handle])
+            guard case let .result(result) = reply, result["delivery"]?.string == "delivered" else {
+                throw WorkspaceAgentReportChecks.Failure(description: "message failed: \(reply)")
+            }
+            // The new handle must not inherit the preceding turn's result.
+            let before = bench.f.api.dispatch(agentId: parent, requestId: UUID().uuidString, op: "operation.get", payload: ["operationId": handle])
+            guard case let .result(beforeResult) = before else { throw WorkspaceAgentReportChecks.Failure(description: "operation refused") }
+            try HelperGuardChecks.expect(beforeResult["childResult"] == nil, "new message inherited old result")
+            s.qaDeliver(.turnCompleted(threadId: "message", turnId: handle, outcome: outcome, errorMessage: outcome == .failed ? "helper work error" : nil), to: child)
+            // The handle settles independently of a later active turn.
+            let waited = try await WorkspaceAgentReportChecks.call(config, "wait_agents", ["handles": [handle], "timeoutSeconds": 1])
+            let entries = (waited.reply["result"] as? [String: Any])?["agents"] as? [[String: Any]]
+            let expected = outcome == .completed ? "completed" : (outcome == .failed ? "failed" : "interrupted")
+            try HelperGuardChecks.expect(entries?.first?["status"] as? String == expected, "message handle did not settle as \(expected): \(waited.reply)")
+            try Data().write(to: URL(fileURLWithPath: s.records[child]!.cwd).appendingPathComponent("release.flag"))
+            let done = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(child) }
+            try HelperGuardChecks.expect(done, "helper did not release")
+            let file = SpawnResultFile.read(parentCwd: s.records[parent]!.cwd, handle: handle)
+            try HelperGuardChecks.expect(file?.status.rawValue == expected, "later terminal overwrote a message handle")
+        }
+    }
     static func run() async throws {
         let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "helper completion check")
         defer { ProcessInfo.processInfo.endActivity(activity) }

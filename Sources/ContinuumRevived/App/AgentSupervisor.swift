@@ -7359,6 +7359,43 @@ final class AgentSupervisor {
 
     // MARK: - App-wide Managed mode
 
+    private struct HelperMessageSubscription {
+        var parent: AgentID
+        var handle: String
+        var baseline: Date
+    }
+    private var helperMessageSubscriptions: [AgentID: [HelperMessageSubscription]] = [:]
+
+    /// Called only after send accepted, on the same actor before runner events
+    /// can arrive. Each handle owns its result even after the helper starts a
+    /// later turn. A refused send never registers a subscription.
+    func trackHelperMessage(_ child: AgentID, from parent: AgentID, handle: String) {
+        helperMessageSubscriptions[child, default: []].append(.init(parent: parent, handle: handle, baseline: Date()))
+        if let cwd = records[parent]?.cwd {
+            SpawnResultFile.write(.init(toolCallId: handle, status: .spawned, agentId: child.rawValue), parentCwd: cwd, warn: warn)
+        }
+    }
+
+    private func settleHelperMessages(_ child: AgentID, outcome: TurnOutcome, error: String?) {
+        let subscriptions = helperMessageSubscriptions.removeValue(forKey: child) ?? []
+        for subscription in subscriptions {
+            guard let cwd = records[subscription.parent]?.cwd else { continue }
+            let status: SpawnResultFile.Status
+            switch outcome {
+            case .completed: status = .completed
+            case .failed: status = .failed
+            case .interrupted, .cancelled: status = .interrupted
+            }
+            let finalText: String? = transcriptProjections[child]?.finalAssistantText
+            let text = finalText.map { SpawnResultFile.cappedFinalText($0) }
+            let report = records[child]?.lastReport.flatMap { $0.filedAt > subscription.baseline ? $0.report : nil }
+            SpawnResultFile.write(.init(toolCallId: subscription.handle, status: status,
+                agentId: child.rawValue, reason: error, finalText: text?.text,
+                finalTextTruncated: text?.truncated == true ? true : nil, endedAt: Date(), report: report),
+                parentCwd: cwd, warn: warn)
+        }
+    }
+
     // Completion wakes use a separate clock/queue from the watchdog. Reserve
     // each batch before awaiting queue persistence; overlapping flushes cannot
     // accept the same update twice. Failed admission remains pending.
@@ -7379,8 +7416,7 @@ final class AgentSupervisor {
     private func noteHelperCompletion(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?) {
         let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
         guard let child = records[id], child.capabilities.locallyManaged,
-              let parent = child.parentAgentID, records[parent] != nil,
-              wakesForHelperCompletion(parent), helperCompletionTurns[id] != identity else { return }
+              helperCompletionTurns[id] != identity else { return }
         helperCompletionTurns[id] = identity
         let status: String
         switch outcome {
@@ -7396,10 +7432,14 @@ final class AgentSupervisor {
             report = transcriptProjections[id]?.finalAssistantText ?? ""
         }
         let text = "Helper \(String(child.humanDisplayName.prefix(80))) (\(id.rawValue.uuidString)): \(status)\(error.map { ": \(String($0.prefix(600)))" } ?? "")\n\(String(report.prefix(2400)))"
+        let parents = Set([child.parentAgentID].compactMap { $0 }
+            + (helperMessageSubscriptions[id] ?? []).map(\.parent))
+        for parent in parents where records[parent] != nil && wakesForHelperCompletion(parent) {
         var batch = helperCompletionBatches[parent] ?? HelperCompletionBatch(
             deadline: helperCompletionNow().addingTimeInterval(8), updates: [])
         batch.updates.append((id, text))
         helperCompletionBatches[parent] = batch
+        }
         scheduleHelperCompletionFlush()
     }
 
@@ -10581,6 +10621,7 @@ final class AgentSupervisor {
         // must already hold this turn's last assistant entry.
         if case let .turnCompleted(_, turn, outcome, errorMessage) = event {
             noteHelperCompletion(id, turn: turn, outcome: outcome, error: errorMessage)
+            settleHelperMessages(id, outcome: outcome, error: errorMessage)
             writeTerminalSpawnResult(for: id, outcome: outcome, errorMessage: errorMessage)
         }
 

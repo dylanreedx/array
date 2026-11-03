@@ -696,6 +696,7 @@ extension WorkspaceAPIService {
             childName: current.humanDisplayName, childRunning: supervisor.isRunning(childId))
         let childWasRunning = supervisor.isRunning(childId)
         if supervisor.sendAgentMessage(text, from: agentId, to: childId) {
+            supervisor.trackHelperMessage(childId, from: agentId, handle: requestId)
             recordMessageChain(target: childId, hops: hops)
             result.delivery = .delivered
             result.childRunning = supervisor.isRunning(childId)
@@ -810,7 +811,7 @@ extension WorkspaceAPIService {
         let result: OperationGetResult
         switch lookup {
         case let .found(record):
-            let childRunning = record.childAgentId.map { supervisor.records[$0] != nil && supervisor.isRunning($0) }
+            var childRunning = record.childAgentId.map { supervisor.records[$0] != nil && supervisor.isRunning($0) }
             // A delegation's operationId IS its spawn-result handle (step 6 of
             // `delegate`), so an idle child's settled answer is the courier the
             // supervisor wrote under the PARENT's cwd. The same channel pi's
@@ -818,6 +819,11 @@ extension WorkspaceAPIService {
             var childResult: OperationChildResult?
             if record.op == .agentDelegate, childRunning == false, let parentCwd = supervisor.records[agentId]?.cwd {
                 childResult = SpawnResultFile.read(parentCwd: parentCwd, handle: record.operationId).map(childResultForParent)
+            }
+            if record.op == .agentMessage, let cwd = supervisor.records[agentId]?.cwd,
+               let file = SpawnResultFile.read(parentCwd: cwd, handle: record.operationId), file.status != .spawned {
+                childResult = childResultForParent(file)
+                childRunning = false
             }
             result = OperationGetResult(
                 operationId: record.operationId, op: record.op, status: record.status, steps: record.steps,
