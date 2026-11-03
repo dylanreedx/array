@@ -60,6 +60,9 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     private let vimModeLabel = NSTextField(labelWithString: "")
     var qaSetSwitchDecision: (() -> NSApplication.ModalResponse)?
     var qaCodeEditor: CodeEditorHostView? { codeEditor }
+    /// The document itself, inside the editor shell (and beside the sidebar
+    /// when it is open): what a teammate's copy of this file is compared with.
+    var qaDocumentBody: NSView { currentDocumentBody() }
     var qaDocumentID: String { bridgeDocumentID }
     var qaDraftText: String? { documentSession?.draftText }
     var qaSidebarRoot: String? { fileBrowser == nil ? nil : tile.metadata.documentLocation?.checkoutRootPath }

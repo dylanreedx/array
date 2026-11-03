@@ -509,6 +509,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
     // MARK: QA
 
 
+    var qaContentSurface: NSView? { kind == .browser ? nil : scroll }
     var qaText: String { textView.string }
     var qaCaption: String { caption.stringValue }
     var qaEditable: Bool { textView.isEditable }

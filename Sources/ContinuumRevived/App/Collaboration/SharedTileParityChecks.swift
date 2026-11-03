@@ -34,6 +34,8 @@ enum SharedTileParityChecks {
     static let pixelTolerance = 0.02
     static let channelTolerance = 24
     static let tileSize = NSSize(width: 520, height: 640)
+    /// Kinds whose shared content is a document under the guest's caption.
+    static let documentKinds: [Collaboration.LiveTile.Kind] = [.note, .file, .diff]
 
     // MARK: - Loopback relay
 
@@ -223,12 +225,14 @@ enum SharedTileParityChecks {
         for kind in kinds {
             tileItems[kind] = SharedArea.Item(id: .init(), kind: .liveTile, source: .init(owner: dylan.person, host: hostID, binding: .init()))
         }
+        let markdownItem = SharedArea.Item(id: .init(), kind: .liveTile, source: .init(owner: dylan.person, host: hostID, binding: .init()))
         var document = SharedArea.Document()
         var edits: [SharedArea.Edit] = [.admit(agentItem, .init(id: .init(), object: agentItem.id, rect: .init(x: 0, y: 0, width: 520, height: 640), z: 1))]
         for (index, kind) in kinds.enumerated() {
             let item = tileItems[kind]!
             edits.append(.admit(item, .init(id: .init(), object: item.id, rect: .init(x: Double(index + 1) * 560, y: 0, width: 520, height: 640), z: 1)))
         }
+        edits.append(.admit(markdownItem, .init(id: .init(), object: markdownItem.id, rect: .init(x: 2800, y: 0, width: 520, height: 640), z: 1)))
         try document.apply(.init(area: document.id, expectedRevision: 0, edits: edits))
         let authority = SharedAreaCheckRig.Authority(document: document, members: [(dylan, .owner), (sam, .editor)])
         try await authority.setMemberLabel(dylan.person, "Dylan")
@@ -285,12 +289,15 @@ enum SharedTileParityChecks {
             baseURL: URL(string: "http://127.0.0.1:9/checkout"))
         for _ in 0..<100 where browserRuntime.webView.isLoading || browserRuntime.webView.url == nil { try await Task.sleep(for: .milliseconds(50)) }
         try await Task.sleep(for: .milliseconds(400))
+        let markdownURL = projectRoot.appendingPathComponent("Plan.md")
+        try "# Checkout\n\n- Wallets\n- Payment\n".write(to: markdownURL, atomically: true, encoding: .utf8)
+        guard case .spawned(let markdownTile) = spawner.spawnFile(path: markdownURL.path) else { throw Failure(description: "no markdown tile") }
         let tilesByKind: [Collaboration.LiveTile.Kind: UUID] = [.note: note, .file: file, .diff: diff, .browser: browserRuntime.tileId]
         let storage = rigRoot.appendingPathComponent("host-storage")
         var hosts: [LiveTileHost] = []
         defer { for host in hosts { host.stop() } }
-        for kind in kinds {
-            let item = tileItems[kind]!, tileID = tilesByKind[kind]!
+        let fixtures = kinds.map { ($0, tileItems[$0]!, tilesByKind[$0]!, $0.rawValue) } + [(.file, markdownItem, markdownTile, "markdown-file")]
+        for (kind, item, tileID, label) in fixtures {
             guard let hostTile = canvas.tileView(for: tileID) else { throw Failure(description: "\(kind) host tile has no view") }
             let binding = SharedAreaLocalSourceBinding(object: item.id, binding: item.source!.binding, host: hostID,
                                                        projectID: WorkspaceInvariantsFixture.projectA1, tileID: tileID)
@@ -312,9 +319,19 @@ enum SharedTileParityChecks {
             let session = SharedTileSession(view: guestTile, reference: reference, controller: guestController)
             session.start()
             guestSessions.append { session.close() }
-            pairs.append(Pair(kind: kind.rawValue, host: hostTile, guest: guestTile,
-                              hostRegion: { [weak hostTile] in hostTile?.contentView },
-                              guestRegion: { [weak guestTile] in guestTile?.contentView }))
+            // A document kind is compared document to document: the host's
+            // body (a file's document, without the editor shell's sidebar)
+            // with the guest's content under its caption.
+            let document = documentKinds.contains(kind)
+            pairs.append(Pair(kind: label, host: hostTile, guest: guestTile,
+                              hostRegion: { [weak hostTile] in
+                                  if document, let file = hostTile as? FileTileNSView { return file.qaDocumentBody }
+                                  return hostTile?.contentView
+                              },
+                              guestRegion: { [weak guestTile] in
+                                  if document, let surface = guestTile?.body?.qaContentSurface { return surface }
+                                  return guestTile?.contentView
+                              }))
         }
 
         // MARK: Board, through the portal (a board shares only inside one)
@@ -372,6 +389,20 @@ enum SharedTileParityChecks {
                 }
                 return true
             }
+        }
+        // One content size on both sides. The guest's tile carries its own
+        // chrome above the shared content (the ownership strip, the caption),
+        // so its tile is grown by exactly that much; the report says by how much.
+        for index in pairs.indices where pairs[index].kind == "markdown-file" || documentKinds.contains(where: { $0.rawValue == pairs[index].kind }) {
+            let pair = pairs[index]
+            pair.host.layoutSubtreeIfNeeded(); pair.guest.layoutSubtreeIfNeeded()
+            guard let host = pair.hostRegion(), let guest = pair.guestRegion(), let window = pair.guest.window else { continue }
+            let grow = NSSize(width: host.bounds.width - guest.bounds.width, height: host.bounds.height - guest.bounds.height)
+            guard grow != .zero else { continue }
+            window.setContentSize(NSSize(width: pair.guest.frame.width + grow.width, height: pair.guest.frame.height + grow.height))
+            pair.guest.layoutSubtreeIfNeeded()
+            pairs[index].notes.append(String(format: "guest tile grown by %.0f×%.0f pt for its own chrome, so both content regions are %.0f×%.0f pt",
+                                             grow.width, grow.height, host.bounds.width, host.bounds.height))
         }
         try await Task.sleep(for: .milliseconds(600))
 
@@ -555,6 +586,9 @@ enum SharedTileParityChecks {
         var pixelsMatch = true
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             let name = appearance == .aqua ? "light" : "dark"
+            // The app's appearance too: the code editor follows it, as it
+            // does for a person who switches their Mac to dark.
+            NSApp.appearance = NSAppearance(named: appearance)
             for view in [pair.host, pair.guest] { view.window?.appearance = NSAppearance(named: appearance) }
             try await Task.sleep(for: .milliseconds(200))
             guard let hostPicture = await picture(host), let guestPicture = await picture(guest) else {
@@ -576,6 +610,7 @@ enum SharedTileParityChecks {
                                 hostPicture.pixelsWide, hostPicture.pixelsHigh, guestPicture.pixelsWide, guestPicture.pixelsHigh,
                                 ok ? "" : " RED", stem))
         }
+        NSApp.appearance = nil
         for note in pair.notes { lines.append("  note: \(note)") }
         result.red = !(classesMatch && elementsMatch && pixelsMatch)
         result.lines = ["\(pair.kind) \(result.red ? "RED" : "GREEN")"] + lines
