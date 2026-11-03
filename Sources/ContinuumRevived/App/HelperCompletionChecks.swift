@@ -3,6 +3,50 @@ import ContinuumRevivedCore
 
 @MainActor
 enum HelperCompletionChecks {
+    static func runSetting() async throws {
+        let bench = try WorkspaceAgentReportChecks.makeBench(label: "helper-wake-setting")
+        defer { bench.tearDown() }
+        let s = bench.supervisor, id = bench.f.agentId
+        let before = s.records[id]!
+        try HelperGuardChecks.expect(!s.wakesForHelperCompletion(id), "plain agent default must be off")
+        let managedStore = AgentStore(applicationSupportDirectory: bench.f.tempRoot.appendingPathComponent("managed-setting-default"))
+        var managed = before
+        managed.harness = .codex
+        managed.mode = .managed
+        try managedStore.upsert(managed)
+        let managedSupervisor = AgentSupervisor(store: managedStore)
+        _ = managedSupervisor.restore()
+        managedSupervisor.configureManagedMode(defaults: bench.settings)
+        try HelperGuardChecks.expect(managedSupervisor.wakesForHelperCompletion(id), "Managed lead default must be on")
+        try HelperGuardChecks.expect(s.setHelperCompletionWake(true, for: id) && s.wakesForHelperCompletion(id), "plain agent could not enable helper wakes")
+        try HelperGuardChecks.expect(s.records[id] == before, "wake preference replaced or changed the agent record")
+        let restored = AgentSupervisor(store: AgentStore(applicationSupportDirectory: bench.f.tempRoot.appendingPathComponent("setting-restore")))
+        restored.configureManagedMode(defaults: bench.settings)
+        try HelperGuardChecks.expect(restored.wakesForHelperCompletion(id), "preference did not survive supervisor recreation")
+        bench.f.delegate.wireCanvasCallbacks(bench.f.canvas)
+        try bench.f.delegate.reconciledManagedSessionSource.reconcile(
+            registry: bench.f.delegate.registryStore!.loadOrEmpty(), reason: .continuumRestarted, now: Date())
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 1000))
+        bench.f.delegate.qaInstallWorkspaceSidebar(sidebar)
+        bench.f.delegate.qaRefreshAgentSurfaces()
+        s.configureHelperWakeMenu(sidebar.agentInbox)
+        try HelperGuardChecks.expect(sidebar.agentInbox.openRowMenuForQA(clickedRowId: id.rawValue), "lead menu did not open")
+        try HelperGuardChecks.expect(sidebar.agentInbox.rowMenuTitlesForQA.contains("Wake me when helpers finish"), "wake setting absent from lead menu")
+        guard let list = sidebar.agentInbox.rowMenuRenderingForQA else { throw WorkspaceAgentReportChecks.Failure(description: "no choice menu to render") }
+        list.frame = NSRect(x: 0, y: 0, width: 360, height: 900)
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            list.appearance = NSAppearance(named: appearance)
+            list.layoutSubtreeIfNeeded()
+            guard let rep = list.bitmapImageRepForCachingDisplay(in: list.bounds) else { throw WorkspaceAgentReportChecks.Failure(description: "choice menu render unavailable") }
+            list.cacheDisplay(in: list.bounds, to: rep)
+            let out = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("array-scratch/lead-wakeups/setting-\(name).png")
+            try rep.representation(using: .png, properties: [:])?.write(to: out)
+        }
+        try HelperGuardChecks.expect(sidebar.agentInbox.pickRowMenuItemForQA(id: "helper-completion-wake"), "wake preference action did not route")
+        try HelperGuardChecks.expect(!s.wakesForHelperCompletion(id), "explicit off ignored")
+        try HelperGuardChecks.expect(s.records[id]?.harness == before.harness && s.records[id]?.mode == before.mode, "menu action changed harness or mode")
+    }
+
     static func runMessages() async throws {
         let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "helper message check")
         defer { ProcessInfo.processInfo.endActivity(activity) }

@@ -1227,6 +1227,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The row menu's Color pick: the agents, and the zone-palette name (nil for
     /// None). The host writes it to each record.
     var onIdentityColorSelection: (([UUID], String?) -> Void)?
+    var helperCompletionPreference: ((UUID) -> Bool?)?
+    var onHelperCompletionPreferenceChanged: ((UUID, Bool) -> Void)?
     /// Called when the derived wake timer expires so the host can rebuild rows
     /// from raw records. A headless view with no host callback falls back to its
     /// own render, which keeps the timer seam observable without inventing a
@@ -4968,8 +4970,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 targets.allSatisfy { action.isAvailable(for: $0, rollups: rollupsByParent) }
         }
         rowChoiceTargetIds = targets.map(\.id)
-        guard !actions.isEmpty else { rowChoiceController.dismiss(); qaChoiceListForQA = nil; return false }
-        let items = actions.map { action in
+        var items = actions.map { action in
             ChoiceItem(
                 id: action.rawValue,
                 title: action.title(forCount: targets.count),
@@ -4977,8 +4978,21 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 destructive: action == .delete || action == .archive
             )
         }
+        if targets.count == 1, let enabled = helperCompletionPreference?(targets[0].id),
+           onHelperCompletionPreferenceChanged != nil {
+            var wake = ChoiceItem(id: "helper-completion-wake", title: "Wake me when helpers finish", detail: enabled ? "On" : "Off", icon: .system("bell"))
+            wake.trailing = enabled ? "On" : "Off"
+            items.append(wake)
+        }
+        guard !items.isEmpty else { rowChoiceController.dismiss(); qaChoiceListForQA = nil; return false }
         return presentRowChoices(items, anchor: anchor) { [weak self] item in
-            guard let self, let action = InboxRowAction(rawValue: item.id) else { return }
+            guard let self else { return }
+            if item.id == "helper-completion-wake", let target = targets.first,
+               let enabled = self.helperCompletionPreference?(target.id) {
+                self.onHelperCompletionPreferenceChanged?(target.id, !enabled)
+                return
+            }
+            guard let action = InboxRowAction(rawValue: item.id) else { return }
             self.performRowAction(action)
         }
     }
@@ -7418,6 +7432,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var rowMenuTitlesForQA: [String] { activeChoiceListForQA?.qaItems.map(\.title) ?? [] }
     /// The open row menu's list, for a picture.
     var rowMenuListForQA: ChoiceListView? { rowChoiceController.listView }
+    var rowMenuRenderingForQA: ChoiceListView? { activeChoiceListForQA }
     /// Whether the row menu on screen is the shared choice popover's panel.
     var isRowMenuChoicePopoverForQA: Bool { rowChoiceController.isPresented && rowChoiceController.listView != nil }
     func dismissRowMenuForQA() { rowChoiceController.dismiss() }

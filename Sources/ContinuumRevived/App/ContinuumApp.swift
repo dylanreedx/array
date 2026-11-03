@@ -2253,6 +2253,20 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        if CommandLine.arguments.contains("--helper-wake-setting-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperCompletionChecks.runSetting()
+                    print("HelperCompletionChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--helper-completion-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -14726,6 +14740,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // P6.3: the inbox resolves a preset at menu-open time and hands the
         // selected absolute wake to the supervisor; the supervisor writes both
         // snooze dates atomically.
+        agentSupervisor.configureHelperWakeMenu(sidebar.agentInbox)
         sidebar.agentInbox.onSnoozeSelection = { [weak self] rowIds, wakeAt in
             _ = self?.snoozeAgentsFromInbox(rowIds, wakeAt: wakeAt)
         }

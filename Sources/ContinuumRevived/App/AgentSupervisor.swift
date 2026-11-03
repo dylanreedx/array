@@ -7409,8 +7409,34 @@ final class AgentSupervisor {
     private var helperCompletionTurns: [AgentID: String] = [:]
     private var helperCompletionTimer: Task<Void, Never>?
 
+    private func helperWakePreferenceKey(_ id: AgentID) -> String {
+        "array.agent.helperCompletionWake.\(id.rawValue.uuidString.lowercased())"
+    }
+
+    @discardableResult
+    func setHelperCompletionWake(_ enabled: Bool, for id: AgentID) -> Bool {
+        guard let record = records[id], record.capabilities.locallyManaged, record.parentAgentID == nil else { return false }
+        managedModeDefaults.set(enabled, forKey: helperWakePreferenceKey(id))
+        if !enabled { helperCompletionBatches[id] = nil }
+        return true
+    }
+
+    func configureHelperWakeMenu(_ inbox: AgentInboxView) {
+        inbox.helperCompletionPreference = { [weak self] rawID in
+            guard let self else { return nil }
+            let id = AgentID(rawValue: rawID)
+            guard let record = self.records[id], record.capabilities.locallyManaged, record.parentAgentID == nil else { return nil }
+            return self.wakesForHelperCompletion(id)
+        }
+        inbox.onHelperCompletionPreferenceChanged = { [weak self] rawID, enabled in
+            _ = self?.setHelperCompletionWake(enabled, for: AgentID(rawValue: rawID))
+        }
+    }
+
     func wakesForHelperCompletion(_ parent: AgentID) -> Bool {
-        helperCompletionEnabled?(parent) ?? (effectiveMode(for: parent) == .managed)
+        if let helperCompletionEnabled { return helperCompletionEnabled(parent) }
+        if let enabled = managedModeDefaults.object(forKey: helperWakePreferenceKey(parent)) as? Bool { return enabled }
+        return effectiveMode(for: parent) == .managed
     }
 
     private func noteHelperCompletion(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?) {

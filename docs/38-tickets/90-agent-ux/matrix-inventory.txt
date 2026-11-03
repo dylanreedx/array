@@ -171,6 +171,7 @@ check --helper-retry-check
 check --helper-tile-auto-fold-check
 check --helper-tile-cap-check
 check --helper-tile-lifecycle-check
+check --helper-wake-setting-check
 check --helper-watchdog-check
 check --helper-worktree-check
 check --hide-external-rows-check
@@ -588,6 +589,7 @@ leg run_app_check .build/debug/Array --helper-retry-check
 leg run_app_check .build/debug/Array --helper-tile-auto-fold-check
 leg run_app_check .build/debug/Array --helper-tile-cap-check
 leg run_app_check .build/debug/Array --helper-tile-lifecycle-check
+leg run_app_check .build/debug/Array --helper-wake-setting-check
 leg run_app_check .build/debug/Array --helper-watchdog-check
 leg run_app_check .build/debug/Array --helper-worktree-check
 leg run_app_check .build/debug/Array --hide-external-rows-check

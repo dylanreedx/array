@@ -756,6 +756,7 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --workspace-agent-report-check
   run_app_check .build/debug/Array --helper-command-evidence-check
   run_app_check .build/debug/Array --helper-message-result-check
+  run_app_check .build/debug/Array --helper-wake-setting-check
   run_app_check .build/debug/Array --helper-completion-check
   run_app_check .build/debug/Array --helper-watchdog-check
   run_app_check .build/debug/Array --workspace-hook-pushback-check
@@ -792,6 +793,7 @@ if [[ "$HOOK_BRIDGE_ONLY" -eq 1 ]]; then
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
   run_app_check .build/debug/Array --helper-message-result-check
+  run_app_check .build/debug/Array --helper-wake-setting-check
   run_app_check .build/debug/Array --helper-completion-check
   run_app_check .build/debug/Array --workspace-hook-bridge-check
   run_app_check .build/debug/Array --workspace-codex-hook-check
@@ -1113,6 +1115,7 @@ run_app_check .build/debug/Array --workspace-codex-hook-check
 run_app_check .build/debug/Array --workspace-agent-report-check
 run_app_check .build/debug/Array --helper-command-evidence-check
 run_app_check .build/debug/Array --helper-message-result-check
+run_app_check .build/debug/Array --helper-wake-setting-check
 run_app_check .build/debug/Array --helper-completion-check
 run_app_check .build/debug/Array --helper-watchdog-check
 # The opt-in push-back through the real hook command: silent while off; on,
