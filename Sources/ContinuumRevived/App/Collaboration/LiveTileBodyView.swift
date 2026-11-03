@@ -86,7 +86,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.textContainerInset = NSSize(width: 8, height: 8)
         textView.font = kind == .note ? .token(.body) : .token(.bodyMono)
-        textView.drawsBackground = false
+        textView.drawsBackground = kind == .note || kind == .diff
         textView.minSize = .zero
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
@@ -326,7 +326,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
             if documentSurface !== scroll { documentSurface?.removeFromSuperview() }
             documentSurface = view
             addSubview(view)
-            scroll.isHidden = view !== scroll
+            scroll.isHidden = view !== scroll && scroll.superview === self
             needsLayout = true
         }
     }
@@ -558,6 +558,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyAppearance() }
     private func applyAppearance() {
         caption.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        textView.backgroundColor = SurfaceToken.tileBody.color.nsColor(in: self)
         let primary = TextToken.textPrimary.color.nsColor(in: self)
         textView.textColor = primary
         // An empty text view reads its colour back from its typing attributes.

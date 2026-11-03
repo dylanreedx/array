@@ -679,6 +679,14 @@ enum SharedTileParityChecks {
         CATransaction.begin(); view.display(); CATransaction.commit(); CATransaction.flush()
         guard view.bounds.width > 0, view.bounds.height > 0, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
         view.cacheDisplay(in: view.bounds, to: rep)
+        // A document can be transparent over its tile. Include that backing
+        // colour in the still, as it appears on the canvas.
+        if let context = NSGraphicsContext(bitmapImageRep: rep) {
+            NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = context
+            SurfaceToken.tileBody.color.nsColor(in: view).setFill()
+            NSRect(origin: .zero, size: rep.size).fill(using: .destinationOver)
+            NSGraphicsContext.restoreGraphicsState()
+        }
         let webs = SharedAreaCheckRig.descendants(view).compactMap { $0 as? WKWebView }.filter { !$0.isHiddenOrHasHiddenAncestor }
         guard !webs.isEmpty, let context = NSGraphicsContext(bitmapImageRep: rep) else { return rep }
         for web in webs {
