@@ -8868,6 +8868,8 @@ final class AgentSupervisor {
     }
 
     func qaObserveSharedTranscript(_ observation: AgentRuntimeObservation, for id: AgentID) { ingestRuntimeObservation(observation, for: id) }
+    /// Witness only: the agent's own tool-detail capture (`ToolDetailRefreshPerfChecks`).
+    func qaSharedTranscriptToolDetail(for id: AgentID) -> AgentTranscriptCanvasToolDetail? { sharedTranscriptDetails[id] }
 
     /// Resolve only images referenced by this agent's document and owned by
     /// this agent. Paths and attachment-store manifests never enter the lane.

@@ -15,12 +15,67 @@ func runAgentToolDetailStoreChecks() async throws {
     try await runAgentToolDetailPresentationChecks()
     try await runAgentToolDetailDisclosureCollisionChecks()
     try await runAgentToolDetailSemanticFileChecks()
+    await runAgentToolDetailChangesChecks()
     runAgentToolKindChecks()
     await runArrayWorkspaceToolRowChecks()
     await runAgentToolDetailSupplyContractChecks()
     runAgentToolDetailSourceBoundaryChecks()
     try runAgentToolDetailCompileNegativeBoundaryCheck()
     print("Agent tool detail store checks passed: privacy redaction/fail-closed output, scoped cross-agent/turn identity, path-title retention/AX witnesses, implicit-path and compound-argv secret witnesses, cross-store reversed-arrival ties, provider ID bounds, argument/file bounds, truncation caps, start/end ordering, local expiry, same-ID concurrency, one tool taxonomy behind icon/sentence/fold, the supply contract behind shell and delegation rows, and source boundaries")
+}
+
+/// The capture refreshes from deltas, so a reader that applies every
+/// `changes(since:)` in order must hold exactly `allDetails()`: writes, an
+/// update to a record already read, a batch, and expiry.
+private func runAgentToolDetailChangesChecks() async {
+    let clock = ManualToolDetailClock(Date(timeIntervalSinceReferenceDate: 3_000))
+    let store = AgentToolDetailStore(clock: { clock.now() }, timeToLive: 60)
+    defer { Task { await store.shutdown() } }
+    var held: [AgentToolDetailKey: AgentToolDetailRecord] = [:]
+    var revision: UInt64 = 0
+    func apply(_ changes: AgentToolDetailChanges) {
+        for key in changes.removed { held[key] = nil }
+        for record in changes.changed { held[record.identity] = record }
+        revision = changes.revision
+    }
+    func stored() async -> [AgentToolDetailKey: AgentToolDetailRecord] {
+        Dictionary(uniqueKeysWithValues: await store.allDetails().map { ($0.identity, $0) })
+    }
+    let a = testToolDetailKey("delta-a"), b = testToolDetailKey("delta-b"), c = testToolDetailKey("delta-c")
+    _ = await store.recordStart(.init(identity: a, toolName: "read"))
+    _ = await store.recordStart(.init(identity: b, toolName: "edit"))
+    let first = await store.changes(since: 0)
+    apply(first)
+    let afterFirst = await stored()
+    expect(Set(first.changed.map(\.identity)) == [a, b] && first.removed.isEmpty && held == afterFirst,
+           "AgentToolDetail changes: a first read carries every record")
+    let unchanged = await store.changes(since: revision)
+    expect(unchanged.isEmpty && unchanged.revision == revision, "AgentToolDetail changes: nothing written means an empty delta")
+    _ = await store.recordEnd(.init(identity: a, output: "done", status: .completed))
+    let update = await store.changes(since: revision)
+    apply(update)
+    let afterUpdate = await stored()
+    expect(update.changed.map(\.identity) == [a] && held[a]?.output?.text == "done" && held == afterUpdate,
+           "AgentToolDetail changes: an update carries only the record it changed")
+    clock.advance(by: 30)
+    let batch = await store.record([.start(.init(identity: c, toolName: "grep")), .end(.init(identity: c, output: "hit", status: .completed))],
+                                   changesSince: revision)
+    apply(batch)
+    let afterBatch = await stored()
+    expect(batch.changed.map(\.identity) == [c] && held[c]?.output?.text == "hit" && held == afterBatch,
+           "AgentToolDetail changes: a batch is applied in order and reported once")
+    clock.advance(by: 45)
+    let expired = await store.changes(since: revision)
+    apply(expired)
+    let afterExpiry = await stored()
+    expect(Set(expired.removed) == [a, b] && expired.changed.isEmpty && held == afterExpiry && Set(held.keys) == [c],
+           "AgentToolDetail changes: expiry reports the removed identities, got \(expired.removed.count) removed")
+    _ = await store.recordStart(.init(identity: a, toolName: "read again"))
+    let revived = await store.changes(since: revision)
+    apply(revived)
+    let afterRevive = await stored()
+    expect(revived.changed.map(\.identity) == [a] && revived.removed.isEmpty && held == afterRevive,
+           "AgentToolDetail changes: an identity written after it expired comes back as changed, not removed")
 }
 
 private func runAgentToolDetailSemanticFileChecks() async throws {

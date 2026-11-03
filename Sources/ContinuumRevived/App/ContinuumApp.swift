@@ -1790,6 +1790,22 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // What a burst of tool events costs the main thread while it lands and
+        // after it, and that the tool detail it leaves is the store's own.
+        if CommandLine.arguments.contains("--tool-detail-refresh-perf-check") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(120))
+                fputs("FAIL: tool detail refresh perf check exceeded its 120-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do { try await ToolDetailRefreshPerfChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         // A shared agent's transcript, drawn on the guest by the host tile's
         // renderer from the host's own document; light and dark stills in <dir>.
         if let index = CommandLine.arguments.firstIndex(of: "--shared-agent-chrome-check") {

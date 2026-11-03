@@ -694,8 +694,28 @@ public struct AgentToolDetailSanitizer: Sendable {
     }
 }
 
+/// What changed in an `AgentToolDetailStore` after a revision: records written
+/// since, and identities that expired since. A reader applying every delta in
+/// order holds exactly what `allDetails()` returns.
+public struct AgentToolDetailChanges: Equatable, Sendable {
+    public let revision: UInt64
+    public let changed: [AgentToolDetailRecord]
+    public let removed: [AgentToolDetailKey]
+    public var isEmpty: Bool { changed.isEmpty && removed.isEmpty }
+}
+
+/// One capture-side write, queued in the order the events arrived.
+public enum AgentToolDetailWrite: Sendable {
+    case start(AgentToolDetailStart)
+    case end(AgentToolDetailEnd)
+}
+
 public actor AgentToolDetailStore {
     private var details: [AgentToolDetailKey: AgentToolDetailRecord] = [:]
+    /// Bumped on every write and every expiry; `changes(since:)` reads it.
+    private var revision: UInt64 = 0
+    private var writtenAt: [AgentToolDetailKey: UInt64] = [:]
+    private var expiredAt: [AgentToolDetailKey: UInt64] = [:]
     public nonisolated let currentDate: @Sendable () -> Date
     public nonisolated let timeToLive: TimeInterval
     private let sanitizer: AgentToolDetailSanitizer
@@ -798,7 +818,7 @@ public actor AgentToolDetailStore {
         record.parentItemID = record.observedParentConflict ? nil : record.observedParentItemIDs.first
         record.updatedAt = observedAt
         record.affectedFiles = sanitizer.sanitizeFiles(start.affectedFiles, existing: record.affectedFiles, explicitSecrets: eventSecrets)
-        details[start.identity] = record
+        write(record)
         if timeToLive == 0 { expireLocked(at: observedAt) }
         return record
     }
@@ -848,9 +868,16 @@ public actor AgentToolDetailStore {
         }
         record.updatedAt = observedAt
         record.affectedFiles = sanitizer.sanitizeFiles(end.affectedFiles, existing: record.affectedFiles, explicitSecrets: eventSecrets)
-        details[end.identity] = record
+        write(record)
         if timeToLive == 0 { expireLocked(at: observedAt) }
         return record
+    }
+
+    private func write(_ record: AgentToolDetailRecord) {
+        revision &+= 1
+        details[record.identity] = record
+        writtenAt[record.identity] = revision
+        expiredAt[record.identity] = nil
     }
 
     public func detail(for identity: AgentToolDetailKey) -> AgentToolDetailRecord? {
@@ -864,6 +891,28 @@ public actor AgentToolDetailStore {
             if lhs.updatedAt == rhs.updatedAt { return lhs.identity.sortDescription < rhs.identity.sortDescription }
             return lhs.updatedAt < rhs.updatedAt
         }
+    }
+
+    /// Applies `writes` in order, then reports what changed after `revision`:
+    /// one call per batch, so a burst costs its caller one hop.
+    public func record(_ writes: [AgentToolDetailWrite], changesSince revision: UInt64) -> AgentToolDetailChanges {
+        for write in writes {
+            switch write {
+            case let .start(start): recordStart(start)
+            case let .end(end): recordEnd(end)
+            }
+        }
+        return changes(since: revision)
+    }
+
+    /// The records written and the identities expired after `revision`, with
+    /// the revision to ask from next. Expires first, as `allDetails()` does.
+    public func changes(since revision: UInt64) -> AgentToolDetailChanges {
+        expireLocked(at: currentDate())
+        let changed = writtenAt.filter { $0.value > revision }.keys
+            .sorted { $0.sortDescription < $1.sortDescription }.compactMap { details[$0] }
+        let removed = expiredAt.filter { $0.value > revision }.keys.sorted { $0.sortDescription < $1.sortDescription }
+        return AgentToolDetailChanges(revision: self.revision, changed: changed, removed: removed)
     }
 
     @discardableResult
@@ -920,7 +969,12 @@ public actor AgentToolDetailStore {
             .filter { now.timeIntervalSince($0.value.updatedAt) >= timeToLive }
             .map { $0.key }
             .sorted { $0.sortDescription < $1.sortDescription }
-        for key in expiredKeys { details.removeValue(forKey: key) }
+        for key in expiredKeys {
+            details.removeValue(forKey: key)
+            revision &+= 1
+            writtenAt[key] = nil
+            expiredAt[key] = revision
+        }
         return expiredKeys.map(\.providerItemID)
     }
 }

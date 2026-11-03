@@ -1910,6 +1910,9 @@ run_app_check .build/debug/Array --shell-tool-row-check
 # clearest evidence there is that a witness the gate does not report is not a
 # witness (CLAUDE.md, non-negotiable #2).
 run_app_check .build/debug/Array --tool-detail-check
+# A burst of tool events: the capture's refreshes stay under 4 ms of main-thread
+# time per frame during and after it, and hold exactly the store's records.
+run_app_check .build/debug/Array --tool-detail-refresh-perf-check
 # Directory-aware Markdown: a real title-bar mouse click reaches Preview/Edit;
 # unsaved preview, explicit atomic save, clean reload, and conflict overwrite are witnessed.
 run_app_check .build/debug/Array --file-markdown-preview-check

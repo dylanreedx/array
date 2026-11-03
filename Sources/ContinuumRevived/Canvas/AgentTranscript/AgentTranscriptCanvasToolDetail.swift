@@ -25,6 +25,9 @@ final class AgentTranscriptCanvasToolDetail {
     private var identityByEntryID: [AgentNodeID: AgentToolDetailKey] = [:]
     private var details: [AgentToolDetailKey: AgentToolDetailRecord] = [:]
     private var refreshTask: Task<Void, Never>?
+    private var pendingWrites: [AgentToolDetailWrite] = []
+    /// The store revision `details` reflects.
+    private var storeRevision: UInt64 = 0
     private let timeToLive: TimeInterval?
     private let clock: @Sendable () -> Date
 
@@ -91,10 +94,7 @@ final class AgentTranscriptCanvasToolDetail {
             for case let .toolDetail(_, detail) in pending where detail.phase == .ended {
                 bufferEndDetail(detail, identity: identity)
             }
-            Task { [weak self, store] in
-                for start in starts { _ = await store.recordStart(start) }
-                self?.refresh()
-            }
+            record(starts.map { .start($0) })
             return identity
         case let .itemCompleted(threadID, itemID, kind, status):
             guard AgentToolDetailPolicy.carriesHostLocalDetail(kind),
@@ -105,24 +105,17 @@ final class AgentTranscriptCanvasToolDetail {
             let mapped: AgentItemStatus = status == .failed ? .failed : (status == .declined ? .cancelled : .completed)
             let end = pendingEndDetails.removeValue(forKey: identity)
             identitiesAwaitingEnd.remove(identity)
-            Task { [weak self, store] in
-                _ = await store.recordEnd(AgentToolDetailEnd(
-                    identity: identity, output: end?.outputPreview, status: mapped, exitCode: end?.exitCode,
-                    endedAt: end?.observedAt, shellOutcome: end?.shellOutcome, reportedDuration: end?.reportedDuration))
-                self?.refresh()
-            }
+            record([.end(AgentToolDetailEnd(
+                identity: identity, output: end?.outputPreview, status: mapped, exitCode: end?.exitCode,
+                endedAt: end?.observedAt, shellOutcome: end?.shellOutcome, reportedDuration: end?.reportedDuration))])
         case let .turnCompleted(threadID, _, outcome, _):
             guard let scope = activeScope, scope.threadID == threadID else { break }
             let swept = identitiesAwaitingEnd.filter { $0.scope == scope }
             guard !swept.isEmpty else { break }
             identitiesAwaitingEnd.subtract(swept)
             let status: AgentItemStatus = outcome == .completed ? .completed : .interrupted
-            Task { [weak self, store] in
-                for identity in swept.sorted(by: { $0.providerItemID.rawValue < $1.providerItemID.rawValue }) {
-                    _ = await store.recordEnd(AgentToolDetailEnd(identity: identity, status: status))
-                }
-                self?.refresh()
-            }
+            record(swept.sorted(by: { $0.providerItemID.rawValue < $1.providerItemID.rawValue })
+                .map { .end(AgentToolDetailEnd(identity: $0, status: status)) })
         default:
             break
         }
@@ -148,10 +141,7 @@ final class AgentTranscriptCanvasToolDetail {
             return
         }
         guard let start = detailStart(for: identity, observation: observation, title: runtimeTitles[identity] ?? "Tool") else { return }
-        Task { [weak self, store] in
-            _ = await store.recordStart(start)
-            self?.refresh()
-        }
+        record([.start(start)])
     }
 
     private func detailStart(for identity: AgentToolDetailKey, observation: AgentRuntimeObservation,
@@ -188,20 +178,51 @@ final class AgentTranscriptCanvasToolDetail {
             observedAt: detail.observedAt)
     }
 
-    private func refresh() {
-        guard let store else { return }
-        refreshTask?.cancel()
-        refreshTask = Task { [weak self, store] in
-            let records = await store.allDetails()
-            guard !Task.isCancelled, let self else { return }
-            self.details = Dictionary(uniqueKeysWithValues: records.map { ($0.identity, $0) })
-            self.presentedCache.removeAll()
-            self.presentationGeneration &+= 1
-            self.onRefresh?()
+    /// Writes to the store in the order they were captured, and applies what
+    /// changed there since the last batch. One drain runs at a time and takes
+    /// everything queued behind it, so a burst of tool events costs the main
+    /// actor a hop per batch and the records that changed, not a task and a
+    /// full read per event. Every event reading every record, with each
+    /// cancelled read's snapshot freed here, kept main busy for seconds.
+    private func record(_ writes: [AgentToolDetailWrite]) {
+        guard store != nil, !writes.isEmpty else { return }
+        pendingWrites += writes
+        guard refreshTask == nil else { return }
+        refreshTask = Task { [weak self] in
+            while let self, !self.pendingWrites.isEmpty {
+                let batch = self.pendingWrites
+                self.pendingWrites = []
+                await self.write(batch)
+            }
+            self?.refreshTask = nil
         }
     }
 
-    func qaWaitForRefresh() async { await refreshTask?.value }
+    private func write(_ batch: [AgentToolDetailWrite]) async {
+        guard let store else { return }
+        let changes = await store.record(batch, changesSince: storeRevision)
+        storeRevision = changes.revision
+        guard !changes.isEmpty else { return }
+        var touched = Set(changes.removed)
+        for key in changes.removed { details[key] = nil }
+        for record in changes.changed { details[record.identity] = record; touched.insert(record.identity) }
+        // A presentation depends on its block and its record only.
+        presentedCache = presentedCache.filter { !touched.contains($0.value.identity) }
+        presentationGeneration &+= 1
+        onRefresh?()
+    }
+
+    /// Returns once every refresh requested so far has landed.
+    func qaWaitForRefresh() async {
+        while let running = refreshTask { await running.value }
+    }
+
+    /// Witness only: the records this capture holds, and its store's own.
+    func qaDetailsMatchStore() async -> (held: Int, stored: Int, equal: Bool) {
+        guard let store else { return (details.count, 0, details.isEmpty) }
+        let stored = Dictionary(uniqueKeysWithValues: await store.allDetails().map { ($0.identity, $0) })
+        return (details.count, stored.count, stored == details)
+    }
 
     // MARK: Presentation
 
