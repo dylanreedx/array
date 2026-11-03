@@ -198,6 +198,11 @@ enum SharedTileParityChecks {
         /// Element endings BOTH sides must lay out: a state the share must
         /// carry truthfully, not merely carry the same on both Macs.
         var mustShow: [String] = []
+        /// Differences the guest is DESIGNED to have (a read-only view drops
+        /// what only an editor can use). Each must occur exactly: a guest that
+        /// gained an editor's control, or lost a read-only cue, is RED.
+        var designedMissingOnGuest: [String] = []
+        var designedOnlyOnGuest: [String] = []
     }
 
     struct Comparison {
@@ -379,10 +384,19 @@ enum SharedTileParityChecks {
         boardItem.apply(contents: .init(record: try await loop.wire(boardRevision), bytes: try await loop.wire(boardBytes)))
         _ = window(for: boardItem)
         boardItem.layoutSubtreeIfNeeded()
+        // The chips name the fixture's agents as the supervisor records them.
+        let agentNames = scene.agents.map { app.qaAgentSupervisor.records[$0]?.displayName ?? "" }
         pairs.append(Pair(kind: "board", host: hostBoard, guest: boardItem.board,
                           hostRegion: { [weak hostBoard] in hostBoard?.contentView },
                           guestRegion: { [weak boardItem] in boardItem?.board.contentView },
-                          notes: ["guest is a portal item: the host's KanbanTileNSView, read only (no add row, grip, chip menu glyph; hint says read only)"]))
+                          notes: ["guest is a portal item: the host's KanbanTileNSView, read only (no add row, grip, chip menu glyph; hint says read only)"],
+                          // KanbanTileNSView.readOnlyOwner: no adding, no grips,
+                          // chips that cannot open a menu, and a hint that says so.
+                          designedMissingOnGuest: ["+ Add task", "+ Add task", "+ Add task", "⠿", "⠿", "⠿",
+                                                   "\(agentNames[0]) ▾", "\(agentNames[1]) ▾", "Assign agent ▾",
+                                                   "Drag a task onto an agent to assign it · Click to open details"],
+                          designedOnlyOnGuest: [agentNames[0], agentNames[1], "Unassigned",
+                                                "Read only · Dylan's board · Click a task to read it · Changes happen on Dylan's Mac"]))
 
         // Let every lane deliver: the guest bodies show their first state.
         try await SharedAreaCheckRig.eventually("every guest tile shows the host's content", attempts: 1600) {
@@ -586,9 +600,15 @@ enum SharedTileParityChecks {
 
         // Elements.
         let hostElements = elements(host), guestElements = elements(guest)
-        let missing = subtract(hostElements, guestElements), extra = subtract(guestElements, hostElements)
-        let elementsMatch = missing.isEmpty && extra.isEmpty
-        lines.append("  elements: host \(hostElements.count) · guest \(guestElements.count)" + (elementsMatch ? " (same)" : ""))
+        let allMissing = subtract(hostElements, guestElements), allExtra = subtract(guestElements, hostElements)
+        let missing = subtract(allMissing, pair.designedMissingOnGuest), extra = subtract(allExtra, pair.designedOnlyOnGuest)
+        let absentDesign = subtract(pair.designedMissingOnGuest, allMissing).map { "host-only \(quoted($0))" }
+            + subtract(pair.designedOnlyOnGuest, allExtra).map { "guest-only \(quoted($0))" }
+        let elementsMatch = missing.isEmpty && extra.isEmpty && absentDesign.isEmpty
+        let designed = pair.designedMissingOnGuest.count + pair.designedOnlyOnGuest.count
+        lines.append("  elements: host \(hostElements.count) · guest \(guestElements.count)"
+                     + (designed > 0 ? ", \(designed) designed differences" : "") + (elementsMatch ? " (same)" : ""))
+        for line in absentDesign { lines.append("    designed difference absent: \(line)") }
         for line in missing.prefix(16) { lines.append("    missing on guest: \(quoted(line))") }
         if missing.count > 16 { lines.append("    … \(missing.count - 16) more missing") }
         for line in extra.prefix(16) { lines.append("    only on guest: \(quoted(line))") }
