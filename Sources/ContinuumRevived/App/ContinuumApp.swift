@@ -2744,6 +2744,16 @@ enum ContinuumApp {
         }
         // 0.7.40: the under-bar's pills stay at their natural size and the
         // composer stays inside the tile at every zoom and character size.
+        if CommandLine.arguments.contains("--composer-mounted-containment-check") {
+            _ = NSApplication.shared
+            do {
+                print(try ComposerMountedContainmentChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL mounted composer: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--agent-tile-fit-check") {
             _ = NSApplication.shared
             do {

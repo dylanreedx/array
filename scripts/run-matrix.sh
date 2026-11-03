@@ -860,6 +860,7 @@ if [[ "$AGENT_TILE_MENU_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --choice-geometry-check
   run_app_check .build/debug/Array --workspace-selector-check
   run_app_check .build/debug/Array --ui-probe-check
+  run_app_check .build/debug/Array --composer-mounted-containment-check
   matrix_report 'Agent tile menu matrix (targeted)'
   exit $?
 fi
@@ -1421,6 +1422,7 @@ run_app_check .build/debug/Array --tile-drag-grab-check
 run_app_check .build/debug/Array --tile-chrome-scale-check
 # 0.7.40: the under-bar's pills stop at their 100% size, and the composer stays
 # inside the tile, across zooms, text zooms and character sizes.
+run_app_check .build/debug/Array --composer-mounted-containment-check
 run_app_check .build/debug/Array --agent-tile-fit-check
 run_app_check .build/debug/Array --camera-chrome-redraw-check
 run_app_check .build/debug/Array --resize-dimensions-hud-check

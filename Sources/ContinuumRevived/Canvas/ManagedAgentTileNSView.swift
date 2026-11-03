@@ -4873,6 +4873,38 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             return (name, view.convert(view.bounds, to: contentBackdrop))
         }
     }
+    /// Unclipped descendant frames and their actual ancestor clip intersections,
+    /// all in tile coordinates. Scroll document contents may scroll; their viewport
+    /// and every other displayed compose descendant must fit. Reading frames only.
+    var qaMountedComposerContainment: [(name: String, frame: NSRect, clip: NSRect)] {
+        let named: [(String, NSView?)] = [("prompt", v2Composer), ("send", v2ActionButton),
+            ("sendChoice", v2SendChoice), ("model", providerFooter.modelButton),
+            ("harness", providerFooter.harnessButton), ("effort", providerFooter.effortButton), ("mic", v2DictationButton)]
+        var result: [(String, NSRect, NSRect)] = []
+        var seen = Set<ObjectIdentifier>()
+        func visit(_ node: NSView, path: String) {
+            guard seen.insert(ObjectIdentifier(node)).inserted, !node.isHiddenOrHasHiddenAncestor,
+                  node.bounds.width > 0, node.bounds.height > 0 else { return }
+            if let scroll = node.superview as? NSClipView, scroll.documentView === node { return }
+            let name = named.first(where: { $0.1 === node })?.0 ?? path
+            var clip = bounds.intersection(visibleRect)
+            var parent = node.superview
+            while let ancestor = parent, ancestor !== self {
+                if ancestor is NSClipView || ancestor.layer?.masksToBounds == true {
+                    clip = clip.intersection(ancestor.convert(ancestor.bounds, to: self))
+                }
+                parent = ancestor.superview
+            }
+            result.append((name, node.convert(node.bounds, to: self), clip))
+            for (index, child) in node.subviews.enumerated() {
+                visit(child, path: path + "/\(index):\(type(of: child))")
+            }
+        }
+        visit(composeBackdrop, path: "compose")
+        if let footer = v2FooterRow { visit(footer, path: "footer") }
+        return result
+    }
+
     /// Every menu item the zoom submenu offers, as (identifier, title, enabled).
     func qaPageZoomMenuEntries() -> [(id: String, title: String, enabled: Bool)] {
         guard let submenu = makeAdditionalTitleBarMenuItems()
