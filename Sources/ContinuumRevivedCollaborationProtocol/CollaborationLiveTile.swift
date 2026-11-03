@@ -216,39 +216,37 @@ extension Collaboration {
             }
         }
 
-        /// The address a host's browser may send, and whether the guest loads it.
-        /// Cookies never travel; this is about the URL itself, which can carry a
-        /// secret. A sign-in in the URL (`user:pass@`) is always dropped. A
-        /// query or fragment naming a token, key, code, session, signature or
-        /// password makes the page private, and a private page's address goes
-        /// without its query and fragment: the guest never loads it, so it
-        /// needs only where it is. A public page keeps its full address, so the
-        /// guest's own browser can load the same page.
+        /// Strip credentials and never publish query strings, fragments, or
+        /// opaque path tokens. Private addresses are shown only as stills.
         public static func shareable(_ address: String) -> (url: String?, reach: Reach) {
-            guard !address.isEmpty else { return (nil, .private) }
-            guard var parts = URLComponents(string: address) else { return (nil, .private) }
+            guard !address.isEmpty, var parts = URLComponents(string: address) else { return (nil, .private) }
             let signedIn = parts.user != nil || parts.password != nil
             parts.user = nil; parts.password = nil
-            let reach: Reach = signedIn || carriesSecret(parts) || isPrivateAddress(parts.url) ? .private : .public
+            var opaquePath = false
+            let segments = parts.path.split(separator: "/", omittingEmptySubsequences: false).map { segment -> String in
+                let value = String(segment)
+                guard isOpaquePathSegment(value) else { return value }
+                opaquePath = true
+                return "*"
+            }
+            let reach: Reach = signedIn || parts.query != nil || parts.fragment != nil || opaquePath || isPrivateAddress(parts.url) ? .private : .public
+            if opaquePath { parts.path = segments.joined(separator: "/") }
             if reach == .private { parts.query = nil; parts.fragment = nil }
             return (parts.string, reach)
         }
-        static func carriesSecret(_ parts: URLComponents) -> Bool {
-            var names = (parts.queryItems ?? []).map(\.name)
-            if let fragment = parts.fragment, fragment.contains("=") {
-                names += fragment.split(separator: "&").map { String($0.split(separator: "=", maxSplits: 1).first ?? "") }
+
+        private static func isOpaquePathSegment(_ value: String) -> Bool {
+            guard value.count >= 24 else { return false }
+            // Readable hyphenated slugs are common; mixed alphanumeric strings
+            // and identifiers can carry credentials even without a known name.
+            if value.contains("-"), value.allSatisfy({ $0 == "-" || $0.isLowercase }) { return false }
+            let counts = Dictionary(value.map { ($0, 1) }, uniquingKeysWith: +)
+            let length = Double(value.count)
+            let entropy = counts.values.reduce(0.0) { result, count in
+                let frequency = Double(count) / length
+                return result - frequency * log2(frequency)
             }
-            // Whole words of the name (`access_token`, `X-Amz-Signature`), and
-            // a few suffixes for run-together names (`accessToken`, `apikey`),
-            // so `keyword` or `author` stay public.
-            let words: Set<String> = ["token", "key", "apikey", "secret", "password", "passwd", "pwd", "auth", "code", "session",
-                                      "sessionid", "sid", "sig", "signature", "credential", "credentials", "jwt", "otp", "nonce", "ticket"]
-            let suffixes = ["token", "secret", "password", "signature", "apikey", "sessionid"]
-            return names.contains { name in
-                let lower = name.lowercased()
-                let parts = lower.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
-                return parts.contains(where: words.contains) || suffixes.contains(where: lower.hasSuffix)
-            }
+            return entropy >= 3.5
         }
 
         /// A URL the guest cannot reach from their own Mac: loopback, link-local,

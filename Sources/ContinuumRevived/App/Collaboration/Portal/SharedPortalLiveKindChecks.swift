@@ -149,23 +149,36 @@ enum SharedPortalLiveKindChecks {
         try require(sentPayload?.url == "https://shop.example.com/reset" && sentPayload?.mode == .still
                     && !sentText.contains("abc123") && !sentText.contains("hunter2") && !sentText.contains("sam:"),
                     "browser: a URL's sign-in, token query and fragment never leave the host; it goes as a still: \(sentPayload.map { "\($0.url ?? "nil") \($0.mode)" } ?? "nil")")
-        try require(Collaboration.LiveTile.shareable("https://duckduckgo.com/?q=swift+keyword&author=me").reach == .public
-                    && Collaboration.LiveTile.shareable("https://duckduckgo.com/?q=swift+keyword&author=me").url == "https://duckduckgo.com/?q=swift+keyword&author=me"
-                    && Collaboration.LiveTile.shareable("https://app.example.com/cb#access_token=x").reach == .private
-                    && Collaboration.LiveTile.shareable("https://s3.example.com/f?X-Amz-Signature=1").reach == .private,
-                    "browser: an ordinary query stays public and loads live; token fragments and signed URLs go as stills")
+        // Only scheme, host and path ever travel live. Any query or fragment,
+        // whatever its names, and any long opaque path segment make a still,
+        // and the still's address drops them.
+        let token = "Zx9Kq2Lm7Vb4Np8Rt6Yw3Hs5"
+        let cases: [(String, Collaboration.LiveTile.Reach, String)] = [
+            ("https://example.com/reset?verification=SECRET", .private, "https://example.com/reset"),
+            ("https://example.com/#SECRET", .private, "https://example.com/"),
+            ("https://example.com/docs?q=swift", .private, "https://example.com/docs"),
+            ("https://example.com/reset/\(token)", .private, "https://example.com/reset/*"),
+            ("https://example.com/d/3f2b8c1e-9a4d-4e7f-b6a2-1c5d8e9f0a7b/edit", .private, "https://example.com/d/*/edit"),
+            ("https://example.com/docs/getting-started", .public, "https://example.com/docs/getting-started"),
+            ("https://example.com/blog/how-to-share-a-browser-tile-safely", .public, "https://example.com/blog/how-to-share-a-browser-tile-safely"),
+        ]
+        for (address, reach, sent) in cases {
+            let shared = Collaboration.LiveTile.shareable(address)
+            try require(shared.reach == reach && shared.url == sent && !(shared.url ?? "").contains("SECRET") && !(shared.url ?? "").contains(token),
+                        "browser: \(address) goes \(reach) as \(sent) (got \(shared.reach) \(shared.url ?? "nil"))")
+        }
 
         // A public page: the guest's own browser loads it, in a store of its
         // own (no cookies of the guest's either), and after the guest clicks
         // away it offers the way back to the host's page.
-        guard let publicDraft = SharedPortalBrowserKind.draft(.browser(.init(url: "https://example.com/docs?q=swift", title: "Docs", reach: .public, frame: nil)), still: nil),
+        guard let publicDraft = SharedPortalBrowserKind.draft(.browser(.init(url: "https://example.com/docs", title: "Docs", reach: .public, frame: nil)), still: nil),
               let publicItem = SharedPortalKinds.kind(for: .browser).makeView(entry: .init(object: .init(), kind: .browser, title: "Docs"), guest: guest) as? SharedPortalLiveItemView else {
             throw Failure(description: "no public browser item")
         }
         publicItem.frame = NSRect(x: 0, y: 0, width: 440, height: 460)
         publicItem.apply(contents: try contents(publicDraft, object: publicItem.entry.object))
-        try require(publicItem.qaFacts["mode"] == "live" && publicItem.qaFacts["url"] == "https://example.com/docs?q=swift"
-                    && publicItem.qaFacts["store"] == "ephemeral" && publicItem.qaFacts["address"] == "https://example.com/docs?q=swift"
+        try require(publicItem.qaFacts["mode"] == "live" && publicItem.qaFacts["url"] == "https://example.com/docs"
+                    && publicItem.qaFacts["store"] == "ephemeral" && publicItem.qaFacts["address"] == "https://example.com/docs"
                     && publicItem.qaFacts["status"] == "Following Dylan",
                     "browser (public): the guest loads the page itself, in an ephemeral store, following the host: \(publicItem.qaFacts)")
         guard let guestWeb = publicItem.body.qaWebView else { throw Failure(description: "the public page has no web view on the guest") }
