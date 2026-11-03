@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import ContinuumRevivedCore
+import ContinuumRevivedAgentUI
 import CoreText
 import ImageIO
 import UniformTypeIdentifiers
@@ -313,7 +314,7 @@ enum FanoutFilmRender {
             return CGRect(x: r.minX, y: Double(height) - r.maxY, width: r.width, height: r.height)
         }
         let tiles = Dictionary(uniqueKeysWithValues: frame.tiles.map { ($0.id, $0) })
-        cg.setStrokeColor(CGColor(red: 0.62, green: 0.77, blue: 0.92, alpha: 0.65))
+        cg.setStrokeColor(LineToken.borderStrong.color.nsColor(in: canvas).withAlphaComponent(0.65).cgColor)
         cg.setLineWidth(1)
         for tile in frame.tiles {
             guard let parentID = tile.parent, let parent = tiles[parentID] else { continue }
@@ -322,7 +323,7 @@ enum FanoutFilmRender {
             cg.addLine(to: CGPoint(x: b.midX, y: b.midY))
             cg.strokePath()
         }
-        let accent = CGColor(red: 0.25, green: 0.75, blue: 1, alpha: 1)
+        let accent = LineToken.borderStrong.color.cgColor(in: canvas)
         cg.setStrokeColor(accent)
         cg.setLineWidth(2)
         if let active = frame.active, let tile = tiles[active] {
