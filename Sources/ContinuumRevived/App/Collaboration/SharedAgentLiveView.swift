@@ -77,8 +77,31 @@ final class SharedAgentLiveView: NSView {
     var lastPromptText: String { lastPrompt.stringValue }
     var statusColor: NSColor? { status.textColor }
     var isPolling: Bool { task != nil }
-    var offersComposer: Bool { composer.superview === self && !composer.isHidden }
+    var offersComposer: Bool {
+        if showsChrome { return strip.composer.readOnlyReason == nil && !strip.composer.isHidden }
+        return composer.superview === self && !composer.isHidden
+    }
+    /// The editor a prompt is typed in: the host tile's composer once the host
+    /// sends its chrome, the plain one before.
+    var activeComposer: AgentComposerView { showsChrome ? strip.composer : composer }
     let composer = AgentComposerView(frame: .zero, variant: .compactFreeform)
+
+    // MARK: Host chrome (agent-chrome)
+
+    typealias Chrome = SharedAgentTranscriptWire.Chrome
+    /// The host tile's compose strip: status row, composer, provider row and
+    /// primary action. Joins the view when the host first sends its chrome.
+    let strip = SharedAgentComposeStrip()
+    /// The host's chrome as last received; nil from an older host.
+    var chrome: Chrome? { transcriptLive ? transcriptView.mirror.chrome : nil }
+    /// Whether this view draws the host tile's chrome rather than its own lines.
+    private(set) var showsChrome = false
+    /// The chrome changed: the tile re-reads its title bar and under-bar.
+    var onChromeChange: (() -> Void)?
+    private var chromeTick: Timer?
+    /// The host's character for the tile's title bar: its set, as this Mac
+    /// resolved it, and the character the host draws in it.
+    private(set) var characterSet: SharedAgentCharacterSet?
 
     private let status = NSTextField(labelWithString: "")
     private let controls = NSTextField(wrappingLabelWithString: "")
@@ -119,6 +142,7 @@ final class SharedAgentLiveView: NSView {
         for view in [status, controls, scroll, lastPrompt] { addSubview(view) }
         transcriptView.isHidden = true
         transcriptView.onOpenWebLink = { url, _ in NSWorkspace.shared.open(url) }
+        transcriptView.onChromeChange = { [weak self] in self?.chromeChanged() }
         addSubview(transcriptView)
         for view in [transcriptView, helperView] {
             view.agentStatus = helpers.statusSource
@@ -130,6 +154,13 @@ final class SharedAgentLiveView: NSView {
         helperTitle.font = .token(.label); helperTitle.lineBreakMode = .byTruncatingTail
         helperBack.target = self; helperBack.action = #selector(closeHelper)
         for view in [helperView, helperBack, helperTitle] as [NSView] { view.isHidden = true; addSubview(view) }
+        strip.isHidden = true
+        strip.composer.onSubmitPrompt = { [weak self] text in self?.submit(text) }
+        strip.composer.onDraftChange = { [weak self] _ in self?.renderChrome() }
+        strip.composer.setAccessibilityLabel("Prompt the shared agent")
+        strip.action.target = self; strip.action.action = #selector(stripActionPressed)
+        // The strip joins the view when the host first sends its chrome: a
+        // view on an older host carries no Auto Layout subtree to lay out.
         setAccessibilityRole(.group)
         setAccessibilityLabel("Live agent view")
         applyAppearance()
@@ -139,6 +170,22 @@ final class SharedAgentLiveView: NSView {
 
     override func layout() {
         super.layout()
+        if showsChrome {
+            // The host tile's arrangement: transcript, then the compose strip;
+            // a line about this view's own last prompt sits between them.
+            let stripHeight = strip.height(forWidth: bounds.width)
+            var bottom = bounds.height - stripHeight
+            let stripFrame = NSRect(x: 0, y: bottom, width: bounds.width, height: stripHeight)
+            if strip.frame != stripFrame { strip.frame = stripFrame }
+            if !controls.isHidden {
+                controls.frame = .init(x: CGFloat(Space.m), y: bottom - 22, width: max(0, bounds.width - 2 * CGFloat(Space.m)), height: 18)
+                bottom -= 26
+            }
+            let transcriptFrame = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bottom))
+            if transcriptView.frame != transcriptFrame { transcriptView.frame = transcriptFrame }
+            layoutHelper(in: transcriptFrame)
+            return
+        }
         status.frame = .init(x: 0, y: 0, width: bounds.width, height: 18)
         controls.frame = .init(x: 0, y: 22, width: bounds.width, height: 34)
         // Transcript above, then the composer row: who sent the last prompt,
@@ -165,8 +212,13 @@ final class SharedAgentLiveView: NSView {
         scroll.frame = .init(x: 0, y: 60, width: bounds.width, height: max(0, bottom - 60))
         transcript.frame.size.width = scroll.contentSize.width
         if transcriptView.frame != scroll.frame { transcriptView.frame = scroll.frame }
+        layoutHelper(in: scroll.frame)
+    }
+
+    /// An opened helper's transcript, over the parent's.
+    private func layoutHelper(in area: NSRect) {
         if openedHelper != nil {
-            let area = scroll.frame, header = Self.helperHeaderHeight
+            let header = Self.helperHeaderHeight
             let backSize = NSSize(width: ChromeIconButton.side, height: ChromeIconButton.side)
             helperBack.frame = .init(x: area.minX, y: area.minY + ((header - backSize.height) / 2).rounded(),
                                      width: backSize.width, height: backSize.height)
@@ -237,6 +289,7 @@ final class SharedAgentLiveView: NSView {
         transcriptView.isHidden = !live || openedHelper != nil
         scroll.isHidden = live
         needsLayout = true
+        chromeChanged()
     }
 
     func stop() {
@@ -337,6 +390,10 @@ final class SharedAgentLiveView: NSView {
     // MARK: - Full access
 
     @objc private func sendPressed() { composer.composerRequestedSend(composer.textView) }
+    @objc private func stripActionPressed() {
+        guard strip.action.presentation.primaryAction == .send else { return }
+        strip.composer.composerRequestedSend(strip.composer.textView)
+    }
     /// The Send button, pressed. Checks drive the real control.
     func qaPressSend() { send.sendAction(send.action, to: send.target) }
 
@@ -350,7 +407,7 @@ final class SharedAgentLiveView: NSView {
             guard let self else { return }
             sending = false
             switch outcome {
-            case .queued: composer.acceptCurrentSendIntent(); delivery = Self.deliveryText(prompter.receipt?.phase)
+            case .queued: activeComposer.acceptCurrentSendIntent(); delivery = Self.deliveryText(prompter.receipt?.phase)
             case .refused: delivery = prompter.message.hasPrefix("Refused") ? prompter.message : "Refused. " + prompter.message
             case .unresolved: delivery = "Not confirmed yet. " + prompter.message
             }
@@ -385,7 +442,112 @@ final class SharedAgentLiveView: NSView {
     }
 
     private func setText(_ field: NSTextField, _ value: String) { if field.stringValue != value { field.stringValue = value } }
+
+    private func chromeChanged() {
+        let next = chrome != nil
+        if next != showsChrome {
+            showsChrome = next
+            for view in [status, controls, scroll, lastPrompt] as [NSView] { view.isHidden = next }
+            if next { composer.isHidden = true; send.isHidden = true } else { scroll.isHidden = transcriptLive }
+            if next, strip.superview == nil { addSubview(strip) }
+            strip.isHidden = !next
+            needsLayout = true
+        }
+        resolveCharacterSet()
+        render()
+        onChromeChange?()
+    }
+
+    private func resolveCharacterSet() {
+        let base = helpers.characterSource
+        guard let chrome, let reference = chrome.character?.theme else {
+            characterSet = nil
+            for view in [transcriptView, helperView] { view.agentCharacters = base }
+            return
+        }
+        let set = SharedAgentCharacterSets.resolve(reference, files: transcriptView.mirror.characterThemes)
+        guard set != characterSet else { return }
+        characterSet = set
+        // The transcript's chips draw the host's set too: the agent itself and
+        // its helpers, each as the host assigns them, in the poses the helper
+        // roster reports.
+        let agent = chrome.agent
+        let source = AgentCharacterSource { [weak self] id in
+            guard let self, let chrome = self.chrome, let set = self.characterSet else { return base.current(id) }
+            if id == agent, let character = chrome.character {
+                return self.characterInput(for: id, character: character, set: set)
+            }
+            // A helper's pose comes from the roster. Its set is the host's only
+            // where this Mac would draw another one: the same built-in set
+            // draws the roster's own pick, as the host does.
+            let base = base.current(id)
+            guard set.key != "builtin:" + (AgentCharacterController.shared.theme?.id ?? "") else { return base }
+            var input = base ?? .init(snapshot: AgentCharacterSnapshot(state: .ready), characterName: nil)
+            if let assignment = set.assignment(for: id, shipped: chrome.helpers[id], name: input.characterName) {
+                input.shared = .init(set: set, assignment: assignment)
+            }
+            return input
+        }
+        for view in [transcriptView, helperView] { view.agentCharacters = source }
+    }
+
+    private func characterInput(for id: UUID, character: Chrome.Character, set: SharedAgentCharacterSet) -> AgentCharacterSource.Input? {
+        guard let assignment = set.assignment(for: id, shipped: character.assignment, name: character.characterName) else { return nil }
+        return .init(snapshot: character.snapshot, characterName: character.characterName, shared: .init(set: set, assignment: assignment))
+    }
+
+    /// The title bar's character: the host's agent, pose and set.
+    var titleCharacter: (agentID: UUID, input: AgentCharacterSource.Input)? {
+        guard let chrome, let character = chrome.character, let set = characterSet,
+              let input = characterInput(for: chrome.agent, character: character, set: set) else { return nil }
+        return (chrome.agent, input)
+    }
+
+    /// Why the composer cannot send from here, or nil when it can.
+    func readOnlyReason(state: Projection.Snapshot?, role: Collaboration.Role) -> String? {
+        let owner = source.map { name($0.owner) ?? "its owner" } ?? "its owner"
+        if let ended { return ended + ". Prompts are refused." }
+        guard let state else { return "Connecting to \(owner)'s Mac…" }
+        guard state.capabilities.locallyManaged else { return "A watched session. Prompts can't reach it from a shared view." }
+        guard role.allows(.promptAgent) else { return "View only. \(owner.prefix(1).uppercased() + owner.dropFirst()) and editors can prompt it." }
+        guard prompter != nil else { return "It runs on \(owner)'s Mac. Open it beside to prompt it." }
+        return nil
+    }
+
+    /// The strip, the tail and the clock, from the host's chrome now.
+    private func renderChrome(now: Date = AgentElapsedClock.now()) {
+        guard showsChrome, let chrome else { stopChromeTick(); return }
+        let role = controller.scope?.role ?? .viewer
+        let reason = readOnlyReason(state: replica.state, role: role)
+        strip.apply(chrome, mayPrompt: reason == nil, readOnlyReason: reason, sending: sending, now: now)
+        let tail = SharedAgentChromePresenter.tail(chrome, now: now)
+        transcriptView.applyTail(working: tail.working, text: tail.text, settled: tail.settled)
+        let line = delivery ?? ""
+        setText(controls, line)
+        if controls.isHidden != line.isEmpty { controls.isHidden = line.isEmpty; needsLayout = true }
+        // The host's clocks run here only while something shows one.
+        let ticking = chrome.tail.working || chrome.header.startedAt != nil || chrome.activity?.phaseStartedAt != nil
+        if ticking, window != nil { startChromeTick() } else { stopChromeTick() }
+    }
+
+    private func startChromeTick() {
+        guard chromeTick == nil else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.renderChrome() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        chromeTick = timer
+    }
+
+    private func stopChromeTick() { chromeTick?.invalidate(); chromeTick = nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { stopChromeTick() } else { renderChrome() }
+    }
+
     private func render() {
+        if showsChrome { renderChrome(); return }
         let role = controller.scope?.role ?? .viewer
         guard let state = replica.state else {
             // Assigned only on change: a poll that learns nothing new must not
@@ -488,6 +650,7 @@ final class SharedAgentLiveView: NSView {
 
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyAppearance() }
     private func applyAppearance() {
+        strip.applyTokens()
         status.textColor = TextToken.textPrimary.color.nsColor(in: self)
         controls.textColor = TextToken.textSecondary.color.nsColor(in: self)
         transcript.font = .token(.body)

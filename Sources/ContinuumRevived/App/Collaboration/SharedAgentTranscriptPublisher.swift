@@ -56,6 +56,13 @@ final class SharedAgentTranscriptPublisher {
     private var cachedImages: [AgentImageAttachmentID: Data] = [:]
     private var lastImageIDs: Set<AgentImageAttachmentID> = []
     private var lastImageRead = Date.distantPast
+    /// The host tile's chrome now, and the person's own character set it
+    /// names (agent-chrome). Nil: this publisher sends no chrome.
+    private let chrome: (@MainActor () -> (chrome: Wire.Chrome, theme: Wire.CharacterTheme?)?)?
+    /// The chrome the guest holds, and the sets it was sent since the last checkpoint.
+    private(set) var publishedChrome: Wire.Chrome?
+    private var sentThemes: Set<String> = []
+    private(set) var chromeOps = 0
     private let sink: SharedAgentTranscriptSink
     private let budget: SharedAgentTranscriptBudget
     /// Host entries (before the budget) as the guest now holds them.
@@ -78,10 +85,11 @@ final class SharedAgentTranscriptPublisher {
          details: @escaping @MainActor () -> [AgentNodeID: SharedAgentToolPresentation] = { [:] },
          detailRevision: @escaping @MainActor () -> UInt64? = { nil },
          imageData: @escaping @MainActor (AgentDocument) async -> [AgentImageAttachmentID: Data] = { _ in [:] },
+         chrome: (@MainActor () -> (chrome: Wire.Chrome, theme: Wire.CharacterTheme?)?)? = nil,
          document: @escaping @MainActor () -> AgentDocument?) {
         self.agent = agent; self.stream = stream; self.generation = generation
         self.budget = budget; self.sink = sink; self.helpers = helpers; self.document = document
-        self.details = details; self.detailRevision = detailRevision; self.imageData = imageData
+        self.details = details; self.detailRevision = detailRevision; self.imageData = imageData; self.chrome = chrome
     }
 
     /// The main stream carries the agent's helper roster; a helper's own
@@ -91,13 +99,20 @@ final class SharedAgentTranscriptPublisher {
         let roster: (@MainActor () -> [Wire.Helper])? = stream == Lane.mainStream ? { @MainActor [weak supervisor] in
             supervisor.map { SharedAgentHelpers.roster($0, lead: agent) } ?? []
         } : nil
+        // Only the agent's own stream carries its tile's chrome; a helper's
+        // stream is drawn inside the parent's transcript.
+        var chrome: (@MainActor () -> (chrome: Wire.Chrome, theme: Wire.CharacterTheme?)?)?
+        if stream == Lane.mainStream {
+            let builder = SharedAgentChromeBuilder(supervisor: supervisor, agent: agent)
+            chrome = { builder.build() }
+        }
         self.init(agent: agent, stream: stream, generation: generation, sink: sink, helpers: roster, details: { [weak supervisor] in
             (supervisor?.sharedTranscriptToolBlocks(for: agent) ?? [:]).compactMapValues { SharedAgentToolPresentation(presented: $0) }
         }, detailRevision: { [weak supervisor] in
             supervisor?.sharedTranscriptDetailRevision(for: agent)
         }, imageData: { [weak supervisor] document in
             await supervisor?.sharedTranscriptImages(for: agent, document: document) ?? [:]
-        }) { [weak supervisor] in
+        }, chrome: chrome) { [weak supervisor] in
             supervisor?.transcriptDocument(for: agent)
         }
     }
@@ -122,9 +137,11 @@ final class SharedAgentTranscriptPublisher {
         let roster = helpers?()
         let revision = detailRevision()
         let now = Date()
+        let chromeNow = chrome?()
+        let chromeChanged = chromeNow.map { !Self.sameForGuest($0.chrome, publishedChrome) } ?? false
         // Detail changes have their own revision; periodic audits still notice
         // TTL expiry and images that were not ready at the previous read.
-        if !needsCheckpoint, current.version == lastVersion, roster == publishedHelpers, let revision,
+        if !needsCheckpoint, current.version == lastVersion, roster == publishedHelpers, !chromeChanged, let revision,
            revision == lastDetailRevision, now.timeIntervalSince(lastDetailAudit) < 5 { return }
         publishing = true
         let currentDetails = details()
@@ -136,7 +153,7 @@ final class SharedAgentTranscriptPublisher {
         let visible = published.isEmpty && lastVersion == current.version ? [] : window(of: current.entries)
         let visibleBlocks = Wire.blockIDs(in: visible)
         let visibleImages = Self.imageIDs(in: visible)
-        if !needsCheckpoint, current.version == lastVersion, roster == publishedHelpers,
+        if !needsCheckpoint, current.version == lastVersion, roster == publishedHelpers, !chromeChanged,
            currentDetails.filter({ visibleBlocks.contains($0.key) }) == publishedDetails,
            cachedImages.filter({ visibleImages.contains($0.key) }) == publishedImages {
             lastDetailRevision = revision; lastDetailAudit = now
@@ -146,7 +163,7 @@ final class SharedAgentTranscriptPublisher {
         do {
             if needsCheckpoint || bytesSinceCheckpoint > Lane.checkpointAfterBytes
                 || cachedImages.filter({ visibleImages.contains($0.key) }) != publishedImages {
-                try await sendCheckpoint(current, roster: roster, details: currentDetails, images: cachedImages)
+                try await sendCheckpoint(current, roster: roster, details: currentDetails, images: cachedImages, chrome: chromeNow)
             } else if var ops = current.version == lastVersion ? [] : patch(to: current.entries) {
                 let keptIDs = Wire.blockIDs(in: window(of: current.entries))
                 let nextDetails = currentDetails.filter { keptIDs.contains($0.key) }
@@ -154,21 +171,32 @@ final class SharedAgentTranscriptPublisher {
                 let detailOps = changedIDs.sorted { $0.rawValue < $1.rawValue }.map { Wire.Op.toolDetail(block: $0, detail: nextDetails[$0]) }
                 ops = ops.map(fitted) + detailOps
                 if let roster, roster != publishedHelpers { ops.append(.helpers(roster)) }
+                var chromeSent: Wire.Chrome?
+                if chromeChanged, let chromeNow {
+                    // A set travels once, before the first chrome that names it.
+                    if let theme = chromeNow.theme, !sentThemes.contains(theme.hash) { ops.append(.characterTheme(theme)) }
+                    ops.append(.chrome(chromeNow.chrome))
+                    chromeSent = chromeNow.chrome
+                }
                 if !ops.isEmpty {
                     let body = try Wire.encode(Wire.Patch(ops: ops))
                     if body.count > Lane.maxFrameBytes {
-                        try await sendCheckpoint(current, roster: roster, details: currentDetails, images: cachedImages)
+                        try await sendCheckpoint(current, roster: roster, details: currentDetails, images: cachedImages, chrome: chromeNow)
                     } else {
                         let frame = Lane.Frame(generation: generation, sequence: through + 1, body: body)
                         try await sink.publish(stream: stream, checkpoint: nil, frames: [frame])
                         through += 1; frames += 1; bytesSinceCheckpoint += body.count
                         published = window(of: current.entries); publishedDetails = nextDetails
                         if let roster, roster != publishedHelpers { publishedHelpers = roster; onHelpersPublished?(roster) }
+                        if let chromeSent {
+                            publishedChrome = chromeSent; chromeOps += 1
+                            if let theme = chromeNow?.theme { sentThemes.insert(theme.hash) }
+                        }
                     }
                 }
                 lastVersion = current.version
             } else {
-                try await sendCheckpoint(current, roster: roster, details: currentDetails, images: cachedImages)
+                try await sendCheckpoint(current, roster: roster, details: currentDetails, images: cachedImages, chrome: chromeNow)
             }
             lastDetailRevision = revision; lastDetailAudit = now
             lastError = nil
@@ -184,10 +212,13 @@ final class SharedAgentTranscriptPublisher {
     }
 
     private func sendCheckpoint(_ current: AgentDocument, roster: [Wire.Helper]?, details: [AgentNodeID: SharedAgentToolPresentation],
-                                images: [AgentImageAttachmentID: Data]) async throws {
-        // The roster rides inside the same limit (32 helpers, a few KiB).
+                                images: [AgentImageAttachmentID: Data],
+                                chrome chromeNow: (chrome: Wire.Chrome, theme: Wire.CharacterTheme?)?) async throws {
+        // The roster rides inside the same limit (32 helpers, a few KiB), and
+        // so do the chrome and a person's own set (at most 32 KiB deflated).
         let rosterBytes = try roster.map { try Wire.encode($0).count + 16 } ?? 0
-        let window = Wire.window(current.entries, maxBytes: Lane.maxCheckpointBytes - rosterBytes, budget: budget)
+        let window = Wire.window(current.entries, maxBytes: Lane.maxCheckpointBytes - rosterBytes, budget: budget,
+                                 chrome: chromeNow?.chrome, characterTheme: chromeNow?.theme)
         var entries = window.entries
         var omitted = window.omittedEntries
         var selected: [AgentNodeID: SharedAgentToolPresentation] = [:]
@@ -198,7 +229,8 @@ final class SharedAgentTranscriptPublisher {
             let items = selected.keys.sorted { $0.rawValue < $1.rawValue }.compactMap { id in
                 selected[id].map { Wire.ToolDetail(block: id, detail: $0) }
             }
-            body = try Wire.encode(Wire.Checkpoint(entries: entries, omittedEntries: omitted, helpers: roster, toolDetails: items))
+            body = try Wire.encode(Wire.Checkpoint(entries: entries, omittedEntries: omitted, helpers: roster, toolDetails: items,
+                                                   chrome: chromeNow?.chrome, characterTheme: chromeNow?.theme))
             if body.count <= Lane.maxCheckpointBytes || entries.isEmpty { break }
             entries.removeFirst(); omitted += 1
         }
@@ -223,6 +255,19 @@ final class SharedAgentTranscriptPublisher {
         published = Array(current.entries.suffix(entries.count)); publishedDetails = selected; publishedImages = selectedImages
         lastVersion = current.version
         if let roster { let changed = roster != publishedHelpers; publishedHelpers = roster; if changed { onHelpersPublished?(roster) } }
+        publishedChrome = chromeNow?.chrome
+        sentThemes = Set(chromeNow?.theme.map { [$0.hash] } ?? [])
+    }
+
+    /// Whether the guest would draw `a` as it draws `b`. The character's last
+    /// output time moves on every streamed delta; it changes the pose only
+    /// after tens of seconds of quiet, so it alone resends at most every 10 s.
+    static func sameForGuest(_ a: Wire.Chrome, _ b: Wire.Chrome?) -> Bool {
+        guard var b else { return false }
+        if let x = a.character?.lastOutputAt, let y = b.character?.lastOutputAt, abs(x.timeIntervalSince(y)) < 10 {
+            b.character?.lastOutputAt = x
+        }
+        return a == b
     }
 
     private func sendImageOp(_ op: Wire.Op) async throws {

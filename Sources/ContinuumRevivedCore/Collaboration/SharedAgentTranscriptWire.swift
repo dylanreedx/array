@@ -48,10 +48,15 @@ public enum SharedAgentTranscriptWire {
         case toolDetail(block: AgentNodeID, detail: SharedAgentToolPresentation?)
         case imageManifest(SharedAgentTranscriptImages.Manifest)
         case imageChunk(SharedAgentTranscriptImages.Chunk)
+        /// The host tile's chrome now (agent-chrome). Replaces the last one.
+        case chrome(Chrome)
+        /// A person's own character set, sent once per set before the chrome
+        /// that names it.
+        case characterTheme(CharacterTheme)
         /// An op this build does not know (a newer host): decoded and skipped.
         case unknown(String)
 
-        private enum Keys: String, CodingKey { case op, head, after, blocks, entry, block, helpers, detail, manifest, chunk }
+        private enum Keys: String, CodingKey { case op, head, after, blocks, entry, block, helpers, detail, manifest, chunk, chrome, theme }
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: Keys.self)
             let op = try c.decode(String.self, forKey: .op)
@@ -65,6 +70,10 @@ public enum SharedAgentTranscriptWire {
             case "toolDetail": self = .toolDetail(block: try c.decode(AgentNodeID.self, forKey: .block), detail: try c.decodeIfPresent(SharedAgentToolPresentation.self, forKey: .detail))
             case "imageManifest": self = .imageManifest(try c.decode(SharedAgentTranscriptImages.Manifest.self, forKey: .manifest))
             case "imageChunk": self = .imageChunk(try c.decode(SharedAgentTranscriptImages.Chunk.self, forKey: .chunk))
+            // Chrome is presentation: one this build cannot read is skipped,
+            // never a reason to drop the frame and resnapshot the transcript.
+            case "chrome": self = (try? c.decode(Chrome.self, forKey: .chrome)).map(Op.chrome) ?? .unknown(op)
+            case "characterTheme": self = (try? c.decode(CharacterTheme.self, forKey: .theme)).map(Op.characterTheme) ?? .unknown(op)
             default: self = .unknown(op)
             }
         }
@@ -87,6 +96,10 @@ public enum SharedAgentTranscriptWire {
                 try c.encode("imageManifest", forKey: .op); try c.encode(manifest, forKey: .manifest)
             case let .imageChunk(chunk):
                 try c.encode("imageChunk", forKey: .op); try c.encode(chunk, forKey: .chunk)
+            case let .chrome(chrome):
+                try c.encode("chrome", forKey: .op); try c.encode(chrome, forKey: .chrome)
+            case let .characterTheme(theme):
+                try c.encode("characterTheme", forKey: .op); try c.encode(theme, forKey: .theme)
             case let .unknown(op):
                 try c.encode(op, forKey: .op)
             }
@@ -108,11 +121,17 @@ public enum SharedAgentTranscriptWire {
         /// (a child stream, or a host before helpers).
         public let helpers: [Helper]?
         public let toolDetails: [ToolDetail]
-        public init(entries: [AgentEntry], omittedEntries: Int, helpers: [Helper]? = nil, toolDetails: [ToolDetail] = []) {
+        /// The chrome at the checkpoint, and the set it names when that is a
+        /// person's own: a late joiner or a resnapshot has seen no earlier frame.
+        public var chrome: Chrome?
+        public var characterTheme: CharacterTheme?
+        public init(entries: [AgentEntry], omittedEntries: Int, helpers: [Helper]? = nil, toolDetails: [ToolDetail] = [],
+                    chrome: Chrome? = nil, characterTheme: CharacterTheme? = nil) {
             schema = SharedAgentTranscriptWire.schema; self.entries = entries
             self.omittedEntries = omittedEntries; self.helpers = helpers; self.toolDetails = toolDetails
+            self.chrome = chrome; self.characterTheme = characterTheme
         }
-        private enum Keys: String, CodingKey { case schema, entries, omittedEntries, helpers, toolDetails }
+        private enum Keys: String, CodingKey { case schema, entries, omittedEntries, helpers, toolDetails, chrome, characterTheme }
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: Keys.self)
             schema = try c.decode(Int.self, forKey: .schema)
@@ -120,6 +139,15 @@ public enum SharedAgentTranscriptWire {
             omittedEntries = try c.decode(Int.self, forKey: .omittedEntries)
             helpers = try c.decodeIfPresent([Helper].self, forKey: .helpers)
             toolDetails = try c.decodeIfPresent([ToolDetail].self, forKey: .toolDetails) ?? []
+            chrome = try? c.decodeIfPresent(Chrome.self, forKey: .chrome)
+            characterTheme = try? c.decodeIfPresent(CharacterTheme.self, forKey: .characterTheme)
+        }
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: Keys.self)
+            try c.encode(schema, forKey: .schema); try c.encode(entries, forKey: .entries)
+            try c.encode(omittedEntries, forKey: .omittedEntries)
+            try c.encodeIfPresent(helpers, forKey: .helpers); try c.encode(toolDetails, forKey: .toolDetails)
+            try c.encodeIfPresent(chrome, forKey: .chrome); try c.encodeIfPresent(characterTheme, forKey: .characterTheme)
         }
     }
     public struct Patch: Codable, Equatable, Sendable {
@@ -169,15 +197,18 @@ public enum SharedAgentTranscriptWire {
     }
 
     /// The newest entries whose encoding fits `maxBytes`, oldest first.
-    public static func window(_ entries: [AgentEntry], maxBytes: Int, budget: SharedAgentTranscriptBudget) -> Checkpoint {
-        var kept: [AgentEntry] = [], used = 64
+    public static func window(_ entries: [AgentEntry], maxBytes: Int, budget: SharedAgentTranscriptBudget,
+                              chrome: Chrome? = nil, characterTheme: CharacterTheme? = nil) -> Checkpoint {
+        let carried = (chrome.flatMap { try? encode($0).count } ?? 0) + (characterTheme.flatMap { try? encode($0).count } ?? 0)
+        var kept: [AgentEntry] = [], used = 64 + carried
         for entry in entries.reversed() {
             let fitted = budget.fit(entry)
             let size = (try? encode(fitted).count) ?? .max
             guard used + size <= maxBytes else { break }
             kept.append(fitted); used += size
         }
-        return Checkpoint(entries: kept.reversed(), omittedEntries: entries.count - kept.count)
+        return Checkpoint(entries: kept.reversed(), omittedEntries: entries.count - kept.count,
+                          chrome: chrome, characterTheme: characterTheme)
     }
 
     public static func blockIDs(in entries: [AgentEntry]) -> Set<AgentNodeID> {
@@ -198,12 +229,30 @@ public enum SharedAgentTranscriptWire {
         public private(set) var helpers: [Helper]?
         public private(set) var toolDetails: [AgentNodeID: SharedAgentToolPresentation] = [:]
         public private(set) var images = SharedAgentTranscriptImages.Receiver()
+        /// The host tile's chrome, as last sent; nil before any (an older host).
+        public private(set) var chrome: Chrome?
+        /// The person's own sets this mirror was sent, by hash. Unvalidated: the
+        /// app validates one before drawing it.
+        public private(set) var characterThemes: [String: CharacterTheme] = [:]
+        /// Sets kept at once: a host sends the one it shows, and a change of set
+        /// sends the new one.
+        public static let maximumCharacterThemes = 4
         public init() {}
+
+        private mutating func keep(_ theme: CharacterTheme) {
+            if characterThemes.count >= Self.maximumCharacterThemes, characterThemes[theme.hash] == nil {
+                let named = chrome?.character?.theme.hash
+                if let drop = characterThemes.keys.sorted().first(where: { $0 != named }) { characterThemes[drop] = nil }
+            }
+            characterThemes[theme.hash] = theme
+        }
 
         public enum Failure: Error, Equatable { case schema, unknownEntry(AgentNodeID), missingBlock(AgentNodeID), unknownAnchor(AgentNodeID), invalidHelpers }
         public struct Touched: Equatable, Sendable {
             public var ids: Set<AgentNodeID> = []
             public var structural = false
+            /// The chrome or a character set changed.
+            public var chrome = false
             public init(ids: Set<AgentNodeID> = [], structural: Bool = false) { self.ids = ids; self.structural = structural }
         }
 
@@ -217,10 +266,14 @@ public enum SharedAgentTranscriptWire {
             images = SharedAgentTranscriptImages.Receiver()
             omittedEntries = checkpoint.omittedEntries
             helpers = checkpoint.helpers
+            chrome = checkpoint.chrome
+            if let theme = checkpoint.characterTheme { keep(theme) }
             var entries = checkpoint.entries
             if checkpoint.omittedEntries > 0 { entries.insert(Self.omittedNotice(checkpoint.omittedEntries), at: 0) }
             document = AgentDocument(version: document.version &+ 1, entries: entries)
-            return Touched(ids: [], structural: true)
+            var touched = Touched(ids: [], structural: true)
+            touched.chrome = true
+            return touched
         }
 
         /// All or nothing: a patch that fails leaves the mirror as it was.
@@ -233,6 +286,8 @@ public enum SharedAgentTranscriptWire {
             var pendingOrder: [AgentNodeID: [AgentNodeID]] = [:]
             var stagedBlocks: [AgentNodeID: [AgentNodeID: AgentBlock]] = [:]
             var roster = helpers
+            var pendingChrome: Chrome?
+            var pendingThemes: [CharacterTheme] = []
             func index(_ id: AgentNodeID) -> Int? { entries.firstIndex { $0.id == id } }
             for op in patch.ops {
                 switch op {
@@ -273,6 +328,12 @@ public enum SharedAgentTranscriptWire {
                 case let .imageChunk(chunk):
                     do { try receivedImages.receive(chunk) } catch { throw Failure.schema }
                     touched.structural = true
+                case let .chrome(next):
+                    touched.chrome = true
+                    pendingChrome = next
+                case let .characterTheme(theme):
+                    touched.chrome = true
+                    pendingThemes.append(theme)
                 case .unknown:
                     continue
                 }
@@ -297,7 +358,13 @@ public enum SharedAgentTranscriptWire {
             guard touched.ids.filter({ details[$0] != nil }).allSatisfy(validIDs.contains) else { throw Failure.schema }
             toolDetails = details.filter { validIDs.contains($0.key) }
             images = receivedImages
-            document = AgentDocument(version: document.version &+ 1, entries: entries)
+            for theme in pendingThemes { keep(theme) }
+            if let pendingChrome { chrome = pendingChrome }
+            // A chrome-only patch leaves the document (and its version) alone,
+            // so the transcript does not re-present for a status tick.
+            if entries != document.entries || !touched.ids.isEmpty || touched.structural {
+                document = AgentDocument(version: document.version &+ 1, entries: entries)
+            }
             helpers = roster
             return touched
         }

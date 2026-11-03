@@ -255,7 +255,7 @@ struct AgentCompactStatusPresentation: Equatable {
             isExternal: snapshot.workingLocation.relationToHome == .outside)
     }
 
-    private static func presentActivity(
+    static func presentActivity(
         _ input: AgentCompactActivityInput,
         now: Date
     ) -> Activity {

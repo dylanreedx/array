@@ -1,6 +1,7 @@
 import AppKit
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
+import ContinuumRevivedCore
 
 /// C10: `AgentReferencePayload` deliberately carries no status — a status tick
 /// must never rewrite the semantic document. This is the render-time seam a
@@ -35,6 +36,14 @@ struct AgentCharacterSource: @unchecked Sendable {
         var snapshot: AgentCharacterSnapshot
         /// The agent's chosen character, by name; nil lets its id choose.
         var characterName: String?
+        /// A shared agent's host set and the character the host draws in it
+        /// (agent-chrome). nil: this Mac's own set and rule.
+        var shared: Shared?
+
+        struct Shared: Equatable {
+            var set: SharedAgentCharacterSet
+            var assignment: AgentCharacterAssignment
+        }
     }
 
     let current: (UUID) -> Input?

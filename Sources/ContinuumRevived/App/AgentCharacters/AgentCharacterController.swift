@@ -302,6 +302,40 @@ final class AgentCharacterController {
         return built
     }
 
+    // MARK: Shared agents' sets (agent-chrome)
+
+    private struct SharedAtlasKey: Hashable {
+        let set: String
+        let assignment: AgentCharacterAssignment
+        let appearance: AgentCharacterAtlas.Appearance
+    }
+    /// Atlases of sets other Macs' shared agents draw, keyed by the set's key
+    /// (with its content hash), never by id: a guest's own set can share an id.
+    private var sharedAtlases: [SharedAtlasKey: AgentCharacterSpriteAtlas] = [:]
+    private var sharedLeadSets: [String: AgentCharacterTheme] = [:]
+    static let maximumSharedAtlases = 48
+
+    func sharedAtlas(set: SharedAgentCharacterSet, assignment: AgentCharacterAssignment,
+                     appearance: AgentCharacterAtlas.Appearance) -> AgentCharacterSpriteAtlas? {
+        let key = SharedAtlasKey(set: set.key, assignment: assignment, appearance: appearance)
+        if let built = sharedAtlases[key] { return built }
+        let theme: AgentCharacterTheme
+        if assignment.kind == .lead {
+            if sharedLeadSets[set.key] == nil { sharedLeadSets[set.key] = set.theme.leadSet }
+            guard let lead = sharedLeadSets[set.key] else { return nil }
+            theme = lead
+        } else {
+            theme = set.theme
+        }
+        guard theme.characters.indices.contains(assignment.index),
+              let built = AgentCharacterSpriteAtlas(theme: theme, character: assignment.index, appearance: appearance)
+        else { return nil }
+        atlasBuilds += 1
+        if sharedAtlases.count >= Self.maximumSharedAtlases { sharedAtlases.removeAll(); sharedLeadSets.removeAll() }
+        sharedAtlases[key] = built
+        return built
+    }
+
     /// The plan for one agent now, honouring motion settings.
     func plan(for snapshot: AgentCharacterSnapshot, now: Date) -> AgentCharacterPlan {
         var snapshot = snapshot

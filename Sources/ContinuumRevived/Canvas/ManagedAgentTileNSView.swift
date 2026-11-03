@@ -3114,7 +3114,15 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// fact; a probe's injected facts win while it holds them.
     private func compactPhaseFacts() -> (session: AgentCompactStatusPhaseFacts.Session?, turn: AgentCompactStatusPhaseFacts.Turn?) {
         if let injectedCompactFacts { return injectedCompactFacts }
-        let presence = currentPresence
+        return Self.compactPhaseFacts(presence: currentPresence, hasPresenceFacts: hasPresenceFacts,
+                                      compaction: compactionSessionFact)
+    }
+
+    /// The row's session and turn facts from one presence. A shared agent's
+    /// host builds its guest's status row from the same function.
+    static func compactPhaseFacts(
+        presence: AgentTurnPresence, hasPresenceFacts: Bool, compaction compactionSessionFact: AgentCompactStatusPhaseFacts.Session?
+    ) -> (session: AgentCompactStatusPhaseFacts.Session?, turn: AgentCompactStatusPhaseFacts.Turn?) {
         let anchor = presence.startedAt
         var session: AgentCompactStatusPhaseFacts.Session?
         var turn: AgentCompactStatusPhaseFacts.Turn?
@@ -3210,6 +3218,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private func presentationWithoutThinkingIndicator(
         _ presentation: AgentCompactStatusPresentation
     ) -> AgentCompactStatusPresentation {
+        Self.presentationWithoutThinkingIndicator(presentation)
+    }
+
+    static func presentationWithoutThinkingIndicator(
+        _ presentation: AgentCompactStatusPresentation
+    ) -> AgentCompactStatusPresentation {
         let activity = presentation.activity
         // Only the ACTIVITY is being rewritten here. Everything else must be
         // carried across verbatim: this helper sits on every production repaint,
@@ -3243,7 +3257,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     /// Attention states only. These occur precisely when the gyro is NOT shown
     /// (the agent is not running), so without them a failure would be invisible.
-    private static func footerRetainsPhase(_ phase: AgentCompactActivityPhase) -> Bool {
+    static func footerRetainsPhase(_ phase: AgentCompactActivityPhase) -> Bool {
         switch phase {
         case .failed, .interrupted, .waiting:
             return true
@@ -3254,7 +3268,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     /// The words that ride the gyro: the live phase and its elapsed reading.
     /// Attention and idle states return nil — those are the footer's, or nobody's.
-    private static func tailStatusText(
+    static func tailStatusText(
         for activity: AgentCompactStatusPresentation.Activity,
         liveToolVerb: String? = nil,
         startupDetail: String? = nil,
@@ -3290,12 +3304,21 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// No authoritative fact means the row says nothing. A visible "Unknown" chip
     /// is the boot-time stale claim: before the first event of a session there is
     /// no live phase, and the previous session's residue must not read as one.
-    private func unknownCompactActivity() -> AgentCompactStatusPresentation.Activity {
+    private func unknownCompactActivity() -> AgentCompactStatusPresentation.Activity { Self.unknownCompactActivity }
+
+    static var unknownCompactActivity: AgentCompactStatusPresentation.Activity {
         .silent(
             detailText: "Activity phase: unknown. No authoritative session, turn, interaction, or current-tool phase fact.")
     }
 
     private func compactLocationPresentation(
+        _ snapshot: AgentLocationSnapshot,
+        detail: AgentLocationStatusPresentation
+    ) -> AgentCompactStatusPresentation.Location {
+        Self.compactLocationPresentation(snapshot, detail: detail)
+    }
+
+    static func compactLocationPresentation(
         _ snapshot: AgentLocationSnapshot,
         detail: AgentLocationStatusPresentation
     ) -> AgentCompactStatusPresentation.Location {
@@ -4658,17 +4681,19 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private func refreshTitleBarIdentity() {
         let recordName = attachedAgentID
             .flatMap { agentSource?.records[$0]?.humanDisplayName }
-        let candidate = recordName ?? headerAgentName ?? AgentRecord.defaultAgentName
-        let name = AgentName.displayTitle(
-            candidate,
-            model: providerSettings.model,
-            id: attachedAgentID?.rawValue
-        )
+        let name = Self.titleBarName(recordName: recordName, fallback: headerAgentName,
+                                     model: providerSettings.model, id: attachedAgentID?.rawValue)
         // Just the name: the mark beside it already says it is an agent.
         setTitleBarIdentity(
             title: name,
             providerModel: providerSettings.model
         )
+    }
+
+    /// The agent's name as the title bar shows it. A shared agent's host sends
+    /// its guest exactly this.
+    static func titleBarName(recordName: String?, fallback: String?, model: String, id: UUID?) -> String {
+        AgentName.displayTitle(recordName ?? fallback ?? AgentRecord.defaultAgentName, model: model, id: id)
     }
 
     @objc private func managedModeChanged(_ notification: Notification) {
@@ -5085,6 +5110,21 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
     @discardableResult
     func qaPickModel(_ model: String) -> Bool { providerFooter.qaPickModel(model) }
+
+    /// QA: the chrome as this tile shows it, read off its views, for the shared
+    /// agent's host/guest comparison (`SharedAgentChromeFacts`).
+    var qaChromeFacts: [String: String] {
+        var facts: [String: String] = [:]
+        SharedAgentChromeFacts.read(tile: self, header: agentHeader, into: &facts)
+        if let v2ActionButton {
+            SharedAgentChromeFacts.read(statusRow: compactStatusRow, footer: providerFooter, action: v2ActionButton, into: &facts)
+        }
+        return facts
+    }
+    /// QA: the views the chrome comparison pictures.
+    var qaChromeViews: (header: AgentTileHeaderView, statusRow: AgentCompactStatusRowView, footer: AgentComposerFooterView, composer: AgentComposerView?) {
+        (agentHeader, compactStatusRow, providerFooter, v2Composer)
+    }
     @discardableResult
     func qaPickHarness(_ harness: AgentHarness) -> Bool { providerFooter.qaPickHarness(harness) }
     @discardableResult

@@ -41,6 +41,9 @@ final class SharedAgentTileNSView: TileNSView {
         setContentView(body)
         let host = reference?.hostName ?? "Someone"
         apply(.placeholder("Shared by \(host) · sign in to see it"), hostName: host, colour: .systemOrange)
+        enableTitleBarActions()
+        setTileActionLabels(close: "Close shared view", stop: AgentTileHeaderView.stopActionTitle)
+        setStopActionUnavailable("Only \(host) can stop it, on \(host)'s Mac.")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
@@ -50,7 +53,87 @@ final class SharedAgentTileNSView: TileNSView {
     var qaFooterText: String { body.footerText }
     var qaPlaceholderText: String? { body.placeholderText }
 
-    func install(live: SharedAgentLiveView) { body.install(live: live) }
+    func install(live: SharedAgentLiveView) {
+        body.install(live: live)
+        live.onChromeChange = { [weak self] in self?.applyHostChrome() }
+        applyHostChrome()
+    }
+
+    // MARK: The host tile's chrome (agent-chrome)
+
+    /// The host tile's under-bar header: branch, Managed, status.
+    let agentHeader = AgentTileHeaderView()
+    private var showsHostChrome = false
+
+    /// Title bar, under-bar, identity and character, from the host's chrome.
+    /// Before the host sends any (an older host) the tile keeps its own title.
+    func applyHostChrome() {
+        guard let live = body.live, let chrome = live.chrome else {
+            guard showsHostChrome else { return }
+            showsHostChrome = false
+            setTitleBarIdentity(title: nil)
+            setTitleBarTint(nil)
+            layer?.borderWidth = 0
+            agentStatus = nil
+            setAgentStatusLabel(nil)
+            setAgentCharacter(agentID: nil, snapshot: nil)
+            body.fillsBody = false
+            return
+        }
+        if !showsHostChrome {
+            showsHostChrome = true
+            agentHeader.showsElapsedTime = false
+            setUnderBarAccessory(agentHeader, height: AgentTileHeaderView.preferredHeight(zoom: .default))
+            body.fillsBody = true
+        }
+        setTitleBarIdentity(title: chrome.title, providerModel: chrome.model)
+        let identity = SharedAgentChromePresenter.identity(chrome)
+        setTitleBarTint(identity.bar)
+        layer?.borderWidth = identity.border == nil ? 0 : ManagedAgentTileNSView.identityBorderWidth
+        layer?.borderColor = identity.border?.cgColor
+        agentStatus = chrome.header.status
+        setAgentStatusLabel(chrome.header.stateLabel)
+        agentHeader.showsManaged = chrome.header.managed
+        agentHeader.apply(SharedAgentChromePresenter.header(chrome))
+        if let pick = live.titleCharacter {
+            setAgentCharacter(agentID: pick.agentID, snapshot: pick.input.snapshot, characterName: pick.input.characterName,
+                              shared: pick.input.shared.map { ($0.set, $0.assignment) })
+        } else {
+            setAgentCharacter(agentID: nil, snapshot: nil)
+        }
+        setStopActionUnavailable("Only \(hostName) can stop it, on \(hostName)'s Mac.")
+    }
+
+    /// The host tile's ⋯ items, each disabled with why: they change the agent
+    /// on its owner's Mac, which nothing here can do.
+    override func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] {
+        guard showsHostChrome else { return [] }
+        let host = hostName
+        func unavailable(_ title: String, _ reason: String) -> NSMenuItem {
+            let item = ChoiceDetailMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            item.detail = reason
+            item.identifier = NSUserInterfaceItemIdentifier("sharedAgent.menu." + title)
+            return item
+        }
+        return [
+            unavailable("Zoom", "Page zoom is on \(host)'s tile only."),
+            unavailable("Sounds", "This agent's sounds play on \(host)'s Mac."),
+            unavailable("Rename", "Only \(host) can rename it."),
+            unavailable("Color", "Only \(host) can change its colour."),
+            unavailable("Character", "Only \(host) can choose its character."),
+            unavailable("Workspace Tools", "\(host) decides what tools it has."),
+            unavailable("Show Background Processes", "Its processes run on \(host)'s Mac."),
+        ]
+    }
+
+    /// QA: the chrome as this tile shows it, for the host/guest comparison.
+    var qaChromeFacts: [String: String] {
+        var facts: [String: String] = [:]
+        SharedAgentChromeFacts.read(tile: self, header: agentHeader, into: &facts)
+        if let live = body.live { facts.merge(live.strip.qaFacts) { first, _ in first } }
+        return facts
+    }
 
     /// One place for everything the state changes: the tab, the outline, the
     /// footer, the body's dimming.
@@ -98,6 +181,9 @@ final class SharedAgentTileBody: NSView {
     private let footerDetail = NSTextField(wrappingLabelWithString: "")
     private var showsFooter = false
     private var dimmed = false
+    /// The live view draws the host tile's chrome: it takes the whole body,
+    /// edge to edge, as the host tile's content does.
+    var fillsBody = false { didSet { if fillsBody != oldValue { needsLayout = true } } }
     override var isFlipped: Bool { true }
     static let footerHeight: CGFloat = 54
 
@@ -155,7 +241,9 @@ final class SharedAgentTileBody: NSView {
         let inset: CGFloat = 12
         placeholder.frame = NSRect(x: inset, y: bounds.height / 2 - 24, width: max(0, bounds.width - 2 * inset), height: 48)
         let footer = showsFooter ? Self.footerHeight : 0
-        let liveFrame = NSRect(x: inset, y: 8, width: max(0, bounds.width - 2 * inset), height: max(0, bounds.height - footer - 16))
+        let liveFrame = fillsBody
+            ? NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - footer))
+            : NSRect(x: inset, y: 8, width: max(0, bounds.width - 2 * inset), height: max(0, bounds.height - footer - 16))
         if let live, live.frame != liveFrame { live.frame = liveFrame }
         let top = bounds.height - footer
         footerLine.frame = NSRect(x: inset + 14, y: top + 8, width: max(0, bounds.width - 2 * inset - 14), height: 18)

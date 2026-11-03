@@ -176,8 +176,9 @@ class TileNSView: NSView, TokenThemed {
     /// Show `agentID`'s character in the header for `snapshot`, or none (nil).
     /// Called by the agent tile when its status or turn changes; cheap to repeat.
     func setAgentCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, characterName: String? = nil,
+                           shared: (set: SharedAgentCharacterSet, assignment: AgentCharacterAssignment)? = nil,
                            now: Date = Date()) {
-        titleBar?.setCharacter(agentID: agentID, snapshot: snapshot, characterName: characterName, now: now)
+        titleBar?.setCharacter(agentID: agentID, snapshot: snapshot, characterName: characterName, shared: shared, now: now)
     }
     var qaCharacterLayer: CharacterSpriteLayer? { titleBar?.characterLayer }
     var qaCharacterRect: NSRect? { titleBar?.qaCharacterRect }
@@ -335,6 +336,8 @@ class TileNSView: NSView, TokenThemed {
     }
 
     func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] { [] }
+    /// The ⋯ menu's Stop, shown disabled with this reason; nil restores it.
+    func setStopActionUnavailable(_ reason: String?) { titleBar?.stopActionUnavailableReason = reason }
     /// QA: the ⋯ menu exactly as the title bar builds it.
     func qaTileContextMenu() -> NSMenu? { titleBar?.makeTileContextMenu() }
 
@@ -2264,6 +2267,9 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// invalidates the chrome, and it survives the controls being drawn inline.
     let characterLayer = CharacterSpriteLayer()
     private var characterInput: (id: UUID, snapshot: AgentCharacterSnapshot, name: String?)?
+    /// A shared agent's host set and character (agent-chrome): drawn from the
+    /// host's set, not this Mac's selected one.
+    private var sharedCharacter: (set: SharedAgentCharacterSet, assignment: AgentCharacterAssignment)?
     /// The character's size at chrome scale 1 (1 pt per art pixel); nil for none.
     private var characterSize: NSSize?
     /// Plan 110 › size: how much taller than 24 pt this bar is for its character's
@@ -2289,6 +2295,9 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     private var displayTitleOverride: String?
     private var closeActionTitle = "Close tile"
     private var stopActionTitle = "Stop run"
+    /// Why this tile cannot stop its run from here (a shared agent's guest);
+    /// nil offers Stop as usual.
+    var stopActionUnavailableReason: String?
 
     var whereMarker: String? {
         didSet { if whereMarker != oldValue { invalidateChrome() } }
@@ -2625,17 +2634,20 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     var qaCharacterRect: NSRect? { characterLayer.isHidden ? nil : characterRect }
     var qaProviderMarkRect: NSRect? { providerMarkView.isHidden ? nil : providerMarkView.frame }
 
-    func setCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, characterName: String?, now: Date) {
+    func setCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, characterName: String?,
+                      shared: (set: SharedAgentCharacterSet, assignment: AgentCharacterAssignment)? = nil, now: Date) {
         if let agentID, let snapshot { characterInput = (agentID, snapshot, characterName) } else { characterInput = nil }
+        sharedCharacter = shared
         refreshCharacter(now: now)
     }
 
     /// Resolve and show the character; lays out only when the slot appears or goes.
     func refreshCharacter(now: Date) {
         let controller = AgentCharacterController.shared
+        let appearance = AgentCharacterController.appearance(of: self)
         guard let input = characterInput,
-              let atlas = controller.atlas(for: input.id, appearance: AgentCharacterController.appearance(of: self),
-                                           name: input.name) else {
+              let atlas = sharedCharacter.map({ controller.atlas(shared: $0.set, assignment: $0.assignment, appearance: appearance) })
+                ?? controller.atlas(for: input.id, appearance: appearance, name: input.name) else {
             controller.scheduleRevisit(for: self, at: nil)
             if characterSize != nil {
                 characterSize = nil
@@ -2650,7 +2662,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         let plan = controller.plan(for: input.snapshot, now: now)
         characterLayer.show(plan, sprite: atlas, phase: controller.phase(for: input.id), now: now)
         controller.scheduleRevisit(for: self, at: plan.revisitAt)
-        let scale = CGFloat(controller.theme?.scale ?? 1)
+        let scale = CGFloat(sharedCharacter?.set.theme.scale ?? controller.theme?.scale ?? 1)
         let size = NSSize(width: CGFloat(atlas.atlas.frameWidth) / scale, height: CGFloat(atlas.atlas.frameHeight) / scale)
         if characterSize != size {
             characterSize = size
@@ -3224,8 +3236,12 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         if !additionalItems.isEmpty {
             menu.addItem(NSMenuItem.separator())
         }
-        let stop = NSMenuItem(title: stopActionTitle, action: #selector(handleStopRun(_:)), keyEquivalent: "")
+        let stop = ChoiceDetailMenuItem(title: stopActionTitle, action: #selector(handleStopRun(_:)), keyEquivalent: "")
         stop.target = self
+        if let reason = stopActionUnavailableReason {
+            stop.isEnabled = false
+            stop.detail = reason
+        }
         menu.addItem(stop)
         menu.addItem(NSMenuItem.separator())
         let close = NSMenuItem(title: closeActionTitle, action: #selector(handleClose(_:)), keyEquivalent: "")

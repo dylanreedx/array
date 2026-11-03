@@ -1,5 +1,11 @@
 import AppKit
 
+/// A command with a second line, for the shared choice surface: why a disabled
+/// action is unavailable, said where the person is looking.
+final class ChoiceDetailMenuItem: NSMenuItem {
+    var detail: String?
+}
+
 /// Presents an existing command tree using Array's shared choice surface.
 /// NSMenu is retained only as the command model: selection sends the original
 /// item to its original target, including closure-backed menu items.
@@ -91,8 +97,8 @@ final class ChoiceMenuController {
             let id = "\(prefix).\(index)"
             let hasSubmenu = source.submenu != nil
             var item = ChoiceItem(
-                id: id, title: source.title, enabled: source.isEnabled,
-                toolTip: source.toolTip)
+                id: id, title: source.title, detail: (source as? ChoiceDetailMenuItem)?.detail,
+                enabled: source.isEnabled, toolTip: source.toolTip)
             item.separatorBefore = separatorBefore
             item.hasSubmenu = hasSubmenu
             // The cascade owner dismisses all levels before dispatching a leaf.

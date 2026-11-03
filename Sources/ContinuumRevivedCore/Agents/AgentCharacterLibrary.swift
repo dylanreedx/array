@@ -430,6 +430,31 @@ public enum AgentCharacterImports {
 public enum AgentCharacterValidator {
     public static let flag = "--validate-agent-character-theme"
 
+    static let oversizedProblem = "the file is over 3 MB"
+
+    /// What makes a set that parses still not a user set: today, only taking
+    /// the built-in set's id.
+    static func problems(of theme: AgentCharacterTheme) -> [String] {
+        theme.id == AgentCharacterBundled.themeID
+            ? ["\"id\" \(theme.id) is the built-in set's; give your set its own id"] : []
+    }
+
+    /// One theme file's bytes, judged exactly as the report judges a file: the
+    /// size limit, the parser, then the user-set rules. A shared agent's guest
+    /// validates the host's set with this before drawing it.
+    public static func validate(data: Data) -> Result<AgentCharacterTheme, AgentCharacterThemeProblems> {
+        guard data.count <= AgentCharacterThemeParser.maximumFileBytes else {
+            return .failure(.init(messages: [oversizedProblem]))
+        }
+        switch AgentCharacterThemeParser.parse(data: data) {
+        case let .success(theme):
+            let problems = problems(of: theme)
+            return problems.isEmpty ? .success(theme) : .failure(.init(messages: problems))
+        case let .failure(problems):
+            return .failure(problems)
+        }
+    }
+
     /// The report for `paths` (files, or folders scanned like the themes folder).
     public static func report(paths: [String], themesFolder: URL) -> (json: String, valid: Bool) {
         var entries: [[String: Any]] = []
@@ -452,15 +477,12 @@ public enum AgentCharacterValidator {
                 let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue ?? 0
                 let result: Result<AgentCharacterTheme, AgentCharacterThemeProblems> =
                     size > AgentCharacterThemeParser.maximumFileBytes
-                    ? .failure(.init(messages: ["the file is over 3 MB"]))
+                    ? .failure(.init(messages: [Self.oversizedProblem]))
                     : (try? Data(contentsOf: file)).map(AgentCharacterThemeParser.parse(data:))
                         ?? .failure(.init(messages: ["the file could not be read"]))
                 switch result {
                 case let .success(theme):
-                    var problems: [String] = []
-                    if theme.id == AgentCharacterBundled.themeID {
-                        problems.append("\"id\" \(theme.id) is the built-in set's; give your set its own id")
-                    }
+                    let problems = Self.problems(of: theme)
                     entries.append([
                         "file": file.path, "valid": problems.isEmpty, "id": theme.id, "title": theme.title,
                         "scale": theme.scale, "frameSize": [theme.frameWidth, theme.frameHeight],

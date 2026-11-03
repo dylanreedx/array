@@ -1036,8 +1036,12 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                 let docRect = rect.offsetBy(dx: insets.left, dy: item.y)
                 guard docRect.intersects(viewport) else { continue }
                 let key = CharacterSlotKey(blockID: item.blockID, agentID: mark.agentID)
-                let live = mark.snapshot == nil ? renderContext.agentCharacters.current(mark.agentID) : nil
-                guard let atlas = controller.atlas(for: mark.agentID, appearance: appearance, name: live?.characterName) else { continue }
+                let source = renderContext.agentCharacters.current(mark.agentID)
+                let live = mark.snapshot == nil ? source : nil
+                // A shared agent's guest draws the host's set and character.
+                let shared = source?.shared
+                guard let atlas = shared.map({ controller.atlas(shared: $0.set, assignment: $0.assignment, appearance: appearance) })
+                        ?? controller.atlas(for: mark.agentID, appearance: appearance, name: live?.characterName) else { continue }
                 // Nothing known about the agent: its own character, standing idle.
                 let snapshot = mark.snapshot ?? live?.snapshot ?? AgentCharacterSnapshot(state: .ready)
                 let plan = controller.plan(for: snapshot, now: now)

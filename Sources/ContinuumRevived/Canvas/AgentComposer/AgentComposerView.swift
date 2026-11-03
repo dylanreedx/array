@@ -830,6 +830,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         layer?.borderWidth = isEditorFocused || referenceDropHighlighted ? Self.focusedBorderWidth : Self.idleBorderWidth
         placeholderLabel.font = .token(.body, zoom: pageZoom)
         placeholderLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
+        if readOnlyReason != nil { applyReadOnlyPlaceholder() }
         keyHintLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
         // Update existing draft attributes as well as typing attributes so
         // TextKit line metrics follow token/readability changes immediately.
@@ -1910,6 +1911,47 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
 
     private func updatePlaceholder() {
         placeholderLabel.isHidden = !textView.string.isEmpty
+    }
+
+    /// Why this composer cannot send from here (a shared agent another Mac
+    /// runs, seen by someone who may not prompt it). The editor takes no text
+    /// and the placeholder says why, behind a lock. nil restores the editor.
+    var readOnlyReason: String? {
+        didSet {
+            guard readOnlyReason != oldValue else { return }
+            textView.isEditable = readOnlyReason == nil
+            textView.isSelectable = readOnlyReason == nil
+            if readOnlyReason != nil, !textView.string.isEmpty { textView.string = "" }
+            placeholderLabel.lineBreakMode = readOnlyReason == nil ? .byTruncatingTail : .byWordWrapping
+            placeholderLabel.maximumNumberOfLines = readOnlyReason == nil ? 1 : 2
+            applyReadOnlyPlaceholder()
+            updatePlaceholder()
+            setAccessibilityValue(readOnlyReason)
+        }
+    }
+    var qaPlaceholderText: String { placeholderLabel.stringValue }
+
+    private func applyReadOnlyPlaceholder() {
+        guard let readOnlyReason else {
+            placeholderLabel.stringValue = variant.placeholder
+            return
+        }
+        let theme = effectiveTokenTheme
+        let font = NSFont.token(.body, zoom: pageZoom)
+        let colour = TextToken.textSecondary.color.nsColor(for: theme)
+        let text = NSMutableAttributedString()
+        if let lock = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: font.pointSize * 0.85, weight: .medium)
+                .applying(.init(paletteColors: [colour]))) {
+            let attachment = NSTextAttachment()
+            attachment.image = lock
+            attachment.bounds = NSRect(x: 0, y: font.descender / 2, width: lock.size.width, height: lock.size.height)
+            text.append(NSAttributedString(attachment: attachment))
+            text.append(NSAttributedString(string: "\u{2002}"))
+        }
+        text.append(NSAttributedString(string: readOnlyReason))
+        text.addAttributes([.font: font, .foregroundColor: colour], range: NSRange(location: 0, length: text.length))
+        placeholderLabel.attributedStringValue = text
     }
 
     private func editorContentsChanged() {

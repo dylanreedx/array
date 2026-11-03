@@ -36,6 +36,8 @@ final class SharedAgentTranscriptView: NSView {
     var agentCharacters: AgentCharacterSource = .unavailable { didSet { refreshRenderContext() } }
     var onRevealAgent: ((_ agentID: UUID, _ parentAgentID: UUID) -> Void)?
     var onOpenWebLink: ((URL, AgentLinkOpenTarget) -> Void)?
+    /// The host's chrome or one of its character sets arrived (agent-chrome).
+    var onChromeChange: (() -> Void)?
     override var isFlipped: Bool { true }
 
     override init(frame frameRect: NSRect) {
@@ -89,6 +91,7 @@ final class SharedAgentTranscriptView: NSView {
                 guard frame.sequence == at.through + 1 else { throw Wire.Mirror.Failure.schema }
                 let step = try next.apply(try Wire.decode(Wire.Patch.self, from: frame.body))
                 touched.ids.formUnion(step.ids); touched.structural = touched.structural || step.structural
+                touched.chrome = touched.chrome || step.chrome
                 position = .init(generation: at.generation, through: frame.sequence)
                 appliedFrames += 1
             }
@@ -99,8 +102,11 @@ final class SharedAgentTranscriptView: NSView {
         }
         cursor = position
         guard next != mirror else { return true }
+        let documentChanged = next.document != mirror.document
         mirror = next
-        present(touched)
+        // Images and tool details change what is drawn without new entries.
+        if documentChanged || touched.structural || !touched.ids.isEmpty { present(touched) }
+        if touched.chrome { onChromeChange?() }
         return true
     }
 
@@ -117,9 +123,22 @@ final class SharedAgentTranscriptView: NSView {
 
     /// Another agent: forget this one's document.
     func reset() {
-        guard cursor != nil || !mirror.document.entries.isEmpty else { return }
+        guard cursor != nil || !mirror.document.entries.isEmpty || mirror.chrome != nil else { return }
         mirror = Wire.Mirror(); cursor = nil
         present(.init(ids: [], structural: true))
+        onChromeChange?()
+    }
+
+    /// The host tile's tail, drawn on this surface: the working gyro and its
+    /// words, or the settled "Worked for …".
+    func applyTail(working: Bool, text: String?, settled: String?) {
+        surface.setTurnInFlight(working)
+        if let settled {
+            surface.setSettledTailStatus(settled)
+            return
+        }
+        surface.setThinkingStatusText(text ?? "")
+        surface.setThinkingIndicatorVisible(working)
     }
 
     private func present(_ touched: Wire.Mirror.Touched) {
