@@ -99,7 +99,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
 
         let body = NSView()
         body.wantsLayer = true
-        body.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1.0).cgColor
+        body.layer?.backgroundColor = BrowserChromeStyle.background.cgColor
 
         backButton.target = self
         backButton.action = #selector(handleBack(_:))

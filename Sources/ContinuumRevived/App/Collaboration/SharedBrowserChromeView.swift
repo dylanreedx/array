@@ -118,6 +118,9 @@ final class SharedBrowserChromeView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        // What the owner's tile paints behind its rows, in both appearances.
+        BrowserChromeStyle.background.setFill()
+        bounds.fill()
         guard showsTitleBar else { return }
         // The tile header as the tile title bar draws it: `tileChrome`, the title,
         // and the separator hairline along its bottom.

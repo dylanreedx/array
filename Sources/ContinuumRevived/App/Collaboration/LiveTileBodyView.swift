@@ -572,6 +572,12 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         needsDisplay = true
     }
     override func draw(_ dirtyRect: NSRect) {
+        // A browser paints what the owner's browser tile paints behind its page.
+        if kind == .browser, browserChrome != nil {
+            BrowserChromeStyle.background.setFill()
+            bounds.fill()
+            return
+        }
         SurfaceToken.tileBody.color.nsColor(in: self).setFill()
         bounds.fill()
         LineToken.separator.color.nsColor(in: self).setFill()
