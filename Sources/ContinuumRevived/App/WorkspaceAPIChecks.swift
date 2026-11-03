@@ -384,7 +384,7 @@ enum WorkspaceAPIChecks {
         // approves them, so they must NOT be advertised here — a capability
         // list is a promise, not a menu of what exists.
         try expect((ctx["capabilities"]?.array?.compactMap(\.string) ?? []).sorted()
-                   == ["agent.find", "agent.inspect", "agent.notify", "agent.report", "agent.reveal", "agent.status", "agent.update", "artifact.open",
+                   == ["agent.find", "agent.inspect", "agent.notify", "agent.report", "agent.reveal", "agent.schedule", "agent.status", "agent.update", "artifact.open",
                        "board.apply", "board.query", "browser.console", "browser.snapshot", "browser.take_screenshot", "canvas.query", "operation.get", "workspace.context"],
                    "capabilities from the preset grant, got \(String(describing: ctx["capabilities"]))")
         let ctxBytes = try JSONSerialization.data(withJSONObject: WorkspaceAPIService.plain(ctx)).count
