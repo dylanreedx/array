@@ -1240,6 +1240,9 @@ final class AgentSupervisor {
     /// means this stays empty; a check that never passes a store pays nothing.
     private var transcriptProjections: [AgentID: ManagedAgentTranscriptModel] = [:]
     private var transcriptPersistenceTasks: [AgentID: Task<Void, Never>] = [:]
+    private var transcriptPersistDebounce: [AgentID: Task<Void, Never>] = [:]
+    private var transcriptPersistDeadline: [AgentID: ContinuousClock.Instant] = [:]
+    private var transcriptSaveWanted: Set<AgentID> = []
     /// Queue 91 P2 host-local projection. Never persisted or published: it carries
     /// concrete checkout/current/tool-target URLs that are outside I5's wire model.
     private var locationProjectors: [AgentID: AgentLocationProjector] = [:]
@@ -6477,6 +6480,10 @@ final class AgentSupervisor {
         // their work (the same rule the C3 migration follows) — quarantined,
         // never `rm`'d, so a deleted agent's history is still on disk if
         // someone goes looking for it.
+        transcriptPersistDebounce[id]?.cancel()
+        transcriptPersistDebounce.removeValue(forKey: id)
+        transcriptPersistDeadline.removeValue(forKey: id)
+        transcriptSaveWanted.remove(id)
         transcriptPersistenceTasks[id]?.cancel()
         transcriptPersistenceTasks.removeValue(forKey: id)
         transcriptProjections.removeValue(forKey: id)
@@ -9337,7 +9344,7 @@ final class AgentSupervisor {
     }
 
     private func scheduleTranscriptPersist(for id: AgentID, final: Bool) {
-        guard let store = transcriptStore else { return }
+        guard transcriptStore != nil else { return }
         // Assistant/reasoning content deltas parse into blocks off a scheduled
         // deadline (the tile drove that off a real `RunLoop` timer); nothing
         // here runs that clock, so a boundary write must flush the pending
@@ -9347,14 +9354,50 @@ final class AgentSupervisor {
             _ = projection.flushPendingStreamingMarkup()
             transcriptProjections[id] = projection
         }
-        guard let document = transcriptProjections[id]?.document else { return }
+        guard transcriptProjections[id] != nil else { return }
+        if final {
+            transcriptPersistDeadline[id] = nil
+            saveTranscript(for: id)
+            return
+        }
+        // Trailing debounce: 200 ms after the last streamed event. One timer per
+        // agent follows a moving deadline; a task per event left a burst's worth
+        // of cancelled timers to run on the main thread after it.
+        transcriptPersistDeadline[id] = .now + .milliseconds(200)
+        guard transcriptPersistDebounce[id] == nil else { return }
+        transcriptPersistDebounce[id] = Task { [weak self] in
+            while let self, !Task.isCancelled, let deadline = self.transcriptPersistDeadline[id] {
+                if ContinuousClock.now >= deadline {
+                    self.transcriptPersistDeadline[id] = nil
+                    self.saveTranscript(for: id)
+                    break
+                }
+                try? await Task.sleep(until: deadline)
+            }
+            self?.transcriptPersistDebounce[id] = nil
+        }
+    }
+
+    /// One save in flight per agent, of the document as it is when the save
+    /// starts; saves asked for meanwhile become one more. A burst of finished
+    /// turns used to start a save per turn, each holding its own copy of the
+    /// whole document: every later event copied the transcript again, and the
+    /// copies were freed on the main thread as the saves ended.
+    private func saveTranscript(for id: AgentID) {
+        guard let store = transcriptStore else { return }
+        transcriptSaveWanted.insert(id)
+        guard transcriptPersistenceTasks[id] == nil else { return }
         let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
-        transcriptPersistenceTasks[id]?.cancel()
         transcriptPersistenceTasks[id] = Task { [weak self] in
-            if !final { try? await Task.sleep(for: .milliseconds(200)) }
-            guard !Task.isCancelled, let self else { return }
-            try? await store.saveSnapshot(agentID: id, sessionID: sessionID, document: document)
-            self.transcriptPersistenceTasks.removeValue(forKey: id)
+            while let self, !Task.isCancelled, self.transcriptSaveWanted.remove(id) != nil,
+                  self.transcriptProjections[id] != nil {
+                // The detached task owns the copy and frees it, off the main thread.
+                await Task.detached(priority: .utility) { [document = self.transcriptProjections[id]?.document] in
+                    guard let document else { return }
+                    try? await store.saveSnapshot(agentID: id, sessionID: sessionID, document: document)
+                }.value
+            }
+            self?.transcriptPersistenceTasks[id] = nil
         }
     }
 

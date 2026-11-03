@@ -1790,6 +1790,23 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // What saving managed agents' transcripts costs the main thread during
+        // and after a burst of finished turns, and that the saved file is the
+        // supervisor's document.
+        if CommandLine.arguments.contains("--transcript-save-perf-check") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(120))
+                fputs("FAIL: transcript save perf check exceeded its 120-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do { try await TranscriptSavePerfChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         // What a burst of tool events costs the main thread while it lands and
         // after it, and that the tool detail it leaves is the store's own.
         if CommandLine.arguments.contains("--tool-detail-refresh-perf-check") {

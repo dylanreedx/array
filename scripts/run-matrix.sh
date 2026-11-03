@@ -1913,6 +1913,9 @@ run_app_check .build/debug/Array --tool-detail-check
 # A burst of tool events: the capture's refreshes stay under 4 ms of main-thread
 # time per frame during and after it, and hold exactly the store's records.
 run_app_check .build/debug/Array --tool-detail-refresh-perf-check
+# A burst of finished turns: transcript saves stay under 4 ms of main-thread time
+# per frame during and after it, and save exactly the supervisor's document.
+run_app_check .build/debug/Array --transcript-save-perf-check
 # Directory-aware Markdown: a real title-bar mouse click reaches Preview/Edit;
 # unsaved preview, explicit atomic save, clean reload, and conflict overwrite are witnessed.
 run_app_check .build/debug/Array --file-markdown-preview-check

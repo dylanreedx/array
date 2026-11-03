@@ -341,6 +341,7 @@ check --transcript-delta-index-oracle-check
 check --transcript-provider-parity-check
 check --transcript-rehydration-check
 check --transcript-rhythm-check
+check --transcript-save-perf-check
 check --transcript-turn-cards-check
 check --transcript-viewport-clipping-check
 check --ui-baseline-check
@@ -742,6 +743,7 @@ leg run_app_check .build/debug/Array --transcript-canvas-check
 leg run_app_check .build/debug/Array --transcript-delta-index-oracle-check
 leg run_app_check .build/debug/Array --transcript-provider-parity-check
 leg run_app_check .build/debug/Array --transcript-rhythm-check
+leg run_app_check .build/debug/Array --transcript-save-perf-check
 leg run_app_check .build/debug/Array --transcript-turn-cards-check
 leg run_app_check .build/debug/Array --transcript-viewport-clipping-check
 leg run_app_check .build/debug/Array --ui-baseline-check
