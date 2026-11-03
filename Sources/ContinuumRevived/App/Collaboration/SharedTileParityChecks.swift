@@ -590,6 +590,10 @@ enum SharedTileParityChecks {
             // does for a person who switches their Mac to dark.
             NSApp.appearance = NSAppearance(named: appearance)
             for view in [pair.host, pair.guest] { view.window?.appearance = NSAppearance(named: appearance) }
+            // Offscreen windows can defer appearance notifications. Resolve the
+            // owners' normal token hooks before taking the document still.
+            pair.host.applyTokens()
+            (pair.guest as? SharedTileNSView)?.body?.viewDidChangeEffectiveAppearance()
             try await Task.sleep(for: .milliseconds(200))
             guard let hostPicture = await picture(host), let guestPicture = await picture(guest) else {
                 lines.append("  pixels \(name): no bitmap"); pixelsMatch = false; continue
