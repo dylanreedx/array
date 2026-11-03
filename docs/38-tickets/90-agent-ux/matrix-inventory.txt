@@ -133,6 +133,7 @@ check --diff-review-off-main-check
 check --diff-tile-check
 check --document-location-check
 check --drag-magnetize-check
+check --duckherd-theme-check
 check --editor-navigation-check
 check --editor-web-bridge-check
 check --empty-workspace-creation-check
@@ -558,6 +559,7 @@ leg run_app_check .build/debug/Array --cross-project-agents-check
 leg run_app_check .build/debug/Array --diff-review-off-main-check
 leg run_app_check .build/debug/Array --diff-tile-check
 leg run_app_check .build/debug/Array --drag-magnetize-check
+leg run_app_check .build/debug/Array --duckherd-theme-check
 leg run_app_check .build/debug/Array --editor-navigation-check
 leg run_app_check .build/debug/Array --editor-web-bridge-check
 leg run_app_check .build/debug/Array --empty-workspace-creation-check
