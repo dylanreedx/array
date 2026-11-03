@@ -329,13 +329,6 @@ MATRIX_KNOWN_RED=(
   # over Dylan's session. Fix: confirm in an active-app run, or split the
   # metric into placement (offset must be zero) and shading.
   --file-tile-zoom-check
-  # A real product gap, and the witness that tracks it (2026-11-02): a guest's
-  # shared agent draws the projection as plain text, and a guest's browser and
-  # other kinds do not draw what the host's tile draws. The multiplayer polish
-  # round (transcript-lead, shared-browser, kinds-parity) closes it; the
-  # report names each differing kind and element. Remove this line when the
-  # leg passes, never by loosening its tolerance.
-  --shared-tile-parity-check
 
 )
 # Advisory legs whose status the caller captures itself (`|| var=$?`); these must
