@@ -10,6 +10,18 @@ import Foundation
 // accepted or refused here exactly as it is there (CoreChecks
 // `--agent-character-theme-check` holds a corpus recorded against it).
 //
+// Two deliberate widenings, for theme files made for newer Duckherd builds than
+// the published parser (0.4.10 caps a set at 12 helpers and lead frames at the
+// lead box). Both follow the Bleach set Duckherd users share (plan 110 ›
+// "Duckherd themes as they ship"):
+//  - up to `maximumHelpers` (16) helpers;
+//  - lead frames as stored sprites: rows may stop early and a frame may have
+//    fewer rows, the rest clear, anchored top-left; with no `leadSize`, the lead
+//    box grows to the largest frame, in whole cells, up to the format's 40 x 8
+//    cells. A level may be another level's index (that level's frames again),
+//    and `lead.shift`, the level-change frames, is checked and kept.
+// Fields the format does not know (`voices`, ...) are ignored, as Duckherd does.
+//
 // Platform-neutral on purpose: the iOS companion can draw the same characters.
 
 /// One of the five work loops every character has.
@@ -150,6 +162,8 @@ public struct AgentCharacterTheme: Equatable, Sendable {
 
 /// A theme's lead art (format `lead`): frames at `leadSize`, 28 × 16 by default.
 public struct AgentCharacterLead: Equatable, Sendable {
+    /// The lead box: `leadSize`, or with none, the largest frame in whole cells.
+    /// Every frame below is padded to it.
     public let width: Int
     public let height: Int
     /// The lead at rest: no helpers running.
@@ -158,6 +172,9 @@ public struct AgentCharacterLead: Equatable, Sendable {
     public let rising: [AgentCharacterFrame]
     /// 1 to 4 loops, one per power level: the more helpers, the higher.
     public let levels: [[AgentCharacterFrame]]
+    /// Frames between two levels (`lead.shift`), when the file has them. Kept,
+    /// not yet drawn: Array swaps a lead's level without a transition.
+    public let shift: [AgentCharacterFrame]?
     /// The format's 150 ms beat: lead frames carry no pace of their own.
     public static let frameMs: Double = 150
 }
@@ -174,6 +191,9 @@ public enum AgentCharacterThemeParser {
     /// The reference runtime's read cap; a larger file is refused unread.
     public static let maximumFileBytes = 4 * 1024 * 1024
     public static let maximumProblems = 8
+    /// Helpers in one set: the published parser's 12, widened to the 16 that
+    /// Duckherd sets ship with (the Bleach set has 16).
+    public static let maximumHelpers = 16
     public static let reservedID = "ducks"
 
     private static let actions = AgentCharacterLoop.allCases
@@ -226,6 +246,9 @@ public enum AgentCharacterThemeParser {
         }
         let helperSize = size("helperSize", width: 20, height: 12)
         let leadSize = size("leadSize", width: 28, height: 16)
+        let leadSizeIsSet = raw["leadSize"] != nil
+        // What a lead frame may fill: the set lead box, else the format's largest.
+        let leadLimit = leadSizeIsSet ? leadSize : (w: 40 * 2 * px, h: 8 * 4 * px)
 
         var palette: [Character: AgentCharacterColour] = [:]
         if case let .object(entries)? = raw["palette"] {
@@ -301,7 +324,7 @@ public enum AgentCharacterThemeParser {
 
         var characters: [AgentCharacter] = []
         var taken = Set<String>()
-        if let helpers = raw["helpers"]?.arrayValue, (1...12).contains(helpers.count) {
+        if let helpers = raw["helpers"]?.arrayValue, (1...maximumHelpers).contains(helpers.count) {
             for (index, helper) in helpers.enumerated() {
                 let at = "helpers[\(index)]"
                 guard helper.isObject else { bad("\(at): not an object"); continue }
@@ -373,17 +396,59 @@ public enum AgentCharacterThemeParser {
                 }
             }
         } else {
-            bad("\"helpers\": 1 to 12 entries")
+            bad("\"helpers\": 1 to \(maximumHelpers) entries")
+        }
+
+        // A lead frame: up to `leadLimit` rows of text, each up to its width,
+        // short rows and missing rows clear (padded once the box is known).
+        func leadFrame(_ value: AgentCharacterJSON?, _ at: String) -> AgentCharacterFrame? {
+            guard let rows = value?.arrayValue, (1...leadLimit.h).contains(rows.count),
+                  let strings = Optional(rows.compactMap(\.stringValue)), strings.count == rows.count else {
+                bad("\(at): a lead frame is 1 to \(leadLimit.h) rows of text")
+                return nil
+            }
+            for row in strings {
+                if row.utf16.count > leadLimit.w {
+                    bad("\(at): lead rows are at most \(leadLimit.w) wide")
+                    return nil
+                }
+                for scalar in row.unicodeScalars where scalar != "." {
+                    if !baseKnown.contains(Character(scalar)) {
+                        bad("\(at): the letter \(jsonQuoted(String(scalar))) is not in the palette")
+                        return nil
+                    }
+                }
+            }
+            return strings
+        }
+        func leadFrames(_ value: AgentCharacterJSON?, _ at: String) -> [AgentCharacterFrame]? {
+            guard let items = value?.arrayValue, !items.isEmpty, items.count <= 64 else {
+                bad("\(at): 1 to 64 frames")
+                return nil
+            }
+            let out = items.enumerated().map { leadFrame($0.element, "\(at)[\($0.offset)]") }
+            return out.contains(where: { $0 == nil }) ? nil : out.compactMap { $0 }
         }
 
         var leadArt: AgentCharacterLead?
         if let lead = raw["lead"] {
-            let rest = frames(lead.isObject ? lead["rest"] : nil, leadSize, "lead.rest", baseKnown)
-            let rising = frames(lead.isObject ? lead["rising"] : nil, leadSize, "lead.rising", baseKnown)
+            let rest = leadFrames(lead.isObject ? lead["rest"] : nil, "lead.rest")
+            let rising = leadFrames(lead.isObject ? lead["rising"] : nil, "lead.rising")
+            let shift = lead.isObject && lead["shift"] != nil ? leadFrames(lead["shift"], "lead.shift") : nil
+            let shiftValid = !(lead.isObject && lead["shift"] != nil) || shift != nil
             var levelSets: [[AgentCharacterFrame]]?
             if let levels = lead.isObject ? lead["levels"]?.arrayValue : nil, (1...4).contains(levels.count) {
-                let sets = levels.enumerated().map { frames($0.element, leadSize, "lead.levels[\($0.offset)]", baseKnown) }
-                levelSets = sets.contains(where: { $0 == nil }) ? nil : sets.compactMap { $0 }
+                // A level is its frames, or the index of another level whose frames it reuses.
+                let sets: [[AgentCharacterFrame]?] = levels.enumerated().map { offset, level in
+                    level.integerValue == nil ? leadFrames(level, "lead.levels[\(offset)]") : nil
+                }
+                let resolved: [[AgentCharacterFrame]?] = levels.enumerated().map { offset, level in
+                    guard let other = level.integerValue else { return sets[offset] }
+                    if other >= 0, other < levels.count, other != offset, let frames = sets[other] { return frames }
+                    bad("lead.levels[\(offset)]: a set of frames, or the index of another level's frames")
+                    return nil
+                }
+                levelSets = resolved.contains(where: { $0 == nil }) ? nil : resolved.compactMap { $0 }
             } else {
                 bad("lead.levels: 1 to 4 sets of frames")
             }
@@ -404,8 +469,23 @@ public enum AgentCharacterThemeParser {
                     bad("lead.flare: {\"small\": [[[row, col, letter], ...]], \"big\": ...}, each letter in the palette")
                 }
             }
-            if let rest, let rising, let levelSets {
-                leadArt = AgentCharacterLead(width: leadSize.w, height: leadSize.h, rest: rest, rising: rising, levels: levelSets)
+            if let rest, let rising, let levelSets, shiftValid {
+                // The box: the set size, else the default grown to the largest frame in whole cells.
+                let all = rest + rising + levelSets.joined() + (shift ?? [])
+                func cells(_ value: Int, _ cell: Int) -> Int { (value + cell - 1) / cell * cell }
+                let width = leadSizeIsSet ? leadSize.w
+                    : max(leadSize.w, cells(all.map { $0.map(\.utf16.count).max() ?? 0 }.max() ?? 0, 2 * px))
+                let height = leadSizeIsSet ? leadSize.h : max(leadSize.h, cells(all.map(\.count).max() ?? 0, 4 * px))
+                func pad(_ frames: [AgentCharacterFrame]) -> [AgentCharacterFrame] {
+                    frames.map { frame in
+                        (0..<height).map { y in
+                            let row = y < frame.count ? frame[y] : ""
+                            return row + String(repeating: ".", count: width - row.utf16.count)
+                        }
+                    }
+                }
+                leadArt = AgentCharacterLead(width: width, height: height, rest: pad(rest), rising: pad(rising),
+                                             levels: levelSets.map(pad), shift: shift.map(pad))
             }
         }
 

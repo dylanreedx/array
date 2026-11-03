@@ -2620,6 +2620,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // Plan 110 › Duckherd themes as they ship: a shared-set-shaped file imports and draws.
+        if CommandLine.arguments.contains("--duckherd-theme-check") {
+            _ = NSApplication.shared
+            do {
+                print(try DuckherdThemeChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL duckherd theme: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         // Plan 110, slice 5: characters in the agent tile header.
         if CommandLine.arguments.contains("--tile-character-check") {
             _ = NSApplication.shared

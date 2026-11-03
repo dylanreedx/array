@@ -767,3 +767,49 @@ change a transcript's width.
 while other benches compiled (load average 4.4-6.0). The gate should rerun
 `scripts/canvas-motion/character-arms.sh` on an idle, unlocked Mac, characters off
 versus on, and confirm the zoom and pan numbers and the zero width re-measures.
+
+## Duckherd themes as they ship (0.7.41)
+
+Dylan imported a colleague's Duckherd theme, the Bleach set, in 0.7.40 and Array
+refused it: `"helpers": 1 to 12 entries`, and every lead frame "is 64 rows of text".
+
+What the format really is, found 2026-11-03:
+
+- Array's parser matched the published Duckherd parser word for word
+  (`hooks/themes.ts` at `ea44e834`, v0.4.10): 12 helpers, lead frames exactly
+  `leadSize`. The published parser refuses the Bleach file too. The file was made
+  for a newer, unpublished Duckherd build (its README names a local plugin folder),
+  so its loader could not be read; its rules come from the file itself.
+- The file: `scale: 4`, a 151-colour palette, `marks`, `stuck`, 16 helpers at the
+  default 80 x 48 (exact rows, as published), a `voices` block of mp3 paths, and a
+  lead whose frames are stored trimmed. Rows end at their last coloured pixel, a
+  frame ends at its last row with colour, leading empty rows are `""`. Heights run 76
+  to 111 rows, widths up to 112. Rendered top-left anchored, the feet land on the
+  same row in every frame (the jump frames lift), so top-left anchoring is the
+  stored meaning. `levels` is `[9 frames, 0, 16 frames]`: the `0` reuses level 0.
+  `shift` holds two frames that match the last pose of level 0 and the first of
+  level 2: a level-change transition.
+
+What changed: up to 16 helpers; lead frames may be trimmed and differ in size, the
+lead box grows to the largest frame in whole cells (up to the format's 40 x 8 cells)
+when `leadSize` is absent; a level may be another level's index; `shift` is checked
+and kept, not drawn. Size caps, the read-only copy and validation are unchanged.
+Problems name the real limits ("a lead frame is 1 to 128 rows of text", "lead rows
+are at most 320 wide", "1 to 16 entries"). The Bleach lead box is 112 x 112: 28, 42
+and 70 points square at Small, Medium and Large, each a whole number of device
+pixels per 1x pixel.
+
+Shared agents: the Bleach file deflates to about 100 KiB, over the 32 KiB a set may
+cost (one 48 KiB relay frame, base64). Raising it means carrying a set over several
+frames, which is a protocol change; for now the guest draws its built-in set, the
+fallback `--shared-agent-chrome-check` already witnesses.
+
+Witnesses: CoreChecks `--agent-character-theme-check` (a generated
+Duckherd-shaped set, `AgentCharacterDuckherdFixture`, plus six named limits) and
+`--duckherd-theme-check` (Settings import, then the lead and helpers in the sidebar
+and header at all three sizes; `CONTINUUM_DUCKHERD_THEME_FILE` tries a real file
+locally). The Bleach file and its art are never committed.
+
+Follow-ups: voices (spawn/done/any mp3s) would be a new notification path and need
+an entry in `docs/internals/notification-paths.md` first; `shift` as a level-change
+transition; shipping large sets to guests in chunks.

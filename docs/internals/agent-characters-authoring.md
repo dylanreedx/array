@@ -48,7 +48,8 @@ The id `ducks` is reserved, and `ducks-classic` is the built-in set's.
   or digit.
 - `title`: what Settings shows, up to 60 characters. Defaults to the id.
 - `palette`: one-character keys, each a `#rrggbb` colour. `.` is reserved for clear.
-- `helpers`: the characters, 1 to 12. Each agent gets one from a hash of its id, or
+- `helpers`: the characters, 1 to 16 (the published Duckherd parser allows 12; sets
+  Duckherd users share, such as the Bleach set, have 16). Each agent gets one from a hash of its id, or
   the one the person (or an agent, through `agent.update` with `character`) picked by
   `name`.
 
@@ -132,6 +133,21 @@ states onto the lead art:
 Frames play at 150 ms. Lead frames may only use the theme's `palette`: a helper's
 `colors` do not apply to them.
 
+Lead frames may be stored trimmed, as shared Duckherd sets store them: a row may stop
+at its last coloured pixel and a frame may end at its last row with any colour; what
+is missing is clear, anchored at the top left (an empty row is `""`). Frames in one
+set may differ in size. With no `leadSize`, the lead box is the default grown to the
+largest frame, rounded up to whole cells (2 x 4 pixels, x `scale`), at most 40 cells
+wide and 8 cells tall (80 x 32, or 320 x 128 at `scale: 4`); a frame that does not
+fit is refused with that limit. With `leadSize`, every frame must fit inside it. The
+Bleach set's lead frames are 76 to 111 rows and up to 112 wide at `scale: 4`, so its
+lead box is 112 x 112: 28 x 28 points at Small, centred on the row like any lead.
+
+A level may be a number instead of frames: the index of another level, whose frames
+it plays again (`"levels": [[...], 0, [...]]`). `lead.shift`, the frames between
+two levels, is checked like the other lead frames and kept, but not drawn: Array
+swaps a lead's level without a transition.
+
 Only one agent per pack leads: the top of a delegation tree. Its helpers take the
 set's characters in the order they were delegated, wrapping once the set runs out;
 a helper's own helpers keep their hashed pick. A set with no `lead` leaves the lead
@@ -140,9 +156,14 @@ on a helper character and starts its helpers just after it. A character picked f
 
 ### Accepted but not drawn
 
-`sounds`, `blink`, `names`, `marks`, `stuck`, `opusMark`, `lead.flare` and
-`idleMove` are validated (a bad value still fails the file) but Array does not use
-them yet. Sounds are never played.
+`sounds`, `blink`, `names`, `marks`, `stuck`, `opusMark`, `lead.flare`,
+`lead.shift` and `idleMove` are validated (a bad value still fails the file) but
+Array does not use them yet. Sounds are never played. Fields the format does not
+know, such as a shared set's `voices`, are ignored, as Duckherd ignores them.
+
+A set shared with a guest of a shared agent must deflate to 32 KiB or less (one relay
+frame). Most scale-4 sets, Bleach included (about 100 KiB), are larger: the guest
+then draws its built-in set.
 
 ## Rules
 

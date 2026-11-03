@@ -2132,6 +2132,11 @@ run_app_check .build/debug/Array --character-size-check
 # helpers draw distinct characters in delegation order (stable over a restore), a
 # manual pick wins, a lone agent keeps its hash, a set with no lead art falls back.
 run_app_check .build/debug/Array --lead-character-check
+# Plan 110 › Duckherd themes as they ship: a set shaped like the shared Bleach set
+# (16 helpers, scale 4, trimmed lead frames up to 111 rows, shift, a level by
+# index, voices) imports through Settings and draws its lead and helpers in the
+# sidebar and header at Small, Medium and Large.
+run_app_check .build/debug/Array --duckherd-theme-check
 # Plan 110, slice 6: Settings › Appearance › Agent characters: import copies one
 # file, a bad file shows its problems and imports nothing, discovery uses a fixture
 # home only, and the preview grid renders in both appearances (still under RM).

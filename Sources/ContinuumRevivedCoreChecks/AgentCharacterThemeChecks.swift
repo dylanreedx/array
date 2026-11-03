@@ -63,7 +63,21 @@ func runAgentCharacterThemeChecks() {
     }
     expect(manifest.cases.count >= 50, "the corpus has its cases (\(manifest.cases.count))")
     var accepted = 0, rejected = 0
+    // Where Array deliberately accepts more than the published parser (plan 110 ›
+    // "Duckherd themes as they ship"): up to 16 helpers, as shared sets have,
+    // so the reference's "1 to 12 entries" reads "1 to 16 entries" here.
+    let widened: [String: Int] = ["bad-13-helpers.theme.json": 13]
     for item in manifest.cases {
+        if let helpers = widened[item.file] {
+            let text = (try? String(contentsOf: folder.appendingPathComponent(item.file), encoding: .utf8)) ?? ""
+            guard case let .success(theme) = AgentCharacterThemeParser.parse(text: text) else {
+                expect(false, "\(item.file): Array accepts up to 16 helpers: \(AgentCharacterThemeParser.parse(text: text))")
+                return
+            }
+            expect(theme.characters.count == helpers, "\(item.file): \(helpers) helpers, got \(theme.characters.count)")
+            accepted += 1
+            continue
+        }
         guard let text = try? String(contentsOf: folder.appendingPathComponent(item.file), encoding: .utf8) else {
             expect(false, "corpus file \(item.file) unreadable")
             return
@@ -77,8 +91,9 @@ func runAgentCharacterThemeChecks() {
             accepted += 1
         case let .failure(problems):
             expect(!item.accepted, "\(item.file): the reference ACCEPTED it, Swift rejected: \(problems.messages)")
-            expect(problems.messages == item.errors ?? [],
-                   "\(item.file): messages differ\n  swift: \(problems.messages)\n  reference: \(item.errors ?? [])")
+            let reference = (item.errors ?? []).map { $0 == "\"helpers\": 1 to 12 entries" ? "\"helpers\": 1 to 16 entries" : $0 }
+            expect(problems.messages == reference,
+                   "\(item.file): messages differ\n  swift: \(problems.messages)\n  reference: \(reference)")
             rejected += 1
         }
     }
@@ -153,5 +168,102 @@ func runAgentCharacterThemeChecks() {
     } else {
         expect(false, "the built-in set has a Pekin")
     }
-    print("Agent character theme checks passed: built-in set (8 x 105 frames), \(accepted) accepted + \(rejected) rejected corpus files match the reference, \(atlasChecks) atlas pixels")
+    let duckherd = runDuckherdShapedThemeChecks(expect)
+    print("Agent character theme checks passed: built-in set (8 x 105 frames), \(accepted) accepted + \(rejected) rejected corpus files match the reference (1 widened to 16 helpers), \(atlasChecks) atlas pixels; \(duckherd)")
+}
+
+/// Plan 110 › "Duckherd themes as they ship": a set shaped like the ones Duckherd
+/// users share (the Bleach set) imports, its trimmed lead frames are padded into
+/// one lead box, and the limits a bad file hits name the real numbers.
+func runDuckherdShapedThemeChecks(_ expect: (@autoclosure () -> Bool, String) -> Void) -> String {
+    typealias Fixture = AgentCharacterDuckherdFixture
+    func problems(_ text: String) -> [String] {
+        if case let .failure(found) = AgentCharacterThemeParser.parse(text: text) { return found.messages }
+        return []
+    }
+    let text = Fixture.text()
+    guard case let .success(theme) = AgentCharacterThemeParser.parse(text: text) else {
+        expect(false, "the Duckherd-shaped set is refused: \(problems(text))")
+        return ""
+    }
+    expect(theme.id == Fixture.id && theme.scale == 4, "id and scale 4")
+    expect(theme.characters.count == Fixture.helperCount, "16 helpers, got \(theme.characters.count)")
+    expect(theme.frameWidth == 80 && theme.frameHeight == 48, "helpers stay 80 x 48 at scale 4")
+    expect(theme.palette.count == 151, "the 151-letter palette, got \(theme.palette.count)")
+    expect(theme.characters.allSatisfy { $0.clips[.idleMove] != nil }, "every helper keeps idleMove")
+    guard let lead = theme.lead else {
+        expect(false, "the lead art is kept")
+        return ""
+    }
+    // The tallest frame is 111 rows: the box is the next whole cell (16 rows at
+    // scale 4), 112; the widest row is 112, already whole cells.
+    expect(lead.width == 112 && lead.height == 112, "the lead box grows to the largest frame: \(lead.width) x \(lead.height)")
+    let all = lead.rest + lead.rising + lead.levels.joined() + (lead.shift ?? [])
+    expect(all.allSatisfy { $0.count == lead.height && $0.allSatisfy { $0.utf16.count == lead.width } },
+           "every lead frame is padded to the box")
+    expect(lead.rest.count == Fixture.restFrames && lead.rising.count == Fixture.risingFrames
+           && lead.shift?.count == Fixture.shiftFrames, "rest 4, rising 29, shift 2")
+    expect(lead.levels.map(\.count) == [9, 9, 16] && lead.levels[1] == lead.levels[0],
+           "levels: 9 frames, level 0 again by index, 16 frames (\(lead.levels.map(\.count)))")
+    // Padding is clear and anchored top-left: the stored rows come back unchanged at their start.
+    let raw = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any]
+    let rawRest = ((raw?["lead"] as? [String: Any])?["rest"] as? [[String]])?.first ?? []
+    expect(!rawRest.isEmpty && rawRest[0].isEmpty && rawRest.count == 81, "the fixture's rest frame is trimmed as shared sets are")
+    expect(zip(rawRest, lead.rest[0]).allSatisfy { stored, padded in padded.hasPrefix(stored)
+        && padded.dropFirst(stored.count).allSatisfy { $0 == "." } }
+        && lead.rest[0].dropFirst(rawRest.count).allSatisfy { $0.allSatisfy { $0 == "." } },
+           "trimmed rows and rows past the end are clear, top-left anchored")
+    guard let leadSet = theme.leadSet else {
+        expect(false, "the lead set is built")
+        return ""
+    }
+    expect(leadSet.characters.count == 3 && leadSet.frameWidth == 112 && leadSet.frameHeight == 112, "3 lead levels at the lead box")
+    var atlases = 0
+    for (set, index) in [(leadSet, 0), (leadSet, 2), (theme, 0), (theme, 15)] {
+        for appearance in AgentCharacterAtlas.Appearance.allCases {
+            let atlas = AgentCharacterAtlas(theme: set, character: index, appearance: appearance)
+            expect(atlas.frameWidth == set.frameWidth && atlas.frameHeight == set.frameHeight && atlas.width <= 4096,
+                   "atlas \(index) keeps its frame size")
+            // An art pixel of the first rest/done frame is its palette colour.
+            let character = set.characters[index]
+            let frame = character.frame(of: .done)
+            let rect = atlas.frames[atlas.frameIndex(of: .done)]
+            guard let (y, row) = frame.enumerated().first(where: { $0.element.contains { $0 != "." } }),
+                  let x = Array(row.unicodeScalars).firstIndex(where: { $0 != "." }),
+                  let colour = set.colour(of: Character(Array(row.unicodeScalars)[x]), in: character) else {
+                expect(false, "frame has art"); return ""
+            }
+            let pixel = atlas.pixel(x: rect.x + x, y: rect.y + y)
+            expect(pixel == (colour.red, colour.green, colour.blue, 255), "atlas \(index) draws its palette colour")
+            atlases += 1
+        }
+    }
+    // The validator a guest uses accepts it too.
+    expect((try? AgentCharacterValidator.validate(data: Data(text.utf8)).get()) == theme, "the shared-set validator accepts it")
+    // A shared agent's guest: a set like this deflates past the 32 KiB a relay
+    // frame can carry (the Bleach set deflates to about 100 KiB), so its host
+    // never ships it and the guest draws the built-in set
+    // (`--shared-agent-chrome-check` witnesses that fallback on screen).
+    let wire = SharedAgentTranscriptWire.CharacterTheme(file: Data(text.utf8))
+    expect(wire == nil, "a Duckherd-sized set is not shipped to guests (\(SharedAgentTranscriptWire.CharacterTheme.maximumDeflatedBytes) bytes deflated at most)")
+
+    // The limits, named.
+    // 17 helpers at this size would pass the 3 MB text cap first; the count is
+    // judged before any helper's content, so 17 empty helpers show it alone.
+    var seventeen = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] ?? [:]
+    seventeen["helpers"] = Array(repeating: [String: Any](), count: 17)
+    let seventeenText = String(decoding: (try? JSONSerialization.data(withJSONObject: seventeen)) ?? Data(), as: UTF8.self)
+    expect(problems(seventeenText) == ["\"helpers\": 1 to 16 entries"], "17 helpers: \(problems(seventeenText))")
+    let tall = Array(repeating: "A", count: 129)
+    expect(problems(Fixture.text(extraLead: ["rest": [tall]])) == ["lead.rest[0]: a lead frame is 1 to 128 rows of text"],
+           "a 129-row lead frame: \(problems(Fixture.text(extraLead: ["rest": [tall]])))")
+    let wide = [String(repeating: "A", count: 321)]
+    expect(problems(Fixture.text(extraLead: ["rest": [wide]])) == ["lead.rest[0]: lead rows are at most 320 wide"],
+           "a 321-wide lead row: \(problems(Fixture.text(extraLead: ["rest": [wide]])))")
+    let boxed = problems(Fixture.text(leadSize: [112, 64]))
+    expect(boxed.first == "lead.rest[0]: a lead frame is 1 to 64 rows of text", "a set leadSize bounds the frames: \(boxed)")
+    expect(problems(Fixture.text(leadLevels: [[["A"]], 1])) == ["lead.levels[1]: a set of frames, or the index of another level's frames"],
+           "a level naming itself: \(problems(Fixture.text(leadLevels: [[["A"]], 1])))")
+    expect(problems(Fixture.text(extraLead: ["shift": []])) == ["lead.shift: 1 to 64 frames"], "an empty shift")
+    return "Duckherd-shaped set: 16 helpers, 151 colours, lead box 112 x 112 from trimmed frames, levels by index, shift kept, \(atlases) atlases, 6 limits named, too large to ship to a guest"
 }
