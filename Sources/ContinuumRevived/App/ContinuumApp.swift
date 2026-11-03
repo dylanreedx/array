@@ -1969,6 +1969,28 @@ enum ContinuumApp {
         // Mode A of the share redesign, alone: a real header Share and Copy
         // against a local continuum-relay (the same stage the native check
         // runs last but one). Needs `continuum-relay` built beside Array.
+        // Copy link: pending at once, Copied only after the pasteboard holds
+        // the link, and what each press costs against a held, delayed relay.
+        if CommandLine.arguments.contains("--share-copy-latency-check") {
+            setbuf(stdout, nil)
+            setbuf(stderr, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(150))
+                fputs("FAIL: share copy latency check exceeded its 150-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do {
+                    print(try await ShareCopyLatencyChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--share-agent-relay-check") {
             setbuf(stdout, nil)
             setbuf(stderr, nil)

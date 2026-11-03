@@ -194,7 +194,12 @@ final class ShareLinkSession {
         guard case .live(let current) = phase, people.isEmpty else { copied = false; onChange?(); return }
         await run {
             try await self.links.revokeLink(area: current.area.rawValue, link: current.id)
-            self.phase = .live(try await self.links.createShareLink(area: current.area.rawValue, slug: self.slug, lifetime: next))
+            do {
+                self.phase = .live(try await self.links.createShareLink(area: current.area.rawValue, slug: self.slug, lifetime: next))
+            } catch {
+                self.phase = .revoked(area: current.area.rawValue)
+                throw error
+            }
             self.copied = false
         }
     }
@@ -232,10 +237,17 @@ final class ShareLinkSession {
             onChange?()
             return
         }
+        let previous = phase
         await run {
-            if case .live(let stale) = self.phase {
+            if case .live(let stale) = previous {
                 try await self.links.revokeLink(area: stale.area.rawValue, link: stale.id)
-                let link = try await self.links.createShareLink(area: stale.area.rawValue, slug: self.slug, lifetime: self.lifetime)
+                let link: Collaboration.ShareLink
+                do {
+                    link = try await self.links.createShareLink(area: stale.area.rawValue, slug: self.slug, lifetime: self.lifetime)
+                } catch {
+                    self.phase = .revoked(area: stale.area.rawValue)
+                    throw error
+                }
                 self.phase = .live(link)
                 self.write(link)
                 return
@@ -363,15 +375,15 @@ final class ShareLinkSession {
 
     private func write(_ link: Collaboration.ShareLink) {
         pasteboard.clearContents()
-        pasteboard.setString(link.url.absoluteString, forType: .string)
-        copied = true
-        failure = nil
+        copied = pasteboard.setString(link.url.absoluteString, forType: .string)
+        failure = copied ? nil : "The link could not be copied. Try again."
         onChange?()
     }
 
     private func run(_ body: @escaping () async throws -> Void) async {
         let resume = phase
         phase = .working
+        copied = false
         failure = nil
         onChange?()
         do { try await body() }

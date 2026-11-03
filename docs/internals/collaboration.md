@@ -759,3 +759,19 @@ instead of executing. Receipts and teeth logs are in
 throwaway container context. Its checks stage builds and runs the collaboration
 HTTP fixture alongside existing companion suites. This verifies service code;
 it does not verify the native canvas, host runner, TLS proxy or deployed service.
+
+Copy responsiveness is witnessed by `--share-copy-latency-check` and the focused
+`scripts/run-matrix.sh --share-copy-latency` gate. It drives the real Copy
+control against a private relay through a counting proxy, including a held
+link mint, private clipboard assertions, a main-thread heartbeat, local cached
+Copy/reopen, repeated presses, a large streaming agent, a live note and reshare.
+The proxy adds 60 ms per request; these are controlled local measurements,
+not production-relay latency claims. `ARRAY_SHARE_LATENCY_OUT` writes timing
+JSON and light/dark popover stills. Raw request logs include independent hosts.
+
+A remembered host ID is an account-local lookup: reusing it requires no extra
+identity round trip or account busy interval. Link replacement captures the
+previous live phase before entering the pending phase. If revocation succeeds
+and minting fails, the session retains a retryable revoked-link state rather
+than offering the revoked token for Copy. `Copied` follows a successful
+pasteboard write; starting another operation clears the old copied state.

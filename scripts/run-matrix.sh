@@ -59,6 +59,7 @@ IOS_PREVIEW_PROOF_ONLY=0
 IOS_PREVIEW_LIVE_ONLY=0
 IOS_PREVIEW_TILE_ONLY=0
 COLLABORATION_ONLY=0
+SHARE_COPY_LATENCY_ONLY=0
 SHARE_REVOCATION_ONLY=0
 COMPACTION_REPLAY_ONLY=0
 AGENT_SCHEDULES_ONLY=0
@@ -75,6 +76,10 @@ if [[ $# -gt 0 ]]; then
       ;;
     --agent-schedules)
       AGENT_SCHEDULES_ONLY=1
+      shift
+      ;;
+    --share-copy-latency)
+      SHARE_COPY_LATENCY_ONLY=1
       shift
       ;;
     --share-revocation)
@@ -634,6 +639,13 @@ if [[ "$AGENT_SCHEDULES_ONLY" -eq 1 ]]; then
 fi
 # Focused form of the existing real-relay share leg, including explicit
 # revocation, host teardown, persistence and visible ownership state.
+if [[ "$SHARE_COPY_LATENCY_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array
+  run swift build --disable-sandbox --skip-update --product continuum-relay
+  run_app_check .build/debug/Array --share-copy-latency-check
+  matrix_report 'Share Copy link matrix (targeted)'
+  exit $?
+fi
 if [[ "$SHARE_REVOCATION_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run swift build --disable-sandbox --skip-update --product continuum-relay
@@ -665,6 +677,7 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --shared-agent-migration-check
   run_app_check .build/debug/Array --share-agent-relay-check
   run_app_check .build/debug/Array --share-under-load-check
+  run_app_check .build/debug/Array --share-copy-latency-check
   run_app_check .build/debug/Array --shared-agent-render-check
   run_app_check .build/debug/Array --shared-agent-transcript-parity-check
   # The host's transcript publisher: main-thread budget per patch, and the same
@@ -1657,6 +1670,7 @@ run_app_check .build/debug/Array --shared-area-zone-check
 # Mode A (share one agent, .plans/105): the one-agent zone migration, a real
 # header Share against a local continuum-relay, and the tile in light and dark.
 run_app_check .build/debug/Array --shared-agent-migration-check
+run_app_check .build/debug/Array --share-copy-latency-check
 run_app_check .build/debug/Array --share-agent-relay-check
 # Share with a slow relay and a big agent: refused transcript uploads back off,
 # a lead with 32 helpers settles inside the relay's per-agent budget and its

@@ -403,7 +403,10 @@ public final class CollaborationAccountController {
         }
     }
     public func registerHost() async throws -> SharedArea.ID<SharedArea.Host> {
-        try await withAccount { active, ticket in
+        // The selected, authenticated account already owns this persisted ID.
+        // Looking it up must not occupy the account or contact the relay again.
+        if status == .ready, let id = active?.account.hostID { return id }
+        return try await withAccount { active, ticket in
             if let id = active.account.hostID { return id }
             let host = try await active.transport.registerHost()
             try self.current(ticket)
