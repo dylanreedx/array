@@ -60,6 +60,7 @@ IOS_PREVIEW_LIVE_ONLY=0
 IOS_PREVIEW_TILE_ONLY=0
 COLLABORATION_ONLY=0
 SHARE_REVOCATION_ONLY=0
+COMPACTION_REPLAY_ONLY=0
 AGENT_SCHEDULES_ONLY=0
 COMPANION_TASKS_ONLY=0
 NOTIFICATIONS_ONLY=0
@@ -68,6 +69,10 @@ MANAGED_MODE_ONLY=0
 HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    --compaction-replay)
+      COMPACTION_REPLAY_ONLY=1
+      shift
+      ;;
     --agent-schedules)
       AGENT_SCHEDULES_ONLY=1
       shift
@@ -609,6 +614,15 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+if [[ "$COMPACTION_REPLAY_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array
+  run_app_check .build/debug/Array --live-compaction-replay-check
+  run_app_check .build/debug/Array --agent-compaction-ui-check
+  run_app_check .build/debug/Array --transcript-save-perf-check
+  run_app_check .build/debug/Array --tool-detail-refresh-perf-check
+  matrix_report 'Compaction replay matrix (targeted)'
+  exit $?
+fi
 if [[ "$AGENT_SCHEDULES_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
