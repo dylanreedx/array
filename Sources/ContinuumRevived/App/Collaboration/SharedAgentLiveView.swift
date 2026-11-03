@@ -119,6 +119,7 @@ final class SharedAgentLiveView: NSView {
         for view in [transcriptView, helperView] {
             view.agentStatus = helpers.statusSource
             view.agentMessageSenders = helpers.senderSource
+            view.agentCharacters = helpers.characterSource
             view.onRevealAgent = { [weak self] agent, _ in self?.openHelper(agent) }
         }
         helperView.onOpenWebLink = { url, _ in NSWorkspace.shared.open(url) }

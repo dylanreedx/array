@@ -46,26 +46,46 @@ enum SharedAgentHelperChecks {
         let root = try SharedAreaCheckRig.root("shared-agent-helpers")
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Characters on, the built-in set, in a suite and themes folder of its own.
+        let controller = AgentCharacterController.shared
+        let suite = "ArraySharedAgentHelpersChecks-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        controller.importsDirectory = root.appendingPathComponent("characters", isDirectory: true)
+        controller.reduceMotion = { false }
+        controller.windowIsVisible = { _ in true }
+        defaults.set(true, forKey: AgentCharacterConfig.enabledKey)
+        controller.adopt(defaults: defaults)
+        guard let set = controller.theme, set.characters.count >= 6 else { throw Failure(description: "the built-in set did not load") }
         let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("agents"))
         let project = UUID(), start = Date()
-        func record(_ name: String, parent: AgentID?, observed: Bool = false, color: String? = nil, at offset: TimeInterval) throws -> AgentID {
+        func record(_ name: String, parent: AgentID?, observed: Bool = false, color: String? = nil, at offset: TimeInterval,
+                    ordinal: ((UUID) -> Int)? = nil, pick: String? = nil) throws -> AgentID {
             let id = AgentID(rawValue: UUID())
             var value = AgentRecord(id: id, displayName: name, harness: .claudeCode, model: "scripted/helpers", thinking: "none",
                                     cwd: root.path, projectId: project, createdAt: start.addingTimeInterval(offset), lastActivityAt: start)
             value.parentAgentID = parent
+            value.parentRelativeOrdinal = ordinal?(id.rawValue)
+            value.characterName = pick
             if observed { value.capabilities = .observedReadOnly }
             value.identityColor = color
             try store.upsert(value)
             return id
         }
         let lead = try record("Checkout lead", parent: nil, at: 0)
-        let scout = try record("Scout the relay", parent: lead, color: "teal", at: 1)
-        let reviewer = try record("Review the diff", parent: lead, observed: true, at: 2)
+        // Scout's delegation slot is one its id's hash would not pick, so a guest
+        // that re-derived instead of adopting the host's fact draws another duck.
+        let scout = try record("Scout the relay", parent: lead, color: "teal", at: 1, ordinal: { id in
+            (AgentCharacterConfig.characterIndex(for: id, count: set.characters.count) + 1) % set.characters.count + 1
+        })
+        let reviewer = try record("Review the diff", parent: lead, observed: true, at: 2, ordinal: { _ in 2 },
+                                  pick: set.characters[4].name)
         let unrelated = try record("Someone else's agent", parent: nil, at: 3)
         let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) },
                                          warn: { _ in }, nameTitlerCommand: { _ in nil },
                                          transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts", isDirectory: true)))
         _ = supervisor.restore()
+        supervisor.publishCharacterPacks()
         func deliver(_ event: AgentRuntimeEvent, _ id: AgentID) { supervisor.qaDeliver(event, to: id) }
         func thread(_ id: AgentID) -> String { AgentSupervisor.threadId(for: id) }
         func settle() async { for _ in 0..<20 { await Task.yield() } }
@@ -107,9 +127,14 @@ enum SharedAgentHelperChecks {
         try document.apply(.init(area: document.id, expectedRevision: 0, edits: [
             .admit(item, .init(id: .init(), object: item.id, rect: .init(x: 0, y: 0, width: 400, height: 500), z: 1))]))
         let authority = SharedAreaCheckRig.Authority(document: document, members: [(me, .editor), (owner, .owner)])
-        let controller = try SharedAreaCheckRig.controller(root: root.appendingPathComponent("guest"), identity: me, label: "Sam",
+        let area = try SharedAreaCheckRig.controller(root: root.appendingPathComponent("guest"), identity: me, label: "Sam",
                                                            authority: authority, seed: (document, .editor))
-        let guest = SharedAgentLiveView(controller: controller, read: { _, _ in throw Failure(description: "rows lane not used") },
+        let hostCharacters = ManagedAgentTileNSView.agentCharacterSource(supervisor)
+        let picks = [scout: nil as String?, reviewer: set.characters[4].name]
+        let hostAssignments = [scout, reviewer].map { controller.assignment(for: $0.rawValue, name: picks[$0] ?? nil) }
+        // A guest Mac holds none of the host's records, so no packs either.
+        controller.setPacks([:])
+        let guest = SharedAgentLiveView(controller: area, read: { _, _ in throw Failure(description: "rows lane not used") },
                                         readTranscript: { _, request in try lane.read(request) })
         guest.frame = NSRect(x: 0, y: 0, width: 520, height: 640)
         guest.show(object: object, in: document)
@@ -124,6 +149,12 @@ enum SharedAgentHelperChecks {
             let host = ids.map { hostChip.current($0) }, shown = ids.map { guestChip.current($0) }
             try expect(host == shown && host.allSatisfy { $0 != nil },
                        "\(label): every helper chip in the guest's transcript reads the host chip's status (host \(host.map { $0!.rawValue }), guest \(shown.map { $0?.rawValue ?? "none" }))")
+            let hostPose = ids.map { hostCharacters.current($0) }, guestPose = ids.map { guest.transcriptView.agentCharacters.current($0) }
+            try expect(hostPose == guestPose && hostPose.allSatisfy { $0 != nil },
+                       "\(label): every helper chip's character input on the guest is the host chip's (pose and pick)")
+            let drawn = ids.map { controller.assignment(for: $0, name: picks[AgentID(rawValue: $0)] ?? nil) }
+            try expect(drawn == hostAssignments,
+                       "\(label): the guest draws each helper as the host does (host \(hostAssignments.map { "\($0!.kind.rawValue) \($0!.index)" }), guest \(drawn.map { $0.map { "\($0.kind.rawValue) \($0.index)" } ?? "none" }))")
         }
 
         let roster = guest.helpers
@@ -137,6 +168,10 @@ enum SharedAgentHelperChecks {
         }
         try expect(chips.count == 2 && chips == hostChips && Set(chips.map(\.agentID)) == Set(roster.helpers.map(\.id)),
                    "the guest's transcript holds the host's two subagent chips, names included, keyed by the roster's ids")
+        try expect(roster.helpers.map { $0.character?.theme } == [set.id, set.id]
+                   && roster.helpers.map { $0.character?.assignment } == hostAssignments
+                   && roster.helpers.map { $0.character?.pick } == [nil, set.characters[4].name],
+                   "each helper's character names the host's set, its pick and the host's assignment")
         try expect(roster.helpers.map(\.name) == ["Scout the relay", "Review the diff"]
                    && roster.helpers.map(\.origin) == [.delegated, .provider] && roster.helpers.allSatisfy { $0.parent == nil },
                    "each helper's name is the host's, with its origin and nesting")
@@ -213,7 +248,7 @@ enum SharedAgentHelperChecks {
                    "with no helper working the guest's lead drops the working glyph and counts the failure")
 
         // A late joiner starts from the checkpoint, roster included.
-        let late = SharedAgentLiveView(controller: controller, read: { _, _ in throw Failure(description: "rows lane not used") },
+        let late = SharedAgentLiveView(controller: area, read: { _, _ in throw Failure(description: "rows lane not used") },
                                        readTranscript: { _, request in try lane.read(request) })
         late.show(object: object, in: document); late.stop()
         _ = await late.pollTranscript(object, ticket: late.qaTicket, waitMilliseconds: 0)

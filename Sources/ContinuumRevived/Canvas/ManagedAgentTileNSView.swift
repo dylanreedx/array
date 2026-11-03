@@ -4146,7 +4146,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// tile header and sidebar row, so all three show one pose.
     private var agentCharacterSource: AgentCharacterSource {
         guard let supervisor = agentSource else { return .unavailable }
-        return AgentCharacterSource(current: { [weak supervisor] rawAgentID in
+        return Self.agentCharacterSource(supervisor)
+    }
+
+    /// The host's chip character seam, by itself, for the shared-agent witness.
+    static func agentCharacterSource(_ supervisor: AgentSupervisor) -> AgentCharacterSource {
+        AgentCharacterSource(current: { [weak supervisor] rawAgentID in
             guard let supervisor else { return nil }
             let agentID = AgentID(rawValue: rawAgentID)
             let record = supervisor.records[agentID]

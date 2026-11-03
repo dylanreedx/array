@@ -16,6 +16,37 @@ extension SharedAgentTranscriptWire {
     /// `provider`: a subagent the CLI runs and Array only watches.
     public enum HelperOrigin: String, Codable, Sendable { case delegated, provider }
 
+    /// The helper's character as the host draws it: the host's shown set, the
+    /// host-computed assignment (lead art or a helper index, packs and manual
+    /// picks already applied) and the pose facts its tile header reads. A guest
+    /// draws this as given and never re-derives it. Text-free: a set id, a
+    /// character name from that set, a loop word and timestamps.
+    public struct HelperCharacter: Codable, Equatable, Sendable {
+        /// The host's shown set (`AgentCharacterTheme.id`).
+        public var theme: String
+        public var assignment: AgentCharacterAssignment?
+        /// The helper's manual pick (`AgentRecord.characterName`), nil = automatic.
+        public var pick: String?
+        /// The character the assignment names in the host's set, for a guest
+        /// showing another set: it draws the same-named character, else its own.
+        public var resolvedName: String?
+        /// `AgentCharacterLoop` raw value.
+        public var action: String?
+        public var lastOutputAt: Date?
+        public var promptSentAt: Date?
+        public var stepFailedAt: Date?
+        public var endedAt: Date?
+        /// `AgentCharacterActivity.Outcome` raw value.
+        public var outcome: String?
+        public init(theme: String, assignment: AgentCharacterAssignment?, pick: String?, resolvedName: String?,
+                    action: String?, lastOutputAt: Date?, promptSentAt: Date?, stepFailedAt: Date?,
+                    endedAt: Date?, outcome: String?) {
+            self.theme = theme; self.assignment = assignment; self.pick = pick; self.resolvedName = resolvedName
+            self.action = action; self.lastOutputAt = lastOutputAt; self.promptSentAt = promptSentAt
+            self.stepFailedAt = stepFailedAt; self.endedAt = endedAt; self.outcome = outcome
+        }
+    }
+
     /// One helper. `id` is the host's agent id, which the document's agent
     /// reference and agent message blocks already carry. No prompt, transcript
     /// text, error text, path or provider id.
@@ -31,10 +62,12 @@ extension SharedAgentTranscriptWire {
         /// The host's identity colour token name, never a colour value.
         public var identityColor: String?
         public let spawnedAt: Date
+        /// Nil when the host shows no characters.
+        public var character: HelperCharacter?
         public init(id: UUID, parent: UUID?, name: String, origin: HelperOrigin, harness: String?,
-                    state: HelperState, identityColor: String?, spawnedAt: Date) {
+                    state: HelperState, identityColor: String?, spawnedAt: Date, character: HelperCharacter? = nil) {
             self.id = id; self.parent = parent; self.name = name; self.origin = origin; self.harness = harness
-            self.state = state; self.identityColor = identityColor; self.spawnedAt = spawnedAt
+            self.state = state; self.identityColor = identityColor; self.spawnedAt = spawnedAt; self.character = character
         }
     }
 
@@ -61,6 +94,11 @@ extension SharedAgentTranscriptWire {
         for helper in helpers {
             guard helper.name.utf8.count <= maxHelperNameBytes, (helper.harness?.utf8.count ?? 0) <= 16,
                   (helper.identityColor?.utf8.count ?? 0) <= 32 else { return false }
+            if let character = helper.character {
+                guard character.theme.utf8.count <= 128, (character.pick?.utf8.count ?? 0) <= 128,
+                      (character.resolvedName?.utf8.count ?? 0) <= 128, (character.action?.utf8.count ?? 0) <= 32,
+                      (character.outcome?.utf8.count ?? 0) <= 32, (character.assignment?.index ?? 0) >= 0 else { return false }
+            }
             if let parent = helper.parent { guard seen.contains(parent) else { return false } }
             seen.insert(helper.id)
         }
