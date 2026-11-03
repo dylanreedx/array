@@ -118,7 +118,7 @@ Move OR resize exactly one tile of your own checkout, in world coordinates, thro
 
 ### `array_board_query`
 
-List project boards with their ordered columns, or read one board's ordered tasks, revision, Markdown body, typed links, image metadata and assignee. Without boardId returns summaries suitable for choosing a board and destination column. Read-only and paginated.
+List project boards with their ordered columns, or read one board's ordered tasks, revision, Markdown body, typed links, image metadata and assignee. Without boardId returns summaries suitable for choosing a board and destination column. Card reads include `comments`: each comment has `id`, `authorID`, `authorName`, `createdAt` and `body`, with optional `authorColour` and `authorCharacter`. Read-only and paginated.
 
 | Input | Meaning |
 | --- | --- |
@@ -134,19 +134,22 @@ Create, edit, move, assign, unassign or delete one task in your project. Uses th
 
 | Input | Meaning |
 | --- | --- |
-| `op` | Required.  Values: `create`, `edit`, `move`, `assign`, `unassign`, `delete`. |
+| `op` | Required.  Values: `create`, `edit`, `move`, `assign`, `unassign`, `delete`, `comment`, `editComment`, `deleteComment`. |
 | `checkoutHandle` | Optional.  |
 | `boardId` | Required.  |
 | `expectedRevision` | Required.  |
 | `idempotencyKey` | Required.  |
-| `cardId` | Optional.  |
+| `cardId` | Required for comment operations. |
+| `commentId` | Required for `editComment` and `deleteComment`. |
 | `columnId` | Optional.  |
 | `title` | Optional.  |
-| `body` | Optional.  |
+| `body` | Required for `comment` and `editComment`: Markdown, 1–8192 UTF-8 bytes. |
 | `links` | Optional.  |
 | `assigneeAgentId` | Optional.  |
 | `afterCardId` | Optional.  |
 | `beforeCardId` | Optional.  |
+
+Comment operations require `boardId`, `cardId`, `expectedRevision` and `idempotencyKey`. Authors can edit or delete only their own comments.
 
 ### `array_board_manage`
 
