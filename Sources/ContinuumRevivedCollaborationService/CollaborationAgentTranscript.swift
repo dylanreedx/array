@@ -7,6 +7,7 @@ struct CollaborationAgentTranscriptEntry {
     var host: String
     var log: Collaboration.AgentTranscript.Log
     var charge: Int
+    var lastWrite: UInt64
 }
 struct CollaborationAgentTranscriptWaiter {
     let key: String
@@ -23,6 +24,7 @@ struct CollaborationAgentTranscriptTable {
     var entries: [String: CollaborationAgentTranscriptEntry] = [:]
     var waiters: [UUID: CollaborationAgentTranscriptWaiter] = [:]
     var rates: [String: CollaborationAgentTranscriptRate] = [:]
+    var writeSequence: UInt64 = 0
     static let maxWaiters = 1024
     static func key(_ area: UUID, _ object: UUID, _ stream: String) -> String {
         area.uuidString + "/" + object.uuidString + "/" + stream
@@ -60,18 +62,37 @@ extension CollaborationStore {
         catch { throw CollaborationStoreError.invalidRequest }
         let tile = area.uuidString + "/" + object.uuidString + "/"
         let tileEntries = agentTranscripts.entries.filter { $0.key.hasPrefix(tile) }
-        guard agentTranscripts.entries[key] != nil ||
-                (tileEntries.count < Collaboration.AgentTranscript.maxStreamsPerTile && agentTranscripts.entries.count < Collaboration.AgentTranscript.maxStreamsTotal)
-        else { throw CollaborationStoreError.rateLimited }
         func size(_ log: Collaboration.AgentTranscript.Log) -> Int {
-            // Charge bounded metadata too, including empty frames and streams.
+            // Charge metadata as well as bodies, including empty streams and frames.
             512 + log.checkpoint.body.count + log.retainedBytes + 128 * log.frames.count
         }
         let oldBytes = agentTranscripts.entries[key]?.charge ?? 0
         let nextBytes = size(next)
-        let tileBytes = tileEntries.values.reduce(0) { $0 + $1.charge } - oldBytes + nextBytes
-        let totalBytes = agentTranscripts.entries.values.reduce(0) { $0 + $1.charge } - oldBytes + nextBytes
-        guard tileBytes <= Collaboration.AgentTranscript.maxBytesPerTile,
+        guard nextBytes <= Collaboration.AgentTranscript.maxBytesPerTile,
+              nextBytes <= Collaboration.AgentTranscript.maxBytesTotal else { throw CollaborationStoreError.rateLimited }
+        var tileBytes = tileEntries.values.reduce(0) { $0 + $1.charge } - oldBytes + nextBytes
+        var totalBytes = agentTranscripts.entries.values.reduce(0) { $0 + $1.charge } - oldBytes + nextBytes
+        let isNew = agentTranscripts.entries[key] == nil
+        var tileCount = tileEntries.count + (isNew ? 1 : 0)
+        var totalCount = agentTranscripts.entries.count + (isNew ? 1 : 0)
+        // Select victims before changing anything: a rejected/rate-limited
+        // publish must not discard a reader's retained checkpoint.
+        let oldest = agentTranscripts.entries.filter { $0.key != key }.sorted {
+            $0.value.lastWrite == $1.value.lastWrite ? $0.key < $1.key : $0.value.lastWrite < $1.value.lastWrite
+        }
+        var victims: Set<String> = []
+        for entry in oldest where entry.key.hasPrefix(tile) {
+            guard tileCount > Collaboration.AgentTranscript.maxStreamsPerTile || tileBytes > Collaboration.AgentTranscript.maxBytesPerTile else { break }
+            victims.insert(entry.key); tileCount -= 1; totalCount -= 1
+            tileBytes -= entry.value.charge; totalBytes -= entry.value.charge
+        }
+        guard tileCount <= Collaboration.AgentTranscript.maxStreamsPerTile,
+              tileBytes <= Collaboration.AgentTranscript.maxBytesPerTile else { throw CollaborationStoreError.rateLimited }
+        for entry in oldest where !victims.contains(entry.key) {
+            guard totalCount > Collaboration.AgentTranscript.maxStreamsTotal || totalBytes > Collaboration.AgentTranscript.maxBytesTotal else { break }
+            victims.insert(entry.key); totalCount -= 1; totalBytes -= entry.value.charge
+        }
+        guard totalCount <= Collaboration.AgentTranscript.maxStreamsTotal,
               totalBytes <= Collaboration.AgentTranscript.maxBytesTotal else { throw CollaborationStoreError.rateLimited }
         // Per-tile token buckets bound both patch rate and bytes, including batches.
         let now = clock(), previous = agentTranscripts.rates[tile] ?? .init(tokens: 32, bytes: 2_097_152, at: now)
@@ -81,7 +102,14 @@ extension CollaborationStore {
         let cost = Double(max(1, report.frames.count)), byteCost = Double(report.bodyBytes)
         guard tokens >= cost, bytes >= byteCost else { throw CollaborationStoreError.rateLimited }
         agentTranscripts.rates[tile] = .init(tokens: tokens - cost, bytes: bytes - byteCost, at: now)
-        agentTranscripts.entries[key] = .init(host: report.host.rawValue.uuidString, log: next, charge: nextBytes)
+        let affectedTiles = Set(victims.map { $0.split(separator: "/").prefix(2).joined(separator: "/") + "/" })
+        for victim in victims { agentTranscripts.entries.removeValue(forKey: victim); wakeAgentTranscript(victim) }
+        agentTranscripts.writeSequence &+= 1
+        agentTranscripts.entries[key] = .init(host: report.host.rawValue.uuidString, log: next, charge: nextBytes,
+                                               lastWrite: agentTranscripts.writeSequence)
+        for affected in affectedTiles where !agentTranscripts.entries.keys.contains(where: { $0.hasPrefix(affected) }) {
+            agentTranscripts.rates.removeValue(forKey: affected)
+        }
         wakeAgentTranscript(key)
     }
 

@@ -27,7 +27,7 @@ extension Collaboration {
         public static let maxStreamBytes = 64
         public static let maxFramesPerRead = 64
         public static let maxWaitMilliseconds = 25_000
-        public static let maxStreamsPerTile = 16
+        public static let maxStreamsPerTile = 33
         public static let maxBytesPerTile = 4 * 1024 * 1024
         public static let maxBytesTotal = 64 * 1024 * 1024
         public static let maxStreamsTotal = 4096
@@ -35,8 +35,9 @@ extension Collaboration {
         public static let maxReadBodyBytes = 224 * 1024
 
         public static func validStream(_ stream: String) -> Bool {
-            !stream.isEmpty && stream.utf8.count <= maxStreamBytes
-                && stream.unicodeScalars.allSatisfy { $0.value > 0x20 && $0.value < 0x7F }
+            if stream == mainStream { return true }
+            guard stream.hasPrefix("child:"), let id = UUID(uuidString: String(stream.dropFirst(6))) else { return false }
+            return stream == childStream(id)
         }
 
         /// The whole picture at `through`, as the host's body encoding states it.

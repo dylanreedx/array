@@ -268,21 +268,61 @@ private func runProjectionHTTPChecks() async throws {
         let (legacyTranscriptBytes, legacyTranscriptResponse) = try await URLSession.shared.data(for: legacyTranscript)
         try projectionCheck((legacyTranscriptResponse as? HTTPURLResponse)?.statusCode == 426 && !String(decoding: legacyTranscriptBytes, as: UTF8.self).contains("Y2hlY2twb2ludA"),
             "legacy transcript request receives update required and no checkpoint bytes")
-        // A tile's child streams and publisher work must remain bounded.
-        transcriptClock.advance(10)
-        for i in 1..<16 {
+        // Exercise actual authenticated store writes with 10,000 distinct valid child names.
+        func child(_ number: Int) -> String {
+            let id = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012x", number))!
+            return Collaboration.AgentTranscript.childStream(id)
+        }
+        for index in 0..<10_000 {
+            transcriptClock.advance(1)
             try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
-                report: .init(epoch: 1, host: host.id, stream: "child:\(i)", checkpoint: transcriptCheckpoint, frames: []))
+                report: .init(epoch: 1, host: host.id, stream: child(index), checkpoint: transcriptCheckpoint, frames: []))
+        }
+        var retainedChildren = 0
+        for index in 0..<10_000 {
+            do {
+                _ = try await store.readAgentTranscript(token: b.token, area: area, object: object.rawValue,
+                    request: .init(stream: child(index), cursor: nil, waitMilliseconds: 0))
+                guard index >= 9_967 else { throw ProjectionCheckFailure(message: "older child survived newer children") }
+                retainedChildren += 1
+            } catch CollaborationStoreError.unavailable {
+                guard index < 9_967 else { throw ProjectionCheckFailure(message: "newest child was evicted out of order") }
+            }
+        }
+        try projectionCheck(retainedChildren == 33, "10,000 child streams leave exactly 33 retained")
+        let latestChild = try await store.readAgentTranscript(token: b.token, area: area, object: object.rawValue,
+            request: .init(stream: child(9_999), cursor: nil, waitMilliseconds: 0))
+        guard case .resnapshot(let latestCheckpoint, _, _) = latestChild, latestCheckpoint == transcriptCheckpoint else {
+            throw ProjectionCheckFailure(message: "latest child checkpoint missing after eviction")
         }
         do {
-            try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
-                report: .init(epoch: 1, host: host.id, stream: "child:overflow", checkpoint: transcriptCheckpoint, frames: []))
-            throw ProjectionCheckFailure(message: "tile stream count was unbounded")
-        } catch CollaborationStoreError.rateLimited { }
+            _ = try await store.readAgentTranscript(token: b.token, area: area, object: object.rawValue,
+                request: .init(stream: child(0), cursor: nil, waitMilliseconds: 0))
+            throw ProjectionCheckFailure(message: "oldest child was not evicted")
+        } catch CollaborationStoreError.unavailable { }
+        for invalid in ["child:1", "child:", "child:00000000-0000-0000-0000-00000000000A", "other"] {
+            do {
+                try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
+                    report: .init(epoch: 1, host: host.id, stream: invalid, checkpoint: transcriptCheckpoint, frames: []))
+                throw ProjectionCheckFailure(message: "invalid stream accepted: \(invalid)")
+            } catch CollaborationStoreError.invalidRequest { }
+        }
+        print("PASS transcript: 10,000 valid child streams evict oldest; malformed names rejected")
+        // Re-establish main if child churn evicted it.
+        transcriptClock.advance(1)
+        try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue, report: transcriptReport)
         transcriptClock.advance(10)
         let batch = (1...32).map { Collaboration.AgentTranscript.Frame(generation: 1, sequence: UInt64($0), body: Data("p".utf8)) }
         try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
             report: .init(epoch: 1, host: host.id, stream: "main", checkpoint: nil, frames: batch))
+        do {
+            try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
+                report: .init(epoch: 1, host: host.id, stream: child(15_000), checkpoint: transcriptCheckpoint, frames: []))
+            throw ProjectionCheckFailure(message: "rate-limited new stream unexpectedly published")
+        } catch CollaborationStoreError.rateLimited { }
+        _ = try await store.readAgentTranscript(token: b.token, area: area, object: object.rawValue,
+            request: .init(stream: child(9_968), cursor: nil, waitMilliseconds: 0))
+        print("PASS transcript: rejected publish preserves the oldest checkpoint")
         try await projectionRefuses(429, "transcript patch burst receives HTTP backpressure") {
             try await aa.publishAgentTranscript(area: area, object: object.rawValue,
                 report: .init(epoch: 1, host: host.id, stream: "main", checkpoint: nil,
@@ -311,33 +351,84 @@ private func runProjectionHTTPChecks() async throws {
         try await projectionRefuses(404, "an excluded person cannot read a transcript") {
             _ = try await cc.readAgentTranscript(area: area, object: object.rawValue, request: transcriptRequest)
         }
-        // Checkpoint bodies and frame metadata count toward the tile budget.
+        // A single tile's byte quota also evicts oldest streams, even before
+        // its count limit is reached. The evicted host must checkpoint again.
+        let tileCheckpoint = Collaboration.AgentTranscript.Checkpoint(generation: 1, through: 0,
+            body: Data(repeating: 65, count: Collaboration.AgentTranscript.maxCheckpointBytes))
+        let tileBlock = Data(repeating: 66, count: Collaboration.AgentTranscript.maxFrameBytes)
+        for index in 30_000..<30_014 {
+            transcriptClock.advance(2)
+            try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
+                report: .init(epoch: 1, host: host.id, stream: child(index), checkpoint: tileCheckpoint, frames: []))
+            transcriptClock.advance(2)
+            try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
+                report: .init(epoch: 1, host: host.id, stream: child(index), checkpoint: nil,
+                    frames: (1...3).map { .init(generation: 1, sequence: UInt64($0), body: tileBlock) }))
+        }
+        do {
+            _ = try await store.readAgentTranscript(token: b.token, area: area, object: object.rawValue,
+                request: .init(stream: child(30_000), cursor: nil, waitMilliseconds: 0))
+            throw ProjectionCheckFailure(message: "per-tile oldest stream was not evicted")
+        } catch CollaborationStoreError.unavailable { }
+        do {
+            try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
+                report: .init(epoch: 1, host: host.id, stream: child(30_000), checkpoint: nil,
+                              frames: [.init(generation: 1, sequence: 4, body: Data("p".utf8))]))
+            throw ProjectionCheckFailure(message: "evicted stream accepted a frame without checkpoint")
+        } catch CollaborationStoreError.invalidCursor { }
+        _ = try await store.readAgentTranscript(token: b.token, area: area, object: object.rawValue,
+            request: .init(stream: child(30_013), cursor: nil, waitMilliseconds: 0))
+        transcriptClock.advance(1)
+        try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
+            report: .init(epoch: 1, host: host.id, stream: child(30_000), checkpoint: tileCheckpoint, frames: []))
+        let recovered = try await store.readAgentTranscript(token: b.token, area: area, object: object.rawValue,
+            request: .init(stream: child(30_000), cursor: nil, waitMilliseconds: 0))
+        guard case .resnapshot(let recoveredCheckpoint, _, _) = recovered, recoveredCheckpoint == tileCheckpoint else {
+            throw ProjectionCheckFailure(message: "evicted stream did not recover with a checkpoint")
+        }
+        print("PASS transcript: per-tile byte quota evicts oldest and restores from checkpoint")
+        // Fill 20 agents beyond the global byte budget. Each agent holds three
+        // streams below its own limit; only the global oldest-first policy can
+        // evict the first agent's main stream while retaining the newest.
+        var quotaItems: [SharedArea.Item] = []
+        var quotaEdits: [SharedArea.Edit] = []
+        for index in 0..<20 {
+            let quotaItem = SharedArea.Item(id: .init(), kind: .agentObservation,
+                source: .init(owner: a.identity.person, host: host.id, binding: .init()))
+            quotaItems.append(quotaItem)
+            quotaEdits.append(.admit(quotaItem, .init(id: .init(), object: quotaItem.id,
+                rect: .init(x: Double(index * 10), y: 0, width: 10, height: 10))))
+        }
+        let quotaRevision = try await aa.state(area: area).document.revision
+        _ = try await aa.apply(area: area, mutation: .init(epoch: 1,
+            command: .init(area: state.document.id, expectedRevision: quotaRevision, edits: quotaEdits)))
         let bulky = Collaboration.AgentTranscript.Checkpoint(generation: 1, through: 0,
             body: Data(repeating: 65, count: Collaboration.AgentTranscript.maxCheckpointBytes))
-        for i in 1..<16 {
-            transcriptClock.advance(1)
-            try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue,
-                report: .init(epoch: 1, host: host.id, stream: "child:\(i)", checkpoint: bulky, frames: []))
-        }
-        var hitTileBudget = false
-        for i in 1..<16 {
-            for sequence in 1...3 {
+        let block = Data(repeating: 66, count: Collaboration.AgentTranscript.maxFrameBytes)
+        for quotaItem in quotaItems {
+            for stream in ["main", child(20_000), child(20_001)] {
                 transcriptClock.advance(1)
-                let oversizedTileReport = Collaboration.AgentTranscript.Publish(epoch: 1, host: host.id, stream: "child:\(i)", checkpoint: nil,
-                    frames: [.init(generation: 1, sequence: UInt64(sequence), body: Data(repeating: 66, count: Collaboration.AgentTranscript.maxFrameBytes))])
-                do { try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue, report: oversizedTileReport) }
-                catch CollaborationStoreError.rateLimited {
-                    transcriptClock.advance(10)
-                    do {
-                        try await store.publishAgentTranscript(token: a.token, area: area, object: object.rawValue, report: oversizedTileReport)
-                        throw ProjectionCheckFailure(message: "tile budget replenished like a rate limit")
-                    } catch CollaborationStoreError.rateLimited { hitTileBudget = true }
-                    break
+                try await store.publishAgentTranscript(token: a.token, area: area, object: quotaItem.id.rawValue,
+                    report: .init(epoch: 1, host: host.id, stream: stream, checkpoint: bulky, frames: []))
+                for batchStart in stride(from: 1, through: 19, by: 3) {
+                    transcriptClock.advance(1)
+                    let frames = (batchStart...min(batchStart + 2, 20)).map {
+                        Collaboration.AgentTranscript.Frame(generation: 1, sequence: UInt64($0), body: block)
+                    }
+                    try await store.publishAgentTranscript(token: a.token, area: area, object: quotaItem.id.rawValue,
+                        report: .init(epoch: 1, host: host.id, stream: stream, checkpoint: nil, frames: frames))
                 }
             }
-            if hitTileBudget { break }
         }
-        try projectionCheck(hitTileBudget, "retained bytes across child streams are bounded per tile")
+        do {
+            _ = try await store.readAgentTranscript(token: b.token, area: area, object: quotaItems.first!.id.rawValue, request: transcriptRequest)
+            throw ProjectionCheckFailure(message: "global oldest stream was not evicted")
+        } catch CollaborationStoreError.unavailable { }
+        let newestQuota = try await store.readAgentTranscript(token: b.token, area: area, object: quotaItems.last!.id.rawValue, request: transcriptRequest)
+        guard case .resnapshot(let newestCheckpoint, _, _) = newestQuota, newestCheckpoint == bulky else {
+            throw ProjectionCheckFailure(message: "newest global quota checkpoint was lost")
+        }
+        print("PASS transcript: global byte quota evicts the oldest agent's stream")
         func frame(_ generation: UInt64, _ sequence: UInt64, _ payload: P.Payload, host frameHost: SharedArea.ID<SharedArea.Host>? = nil) -> P.Frame {
             .init(host: frameHost ?? host.id, object: object, generation: generation, sequence: sequence, payload: payload)
         }
