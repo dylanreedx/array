@@ -948,7 +948,7 @@ count ContinuumRevivedCoreChecks 199
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
-count ContinuumRevivedRelayChecks 3
+count ContinuumRevivedRelayChecks 7
 count ContinuumRevivedRelayCoreChecks 3
 count ContinuumRevivedRelayIntegrationChecks 4
 count ContinuumRevivedRelayProtocolChecks 0
