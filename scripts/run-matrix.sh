@@ -755,6 +755,7 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --workspace-mcp-host-check
   run_app_check .build/debug/Array --workspace-agent-report-check
   run_app_check .build/debug/Array --helper-command-evidence-check
+  run_app_check .build/debug/Array --helper-completion-check
   run_app_check .build/debug/Array --helper-watchdog-check
   run_app_check .build/debug/Array --workspace-hook-pushback-check
   run_app_check .build/debug/Array --claude-adopted-turn-check
@@ -789,6 +790,7 @@ if [[ "$HOOK_BRIDGE_ONLY" -eq 1 ]]; then
   run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
+  run_app_check .build/debug/Array --helper-completion-check
   run_app_check .build/debug/Array --workspace-hook-bridge-check
   run_app_check .build/debug/Array --workspace-codex-hook-check
   run_app_check .build/debug/Array --workspace-mcp-host-check
@@ -1108,6 +1110,7 @@ run_app_check .build/debug/Array --workspace-codex-hook-check
 # the final text's place; a later turn without one carries none.
 run_app_check .build/debug/Array --workspace-agent-report-check
 run_app_check .build/debug/Array --helper-command-evidence-check
+run_app_check .build/debug/Array --helper-completion-check
 run_app_check .build/debug/Array --helper-watchdog-check
 # The opt-in push-back through the real hook command: silent while off; on,
 # one block for a helper's long hand-back, and silent for a continuation, a

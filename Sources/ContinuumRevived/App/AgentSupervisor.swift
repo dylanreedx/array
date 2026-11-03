@@ -4247,6 +4247,7 @@ final class AgentSupervisor {
 
     /// Kills the bound runner's process group and closes the turn synchronously.
     private func killRunner(_ id: AgentID, pauseAfterStop: Bool = true) {
+        let hadRunner = runners[id] != nil
         interruptingAgents.remove(id)
         deferredForceSends[id] = nil
         openToolItems[id] = nil
@@ -4285,6 +4286,10 @@ final class AgentSupervisor {
         interruptWorkingClaudeMirroredChildren(of: id)
         notifyTurnCapabilitiesChanged(id)
         deliver(.sessionStateChanged(.stopped), to: id)
+        if hadRunner {
+            deliver(.turnCompleted(threadId: Self.threadId(for: id), turnId: "stopped:\(Self.threadId(for: id))",
+                outcome: .interrupted, errorMessage: nil), to: id)
+        }
     }
 
     /// Stops every agent with a prompt in flight. The app calls this when it quits
@@ -7353,6 +7358,85 @@ final class AgentSupervisor {
     }
 
     // MARK: - App-wide Managed mode
+
+    // Completion wakes use a separate clock/queue from the watchdog. Reserve
+    // each batch before awaiting queue persistence; overlapping flushes cannot
+    // accept the same update twice. Failed admission remains pending.
+    var helperCompletionNow: () -> Date = Date.init
+    var helperCompletionEnabled: ((AgentID) -> Bool)?
+    private struct HelperCompletionBatch {
+        var deadline: Date
+        var updates: [(AgentID, String)]
+    }
+    private var helperCompletionBatches: [AgentID: HelperCompletionBatch] = [:]
+    private var helperCompletionTurns: [AgentID: String] = [:]
+    private var helperCompletionTimer: Task<Void, Never>?
+
+    func wakesForHelperCompletion(_ parent: AgentID) -> Bool {
+        helperCompletionEnabled?(parent) ?? (effectiveMode(for: parent) == .managed)
+    }
+
+    private func noteHelperCompletion(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?) {
+        let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
+        guard let child = records[id], child.capabilities.locallyManaged,
+              let parent = child.parentAgentID, records[parent] != nil,
+              wakesForHelperCompletion(parent), helperCompletionTurns[id] != identity else { return }
+        helperCompletionTurns[id] = identity
+        let status: String
+        switch outcome {
+        case .completed: status = "succeeded"
+        case .failed: status = "failed"
+        case .interrupted, .cancelled: status = "stopped"
+        }
+        let report: String
+        if let filed = child.lastReport, filed.filedAt > (lastSettledAt[id] ?? reportTurnBaseline),
+           let encoded = try? JSONEncoder().encode(filed.report) {
+            report = String(decoding: encoded, as: UTF8.self)
+        } else {
+            report = transcriptProjections[id]?.finalAssistantText ?? ""
+        }
+        let text = "Helper \(String(child.humanDisplayName.prefix(80))) (\(id.rawValue.uuidString)): \(status)\(error.map { ": \(String($0.prefix(600)))" } ?? "")\n\(String(report.prefix(2400)))"
+        var batch = helperCompletionBatches[parent] ?? HelperCompletionBatch(
+            deadline: helperCompletionNow().addingTimeInterval(8), updates: [])
+        batch.updates.append((id, text))
+        helperCompletionBatches[parent] = batch
+        scheduleHelperCompletionFlush()
+    }
+
+    private func scheduleHelperCompletionFlush() {
+        guard helperCompletionTimer == nil, !helperCompletionBatches.isEmpty else { return }
+        let deadline = helperCompletionBatches.values.map(\.deadline).min()!
+        let delay = max(0.1, deadline.timeIntervalSince(helperCompletionNow()))
+        helperCompletionTimer = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.helperCompletionTimer = nil
+            await self.flushHelperCompletions()
+            self.scheduleHelperCompletionFlush()
+        }
+    }
+
+    func flushHelperCompletions() async {
+        for parent in Array(helperCompletionBatches.keys) {
+            guard let batch = helperCompletionBatches[parent], batch.deadline <= helperCompletionNow() else { continue }
+            helperCompletionBatches[parent] = nil
+            guard records[parent] != nil, wakesForHelperCompletion(parent),
+                  let sender = batch.updates.first?.0 else { continue }
+            let text = "Helper turn updates\n" + batch.updates.map(\.1).joined(separator: "\n\n")
+            let accepted: Bool
+            if isRunning(parent) {
+                let result = await accept(.queue(AgentPrompt(agentMessageText(text, from: sender))), for: parent)
+                if case .accepted = result { accepted = true } else { accepted = false }
+            } else {
+                accepted = sendAgentMessage(text, from: sender, to: parent)
+            }
+            if !accepted {
+                var pending = helperCompletionBatches[parent] ?? HelperCompletionBatch(deadline: helperCompletionNow(), updates: [])
+                pending.updates.insert(contentsOf: batch.updates, at: 0)
+                helperCompletionBatches[parent] = pending
+            }
+        }
+    }
 
     private var managedModeDefaults: UserDefaults = .standard
     private var managedModeObserver: NSObjectProtocol?
@@ -10495,7 +10579,8 @@ final class AgentSupervisor {
         // `spawned` to a terminal status, carrying the child's final assistant
         // text. After `ingestTranscriptEvent` above on purpose — the projection
         // must already hold this turn's last assistant entry.
-        if case let .turnCompleted(_, _, outcome, errorMessage) = event {
+        if case let .turnCompleted(_, turn, outcome, errorMessage) = event {
+            noteHelperCompletion(id, turn: turn, outcome: outcome, error: errorMessage)
             writeTerminalSpawnResult(for: id, outcome: outcome, errorMessage: errorMessage)
         }
 

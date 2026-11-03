@@ -2239,6 +2239,20 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        if CommandLine.arguments.contains("--helper-completion-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperCompletionChecks.run()
+                    print("HelperCompletionChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--helper-watchdog-check") {
             _ = NSApplication.shared
             Task { @MainActor in
