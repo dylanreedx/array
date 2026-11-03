@@ -225,3 +225,27 @@ enum SharedAgentChromeFacts {
         facts["header.managed"] = String(header.showsManaged)
     }
 }
+
+extension SharedAgentComposeStrip {
+    /// The strip as the appearance census renders it: a working host agent
+    /// with a context reading, seen by someone who may not prompt it.
+    static func appearanceFixture(width: CGFloat) -> SharedAgentComposeStrip {
+        let chrome = SharedAgentTranscriptWire.Chrome(
+            agent: UUID(), title: "Map the checkout states", harness: AgentHarness.claudeCode.rawValue, model: "fixture/appearance",
+            thinking: "medium", identityColor: nil, identityStyle: nil,
+            header: .init(name: "Map the checkout states", status: .working, stateLabel: "Working",
+                          stateAccessibilityLabel: "Agent is working.", availableActionDescription: "Stop current turn",
+                          startedAt: nil, branch: nil, managed: false),
+            turn: .init(working: true, canSend: false, canStop: true, canSteer: false, canQueue: false, isMirrored: false),
+            context: AgentContextWindowSnapshot(usedTokens: 92_000, maxTokens: 200_000, observedAt: Date(),
+                                                source: .claudeAssistantUsage, freshness: .live),
+            activity: nil, location: .init(symbolName: "house", text: "checkout", accessibilityLabel: "Home and Where: checkout, project root.",
+                                           isExternal: false),
+            enabledElements: [], tail: .init(working: true, text: nil, since: nil, settled: nil), character: nil, helpers: [:])
+        let strip = SharedAgentComposeStrip(frame: .zero)
+        strip.apply(chrome, mayPrompt: false, readOnlyReason: "View only. Dylan and editors can prompt it.", sending: false)
+        let height = strip.height(forWidth: width)
+        strip.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        return strip
+    }
+}

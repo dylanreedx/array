@@ -260,6 +260,7 @@ check --settle-closes-tile-check
 check --share-agent-relay-check
 check --shared-agent-sidebar-check
 check --shared-agent-helpers-check
+check --shared-agent-chrome-check
 check --shared-agent-migration-check
 check --shared-agent-render-check
 check --shared-agent-transcript-parity-check
@@ -661,6 +662,7 @@ leg run_app_check .build/debug/Array --shared-agent-helpers-check
 leg run_app_check .build/debug/Array --shared-agent-migration-check
 leg run_app_check .build/debug/Array --shared-agent-render-check
 leg run_app_check .build/debug/Array --shared-agent-transcript-parity-check
+leg run_app_check .build/debug/Array --shared-agent-chrome-check
 leg run_app_check .build/debug/Array --shared-portal-migration-check
 leg run_app_check .build/debug/Array --shared-portal-render-check
 leg run_app_check .build/debug/Array --shared-area-zone-check

@@ -1776,6 +1776,23 @@ enum ContinuumApp {
         }
         // A shared agent's transcript, drawn on the guest by the host tile's
         // renderer from the host's own document; light and dark stills in <dir>.
+        if let index = CommandLine.arguments.firstIndex(of: "--shared-agent-chrome-check") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            let next = CommandLine.arguments.indices.contains(index + 1) ? CommandLine.arguments[index + 1] : nil
+            let directory = URL(fileURLWithPath: next.flatMap { $0.hasPrefix("-") ? nil : $0 }
+                ?? NSTemporaryDirectory() + "shared-agent-chrome")
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(90))
+                fputs("FAIL: shared agent chrome check exceeded its 90-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do { try await SharedAgentChromeChecks.run(directory: directory); print("PASS: shared agent chrome"); Foundation.exit(0) }
+                catch { fputs("FAIL: shared agent chrome: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--shared-agent-transcript-parity-check") {
             setbuf(stdout, nil)
             _ = NSApplication.shared

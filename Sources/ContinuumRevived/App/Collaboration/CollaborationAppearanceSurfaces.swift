@@ -33,6 +33,8 @@ enum CollaborationAppearanceSurfaces {
             .init(id: "sharedAgentTile", size: SharedAgentAppearance.size, view: try SharedAgentAppearance.surface()),
             .init(id: "sharedAgentTranscript", size: .init(width: 520, height: 420),
                   view: SharedAgentTranscriptView.appearanceFixture(size: .init(width: 520, height: 420))),
+            .init(id: "sharedAgentComposeStrip", size: .init(width: 520, height: 200),
+                  view: SharedAgentComposeStrip.appearanceFixture(width: 520)),
             .init(id: "sharedPortalTile", size: SharedPortalAppearance.size, view: try SharedPortalAppearance.surface()),
             // Every other kind (SHARE-KINDS.md): note, file, diff, browser, terminal, stopped, placeholder.
             .init(id: "sharedTiles", size: SharedTileAppearance.size, view: SharedTileAppearance.surface().0)

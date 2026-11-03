@@ -610,6 +610,7 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --shared-agent-transcript-parity-check
   run_app_check .build/debug/Array --shared-agent-helpers-check
   run_app_check .build/debug/Array --shared-agent-sidebar-check
+  run_app_check .build/debug/Array --shared-agent-chrome-check
   run_app_check .build/debug/Array --shared-portal-migration-check
   run_app_check .build/debug/Array --shared-portal-render-check
   # Every other tile kind (.plans/105-collaboration/SHARE-KINDS.md): the note
@@ -1549,6 +1550,10 @@ run_app_check .build/debug/Array --shared-agent-render-check
 run_app_check .build/debug/Array --shared-agent-transcript-parity-check
 run_app_check .build/debug/Array --shared-agent-helpers-check
 run_app_check .build/debug/Array --shared-agent-sidebar-check
+# A shared agent's guest tile shows the host tile's chrome: title, status,
+# meter, chips, Stop, menu, and the host's own character set (or the built-in
+# one when the set is invalid, too large or missing).
+run_app_check .build/debug/Array --shared-agent-chrome-check
 # Mode B (the portal, .plans/105): old shared zones become portal tiles on
 # load, and the portal in light and dark.
 run_app_check .build/debug/Array --shared-portal-migration-check

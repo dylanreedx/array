@@ -198,6 +198,9 @@ enum SharedTileParityChecks {
         /// Element endings BOTH sides must lay out: a state the share must
         /// carry truthfully, not merely carry the same on both Macs.
         var mustShow: [String] = []
+        /// Chrome facts the two tiles disagree on (agent-chrome), checked
+        /// beside the content region; RED when any.
+        var chromeDifferences: [String] = []
     }
 
     struct Comparison {
@@ -531,6 +534,15 @@ enum SharedTileParityChecks {
             notes.append("transcript lane: guest \(session.live.transcriptView.qaMirrorDocument.entries.count) entries, owner \(ownDocument().count), live \(session.live.transcriptLive)")
         }
 
+        // The tile's chrome, read off both tiles' views (agent-chrome).
+        try? await SharedAreaCheckRig.eventually("the guest's tile shows the host's chrome", attempts: 400) {
+            session.live.chrome != nil
+        }
+        guestTile.applyHostChrome()
+        let hostFacts = hostTile.qaChromeFacts, guestFacts = guestTile.qaChromeFacts
+        let chromeDifferences = SharedAgentChromeChecks.comparedFacts.filter { hostFacts[$0] != guestFacts[$0] }
+            .map { "\($0): host \(hostFacts[$0] ?? "nil") · guest \(guestFacts[$0] ?? "nil")" }
+        notes.append("chrome: \(SharedAgentChromeChecks.comparedFacts.count - chromeDifferences.count) of \(SharedAgentChromeChecks.comparedFacts.count) facts match")
         let blocks = hostTile.qaDocumentForChecks.entries.flatMap { entry in entry.blocks.map { "\(entry.role)/\($0.kind)" } }
         notes.append("host blocks: " + blocks.joined(separator: ", "))
         return Pair(kind: "agent", host: hostTile, guest: guestTile,
@@ -547,7 +559,7 @@ enum SharedTileParityChecks {
                     notes: notes,
                     // The host stored the screenshot and the guest received its
                     // bytes: both Macs hold the picture, so both must say so.
-                    mustShow: ["· Available locally"])
+                    mustShow: ["· Available locally"], chromeDifferences: chromeDifferences)
     }
 
     /// A small picture for the transcript's image block: the production
@@ -637,7 +649,8 @@ enum SharedTileParityChecks {
         }
         NSApp.appearance = nil
         for note in pair.notes { lines.append("  note: \(note)") }
-        result.red = !(classesMatch && elementsMatch && shown && pixelsMatch)
+        for difference in pair.chromeDifferences { lines.append("  chrome differs: \(difference)") }
+        result.red = !(classesMatch && elementsMatch && shown && pixelsMatch) || !pair.chromeDifferences.isEmpty
         result.lines = ["\(pair.kind) \(result.red ? "RED" : "GREEN")"] + lines
         return result
     }
