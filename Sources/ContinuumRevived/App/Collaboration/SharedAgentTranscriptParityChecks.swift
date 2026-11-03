@@ -231,7 +231,7 @@ enum SharedAgentTranscriptParityChecks {
             provenance: .localNotice(reason: "pending fixture"), lifecycle: .open(markupBlockID: nil), blocks: [pendingBlock, nestedContainer])
         let pendingLane = LaneSink(host: hostID)
         let pendingPublisher = SharedAgentTranscriptPublisher(agent: agent, generation: 1, sink: pendingLane,
-            details: { [pendingBlock.id: SharedAgentToolPresentation(presented: pendingBlock)!,
+            details: { _ in [pendingBlock.id: SharedAgentToolPresentation(presented: pendingBlock)!,
                         nestedTool.id: SharedAgentToolPresentation(presented: nestedTool)!] },
             document: { AgentDocument(version: 1, entries: [pendingEntry]) })
         await pendingPublisher.tick()
@@ -643,7 +643,7 @@ enum SharedAgentTranscriptParityChecks {
         var detailReads = 0
         var detailRevision: UInt64 = 1
         let stablePublisher = SharedAgentTranscriptPublisher(agent: agent, generation: 1, sink: stableLane,
-            details: { detailReads += 1; return [:] }, detailRevision: { detailRevision }, document: { stableDocument })
+            details: { _ in detailReads += 1; return [:] }, detailRevision: { detailRevision }, document: { stableDocument })
         await stablePublisher.tick()
         for _ in 0..<20 { await stablePublisher.tick() }
         try expect(detailReads == 1, "unchanged ticks do not rescan transcript tool detail")

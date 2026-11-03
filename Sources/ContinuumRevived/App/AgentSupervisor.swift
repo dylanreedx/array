@@ -8834,31 +8834,39 @@ final class AgentSupervisor {
 
     func sharedTranscriptToolBlocks(for id: AgentID) -> [AgentNodeID: AgentBlock] {
         guard let document = transcriptProjections[id]?.document else { return [:] }
-        let capture = sharedTranscriptDetails[id]
-        let hidden = AgentTranscriptCanvasView.foldDelegations(document.entries).superseded
-        var result: [AgentNodeID: AgentBlock] = [:]
-        func visit(_ block: AgentBlock, in entry: AgentEntry) {
-            guard !hidden.contains(block.id) else { return }
-            var presented = capture?.presented(block, in: entry) ?? block
-            if case var .diff(diff) = presented.payload {
-                if !diff.text.isEmpty {
-                    let cached = sharedDiffLineCounts[id]?[block.id]
-                    let count = cached?.revision == block.revision ? cached!.count
-                        : GitDiffParser.parse(diff.text).files.flatMap(\.hunks).reduce(0) { $0 + $1.lines.count }
-                    sharedDiffLineCounts[id, default: [:]][block.id] = (block.revision, count)
-                    diff.presentedTotalLines = count
-                }
-                presented.payload = .diff(diff); result[block.id] = presented
-                return
-            } else if case .toolCall = block.payload {
-                result[block.id] = presented
-                return
-            }
-            block.children.forEach { visit($0, in: entry) }
-        }
-        document.entries.forEach { entry in entry.blocks.forEach { visit($0, in: entry) } }
-        return result
+        let scan = sharedToolBlockScan(for: id)
+        let result = scan.run(document.entries)
+        adopt(result, of: scan, for: id)
+        return result.blocks
     }
+
+    /// The tool details a published agent sends a teammate for `document`
+    /// (`SharedAgentTranscriptPublisher`). The presenter's state is frozen
+    /// here, the transcript is walked and presented off the main actor, and
+    /// only the caches it filled are written back.
+    func sharedTranscriptToolDetails(for id: AgentID, document: AgentDocument) async -> [AgentNodeID: SharedAgentToolPresentation] {
+        let scan = sharedToolBlockScan(for: id)
+        let (result, details) = await Task.detached(priority: .userInitiated) {
+            let result = scan.run(document.entries)
+            return (result, result.blocks.compactMapValues { SharedAgentToolPresentation(presented: $0) })
+        }.value
+        adopt(result, of: scan, for: id)
+        return details
+    }
+
+    private func sharedToolBlockScan(for id: AgentID) -> SharedToolBlockScan {
+        let capture = sharedTranscriptDetails[id]
+        return SharedToolBlockScan(capture: capture, presentation: capture?.presentation,
+                                   diffLineCounts: sharedDiffLineCounts[id] ?? [:])
+    }
+
+    private func adopt(_ result: SharedToolBlockScan.Result, of scan: SharedToolBlockScan, for id: AgentID) {
+        // An agent removed, or re-created, while the scan ran keeps no cache.
+        guard scan.capture === sharedTranscriptDetails[id] else { return }
+        if let presentation = scan.presentation { sharedTranscriptDetails[id]?.adopt(result.presented, from: presentation.generation) }
+        if !result.diffLineCounts.isEmpty { sharedDiffLineCounts[id, default: [:]].merge(result.diffLineCounts) { _, new in new } }
+    }
+
     func qaObserveSharedTranscript(_ observation: AgentRuntimeObservation, for id: AgentID) { ingestRuntimeObservation(observation, for: id) }
 
     /// Resolve only images referenced by this agent's document and owned by

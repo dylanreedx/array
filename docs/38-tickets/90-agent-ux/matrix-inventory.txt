@@ -265,6 +265,7 @@ check --shared-agent-chrome-check
 check --shared-agent-migration-check
 check --shared-agent-render-check
 check --shared-agent-transcript-parity-check
+check --shared-agent-transcript-publisher-perf-check
 check --shared-portal-migration-check
 check --shared-portal-render-check
 check --shared-area-zone-check
@@ -665,6 +666,7 @@ leg run_app_check .build/debug/Array --shared-agent-migration-check
 leg run_app_check .build/debug/Array --shared-agent-render-check
 leg run_app_check .build/debug/Array --shared-agent-transcript-parity-check
 leg run_app_check .build/debug/Array --shared-agent-chrome-check
+leg run_app_check .build/debug/Array --shared-agent-transcript-publisher-perf-check
 leg run_app_check .build/debug/Array --shared-portal-migration-check
 leg run_app_check .build/debug/Array --shared-portal-render-check
 leg run_app_check .build/debug/Array --shared-area-zone-check

@@ -196,6 +196,7 @@ final class AgentTranscriptCanvasToolDetail {
             guard !Task.isCancelled, let self else { return }
             self.details = Dictionary(uniqueKeysWithValues: records.map { ($0.identity, $0) })
             self.presentedCache.removeAll()
+            self.presentationGeneration &+= 1
             self.onRefresh?()
         }
     }
@@ -204,69 +205,120 @@ final class AgentTranscriptCanvasToolDetail {
 
     // MARK: Presentation
 
-    private func key(for entry: AgentEntry) -> AgentToolDetailKey? {
-        guard case let .providerItem(provider, itemID?) = entry.provenance,
-              let itemID = AgentToolDetailID(itemID),
-              let candidate = identityByEntryID[entry.id],
-              candidate.providerItemID == itemID,
-              agentID == nil || candidate.scope.agentID == agentID?.rawValue.uuidString,
-              candidate.scope.provider == provider
-        else { return nil }
-        return candidate
-    }
-
     /// `AgentTranscriptListView.presentedToolBlock`, for one block of `entry`.
     func presented(_ block: AgentBlock, in entry: AgentEntry) -> AgentBlock {
-        switch block.payload {
-        case .toolCall, .diff: break
-        default: return block
+        switch presentation.present(block, in: entry) {
+        case .unchanged: return block
+        case .fallback: return fallbackPresentation?(block) ?? block
+        case let .cached(presented): return presented
+        case let .fresh(presented, cached):
+            presentedCache[block.id] = cached
+            qaPresentationCount += 1
+            return presented
         }
-        guard let identity = key(for: entry), let detail = details[identity], detail.identity == identity else {
-            return fallbackPresentation?(block) ?? block
+    }
+
+    /// Everything `presented` reads, frozen, so the shared-transcript publisher
+    /// can present a whole document off the main actor. The fallback is not
+    /// part of it: a frozen presentation reports `.fallback` and the caller
+    /// decides. `generation` names the detail records it was taken from.
+    var presentation: Presentation {
+        Presentation(agentID: agentID, identityByEntryID: identityByEntryID, details: details,
+                     timeToLive: timeToLive, clock: clock, cache: presentedCache, generation: presentationGeneration)
+    }
+
+    /// Keeps blocks an off-main presentation produced, unless detail records
+    /// landed since it was taken (they would be stale).
+    func adopt(_ fresh: [AgentNodeID: Presentation.Cached], from generation: UInt64) {
+        guard generation == presentationGeneration, !fresh.isEmpty else { return }
+        presentedCache.merge(fresh) { _, new in new }
+        qaPresentationCount += fresh.count
+    }
+
+    struct Presentation: Sendable {
+        typealias Cached = (revision: UInt64, identity: AgentToolDetailKey, block: AgentBlock)
+        enum Outcome {
+            /// Not a tool or diff block.
+            case unchanged
+            /// No live detail record: the caller's fallback, else the block.
+            case fallback
+            case cached(AgentBlock)
+            /// Presented now from its detail record; cache it.
+            case fresh(AgentBlock, Cached)
         }
-        if let timeToLive, timeToLive <= 0 || clock().timeIntervalSince(detail.updatedAt) >= timeToLive {
-            return fallbackPresentation?(block) ?? block
+
+        let agentID: AgentID?
+        let identityByEntryID: [AgentNodeID: AgentToolDetailKey]
+        let details: [AgentToolDetailKey: AgentToolDetailRecord]
+        let timeToLive: TimeInterval?
+        let clock: @Sendable () -> Date
+        let cache: [AgentNodeID: Cached]
+        let generation: UInt64
+
+        private func key(for entry: AgentEntry) -> AgentToolDetailKey? {
+            guard case let .providerItem(provider, itemID?) = entry.provenance,
+                  let itemID = AgentToolDetailID(itemID),
+                  let candidate = identityByEntryID[entry.id],
+                  candidate.providerItemID == itemID,
+                  agentID == nil || candidate.scope.agentID == agentID?.rawValue.uuidString,
+                  candidate.scope.provider == provider
+            else { return nil }
+            return candidate
         }
-        // Every rebuild presents every tool row, and presenting is redaction and
-        // string work; a transcript's worth of it ran on each update and at every
-        // turn end. The result depends on the block and its detail record only.
-        if let cached = presentedCache[block.id], cached.revision == block.revision, cached.identity == identity {
-            return cached.block
-        }
-        var presented = block
-        switch block.payload {
-        case var .toolCall(payload):
-            let collapsed = AgentToolDetailPresenter.collapsed(detail)
-            payload.presentedToolNameText = payload.name
-            payload.name = collapsed.actionLine
-            payload.summary = AgentToolDetailPresenter.observableDisclosureText(detail)
-            payload.presentedTrailingDetailText = collapsed.durationText
-            payload.presentedShell = AgentToolDetailPresenter.shellInvocation(detail)
-            if let output = detail.output {
-                payload.presentedOutputText = output.text
-                var notes: [String] = []
-                if output.truncatedByBytes { notes.append("truncated by size") }
-                if output.truncatedByLines { notes.append("truncated by lines") }
-                if output.redacted { notes.append("redacted") }
-                payload.presentedOutputNote = notes.isEmpty ? nil : "Output \(notes.joined(separator: ", "))"
+
+        func present(_ block: AgentBlock, in entry: AgentEntry) -> Outcome {
+            switch block.payload {
+            case .toolCall, .diff: break
+            default: return .unchanged
             }
-            presented.payload = .toolCall(payload)
-        case var .diff(payload):
-            if payload.files.isEmpty { payload.files = AgentToolDetailPresenter.observableChangedFiles(detail) }
-            payload.presentedFilesArePending = payload.files.isEmpty
-                && (detail.status == .inProgress || detail.status == .pending)
-            presented.payload = .diff(payload)
-        default:
-            return block
+            guard let identity = key(for: entry), let detail = details[identity], detail.identity == identity else {
+                return .fallback
+            }
+            if let timeToLive, timeToLive <= 0 || clock().timeIntervalSince(detail.updatedAt) >= timeToLive {
+                return .fallback
+            }
+            // Every rebuild presents every tool row, and presenting is redaction and
+            // string work; a transcript's worth of it ran on each update and at every
+            // turn end. The result depends on the block and its detail record only.
+            if let cached = cache[block.id], cached.revision == block.revision, cached.identity == identity {
+                return .cached(cached.block)
+            }
+            var presented = block
+            switch block.payload {
+            case var .toolCall(payload):
+                let collapsed = AgentToolDetailPresenter.collapsed(detail)
+                payload.presentedToolNameText = payload.name
+                payload.name = collapsed.actionLine
+                payload.summary = AgentToolDetailPresenter.observableDisclosureText(detail)
+                payload.presentedTrailingDetailText = collapsed.durationText
+                payload.presentedShell = AgentToolDetailPresenter.shellInvocation(detail)
+                if let output = detail.output {
+                    payload.presentedOutputText = output.text
+                    var notes: [String] = []
+                    if output.truncatedByBytes { notes.append("truncated by size") }
+                    if output.truncatedByLines { notes.append("truncated by lines") }
+                    if output.redacted { notes.append("redacted") }
+                    payload.presentedOutputNote = notes.isEmpty ? nil : "Output \(notes.joined(separator: ", "))"
+                }
+                presented.payload = .toolCall(payload)
+            case var .diff(payload):
+                if payload.files.isEmpty { payload.files = AgentToolDetailPresenter.observableChangedFiles(detail) }
+                payload.presentedFilesArePending = payload.files.isEmpty
+                    && (detail.status == .inProgress || detail.status == .pending)
+                presented.payload = .diff(payload)
+            default:
+                return .unchanged
+            }
+            return .fresh(presented, (block.revision, identity, presented))
         }
-        presentedCache[block.id] = (block.revision, identity, presented)
-        qaPresentationCount += 1
-        return presented
     }
 
     /// Tool and diff blocks presented from their detail records, not the cache.
     private(set) var qaPresentationCount = 0
 
     /// Presented tool and diff blocks, emptied whenever detail records land.
-    private var presentedCache: [AgentNodeID: (revision: UInt64, identity: AgentToolDetailKey, block: AgentBlock)] = [:]
+    private var presentedCache: [AgentNodeID: Presentation.Cached] = [:]
+    /// Bumped whenever detail records land, so an off-main presentation taken
+    /// before them is not adopted.
+    private var presentationGeneration: UInt64 = 0
 }

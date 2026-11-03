@@ -830,7 +830,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     /// row that call produced (never itself), and consecutive chips — rows
     /// already superseded are transparent, any other row ends the run — share
     /// the first chip's row. A document with no chip costs one scan.
-    static func foldDelegations(_ entries: [AgentEntry]) -> ChipFold {
+    nonisolated static func foldDelegations(_ entries: [AgentEntry]) -> ChipFold {
         var fold = ChipFold()
         guard entries.contains(where: { entry in
             entry.role != .reasoning && entry.blocks.contains { if case .agentReference = $0.payload { return true }; return false }

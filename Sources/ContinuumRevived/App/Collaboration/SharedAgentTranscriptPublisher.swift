@@ -46,7 +46,8 @@ final class SharedAgentTranscriptPublisher {
     /// After a roster reaches the relay: the host session starts and stops
     /// each helper's own stream from it.
     var onHelpersPublished: (([Wire.Helper]) -> Void)?
-    private let details: @MainActor () -> [AgentNodeID: SharedAgentToolPresentation]
+    /// Presented tool details for one document; may do its work off the main actor.
+    private let details: @MainActor (AgentDocument) async -> [AgentNodeID: SharedAgentToolPresentation]
     private let detailRevision: @MainActor () -> UInt64?
     private var lastDetailRevision: UInt64?
     private var lastDetailAudit = Date.distantPast
@@ -82,7 +83,7 @@ final class SharedAgentTranscriptPublisher {
     init(agent: AgentID, stream: String = Lane.mainStream, generation: UInt64,
          budget: SharedAgentTranscriptBudget = SharedAgentTranscriptSafeBudget(),
          sink: SharedAgentTranscriptSink, helpers: (@MainActor () -> [Wire.Helper])? = nil,
-         details: @escaping @MainActor () -> [AgentNodeID: SharedAgentToolPresentation] = { [:] },
+         details: @escaping @MainActor (AgentDocument) async -> [AgentNodeID: SharedAgentToolPresentation] = { _ in [:] },
          detailRevision: @escaping @MainActor () -> UInt64? = { nil },
          imageData: @escaping @MainActor (AgentDocument) async -> [AgentImageAttachmentID: Data] = { _ in [:] },
          chrome: (@MainActor () -> (chrome: Wire.Chrome, theme: Wire.CharacterTheme?)?)? = nil,
@@ -106,8 +107,8 @@ final class SharedAgentTranscriptPublisher {
             let builder = SharedAgentChromeBuilder(supervisor: supervisor, agent: agent)
             chrome = { builder.build() }
         }
-        self.init(agent: agent, stream: stream, generation: generation, sink: sink, helpers: roster, details: { [weak supervisor] in
-            (supervisor?.sharedTranscriptToolBlocks(for: agent) ?? [:]).compactMapValues { SharedAgentToolPresentation(presented: $0) }
+        self.init(agent: agent, stream: stream, generation: generation, sink: sink, helpers: roster, details: { [weak supervisor] document in
+            await supervisor?.sharedTranscriptToolDetails(for: agent, document: document) ?? [:]
         }, detailRevision: { [weak supervisor] in
             supervisor?.sharedTranscriptDetailRevision(for: agent)
         }, imageData: { [weak supervisor] document in
@@ -131,9 +132,24 @@ final class SharedAgentTranscriptPublisher {
 
     func stop() { loop?.cancel(); loop = nil }
 
+    /// Witness only: plan on the main actor, as every publish did before the
+    /// work moved off it. Same plan, same order; only the executor differs.
+    var qaPlansOnMainActor = false
+
+    /// Ticks called while one is away; resumed when it finishes.
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
     /// One publish of whatever changed. Witnesses call this directly.
+    ///
+    /// The main actor reads the document and the publisher's own state, and
+    /// sends; finding what changed, presenting tool details and encoding run
+    /// off it, on values. Ticks never overlap: a tick called while another is
+    /// away waits for it, then publishes what changed since. So frames leave in
+    /// sequence, a checkpoint is never overtaken by an older patch, and when
+    /// `tick()` returns, the document as it was at the call has been published.
     func tick() async {
-        guard !publishing, !superseded, !laneUnavailable, let current = document() else { return }
+        while publishing { await withCheckedContinuation { waiting.append($0) } }
+        guard !superseded, !laneUnavailable, let current = document() else { return }
         let roster = helpers?()
         let revision = detailRevision()
         let now = Date()
@@ -144,59 +160,45 @@ final class SharedAgentTranscriptPublisher {
         if !needsCheckpoint, current.version == lastVersion, roster == publishedHelpers, !chromeChanged, let revision,
            revision == lastDetailRevision, now.timeIntervalSince(lastDetailAudit) < 5 { return }
         publishing = true
-        let currentDetails = details()
-        let imageIDs = Self.imageIDs(in: current.entries)
+        defer {
+            publishing = false
+            let resumed = waiting; waiting = []
+            resumed.forEach { $0.resume() }
+        }
+        let currentDetails = await details(current)
+        let entries = current.entries
+        let imageIDs = await offMain { Self.imageIDs(in: entries) }
         if imageIDs != lastImageIDs || (cachedImages.count < imageIDs.count && Date().timeIntervalSince(lastImageRead) >= 5) {
             cachedImages = Self.boundedImages(await imageData(current))
             lastImageIDs = imageIDs; lastImageRead = Date()
         }
-        let visible = published.isEmpty && lastVersion == current.version ? [] : window(of: current.entries)
-        let visibleBlocks = Wire.blockIDs(in: visible)
-        let visibleImages = Self.imageIDs(in: visible)
-        if !needsCheckpoint, current.version == lastVersion, roster == publishedHelpers, !chromeChanged,
-           currentDetails.filter({ visibleBlocks.contains($0.key) }) == publishedDetails,
-           cachedImages.filter({ visibleImages.contains($0.key) }) == publishedImages {
-            lastDetailRevision = revision; lastDetailAudit = now
-            publishing = false; return
-        }
-        defer { publishing = false }
+        let state = State(current: current, roster: roster, details: currentDetails, images: cachedImages, budget: budget,
+                          published: published, publishedDetails: publishedDetails, publishedImages: publishedImages,
+                          publishedHelpers: publishedHelpers, lastVersion: lastVersion, needsCheckpoint: needsCheckpoint,
+                          bytesSinceCheckpoint: bytesSinceCheckpoint, chrome: chromeNow, chromeChanged: chromeChanged,
+                          sentThemes: sentThemes)
         do {
-            if needsCheckpoint || bytesSinceCheckpoint > Lane.checkpointAfterBytes
-                || cachedImages.filter({ visibleImages.contains($0.key) }) != publishedImages {
-                try await sendCheckpoint(current, roster: roster, details: currentDetails, images: cachedImages, chrome: chromeNow)
-            } else if var ops = current.version == lastVersion ? [] : patch(to: current.entries) {
-                let keptIDs = Wire.blockIDs(in: window(of: current.entries))
-                let nextDetails = currentDetails.filter { keptIDs.contains($0.key) }
-                let changedIDs = Set(publishedDetails.keys).union(nextDetails.keys).filter { publishedDetails[$0] != nextDetails[$0] }
-                let detailOps = changedIDs.sorted { $0.rawValue < $1.rawValue }.map { Wire.Op.toolDetail(block: $0, detail: nextDetails[$0]) }
-                ops = ops.map(fitted) + detailOps
-                if let roster, roster != publishedHelpers { ops.append(.helpers(roster)) }
-                var chromeSent: Wire.Chrome?
+            switch try await offMain({ try Self.plan(state) }) {
+            case .unchanged:
+                // Nothing reached the relay, so an earlier failure still stands.
+                lastDetailRevision = revision; lastDetailAudit = now
+                return
+            case let .checkpoint(plan):
+                try await sendCheckpoint(plan, current: current, roster: roster, chrome: chromeNow)
+            case .noOps:
+                lastVersion = current.version
+            case let .patch(body, window, nextDetails):
+                let frame = Lane.Frame(generation: generation, sequence: through + 1, body: body)
+                try await sink.publish(stream: stream, checkpoint: nil, frames: [frame])
+                through += 1; frames += 1; bytesSinceCheckpoint += body.count
+                published = window; publishedDetails = nextDetails
+                if let roster, roster != publishedHelpers { publishedHelpers = roster; onHelpersPublished?(roster) }
+                // `plan` adds the chrome ops exactly when the chrome changed.
                 if chromeChanged, let chromeNow {
-                    // A set travels once, before the first chrome that names it.
-                    if let theme = chromeNow.theme, !sentThemes.contains(theme.hash) { ops.append(.characterTheme(theme)) }
-                    ops.append(.chrome(chromeNow.chrome))
-                    chromeSent = chromeNow.chrome
-                }
-                if !ops.isEmpty {
-                    let body = try Wire.encode(Wire.Patch(ops: ops))
-                    if body.count > Lane.maxFrameBytes {
-                        try await sendCheckpoint(current, roster: roster, details: currentDetails, images: cachedImages, chrome: chromeNow)
-                    } else {
-                        let frame = Lane.Frame(generation: generation, sequence: through + 1, body: body)
-                        try await sink.publish(stream: stream, checkpoint: nil, frames: [frame])
-                        through += 1; frames += 1; bytesSinceCheckpoint += body.count
-                        published = window(of: current.entries); publishedDetails = nextDetails
-                        if let roster, roster != publishedHelpers { publishedHelpers = roster; onHelpersPublished?(roster) }
-                        if let chromeSent {
-                            publishedChrome = chromeSent; chromeOps += 1
-                            if let theme = chromeNow?.theme { sentThemes.insert(theme.hash) }
-                        }
-                    }
+                    publishedChrome = chromeNow.chrome; chromeOps += 1
+                    if let theme = chromeNow.theme { sentThemes.insert(theme.hash) }
                 }
                 lastVersion = current.version
-            } else {
-                try await sendCheckpoint(current, roster: roster, details: currentDetails, images: cachedImages, chrome: chromeNow)
             }
             lastDetailRevision = revision; lastDetailAudit = now
             lastError = nil
@@ -211,48 +213,27 @@ final class SharedAgentTranscriptPublisher {
         }
     }
 
-    private func sendCheckpoint(_ current: AgentDocument, roster: [Wire.Helper]?, details: [AgentNodeID: SharedAgentToolPresentation],
-                                images: [AgentImageAttachmentID: Data],
+    private func offMain<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
+        if qaPlansOnMainActor { return try work() }
+        return try await Task.detached(priority: .userInitiated) { try work() }.value
+    }
+    private func offMain<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        if qaPlansOnMainActor { return work() }
+        return await Task.detached(priority: .userInitiated) { work() }.value
+    }
+
+    private func sendCheckpoint(_ plan: CheckpointPlan, current: AgentDocument, roster: [Wire.Helper]?,
                                 chrome chromeNow: (chrome: Wire.Chrome, theme: Wire.CharacterTheme?)?) async throws {
-        // The roster rides inside the same limit (32 helpers, a few KiB), and
-        // so do the chrome and a person's own set (at most 32 KiB deflated).
-        let rosterBytes = try roster.map { try Wire.encode($0).count + 16 } ?? 0
-        let window = Wire.window(current.entries, maxBytes: Lane.maxCheckpointBytes - rosterBytes, budget: budget,
-                                 chrome: chromeNow?.chrome, characterTheme: chromeNow?.theme)
-        var entries = window.entries
-        var omitted = window.omittedEntries
-        var selected: [AgentNodeID: SharedAgentToolPresentation] = [:]
-        var body = Data()
-        while true {
-            let ids = Wire.blockIDs(in: entries)
-            selected = details.filter { ids.contains($0.key) }
-            let items = selected.keys.sorted { $0.rawValue < $1.rawValue }.compactMap { id in
-                selected[id].map { Wire.ToolDetail(block: id, detail: $0) }
-            }
-            body = try Wire.encode(Wire.Checkpoint(entries: entries, omittedEntries: omitted, helpers: roster, toolDetails: items,
-                                                   chrome: chromeNow?.chrome, characterTheme: chromeNow?.theme))
-            if body.count <= Lane.maxCheckpointBytes || entries.isEmpty { break }
-            entries.removeFirst(); omitted += 1
-        }
         let next = through + 1
-        try await sink.publish(stream: stream, checkpoint: .init(generation: generation, through: next, body: body), frames: [])
+        try await sink.publish(stream: stream, checkpoint: .init(generation: generation, through: next, body: plan.body), frames: [])
         through = next; checkpoints += 1; bytesSinceCheckpoint = 0
-        let visibleIDs = Self.imageIDs(in: entries)
-        let selectedImages = images.filter { visibleIDs.contains($0.key) }
-        var sentHashes: Set<String> = []
-        for id in selectedImages.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
-            guard let data = selectedImages[id] else { continue }
-            let manifest = SharedAgentTranscriptImages.Manifest(attachment: id, data: data)
-            try await sendImageOp(.imageManifest(manifest))
-        }
-        for id in selectedImages.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
-            guard let data = selectedImages[id] else { continue }
-            let hash = SharedAgentTranscriptImages.digest(data)
-            guard sentHashes.insert(hash).inserted else { continue }
-            for chunk in SharedAgentTranscriptImages.chunks(data) { try await sendImageOp(.imageChunk(chunk)) }
+        for body in plan.imageBodies {
+            let frame = Lane.Frame(generation: generation, sequence: through + 1, body: body)
+            try await sink.publish(stream: stream, checkpoint: nil, frames: [frame])
+            through += 1; frames += 1
         }
         needsCheckpoint = false
-        published = Array(current.entries.suffix(entries.count)); publishedDetails = selected; publishedImages = selectedImages
+        published = Array(current.entries.suffix(plan.kept)); publishedDetails = plan.details; publishedImages = plan.images
         lastVersion = current.version
         if let roster { let changed = roster != publishedHelpers; publishedHelpers = roster; if changed { onHelpersPublished?(roster) } }
         publishedChrome = chromeNow?.chrome
@@ -270,11 +251,118 @@ final class SharedAgentTranscriptPublisher {
         return a == b
     }
 
-    private func sendImageOp(_ op: Wire.Op) async throws {
-        let body = try Wire.encode(Wire.Patch(ops: [op]))
-        let frame = Lane.Frame(generation: generation, sequence: through + 1, body: body)
-        try await sink.publish(stream: stream, checkpoint: nil, frames: [frame])
-        through += 1; frames += 1
+    // MARK: - Plan (off the main actor, on values)
+
+    /// What one tick reads: the document and what the guest now holds.
+    struct State: Sendable {
+        let current: AgentDocument
+        let roster: [Wire.Helper]?
+        let details: [AgentNodeID: SharedAgentToolPresentation]
+        let images: [AgentImageAttachmentID: Data]
+        let budget: SharedAgentTranscriptBudget
+        let published: [AgentEntry]
+        let publishedDetails: [AgentNodeID: SharedAgentToolPresentation]
+        let publishedImages: [AgentImageAttachmentID: Data]
+        let publishedHelpers: [Wire.Helper]?
+        let lastVersion: UInt64?
+        let needsCheckpoint: Bool
+        let bytesSinceCheckpoint: Int
+        /// The host tile's chrome now, and whether the guest draws something else.
+        let chrome: (chrome: Wire.Chrome, theme: Wire.CharacterTheme?)?
+        let chromeChanged: Bool
+        let sentThemes: Set<String>
+    }
+
+    struct CheckpointPlan: Sendable {
+        let body: Data
+        /// Image manifests, then each distinct image's chunks, encoded.
+        let imageBodies: [Data]
+        /// How many of the newest host entries it carries.
+        let kept: Int
+        let details: [AgentNodeID: SharedAgentToolPresentation]
+        let images: [AgentImageAttachmentID: Data]
+    }
+
+    enum Plan: Sendable {
+        case unchanged
+        case checkpoint(CheckpointPlan)
+        /// The entries are unchanged on the wire; the version is noted.
+        case noOps
+        case patch(body: Data, window: [AgentEntry], details: [AgentNodeID: SharedAgentToolPresentation])
+    }
+
+    nonisolated static func plan(_ state: State) throws -> Plan {
+        let current = state.current
+        let visible = state.published.isEmpty && state.lastVersion == current.version ? [] : window(state.published, of: current.entries)
+        let visibleBlocks = Wire.blockIDs(in: visible)
+        let visibleImages = imageIDs(in: visible)
+        let changedImages = state.images.filter({ visibleImages.contains($0.key) }) != state.publishedImages
+        if !state.needsCheckpoint, current.version == state.lastVersion, state.roster == state.publishedHelpers, !state.chromeChanged,
+           state.details.filter({ visibleBlocks.contains($0.key) }) == state.publishedDetails, !changedImages {
+            return .unchanged
+        }
+        if state.needsCheckpoint || state.bytesSinceCheckpoint > Lane.checkpointAfterBytes || changedImages {
+            return .checkpoint(try checkpoint(state))
+        }
+        guard var ops = current.version == state.lastVersion ? [] : patch(state.published, to: current.entries) else {
+            return .checkpoint(try checkpoint(state))
+        }
+        let window = window(state.published, of: current.entries)
+        let keptIDs = Wire.blockIDs(in: window)
+        let nextDetails = state.details.filter { keptIDs.contains($0.key) }
+        let published = state.publishedDetails
+        let changedIDs = Set(published.keys).union(nextDetails.keys).filter { published[$0] != nextDetails[$0] }
+        let detailOps = changedIDs.sorted { $0.rawValue < $1.rawValue }.map { Wire.Op.toolDetail(block: $0, detail: nextDetails[$0]) }
+        ops = ops.map { fitted($0, budget: state.budget) } + detailOps
+        if let roster = state.roster, roster != state.publishedHelpers { ops.append(.helpers(roster)) }
+        if state.chromeChanged, let chrome = state.chrome {
+            // A set travels once, before the first chrome that names it.
+            if let theme = chrome.theme, !state.sentThemes.contains(theme.hash) { ops.append(.characterTheme(theme)) }
+            ops.append(.chrome(chrome.chrome))
+        }
+        guard !ops.isEmpty else { return .noOps }
+        let body = try Wire.encode(Wire.Patch(ops: ops))
+        if body.count > Lane.maxFrameBytes { return .checkpoint(try checkpoint(state)) }
+        return .patch(body: body, window: window, details: nextDetails)
+    }
+
+    nonisolated private static func checkpoint(_ state: State) throws -> CheckpointPlan {
+        // The roster rides inside the same limit (32 helpers, a few KiB), and
+        // so do the chrome and a person's own set (at most 32 KiB deflated).
+        let rosterBytes = try state.roster.map { try Wire.encode($0).count + 16 } ?? 0
+        let window = Wire.window(state.current.entries, maxBytes: Lane.maxCheckpointBytes - rosterBytes, budget: state.budget,
+                                 chrome: state.chrome?.chrome, characterTheme: state.chrome?.theme)
+        var entries = window.entries
+        var omitted = window.omittedEntries
+        var selected: [AgentNodeID: SharedAgentToolPresentation] = [:]
+        var body = Data()
+        while true {
+            let ids = Wire.blockIDs(in: entries)
+            selected = state.details.filter { ids.contains($0.key) }
+            let items = selected.keys.sorted { $0.rawValue < $1.rawValue }.compactMap { id in
+                selected[id].map { Wire.ToolDetail(block: id, detail: $0) }
+            }
+            body = try Wire.encode(Wire.Checkpoint(entries: entries, omittedEntries: omitted, helpers: state.roster, toolDetails: items,
+                                                   chrome: state.chrome?.chrome, characterTheme: state.chrome?.theme))
+            if body.count <= Lane.maxCheckpointBytes || entries.isEmpty { break }
+            entries.removeFirst(); omitted += 1
+        }
+        let visibleIDs = imageIDs(in: entries)
+        let selectedImages = state.images.filter { visibleIDs.contains($0.key) }
+        var imageBodies: [Data] = []
+        var sentHashes: Set<String> = []
+        for id in selectedImages.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+            guard let data = selectedImages[id] else { continue }
+            let manifest = SharedAgentTranscriptImages.Manifest(attachment: id, data: data)
+            imageBodies.append(try Wire.encode(Wire.Patch(ops: [.imageManifest(manifest)])))
+        }
+        for id in selectedImages.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+            guard let data = selectedImages[id] else { continue }
+            let hash = SharedAgentTranscriptImages.digest(data)
+            guard sentHashes.insert(hash).inserted else { continue }
+            for chunk in SharedAgentTranscriptImages.chunks(data) { imageBodies.append(try Wire.encode(Wire.Patch(ops: [.imageChunk(chunk)]))) }
+        }
+        return CheckpointPlan(body: body, imageBodies: imageBodies, kept: entries.count, details: selected, images: selectedImages)
     }
 
     private static func boundedImages(_ images: [AgentImageAttachmentID: Data]) -> [AgentImageAttachmentID: Data] {
@@ -291,7 +379,7 @@ final class SharedAgentTranscriptPublisher {
         return selected
     }
 
-    private static func imageIDs(in entries: [AgentEntry]) -> Set<AgentImageAttachmentID> {
+    nonisolated private static func imageIDs(in entries: [AgentEntry]) -> Set<AgentImageAttachmentID> {
         var ids: Set<AgentImageAttachmentID> = []
         func visit(_ block: AgentBlock) {
             switch block.payload {
@@ -307,17 +395,17 @@ final class SharedAgentTranscriptPublisher {
 
     /// The current entries from the guest's first one on. Entries before the
     /// window stay on this Mac. Nil if the window's first entry is gone.
-    private func window(of entries: [AgentEntry]) -> [AgentEntry] {
+    nonisolated private static func window(_ published: [AgentEntry], of entries: [AgentEntry]) -> [AgentEntry] {
         guard let first = published.first?.id, let start = entries.firstIndex(where: { $0.id == first }) else { return entries }
         return Array(entries[start...])
     }
 
-    private func patch(to entries: [AgentEntry]) -> [Wire.Op]? {
+    nonisolated private static func patch(_ published: [AgentEntry], to entries: [AgentEntry]) -> [Wire.Op]? {
         if let first = published.first?.id, !entries.contains(where: { $0.id == first }) { return nil }
-        return Wire.patch(from: published, to: window(of: entries))
+        return Wire.patch(from: published, to: window(published, of: entries))
     }
 
-    private func fitted(_ op: Wire.Op) -> Wire.Op {
+    nonisolated private static func fitted(_ op: Wire.Op, budget: SharedAgentTranscriptBudget) -> Wire.Op {
         guard case let .block(entry, block) = op else { return op }
         return .block(entry: entry, budget.fit(block, limit: Wire.maxBlockBytes))
     }

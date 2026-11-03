@@ -601,6 +601,9 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --share-agent-relay-check
   run_app_check .build/debug/Array --shared-agent-render-check
   run_app_check .build/debug/Array --shared-agent-transcript-parity-check
+  # The host's transcript publisher: main-thread budget per patch, and the same
+  # frames as when it planned on the main actor.
+  run_app_check .build/debug/Array --shared-agent-transcript-publisher-perf-check
   run_app_check .build/debug/Array --shared-agent-helpers-check
   run_app_check .build/debug/Array --shared-agent-sidebar-check
   run_app_check .build/debug/Array --shared-agent-chrome-check
@@ -1545,6 +1548,9 @@ run_app_check .build/debug/Array --shared-agent-migration-check
 run_app_check .build/debug/Array --share-agent-relay-check
 run_app_check .build/debug/Array --shared-agent-render-check
 run_app_check .build/debug/Array --shared-agent-transcript-parity-check
+# The host's transcript publisher: under 4 ms of main-thread time per streaming
+# patch on a ~500 KB transcript, and the same frames as when it planned on main.
+run_app_check .build/debug/Array --shared-agent-transcript-publisher-perf-check
 run_app_check .build/debug/Array --shared-agent-helpers-check
 run_app_check .build/debug/Array --shared-agent-sidebar-check
 # A shared agent's guest tile shows the host tile's chrome: title, status,
