@@ -314,7 +314,7 @@ enum SharedTileParityChecks {
                 runtimeRef: nil, metadata: .init(sharedTile: reference)))
             guestTile.frame = NSRect(origin: .zero, size: hostTile.frame.size)
             _ = window(for: guestTile)
-            let guestController = try controller(root: rigRoot.appendingPathComponent("guest-\(kind.rawValue)"), identity: sam,
+            let guestController = try controller(root: rigRoot.appendingPathComponent("guest-\(label)"), identity: sam,
                                                  label: "Sam", authority: authority, loop: loop, document: document)
             let session = SharedTileSession(view: guestTile, reference: reference, controller: guestController)
             session.start()
