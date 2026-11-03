@@ -17582,10 +17582,18 @@ private func checkTurnCapabilityRepaint<Failure: Error>(
     }) else {
         throw fail("capability-repaint: stopping the spawning runner did not release the flight (stops \(spawnRunner.stopCount), completed \(spawnRunner.completedRuns), action '\(tile.qaV2ActionTitle ?? "nil")')")
     }
-    // Let round 1's `.stopped` delivery land before counting round 2's events.
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, { tile.ingestedEvents.count == 1 }) else {
+    // A forced stop delivers the session state and settles its interrupted turn.
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        tile.ingestedEvents.count == 2 && tile.ingestedEvents.first == .sessionStateChanged(.stopped)
+            && tile.ingestedEvents.contains(where: {
+                if case .turnCompleted(_, _, .interrupted, _) = $0 { return true }
+                return false
+            })
+    }) else {
         throw fail("capability-repaint: the stop's session event never reached the tile (\(tile.ingestedEvents.count) ingested)")
     }
+
+    let eventsAfterStop = tile.ingestedEvents.count
 
     // Round 2 — a full natural turn, ending in the DRAIN window: terminal events
     // arrive while the process is still alive and blocked in run().
@@ -17607,7 +17615,7 @@ private func checkTurnCapabilityRepaint<Failure: Error>(
     // event count is part of the condition: spawn and drain deliberately look
     // identical at the button, so only the ingested turn distinguishes them.
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
-        tile.ingestedEvents.count == 4 && tile.qaV2CanSend == false
+        tile.ingestedEvents.count == eventsAfterStop + 3 && tile.qaV2CanSend == false
             && tile.qaV2ActionTitle == "Stop" && !tile.qaProviderControlsEnabled
     }) else {
         throw fail("capability-repaint: the drain window lost its Stop (canSend \(tile.qaV2CanSend), action '\(tile.qaV2ActionTitle ?? "nil")', pickers \(tile.qaProviderControlsEnabled ? "live" : "dark"), events \(tile.ingestedEvents.count))")
@@ -18071,8 +18079,15 @@ private func checkTileIsASubscriber(
     guard await waitUntil(timeout: 10, pollInterval: 0.02, { probe.events.count > probeAtDetach }) else {
         throw fail("the supervisor stopped delivering events to its remaining subscriber after the tile detached")
     }
-    guard probe.events.last == .sessionStateChanged(.stopped) else {
-        throw fail("the remaining subscriber did not see the stop: \(String(describing: probe.events.last))")
+    let stopEvents = Array(probe.events.dropFirst(probeAtDetach))
+    guard let stopIndex = stopEvents.firstIndex(of: .sessionStateChanged(.stopped)) else {
+        throw fail("the remaining subscriber did not see the stop: \(stopEvents)")
+    }
+    guard stopEvents.dropFirst(stopIndex + 1).contains(where: {
+        if case .turnCompleted(_, _, .interrupted, _) = $0 { return true }
+        return false
+    }) else {
+        throw fail("the stopped turn did not settle after its session-state event")
     }
     guard tile.ingestedEvents.count == tileEventsAtDetach else {
         throw fail("a detached tile kept ingesting: \(tile.ingestedEvents.count) events, was \(tileEventsAtDetach)")
