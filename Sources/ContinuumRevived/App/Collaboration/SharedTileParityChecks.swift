@@ -195,6 +195,9 @@ enum SharedTileParityChecks {
         let guestRegion: () -> NSView?
         /// Extra facts for the report (block kinds the host drew, and so on).
         var notes: [String] = []
+        /// Element endings BOTH sides must lay out: a state the share must
+        /// carry truthfully, not merely carry the same on both Macs.
+        var mustShow: [String] = []
     }
 
     struct Comparison {
@@ -441,8 +444,12 @@ enum SharedTileParityChecks {
         try store.upsert(AgentRecord(id: agent, displayName: "Map the checkout state machine", harness: .claudeCode,
                                      model: "fixture/parity", thinking: "medium", cwd: agentRoot.path, projectId: project,
                                      createdAt: Date(), lastActivityAt: Date()))
+        // One attachment store for the supervisor and the tile, as the app has:
+        // the screenshot the supervisor stores is the file the host tile shows.
+        let attachments = AgentComposerAttachmentStore(applicationSupportDirectory: agentRoot)
         let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) },
                                          warn: { _ in }, nameTitlerCommand: { _ in nil },
+                                         attachmentStore: attachments,
                                          transcriptStore: AgentTranscriptStore(root: agentRoot.appendingPathComponent("transcripts", isDirectory: true)))
         _ = supervisor.restore()
 
@@ -452,6 +459,8 @@ enum SharedTileParityChecks {
             metadata: TileMetadata(launchProfileId: "managed-agent")))
         hostTile.frame = NSRect(origin: .zero, size: tileSize)
         _ = window(hostTile)
+        hostTile.bindV2ComposerState(draftStore: AgentComposerDraftStore(applicationSupportDirectory: agentRoot, attachmentStore: attachments),
+                                     promptHistory: AgentPromptHistory(), attachmentStore: attachments)
         hostTile.attach(agentID: agent, supervisor: supervisor)
 
         // Published before the turn, as mode A does: what follows is live.
@@ -535,7 +544,10 @@ enum SharedTileParityChecks {
                             SharedAreaCheckRig.descendants(live).first { $0 is NSScrollView }
                         }
                     },
-                    notes: notes)
+                    notes: notes,
+                    // The host stored the screenshot and the guest received its
+                    // bytes: both Macs hold the picture, so both must say so.
+                    mustShow: ["· Available locally"])
     }
 
     /// A small picture for the transcript's image block: the production
@@ -582,6 +594,15 @@ enum SharedTileParityChecks {
         for line in extra.prefix(16) { lines.append("    only on guest: \(quoted(line))") }
         if extra.count > 16 { lines.append("    … \(extra.count - 16) more only on guest") }
 
+        var shown = true
+        for ending in pair.mustShow {
+            for (side, list) in [("host", hostElements), ("guest", guestElements)] {
+                let found = list.first { $0.hasSuffix(ending) }
+                lines.append("  must show \(quoted(ending)): \(side) " + (found.map { "shows \(quoted($0))" } ?? "does not RED"))
+                if found == nil { shown = false }
+            }
+        }
+
         // Pixels, light and dark.
         var pixelsMatch = true
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
@@ -616,7 +637,7 @@ enum SharedTileParityChecks {
         }
         NSApp.appearance = nil
         for note in pair.notes { lines.append("  note: \(note)") }
-        result.red = !(classesMatch && elementsMatch && pixelsMatch)
+        result.red = !(classesMatch && elementsMatch && shown && pixelsMatch)
         result.lines = ["\(pair.kind) \(result.red ? "RED" : "GREEN")"] + lines
         return result
     }
