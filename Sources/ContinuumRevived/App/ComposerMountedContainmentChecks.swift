@@ -21,7 +21,7 @@ enum ComposerMountedContainmentChecks {
             let project = UUID(uuidString: "00000000-0000-0000-0000-0000000CA104")!
             let zone = UUID(uuidString: "00000000-0000-0000-0000-0000000CA107")!
             let cwd = root.appendingPathComponent("Pb")
-            _ = delegate.qaAgentSupervisor.spawn(role: nil, prompt: nil, cwd: cwd, harness: .codex,
+            _ = delegate.qaAgentSupervisor.spawn(role: nil, prompt: nil, cwd: cwd, harness: .codex, mode: .managed,
                 model: AgentCatalogQAFixture.codex.models[0], thinking: "medium", projectId: project, projectRoot: cwd, tileId: tileID)
             let store = ProjectStore(projectRoot: cwd)
             var state = try store.loadCanvas()
@@ -41,7 +41,7 @@ enum ComposerMountedContainmentChecks {
         window.contentView = f.canvas
         window.orderFrontOffscreenForChecks()
         defer { window.orderOut(nil) }
-        let out = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("array-scratch/underbar-cap/mounted-containment")
+        let out = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("qa-runs/composer-mounted-containment")
         try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
         var rows: [[String: Any]] = [], failures: [String] = []
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
@@ -70,6 +70,26 @@ enum ComposerMountedContainmentChecks {
                                 guard tile.qaPageZoomContentRoot.isDescendant(of: tile) else {
                                     failures.append("\(label): body not live in mounted tile"); continue
                                 }
+                                var chromeFacts: [String: CGFloat] = [:]
+                                let header = tile.qaPageZoomHeaderView
+                                if let badge = header.qaManagedBadge, let scale = tile.qaUnderBarScale,
+                                   let under = tile.qaUnderBarFrame, zoom <= 1 {
+                                    let screenFont = badge.qaTextPointSize * scale * CGFloat(zoom)
+                                    let natural = badge.qaTextPointSize * TileNSView.minScreenGrabPx / TileNSView.titleBarHeight
+                                    if screenFont > natural + 0.01 {
+                                        failures.append("\(label): screen role font \(screenFont) exceeds natural \(natural)")
+                                    }
+                                    let role = min(badge.qaTextPointSize, NSFont.token(.label).pointSize)
+                                    if width >= 320 && screenFont < role - 0.01 {
+                                        failures.append("\(label): screen role font \(screenFont) below readable \(role)")
+                                    }
+                                    if let local = header.qaManagedFrame,
+                                       let pill = tile.qaUnderBarRect(local, in: header),
+                                       pill.maxY > tile.qaPageZoomContentRoot.convert(tile.qaPageZoomContentRoot.bounds, to: tile).minY + 0.5 {
+                                        failures.append("\(label): Managed covers mounted body")
+                                    }
+                                    chromeFacts = ["screenFont": screenFont, "screenRowHeight": under.height * CGFloat(zoom)]
+                                }
                                 let nodes = tile.qaMountedComposerContainment
                                 for required in ["prompt", "send", "model"] where !nodes.contains(where: { $0.name == required }) {
                                     failures.append("\(label): missing visible \(required)")
@@ -82,7 +102,7 @@ enum ComposerMountedContainmentChecks {
                                     if !fits { failures.append("\(label): \(node.name) frame=\(node.frame), clipped tile rect=\(node.clip)") }
                                     children.append(["name": node.name, "frame": NSStringFromRect(node.frame), "clip": NSStringFromRect(node.clip), "fits": String(fits)])
                                 }
-                                rows.append(["sample": label, "tile": NSStringFromRect(tile.bounds), "children": children])
+                                rows.append(["sample": label, "tile": NSStringFromRect(tile.bounds), "children": children, "chrome": chromeFacts])
                                 if width == 420 && textZoom == 110 && zoom == 1 && !draft.isEmpty,
                                    let rep = tile.bitmapImageRepForCachingDisplay(in: tile.bounds) {
                                     tile.cacheDisplay(in: tile.bounds, to: rep)

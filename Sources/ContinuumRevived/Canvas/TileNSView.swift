@@ -994,10 +994,8 @@ class TileNSView: NSView, TokenThemed {
     private(set) var qaChromeZOrderRepairCount = 0
 
     private func layoutContentView() {
-        // The inset is zoom-independent, so a camera move never re-frames the body:
-        // an enlarged low-zoom grab strip is visual chrome OVER a stable body, not
-        // a resize request. That rule was written for the Ghostty grid and now
-        // holds for every tile kind — see `contentTopInsetWorldHeight`.
+        // An under-bar reserves its readable chrome growth. Plain tiles retain
+        // the stable body origin; no-op assignments still leave layout alone.
         let barHeight = contentTopInsetWorldHeight
         let nextFrame = NSRect(x: 0, y: barHeight, width: bounds.width, height: max(0, bounds.height - barHeight))
         if contentView?.frame != nextFrame {
@@ -1571,33 +1569,32 @@ class TileNSView: NSView, TokenThemed {
     /// region — no second divergent floor to drift out of sync.
     var chromeBarHeight: CGFloat { grabHeightInLocalCoordinates }
 
-    /// World y-offset for the content view. Deliberately the UNFLOORED bar height,
-    /// so it does not change with the camera: `chromeBarHeight` is
-    /// `max(titleBarHeight, minScreenGrabPx/zoom)`, and since `minScreenGrabPx`
-    /// (28) exceeds `titleBarHeight` (24), every zoom below 1.167 moves that floor
-    /// on every step. Aliasing the inset to it re-framed the body on each step and
-    /// reflowed the document. At low zoom the enlarged grab strip therefore overlays
-    /// the top of the body rather than pushing it down — chrome geometry is
-    /// unchanged, only what it covers.
-    ///
-    /// The under-bar's share is reserved at the zoom-1 chrome scale
-    /// (`minScreenGrabPx / titleBarHeight`), the scale it draws at in the common
-    /// case, so at 100% it meets the body exactly; zoomed in it leaves a few
-    /// points of body colour, zoomed out it overlays the body like the bar does.
+    /// Preserve the 100% body origin, including the row's existing bottom padding.
+    /// When readable chrome grows in world units, reserve that growth too. Only
+    /// the height changes: document width and the terminal's column count stay put.
     var contentTopInsetWorldHeight: CGFloat {
-        let under = underBarWorldHeight
-        return naturalTitleBarHeight + (under == 0 ? 0 : (under * Self.underBarMaximumScale).rounded(.up))
+        let base = underBarWorldHeight
+        let naturalRow = base * Self.underBarMaximumScale
+        let inset = naturalTitleBarHeight + naturalRow.rounded(.up)
+        guard base > 0 else { return inset }
+        let naturalBar = max(naturalTitleBarHeight, Self.minScreenGrabPx)
+        let extra = max(0, chromeBarHeight - naturalBar)
+            + max(0, base * underBarScale - naturalRow)
+        return inset + extra.rounded(.up)
     }
 
-    /// The most the under-bar scales: the chrome's scale at 100% zoom
-    /// (`minScreenGrabPx / titleBarHeight`, 28 / 24). Zoomed further out the
-    /// title bar keeps growing in world units to hold 28 px on screen, but the
-    /// row under it stops here, so its 11 pt pill text is never bigger than the
-    /// bar's own 11 pt secondary text at 100% (both draw at this scale there)
-    /// and the row never outgrows the share of the body reserved for it
-    /// (`contentTopInsetWorldHeight`). Past this it shrinks with the body it
-    /// describes, rather than becoming a tall band with one huge pill in it.
+    /// Natural chrome scale at 100%. This caps SCREEN size when zoomed out,
+    /// not world size: the latter would make an 11pt label become 3pt at 25%.
     static var underBarMaximumScale: CGFloat { minScreenGrabPx / titleBarHeight }
+
+    private var underBarScale: CGFloat {
+        guard let underBar else { return 1 }
+        let zoom = CGFloat(canvas?.viewport.zoom ?? 1)
+        let naturalScale = max(1, min(Self.underBarMaximumScale, bounds.width / underBar.minimumContentWidth))
+        let screenCap = naturalScale / max(0.01, min(1, zoom))
+        let width = zoom < 1 ? underBar.minimumReadableContentWidth : underBar.minimumContentWidth
+        return max(1, min(zoomChromeScale, screenCap, bounds.width / width))
+    }
 
     // MARK: - Ownership mark (`.plans/105-collaboration/SHARE-REDESIGN.md`, mode A)
     //
@@ -1719,20 +1716,18 @@ class TileNSView: NSView, TokenThemed {
         return underBar.convert(rect, to: self)
     }
 
-    /// Frames only when the chrome bucket or the content changed, so a camera
-    /// step that stays inside one bucket assigns nothing.
+    /// The title follows its chrome bucket; the under-bar also caps its exact
+    /// screen size. Unchanged row geometry is left alone by `place`.
     private func layoutUnderBar() {
         guard let underBar else { return }
         let base = underBarWorldHeight
         if underBar.isHidden != (base == 0) { underBar.isHidden = base == 0 }
         guard base > 0 else { return }
         let bar = chromeBarHeight
-        // The bar's chrome scale, until the row's essentials (the indicator's
-        // dot, a Stop sharing control) would no longer fit across the tile, and
-        // never past `underBarMaximumScale`.
-        // `zoomChromeScale`, not bar / titleBarHeight: a Large character size
-        // makes the bar taller without the row needing to grow with it.
-        let scale = max(1, min(zoomChromeScale, Self.underBarMaximumScale, bounds.width / underBar.minimumContentWidth))
+        (underBar.accessory as? TileUnderBarAccessory)?.setReadableChrome((canvas?.viewport.zoom ?? 1) < 1)
+        // Preserve the chrome's natural screen role size, allowing width pressure
+        // to compact the row using the accessory's actual minimum geometry.
+        let scale = underBarScale
         underBar.place(frame: NSRect(x: 0, y: bar, width: bounds.width, height: base * scale), unscaledHeight: base)
     }
 
@@ -1793,6 +1788,7 @@ class TileNSView: NSView, TokenThemed {
     /// sweep — the exact cost the plane exists to remove.
     func refreshZoomDependentChrome() {
         layoutChrome()
+        if underBarWorldHeight > 0 { layoutContentView() }
     }
 
     /// World edge length for the close button, floored so its on-screen size
@@ -3801,6 +3797,13 @@ extension TitleBarView: NSTextFieldDelegate {
 @MainActor
 protocol TileUnderBarAccessory: NSView {
     var minimumWholeWidth: CGFloat { get }
+    var minimumReadableWidth: CGFloat { get }
+    func setReadableChrome(_ readable: Bool)
+}
+
+extension TileUnderBarAccessory {
+    var minimumReadableWidth: CGFloat { minimumWholeWidth }
+    func setReadableChrome(_ readable: Bool) {}
 }
 
 /// The row under a tile's title bar (see `TileNSView` › Under-bar): the live
@@ -3890,6 +3893,16 @@ final class TileUnderBarView: NSView {
         if trailing != nil { width += trailingWidth + 8 }
         width += accessoryMinimumWidth
         return max(width, 1)
+    }
+
+    var minimumReadableContentWidth: CGFloat {
+        let compact = (accessory as? TileUnderBarAccessory)?.minimumReadableWidth ?? accessoryMinimumWidth
+        // Match layout's actual compact indicator gap (4, not the legacy 8).
+        // Two existing border widths leave one at each edge for pixel snapping.
+        var width = compact + 2 * CGFloat(LineWidth.hairline)
+        if indicatorText != nil { width += 8 + Self.compactIndicatorWidth + 4 }
+        if trailing != nil { width += trailingWidth + 8 }
+        return max(1, width)
     }
 
     /// The indicator pill, far left, in bounds space; nil when unshared. Its

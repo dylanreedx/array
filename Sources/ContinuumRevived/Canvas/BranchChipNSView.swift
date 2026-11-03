@@ -170,6 +170,11 @@ final class BranchChipNSView: NSView, TokenThemed, AgentPageZoomScalable {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+    var minimumWholeWidth: CGFloat {
+        (iconWidth?.constant ?? 0) + (minimumTextWidthConstraint?.constant ?? 0)
+            + (stack?.spacing ?? 0) + (stack?.edgeInsets.left ?? 0) + (stack?.edgeInsets.right ?? 0)
+    }
+
     /// Paint a display, or hide when there is none.
     func apply(_ display: Display?) {
         guard let display else {
@@ -230,6 +235,7 @@ final class BranchChipNSView: NSView, TokenThemed, AgentPageZoomScalable {
         applyTokens()
     }
 
+    var qaTextPointSize: CGFloat { label.font?.pointSize ?? 0 }
     var qaText: String { (accessibilityValue() as? String) ?? label.stringValue }
     var qaIsWarning: Bool { isWarning }
 }

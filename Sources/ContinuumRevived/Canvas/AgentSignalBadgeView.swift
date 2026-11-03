@@ -47,6 +47,8 @@ final class AgentSignalBadgeView: NSView, AgentPageZoomScalable {
 
     required init?(coder: NSCoder) { nil }
 
+    var minimumWholeWidth: CGFloat { widthConstraint?.constant ?? 0 }
+
     override func layout() {
         super.layout()
         // Corner style (Settings › Appearance › Corner style), re-resolved here.

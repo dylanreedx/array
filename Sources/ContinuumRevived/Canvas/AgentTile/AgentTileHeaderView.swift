@@ -48,6 +48,21 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable, Til
     /// The tile's under-bar keeps this header at least this wide, so a low
     /// zoom never costs a pill.
     var minimumWholeWidth: CGFloat { showsManaged ? max(managedFloor, 150) : 150 }
+    var minimumReadableWidth: CGFloat {
+        var widths: [CGFloat] = []
+        if showsElapsed { widths.append(elapsedWidth?.constant ?? 0) }
+        if !branchChip.isHidden { widths.append(branchChip.minimumWholeWidth) }
+        if let status = statusBadge as? AgentSignalBadgeView, !status.isHidden {
+            widths.append(status.minimumWholeWidth)
+        }
+        // Branch and actionable status retain priority; Managed already yields
+        // as a unit below managedFloor. A solitary Managed badge stays whole.
+        if widths.isEmpty, showsManaged { widths.append(managedBadge.intrinsicContentSize.width) }
+        // The existing 999/998 side-inset constraints give way before text.
+        // Reserve the controls themselves, allowing those insets to collapse.
+        return widths.reduce(0, +) + CGFloat(max(0, widths.count - 1)) * CGFloat(pageZoom.scaled(Space.m))
+    }
+    var qaManagedCanFit: Bool { bounds.width >= managedFloor }
     var qaManagedBadge: AgentManagedBadgeView? { managedBadge.isHidden ? nil : managedBadge }
     var qaManagedFrame: NSRect? {
         managedBadge.isHidden ? nil : managedBadge.convert(managedBadge.bounds, to: self)
@@ -206,11 +221,26 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable, Til
             && (statusBadge?.isHidden != false || bounds.width >= CGFloat(pageZoom.scaled(520)))
     }
 
+    private var readableChrome = false
+    func setReadableChrome(_ readable: Bool) {
+        guard readable != readableChrome else { return }
+        readableChrome = readable
+        needsLayout = true
+    }
+
     override func layout() {
         // The duration remains in the spoken status. At narrow widths a live
         // status badge takes this space so both branch and status stay legible.
         elapsedLabel.isHidden = !showsElapsed
         updateVisibility()
+        // The old asymmetric priorities spent all spare width on the leading
+        // inset, leaving a snapped chip against the far edge. Share the available
+        // padding while compact; restore the exact natural insets at 100%.
+        let spare = max(0, bounds.width - minimumReadableWidth) / 2
+        let left = readableChrome ? min(horizontalInsets.left, spare) : horizontalInsets.left
+        let right = readableChrome ? min(horizontalInsets.right, spare) : horizontalInsets.right
+        if rowLeading?.constant != left { rowLeading?.constant = left }
+        if rowTrailing?.constant != -right { rowTrailing?.constant = -right }
         super.layout()
     }
 
@@ -271,6 +301,7 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable, Til
     var qaName: String { presentation?.name ?? "" }
     var qaState: String { presentation?.stateLabel ?? "" }
     var qaElapsed: String? { elapsedLabel.isHidden ? nil : elapsedLabel.stringValue }
+    var qaBranchTextPointSize: CGFloat { branchChip.qaTextPointSize }
     var qaBranch: String? { branchChip.isHidden ? nil : branchChip.qaText }
     var qaBranchIsWarning: Bool { !branchChip.isHidden && branchChip.qaIsWarning }
     var qaBranchTooltip: String? { branchChip.isHidden ? nil : branchChip.toolTip }

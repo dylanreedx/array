@@ -11,9 +11,8 @@ import ContinuumRevivedCore
 // canvas in an offscreen window, swept over canvas zooms, tile widths and the
 // three character sizes (Settings › Appearance › Agent characters › Character
 // size, posted through the setting's own change notification). At every point:
-// (a) the Managed pill's text and the under-bar's height never exceed their size
-//     at 100% zoom, and the pill text at 100% is no larger than the title bar's
-//     secondary text at 100%;
+// (a) zoomed-out screen text stays at its natural chrome role size (or yields
+//     to real width pressure), never exceeding its 100% screen size;
 // (b) every pill is whole: shown, inside the under-bar and the tile, text unclipped;
 // (c) every composer control (prompt, harness, model, effort, mic, Send) lies
 //     fully inside the tile.
@@ -190,16 +189,39 @@ enum AgentTileFitChecks {
                         let bar = view.qaTitleBarFrame
                         var row: [String: Any] = ["page": percent, "size": size.name, "zoom": zoom, "width": width,
                                                   "titleBar": NSStringFromRect(bar), "titleFont": view.qaTitleFontWorldSize]
-                        // (a) the cap.
+                        // Screen-space readability and ceiling, measured from the real label.
                         if let s = sample(view, label: label) {
+                            let screen = CGFloat(zoom)
                             row["pillText"] = s.pillText; row["rowHeight"] = s.rowHeight; row["underBarScale"] = s.scale
-                            expect(s.pillText <= natural.pillText + 0.01,
-                                   "\(label): Managed text \(s.pillText) pt exceeds its natural size \(natural.pillText) pt")
-                            expect(s.rowHeight <= natural.rowHeight + 0.5,
-                                   "\(label): under-bar height \(s.rowHeight) exceeds its natural height \(natural.rowHeight)")
+                            row["screenPillText"] = s.pillText * screen
+                            row["screenRowHeight"] = s.rowHeight * screen
+                            if zoom <= 1 {
+                                expect(s.pillText * screen <= natural.pillText + 0.01,
+                                       "\(label): screen Managed text exceeds natural chrome role size")
+                                expect(s.rowHeight * screen <= natural.rowHeight + 0.5,
+                                       "\(label): screen row exceeds natural chrome row")
+                                // The role's unscaled label font is the readability floor;
+                                // the 100% chrome adds only its existing 28/24 scale.
+                                if width >= 320 {
+                                    let role = min(natural.pillText, defaultNatural.pillText) / (TileNSView.minScreenGrabPx / TileNSView.titleBarHeight)
+                                    expect(s.pillText * screen >= role - 0.01,
+                                           "\(label): screen Managed text \(s.pillText * screen) below role font \(role)")
+                                }
+                            } else {
+                                expect(s.pillText <= natural.pillText + 0.01,
+                                       "\(label): zoomed-in world font changed")
+                            }
                         }
                         // (b) pills whole.
                         let header = view.qaPageZoomHeaderView
+                        if header.qaBranch != nil, let scale = view.qaUnderBarScale, zoom <= 1 {
+                            let screenFont = header.qaBranchTextPointSize * scale * CGFloat(zoom)
+                            let floor = min(NSFont.token(.caption).pointSize,
+                                            NSFont.token(.caption, zoom: AgentPageZoom(percent: percent)).pointSize)
+                            expect(screenFont >= floor - 0.05,
+                                   "\(label): branch screen font \(screenFont) below caption role \(floor)")
+                            row["screenBranchText"] = screenFont
+                        }
                         if let under = view.qaUnderBarFrame {
                             var pills: [(String, NSRect?, NSView)] = [("managed", header.qaManagedFrame, header)]
                             if width == crowdedWidth { pills.append(("branch", header.qaBranch == nil ? nil : header.qaBranchFrame, header)) }
@@ -208,6 +230,10 @@ enum AgentTileFitChecks {
                                     expect(name == "managed" && width == crowdedWidth, "\(label): the \(name) pill is not shown"); continue
                                 }
                                 row[name] = NSStringFromRect(rect)
+                                if let body = view.contentView {
+                                    expect(rect.maxY <= body.frame.minY + 0.5,
+                                           "\(label): \(name) covers body beginning at \(body.frame.minY)")
+                                }
                                 expect(under.insetBy(dx: -0.5, dy: -0.5).contains(rect), "\(label): \(name) pill \(rect) is outside the under-bar \(under)")
                                 expect(rect.minX >= 0 && rect.maxX <= view.bounds.width - 1, "\(label): \(name) pill \(rect) runs past the tile")
                                 expect(!rect.intersects(bar), "\(label): \(name) pill \(rect) clips the title bar \(bar)")

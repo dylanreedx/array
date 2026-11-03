@@ -8,10 +8,8 @@ import ContinuumRevivedCore
 /// on screen) and draws at `chromeScale`. The row under it — the live
 /// collaboration indicator, the agent's branch and managed pills — sits BELOW
 /// the bar at every zoom (never under it, where the bar clipped it) and scales
-/// with it up to the chrome's 100% scale (`underBarMaximumScale`): at 100% and
-/// zoomed in its height keeps a fixed ratio to the bar's; zoomed out it never
-/// grows past its 100% world height, so the bar's growth no longer turns it into
-/// a tall band with one huge pill (0.7.40).
+/// with it up to the chrome's natural SCREEN size. The row reserves its growth
+/// in the body inset, keeping its visible controls clear of the transcript.
 /// Reads laid-out frames in the tile's world space, and writes stills of the
 /// tile's top in light and dark at each zoom.
 @MainActor
@@ -151,6 +149,10 @@ enum TileUnderBarChecks {
                     ]
                     var pills: [(String, NSRect)] = []
                     for (name, local, owner) in locals {
+                        if name == "managed", local == nil {
+                            try expect(!header.qaManagedCanFit, "Managed yielded despite room for the full row")
+                            continue
+                        }
                         guard let local, let rect = view.qaUnderBarRect(local, in: owner) else {
                             throw Failure(description: "under-bar: agent-full zoom \(zoom): the \(name) pill is not shown (header \(header.frame) whole \(header.minimumWholeWidth), row \(String(describing: under)))")
                         }
@@ -198,20 +200,16 @@ enum TileUnderBarChecks {
             try expect(high / low < tolerance, "\(name): height / title-bar height varies between 1.0 and 1.6 \(values) — it does not scale with the bar")
             try expect(zoomedOut.allSatisfy { $0 <= high * tolerance }, "\(name): zoomed out the row outgrew the bar's ratio \(values)")
         }
-        for (name, values) in world where values.count == zooms.count {
-            // Never past the 100% world height: the cap.
-            let tolerance = name.hasSuffix(":managed") ? 1.0 : 0.5
-            try expect(values.allSatisfy { $0 <= values[2] + tolerance },
-                       "\(name): world height \(values) exceeds its 100% height \(values[2]) — the row has no ceiling")
-        }
         for (name, values) in screen where values.count == zooms.count {
-            // Zoomed out it shrinks with the body it describes, never faster
-            // than the camera (scale >= 1), and never larger on screen than at 100%.
-            try expect(values[0] <= values[2] + 0.5, "\(name): on screen at 0.35 \(values[0]) is larger than at 1.0 \(values[2])")
+            try expect(values[0] <= values[2] + 0.5,
+                       "\(name): zoomed-out screen height exceeds natural size")
         }
-        // The body never reflows with the camera.
+        // Only tiles without an under-bar keep a camera-independent body origin.
+        // A readable under-bar must reserve its growth rather than cover content.
         for (name, tops) in contentTops {
-            try expect(tops.count == 1, "\(name): content top moves with zoom \(tops.sorted())")
+            if name == "terminal-plain" {
+                try expect(tops.count == 1, "\(name): plain content top moves with zoom")
+            }
         }
         try expect(views[1].view.contentView?.frame.minY == TileNSView.titleBarHeight,
                    "an unshared terminal's body must start right under the title bar")

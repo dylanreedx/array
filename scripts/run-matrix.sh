@@ -911,6 +911,7 @@ fi
 if [[ "$AGENT_TILE_MENU_ONLY" -eq 1 ]]; then
   run_leg scripts/check-color-hygiene.sh
   run swift build --product Array
+  run_app_check .build/debug/Array --agent-tile-fit-check
   run_app_check .build/debug/Array --tile-chrome-scale-check
   run_app_check .build/debug/Array --agent-native-menu-check
   run_app_check .build/debug/Array --managed-agent-page-zoom-check
