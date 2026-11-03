@@ -33,6 +33,7 @@ extension Collaboration {
         /// are presentation, not a grant: the host revalidates every command.
         /// Teardown (kill) is deliberately absent; interrupt keeps the session.
         public struct Capabilities: Codable, Equatable, Sendable {
+            public var identity: Identity? = nil
             public let locallyManaged: Bool
             public let canSend: Bool
             public let canQueue: Bool
@@ -98,6 +99,12 @@ extension Collaboration {
                 self.id = id; self.turn = turn; self.kind = kind; self.text = text; self.status = status
                 self.truncated = truncated; self.sequence = sequence
             }
+        }
+
+        public struct Identity: Codable, Equatable, Sendable {
+            public var color: String?
+            public var character: String?
+            public init(color: String?, character: String?) { self.color = color; self.character = character }
         }
 
         /// Where an event stands in a projection: the source of truth for the

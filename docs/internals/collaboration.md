@@ -538,8 +538,9 @@ tile, and Open is the only verb offered. The row's clocks are the guest's, not
 the host's. The session reports connection, phase and roster after every read
 (`noteSharedAgentSidebar`), and the sidebar pushes only on change. Only the
 sidebar takes these rows (`sidebarInboxRows`); the palette, companion and
-lifecycle verbs never see them. The lead's own identity colour and character
-are not on the wire yet. Witness: `--shared-agent-sidebar-check`.
+lifecycle verbs never see them. The lead's identity colour and character travel
+as optional presentation facts in capabilities; helpers carry their character
+name alongside their colour. Older peers can omit these fields. Witness: `--shared-agent-sidebar-check`.
 
 Every frame carries host, object, a host generation persisted per object and a
 sequence. The host, the service and each viewer apply the same reducer

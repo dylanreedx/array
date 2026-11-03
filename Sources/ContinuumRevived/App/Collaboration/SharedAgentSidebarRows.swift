@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import ContinuumRevivedCore
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCollaborationProtocol
 
@@ -32,7 +33,8 @@ enum SharedAgentSidebarRows {
     struct Facts: Equatable {
         var connection: Connection = .connecting
         var phase: Projection.Phase?
-        var helpers: [Projection.Helper] = []
+        var helpers: [SharedAgentTranscriptWire.Helper] = []
+        var identity: Projection.Identity? = nil
     }
 
     /// This Mac's clocks for one tile, advanced by `Tracker.note`.
@@ -85,7 +87,7 @@ enum SharedAgentSidebarRows {
         }
     }
 
-    static func state(_ helper: Projection.HelperState) -> InboxState {
+    static func state(_ helper: SharedAgentTranscriptWire.HelperState) -> InboxState {
         InboxState(rawValue: helper.rawValue) ?? .ready
     }
 
@@ -126,8 +128,8 @@ enum SharedAgentSidebarRows {
             elapsed: started.map { max(0, now.timeIntervalSince($0)) }, elapsedStartedAt: started,
             lastActiveAt: clocks.lastActiveAt ?? clocks.seenAt, createdAt: clocks.seenAt,
             isUnconfirmed: !confirmed && !stopped, settlementBlocked: true,
-            identityColor: lead.identityColor, whereMarker: marker(lead),
-            characterName: lead.characterName)
+            identityColor: facts.identity?.color ?? lead.identityColor, whereMarker: marker(lead),
+            characterName: facts.identity?.character ?? lead.characterName)
         leadRow.sharedAgent = shared
         guard !stopped else { return [leadRow] }
         let present = Set(facts.helpers.map(\.id))
@@ -147,7 +149,7 @@ enum SharedAgentSidebarRows {
                 isUnconfirmed: !confirmed, settlementBlocked: true,
                 harness: harness(helper.harness), identityColor: helper.identityColor,
                 // Its tile, if it has one, is on the host: here it lives in its lead's card.
-                hasTile: false)
+                hasTile: false, characterName: helper.character?.pick ?? helper.character?.resolvedName)
             row.sharedAgent = shared
             return row
         }

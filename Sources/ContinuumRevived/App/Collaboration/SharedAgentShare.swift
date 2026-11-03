@@ -80,7 +80,7 @@ final class SharedAgentTileSession {
         case .stopped: connection = .stopped
         case .connecting, .placeholder: connection = .connecting
         }
-        return .init(connection: connection, phase: live.replica.state?.phase, helpers: live.helpers.helpers)
+        return .init(connection: connection, phase: live.replica.state?.phase, helpers: live.helpers.helpers, identity: live.replica.state?.capabilities.identity)
     }
 
     init(view: SharedAgentTileNSView, reference: SharedAgentTileReference, controller: SharedAreaController,

@@ -63,10 +63,11 @@ enum SharedAgentSidebarChecks {
                                     lastActivityAt: start)
             value.parentAgentID = parent
             value.identityColor = color
+            value.characterName = "fox"
             try hostStore.upsert(value)
             return id
         }
-        let lead = try hostRecord(leadTitle, parent: nil, at: -600)
+        let lead = try hostRecord(leadTitle, parent: nil, color: "teal", at: -600)
         let scout = try hostRecord("Scout the wallet path", parent: lead, color: "teal", at: -500)
         let reviewer = try hostRecord("Review the receipt email", parent: lead, at: -400)
         let hostSupervisor = AgentSupervisor(store: hostStore, makeRunner: { _ in ScriptedAgentRunner(script: []) },
@@ -177,6 +178,7 @@ enum SharedAgentSidebarChecks {
         // MARK: The lead's row.
 
         guard let leadRow = drawnRow(sharedTile) else { throw Failure(description: "no shared lead row") }
+        try expect(leadRow.identityColor == "teal" && leadRow.characterName == "fox", "lead identity crosses the projection into the sidebar")
         try expect(leadRow.title == leadTitle && leadRow.parentId == nil && leadRow.workspaceId == world.workspaceId
             && leadRow.projectId == projectId,
             "the shared tile is a top-level row titled as the tile, in its project and workspace")

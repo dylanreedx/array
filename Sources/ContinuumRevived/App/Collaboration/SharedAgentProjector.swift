@@ -82,7 +82,9 @@ final class SharedAgentProjector {
         // delivery, so every later event is in the tail and none is in both.
         let attachment = supervisor.transcriptAttachment(for: agent, reboundTo: AgentSupervisor.threadId(for: agent))
         let rows = history == .assistantOutput ? Self.assistantRows(attachment.snapshot, salt: salt) : []
-        let (phase, capabilities) = Self.read(supervisor, agent)
+        let (phase, rawCapabilities) = Self.read(supervisor, agent)
+        var capabilities = rawCapabilities
+        capabilities.identity = Self.identity(supervisor, agent)
         log = Projection.Log(snapshot: .init(host: host, object: object, generation: generation, history: history,
                                              phase: phase, capabilities: capabilities, rows: rows,
                                              lastPrompt: Self.lastPrompt(supervisor, agent, owner: owner)))
@@ -227,8 +229,14 @@ final class SharedAgentProjector {
         refreshState()
     }
 
+    static func identity(_ supervisor: AgentSupervisor, _ agent: AgentID) -> Projection.Identity {
+        .init(color: supervisor.records[agent]?.identityColor, character: supervisor.records[agent]?.characterName)
+    }
+
     private func refreshState() {
-        let (phase, capabilities) = Self.read(supervisor, agent)
+        let (phase, rawCapabilities) = Self.read(supervisor, agent)
+        var capabilities = rawCapabilities
+        capabilities.identity = Self.identity(supervisor, agent)
         if phase != log.head.phase { emit(.phase(phase)) }
         if capabilities != log.head.capabilities { emit(.capabilities(capabilities)) }
         if let prompt = Self.lastPrompt(supervisor, agent, owner: owner), prompt != log.head.lastPrompt { emit(.prompted(prompt)) }
