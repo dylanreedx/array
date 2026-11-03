@@ -70,14 +70,8 @@ Sources/ContinuumRevived/Canvas/BrowserSnapshotTileNSView.swift:1:body.layer?.ba
 # Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.10
 Sources/ContinuumRevived/Canvas/BrowserSnapshotTileNSView.swift:1:caption.textColor = .secondaryLabelColor
 
-# hardcoded dark-only fill literal · owner: P1.10
-Sources/ContinuumRevived/Canvas/BrowserTileNSView.swift:1:body.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1.0).cgColor
-
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.10
-Sources/ContinuumRevived/Canvas/BrowserTileNSView.swift:1:faviconLabel.textColor = .secondaryLabelColor
-
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.10
-Sources/ContinuumRevived/Canvas/BrowserTileNSView.swift:1:findResultLabel.textColor = .secondaryLabelColor
+# hardcoded dark-only fill literal, moved here from BrowserTileNSView so the owner's and a guest's browser chrome share it · owner: P1.10
+Sources/ContinuumRevived/Canvas/BrowserTabStripView.swift:1:static let background = NSColor(white: 0.10, alpha: 1.0)
 
 # hardcoded dark-only fill literal · owner: P1.10
 Sources/ContinuumRevived/Canvas/ConductorQueueTileNSView.swift:1:body.layer?.backgroundColor = NSColor(red: 0.10, green: 0.14, blue: 0.18, alpha: 1).cgColor
