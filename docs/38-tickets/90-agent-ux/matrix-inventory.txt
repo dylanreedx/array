@@ -954,3 +954,8 @@ count ContinuumRevivedRelayIntegrationChecks 4
 count ContinuumRevivedRelayProtocolChecks 0
 count ContinuumRevivedSyncChecks 12
 count ContinuumRevivedSyncIntegrationChecks 1
+check --auto-layout-fanout-app-check
+check --auto-layout-fanout-check
+leg run_app_check .build/debug/Array --auto-layout-fanout-app-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --auto-layout-fanout-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --jelly-trajectory-probe
