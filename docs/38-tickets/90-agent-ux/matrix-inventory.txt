@@ -268,6 +268,7 @@ check --settings-schema-check
 check --settings-search-check
 check --settle-closes-tile-check
 check --share-agent-relay-check
+check --share-under-load-check
 check --shared-agent-sidebar-check
 check --shared-agent-helpers-check
 check --shared-agent-chrome-check
@@ -680,6 +681,7 @@ leg run_app_check .build/debug/Array --settings-panel-check
 leg run_app_check .build/debug/Array --settings-search-check
 leg run_app_check .build/debug/Array --settle-closes-tile-check
 leg run_app_check .build/debug/Array --share-agent-relay-check
+leg run_app_check .build/debug/Array --share-under-load-check
 leg run_app_check .build/debug/Array --shared-agent-sidebar-check
 leg run_app_check .build/debug/Array --shared-agent-helpers-check
 leg run_app_check .build/debug/Array --shared-agent-migration-check

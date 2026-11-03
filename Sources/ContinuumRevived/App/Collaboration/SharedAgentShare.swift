@@ -341,6 +341,8 @@ extension AppDelegate {
               let entries = hostedAgentShares?.entries(account: account) else { return }
         var changed = false
         for entry in entries {
+            // Yield between areas when Share opens, and ignore a host revoked during the read.
+            guard !shareEntry.isPresented else { break }
             guard let rows = try? await shareLinks.listAccess(area: entry.area),
                   hostedAgentShares?.entries.contains(where: { $0.area == entry.area }) == true else { continue }
             var seen = Set<UUID>()

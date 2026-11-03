@@ -90,16 +90,43 @@ final class SharedAreaAgentProjectionHost {
         for object in Array(helperTranscripts.keys) { stopHelpers(object) }
     }
 
-    /// One publisher per helper in `roster`, under the shared agent's object.
+    /// The relay holds one shared agent's streams, main and helpers together,
+    /// in `maxBytesPerTile` and evicts the oldest past it. An evicted stream's
+    /// publisher checkpoints again, which evicts the next: more streams than fit
+    /// never settle, and resend checkpoints for as long as the agent is shared
+    /// (0.7.40: a lead with 32 helpers held a 1-vCPU relay near saturation). So
+    /// only as many helpers stream as fit when every stream is at its largest:
+    /// a full checkpoint plus the frames it may add before its next one, with
+    /// the main stream also carrying its images. Helpers' images are not
+    /// reserved; past the bound, publish backoff (`retryDelay`) keeps it slow.
+    static let maxHelperStreams: Int = {
+        typealias Lane = Collaboration.AgentTranscript
+        let largestStream = Lane.maxCheckpointBytes + Lane.checkpointAfterBytes + Lane.maxFrameBytes + 64 * 1024
+        let main = largestStream + SharedAgentTranscriptImages.maxTotalBytes
+        return max(0, min(Lane.maxStreamsPerTile - 1, (Lane.maxBytesPerTile - main) / largestStream))
+    }()
+
+    /// The helpers that stream: working or waiting on someone first, then the
+    /// most recently spawned. The roster still names every helper.
+    static func streamedHelpers(_ roster: [SharedAgentTranscriptWire.Helper]) -> [UUID] {
+        let active: Set<SharedAgentTranscriptWire.HelperState> = [.working, .approval, .input]
+        return roster.sorted {
+            let (a, b) = (active.contains($0.state), active.contains($1.state))
+            return a != b ? a : $0.spawnedAt > $1.spawnedAt
+        }.prefix(maxHelperStreams).map(\.id)
+    }
+
+    /// One publisher per streamed helper in `roster`, under the shared agent's object.
     func syncHelpers(_ object: SharedArea.ID<SharedArea.Object>, host: SharedArea.ID<SharedArea.Host>,
                      _ roster: [SharedAgentTranscriptWire.Helper]) {
         guard let makeTranscriptSink else { return }
-        let wanted = Set(roster.map(\.id))
+        let streamed = Self.streamedHelpers(roster)
+        let wanted = Set(streamed)
         var current = helperTranscripts[object] ?? [:]
         for (id, publisher) in current where !wanted.contains(id) || publisher.superseded {
             publisher.stop(); current[id] = nil
         }
-        for id in roster.map(\.id) where current[id] == nil {
+        for id in streamed where current[id] == nil {
             do {
                 let stream = Collaboration.AgentTranscript.childStream(id)
                 let generation = try SharedAgentProjectionGenerations.next(

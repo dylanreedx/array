@@ -122,7 +122,9 @@ enum ShareEntryChecks {
         }
     }
 
-    static func mountScene(_ label: String) throws -> Scene {
+    /// `transcripts`: the supervisor keeps each agent's transcript document,
+    /// as production does, for checks that publish one.
+    static func mountScene(_ label: String, transcripts: Bool = false) throws -> Scene {
         acceptFirstMouseEverywhere()
         let agentA = TileInsertSlideChecks.tileA, agentB = TileInsertSlideChecks.tileB
         let noteC = TileInsertSlideChecks.tileC, agentD = TileInsertSlideChecks.tileD
@@ -157,7 +159,8 @@ enum ShareEntryChecks {
         fixture.configureMount = { delegate, _ in
             delegate.agentSupervisor = AgentSupervisor(
                 store: AgentStore(applicationSupportDirectory: appSupport),
-                makeRunner: { _ in constructions += 1; return ScriptedAgentRunner(script: [], holdUntilStopped: true) })
+                makeRunner: { _ in constructions += 1; return ScriptedAgentRunner(script: [], holdUntilStopped: true) },
+                transcriptStore: transcripts ? AgentTranscriptStore(root: appSupport.appendingPathComponent("transcripts", isDirectory: true)) : nil)
             for (id, name) in [(agentA, "Map the checkout state machine"), (agentB, "Audit the receipt email path"),
                                (agentD, "Fix the saved-card toggle")] {
                 agents.append(delegate.agentSupervisor.spawn(

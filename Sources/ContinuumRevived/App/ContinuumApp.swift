@@ -1989,6 +1989,29 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // Share with a slow relay and a big agent (`ShareUnderLoadChecks`):
+        // uploads back off, a big agent's streams settle, a share waits out the
+        // account lane, Copy is local, a refused link releases the lane.
+        if CommandLine.arguments.contains("--share-under-load-check") {
+            setbuf(stdout, nil)
+            setbuf(stderr, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(240))
+                fputs("FAIL: share under load check exceeded its 240-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do {
+                    try await ShareUnderLoadChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--collaboration-native-check") {
             setbuf(stdout, nil)
             setbuf(stderr, nil)

@@ -123,6 +123,17 @@ final class SharedAgentTranscriptPublisher {
         }
     }
 
+    /// A refused or lost publish is retried as a whole checkpoint. Retrying
+    /// that every tick is what kept a 0.7.40 relay saturated: each refusal
+    /// (rate limit, eviction, a busy relay timing out) cost the next tick a
+    /// full checkpoint. So failures in a row wait 1, 2, 4 ... up to 30 s.
+    static let maxRetryDelay: Duration = .seconds(30)
+    private(set) var consecutiveFailures = 0
+    var retryDelay: Duration {
+        guard consecutiveFailures > 0 else { return Self.interval }
+        return min(Self.maxRetryDelay, .seconds(1 << min(consecutiveFailures - 1, 5)))
+    }
+
     /// Ticks until stopped. A tick whose document version did not move costs a compare.
     func start() {
         guard loop == nil else { return }
@@ -130,7 +141,7 @@ final class SharedAgentTranscriptPublisher {
             while !Task.isCancelled {
                 guard let self, !self.superseded, !self.laneUnavailable else { return }
                 await self.tick()
-                try? await Task.sleep(for: Self.interval)
+                try? await Task.sleep(for: self.retryDelay)
             }
         }
     }
@@ -213,7 +224,7 @@ final class SharedAgentTranscriptPublisher {
                 lastVersion = current.version
             }
             lastDetailRevision = revision; lastDetailAudit = now
-            lastError = nil
+            lastError = nil; consecutiveFailures = 0
         } catch SharedAgentTranscriptRefusal.superseded {
             lastError = SharedAgentTranscriptRefusal.superseded; superseded = true; stop()
         } catch SharedAgentTranscriptRefusal.unavailable {
@@ -221,7 +232,7 @@ final class SharedAgentTranscriptPublisher {
         } catch {
             // Refused, or lost after the relay took it: either way only a
             // checkpoint can say for certain what the guest holds.
-            lastError = error; needsCheckpoint = true
+            lastError = error; needsCheckpoint = true; consecutiveFailures += 1
         }
     }
 

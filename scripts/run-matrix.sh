@@ -664,6 +664,7 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --shared-area-zone-check
   run_app_check .build/debug/Array --shared-agent-migration-check
   run_app_check .build/debug/Array --share-agent-relay-check
+  run_app_check .build/debug/Array --share-under-load-check
   run_app_check .build/debug/Array --shared-agent-render-check
   run_app_check .build/debug/Array --shared-agent-transcript-parity-check
   # The host's transcript publisher: main-thread budget per patch, and the same
@@ -1657,6 +1658,11 @@ run_app_check .build/debug/Array --shared-area-zone-check
 # header Share against a local continuum-relay, and the tile in light and dark.
 run_app_check .build/debug/Array --shared-agent-migration-check
 run_app_check .build/debug/Array --share-agent-relay-check
+# Share with a slow relay and a big agent: refused transcript uploads back off,
+# a lead with 32 helpers settles inside the relay's per-agent budget and its
+# guest reads the tail, a share waits out the account lane, Copy is local, and
+# a link refused with 413 says so and releases the lane.
+run_app_check .build/debug/Array --share-under-load-check
 run_app_check .build/debug/Array --shared-agent-render-check
 run_app_check .build/debug/Array --shared-agent-transcript-parity-check
 # The host's transcript publisher: under 4 ms of main-thread time per streaming

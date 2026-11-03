@@ -132,10 +132,15 @@ final class ShareLinkCoordinator {
 
     /// The account runs one request at a time and refuses a second with
     /// `.busy` before anything is sent. The open popover re-reads who has
-    /// access every 2 s, so a press could meet that read in flight; it waits
-    /// its turn instead of failing.
-    static func waitingOutBusy<T>(_ body: () async throws -> T) async throws -> T {
-        for _ in 0..<40 {
+    /// access every 2 s, and the shared-agent tabs every 15 s, so a press can
+    /// meet a read in flight; it waits its turn instead of failing. The turn is
+    /// as long as the relay is slow: one read is two round trips, and a 0.7.40
+    /// relay took up to 13 s per request, so the 4 s this used to wait failed a
+    /// share with "Another collaboration action is still running".
+    static let busyDeadline: Duration = .seconds(90)
+    static func waitingOutBusy<T>(deadline: Duration = busyDeadline, _ body: () async throws -> T) async throws -> T {
+        let clock = ContinuousClock(), end = clock.now + deadline
+        while clock.now < end {
             do { return try await body() }
             catch CollaborationAccountFailure.busy { try await Task.sleep(for: .milliseconds(100)) }
         }
