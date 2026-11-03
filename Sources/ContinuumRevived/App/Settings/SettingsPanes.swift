@@ -332,7 +332,7 @@ struct SettingsFieldRow: View {
             case .custom("agentAccounts", _):
                 SettingsAccountRows(model: model)
             case .custom("agentCharacters", _):
-                AgentCharacterSettingsRows(model: AgentCharacterSettingsModel(defaults: model.defaults))
+                AgentCharacterSettingsRows(model: AgentCharacterSettingsModel(defaults: model.defaults), settings: model)
                     .settingsAnchor(SettingsRegistry.anchor(for: field) ?? field.label, model: model)
             case .shortcuts:
                 EmptyView()

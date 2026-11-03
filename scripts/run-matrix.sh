@@ -2254,6 +2254,11 @@ run_app_check .build/debug/Array --duckherd-theme-check
 # file, a bad file shows its problems and imports nothing, discovery uses a fixture
 # home only, and the preview grid renders in both appearances (still under RM).
 run_app_check .build/debug/Array --character-settings-check
+# Plan 110 › found themes: "Found on this Mac" through the real Settings rows,
+# light and dark: each file's title, characters and plugin, Import / Imported /
+# Update by content hash, one row per byte-identical file, an invalid file's
+# reason in place of its at-rest preview; Import and Update pressed in the view.
+run_app_check .build/debug/Array --found-character-themes-check
 # Plan 110: agent-made sets in the themes folder reach the row and the tile header
 # live (new, edited, half-written, removed), and the validator binary's verdicts.
 run_app_check .build/debug/Array --character-themes-live-check

@@ -2769,6 +2769,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // Plan 110 › found themes: each theme file found on this Mac named, stated and pictured.
+        if CommandLine.arguments.contains("--found-character-themes-check") {
+            _ = NSApplication.shared
+            do {
+                print(try FoundCharacterThemesChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL found character themes: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         // Plan 110 › lead: one lead per pack, distinct helpers in delegation order.
         if CommandLine.arguments.contains("--lead-character-check") {
             _ = NSApplication.shared

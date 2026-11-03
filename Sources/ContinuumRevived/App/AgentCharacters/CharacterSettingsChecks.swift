@@ -57,10 +57,10 @@ enum CharacterSettingsChecks {
         defer { AgentCharacterSettingsModel.homeOverrideForChecks = nil }
 
         let model = AgentCharacterSettingsModel(defaults: defaults, importsDirectory: imports, home: home)
-        try expect(model.found.map(\.lastPathComponent).sorted() == [AgentCharacterImports.folderThemeName, "pond.theme.json"].sorted(),
+        try expect(model.found.map(\.url.lastPathComponent).sorted() == [AgentCharacterImports.folderThemeName, "pond.theme.json"].sorted(),
                    "discovery finds the pluginConfigs themes folder and the installed plugin's theme: \(model.found)")
         try expect(fm.contentsOfDirectory(atPath: imports.path).isEmpty, "discovery imports nothing by itself")
-        try expect(model.found.map(AgentCharacterSettingsModel.foundLabel).allSatisfy { !$0.lowercased().contains("duckherd") },
+        try expect(model.found.map(\.title).allSatisfy { !$0.lowercased().contains("duckherd") },
                    "the list never shows the format's third-party file name")
 
         // A folder import copies exactly the theme file.

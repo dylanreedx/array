@@ -1,4 +1,5 @@
 import ContinuumRevivedAgentUI
+import CryptoKit
 import Foundation
 
 // Plan: .plans/110-agent-characters/README.md
@@ -388,14 +389,41 @@ public enum AgentCharacterImports {
         return Array(out.prefix(maximumCandidates))
     }
 
+    /// The Claude Code plugin a found theme file came with: its manifest's name
+    /// and version, or, without a manifest, its `name@marketplace` key's name.
+    public struct PluginSource: Equatable, Sendable {
+        public let name: String
+        public let version: String?
+        public var label: String { version.map { "\(name) \($0)" } ?? name }
+    }
+
+    /// A theme file a plugin points at, and that plugin.
+    public struct FoundFile: Equatable, Sendable {
+        public let url: URL
+        public let source: PluginSource?
+    }
+
     /// Theme files Claude Code's plugins point at, found on this Mac WITHOUT
     /// reading any theme: the `themesDir` a plugin's settings name in
     /// `<home>/.claude/settings.json` (`pluginConfigs`), and the theme file at the
-    /// root of each installed plugin (`installed_plugins.json`). `home` is passed
-    /// in so a check can point it at a fixture, never at the real one.
-    public static func discover(home: URL) -> [URL] {
+    /// root of each installed plugin (`installed_plugins.json`), each with the
+    /// plugin it came with. `home` is passed in so a check can point it at a
+    /// fixture, never at the real one.
+    public static func discover(home: URL) -> [FoundFile] {
         let claude = home.appendingPathComponent(".claude", isDirectory: true)
-        var found: [URL] = []
+        var installs: [(key: String, path: URL, source: PluginSource)] = []
+        if let data = try? Data(contentsOf: claude.appendingPathComponent("plugins/installed_plugins.json")),
+           let installed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let plugins = installed["plugins"] as? [String: Any] {
+            for key in plugins.keys.sorted() {
+                for entry in (plugins[key] as? [[String: Any]]) ?? [] {
+                    guard let path = entry["installPath"] as? String, !path.isEmpty else { continue }
+                    let root = URL(fileURLWithPath: path, isDirectory: true)
+                    installs.append((key, root, pluginSource(key: key, root: root, version: entry["version"] as? String)))
+                }
+            }
+        }
+        var found: [FoundFile] = []
         if let data = try? Data(contentsOf: claude.appendingPathComponent("settings.json")),
            let settings = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let configs = settings["pluginConfigs"] as? [String: Any] {
@@ -405,22 +433,151 @@ public enum AgentCharacterImports {
                 let raw = (config["themesDir"] as? String) ?? ((config["options"] as? [String: Any])?["themesDir"] as? String)
                 guard let raw, !raw.isEmpty else { continue }
                 let path = raw.hasPrefix("~/") ? home.appendingPathComponent(String(raw.dropFirst(2))).path : raw
+                let source = installs.first { $0.key == key }?.source ?? pluginSource(key: key, root: nil, version: nil)
                 found += candidates(inFolder: URL(fileURLWithPath: path, isDirectory: true))
+                    .map { FoundFile(url: $0, source: source) }
             }
         }
-        if let data = try? Data(contentsOf: claude.appendingPathComponent("plugins/installed_plugins.json")),
-           let installed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let plugins = installed["plugins"] as? [String: Any] {
-            for key in plugins.keys.sorted() {
-                for entry in (plugins[key] as? [[String: Any]]) ?? [] {
-                    guard let path = entry["installPath"] as? String, !path.isEmpty else { continue }
-                    let file = URL(fileURLWithPath: path, isDirectory: true).appendingPathComponent(folderThemeName)
-                    if FileManager.default.fileExists(atPath: file.path) { found.append(file) }
-                }
-            }
+        for install in installs {
+            let file = install.path.appendingPathComponent(folderThemeName)
+            if FileManager.default.fileExists(atPath: file.path) { found.append(FoundFile(url: file, source: install.source)) }
         }
         var seen = Set<String>()
-        return found.filter { seen.insert($0.standardizedFileURL.path).inserted }
+        return found.filter { seen.insert($0.url.standardizedFileURL.path).inserted }
+    }
+
+    /// `<root>/.claude-plugin/plugin.json`'s name and version, else the key's.
+    static func pluginSource(key: String, root: URL?, version: String?) -> PluginSource {
+        let fallback = String(key.split(separator: "@").first ?? Substring(key))
+        guard let root,
+              let data = try? Data(contentsOf: root.appendingPathComponent(".claude-plugin/plugin.json")),
+              let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return PluginSource(name: fallback, version: version)
+        }
+        let name = (manifest["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? fallback
+        return PluginSource(name: name, version: (manifest["version"] as? String) ?? version)
+    }
+
+    /// One row of "Found on this Mac": a theme's bytes, wherever they sit.
+    public struct FoundTheme: Equatable, Sendable {
+        public enum State: Equatable, Sendable {
+            /// Not imported: Import.
+            case new
+            /// Byte-identical to an imported set: nothing to do.
+            case imported
+            /// Its id is imported with other content: Update replaces that copy.
+            case update
+            /// Not a valid set: the validator's first problem.
+            case invalid(String)
+        }
+
+        /// The first path holding these bytes, and every path that does.
+        public let url: URL
+        public let paths: [URL]
+        public let source: PluginSource?
+        /// SHA-256 of the file's bytes, hex.
+        public let hash: String
+        /// The file's own title, else its id, else its file name.
+        public let title: String
+        public let theme: AgentCharacterTheme?
+        public let state: State
+
+        /// "Lead + 16 helpers · from pond-pals 1.2.0".
+        public var detail: String {
+            var parts: [String] = []
+            if let theme {
+                let helpers = theme.characters.count
+                parts.append(theme.hasLead
+                    ? "Lead + \(helpers) helper\(helpers == 1 ? "" : "s")"
+                    : "\(helpers) character\(helpers == 1 ? "" : "s")")
+            }
+            if let source { parts.append("from \(source.label)") }
+            return parts.joined(separator: " · ")
+        }
+    }
+
+    /// Read, validate and hash each found file, one row per distinct content (the
+    /// first path wins), each stated against what `importsDirectory` holds:
+    /// byte-identical there is `imported`, the same id with other bytes is
+    /// `update`. Theme files are read here, never written.
+    public static func describe(_ found: [FoundFile], importsDirectory: URL) -> [FoundTheme] {
+        var importedHashes = Set<String>()
+        var importedIDs = Set<String>()
+        for file in scan(importsDirectory) {
+            guard let data = try? Data(contentsOf: file.url) else { continue }
+            importedHashes.insert(sha256(data))
+            if case let .success(theme) = file.result { importedIDs.insert(theme.id) }
+        }
+        var rows: [FoundTheme] = []
+        var index: [String: Int] = [:]
+        for file in found {
+            let size = (try? FileManager.default.attributesOfItem(atPath: file.url.path)[.size] as? NSNumber)?.intValue ?? 0
+            let data = size > AgentCharacterThemeParser.maximumFileBytes ? nil : try? Data(contentsOf: file.url)
+            let hash = data.map(sha256) ?? "unreadable:" + file.url.path
+            if let at = index[hash] {
+                let row = rows[at]
+                rows[at] = FoundTheme(url: row.url, paths: row.paths + [file.url], source: row.source, hash: hash,
+                                      title: row.title, theme: row.theme, state: row.state)
+                continue
+            }
+            let result: Result<AgentCharacterTheme, AgentCharacterThemeProblems> = data.map { validated($0, hash: hash) }
+                ?? .failure(.init(messages: [size > AgentCharacterThemeParser.maximumFileBytes
+                    ? AgentCharacterValidator.oversizedProblem : "the file could not be read"]))
+            let row: FoundTheme
+            switch result {
+            case let .success(theme):
+                let state: FoundTheme.State = importedHashes.contains(hash) ? .imported
+                    : importedIDs.contains(theme.id) ? .update : .new
+                row = FoundTheme(url: file.url, paths: [file.url], source: file.source, hash: hash,
+                                 title: theme.title, theme: theme, state: state)
+            case let .failure(problems):
+                row = FoundTheme(url: file.url, paths: [file.url], source: file.source, hash: hash,
+                                 title: rawTitle(data, file: file), theme: nil,
+                                 state: .invalid(problems.messages.first ?? "not a character theme"))
+            }
+            index[hash] = rows.count
+            rows.append(row)
+        }
+        return rows
+    }
+
+    /// An invalid file's name for itself: its "title", else its "id", else its
+    /// file name. The format's fixed per-folder name is another product's, so a
+    /// file with that name is called by its plugin instead.
+    static func rawTitle(_ data: Data?, file: FoundFile) -> String {
+        let raw = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        for key in ["title", "id"] {
+            if let text = (raw?[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                return text
+            }
+        }
+        if file.url.lastPathComponent == folderThemeName {
+            return file.source?.name ?? file.url.deletingLastPathComponent().lastPathComponent
+        }
+        return file.url.lastPathComponent
+    }
+
+    static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Validation by content: Settings rebuilds its model on every settings
+    /// change, and a shipped set is a few MB of frames, so one parse per distinct
+    /// file content is kept.
+    private static let parseLock = NSLock()
+    nonisolated(unsafe) private static var parsed: [String: Result<AgentCharacterTheme, AgentCharacterThemeProblems>] = [:]
+
+    static func validated(_ data: Data, hash: String) -> Result<AgentCharacterTheme, AgentCharacterThemeProblems> {
+        parseLock.lock()
+        let cached = parsed[hash]
+        parseLock.unlock()
+        if let cached { return cached }
+        let result = AgentCharacterValidator.validate(data: data)
+        parseLock.lock()
+        if parsed.count >= 32 { parsed.removeAll() }
+        parsed[hash] = result
+        parseLock.unlock()
+        return result
     }
 }
 

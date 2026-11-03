@@ -6,8 +6,9 @@ import SwiftUI
 // Plan: .plans/110-agent-characters/README.md, slice 6 (§4.4, §4.5)
 //
 // Settings › Appearance › Agent characters: which set, importing a set from a
-// theme file, the problems a bad file has, theme files found on this Mac, and a
-// preview grid of every character in every state.
+// theme file, the problems a bad file has, theme files found on this Mac (each
+// named, stated and pictured at rest), and a preview grid of every character of
+// the chosen set in every state.
 
 /// The section's state. Paths are injected so a check can point every one of
 /// them at a temp root; production uses app support and the person's home.
@@ -18,7 +19,8 @@ final class AgentCharacterSettingsModel {
     @ObservationIgnored let importsDirectory: URL
     @ObservationIgnored let home: URL
     private(set) var imported: [AgentCharacterTheme] = []
-    private(set) var found: [URL] = []
+    /// "Found on this Mac": one row per distinct theme file a plugin points at.
+    private(set) var found: [AgentCharacterImports.FoundTheme] = []
     /// The last import's problems, each saying where; empty after a clean import.
     private(set) var problems: [String] = []
     private(set) var problemFile: URL?
@@ -51,8 +53,9 @@ final class AgentCharacterSettingsModel {
             if case let .failure(problems) = file.result { return (file.url, problems.messages) }
             return nil
         }
-        // Lists file locations only; no theme is read until the person imports it.
-        found = AgentCharacterImports.discover(home: home)
+        // Reads each found file to name and state it; nothing is written until
+        // the person imports one.
+        found = AgentCharacterImports.describe(AgentCharacterImports.discover(home: home), importsDirectory: importsDirectory)
         if selectedID != AgentCharacterBundled.themeID, !imported.contains(where: { $0.id == selectedID }) {
             selectedID = AgentCharacterBundled.themeID
         }
@@ -133,13 +136,15 @@ final class AgentCharacterSettingsModel {
 
     static let importItemID = "array.agentCharacters.import"
 
-    /// What a found file is called in the list. A plugin's theme file has the
-    /// format's fixed name, which is another product's; the row names where it
-    /// came from instead, and the tooltip carries the path.
-    static func foundLabel(_ url: URL) -> String {
-        url.lastPathComponent == AgentCharacterImports.folderThemeName
-            ? "Theme from an installed Claude Code plugin"
-            : url.lastPathComponent
+    /// A found row's button: Import, Update, Imported (disabled), or none for an
+    /// invalid file, whose reason shows instead.
+    static func foundAction(_ state: AgentCharacterImports.FoundTheme.State) -> (title: String, enabled: Bool)? {
+        switch state {
+        case .new: return ("Import", true)
+        case .update: return ("Update", true)
+        case .imported: return ("Imported", false)
+        case .invalid: return nil
+        }
     }
 }
 
@@ -183,9 +188,70 @@ private struct PreviewGrid: NSViewRepresentable {
     }
 }
 
+/// One "Found on this Mac" row: the file's title, its characters and plugin,
+/// its state, and its lead and first helpers at rest (or why it is not a set).
+/// The tooltip lists every path holding these bytes.
+private struct FoundThemeRow: View {
+    let row: AgentCharacterImports.FoundTheme
+    let index: Int
+    let model: AgentCharacterSettingsModel
+    let settings: SettingsModel
+
+    var body: some View {
+        let id = "ArrayFoundTheme.\(index)"
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.title).font(.callout).lineLimit(1).truncationMode(.tail)
+                        .settingsRenderedText(id + ".title", row.title, model: settings)
+                    if !row.detail.isEmpty {
+                        Text(row.detail).font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            .settingsRenderedText(id + ".detail", row.detail, model: settings)
+                    }
+                }
+                Spacer()
+                if let action = AgentCharacterSettingsModel.foundAction(row.state) {
+                    Button(action.title) { model.importTheme(from: row.url) }
+                        .disabled(!action.enabled)
+                        .settingsRenderedText(id + ".action", action.title, model: settings)
+                }
+            }
+            if case let .invalid(reason) = row.state {
+                Label {
+                    Text(reason).font(.callout.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
+                .font(.callout)
+                .settingsRenderedText(id + ".problem", reason, model: settings)
+            } else if let theme = row.theme {
+                RestStrip(theme: theme, identifier: id + ".preview")
+            }
+        }
+        .help(row.paths.map { $0.path(percentEncoded: false) }.joined(separator: "\n"))
+    }
+}
+
+/// The strip in the form at exactly its own size.
+private struct RestStrip: NSViewRepresentable {
+    let theme: AgentCharacterTheme
+    let identifier: String
+
+    func makeNSView(context: Context) -> AgentCharacterRestStripView {
+        let view = AgentCharacterRestStripView(theme: theme)
+        view.setAccessibilityIdentifier(identifier)
+        return view
+    }
+    func updateNSView(_ nsView: AgentCharacterRestStripView, context: Context) {}
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: AgentCharacterRestStripView, context: Context) -> CGSize? {
+        nsView.naturalSize
+    }
+}
+
 /// The custom rows of the section, below the switch and the Motion choice.
 struct AgentCharacterSettingsRows: View {
     @State var model: AgentCharacterSettingsModel
+    let settings: SettingsModel
 
     var body: some View {
         let _ = model.selectedID
@@ -248,21 +314,22 @@ struct AgentCharacterSettingsRows: View {
             }
         }
         if !model.found.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 12) {
                 Text("Found on this Mac").font(.callout.weight(.medium))
-                ForEach(model.found, id: \.self) { url in
-                    HStack {
-                        Text(AgentCharacterSettingsModel.foundLabel(url)).font(.callout).lineLimit(1).truncationMode(.middle)
-                            .help(url.path(percentEncoded: false))
-                        Spacer()
-                        Button("Import") { model.importTheme(from: url) }
-                    }
+                ForEach(Array(model.found.enumerated()), id: \.element.hash) { index, row in
+                    FoundThemeRow(row: row, index: index, model: model, settings: settings)
                 }
             }
         }
         if let theme = model.previewTheme {
-            PreviewGrid(theme: theme)
-                .id(theme.id)
+            // The grid belongs to the chosen set (what agents draw), and says so;
+            // a found file shows its own characters in its row.
+            VStack(alignment: .leading, spacing: 6) {
+                Text("\(theme.title) in every state").font(.callout.weight(.medium))
+                    .settingsRenderedText("ArrayAgentCharacterGridTitle", "\(theme.title) in every state", model: settings)
+                PreviewGrid(theme: theme)
+                    .id(theme.id)
+            }
         }
     }
 }
@@ -362,6 +429,77 @@ final class AgentCharacterPreviewGridView: NSView {
             guard let atlas = controller.atlas(theme: theme, character: row, appearance: appearance) else { continue }
             let plan = Self.columns[column].plan
             sprite.show(moving ? plan : .still(plan.still), sprite: atlas, phase: Double(row) / 8, now: now)
+        }
+    }
+}
+
+/// A found set's lead (when it has lead art) and first three helpers, held at
+/// rest, at the preview grid's size and bottom-aligned. Atlases are built for
+/// this theme directly: the controller caches by id, and a found file with an
+/// imported set's id but other art must draw its own.
+final class AgentCharacterRestStripView: NSView {
+    static let helpers = 3
+    private(set) var sprites: [CharacterSpriteLayer] = []
+    /// Its size whatever frame the form gives it.
+    let naturalSize: NSSize
+    /// (theme, character) per sprite, left to right.
+    private var cells: [(theme: AgentCharacterTheme, character: Int, size: NSSize)] = []
+
+    init(theme: AgentCharacterTheme) {
+        let points = AgentCharacterPreviewGridView.pointsPerPixel
+        func size(_ set: AgentCharacterTheme) -> NSSize {
+            NSSize(width: CGFloat(set.frameWidth / set.scale) * points, height: CGFloat(set.frameHeight / set.scale) * points)
+        }
+        if let lead = theme.leadSet { cells.append((lead, 0, size(lead))) }
+        for character in 0..<min(Self.helpers, theme.characters.count) { cells.append((theme, character, size(theme))) }
+        let width = cells.map(\.size.width).reduce(0, +) + CGFloat(max(cells.count - 1, 0)) * AgentCharacterPreviewGridView.gap
+        naturalSize = NSSize(width: width, height: cells.map(\.size.height).max() ?? 0)
+        super.init(frame: NSRect(origin: .zero, size: naturalSize))
+        wantsLayer = true
+        for _ in cells {
+            let sprite = CharacterSpriteLayer()
+            sprite.hostIsFlipped = isFlipped
+            layer?.addSublayer(sprite)
+            sprites.append(sprite)
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var isFlipped: Bool { true }
+    override var intrinsicContentSize: NSSize { naturalSize }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        var x: CGFloat = 0
+        for (sprite, cell) in zip(sprites, cells) {
+            let rect = NSRect(x: x, y: bounds.height - cell.size.height, width: cell.size.width, height: cell.size.height)
+            if sprite.frame != rect { sprite.frame = rect }
+            x += cell.size.width + AgentCharacterPreviewGridView.gap
+        }
+        CATransaction.commit()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        apply()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        apply()
+    }
+
+    /// Every cell at rest, in this view's appearance.
+    func apply() {
+        let appearance = AgentCharacterController.appearance(of: self)
+        for (sprite, cell) in zip(sprites, cells) {
+            guard let atlas = AgentCharacterSpriteAtlas(theme: cell.theme, character: cell.character, appearance: appearance)
+            else { continue }
+            sprite.show(.still(.clip(.idle)), sprite: atlas, phase: 0)
         }
     }
 }
