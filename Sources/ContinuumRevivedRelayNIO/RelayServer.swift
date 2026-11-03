@@ -191,7 +191,10 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
         guard !admin, head.uri.hasPrefix("/collaboration/v1/") else { return RelayWire.maximumRequestBodyBytes }
         let parts = head.uri.split(separator: "/")
         let blob = head.method == .PUT && parts.count == 8 && parts[2] == "areas" && parts[4] == "artifacts" && parts[6] == "blobs"
-        return blob ? Collaboration.Artifact.Limits.blobBytes : 262_144
+        // A blob a little over its budget is read whole, so the store answers it
+        // with a 413 the client can read; cutting it mid-upload drops the
+        // connection under the client instead. Grossly oversized bodies still stop here.
+        return blob ? 2 * Collaboration.Artifact.Limits.blobBytes : 262_144
     }
 
     private func rejectOversizedBody(_ context: ChannelHandlerContext) {
