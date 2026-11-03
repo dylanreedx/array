@@ -234,6 +234,8 @@ final class MultiplayerDriver {
                 // Mode A: the guest has no Stop and no approval control.
                 let titles = Self.buttonTitles(in: view)
                 result["sharedControls"] = titles
+                // What a guest can actually press: enabled controls on screen.
+                result["sharedEnabledControls"] = Self.enabledControlTitles(in: view)
             }
             if let live = liveView {
                 result["offersComposer"] = live.offersComposer
@@ -343,6 +345,20 @@ final class MultiplayerDriver {
         result["sendError"] = body.lastSendError ?? ""
         result["reading"] = body.isReading
         return result
+    }
+
+    private static func enabledControlTitles(in view: NSView) -> [String] {
+        var titles: [String] = []
+        if let control = view as? NSControl, control.isEnabled, !control.isHiddenOrHasHiddenAncestor {
+            if let button = view as? ComposerActionButton {
+                if button.presentation.isEnabled { titles.append(button.presentation.title) }
+            } else {
+                if let button = view as? NSButton, !button.title.isEmpty { titles.append(button.title) }
+                if let label = control.accessibilityLabel(), !label.isEmpty { titles.append(label) }
+            }
+        }
+        for child in view.subviews { titles += enabledControlTitles(in: child) }
+        return titles
     }
 
     private static func buttonTitles(in view: NSView) -> [String] {

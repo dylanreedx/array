@@ -47,6 +47,15 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         return button
     }()
     func hideLocationActions() { actionButton.isHidden = true }
+    /// Why Compact cannot run from here (a teammate's view of a shared agent),
+    /// or nil when it can. Set, the button stays visible but disabled and says why.
+    var compactUnavailableReason: String? {
+        didSet {
+            compactContextButton.isEnabled = compactUnavailableReason == nil
+            compactContextButton.toolTip = compactUnavailableReason ?? "Compact the context window"
+            compactContextButton.setAccessibilityHelp(compactUnavailableReason)
+        }
+    }
 
     private let activityIcon = NSImageView()
     private let activityLabel = HonestWidthLabel(labelWithString: "")

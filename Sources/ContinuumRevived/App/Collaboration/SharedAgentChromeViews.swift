@@ -109,6 +109,8 @@ final class SharedAgentComposeStrip: NSView {
         wantsLayer = true
         let zoom = AgentPageZoom.default
         statusRow.hideLocationActions()
+        // Compaction runs on the owner's runner; nothing here can reach it.
+        statusRow.compactUnavailableReason = "Only its owner can compact it, on the owner's Mac."
         footer.controlsEnabled = false
         footerRow.setViews([footer, action], in: .leading)
         footerRow.orientation = .horizontal

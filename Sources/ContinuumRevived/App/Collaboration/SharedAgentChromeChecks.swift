@@ -210,6 +210,15 @@ enum SharedAgentChromeChecks {
         try expect(shownItems.count == named.count && shownItems.allSatisfy {
             !$0.isEnabled && (($0 as? ChoiceDetailMenuItem)?.detail?.isEmpty == false)
         }, "the guest's ⋯ menu offers the host's actions disabled, each with a reason")
+        // Compact: the host's control, which nothing on the guest can run.
+        let guestRow = guest.strip.statusRow
+        var compactRequests = 0
+        guestRow.onCompactContextRequested = { compactRequests += 1 }
+        guestRow.qaPerformCompactContextAction()
+        guestRow.onCompactContextRequested = nil
+        // Whether it shows depends on the row's width; disabled and inert it must always be.
+        try expect(!guestRow.qaCompactContextButtonEnabled && compactRequests == 0,
+                   "the guest's Compact is disabled and pressing it asks for nothing (visible \(guestRow.qaCompactContextButtonVisible), enabled \(guestRow.qaCompactContextButtonEnabled), requests \(compactRequests))")
 
         // The character: the host's own set, pixel for pixel.
         guard let hostDrawn = drawn(hostTile.qaCharacterLayer), let guestDrawn = drawn(guestTile.qaCharacterLayer) else {

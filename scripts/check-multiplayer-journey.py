@@ -26,7 +26,7 @@ and a terminal shared after its warning as a read-only mirror.
       on the host and "You" on the guest; the reply on both
    6. the host prompts P2: the guest shows it with the host's name, and the reply
    7. the guest resends P1 with the same request ID: nothing new runs
-   8. the guest has no Stop and no approval control; the host keeps both
+   8. no guest control can stop, approve, compact or change the host's agent; the host keeps them
    9. the host's popover lists the guest with "full access"; Remove; the guest
       tile shows the stopped state; a guest prompt is refused, nothing runs
   10. a "Works once" link: the guest joins again; a third app is refused
@@ -166,6 +166,18 @@ ECHO_MEDIAN_MS, ECHO_MAX_MS, STEADY_RATE, FLOOD_BEHIND_SECONDS = 120, 400, 20, 1
 
 class Failed(AssertionError):
     pass
+
+
+# What a guest must never be able to do to the host's agent. Since the guest
+# draws the host's chrome (d397bc87) these controls are present but disabled,
+# so the journey judges what can be pressed, not which labels exist.
+HOST_ONLY_WORDS = ("stop", "approve", "allow", "deny", "compact", "interrupt", "steer",
+                   "harness", "model", "reasoning effort", "rename", "workspace tools")
+
+
+def guest_host_controls(snapshot):
+    enabled = [c.lower() for c in snapshot.get("sharedEnabledControls", [])]
+    return [c for c in enabled if any(w in c for w in HOST_ONLY_WORDS)]
 
 
 def wait_for(probe, label, timeout):
@@ -547,9 +559,10 @@ def mode_b(host, guest, check, eventually, endpoint, env_extra, people):
     retry = guest.call("resendLast"); time.sleep(6)
     check(retry["sameCommand"] and retry["firstID"] == retry["secondID"] and host.call("transcript", tile=agent).get("host", "").count(p1) == 1,
           "B7 (A7): a resend with the same request ID runs nothing new", json.dumps(retry))
-    controls = [c.lower() for c in guest.call("snapshot").get("sharedControls", [])]
-    check(not any("stop" in c or "approve" in c or "allow" in c or "deny" in c for c in controls),
-          "B7 (A8): the guest has no Stop and no approval control", json.dumps(controls))
+    g8 = guest.call("snapshot"); usable = guest_host_controls(g8)
+    check("sharedEnabledControls" in g8 and not usable,
+          "B7 (A8): no guest control can stop, approve, compact or change the host's agent",
+          json.dumps({"usable": usable, "enabled": g8.get("sharedEnabledControls")}))
     agent_item = item_of(agent)
     check(agent_item.get("facts", {}).get("editable") == "false" and "Open beside" in agent_item.get("hover", []),
           "B7: inside the portal the agent is watched, not typed into; it offers Open beside", json.dumps(agent_item.get("hover")))
@@ -1327,10 +1340,10 @@ def main():
 
             # 8. Controls.
             g8 = guest.call("snapshot"); h8 = host.call("snapshot", tile=tile)
-            controls = [c.lower() for c in g8.get("sharedControls", [])]
-            check(not any("stop" in c or "approve" in c or "allow" in c or "deny" in c for c in controls)
-                  and "Approvals stay with its owner" in g8.get("controlsText", ""),
-                  "step 8: the guest has no Stop and no approval control", json.dumps(controls))
+            usable = guest_host_controls(g8)
+            check("sharedEnabledControls" in g8 and not usable,
+                  "step 8: no guest control can stop, approve, compact or change the host's agent",
+                  json.dumps({"usable": usable, "enabled": g8.get("sharedEnabledControls")}))
             check(h8.get("hostIsManagedAgentTile") and h8.get("hostHasRunner"),
                   "step 8: the host's own agent tile, with its runner, keeps Stop and approvals")
 
