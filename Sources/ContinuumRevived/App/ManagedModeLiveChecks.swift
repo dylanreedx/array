@@ -80,30 +80,33 @@ func runManagedModeLiveChecks() async throws {
         delegate.agentSupervisor = supervisor
     }
     try fixture.mount()
+    // One main-actor binding for everything after the mount: the `var` above is
+    // assigned inside the mount closure, a region release builds treat as task-isolated.
+    let mounted: AgentSupervisor = supervisor
     // The app installs its sidebar activity feed at launch; the mount does not.
     app.installAgentAwarenessHooks()
     defer {
-        supervisor.stopAll()
+        mounted.stopAll()
         // Keep Array's own isolated state (transcripts, records) as evidence.
         let kept = evidenceDir.appendingPathComponent("app-support-\(harness.rawValue)")
         try? FileManager.default.removeItem(at: kept)
         try? FileManager.default.copyItem(at: fixture.appSupport, to: kept)
     }
     // Lowered so a sleeping helper is flagged inside one paid run.
-    supervisor.helperWatchdogThreshold = 20
+    mounted.helperWatchdogThreshold = 20
 
-    let lead = supervisor.spawn(role: nil, prompt: nil, cwd: root, harness: harness, model: leadModel,
+    let lead = mounted.spawn(role: nil, prompt: nil, cwd: root, harness: harness, model: leadModel,
         thinking: "low", projectId: WorkspaceInvariantsFixture.projectA1, projectRoot: root, displayName: "Managed live lead")
-    record("leadIsManaged", supervisor.effectiveMode(for: lead) == .managed, supervisor.effectiveMode(for: lead).rawValue)
+    record("leadIsManaged", mounted.effectiveMode(for: lead) == .managed, mounted.effectiveMode(for: lead).rawValue)
     guard results["leadIsManaged"] == true else { throw Failure(description: "Lead is not Managed; no model turn was sent.") }
-    _ = supervisor.setWorkspaceToolsEnabled(agentID: lead, true)
+    _ = mounted.setWorkspaceToolsEnabled(agentID: lead, true)
 
     var text: [AgentID: String] = [:]
     var answers: [AgentID: [String]] = [:]
     var tools: [AgentID: [String]] = [:]
     var failures: [String] = []
     var context: [AgentID: [Int]] = [:]
-    let observer = supervisor.addDeliveredEventObserver { id, event in
+    let observer = mounted.addDeliveredEventObserver { id, event in
         switch event {
         case .turnStarted: text[id] = ""
         case let .contentDelta(_, _, .assistant, delta): text[id, default: ""] += delta
@@ -116,16 +119,16 @@ func runManagedModeLiveChecks() async throws {
         default: break
         }
     }
-    defer { supervisor.removeDeliveredEventObserver(observer) }
-    func name(_ id: AgentID) -> String { id == lead ? "lead" : (supervisor.records[id]?.humanDisplayName ?? id.rawValue.uuidString) }
+    defer { mounted.removeDeliveredEventObserver(observer) }
+    func name(_ id: AgentID) -> String { id == lead ? "lead" : (mounted.records[id]?.humanDisplayName ?? id.rawValue.uuidString) }
     func snapshotAgents() {
-        evidence["agents"] = ([lead] + supervisor.children(of: lead)).map { id -> [String: Any] in
-            let r = supervisor.records[id]
+        evidence["agents"] = ([lead] + mounted.children(of: lead)).map { id -> [String: Any] in
+            let r = mounted.records[id]
             var o: [String: Any] = ["id": id.rawValue.uuidString, "name": name(id), "model": r?.model ?? "",
                 "mode": r?.mode.rawValue ?? "", "parent": r?.parentAgentID?.rawValue.uuidString ?? "",
                 "checkoutRoot": r?.checkoutRoot ?? "", "cwd": r?.cwd ?? "",
                 "toolCalls": tools[id] ?? [], "answers": answers[id] ?? [], "contextUsedTokens": context[id] ?? [],
-                "hookEvents": (supervisor.hookReceipts[id] ?? []).map { "\($0.event)\($0.toolName.map { ":" + $0 } ?? "")\($0.command.map { " `\($0.prefix(80))`" } ?? "")" }]
+                "hookEvents": (mounted.hookReceipts[id] ?? []).map { "\($0.event)\($0.toolName.map { ":" + $0 } ?? "")\($0.command.map { " `\($0.prefix(80))`" } ?? "")" }]
             if let report = r?.lastReport?.report {
                 o["report"] = ["summary": report.summary, "checks": report.checks.map { "\($0.result.rawValue): \($0.what)" },
                                "commandEvidence": (report.commandEvidence ?? []).map { "\($0)" }]
@@ -150,24 +153,24 @@ func runManagedModeLiveChecks() async throws {
     Pick each helper's model to fit its job. If a helper is stopped, say so and do not retry it yet. End with one short line per job.
     """
     print("LIVE starting \(harness.rawValue) lead \(leadModel)")
-    guard supervisor.send(prompt1, to: lead) else { throw Failure(description: "Lead send refused") }
+    guard mounted.send(prompt1, to: lead) else { throw Failure(description: "Lead send refused") }
 
     // Both helpers exist.
-    let delegated = await waitUntil(timeout: 240, pollInterval: 0.2) { supervisor.children(of: lead).count >= 2 }
+    let delegated = await waitUntil(timeout: 240, pollInterval: 0.2) { mounted.children(of: lead).count >= 2 }
     snapshotAgents()
-    let helpers = supervisor.children(of: lead)
+    let helpers = mounted.children(of: lead)
     record("twoHelpersDelegated", delegated && helpers.count >= 2, helpers.map(name))
     guard delegated else { throw Failure(description: "The lead did not start two helpers; inspect \(evidencePath)") }
     func isJobB(_ id: AgentID) -> Bool {
-        let brief = supervisor.records[id]?.delegationContext?.brief ?? ""
+        let brief = mounted.records[id]?.delegationContext?.brief ?? ""
         return brief.contains("BETA") || brief.contains("sleep")
     }
     let jobB = helpers.first(where: isJobB)
     let jobA = helpers.first { !isJobB($0) }
-    record("helperModelsFromCatalogue", helpers.allSatisfy { snapshot.models.contains(supervisor.records[$0]?.model ?? "") },
-           helpers.map { "\(name($0)): \(supervisor.records[$0]?.model ?? "?")" })
-    record("helpersAreFreeAndTileless", helpers.allSatisfy { supervisor.records[$0]?.mode == .free && supervisor.records[$0]?.tileId == nil })
-    let checkouts = Set(helpers.compactMap { supervisor.records[$0].map { WorktreeManager.resolved(URL(fileURLWithPath: $0.checkoutRoot)) } })
+    record("helperModelsFromCatalogue", helpers.allSatisfy { snapshot.models.contains(mounted.records[$0]?.model ?? "") },
+           helpers.map { "\(name($0)): \(mounted.records[$0]?.model ?? "?")" })
+    record("helpersAreFreeAndTileless", helpers.allSatisfy { mounted.records[$0]?.mode == .free && mounted.records[$0]?.tileId == nil })
+    let checkouts = Set(helpers.compactMap { mounted.records[$0].map { WorktreeManager.resolved(URL(fileURLWithPath: $0.checkoutRoot)) } })
     record("concurrentHelpersOwnCheckouts", checkouts.count == helpers.count, Array(checkouts))
 
     // The sidebar, from the production row builder, drawn offscreen.
@@ -192,52 +195,52 @@ func runManagedModeLiveChecks() async throws {
     inbox.layoutForQA()
     let leadCell = inbox.ownershipCellForQA(id: lead.rawValue)
     leadCell?.layoutSubtreeIfNeeded()
-    let anyWorking = helpers.contains { supervisor.isRunning($0) }
+    let anyWorking = helpers.contains { mounted.isRunning($0) }
     record("sidebarNestsHelpersUnderLead", helperRows.count == helpers.count, ["drawn": inbox.drawnSequenceForQA, "helperRows": helperRows.map(\.title)])
     record("sidebarLeadGlyphWhileHelperWorks", !anyWorking || leadCell?.showsWorkingGlyphForQA == true,
-           ["helperRunning": anyWorking, "glyph": leadCell?.showsWorkingGlyphForQA ?? false, "managedBadge": supervisor.showsManagedIndicator(for: lead)])
+           ["helperRunning": anyWorking, "glyph": leadCell?.showsWorkingGlyphForQA ?? false, "managedBadge": mounted.showsManagedIndicator(for: lead)])
 
     // Stall: the sleeping helper is flagged, then stopped as a user would.
     if let jobB {
-        let flagged = await waitUntil(timeout: 150, pollInterval: 0.5) { supervisor.records[jobB]?.helperWatchdogNeedsYou != nil || !supervisor.isRunning(jobB) }
-        let flag = supervisor.records[jobB]?.helperWatchdogNeedsYou
+        let flagged = await waitUntil(timeout: 150, pollInterval: 0.5) { mounted.records[jobB]?.helperWatchdogNeedsYou != nil || !mounted.isRunning(jobB) }
+        let flag = mounted.records[jobB]?.helperWatchdogNeedsYou
         record("stallFlagged", flagged && flag != nil, flag ?? "helper ended before it was flagged")
         snapshotAgents()
-        if supervisor.isRunning(jobB) { supervisor.stop(jobB) }
+        if mounted.isRunning(jobB) { mounted.stop(jobB) }
     } else {
         record("stallFlagged", false, "no job-B helper identified")
     }
-    let turn1 = await waitUntil(timeout: 420, pollInterval: 0.2) { !supervisor.isRunning(lead) && !(answers[lead] ?? []).isEmpty }
+    let turn1 = await waitUntil(timeout: 420, pollInterval: 0.2) { !mounted.isRunning(lead) && !(answers[lead] ?? []).isEmpty }
     // Let any queued watchdog alert/delivery turns settle.
-    _ = await waitUntil(timeout: 120, pollInterval: 0.5) { !supervisor.isRunning(lead) && supervisor.children(of: lead).allSatisfy { !supervisor.isRunning($0) } }
+    _ = await waitUntil(timeout: 120, pollInterval: 0.5) { !mounted.isRunning(lead) && mounted.children(of: lead).allSatisfy { !mounted.isRunning($0) } }
     snapshotAgents()
     record("leadTurn1Completed", turn1, answers[lead] ?? [])
     let editTools: Set<String> = ["Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"]
-    let leadToolUses = (supervisor.hookReceipts[lead] ?? []).filter { $0.event == "PreToolUse" }.compactMap(\.toolName)
+    let leadToolUses = (mounted.hookReceipts[lead] ?? []).filter { $0.event == "PreToolUse" }.compactMap(\.toolName)
     record("leadNeverEdited", !leadToolUses.contains(where: editTools.contains), leadToolUses)
-    record("leadBriefInjected", (supervisor.hookReceipts[lead] ?? []).contains { $0.event == "SessionStart" })
-    let plan = supervisor.leadPlan(for: lead)
+    record("leadBriefInjected", (mounted.hookReceipts[lead] ?? []).contains { $0.event == "SessionStart" })
+    let plan = mounted.leadPlan(for: lead)
     record("leadPlanPosted", plan.map { !$0.steps.isEmpty } ?? false, plan.map { $0.steps.map { "\($0.state.rawValue) \($0.owner): \($0.title)" } } ?? [])
     if let jobA {
-        let report = supervisor.records[jobA]?.lastReport?.report
+        let report = mounted.records[jobA]?.lastReport?.report
         record("helperFiledReport", report != nil, report?.summary ?? "no array_report filed")
         let observed = (report?.commandEvidence ?? []).contains { $0.outcome == .observed }
         record("reportCommandEvidenceObserved", observed, (report?.commandEvidence ?? []).map { "\($0)" })
-        let greeting = URL(fileURLWithPath: supervisor.records[jobA]!.checkoutRoot).appendingPathComponent("greeting.txt")
+        let greeting = URL(fileURLWithPath: mounted.records[jobA]!.checkoutRoot).appendingPathComponent("greeting.txt")
         record("jobAWorkOnDisk", (try? String(contentsOf: greeting, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) == "ALPHA")
     }
 
     // Turn 2: retry the stopped helper; its first prompt must carry the old work.
     if let jobB {
         let prompt2 = "I stopped the helper for job B (agent id \(jobB.rawValue.uuidString)). Retry it with array_delegate and retryOf set to that id so it continues the earlier work, but tell it to skip the sleep. Collect its report with wait_agents (timeoutSeconds 180), then answer in one line."
-        guard supervisor.send(prompt2, to: lead) else { throw Failure(description: "Lead retry send refused") }
+        guard mounted.send(prompt2, to: lead) else { throw Failure(description: "Lead retry send refused") }
         let retried = await waitUntil(timeout: 240, pollInterval: 0.2) {
-            supervisor.children(of: lead).contains { supervisor.records[$0]?.delegationContext?.retryOf == jobB }
+            mounted.children(of: lead).contains { mounted.records[$0]?.delegationContext?.retryOf == jobB }
         }
-        let retry = supervisor.children(of: lead).first { supervisor.records[$0]?.delegationContext?.retryOf == jobB }
+        let retry = mounted.children(of: lead).first { mounted.records[$0]?.delegationContext?.retryOf == jobB }
         record("retryDelegated", retried && retry != nil)
         _ = await waitUntil(timeout: 300, pollInterval: 0.2) {
-            !supervisor.isRunning(lead) && (answers[lead] ?? []).count >= 2 && !(retry.map(supervisor.isRunning) ?? false)
+            !mounted.isRunning(lead) && (answers[lead] ?? []).count >= 2 && !(retry.map(mounted.isRunning) ?? false)
         }
         snapshotAgents()
         // The retry's real first prompt, as Array's own transcript stored it.
