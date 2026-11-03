@@ -826,6 +826,9 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product array-workspace-mcp
   run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
+  if [[ "${CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE:-0}" == "1" ]]; then
+    run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
+  fi
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
   run_app_check .build/debug/Array --workspace-hook-bridge-check
@@ -1117,6 +1120,12 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
 # under every installed key, plus one unpublished /duckherd off on a resume
 # Duckherd saved as on), declines /duckherd on there, and Free is untouched.
 run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
+# The same through real claude with Duckherd loaded by --plugin-dir, plus the
+# push-back shortening a real helper's report. Spends a little usage; opt in
+# with CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE=1 and CONTINUUM_DUCKHERD_PLUGIN_DIR.
+if [[ "${CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE:-0}" == "1" ]]; then
+  run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
+fi
 run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
 # .plans/102 P2a: array_report/array_status bounds, the once-only push-back
 # decision and its wording, the courier unchanged without a report, and the

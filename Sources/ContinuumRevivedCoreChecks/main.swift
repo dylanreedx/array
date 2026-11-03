@@ -235,6 +235,11 @@ if CommandLine.arguments.contains("--managed-duckherd-check") {
     runManagedDuckherdChecks()
     Foundation.exit(0)
 }
+// Opt-in: real claude, a little usage. CONTINUUM_DUCKHERD_PLUGIN_DIR required.
+if CommandLine.arguments.contains("--managed-duckherd-live-check") {
+    runManagedDuckherdLiveChecks()
+    Foundation.exit(0)
+}
 // CX-01 hardening: the transport's write serialisation, runnable without the
 // load-sensitive legs ahead of it in the full run.
 if CommandLine.arguments.contains("--pi-rpc-transport-check") {

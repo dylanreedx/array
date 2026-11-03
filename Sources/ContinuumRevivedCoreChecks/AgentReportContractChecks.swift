@@ -115,8 +115,13 @@ func runAgentReportContractChecks() {
     let stopReason = WorkspaceAgentHook.pushBackReason(words: 612, offersReportTool: true)
     let subReason = WorkspaceAgentHook.pushBackReason(words: 612, offersReportTool: false)
     expect(stopReason.contains("about 612 words") && stopReason.contains("about 300 words") && stopReason.contains("array_report")
-           && !subReason.contains("array_report") && subReason.contains("Save the full details to a file"),
+           && !subReason.contains("array_report") && subReason.contains("Array is asking you for a details file")
+           && subReason.contains("outside the repository"),
            "push-back: the reason states the length, asks for ~300 words and a file; array_report only for a delegated agent")
+    // Measured: without this a helper shortened to "the full text is in my
+    // previous message", which the parent never receives.
+    expect(subReason.contains("Only this last message reaches that agent") && stopReason.contains("Only this last message reaches that agent"),
+           "push-back: the reason must say the parent reads only the last message: \(subReason)")
     // P0 finding 5: the brief wins, so the reason names that rather than
     // forbidding anything.
     expect(stopReason.contains("If your task says not to write files, just shorten it")

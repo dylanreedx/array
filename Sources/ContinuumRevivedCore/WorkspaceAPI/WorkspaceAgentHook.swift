@@ -127,11 +127,19 @@ public enum WorkspaceAgentHook {
     /// finding 5), so the brief is named as the one that wins. `array_report`
     /// is offered only on `Stop`: a Claude subagent shares its parent's
     /// workspace token, so its report would land on the parent.
+    ///
+    /// Measured on claude 2.1.317 (Haiku helper, a 12-item findings brief):
+    /// the earlier "Save the full details to a file" cut 1,517 words to 304,
+    /// but the helper wrote "the full text is in my previous message" and
+    /// saved nothing, so the parent lost the details. It took the file for a
+    /// report file nobody had asked for, and it assumed the parent reads its
+    /// earlier messages; the parent gets only the last one. Saying both cut
+    /// 1,195 words to 293 with the details in a file outside the repository.
     public static func pushBackReason(words: Int, offersReportTool: Bool) -> String {
-        let keep = offersReportTool
-            ? "Save the full details to a file and give its path, or call array_report with them."
-            : "Save the full details to a file and give its path."
+        let keep = "Array is asking you for a details file: save the full details to a file outside the repository, such as in /tmp, and give its path"
+            + (offersReportTool ? ", or call array_report with them." : ".")
         return "Array: your final message is about \(words) words, and the agent that asked for this work reads all of it. "
+            + "Only this last message reaches that agent: it does not see your earlier messages. "
             + "Please end with a shorter report of about \(AgentShortReportConfig.targetWords) words: the outcome, what you checked, and anything left open. "
             + keep + " "
             + "If your task says not to write files, just shorten it. If your task asks for the full text, return it unchanged."

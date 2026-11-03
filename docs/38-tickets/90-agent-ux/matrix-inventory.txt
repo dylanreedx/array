@@ -216,6 +216,7 @@ check --managed-agent-page-zoom-check
 check --managed-codex-hooks-check
 check --managed-codex-launch-check
 check --managed-duckherd-check
+check --managed-duckherd-live-check
 check --managed-lead-plan-check
 check --managed-mode-hooks-check
 check --managed-mode-launch-check
@@ -926,6 +927,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --local-pairing-endpoint-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --onboarding-foundation-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --pi-provider-failure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
