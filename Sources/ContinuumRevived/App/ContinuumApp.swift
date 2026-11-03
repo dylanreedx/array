@@ -1774,6 +1774,22 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // What one streaming tick of the host's transcript publisher costs the
+        // main thread on a long transcript, with one and three shared agents.
+        if CommandLine.arguments.contains("--shared-agent-transcript-publisher-perf-check") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(120))
+                fputs("FAIL: shared agent transcript publisher perf check exceeded its 120-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do { try await SharedAgentTranscriptPublisherPerfChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         // A shared agent's transcript, drawn on the guest by the host tile's
         // renderer from the host's own document; light and dark stills in <dir>.
         if let index = CommandLine.arguments.firstIndex(of: "--shared-agent-chrome-check") {
