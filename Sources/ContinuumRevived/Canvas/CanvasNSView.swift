@@ -7591,6 +7591,15 @@ final class CanvasNSView: NSView, TokenThemed {
     var sharedAreaZoneIds: [UUID] { liveZones.filter(\.isSharedArea).map(\.zoneId) }
 
     func sharedAreaLayer(for zoneId: UUID) -> SharedAreaLayer? { sharedAreaLayers[zoneId] }
+
+    /// The project zone a tile lent to a shared area came from. A lent tile is in
+    /// no project layer, so `zoneId(containing:)` cannot see it.
+    func lentTileHomeZoneId(_ tileId: UUID) -> UUID? {
+        for layer in sharedAreaLayers.values {
+            if let lent = layer.lent.first(where: { $0.home.id == tileId }) { return lent.homeZoneId }
+        }
+        return nil
+    }
     func sharedAreaZonePlacement(_ zoneId: UUID) -> ZonePlacement? {
         liveZones.first { $0.zoneId == zoneId && $0.isSharedArea }
     }

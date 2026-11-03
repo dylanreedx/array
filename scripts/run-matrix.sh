@@ -1962,6 +1962,12 @@ run_app_check .build/debug/Array --inbox-reveal-project-check
 # landed in the first (the dictation film's swarm spike). World frame against
 # the parent zone's world rect, not the zone stamp (hazard 9).
 run_app_check .build/debug/Array --subagent-tile-zone-check
+# A subagent's sidebar row refused to open ("This helper has no available lead
+# or canvas") under a managed lead whose tile was plainly on the canvas: a
+# native subagent, a lead lent into a shared area, a lead in another workspace,
+# a helper in another project. A real row click must open the subagent's tile
+# in each, with tmux off and with a failing tmux shim that must never be called.
+run_app_check .build/debug/Array --subagent-sidebar-open-check
 # With auto-layout OFF, a zone's automatic placement clamped only the camera, so
 # a tile could be framed past the zone's edge; auto-layout's settle grew the zone
 # over it and hid that. Toolbar spawns into one zone until it is full, asserting

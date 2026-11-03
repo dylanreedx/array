@@ -1318,6 +1318,19 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--subagent-sidebar-open-check") {
+            do {
+                _ = NSApplication.shared
+                let report = try SubagentSidebarOpenChecks.run()
+                print(report)
+                print("ContinuumRevivedSubagentSidebarOpenChecks passed: a subagent row click opens the subagent in every lead state, without tmux")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-spawn-containment-check") {
             do {
                 _ = NSApplication.shared
@@ -15440,9 +15453,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // (.plans/05-close-to-history.md).
         // Plan 106: a tile-less helper opens the way its row's Pop out does, so the
         // lead's cap of three holds (`.plans/102-managed-agent-mode/p3-helper-tiles.md`
-        // forbids the sidebar making helper tiles itself). Refused, its lead opens.
+        // forbids the sidebar making helper tiles itself).
+        //
+        // A click on a subagent row ALWAYS opens the subagent. It used to refuse
+        // ("This helper has no available lead or canvas") and reveal the lead
+        // instead, whenever the pop-out could not place the helper — for every
+        // native subagent, and for a lead in another workspace. The lead's
+        // workspace comes on screen first so the helper lands beside it; if the
+        // pop-out still refuses, the ordinary reveal below gives it a tile.
+        var helperPopOutRefused = false
         if record.tileId == nil, let lead = agentSupervisor.helperLead(for: agentId),
            agentSupervisor.records[lead]?.mode == .managed {
+            if let leadTile = agentSupervisor.records[lead]?.tileId,
+               canvasView?.navigationTileSnapshot(for: leadTile) == nil,
+               let leadWorkspace = workspaceContainingTile(leadTile) {
+                _ = switchWorkspaceFromSidebarIfNeeded(leadWorkspace)
+            }
             do {
                 let tile = try agentSupervisor.popOut(agentId)
                 refreshAgentSurfaces(notify: false)
@@ -15450,8 +15476,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 agentSupervisor.focus(agentID: agentId)
                 return true
             } catch {
-                setWorkspaceManagementMessage(error.localizedDescription)
-                return lead != agentId && revealAgentFromInbox(lead.rawValue)
+                fputs("Reveal from inbox: helper pop-out refused (\(error.localizedDescription)); opening \(agentId.rawValue.uuidString) in its own tile\n", stderr)
+                helperPopOutRefused = true
             }
         }
         let boundTileId = record.tileId.flatMap { tileIsReachable($0) ? $0 : nil }
@@ -15473,7 +15499,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Opening a settled agent gives it a tile the ordinary way; a tile Settle
         // remembered for its Undo is no longer the one to restore.
         settledAgentTiles[agentId] = nil
-        guard let tileId = boundTileId ?? attachTileToAgentFromInbox(agentId) else { return false }
+        guard let tileId = boundTileId
+                ?? attachTileToAgentFromInbox(agentId, popsOutHelper: !helperPopOutRefused) else { return false }
         guard revealTileFromInbox(tileId) else { return false }
         // Out of History: reopening a closed agent is asking for it back, and its
         // row must not stay in a section whose promise is "no tile"
@@ -16099,9 +16126,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// project, the project chip on its row — is untouched: only the view moved.
     /// Internal sidebar operations are AgentSupervisor.popOut/foldBack/setPinned.
     /// This adapter owns only project canvas/session presentation state.
+    ///
+    /// Beside the lead when the lead's tile is on this canvas. Otherwise the
+    /// helper still opens, in its own project's zone — the armed one when it is
+    /// that project's, so it lands near the camera — and only a missing canvas
+    /// refuses. It used to refuse ("Open the lead's workspace and tile…") for a
+    /// lead lent into a shared area, in another workspace, or sitting in another
+    /// project's zone, while the lead was plainly on screen.
     private func popOutHelper(_ id: AgentID, beside lead: AgentID) throws -> UUID {
-        guard let (spawner, scope, point, size) = spawnPlacementBesideParent(of: id, parentID: lead) else {
-            throw AgentSupervisor.HelperTileError(message: "Open the lead's workspace and tile before popping out this helper.")
+        let spawner: TileSpawner
+        var scope: CreationScope?, point: CGPoint?, size: CGSize?
+        let projectId = agentSupervisor.records[id]?.projectId
+        if let (besideSpawner, besideScope, besidePoint, besideSize) = spawnPlacementBesideParent(of: id, parentID: lead) {
+            (spawner, scope, point, size) = (besideSpawner, besideScope, besidePoint, besideSize)
+        } else if let projectId, let (projectSpawner, projectScope) = spawnerAndScope(forProject: projectId) {
+            let armed = resolvedCreationScope()
+            (spawner, scope) = (projectSpawner, armed?.projectId == projectId && armed?.zoneId != nil ? armed : projectScope)
+        } else if let fallback = tileSpawner {
+            spawner = fallback
+        } else {
+            throw AgentSupervisor.HelperTileError(message: "The canvas is unavailable.")
         }
         switch spawner.spawnManagedAgentForExistingAgent(id, supervisor: agentSupervisor, at: point, creationScope: scope, size: size) {
         case let .spawned(tileId):
@@ -16142,12 +16186,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.noteStructuralCommit()
     }
 
-    private func attachTileToAgentFromInbox(_ agentId: AgentID) -> UUID? {
-        if let lead = agentSupervisor.helperLead(for: agentId), agentSupervisor.records[lead]?.mode == .managed {
+    /// `popsOutHelper` false when the caller's pop-out already refused: the
+    /// helper then gets an ordinary tile rather than no tile at all.
+    private func attachTileToAgentFromInbox(_ agentId: AgentID, popsOutHelper: Bool = true) -> UUID? {
+        if popsOutHelper, let lead = agentSupervisor.helperLead(for: agentId), agentSupervisor.records[lead]?.mode == .managed {
             do { return try agentSupervisor.popOut(agentId) }
             catch {
-                fputs("Helper pop-out refused: \(error.localizedDescription)\n", stderr)
-                return nil
+                fputs("Helper pop-out refused: \(error.localizedDescription); opening it in an ordinary tile\n", stderr)
             }
         }
         // M1.6: put the tile in the AGENT'S project when that project has a live
@@ -16226,12 +16271,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let record = agentSupervisor.records[agentId],
               let parentId = parentID ?? record.parentAgentID,
               let parentTileId = agentSupervisor.records[parentId]?.tileId,
-              let (spawner, scope) = spawnerAndScope(forTile: parentTileId),
+              let canvasView else { return nil }
+        // A parent lent into a shared area is drawn there but belongs to its home
+        // zone. The child opens in that home zone, never in the shared area:
+        // lending is what publishes a tile, and nobody chose to share the child.
+        let lentHome = canvasView.lentTileHomeZoneId(parentTileId)
+        guard let (spawner, scope) = lentHome.flatMap({ spawnerAndScope(forZone: $0) })
+                ?? spawnerAndScope(forTile: parentTileId),
               record.projectId == nil || record.projectId == scope.projectId,
               let zoneId = scope.zoneId,
-              let canvasView,
               let zone = canvasView.installedZonePlacement(for: zoneId),
               let parent = canvasView.navigationTileSnapshot(for: parentTileId) else { return nil }
+        if lentHome != nil { return (spawner, scope, nil, nil) }
         let size = CanvasEngine.defaultFrame(for: .managedAgent)
         let gap = TileGapResolver.resolvedGap()
         let zoneRect = CGRect(x: zone.origin.x, y: zone.origin.y, width: zone.size.width, height: zone.size.height)
@@ -23067,8 +23118,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// The spawner of `tileId`'s own project, scoped to `tileId`'s own zone: for
     /// a spawn a tile asks for, wherever the armed zone is.
     private func spawnerAndScope(forTile tileId: UUID) -> (TileSpawner, CreationScope)? {
-        guard let zoneId = canvasView?.zoneId(containing: tileId),
-              let placement = canvasView?.installedZonePlacement(for: zoneId),
+        guard let zoneId = canvasView?.zoneId(containing: tileId) else { return nil }
+        return spawnerAndScope(forZone: zoneId)
+    }
+
+    /// The spawner of `zoneId`'s project, scoped to that zone.
+    private func spawnerAndScope(forZone zoneId: UUID) -> (TileSpawner, CreationScope)? {
+        guard let placement = canvasView?.installedZonePlacement(for: zoneId),
               let projectId = placement.projectId,
               let (spawner, projectScope) = spawnerAndScope(forProject: projectId) else { return nil }
         return (spawner, CreationScope(

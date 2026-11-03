@@ -6860,9 +6860,12 @@ final class AgentSupervisor {
         return records[parent] == nil ? nil : parent
     }
 
+    /// A subagent the harness runs itself (a claude `Agent` call, observed
+    /// read-only) pops out too: its tile watches it. Refusing it left the
+    /// sidebar row of every native subagent under a managed lead unopenable.
     @discardableResult
     func popOut(_ id: AgentID) throws -> UUID {
-        guard let record = records[id], record.capabilities.locallyManaged,
+        guard let record = records[id],
               let lead = helperLead(for: id), let popOutHelperTile else {
             throw HelperTileError(message: "This helper has no available lead or canvas.")
         }
@@ -6974,7 +6977,8 @@ final class AgentSupervisor {
         while let id = pending.popLast() {
             guard seen.insert(id).inserted else { continue }
             pending.append(contentsOf: children(of: id))
-            guard records[id]?.capabilities.locallyManaged == true else { continue }
+            // A native subagent's tile folds too when it was popped out.
+            guard records[id]?.capabilities.locallyManaged == true || records[id]?.helperTileOpenedAt != nil else { continue }
             do { try foldBack(id) }
             catch {
                 pendingHelperFolds.insert(id)
