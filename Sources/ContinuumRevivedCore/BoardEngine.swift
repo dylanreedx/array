@@ -38,6 +38,7 @@ public enum BoardCommand: Equatable, Sendable {
     /// with its own name in the Edit menu, and so the canvas API can offer it
     /// without offering arbitrary text edits.
     case assignCard(id: UUID, to: AgentID?)
+    case setCardAssignees(id: UUID, agents: [AgentID])
 
     case createColumn(id: UUID, name: String, after: UUID?, before: UUID?)
     case renameColumn(id: UUID, name: String)
@@ -250,8 +251,16 @@ public enum BoardEngine {
             guard let index = next.cards.firstIndex(where: { $0.id == id }) else {
                 return .failure(.unknownCard(id))
             }
-            inverse = .assignCard(id: id, to: next.cards[index].assignee)
+            inverse = .setCardAssignees(id: id, agents: next.cards[index].assignees)
             next.cards[index].assignee = agent
+            next.cards[index].updatedAt = now
+
+        case let .setCardAssignees(id, agents):
+            guard let index = next.cards.firstIndex(where: { $0.id == id }) else {
+                return .failure(.unknownCard(id))
+            }
+            inverse = .setCardAssignees(id: id, agents: next.cards[index].assignees)
+            next.cards[index].assignees = BoardCard.uniqueAssignees(agents)
             next.cards[index].updatedAt = now
 
         case let .createColumn(id, name, after, before):

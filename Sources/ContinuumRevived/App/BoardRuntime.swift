@@ -276,7 +276,7 @@ final class BoardRuntime {
     ) -> BoardCommandOutcome? {
         guard let board = board(id: boardId),
               let card = board.card(cardId),
-              card.assignee == agentId,
+              card.assignees.contains(agentId),
               board.orderedColumns.count > 1,
               card.columnId == board.orderedColumns[0].id else { return nil }
         let destination = board.orderedColumns[1].id
@@ -397,7 +397,7 @@ extension BoardCommand {
         case let .addComment(id, _, _), let .editComment(id, _, _, _, _), let .deleteComment(id, _, _),
              let .editTask(id, _, _), let .editCard(id, _, _), let .editTaskFields(id, _, _, _),
              let .moveCard(id, _, _, _),
-             let .deleteCard(id), let .setCardLinks(id, _), let .assignCard(id, _):
+             let .deleteCard(id), let .setCardLinks(id, _), let .assignCard(id, _), let .setCardAssignees(id, _):
             return id == cardId
         case let .restoreCard(card):
             return card.id == cardId

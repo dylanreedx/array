@@ -118,7 +118,7 @@ final class KanbanColumnView: NSView, TokenThemed {
         var existing = Dictionary(uniqueKeysWithValues: cardViews.map { ($0.cardId, $0) })
         var next: [KanbanCardView] = []
         for card in cards {
-            let name = card.assignee.flatMap(assigneeName)
+            let name: String? = card.assignees.isEmpty ? nil : card.assignees.map { assigneeName($0) ?? "Unavailable agent" }.joined(separator: ", ")
             measurementCards[card.id] = (card, name)
             if let view = existing.removeValue(forKey: card.id) {
                 view.update(card: card, assigneeName: name)

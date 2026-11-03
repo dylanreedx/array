@@ -129,6 +129,7 @@ final class BoardTaskDetailController: NSObject, WKScriptMessageHandler, WKNavig
                 "agents": agents.map { ["id": $0.id.rawValue.uuidString, "name": $0.name, "detail": $0.detail] },
                 "columns": tile.board.orderedColumns.map { ["id": $0.id.uuidString, "name": $0.name] },
                 "columnID": card.columnId.uuidString,
+                "assigneeIDs": card.assignees.map { $0.rawValue.uuidString },
                 "assigneeID": card.assignee.map { $0.rawValue.uuidString } as Any? ?? NSNull(),
                 "assigneeName": tile.assigneeName(for: card) as Any? ?? NSNull()]
             .merging(readOnlyFields(tile: tile, card: card)) { $1 }

@@ -81,6 +81,7 @@ public struct BoardQueryCard: Codable, Equatable, Sendable {
     public var body: String
     public var links: [BoardAPILink]
     public var attachments: [BoardAttachment]
+    public var assigneeAgentIds: [AgentID]? = nil
     public var assigneeAgentId: AgentID?
     public var createdAt: Date
     public var updatedAt: Date

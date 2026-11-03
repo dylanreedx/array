@@ -23,8 +23,7 @@ final class BoardCommentDelivery {
               seen.insert(comment.id).inserted,
               let card = transaction.after.card(cardID) else { return }
         let candidates = supervisor.records.values.filter { $0.projectId == projectID && $0.archivedAt == nil && $0.capabilities.locallyManaged }
-        var recipients = Set<AgentID>()
-        if let assignee = card.assignee { recipients.insert(assignee) }
+        var recipients = Set(card.assignees)
         for agent in candidates {
             let uuidMention = "@" + agent.id.rawValue.uuidString.lowercased()
             let text = comment.body.lowercased()

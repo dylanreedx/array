@@ -206,7 +206,7 @@ public enum SharedPortal {
             }
             var ids: [AgentID] = []
             for card in shared.cards {
-                if let assignee = card.assignee, !ids.contains(assignee) { ids.append(assignee) }
+                for assignee in card.assignees where !ids.contains(assignee) { ids.append(assignee) }
                 for case .agent(let id) in card.links where !ids.contains(id) { ids.append(id) }
             }
             return .init(board: shared, agents: ids.map { .init(id: $0, name: agentName($0) ?? "Agent") })

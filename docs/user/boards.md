@@ -74,3 +74,9 @@ Board documents live in your project folder:
 The index tracks boards. Each board JSON holds its columns and cards. Board image assets live under `assets/`. The tile stores the board ID in `.array/canvas.json`; the task body is not embedded in the canvas layout.
 
 Back up the `.array` directory along with the project if you want to preserve boards, notes, and layout. Your normal Git backup includes these only if you deliberately track them. Avoid editing live state files while Array has the project open. [Full storage reference](/docs/storage/).
+
+Tasks can have several agent assignees. Choose an agent to add or remove them;
+choose Unassigned to clear all. Comments notify every assignee and mentioned
+agent once. Through `board.apply`, `assign` adds `assigneeAgentId`; `unassign`
+removes that ID, or clears all when omitted. Reads include `assigneeAgentIds`
+and retain the legacy first `assigneeAgentId`.

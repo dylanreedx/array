@@ -225,14 +225,14 @@ extension WorkspaceAPIService {
                 }
                 guard let assignee = request.assigneeAgentId else { throw BoardRequestFailure("assign requires assigneeAgentId.") }
                 try validateBoardAssignee(assignee, projectId: projectId)
-                command = .assignCard(id: cardId, to: assignee)
+                command = .setCardAssignees(id: cardId, agents: (board.card(cardId)?.assignees ?? []) + [assignee])
             case .unassign:
                 guard request.columnId == nil, request.title == nil, request.body == nil,
-                      request.links == nil, request.assigneeAgentId == nil,
+                      request.links == nil,
                       request.afterCardId == nil, request.beforeCardId == nil else {
-                    throw BoardRequestFailure("unassign accepts only cardId.")
+                    throw BoardRequestFailure("unassign accepts cardId and optional assigneeAgentId.")
                 }
-                command = .assignCard(id: cardId, to: nil)
+                command = .setCardAssignees(id: cardId, agents: request.assigneeAgentId.map { removed in (board.card(cardId)?.assignees ?? []).filter { $0 != removed } } ?? [])
             case .delete:
                 guard request.columnId == nil, request.title == nil, request.body == nil,
                       request.links == nil, request.assigneeAgentId == nil,
@@ -314,6 +314,7 @@ extension WorkspaceAPIService {
             links: card.links.compactMap { boardAPILink($0, fallbackCheckout: checkout) },
             attachments: card.attachments, assigneeAgentId: card.assignee,
             createdAt: card.createdAt, updatedAt: card.updatedAt)
+        result.assigneeAgentIds = card.assignees
         result.comments = card.comments
         return result
     }

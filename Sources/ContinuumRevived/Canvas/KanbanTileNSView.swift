@@ -143,7 +143,7 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
     var canvasZoomForDrag: Double { canvas?.viewport.zoom ?? 1 }
 
     func assigneeName(for card: BoardCard) -> String? {
-        card.assignee.flatMap { agentDisplayName?($0) } ?? (card.assignee == nil ? nil : "agent")
+        card.assignees.isEmpty ? nil : card.assignees.map { agentDisplayName?($0) ?? "Unavailable agent" }.joined(separator: ", ")
     }
 
     func moveTaskFromMenu(_ cardID: UUID, to columnID: UUID) {

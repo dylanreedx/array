@@ -683,8 +683,7 @@ private func runBoardAssignmentCheck() {
            "B10: a task must keep its markdown body")
     expect(linked.card(cards[0])?.links.count == 2, "B10: a task must keep its typed links")
 
-    // Assignment is singular and is NOT a link. A task can reference five things
-    // and still be owned by exactly one agent.
+    // Legacy replacement assignment remains available independently of links.
     let assigned = applyOrFail(.assignCard(id: cards[0], to: agent), to: linked, "B10 assign")
     expect(assigned.after.card(cards[0])?.assignee == agent, "B10: assignment must record the agent")
     expect(assigned.after.card(cards[0])?.links.count == 2,
@@ -703,6 +702,12 @@ private func runBoardAssignmentCheck() {
     expect(cleared.after.card(cards[0])?.assignee == nil, "B10: a task can be taken back")
     let restored = applyOrFail(cleared.inverse, to: cleared.after, "B10 undo unassign").after
     expect(restored.card(cards[0])?.assignee == other, "B10: undoing an unassign restores the owner")
+
+    let multiple = applyOrFail(.setCardAssignees(id: cards[0], agents: [agent, other, agent]), to: assigned.after, "B10 multiple")
+    expect(multiple.after.card(cards[0])?.assignees == [agent, other], "B10: multiple owners are unique and ordered")
+    let replacement = applyOrFail(.assignCard(id: cards[0], to: nil), to: multiple.after, "B10 legacy clear multiple")
+    let multiUndo = applyOrFail(replacement.inverse, to: replacement.after, "B10 restore multiple").after
+    expect(multiUndo.card(cards[0])?.assignees == [agent, other], "B10: legacy clear Undo restores every owner")
 
     // Assignment survives the round trip that matters — the one to disk.
     let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)

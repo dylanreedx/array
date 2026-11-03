@@ -26,6 +26,7 @@ public struct BoardSurfaceSnapshot: Codable, Equatable, Sendable {
         public let links: [CardLink]
         public let attachments: [BoardAttachment]
         public let assignee: AgentID?
+        public var assignees: [AgentID]? = nil
 
         public init(card: BoardCard) {
             id = card.id
@@ -35,6 +36,7 @@ public struct BoardSurfaceSnapshot: Codable, Equatable, Sendable {
             links = card.links
             attachments = card.attachments
             assignee = card.assignee
+            assignees = card.assignees
         }
     }
 

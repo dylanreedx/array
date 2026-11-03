@@ -90,10 +90,18 @@ public struct BoardCard: Codable, Equatable, Sendable, Identifiable {
     public var links: [CardLink]
     public var comments: [BoardComment] = []
     public var attachments: [BoardAttachment]
-    /// The agent this task is assigned to. Distinct from a `CardLink.agent`:
-    /// a link is one of many references, an assignee is a singular
-    /// responsibility, and only one of those answers "who is doing this".
-    public var assignee: AgentID?
+    /// Ordered, unique owners. The singular accessor remains a compatibility replacement.
+    public var assignees: [AgentID] = [] {
+        didSet { assignees = Self.uniqueAssignees(assignees) }
+    }
+    public var assignee: AgentID? {
+        get { assignees.first }
+        set { assignees = newValue.map { [$0] } ?? [] }
+    }
+    public static func uniqueAssignees(_ ids: [AgentID]) -> [AgentID] {
+        var seen = Set<AgentID>()
+        return ids.filter { seen.insert($0).inserted }
+    }
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -116,12 +124,12 @@ public struct BoardCard: Codable, Equatable, Sendable, Identifiable {
         self.body = body
         self.links = links
         self.attachments = attachments
-        self.assignee = assignee
+        self.assignees = assignee.map { [$0] } ?? []
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
     public enum CodingKeys: String, CodingKey, CaseIterable {
-        case id, columnId, position, title, body, links, attachments, comments, assignee, createdAt, updatedAt
+        case id, columnId, position, title, body, links, attachments, comments, assignee, assignees, createdAt, updatedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -134,9 +142,25 @@ public struct BoardCard: Codable, Equatable, Sendable, Identifiable {
         links = try c.decodeIfPresent([CardLink].self, forKey: .links) ?? []
         comments = try c.decodeIfPresent([BoardComment].self, forKey: .comments) ?? []
         attachments = try c.decodeIfPresent([BoardAttachment].self, forKey: .attachments) ?? []
-        assignee = try c.decodeIfPresent(AgentID.self, forKey: .assignee)
+        assignees = Self.uniqueAssignees(try c.decodeIfPresent([AgentID].self, forKey: .assignees) ?? c.decodeIfPresent(AgentID.self, forKey: .assignee).map { [$0] } ?? [])
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(columnId, forKey: .columnId)
+        try c.encode(position, forKey: .position)
+        try c.encode(title, forKey: .title)
+        try c.encode(body, forKey: .body)
+        try c.encode(links, forKey: .links)
+        try c.encode(comments, forKey: .comments)
+        try c.encode(attachments, forKey: .attachments)
+        try c.encode(assignees, forKey: .assignees)
+        try c.encodeIfPresent(assignee, forKey: .assignee)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(updatedAt, forKey: .updatedAt)
     }
 
 }

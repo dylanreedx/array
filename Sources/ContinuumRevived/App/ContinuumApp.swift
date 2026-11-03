@@ -10488,13 +10488,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 if let agentID {
                     guard let record = self.agentSupervisor.records[agentID], record.projectId == projectID, record.archivedAt == nil else { return "Choose an available agent from this project." }
                 }
-                switch runtime.apply(.assignCard(id: cardID, to: agentID), to: view.board.id) {
+                var agents = view.board.card(cardID)?.assignees ?? []
+                if let agentID {
+                    if agents.contains(agentID) { agents.removeAll { $0 == agentID } }
+                    else { agents.append(agentID) }
+                } else { agents = [] }
+                switch runtime.apply(.setCardAssignees(id: cardID, agents: agents), to: view.board.id) {
                 case .applied, .rebased: return nil
                 default: return "That task could not be assigned."
                 }
             }
             view.onAssignToAgent = { [weak self, weak view] cardID, tileID in
-                guard let self, let view, let agentID = self.agentSupervisor.agent(forTile: tileID) else { return }
+                guard let self, let view, let agentID = self.agentSupervisor.agent(forTile: tileID),
+                      view.board.card(cardID)?.assignees.contains(agentID) != true else { return }
                 if let error = view.onTaskAssign?(cardID, agentID) { self.presentSpawnRefusal(error) }
             }
             view.onTaskCreateAgent = { [weak self, weak view] in
@@ -10656,12 +10662,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         for cardID in cardIDs {
             let old = before[cardID]
             let new = after[cardID]
-            let oldAgent = old?.assignee
-            let newAgent = new?.assignee
-            if let oldAgent, oldAgent != newAgent,
-               let tileID = agentSupervisor.records[oldAgent]?.tileId,
-               let view = canvasView?.tileView(for: tileID) as? ManagedAgentTileNSView {
-                Task { await view.clearBoardTask(boardID: transaction.after.id, cardID: cardID) }
+            let oldAgents = old?.assignees ?? []
+            let newAgents = new?.assignees ?? []
+            for oldAgent in oldAgents where !newAgents.contains(oldAgent) {
+                if let tileID = agentSupervisor.records[oldAgent]?.tileId,
+                   let view = canvasView?.tileView(for: tileID) as? ManagedAgentTileNSView {
+                    Task { await view.clearBoardTask(boardID: transaction.after.id, cardID: cardID) }
+                }
             }
             let contentChanged = old.map { BoardTaskContent(card: $0) } != new.map { BoardTaskContent(card: $0) }
             let taskFieldsEdited: Bool
@@ -10676,22 +10683,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // the workspace API already holds it in the turn it is running, so
             // staging it there would only invite a second send of the same task.
             // A hand-off to ANOTHER agent still stages, unsent, for the user.
-            guard let card = new, let newAgent, newAgent != actingAgent,
-                  oldAgent != newAgent || contentChanged || taskFieldsEdited,
-                  let record = agentSupervisor.records[newAgent], record.projectId == projectID,
-                  record.archivedAt == nil, record.capabilities.locallyManaged,
-                  let tileID = record.tileId,
-                  let view = canvasView?.tileView(for: tileID) as? ManagedAgentTileNSView else { continue }
-            Task { [weak runtime, weak view] in
-                guard let runtime, let view else { return }
-                try? await view.prepareBoardTask(
-                    boardID: transaction.after.id, card: card,
-                    revision: transaction.after.revision, store: attachmentStore,
-                    focusComposer: false, confirmReplacement: false)
-                // Async image import may finish after a rapid reassignment. Do
-                // not leave the superseded agent holding context that landed late.
-                if runtime.board(id: transaction.after.id)?.card(cardID)?.assignee != newAgent {
-                    await view.clearBoardTask(boardID: transaction.after.id, cardID: cardID)
+            for newAgent in newAgents {
+                guard let card = new, newAgent != actingAgent,
+                      !oldAgents.contains(newAgent) || contentChanged || taskFieldsEdited,
+                      let record = agentSupervisor.records[newAgent], record.projectId == projectID,
+                      record.archivedAt == nil, record.capabilities.locallyManaged,
+                      let tileID = record.tileId,
+                      let view = canvasView?.tileView(for: tileID) as? ManagedAgentTileNSView else { continue }
+                Task { [weak runtime, weak view] in
+                    guard let runtime, let view else { return }
+                    try? await view.prepareBoardTask(
+                        boardID: transaction.after.id, card: card,
+                        revision: transaction.after.revision, store: attachmentStore,
+                        focusComposer: false, confirmReplacement: false)
+                    // Async image import may finish after a rapid reassignment. Do
+                    // not leave the superseded agent holding context that landed late.
+                    if runtime.board(id: transaction.after.id)?.card(cardID)?.assignees.contains(newAgent) != true {
+                        await view.clearBoardTask(boardID: transaction.after.id, cardID: cardID)
+                    }
                 }
             }
         }

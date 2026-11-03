@@ -158,6 +158,58 @@ enum BoardCommentsChecks {
         _ = runtime.apply(.assignCard(id: cardID, to: missing), to: boardID)
         _ = runtime.apply(.addComment(cardID: cardID, comment: BoardComment(authorID: "local", authorName: "You", createdAt: Date(), body: "Keep this even if the assignee was removed")), to: boardID)
         try require(outcomes.contains("unavailable") && runtime.board(id: boardID)!.card(cardID)!.comments.last?.body.contains("assignee was removed") == true, "missing recipients leave the durable comment intact and report unavailable")
+
+        // Multi-owner contract through the production API, store, UI and delivery.
+        func ownership(_ op: String, _ agent: AgentID?, _ key: String) throws {
+            var payload: [String: Any] = ["op": op, "boardId": boardID.uuidString,
+                "cardId": cardID.uuidString, "expectedRevision": runtime.board(id: boardID)!.revision,
+                "idempotencyKey": key]
+            if let agent { payload["assigneeAgentId"] = agent.rawValue.uuidString }
+            guard case .result = f.api.dispatch(agentId: f.agentId, requestId: key, op: "board.apply", payload: payload) else {
+                throw Failure(message: "multi-owner API failed: " + key)
+            }
+        }
+        try ownership("unassign", nil, "multi-clear")
+        try ownership("assign", recipient, "multi-first")
+        try ownership("assign", sender, "multi-second")
+        try ownership("assign", sender, "multi-duplicate")
+        try require(runtime.board(id: boardID)!.card(cardID)!.assignees == [recipient, sender], "multi-owner API adds without replacing or duplicating")
+        let reloaded = try f.storePb.loadBoard(id: boardID)
+        try require(reloaded.card(cardID)!.assignees == [recipient, sender], "multi-owner persistence reload retains every assignee")
+        let encoded = try JSONEncoder().encode(reloaded.card(cardID)!)
+        var legacy = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        legacy.removeValue(forKey: "assignees")
+        let old = try JSONDecoder().decode(BoardCard.self, from: JSONSerialization.data(withJSONObject: legacy))
+        try require(old.assignees == [recipient], "legacy singular cards migrate to one owner")
+        try ownership("unassign", recipient, "multi-remove-one")
+        try require(runtime.board(id: boardID)!.card(cardID)!.assignees == [sender], "targeted unassign retains other owners")
+        try ownership("assign", recipient, "multi-restore")
+        var multiOutcomes: [(AgentID, String)] = []
+        runtime.commentDeliveryForQA?.onOutcome = { multiOutcomes.append(($0, $1)) }
+        _ = runtime.apply(.addComment(cardID: cardID, comment: BoardComment(authorID: "local", authorName: "You", createdAt: Date(), body: "@\(sender.rawValue.uuidString) review together")), to: boardID)
+        await runtime.commentDeliveryForQA?.waitForPendingDeliveriesForQA()
+        for agent in [recipient, sender] {
+            try require(multiOutcomes.filter { $0.0 == agent && ["delivered", "queued"].contains($0.1) }.count == 1, "each assignee mentioned in the comment receives exactly one delivery")
+        }
+        view.readOnlyOwner = nil
+        view.agentDisplayName = { $0 == recipient ? "First owner" : "Second owner" }
+        await detail.qaLoadComments()
+        for dark in [false, true] {
+            window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            view.appearance = window.appearance
+            await detail.qaLoadComments()
+            _ = try await web.evaluateJavaScript("window.taskEditor.theme(\(dark ? "{bg:'#14171c',card:'#1c212a',text:'#e9ebef',muted:'#a3aab5',line:'#414751',accent:'#9db7ff',mode:'dark'}" : "{bg:'#ffffff',card:'#f5f6f8',text:'#202329',muted:'#6b7079',line:'#e2e5ea',accent:'#4262dc',mode:'light'}"))")
+            _ = try await web.evaluateJavaScript("document.getAnimations().forEach(animation => animation.finish())")
+            try require((try await web.evaluateJavaScript("document.getElementById('assignee-value').textContent")) as? String == "Comment sender, Comment recipient", "detail visibly renders both assignees in \(dark ? "dark" : "light") appearance")
+            let native = KanbanCardView(card: runtime.board(id: boardID)!.card(cardID)!, assigneeName: view.assigneeName(for: runtime.board(id: boardID)!.card(cardID)!))
+            try require(native.qaAssigneeTitle.contains("First owner") && native.qaAssigneeTitle.contains("Second owner"), "native card visibly names every assignee")
+            let image = try await web.takeSnapshot(configuration: nil)
+            if let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) {
+                try png.write(to: output.appendingPathComponent(dark ? "multi-dark.png" : "multi-light.png"))
+            }
+        }
+        try ownership("unassign", nil, "multi-final-clear")
+        try require(runtime.board(id: boardID)!.card(cardID)!.assignees.isEmpty, "legacy unassign without identity clears every owner")
         print("board-comments: persistence, Undo, API, Markdown, guest thread, delivery, queue and loop guard passed")
     }
 }

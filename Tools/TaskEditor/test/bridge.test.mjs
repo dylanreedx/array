@@ -54,3 +54,20 @@ test('a read-only task (a board shared from another Mac) shows the document and 
  assert.equal(messages.length,before,'read only posts nothing');
  dom.window.taskEditor?.dispose?.();dom.window.close();
 });
+
+test('multiple assignees are visible and choices remove one owner at a time',()=>{
+ const dom=new JSDOM(readFileSync(new URL('../src/index.html',import.meta.url),'utf8'),{url:'file:///TaskEditor/index.html',runScripts:'outside-only',pretendToBeVisual:true});
+ const w=dom.window,messages=[];
+ w.webkit={messageHandlers:{taskEditor:{postMessage:m=>messages.push(m)}}};
+ w.eval(readFileSync(new URL('../../../Sources/ContinuumRevived/Resources/TaskEditor/editor.js',import.meta.url),'utf8'));
+ w.taskEditor.load({title:'Together',body:'',attachments:[],columns:[],agents:[{id:'a',name:'Alpha',detail:''},{id:'b',name:'Beta',detail:''}],assigneeIDs:['a','b'],assigneeID:'a'});
+ assert.equal(w.document.getElementById('assignee-value').textContent,'Alpha, Beta');
+ w.document.getElementById('agent-options').children[1].click();
+ assert.equal(w.document.getElementById('assignee-value').textContent,'Beta');
+ assert.equal(messages.at(-1).agentID,'a');
+ w.document.getElementById('agent-options').children[1].click();
+ assert.equal(w.document.getElementById('assignee-value').textContent,'Beta, Alpha');
+ w.document.getElementById('agent-options').children[0].click();
+ assert.equal(w.document.getElementById('assignee-value').textContent,'Assign agents');
+ dom.window.close();
+});

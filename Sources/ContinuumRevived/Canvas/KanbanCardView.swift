@@ -284,8 +284,8 @@ final class KanbanCardView: NSView, TokenThemed {
             (tile.taskAgents?() ?? []).map { agent in
                 ChoiceItem(
                     id: "assign:\(agent.id.rawValue.uuidString)", title: agent.name,
-                    icon: agent.id == card.assignee ? .system("checkmark") : .system("person.crop.circle"),
-                    enabled: agent.id != card.assignee
+                    icon: card.assignees.contains(agent.id) ? .system("checkmark") : .system("person.crop.circle"),
+                    enabled: true
                 )
             }
     }

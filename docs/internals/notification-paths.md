@@ -572,9 +572,11 @@ Core --companion-agent-destination-check and Sync --companion-task-publication-c
 ### BOARD-COMMENT-AGENT — card thread delivery
 
 Implemented by `BoardRuntime.configureCommentDelivery` → `BoardCommentDelivery`
-→ `AgentSupervisor.accept`. A durable new comment targets the assigned locally
-managed agent and same-project @UUID/@display-name mentions. The author's own
-agent is suppressed (`quiet_self`). Duplicate commits and history replay are
+→ `AgentSupervisor.accept`. A durable new comment targets all assigned locally
+managed agents and same-project @UUID/@display-name mentions. The author's own
+agent is suppressed (`quiet_self`). Assignment and mention recipients are unioned
+by agent ID, so each receives at most one delivery per comment. An empty
+recipient set is quiet. Duplicate commits and history replay are
 quiet; edits/deletes never dispatch. Later thread Undo, edits or deletion do not
 retract an already accepted turn or queue item. Validation or persistence failure
 produces no delivery. Comments remain durable if delivery fails.
@@ -595,5 +597,7 @@ change. Portal guests receive the committed snapshot thread read only; they do
 not trigger delivery. Cards open the thread through the existing task-details
 action; delivered prompts use the existing agent transcript/message surfaces.
 
-Witness: `--board-comments-check` covers assigned delivery, busy queueing,
+Witness: `--board-comments-check` covers multiple assigned recipients deduplicated
+against mentions, persistence/reload, additive assignment and targeted/clear-all
+unassignment, visible owner names in both appearances, assigned delivery, busy queueing,
 self suppression, mention-chain suppression, persistence/Undo and guest rendering.

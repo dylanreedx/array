@@ -16,7 +16,7 @@ public enum WorkspaceAPIExposure {
             + TileMetadata.CodingKeys.allCases.map { "tile.metadata.\($0.rawValue)" }
             + ZonePlacement.CodingKeys.allCases.map { "zone.\($0.rawValue)" }
             + Board.CodingKeys.allCases.map { "board.\($0.rawValue)" }
-            + BoardCard.CodingKeys.allCases.filter { $0 == .comments }.map { "boardCard.\($0.rawValue)" }
+            + BoardCard.CodingKeys.allCases.filter { $0 == .comments || $0 == .assignees }.map { "boardCard.\($0.rawValue)" }
             + BoardComment.CodingKeys.allCases.map { "boardComment.\($0.rawValue)" })
     }
 
@@ -142,6 +142,7 @@ public enum WorkspaceAPIExposure {
         "board.revision": .internal, // Concurrency token, bumped only by BoardEngine.
         "board.columns": .notExposed("Column structure stays user-managed; board.manage create uses the default columns."),
         "board.cards": .exposed(.boardApply),
+        "boardCard.assignees": .exposed(.boardApply),
         "boardCard.comments": .exposed(.boardApply),
         "boardComment.id": .internal,
         "boardComment.authorID": .internal,
