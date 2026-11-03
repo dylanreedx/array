@@ -120,7 +120,7 @@ public struct BoardCard: Codable, Equatable, Sendable, Identifiable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
-    private enum CodingKeys: String, CodingKey {
+    public enum CodingKeys: String, CodingKey, CaseIterable {
         case id, columnId, position, title, body, links, attachments, comments, assignee, createdAt, updatedAt
     }
 

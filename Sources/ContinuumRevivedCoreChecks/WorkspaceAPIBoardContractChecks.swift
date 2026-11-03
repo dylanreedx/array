@@ -2,6 +2,7 @@ import ContinuumRevivedCore
 import Foundation
 
 func runWorkspaceAPIBoardContractChecks() {
+    expect(BoardApplyRequest.Op(rawValue: "comment") == .comment && BoardApplyRequest.Op(rawValue: "editComment") == .editComment && BoardApplyRequest.Op(rawValue: "deleteComment") == .deleteComment, "board comment wire operations")
     let boardID = UUID()
     let cardID = UUID()
     let agentID = AgentID(rawValue: UUID())
@@ -86,5 +87,16 @@ func runWorkspaceAPIBoardContractChecks() {
     expect(WorkspaceAPIExposure.decisions["board.title"] == .exposed(.boardManage)
            && WorkspaceAPIExposure.decisions["board.cards"] == .exposed(.boardApply),
            "board titles are exposed through board.manage, tasks through board.apply")
+    let commentRequest = BoardApplyRequest(op: .editComment, boardId: boardID, expectedRevision: 8,
+        idempotencyKey: "comment-edit", cardId: cardID, body: "Updated", commentId: UUID())
+    expect(try! JSONDecoder().decode(BoardApplyRequest.self, from: encoder.encode(commentRequest)) == commentRequest, "comment edit wire round-trip")
+    let commentTool = WorkspaceMCPToolCatalog.tool(named: "array_board_apply")
+    if case .object(let properties)? = commentTool?.inputSchema["properties"] {
+        expect(properties["commentId"] != nil, "shared catalogue publishes commentId")
+        if case .object(let op)? = properties["op"], case .array(let choices)? = op["enum"] {
+            expect([WorkspaceMCPJSON.string("comment"), .string("editComment"), .string("deleteComment")].allSatisfy { choices.contains($0) }, "both transports publish every comment operation")
+        } else { expect(false, "comment operations are published") }
+    } else { expect(false, "shared catalogue has properties") }
+    expect(WorkspaceAPIExposure.violations().isEmpty, "comment fields have live exposure decisions")
     print("WorkspaceAPIBoardContractChecks passed")
 }

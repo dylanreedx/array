@@ -15,7 +15,9 @@ public enum WorkspaceAPIExposure {
             + Tile.CodingKeys.allCases.map { "tile.\($0.rawValue)" }
             + TileMetadata.CodingKeys.allCases.map { "tile.metadata.\($0.rawValue)" }
             + ZonePlacement.CodingKeys.allCases.map { "zone.\($0.rawValue)" }
-            + Board.CodingKeys.allCases.map { "board.\($0.rawValue)" })
+            + Board.CodingKeys.allCases.map { "board.\($0.rawValue)" }
+            + BoardCard.CodingKeys.allCases.filter { $0 == .comments }.map { "boardCard.\($0.rawValue)" }
+            + BoardComment.CodingKeys.allCases.map { "boardComment.\($0.rawValue)" })
     }
 
     // No fallback classification: a new field must be considered deliberately.
@@ -140,12 +142,14 @@ public enum WorkspaceAPIExposure {
         "board.revision": .internal, // Concurrency token, bumped only by BoardEngine.
         "board.columns": .notExposed("Column structure stays user-managed; board.manage create uses the default columns."),
         "board.cards": .exposed(.boardApply),
-        "boardCard.comments": .notExposed("Comment API integration pending."),
+        "boardCard.comments": .exposed(.boardApply),
         "boardComment.id": .internal,
         "boardComment.authorID": .internal,
         "boardComment.authorName": .internal,
         "boardComment.createdAt": .internal,
-        "boardComment.body": .notExposed("Comment API integration pending."),
+        "boardComment.authorColour": .internal,
+        "boardComment.authorCharacter": .internal,
+        "boardComment.body": .exposed(.boardApply),
     ]
 
     public static func violations(

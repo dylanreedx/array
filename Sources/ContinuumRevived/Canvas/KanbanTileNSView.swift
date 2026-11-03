@@ -92,6 +92,7 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
     /// Fires when a task is dropped on a managed-agent tile. The app turns it
     /// into an assignment. Preparing and sending remain separate actions.
     var onAssignToAgent: ((UUID, UUID) -> Void)?
+    var commentIdentity: ((AgentID) -> [String: Any])?
     var taskAgents: (() -> [BoardAgentChoice])?
     var onTaskAssign: ((UUID, AgentID?) -> String?)?
     var onTaskActionError: ((String) -> Void)?

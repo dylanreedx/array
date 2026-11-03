@@ -56,6 +56,7 @@ enum SharedPortalBoardChecks {
         try apply(.createTask(id: receipts, columnId: columns[1], title: "Receipt email", body: "Check the *template*.", links: [],
                               assignee: kept, after: nil, before: nil), "create Receipt email")
         try apply(.createCard(id: polish, columnId: columns[2], title: "Polish the toggle", after: nil, before: nil), "create Polish")
+        try apply(.addComment(cardID: wallet, comment: BoardComment(authorID: "local", authorName: "You", createdAt: Date(), body: "Please check the **next iteration**.")), "comment")
         // A picture on a card, in the project's own attachment store.
         let picture = BoardAttachment(filename: "mock.png", contentType: "image/png", pixelWidth: 64, pixelHeight: 40, byteCount: 0)
         let store = BoardAttachmentStore(projectRoot: root)
@@ -157,7 +158,7 @@ enum SharedPortalBoardChecks {
         }
         try require(guestView.cardView(for: receipts)?.qaMetaText == hostView.cardView(for: receipts)?.qaMetaText,
                     "a card's notes and picture markers match: \(guestView.cardView(for: receipts)?.qaMetaText ?? "")")
-        try require(guestView.cardView(for: wallet)?.qaMetaText == "Notes  3 linked" && hostView.cardView(for: wallet)?.qaMetaText == "Notes  4 linked",
+        try require(guestView.cardView(for: wallet)?.qaMetaText == "1 comment  Notes  3 linked" && hostView.cardView(for: wallet)?.qaMetaText == "1 comment  Notes  4 linked",
                     "the guest's links are the host's minus the file outside the project")
         guard let shownURL = guestView.board.card(wallet)?.links.first, case .url(let address) = shownURL else { throw Failure(description: "no URL link on the guest") }
         try require(address == "https://example.com/pr/12", "the guest's URL link is the scrubbed page: \(address)")
@@ -198,6 +199,8 @@ enum SharedPortalBoardChecks {
         try require(heading == "Plan" && strong == "Apple Pay", "the guest reads the card body as Markdown in the host's task editor")
         try require(editable == "false" && status == "Read only · Dylan's board", "the task editor is read only on the guest: \(status ?? "-")")
         try require(note?.hasPrefix("Map the checkout state machine is Dylan's agent") == true, "the task says whose agent the assignee is: \(note ?? "-")")
+        try require((try await editor.evaluateJavaScript("document.querySelector('.comment strong')?.textContent")) as? String == "next iteration", "portal wire preserves comment Markdown")
+        try require((try await editor.evaluateJavaScript("document.getElementById('comment-compose').hidden")) as? Bool == true, "portal thread has no posting controls")
         // The task editor as the guest sees it, light and dark (WebKit paints
         // out of process, so its own snapshot is the picture).
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -208,6 +211,7 @@ enum SharedPortalBoardChecks {
                 : "{bg:'#14171c',card:'#1c212a',text:'#e9ebef',muted:'#a3aab5',line:'#414751',accent:'#9db7ff',mode:'dark'}"
             _ = try? await editor.evaluateJavaScript("window.taskEditor.theme(\(colours))")
             try await Task.sleep(for: .milliseconds(200))
+            _ = try await editor.evaluateJavaScript("document.getAnimations().forEach(animation => animation.finish())")
             let image = try await editor.takeSnapshot(configuration: nil)
             guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { throw Failure(description: "no task picture") }
             let url = directory.appendingPathComponent("portal-board-task-\(name).png")
@@ -236,6 +240,8 @@ enum SharedPortalBoardChecks {
             }
             throw Failure(description: "\(label) never reached the guest: \(lanes(guestView)) vs \(lanes(hostView))")
         }
+        try apply(.addComment(cardID: wallet, comment: BoardComment(authorID: "local", authorName: "You", createdAt: Date(), body: "A live follow-up")), "live comment")
+        try await follow("a host comment") { guestView.board.card(wallet)?.comments.count == 2 }
         try apply(.moveCard(id: wallet, toColumn: columns[1], after: receipts, before: nil), "move Wallets")
         try await follow("a host move") { guestView.board.card(wallet)?.columnId == columns[1] }
         let fresh = UUID()

@@ -74,6 +74,7 @@ public struct BoardAPILink: Codable, Equatable, Sendable {
 }
 
 public struct BoardQueryCard: Codable, Equatable, Sendable {
+    public var comments: [BoardComment] = []
     public var cardId: UUID
     public var columnId: UUID
     public var title: String
@@ -178,8 +179,9 @@ public enum BoardQueryPage {
 }
 
 public struct BoardApplyRequest: Codable, Equatable, Sendable {
-    public enum Op: String, Codable, Sendable { case create, edit, move, assign, unassign, delete }
+    public enum Op: String, Codable, Sendable { case create, edit, move, assign, unassign, delete, comment, editComment, deleteComment }
 
+    public var commentId: UUID?
     public var op: Op
     public var checkoutHandle: CheckoutHandle?
     public var boardId: UUID
@@ -199,8 +201,9 @@ public struct BoardApplyRequest: Codable, Equatable, Sendable {
         checkoutHandle: CheckoutHandle? = nil, cardId: UUID? = nil,
         columnId: UUID? = nil, title: String? = nil, body: String? = nil,
         links: [BoardAPILink]? = nil, assigneeAgentId: AgentID? = nil,
-        afterCardId: UUID? = nil, beforeCardId: UUID? = nil
+        afterCardId: UUID? = nil, beforeCardId: UUID? = nil, commentId: UUID? = nil
     ) {
+        self.commentId = commentId
         self.op = op
         self.checkoutHandle = checkoutHandle
         self.boardId = boardId

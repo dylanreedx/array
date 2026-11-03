@@ -89,6 +89,7 @@ enum WorkspaceAPIChecks {
         settings: QAIsolatedDefaults? = nil,
         ghostty: GhosttyRuntimeContext? = nil,
         configureRuntime: ((WorkspaceRuntime) -> Void)? = nil,
+        configureDelegate: ((AppDelegate) -> Void)? = nil,
         beforeMount: ((_ delegate: AppDelegate, _ tempRoot: URL) throws -> Void)? = nil
     ) throws -> Fixture {
         let fileManager = FileManager.default
@@ -239,6 +240,7 @@ enum WorkspaceAPIChecks {
         canvas.frame = CGRect(x: 0, y: 0, width: 2000, height: 1200)
 
         let delegate = AppDelegate()
+        configureDelegate?(delegate)
         delegate.qaSettingsDefaults = settings
         func pinPermission() {
             if let settings {

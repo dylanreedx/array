@@ -553,13 +553,31 @@ IOS-03 now reads authenticated task.batch.v1 events through the existing relay p
 
 Core --companion-agent-destination-check and Sync --companion-task-publication-check cover identity, old-task/new-agent isolation, unknown restart, receipt freshness and actual URLSession task-poll delivery. Relay integration checks inspect the persisted fake-APNs request's exact destination. Matrix registration is required; source wiring alone does not prove cold-launch/foreground phone rendering. Text reply remains unimplemented: current relay command capabilities accept approval/stop only, and hosted per-phone encryption/authoritative session ACK require a new contract.
 
-### BOARD-COMMENT-AGENT — proposed, not implemented
+### BOARD-COMMENT-AGENT — card thread delivery
 
-A newly committed card comment should notify its assigned agent and explicitly
-mentioned agents through the existing agent-message queue: idle starts a turn;
-busy queues without interrupting. The payload should contain board/card IDs,
-card title, the new comment and a bounded recent-thread excerpt. Suppress the
-originating agent and cap inherited agent-to-agent chains. Missing/deleted or
-unavailable agents should leave the durable comment visible and report failed
-delivery; Undo and edits should not redispatch. This path is design only: the
-comment storage foundation does not deliver notifications.
+Implemented by `BoardRuntime.configureCommentDelivery` → `BoardCommentDelivery`
+→ `AgentSupervisor.accept`. A durable new comment targets the assigned locally
+managed agent and same-project @UUID/@display-name mentions. The author's own
+agent is suppressed (`quiet_self`). Duplicate commits and history replay are
+quiet; edits/deletes never dispatch. Later thread Undo, edits or deletion do not
+retract an already accepted turn or queue item. Validation or persistence failure
+produces no delivery. Comments remain durable if delivery fails.
+
+Idle targets receive `sendPrompt`; busy/starting targets receive the durable
+composer `queue`, without interruption. A project-scoped host hop budget (six)
+survives queued turns and resets for recipients of a human comment. Above the
+cap: `quiet_chain_limit`. Archived/missing/remote targets: `unavailable`.
+Admission failures are logged with the stable path ID and `failed_<reason>`;
+there is no automatic retry. The thread itself remains the readable record.
+The payload contains board/card IDs, a title capped at 240 characters (with an
+ellipsis when shortened), the complete new
+comment (at most 8192 UTF-8 bytes) and three earlier comments bounded to 400
+characters each, with an explicit continuation marker. Resulting turns retain
+the existing MAC-01/MAC-03/MAC-08 status and
+attention policies. This path adds no independent phone push, sound or focus
+change. Portal guests receive the committed snapshot thread read only; they do
+not trigger delivery. Cards open the thread through the existing task-details
+action; delivered prompts use the existing agent transcript/message surfaces.
+
+Witness: `--board-comments-check` covers assigned delivery, busy queueing,
+self suppression, mention-chain suppression, persistence/Undo and guest rendering.

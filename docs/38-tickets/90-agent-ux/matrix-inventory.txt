@@ -50,6 +50,7 @@ check --agent-transcript-projection-check
 check --ambient-tile-frame-space-check
 check --app-support-channel-check
 check --attention-notification-check
+check --board-comments-check
 check --board-interaction-check
 check --board-library-check
 check --board-model-check
@@ -484,6 +485,7 @@ leg run_app_check .build/debug/Array --agent-tile-rename-check
 leg run_app_check .build/debug/Array --ambient-tile-frame-space-check
 leg run_app_check .build/debug/Array --app-support-channel-check
 leg run_app_check .build/debug/Array --attention-notification-check
+leg run_app_check .build/debug/Array --board-comments-check
 leg run_app_check .build/debug/Array --board-interaction-check
 leg run_app_check .build/debug/Array --board-library-check
 leg run_app_check .build/debug/Array --board-task-workflow-check
@@ -884,6 +886,7 @@ leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode te
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
 leg run_leg python3 scripts/check-notification-map.py --self-test
 leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
+leg run_leg npm --prefix Tools/TaskEditor test
 leg run_leg scripts/capture-cli-fixtures.sh check
 leg run_leg scripts/check-app-bundle.sh --configuration debug
 leg run_leg scripts/check-color-hygiene.sh

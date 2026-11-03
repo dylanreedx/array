@@ -771,14 +771,24 @@ private func runBoardTaskContentCheck() {
 
 private func runBoardCommentCheck() {
     let (board, _, _) = makeFixture()
-    guard let card = board.cards.first else { fatalError("comment fixture requires a card") }
-    let comment = BoardComment(authorID: "local", authorName: "You", createdAt: Date(timeIntervalSince1970: 100), body: "**Progress**")
+    guard let card = board.cards.first else { fputs("FAIL: comment fixture requires a card\n", stderr); Foundation.exit(1) }
+    let comment = BoardComment(id: UUID(uuidString: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF")!, authorID: "local", authorName: "You", createdAt: Date(timeIntervalSince1970: 100), body: "**Progress**")
     let added = applyOrFail(.addComment(cardID: card.id, comment: comment), to: board, "comment add")
     expect(added.after.card(card.id)?.comments == [comment], "comment add preserves attribution and markdown")
+    let second = BoardComment(id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, authorID: "local", authorName: "You", createdAt: comment.createdAt, body: "Same second, later arrival")
+    let pair = applyOrFail(.addComment(cardID: card.id, comment: second), to: added.after, "same-second comment")
+    expect(pair.after.card(card.id)?.comments == [comment, second], "comment order follows commits, even when timestamps coincide")
+    let deleted = applyOrFail(.deleteComment(cardID: card.id, commentID: comment.id, authorID: "local"), to: pair.after, "comment delete")
+    let restoredPair = applyOrFail(deleted.inverse, to: deleted.after, "comment delete undo")
+    expect(restoredPair.after.card(card.id)?.comments == [comment, second], "comment deletion Undo restores its original position")
     let undone = applyOrFail(added.inverse, to: added.after, "comment undo")
     expect(undone.after.card(card.id)?.comments.isEmpty == true, "comment inverse removes comment")
     let edited = applyOrFail(.editComment(cardID: card.id, commentID: comment.id, authorID: "local", body: "Updated"), to: added.after, "comment edit")
     expect(edited.after.card(card.id)?.comments.first?.body == "Updated", "comment edit changes body")
+    switch BoardEngine.apply(.editComment(cardID: card.id, commentID: comment.id, authorID: "local", body: "Stale overwrite", expectedBody: comment.body), to: edited.after, now: Date()) {
+    case .success: expect(false, "a stale comment editor cannot overwrite a newer body")
+    case .failure: break
+    }
     let reverted = applyOrFail(edited.inverse, to: edited.after, "comment edit undo")
     expect(reverted.after.card(card.id)?.comments == [comment], "comment edit inverse restores body")
     switch BoardEngine.apply(.deleteComment(cardID: card.id, commentID: comment.id, authorID: "other"), to: added.after, now: Date()) {
@@ -789,5 +799,11 @@ private func runBoardCommentCheck() {
         let bytes = try JSONEncoder().encode(added.after)
         let restored = try JSONDecoder().decode(Board.self, from: bytes)
         expect(restored.card(card.id)?.comments == [comment], "comment survives board encoding")
-    } catch { fatalError("comment persistence: \(error)") }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("board-comment-store-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectRoot: root)
+        try store.saveBoard(pair.after)
+        let storedPair = try store.loadBoard(id: board.id)
+        expect(storedPair.card(card.id)?.comments == [comment, second], "the project store preserves same-second comment order")
+    } catch { fputs("FAIL: comment persistence: \(error)\n", stderr); Foundation.exit(1) }
 }

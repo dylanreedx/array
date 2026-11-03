@@ -156,7 +156,38 @@ extension WorkspaceAPIService {
         }
         let command: BoardCommand
         do {
+            if request.commentId != nil && ![BoardApplyRequest.Op.editComment, .deleteComment].contains(request.op) { throw BoardRequestFailure("commentId is only valid for editComment/deleteComment.") }
             switch request.op {
+            case .comment, .editComment, .deleteComment:
+                guard request.columnId == nil, request.title == nil, request.links == nil,
+                      request.assigneeAgentId == nil, request.afterCardId == nil, request.beforeCardId == nil else {
+                    throw BoardRequestFailure("Comment operations accept cardId, body and commentId only.")
+                }
+                let author = agentId.rawValue.uuidString.lowercased()
+                if request.op == .comment {
+                    guard request.commentId == nil else { throw BoardRequestFailure("Array creates commentId.") }
+                    let body = try validatedBoardBody(request.body ?? "")
+                    guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, body.utf8.count <= 8192 else { throw BoardRequestFailure("Comment body must be 1–8192 bytes.") }
+                    var comment = BoardComment(authorID: author, authorName: supervisor.records[agentId]?.humanDisplayName ?? "Agent", createdAt: Date(), body: body)
+                    if let record = supervisor.records[agentId] {
+                        let identity = boardCommentIdentity(record, dark: true)
+                        comment.authorColour = identity["colour"] as? String
+                        comment.authorCharacter = identity["character"] as? String
+                    }
+                    command = .addComment(cardID: cardId, comment: comment)
+                } else {
+                    guard let commentID = request.commentId else { throw BoardRequestFailure("commentId is required.") }
+                    guard let existing = board.card(cardId)?.comments.first(where: { $0.id == commentID }) else { throw BoardRequestFailure("No comment with that id exists on this card.", code: .notFound) }
+                    guard existing.authorID == author else { throw BoardRequestFailure("You may change only your own comments.", code: .permissionDenied) }
+                    if request.op == .deleteComment {
+                        guard request.body == nil else { throw BoardRequestFailure("deleteComment does not accept body.") }
+                        command = .deleteComment(cardID: cardId, commentID: commentID, authorID: author)
+                    } else {
+                        let body = try validatedBoardBody(request.body ?? "")
+                        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, body.utf8.count <= 8192 else { throw BoardRequestFailure("Comment body must be 1–8192 bytes.") }
+                        command = .editComment(cardID: cardId, commentID: commentID, authorID: author, body: body)
+                    }
+                }
             case .create:
                 guard request.cardId == nil else { throw BoardRequestFailure("Array creates cardId for create operations; omit cardId.") }
                 guard let columnId = request.columnId else { throw BoardRequestFailure("create requires columnId.") }
@@ -278,11 +309,13 @@ extension WorkspaceAPIService {
     }
 
     private func boardQueryCard(_ card: BoardCard, checkout: CheckoutHandle) -> BoardQueryCard {
-        BoardQueryCard(
+        var result = BoardQueryCard(
             cardId: card.id, columnId: card.columnId, title: card.title, body: card.body,
             links: card.links.compactMap { boardAPILink($0, fallbackCheckout: checkout) },
             attachments: card.attachments, assigneeAgentId: card.assignee,
             createdAt: card.createdAt, updatedAt: card.updatedAt)
+        result.comments = card.comments
+        return result
     }
 
     private func boardAPILink(_ link: CardLink, fallbackCheckout: CheckoutHandle) -> BoardAPILink? {

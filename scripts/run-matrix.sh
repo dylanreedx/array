@@ -50,6 +50,7 @@ CODEX_PERMISSIONS_ONLY=0
 TILE_SELECTION_ONLY=0
 AGENT_REFERENCE_ONLY=0
 BOARDS_ONLY=0
+BOARD_COMMENTS_ONLY=0
 WORKSPACE_SELECTOR_ONLY=0
 AGENT_TILE_MENU_ONLY=0
 TRANSCRIPT_VIEWPORT_ONLY=0
@@ -90,6 +91,10 @@ if [[ $# -gt 0 ]]; then
       ;;
     --tile-selection)
       TILE_SELECTION_ONLY=1
+      shift
+      ;;
+    --board-comments)
+      BOARD_COMMENTS_ONLY=1
       shift
       ;;
     --boards)
@@ -861,10 +866,26 @@ if [[ "$TRANSCRIPT_VIEWPORT_ONLY" -eq 1 ]]; then
   matrix_report 'Transcript viewport matrix (targeted)'
   exit $?
 fi
+if [[ "$BOARD_COMMENTS_ONLY" -eq 1 ]]; then
+  run_leg scripts/check-color-hygiene.sh
+  run swift build --product Array
+  run swift build --product ContinuumRevivedCoreChecks
+  run_app_check .build/debug/Array --board-comments-check
+  run_app_check .build/debug/Array --portal-board-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-board-contract-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check
+  run_leg npm --prefix Tools/TaskEditor test
+  matrix_report 'Card comments matrix (targeted)'
+  exit $?
+fi
 if [[ "$BOARDS_ONLY" -eq 1 ]]; then
   run_leg scripts/check-color-hygiene.sh
   run swift build --product Array
   run swift build --product ContinuumRevivedCoreChecks
+  run_app_check .build/debug/Array --board-comments-check
+  run_app_check .build/debug/Array --portal-board-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-board-contract-check
   run_app_check .build/debug/Array --board-library-check
   run_app_check .build/debug/Array --board-tile-lifecycle-check
   run_app_check .build/debug/Array --board-interaction-check
@@ -2177,6 +2198,8 @@ else
 fi
 run_leg scripts/check-root-docs.sh
 run git diff --check
+
+run_app_check .build/debug/Array --board-comments-check
 
 if [[ "$FAST" -eq 1 ]]; then
   matrix_report "Fast matrix"

@@ -144,6 +144,7 @@ final class KanbanCardView: NSView, TokenThemed {
     /// card renders one line shorter.
     static func metaText(for card: BoardCard, assigneeName: String?) -> String? {
         var parts: [String] = []
+        if !card.comments.isEmpty { parts.append("\(card.comments.count) comment\(card.comments.count == 1 ? "" : "s")") }
         if !card.attachments.isEmpty { parts.append("\(card.attachments.count) image\(card.attachments.count == 1 ? "" : "s")") }
         if !card.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { parts.append("Notes") }
         if !card.links.isEmpty { parts.append("\(card.links.count) linked") }

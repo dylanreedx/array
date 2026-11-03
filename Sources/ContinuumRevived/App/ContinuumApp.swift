@@ -5330,6 +5330,21 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--board-comments-check") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(90))
+                fputs("FAIL: board comments check exceeded 90 seconds\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do { try await BoardCommentsChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--board-task-workflow-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -10313,6 +10328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard runtime.tileConfigurator == nil else { return runtime }
         let projectID = controller.project.id
         let attachmentStore = BoardAttachmentStore(projectRoot: controller.projectRoot)
+        runtime.configureCommentDelivery(supervisor: agentSupervisor, projectID: projectID)
         runtime.onCommittedTransaction = { [weak self, weak runtime] transaction, actingAgent in
             guard let self, let runtime else { return }
             self.synchronizeBoardTaskContexts(
@@ -10329,6 +10345,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             view.taskAttachmentStore = attachmentStore
             view.onTaskActionError = { [weak self] error in self?.presentSpawnRefusal(error) }
             view.agentDisplayName = { [weak self] id in self?.agentSupervisor.displayName(forAgent: id) }
+            view.commentIdentity = { [weak self, weak view] id in
+                guard let record = self?.agentSupervisor.records[id] else { return [:] }
+                return boardCommentIdentity(record, dark: view?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+            }
             view.taskAgents = { [weak self, weak view] in
                 guard let self else { return [] }
                 let zoneID = view?.tile.zoneId

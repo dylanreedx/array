@@ -43,6 +43,18 @@ enum BoardLifecycleError: LocalizedError {
 
 @MainActor
 final class BoardRuntime {
+    private var commentDelivery: BoardCommentDelivery?
+    func configureCommentDelivery(supervisor: AgentSupervisor, projectID: UUID) {
+        guard commentDelivery == nil else { return }
+        let delivery = BoardCommentDelivery()
+        commentDelivery = delivery
+        onCommentCommit = { [weak supervisor] transaction, actor in
+            guard let supervisor else { return }
+            delivery.committed(transaction, actingAgent: actor, projectID: projectID, supervisor: supervisor)
+        }
+    }
+    private var onCommentCommit: ((BoardTransaction, AgentID?) -> Void)?
+    var commentDeliveryForQA: BoardCommentDelivery? { commentDelivery }
     private let projectStore: any ProjectStoring
     private var boards: [UUID: Board] = [:]
     private var views: [UUID: [WeakBoardView]] = [:]
@@ -238,6 +250,7 @@ final class BoardRuntime {
         broadcast(transaction.after, for: boardId, skipping: nil)
         onBoardIndexChanged?()
         onCommittedTransaction?(transaction, actingAgent)
+        if recordUndo { onCommentCommit?(transaction, actingAgent) }
         return transaction.rebasedAnchors
             ? .rebased(revision: transaction.after.revision)
             : .applied(revision: transaction.after.revision)
@@ -381,7 +394,7 @@ extension BoardCommand {
     /// long as a pointer is down.
     func touches(cardId: UUID, in board: Board) -> Bool {
         switch self {
-        case let .addComment(id, _), let .editComment(id, _, _, _), let .deleteComment(id, _, _),
+        case let .addComment(id, _, _), let .editComment(id, _, _, _, _), let .deleteComment(id, _, _),
              let .editTask(id, _, _), let .editCard(id, _, _), let .editTaskFields(id, _, _, _),
              let .moveCard(id, _, _, _),
              let .deleteCard(id), let .setCardLinks(id, _), let .assignCard(id, _):

@@ -103,6 +103,7 @@ final class BoardTaskDetailController: NSObject, WKScriptMessageHandler, WKNavig
         return true
     }
     private func dismiss(restoreFocus: Bool = true) {
+        call("dispose")
         saveTask?.cancel()
         presentationRequested = false
         overlay?.removeFromSuperview()
@@ -118,10 +119,12 @@ final class BoardTaskDetailController: NSObject, WKScriptMessageHandler, WKNavig
         guard ready, let data = try? JSONSerialization.data(withJSONObject: arguments), let json = String(data: data, encoding: .utf8) else { return }
         web.evaluateJavaScript("window.taskEditor.\(method)(...\(json))", completionHandler: nil)
     }
+    private var commentIdentities: [String: [String: Any]] = [:]
     private func snapshot() -> [String: Any] {
+        commentIdentities.removeAll(keepingCapacity: true)
         guard let tile, let card = tile.board.card(cardID) else { return [:] }
         let agents = tile.taskAgents?() ?? []
-        return ["title": draft.title, "body": draft.body,
+        return ["comments": card.comments.map { commentJSON($0) }, "title": draft.title, "body": draft.body,
                 "attachments": draft.attachments.map(Self.imageJSON),
                 "agents": agents.map { ["id": $0.id.rawValue.uuidString, "name": $0.name, "detail": $0.detail] },
                 "columns": tile.board.orderedColumns.map { ["id": $0.id.uuidString, "name": $0.name] },
@@ -136,6 +139,20 @@ final class BoardTaskDetailController: NSObject, WKScriptMessageHandler, WKNavig
         guard let owner = tile.readOnlyOwner else { return [:] }
         let agent = tile.assigneeName(for: card).map { "\($0) is \(owner)'s agent. It runs on \(owner)'s Mac." } ?? ""
         return ["readOnly": true, "readOnlyNote": "Read only · \(owner)'s board", "readOnlyDetail": agent]
+    }
+    private func commentJSON(_ comment: BoardComment) -> [String: Any] {
+        var value: [String: Any] = ["id": comment.id.uuidString, "authorID": comment.authorID,
+            "authorName": comment.authorName, "body": comment.body,
+            "createdAt": ISO8601DateFormatter().string(from: comment.createdAt)]
+        if comment.authorID == "local", let owner = tile?.readOnlyOwner { value["authorName"] = owner }
+        if let colour = comment.authorColour { value["colour"] = colour }
+        if let character = comment.authorCharacter { value["character"] = character }
+        if let identity = commentIdentities[comment.authorID] { value.merge(identity) { _, new in new } }
+        else if let id = UUID(uuidString: comment.authorID), let identity = tile?.commentIdentity?(AgentID(rawValue: id)) {
+            commentIdentities[comment.authorID] = identity
+            value.merge(identity) { _, new in new }
+        }
+        return value
     }
     private static func imageJSON(_ image: BoardAttachment) -> [String: Any] {
         ["id": image.id.uuidString, "filename": image.filename, "url": image.imageURL]
@@ -211,6 +228,26 @@ final class BoardTaskDetailController: NSObject, WKScriptMessageHandler, WKNavig
             let dark = web.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             if !dark { call("theme", [["bg":"#ffffff", "card":"#f5f6f8", "text":"#202329", "muted":"#6b7079", "line":"#e2e5ea", "accent":"#4262dc", "mode":"light"]]) }
             loadAndMount()
+        case "addComment", "editComment", "deleteComment":
+            guard let tile, let runtime = tile.boardRuntime else {
+                call("commentFailed"); call("error", ["The board is no longer available. Your draft is still here."]); return
+            }
+            let command: BoardCommand
+            if type == "addComment" {
+                guard let body = value["body"] as? String, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, body.utf8.count <= 8192 else { call("commentFailed"); call("error", ["Comments must be 1–8192 bytes."]); return }
+                command = .addComment(cardID: cardID, comment: BoardComment(authorID: "local", authorName: "You", createdAt: Date(), body: body))
+            } else {
+                guard let raw = value["commentID"] as? String, let id = UUID(uuidString: raw) else { return }
+                if type == "deleteComment" { command = .deleteComment(cardID: cardID, commentID: id, authorID: "local") }
+                else {
+                    guard let body = value["body"] as? String, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, body.utf8.count <= 8192 else { call("commentFailed"); call("error", ["Comments must be 1–8192 bytes."]); return }
+                    command = .editComment(cardID: cardID, commentID: id, authorID: "local", body: body, expectedBody: value["expectedBody"] as? String)
+                }
+            }
+            switch runtime.apply(command, to: tile.board.id, originatingView: tile) {
+            case .applied, .rebased: call("commentSaved", [type]); call("metadata", [snapshot()])
+            default: call("commentFailed"); call("error", ["The comment could not be saved. Your draft is still here."])
+            }
         case "change": changed(value)
         case "close": closeEditor()
         case "refreshAgents": call("metadata", [snapshot()])
@@ -282,6 +319,12 @@ final class BoardTaskDetailController: NSObject, WKScriptMessageHandler, WKNavig
     }
 
     var qaEditor: WKWebView { web }
+    func qaLoadComments() async {
+        for _ in 0..<100 where !ready { try? await Task.sleep(for: .milliseconds(25)) }
+        web.isHidden = false
+        call("load", [snapshot()])
+        try? await Task.sleep(for: .milliseconds(150))
+    }
 }
 
 /// A window-sized input shield. The document stays in screen coordinates even

@@ -157,6 +157,9 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         }
         let card = cardTitle.map { "\u{201C}\(clipped($0))\u{201D}" } ?? "a card"
         switch op {
+        case .comment: return "Commented on \(card)"
+        case .editComment: return "Edited a comment on \(card)"
+        case .deleteComment: return "Deleted a comment on \(card)"
         case .create: return "Added \(card)"
         case .edit: return "Edited \(card)"
         case .move: return "Moved \(card)" + (columnName.map { " to \(clipped($0))" } ?? "")

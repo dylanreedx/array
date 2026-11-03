@@ -29,7 +29,7 @@ test('editor controls emit typed native bridge messages and keep initial content
  assert.equal(w.document.getElementById('status-options').children[1].getAttribute('aria-selected'),'true');
  w.document.getElementById('title').value='Edited';w.document.getElementById('title').dispatchEvent(new w.Event('input'));
  assert.equal(messages.at(-1).type,'change'); assert.equal(messages.at(-1).title,'Edited'); assert.equal(messages.at(-1).body,'**Context**');
- dom.window.close();
+ dom.window.taskEditor?.dispose?.();dom.window.close();
 });
 test('a read-only task (a board shared from another Mac) shows the document and sends no edits',()=>{
  const html=readFileSync(new URL('../src/index.html',import.meta.url),'utf8');
@@ -52,5 +52,5 @@ test('a read-only task (a board shared from another Mac) shows the document and 
  assert.equal(d.getElementById('status-picker').hidden,true); assert.equal(d.getElementById('agent-picker').hidden,true);
  d.getElementById('title').value='Edited';d.getElementById('title').dispatchEvent(new w.Event('input'));
  assert.equal(messages.length,before,'read only posts nothing');
- dom.window.close();
+ dom.window.taskEditor?.dispose?.();dom.window.close();
 });
