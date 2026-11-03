@@ -10,7 +10,8 @@ import ContinuumRevivedCore
 // sidebar. At Small, Medium and Large (1, 1.5, 2.25):
 // - the agent tile's title bar is 24 × factor tall, or today's floored bar (28
 //   at 100%, more zoomed out) when that is taller, and the body starts 24 × factor
-//   down; zoomed far out every size draws like Small;
+//   down (plus the under-bar) at 100%, and lower but never covered when zoomed
+//   out (f56a0e79); zoomed far out every size draws like Small;
 // - at Medium and Large the header character is a whole number of device pixels
 //   per art pixel at 100%, from a device-pixel origin (the sidebar's rule; Small
 //   keeps today's 7/6 pt per art pixel exactly), and sits centred in the bar
@@ -169,10 +170,17 @@ enum CharacterSizeChecks {
                 try expect(abs(bar - expectedBar) < 0.01, "\(where_): the agent tile's title bar is \(expectedBar) pt, got \(bar)")
                 // The size sets the design bar; the body starts under it and under
                 // the under-bar, which owns its own height (`--tile-chrome-scale-check`).
+                // f56a0e79: zoomed out, the readable bar and under-bar grow in world
+                // units and the body moves down with them so nothing covers it. So at
+                // 100% the body starts where it always did, and when zoomed out it
+                // never starts higher than that. That nothing covers it is the
+                // containment witnesses' (--agent-tile-fit-check and the composer's).
                 let under = view.underBarWorldHeight
-                let expectedTop = 24 * factor + (under == 0 ? 0 : (under * TileNSView.minScreenGrabPx / TileNSView.titleBarHeight).rounded(.up))
-                try expect(abs(view.naturalTitleBarHeight - 24 * factor) < 0.01 && abs(view.contentTopInsetWorldHeight - expectedTop) < 0.01,
-                           "\(where_): the body starts \(expectedTop) pt down, under a \(24 * factor) pt bar (\(view.naturalTitleBarHeight), \(view.contentTopInsetWorldHeight))")
+                let atNatural = 24 * factor + (under == 0 ? 0 : (under * TileNSView.minScreenGrabPx / TileNSView.titleBarHeight).rounded(.up))
+                let top = view.contentTopInsetWorldHeight
+                try expect(abs(view.naturalTitleBarHeight - 24 * factor) < 0.01
+                           && (zoom == 1 ? abs(top - atNatural) < 0.01 : top >= atNatural - 0.01),
+                           "\(where_): the body starts \(zoom == 1 ? "" : "at least ")\(atNatural) pt down, under a \(24 * factor) pt bar (\(view.naturalTitleBarHeight), \(top))")
                 try expect(noteView.chromeBarHeight == floor, "\(where_): a note (no character) keeps today's \(floor) pt bar, got \(noteView.chromeBarHeight)")
                 guard let sprite = view.qaCharacterRect, let mark = view.qaProviderMarkRect,
                       let barView = view.qaTitleBarView else {
