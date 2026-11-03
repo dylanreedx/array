@@ -142,12 +142,13 @@ final class CodeEditorHostView: NSView {
         text: String,
         language: String,
         revision: UInt64,
+        readOnly: Bool = false,
         completion: Completion<UInt64>? = nil
     ) {
         activeDocumentID = documentID
         invoke(
             method: "loadDocument",
-            payload: ["documentId": documentID, "text": text, "language": language, "revision": revision],
+            payload: ["documentId": documentID, "text": text, "language": language, "revision": revision, "readOnly": readOnly],
             completion: completion
         ) { reply in
             guard let revision = Self.uint64(reply["revision"]) else { throw CodeEditorHostError.invalidBridgeReply }

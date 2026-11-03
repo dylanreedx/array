@@ -45,6 +45,11 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
     private let caption = NSTextField(labelWithString: "")
     private let scroll = NSScrollView()
     private let textView = NSTextView()
+    private var markdownSurface: MarkdownDocumentSurface?
+    private var documentSurface: NSView?
+    private var codeEditor: CodeEditorHostView?
+    private let editorDocumentID = UUID().uuidString
+    private var diffModel: GitDiffModel?
     private let frameView = LiveTileFrameView()
     /// A terminal that streams draws through this (`SharedTerminalMirrorView`).
     private let terminalMirror: SharedTerminalMirrorView?
@@ -82,6 +87,8 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         textView.textContainerInset = NSSize(width: 8, height: 8)
         textView.font = kind == .note ? .token(.body) : .token(.bodyMono)
         textView.drawsBackground = false
+        textView.minSize = .zero
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
@@ -90,6 +97,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
+        scroll.scrollerStyle = .overlay
         frameView.onClick = { [weak self] x, y in self?.send(.browserClick(x: x, y: y)) }
         frameView.onScroll = { [weak self] dx, dy in self?.accumulateScroll(dx: dx, dy: dy) }
         frameView.isHidden = true
@@ -176,9 +184,18 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
             showReplicaText()
         case .file(let file):
             setReadOnlyText(file.text ?? file.notice ?? "")
+            showFile(file)
         case .diff(let diff):
             setReadOnlyText(diff.diff)
-            colourDiffLines()
+            diffModel = GitDiffParser.parse(diff.diff)
+            textView.isRichText = true
+            textView.isHorizontallyResizable = true
+            textView.textContainer?.widthTracksTextView = false
+            textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            textView.textContainer?.lineBreakMode = .byClipping
+            scroll.hasHorizontalScroller = true
+            scroll.autohidesScrollers = true
+            renderDiff()
         case .terminal(let terminal):
             if let screen = terminal.screen, let terminalMirror {
                 terminalMirror.isHidden = false; scroll.isHidden = true
@@ -210,6 +227,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
 
     func textDidChange(_ notification: Notification) {
         guard kind == .note, !applyingRemote, inputEnabled, var replica else { return }
+        markdownSurface?.draftDidChange(textView.string)
         let ops = replica.edit(to: textView.string)
         self.replica = replica
         guard !ops.isEmpty else { return }
@@ -220,12 +238,21 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
     private func showReplicaText() {
         guard let replica else { return }
         let next = replica.text
-        guard next != textView.string else { return }
+        if markdownSurface == nil {
+            textView.font = .token(.bodyMono)
+            scroll.autohidesScrollers = true
+            let surface = MarkdownDocumentSurface(textView: textView, sourceScrollView: scroll,
+                initialDraft: next, mode: .split, theme: { [weak self] in self?.effectiveTokenTheme ?? .dark })
+            markdownSurface = surface
+            installDocument(surface.activeBody)
+        }
+        guard next != textView.string else { markdownSurface?.draftDidChange(next); return }
         // Replace only what changed, so the caret and selection stay put
         // around a teammate's edit, as they would around a local one.
         applyingRemote = true
         LiveTileTextSplice.replace(in: textView, with: next)
         applyingRemote = false
+        markdownSurface?.draftDidChange(next)
     }
 
     private func send(_ body: Collaboration.LiveTile.EventBody) {
@@ -292,6 +319,46 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
             else { colour = nil }
             if let colour { storage.addAttribute(.foregroundColor, value: colour, range: range) }
         }
+    }
+
+    private func installDocument(_ view: NSView) {
+        if documentSurface !== view {
+            if documentSurface !== scroll { documentSurface?.removeFromSuperview() }
+            documentSurface = view
+            addSubview(view)
+            scroll.isHidden = view !== scroll
+            needsLayout = true
+        }
+    }
+
+    private func showFile(_ file: Collaboration.LiveTile.File) {
+        guard let text = file.text else {
+            installDocument(scroll)
+            return
+        }
+        if file.language == "markdown" || ["md", "markdown"].contains((file.name as NSString).pathExtension.lowercased()) {
+            if markdownSurface == nil {
+                markdownSurface = MarkdownDocumentSurface(textView: textView, sourceScrollView: scroll,
+                    initialDraft: text, mode: .preview, theme: { [weak self] in self?.effectiveTokenTheme ?? .dark })
+            }
+            markdownSurface?.replaceDraft(text)
+            installDocument(markdownSurface!.activeBody)
+        } else {
+            if codeEditor == nil {
+                codeEditor = CodeEditorHostView(frame: .zero)
+                codeEditor?.setPreferences(EditorPreferences(), isDark: effectiveTokenTheme == .dark)
+            }
+            let editor = codeEditor!
+            installDocument(editor)
+            editor.loadDocument(documentID: editorDocumentID, text: text,
+                language: FileTileNSView.codeMirrorLanguage(FilePreview.sourceLanguage(forPath: file.name)),
+                revision: state?.revision ?? 0, readOnly: true)
+        }
+    }
+
+    private func renderDiff() {
+        guard let diffModel else { return }
+        textView.textStorage?.setAttributedString(DiffReviewTileNSView.render(diffModel, theme: effectiveTokenTheme))
     }
 
     // MARK: Browser
@@ -481,7 +548,8 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         let top = browserChrome?.height ?? 26
         browserChrome?.frame = NSRect(x: 0, y: 0, width: bounds.width, height: top)
         let body = NSRect(x: 0, y: top, width: bounds.width, height: max(0, bounds.height - top))
-        scroll.frame = body
+        if scroll.superview === self, scroll.frame != body { scroll.frame = body }
+        if let documentSurface, documentSurface.frame != body { documentSurface.frame = body }
         frameView.frame = body
         terminalMirror?.frame = body
         webView?.frame = body
@@ -494,7 +562,9 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         textView.textColor = primary
         // An empty text view reads its colour back from its typing attributes.
         textView.typingAttributes[.foregroundColor] = primary
-        if kind == .diff { colourDiffLines() }
+        markdownSurface?.applyTheme()
+        codeEditor?.setPreferences(EditorPreferences(), isDark: effectiveTokenTheme == .dark)
+        if kind == .diff { renderDiff() }
         textView.insertionPointColor = TextToken.textPrimary.color.nsColor(in: self)
         needsDisplay = true
     }
@@ -509,8 +579,11 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
     // MARK: QA
 
 
-    var qaContentSurface: NSView? { kind == .browser ? nil : scroll }
     var qaText: String { textView.string }
+    /// The shared content itself, under the caption: what the parity witness
+    /// compares with the owner's tile body. Nil for a browser, whose top is
+    /// the browser's own chrome.
+    var qaContentSurface: NSView? { kind == .browser ? nil : (documentSurface ?? scroll) }
     var qaCaption: String { caption.stringValue }
     var qaEditable: Bool { textView.isEditable }
     var qaFrameSequence: UInt64 { frameView.frame_?.sequence ?? 0 }

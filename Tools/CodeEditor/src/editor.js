@@ -200,7 +200,7 @@ function requestDefinition(position) {
 }
 
 window.arrayEditor = {
-  loadDocument({documentId, text, language: languageName, revision}) {
+  loadDocument({documentId, text, language: languageName, revision, readOnly = false}) {
     completionRequests.forEach(request => request.resolve(null))
     completionRequests.clear()
     hoverRequests.forEach(request => request.resolve(null))
@@ -215,6 +215,7 @@ window.arrayEditor = {
       view = new EditorView({state, parent: document.querySelector("#editor")})
       view.scrollDOM.addEventListener("scroll", postViewState, {passive: true})
     }
+    if (readOnly) view.dispatch({effects: editable.reconfigure([EditorView.editable.of(false), EditorState.readOnly.of(true)])})
     hookVimMode()
     return {documentId, revision}
   },

@@ -1933,7 +1933,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         return normalized
     }
 
-    private static func codeMirrorLanguage(_ language: FilePreview.SourceLanguage) -> String {
+    static func codeMirrorLanguage(_ language: FilePreview.SourceLanguage) -> String {
         switch language {
         case .javascript: return "javascript"
         case .typescript: return "typescript"
