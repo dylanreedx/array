@@ -510,9 +510,11 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         guard let browserChrome else { return }
         var title = fallbackTitle, address = "", hasPage = false, status: String
         var back: String?
+        var tabs: Collaboration.LiveTile.BrowserTabs?
         if case .browser(let browser)? = state?.payload {
             if !browser.title.isEmpty { title = browser.title }
             address = browser.url ?? ""
+            tabs = browser.tabs
         }
         switch browserMode {
         case .follow:
@@ -531,7 +533,7 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         case .waiting:
             status = state == nil ? "Connecting…" : followFailed != nil ? "Didn't load here" : inPortal ? "Still" : "Waiting"
         }
-        browserChrome.update(title: title, address: address, hasPage: hasPage, status: status, backTitle: back)
+        browserChrome.update(title: title, address: address, hasPage: hasPage, status: status, backTitle: back, tabs: tabs)
         frameView.placeholder = followFailed != nil
             ? "This page didn't load on your Mac, and \(hostName) hasn't sent a picture of it yet."
             : "The page is on \(hostName)'s Mac. A picture shows here once \(hostName) has it on screen."
@@ -570,6 +572,12 @@ final class LiveTileBodyView: NSView, NSTextViewDelegate, WKNavigationDelegate {
         needsDisplay = true
     }
     override func draw(_ dirtyRect: NSRect) {
+        // A browser paints what the owner's browser tile paints behind its page.
+        if kind == .browser, browserChrome != nil {
+            BrowserChromeStyle.background.setFill()
+            bounds.fill()
+            return
+        }
         SurfaceToken.tileBody.color.nsColor(in: self).setFill()
         bounds.fill()
         LineToken.separator.color.nsColor(in: self).setFill()

@@ -176,7 +176,8 @@ extension AppDelegate {
             let view: @MainActor () -> BrowserTileNSView? = { [weak canvas] in canvas?.tileView(for: tileID) as? BrowserTileNSView }
             return BrowserLiveSource(webView: { (view()?.runtime as? WKWebViewBrowserRuntime)?.webView },
                                      address: { (view()?.runtime.url).flatMap { $0.isEmpty ? nil : $0 } ?? tile.metadata.url ?? "" },
-                                     title: { view()?.runtime.title ?? tile.title })
+                                     title: { view()?.runtime.title ?? tile.title },
+                                     tabs: { view()?.sharedTabs })
         default:
             return nil
         }

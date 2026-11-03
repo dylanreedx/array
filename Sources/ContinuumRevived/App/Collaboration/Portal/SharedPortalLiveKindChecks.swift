@@ -168,6 +168,34 @@ enum SharedPortalLiveKindChecks {
                         "browser: \(address) goes \(reach) as \(sent) (got \(shared.reach) \(shared.url ?? "nil"))")
         }
 
+        // The tab row leaves the Mac too, for the guest's read-only tabs: per
+        // tab a title, or a host the shared address would show anyway, never
+        // the tab's address. A tab with neither is "Browser".
+        guard let browserView = host.tileView(browser) as? BrowserTileNSView else { throw Failure(description: "no host browser view") }
+        browserView.createTabForQA(url: "https://sam:hunter2@vault.example.com/k/\(token)?token=abc123#step=2", title: "")
+        browserView.createTabForQA(url: "file:///Users/sam/Secrets/keys.txt", title: "")
+        browserView.createTabForQA(url: "data:text/html,secret-abc123", title: "")
+        guard case .browser(let live)? = await SharedPortalBrowserKind.source(tile: browser, host: host).payload(eventsThrough: 0),
+              let tabs = live.tabs else { throw Failure(description: "browser: the live payload carries no tab row") }
+        let tabsSent = String(decoding: try JSONEncoder().encode(tabs), as: UTF8.self)
+        // Which address each new tab ends up holding depends on WebKit's loads;
+        // what may leave the Mac does not.
+        try require(tabs.labels.count == 4 && tabs.active == 3 && tabs.labels.contains("vault.example.com") && tabs.labels.contains("Browser")
+                    && ["hunter2", "abc123", token, "sam", "Secrets", "keys.txt", "step", "file:", "data:", "/"].allSatisfy { !tabsSent.contains($0) },
+                    "browser: tab labels carry a title or a host, never an address, sign-in, token, path or file: \(tabsSent)")
+        // The one deliberate difference: a tab with no title and no host shows
+        // its address on the owner's strip and "Browser" on the guest's.
+        let raw = "file:///Users/sam/Secrets/keys.txt"
+        try require(BrowserTabStripView.label(title: "", url: raw) == raw && BrowserTabStripView.sharedLabel(title: "", url: raw) == "Browser",
+                    "browser: an untitled file tab is its address at home and Browser when shared")
+        let oversized = Collaboration.LiveTile.BrowserTabs(labels: Array(repeating: String(repeating: "x", count: 500), count: 100), active: 99)
+        let decoded = try JSONDecoder().decode(Collaboration.LiveTile.BrowserTabs.self,
+            from: Data(#"{"labels":[\#((0..<100).map { _ in "\"" + String(repeating: "y", count: 500) + "\"" }.joined(separator: ","))],"active":-3}"#.utf8))
+        try require(oversized.labels.count == Collaboration.LiveTile.BrowserTabs.maxTabs && oversized.active == nil
+                    && decoded.labels.count == Collaboration.LiveTile.BrowserTabs.maxTabs && decoded.active == nil
+                    && (oversized.labels + decoded.labels).allSatisfy { $0.count == Collaboration.LiveTile.BrowserTabs.maxLabelCharacters },
+                    "browser: the tab list is capped on the way out and on the way in")
+
         // A public page: the guest's own browser loads it, in a store of its
         // own (no cookies of the guest's either), and after the guest clicks
         // away it offers the way back to the host's page.

@@ -71,7 +71,8 @@ func runLiveTileLaneChecks() async throws {
         try await publish(note, 1, .note(.init(title: "Plan", snapshot: replica.snapshot, eventsThrough: 0)))
         try await publish(terminal, 1, .terminal(.init(title: "zsh", text: "$ echo hi\nhi\n", columns: 9, rows: 2)))
         try await publish(browser, 1, .browser(.init(url: "http://127.0.0.1:9/", title: "local", reach: .private,
-                                                     frame: .init(jpeg: Data(repeating: 7, count: 100_000), width: 800, height: 600, sequence: 1))))
+                                                     frame: .init(jpeg: Data(repeating: 7, count: 100_000), width: 800, height: 600, sequence: 1),
+                                                     tabs: .init(labels: ["local", "Docs"], active: 0))))
         try await refused("a teammate cannot write the owner's tile state", status: 403) {
             try await publish(note, 2, .note(.init(title: "x", snapshot: replica.snapshot, eventsThrough: 0)), as: guest)
         }
@@ -91,8 +92,21 @@ func runLiveTileLaneChecks() async throws {
         let again = try await guest.readLiveTile(area: area, object: note.rawValue, request: .init(generation: generation, revision: 1, eventsAfter: first.eventHead, waitMilliseconds: 0))
         try check(again.state == nil && again.events.isEmpty, "an unchanged state is not sent again")
         let picture = try await viewer.readLiveTile(area: area, object: browser.rawValue, request: .init(generation: nil, revision: nil, eventsAfter: nil, waitMilliseconds: 0))
-        if case .browser(let value)? = picture.state?.payload { try check(value.frame?.jpeg.count == 100_000, "a 100 KB picture crosses the lane whole") }
-        else { throw CheckFailure(label: "the browser state reads back") }
+        if case .browser(let value)? = picture.state?.payload {
+            try check(value.frame?.jpeg.count == 100_000, "a 100 KB picture crosses the lane whole")
+            try check(value.tabs == .init(labels: ["local", "Docs"], active: 0), "the owner's tab row crosses the relay with the page")
+        } else { throw CheckFailure(label: "the browser state reads back") }
+        // Old and new clients read each other's browser states: a guest built
+        // before the tab row skips the field, and a state from an older host
+        // decodes with no tab row.
+        struct OlderBrowser: Decodable { let url: String?; let title: String; let reach: Collaboration.LiveTile.Reach }
+        let withTabs = try JSONEncoder().encode(Collaboration.LiveTile.Browser(url: "https://example.com/", title: "Docs", reach: .public, frame: nil,
+                                                                               tabs: .init(labels: ["Docs"], active: 0)))
+        let older = try JSONDecoder().decode(OlderBrowser.self, from: withTabs)
+        let fromOlderHost = try JSONDecoder().decode(Collaboration.LiveTile.Browser.self,
+                                                     from: Data(#"{"url":"https://example.com/","title":"Docs","reach":"public"}"#.utf8))
+        try check(older.title == "Docs" && fromOlderHost.tabs == nil && fromOlderHost.title == "Docs",
+                  "an older guest ignores the tab row and an older host's state reads with none")
 
         // A held read wakes when the guest's edit lands.
         let held = Task { try await owner.readLiveTile(area: area, object: note.rawValue, request: .init(generation: generation, revision: 1, eventsAfter: 0, waitMilliseconds: 10_000)) }

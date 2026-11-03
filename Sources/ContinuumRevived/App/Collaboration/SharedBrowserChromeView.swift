@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedAgentUI
+import ContinuumRevivedCollaborationProtocol
 
 /// The top of a teammate's shared browser, drawn as the owner's browser tile
 /// draws it (`BrowserTileNSView`): the same row of back, forward and reload,
@@ -23,12 +24,19 @@ final class SharedBrowserChromeView: NSView {
     let urlField = NSTextField()
     let statusLabel = NSTextField(labelWithString: "")
     let backToHostButton = NSButton(title: "", target: nil, action: nil)
+    /// The owner's tabs, read only, from the owner's own strip component.
+    let tabStrip = BrowserTabStripView(readOnly: true)
     private(set) var title = ""
+    /// Whether the owner sent its tabs. An older host does not: no tab row.
+    private(set) var showsTabs = false
 
     override var isFlipped: Bool { true }
 
-    /// The chrome's height: the row and its margins, and the header in a portal.
-    var height: CGFloat { (showsTitleBar ? TileNSView.titleBarHeight : 0) + Self.rowHeight + 2 * Self.spacing }
+    /// The chrome's height: the header in a portal, then the owner's own chrome
+    /// (`BrowserChromeStyle.pageTop`) when it sent its tabs, else one row.
+    var height: CGFloat {
+        (showsTitleBar ? TileNSView.titleBarHeight : 0) + (showsTabs ? BrowserChromeStyle.pageTop : Self.rowHeight + 2 * Self.spacing)
+    }
 
     init(showsTitleBar: Bool) {
         self.showsTitleBar = showsTitleBar
@@ -52,12 +60,17 @@ final class SharedBrowserChromeView: NSView {
         backToHostButton.bezelStyle = .rounded
         backToHostButton.isHidden = true
         for view in [faviconLabel, urlField, statusLabel, backToHostButton] as [NSView] { addSubview(view) }
+        tabStrip.isHidden = true
+        addSubview(tabStrip)
         applyAppearance()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    func update(title: String, address: String, hasPage: Bool, status: String, backTitle: String?) {
+    func update(title: String, address: String, hasPage: Bool, status: String, backTitle: String?,
+                tabs: Collaboration.LiveTile.BrowserTabs? = nil) {
         if self.title != title { self.title = title; needsDisplay = true }
+        if let tabs { tabStrip.render(labels: tabs.labels, active: tabs.active) }
+        if showsTabs != (tabs != nil) { showsTabs = tabs != nil; tabStrip.isHidden = !showsTabs; superview?.needsLayout = true }
         if urlField.stringValue != address { urlField.stringValue = address; urlField.toolTip = address }
         faviconLabel.stringValue = hasPage ? "●" : "◌"
         if statusLabel.stringValue != status { statusLabel.stringValue = status }
@@ -68,7 +81,12 @@ final class SharedBrowserChromeView: NSView {
 
     override func layout() {
         super.layout()
-        let top = (showsTitleBar ? TileNSView.titleBarHeight : 0) + Self.spacing
+        let header = showsTitleBar ? TileNSView.titleBarHeight : 0
+        if showsTabs {
+            tabStrip.frame = NSRect(x: BrowserChromeStyle.rowInset, y: header + BrowserChromeStyle.rowSpacing,
+                                    width: max(0, bounds.width - 2 * BrowserChromeStyle.rowInset), height: BrowserChromeStyle.rowHeight)
+        }
+        let top = header + Self.spacing + (showsTabs ? BrowserChromeStyle.rowHeight + BrowserChromeStyle.rowSpacing : 0)
         let h = Self.rowHeight
         var x = Self.rowInset
         func place(_ view: NSView, width: CGFloat) {
@@ -100,6 +118,9 @@ final class SharedBrowserChromeView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        // What the owner's tile paints behind its rows, in both appearances.
+        BrowserChromeStyle.background.setFill()
+        bounds.fill()
         guard showsTitleBar else { return }
         // The tile header as the tile title bar draws it: `tileChrome`, the title,
         // and the separator hairline along its bottom.

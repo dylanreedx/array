@@ -201,6 +201,17 @@ enum SharedTileParityChecks {
         /// Chrome facts the two tiles disagree on (agent-chrome), checked
         /// beside the content region; RED when any.
         var chromeDifferences: [String] = []
+        /// Differences the guest is DESIGNED to have (a read-only view drops
+        /// what only an editor can use). Each must occur exactly: a guest that
+        /// gained an editor's control, or lost a read-only cue, is RED.
+        var designedMissingOnGuest: [String] = []
+        var designedOnlyOnGuest: [String] = []
+        /// The same for Array view classes: each listed class must be present
+        /// on its side only, and no other class may differ.
+        var designedClassesHostOnly: Set<String> = []
+        var designedClassesGuestOnly: Set<String> = []
+        /// Facts the pictures cannot pin down; each returned line is RED.
+        var factFailures: () -> [String] = { [] }
     }
 
     struct Comparison {
@@ -329,15 +340,39 @@ enum SharedTileParityChecks {
             // body (a file's document, without the editor shell's sidebar)
             // with the guest's content under its caption.
             let document = documentKinds.contains(kind)
-            pairs.append(Pair(kind: label, host: hostTile, guest: guestTile,
-                              hostRegion: { [weak hostTile] in
-                                  if document, let file = hostTile as? FileTileNSView { return file.qaDocumentBody }
-                                  return hostTile?.contentView
-                              },
-                              guestRegion: { [weak guestTile] in
-                                  if document, let surface = guestTile?.body?.qaContentSurface { return surface }
-                                  return guestTile?.contentView
-                              }))
+            var pair = Pair(kind: label, host: hostTile, guest: guestTile,
+                            hostRegion: { [weak hostTile] in
+                                if document, let file = hostTile as? FileTileNSView { return file.qaDocumentBody }
+                                return hostTile?.contentView
+                            },
+                            guestRegion: { [weak guestTile] in
+                                if document, let surface = guestTile?.body?.qaContentSurface { return surface }
+                                return guestTile?.contentView
+                            })
+            if kind == .browser {
+                // Designed: the owner picks a browser profile, the guest sees
+                // whose browser it is ("Default" and its chevron, "Live from
+                // Dylan's Mac"); a private page reaches the guest as a still,
+                // not a live page ("[page]", "[still]"). The guest's tile is a
+                // live-tile body around its own chrome, not the owner's view.
+                pair.designedMissingOnGuest = ["Default", "[image]", "[page]"]
+                pair.designedOnlyOnGuest = ["Live from Dylan's Mac", "[still]"]
+                pair.designedClassesHostOnly = ["NSView", "BrowserHostView", "ChoiceButton"]
+                pair.designedClassesGuestOnly = ["SharedTileContainer", "LiveTileBodyView", "SharedBrowserChromeView", "LiveTileFrameView"]
+                pair.factFailures = { [weak hostTile, weak guestTile] in
+                    let host = (hostTile as? BrowserTileNSView)?.tabStripLabelsForQA ?? []
+                    let strip = guestTile?.body?.qaBrowserChrome?.tabStrip
+                    let guest = strip?.isHidden == false ? strip?.qaLabels ?? [] : []
+                    var failures: [String] = []
+                    if host.isEmpty || guest != host { failures.append("tab row: host \(host), guest \(guest)") }
+                    if strip?.qaActive != (hostTile as? BrowserTileNSView).flatMap({ view in view.tabStripActiveForQA }) {
+                        failures.append("active tab: host \(String(describing: (hostTile as? BrowserTileNSView)?.tabStripActiveForQA)), guest \(String(describing: strip?.qaActive))")
+                    }
+                    return failures
+                }
+                pair.notes.append("tab row: host \((hostTile as? BrowserTileNSView)?.tabStripLabelsForQA ?? [])")
+            }
+            pairs.append(pair)
         }
 
         // MARK: Board, through the portal (a board shares only inside one)
@@ -382,10 +417,19 @@ enum SharedTileParityChecks {
         boardItem.apply(contents: .init(record: try await loop.wire(boardRevision), bytes: try await loop.wire(boardBytes)))
         _ = window(for: boardItem)
         boardItem.layoutSubtreeIfNeeded()
+        // The chips name the fixture's agents as the supervisor records them.
+        let agentNames = scene.agents.map { app.qaAgentSupervisor.records[$0]?.displayName ?? "" }
         pairs.append(Pair(kind: "board", host: hostBoard, guest: boardItem.board,
                           hostRegion: { [weak hostBoard] in hostBoard?.contentView },
                           guestRegion: { [weak boardItem] in boardItem?.board.contentView },
-                          notes: ["guest is a portal item: the host's KanbanTileNSView, read only (no add row, grip, chip menu glyph; hint says read only)"]))
+                          notes: ["guest is a portal item: the host's KanbanTileNSView, read only (no add row, grip, chip menu glyph; hint says read only)"],
+                          // KanbanTileNSView.readOnlyOwner: no adding, no grips,
+                          // chips that cannot open a menu, and a hint that says so.
+                          designedMissingOnGuest: ["+ Add task", "+ Add task", "+ Add task", "⠿", "⠿", "⠿",
+                                                   "\(agentNames[0]) ▾", "\(agentNames[1]) ▾", "Assign agent ▾",
+                                                   "Drag a task onto an agent to assign it · Click to open details"],
+                          designedOnlyOnGuest: [agentNames[0], agentNames[1], "Unassigned",
+                                                "Read only · Dylan's board · Click a task to read it · Changes happen on Dylan's Mac"]))
 
         // Let every lane deliver: the guest bodies show their first state.
         try await SharedAreaCheckRig.eventually("every guest tile shows the host's content", attempts: 1600) {
@@ -399,7 +443,8 @@ enum SharedTileParityChecks {
         // One content size on both sides. The guest's tile carries its own
         // chrome above the shared content (the ownership strip, the caption),
         // so its tile is grown by exactly that much; the report says by how much.
-        for index in pairs.indices where pairs[index].kind == "markdown-file" || documentKinds.contains(where: { $0.rawValue == pairs[index].kind }) {
+        for index in pairs.indices where pairs[index].kind == "markdown-file" || pairs[index].kind == "browser"
+            || documentKinds.contains(where: { $0.rawValue == pairs[index].kind }) {
             let pair = pairs[index]
             pair.host.layoutSubtreeIfNeeded(); pair.guest.layoutSubtreeIfNeeded()
             guard let host = pair.hostRegion(), let guest = pair.guestRegion(), let window = pair.guest.window else { continue }
@@ -589,18 +634,29 @@ enum SharedTileParityChecks {
 
         // View classes.
         let hostClasses = classes(host), guestClasses = classes(guest)
-        let classesMatch = hostClasses == guestClasses
-        lines.append("  view class: host \(type(of: host)) · guest \(type(of: guest))" + (classesMatch ? " (same subtree classes)" : ""))
+        let hostOnly = hostClasses.subtracting(guestClasses), guestOnly = guestClasses.subtracting(hostClasses)
+        let classesMatch = hostOnly == pair.designedClassesHostOnly && guestOnly == pair.designedClassesGuestOnly
+        let designedClasses = pair.designedClassesHostOnly.count + pair.designedClassesGuestOnly.count
+        lines.append("  view class: host \(type(of: host)) · guest \(type(of: guest))"
+                     + (designedClasses > 0 ? ", \(designedClasses) designed" : "") + (classesMatch ? " (same subtree classes)" : ""))
         if !classesMatch {
-            lines.append("    host only: \(hostClasses.subtracting(guestClasses).sorted().joined(separator: ", "))")
-            lines.append("    guest only: \(guestClasses.subtracting(hostClasses).sorted().joined(separator: ", "))")
+            lines.append("    host only: \(hostOnly.sorted().joined(separator: ", ")) (designed: \(pair.designedClassesHostOnly.sorted().joined(separator: ", ")))")
+            lines.append("    guest only: \(guestOnly.sorted().joined(separator: ", ")) (designed: \(pair.designedClassesGuestOnly.sorted().joined(separator: ", ")))")
         }
+        let factFailures = pair.factFailures()
+        for failure in factFailures { lines.append("  fact RED: \(failure)") }
 
         // Elements.
         let hostElements = elements(host), guestElements = elements(guest)
-        let missing = subtract(hostElements, guestElements), extra = subtract(guestElements, hostElements)
-        let elementsMatch = missing.isEmpty && extra.isEmpty
-        lines.append("  elements: host \(hostElements.count) · guest \(guestElements.count)" + (elementsMatch ? " (same)" : ""))
+        let allMissing = subtract(hostElements, guestElements), allExtra = subtract(guestElements, hostElements)
+        let missing = subtract(allMissing, pair.designedMissingOnGuest), extra = subtract(allExtra, pair.designedOnlyOnGuest)
+        let absentDesign = subtract(pair.designedMissingOnGuest, allMissing).map { "host-only \(quoted($0))" }
+            + subtract(pair.designedOnlyOnGuest, allExtra).map { "guest-only \(quoted($0))" }
+        let elementsMatch = missing.isEmpty && extra.isEmpty && absentDesign.isEmpty
+        let designed = pair.designedMissingOnGuest.count + pair.designedOnlyOnGuest.count
+        lines.append("  elements: host \(hostElements.count) · guest \(guestElements.count)"
+                     + (designed > 0 ? ", \(designed) designed differences" : "") + (elementsMatch ? " (same)" : ""))
+        for line in absentDesign { lines.append("    designed difference absent: \(line)") }
         for line in missing.prefix(16) { lines.append("    missing on guest: \(quoted(line))") }
         if missing.count > 16 { lines.append("    … \(missing.count - 16) more missing") }
         for line in extra.prefix(16) { lines.append("    only on guest: \(quoted(line))") }
@@ -650,7 +706,7 @@ enum SharedTileParityChecks {
         NSApp.appearance = nil
         for note in pair.notes { lines.append("  note: \(note)") }
         for difference in pair.chromeDifferences { lines.append("  chrome differs: \(difference)") }
-        result.red = !(classesMatch && elementsMatch && shown && pixelsMatch) || !pair.chromeDifferences.isEmpty
+        result.red = !(classesMatch && elementsMatch && shown && pixelsMatch) || !pair.chromeDifferences.isEmpty || !factFailures.isEmpty
         result.lines = ["\(pair.kind) \(result.red ? "RED" : "GREEN")"] + lines
         return result
     }

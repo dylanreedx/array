@@ -326,6 +326,8 @@ final class BrowserLiveSource: LiveTileSource {
     private let webView: @MainActor () -> WKWebView?
     private let address: @MainActor () -> String
     private let title: @MainActor () -> String
+    /// The owner's tab row, labels only (`BrowserTileNSView.sharedTabs`).
+    private let tabs: @MainActor () -> Collaboration.LiveTile.BrowserTabs?
     private var frame: Collaboration.LiveTile.Frame?
     private var lastDigest = ""
     private var sequence: UInt64 = 0
@@ -336,8 +338,9 @@ final class BrowserLiveSource: LiveTileSource {
     static let maxFrameBytes = 180 * 1024
     static let minimumFrameInterval: TimeInterval = 0.12
 
-    init(webView: @escaping @MainActor () -> WKWebView?, address: @escaping @MainActor () -> String, title: @escaping @MainActor () -> String) {
-        self.webView = webView; self.address = address; self.title = title
+    init(webView: @escaping @MainActor () -> WKWebView?, address: @escaping @MainActor () -> String, title: @escaping @MainActor () -> String,
+         tabs: @escaping @MainActor () -> Collaboration.LiveTile.BrowserTabs? = { nil }) {
+        self.webView = webView; self.address = address; self.title = title; self.tabs = tabs
     }
 
     func payload(eventsThrough: UInt64) async -> Collaboration.LiveTile.Payload? {
@@ -345,7 +348,7 @@ final class BrowserLiveSource: LiveTileSource {
         // fragment for a page the guest cannot load (`LiveTile.shareable`).
         let shared = Collaboration.LiveTile.shareable(address())
         await captureIfDue()
-        return .browser(.init(url: shared.url, title: title(), reach: shared.reach, frame: frame))
+        return .browser(.init(url: shared.url, title: title(), reach: shared.reach, frame: frame, tabs: tabs()))
     }
 
     /// A WebKit snapshot, only while the page is in a window and visible, and

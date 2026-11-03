@@ -90,6 +90,27 @@ extension Collaboration {
                 self.jpeg = jpeg; self.width = width; self.height = height; self.sequence = sequence
             }
         }
+        /// The host's row of tabs, as its tab strip labels them: a label per tab
+        /// and which one is showing, never a tab's address. Capped on the way out
+        /// and again on the way in, so a hostile or oversized list cannot grow a
+        /// guest's chrome.
+        public struct BrowserTabs: Codable, Equatable, Sendable {
+            public static let maxTabs = 24
+            public static let maxLabelCharacters = 80
+            public let labels: [String]
+            public let active: Int?
+            public init(labels: [String], active: Int?) {
+                let kept = labels.prefix(Self.maxTabs).map { String($0.prefix(Self.maxLabelCharacters)) }
+                self.labels = kept
+                self.active = active.flatMap { kept.indices.contains($0) ? $0 : nil }
+            }
+            private enum CodingKeys: String, CodingKey { case labels, active }
+            public init(from decoder: any Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                self.init(labels: try container.decode([String].self, forKey: .labels),
+                          active: try container.decodeIfPresent(Int.self, forKey: .active))
+            }
+        }
         public struct Browser: Codable, Equatable, Sendable {
             public let url: String?
             public let title: String
@@ -97,8 +118,11 @@ extension Collaboration {
             /// The latest picture of the host's page. Carried for every reach, so
             /// a guest who cannot load a public page still sees it.
             public let frame: Frame?
-            public init(url: String?, title: String, reach: Reach, frame: Frame?) {
-                self.url = url; self.title = title; self.reach = reach; self.frame = frame
+            /// The host's tabs. Absent from an older host; an older guest, or a
+            /// relay built before it, ignores it.
+            public let tabs: BrowserTabs?
+            public init(url: String?, title: String, reach: Reach, frame: Frame?, tabs: BrowserTabs? = nil) {
+                self.url = url; self.title = title; self.reach = reach; self.frame = frame; self.tabs = tabs
             }
         }
         public struct Terminal: Codable, Equatable, Sendable {
