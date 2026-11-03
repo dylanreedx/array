@@ -181,21 +181,84 @@ public extension SharedAgentTranscriptWire {
     /// A person's own character set, as its file: deflated, with the SHA-256 of
     /// the file's bytes. Sent once per set; the guest keeps it in memory only.
     struct CharacterTheme: Codable, Equatable, Sendable {
-        /// What a deflated set may cost on the wire: a frame holds 48 KiB, and
-        /// base64 inflates the bytes by a third.
+        /// What a deflated set may cost inline, in one op: a frame holds 48 KiB,
+        /// and base64 inflates the bytes by a third.
         public static let maximumDeflatedBytes = 32 * 1024
+        /// What a deflated set may cost at all. A larger one (a scale-4 shared
+        /// Duckherd set: the Bleach set is about 100 KiB) travels as `Part`s
+        /// after a checkpoint, at most 16 frames. The publisher fits encoded
+        /// theme and image frames together inside the lane's 1 MiB retention.
+        public static let maximumSharedDeflatedBytes = 256 * 1024
+        /// One part's deflated bytes: a part frame stays well under 48 KiB.
+        public static let partBytes = 16 * 1024
 
         public let hash: String
         public let deflated: Data
 
-        /// nil when the file deflates past `maximumDeflatedBytes`: the guest
-        /// then draws its built-in set.
+        /// nil when the file deflates past `maximumSharedDeflatedBytes`: the
+        /// guest then draws its built-in set.
         public init?(file: Data) {
             guard file.count <= AgentCharacterThemeParser.maximumFileBytes,
-                  let deflated = Self.deflate(file), deflated.count <= Self.maximumDeflatedBytes else { return nil }
+                  let deflated = Self.deflate(file), deflated.count <= Self.maximumSharedDeflatedBytes else { return nil }
             self.hash = Self.hash(file); self.deflated = deflated
         }
         public init(hash: String, deflated: Data) { self.hash = hash; self.deflated = deflated }
+
+        /// Whether the set rides inline (`Op.characterTheme`, a checkpoint's
+        /// `characterTheme`); otherwise it travels as `parts()`.
+        public var isInline: Bool { deflated.count <= Self.maximumDeflatedBytes }
+
+        /// One slice of a large set's deflated bytes, in order. `hash` is the
+        /// file's, as the chrome names it; `total` the whole deflated size.
+        public struct Part: Codable, Equatable, Sendable {
+            public let hash: String
+            public let total: Int
+            public let offset: Int
+            public let bytes: Data
+            public init(hash: String, total: Int, offset: Int, bytes: Data) {
+                self.hash = hash; self.total = total; self.offset = offset; self.bytes = bytes
+            }
+        }
+
+        public func parts() -> [Part] {
+            stride(from: 0, to: deflated.count, by: Self.partBytes).map { offset in
+                Part(hash: hash, total: deflated.count, offset: offset,
+                     bytes: deflated.subdata(in: offset..<min(offset + Self.partBytes, deflated.count)))
+            }
+        }
+
+        /// The guest's one set in flight. Parts must arrive in order for one
+        /// hash; the first part (offset 0) starts over, anything else out of
+        /// order drops the set in flight. Bounded by `maximumSharedDeflatedBytes`
+        /// before a byte is kept; the whole set is only handed on complete, and
+        /// `file()` still checks its hash after a bounded inflate.
+        public struct Assembly: Equatable, Sendable {
+            private var hash: String?
+            private var total = 0
+            private var data = Data()
+            public init() {}
+
+            public mutating func receive(_ part: Part) -> CharacterTheme? {
+                let wellFormed = part.hash.utf8.count == 64
+                    && part.hash.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+                    && (1...CharacterTheme.maximumSharedDeflatedBytes).contains(part.total)
+                    && !part.bytes.isEmpty && part.bytes.count <= CharacterTheme.partBytes
+                    && part.offset >= 0 && part.offset < part.total
+                    && part.offset % CharacterTheme.partBytes == 0
+                    && part.bytes.count == min(CharacterTheme.partBytes, part.total - part.offset)
+                guard wellFormed else { self = .init(); return nil }
+                if part.offset == 0 {
+                    hash = part.hash; total = part.total; data = Data()
+                } else if part.hash != hash || part.total != total || part.offset != data.count {
+                    self = .init(); return nil
+                }
+                data.append(part.bytes)
+                guard data.count == total, let hash else { return nil }
+                let theme = CharacterTheme(hash: hash, deflated: data)
+                self = .init()
+                return theme
+            }
+        }
 
         public static func hash(_ data: Data) -> String {
             SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -204,7 +267,7 @@ public extension SharedAgentTranscriptWire {
         /// The file again, or nil when it is oversized, corrupt or not the file
         /// its hash names. Never inflates past the validator's own size limit.
         public func file() -> Data? {
-            guard deflated.count <= Self.maximumDeflatedBytes,
+            guard deflated.count <= Self.maximumSharedDeflatedBytes,
                   let data = Self.inflate(deflated, limit: AgentCharacterThemeParser.maximumFileBytes),
                   Self.hash(data) == hash else { return nil }
             return data

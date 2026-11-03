@@ -282,34 +282,186 @@ enum SharedAgentChromeChecks {
         }
         window.appearance = NSAppearance(named: .aqua)
 
+        // A large set: a Duckherd-shaped set (scale 4, 16 helpers) deflates past
+        // the 32 KiB one op may carry, so it follows a checkpoint in parts. The
+        // guest, and a late joiner, draw it pixel for pixel. A real shared set
+        // named by CONTINUUM_DUCKHERD_THEME_FILE is tried the same way (local runs).
+        var large: [(label: String, data: Data)] = [("duckherd-shaped", Data(AgentCharacterDuckherdFixture.text().utf8))]
+        if let path = ProcessInfo.processInfo.environment["CONTINUUM_DUCKHERD_THEME_FILE"], !path.isEmpty {
+            large.append(("local-file", try Data(contentsOf: URL(fileURLWithPath: path))))
+        }
+        for (label, data) in large {
+            guard case let .success(parsed) = AgentCharacterThemeParser.parse(data: data) else {
+                throw Failure(description: "\(label): the large set does not parse")
+            }
+            try data.write(to: imports.appendingPathComponent("\(parsed.id).theme.json"))
+            characters.userThemesChangedOnDisk()
+            defaults.set(parsed.id, forKey: AgentCharacterConfig.themeKey)
+            characters.reload()
+            try expect(characters.theme?.id == parsed.id, "\(label): the host draws the large set")
+            SharedAgentCharacterSets.qaReset()
+            hostTile.applyTokens()
+            let checkpoints = publisher.checkpoints
+            try await sync()
+            let hash = Wire.CharacterTheme.hash(data)
+            try expect(guest.characterSet?.fallbackReason == nil && guest.characterSet?.key == "shared:" + hash,
+                       "\(label): the guest draws the host's large set, not a fallback (\(guest.characterSet?.fallbackReason ?? guest.characterSet?.key ?? "none"))")
+            try expect(publisher.checkpoints > checkpoints, "\(label): the large set followed a checkpoint")
+            guard let hostLarge = drawn(hostTile.qaCharacterLayer), let guestLarge = drawn(guestTile.qaCharacterLayer) else {
+                throw Failure(description: "\(label): a title bar shows no character")
+            }
+            try expect(hostLarge.pixels == guestLarge.pixels && hostLarge.frame == guestLarge.frame
+                       && guestLarge.pixels != hostDrawn.pixels,
+                       "\(label): the guest draws the host's large-set character, pixel for pixel")
+            SharedAgentCharacterSets.qaReset()
+            let (lateTile, late) = makeGuest()
+            canvas.addSubview(lateTile); lateTile.frame.origin = NSPoint(x: 0, y: 700)
+            _ = await late.pollTranscript(object, ticket: late.qaTicket, waitMilliseconds: 0)
+            await late.poll(object, ticket: late.qaTicket)
+            try await paint()
+            try expect(late.characterSet?.key == "shared:" + hash && drawn(lateTile.qaCharacterLayer)?.pixels == hostLarge.pixels,
+                       "\(label): a late joiner draws the large set from the checkpoint and its parts")
+            lateTile.removeFromSuperview()
+            if label == "duckherd-shaped" {
+                // Paced: the parts ride one checkpoint, not every checkpoint. A
+                // later checkpoint inside the interval carries none (guests keep
+                // the set); one past the interval carries them again.
+                func partFrames() throws -> Int {
+                    try (lane.log?.frames ?? []).reduce(0) { count, frame in
+                        count + (try JSONDecoder().decode(Wire.Patch.self, from: frame.body).ops
+                            .filter { if case .characterThemePart = $0 { return true }; return false }.count)
+                    }
+                }
+                let sentParts = try partFrames()
+                try expect(sentParts > 1, "\(label): the checkpoint after the set changed carried its \(sentParts) parts")
+                publisher.qaRequestCheckpoint()
+                let before = publisher.checkpoints
+                try await sync()
+                let resent = try partFrames()
+                try expect(publisher.checkpoints == before + 1 && resent == 0
+                           && guest.characterSet?.key == "shared:" + hash && drawn(guestTile.qaCharacterLayer)?.pixels == hostLarge.pixels,
+                           "\(label): a later checkpoint inside \(Int(SharedAgentTranscriptPublisher.themePartsResendInterval)) s re-sends no parts (\(resent)) and the guest keeps drawing the set")
+                SharedAgentCharacterSets.qaReset()
+                let (earlyTile, early) = makeGuest()
+                _ = await early.pollTranscript(object, ticket: early.qaTicket, waitMilliseconds: 0)
+                await early.poll(object, ticket: early.qaTicket)
+                try expect(early.characterSet?.key.hasPrefix("builtin:") == true && early.characterSet?.fallbackReason != nil,
+                           "\(label): a joiner after that checkpoint draws the built-in set until the parts are due again (\(early.characterSet?.fallbackReason ?? "none"))")
+                earlyTile.removeFromSuperview()
+                let later = Date().addingTimeInterval(SharedAgentTranscriptPublisher.themePartsResendInterval + 1)
+                publisher.qaNow = { later }
+                publisher.qaRequestCheckpoint()
+                try await sync()
+                let due = try partFrames()
+                SharedAgentCharacterSets.qaReset()
+                let (dueTile, dueGuest) = makeGuest()
+                canvas.addSubview(dueTile); dueTile.frame.origin = NSPoint(x: 0, y: 700)
+                _ = await dueGuest.pollTranscript(object, ticket: dueGuest.qaTicket, waitMilliseconds: 0)
+                await dueGuest.poll(object, ticket: dueGuest.qaTicket)
+                try await paint()
+                try expect(due == sentParts && dueGuest.characterSet?.key == "shared:" + hash
+                           && drawn(dueTile.qaCharacterLayer)?.pixels == hostLarge.pixels,
+                           "\(label): past the interval the next checkpoint carries the \(sentParts) parts again and a late joiner draws the set (\(due))")
+                dueTile.removeFromSuperview()
+                publisher.qaNow = Date.init
+            }
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                window.appearance = NSAppearance(named: appearance)
+                canvas.layer?.backgroundColor = SurfaceToken.canvas.color.nsColor(for: appearance == .aqua ? .light : .dark).cgColor
+                try await paint()
+                guard let rep = canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds) else { throw Failure(description: "no bitmap") }
+                canvas.cacheDisplay(in: canvas.bounds, to: rep)
+                let url = directory.appendingPathComponent("agent-chrome-large-\(label)-\(appearance == .aqua ? "light" : "dark").png")
+                try rep.representation(using: .png, properties: [:])?.write(to: url)
+                print("WROTE \(url.path)")
+            }
+            window.appearance = NSAppearance(named: .aqua)
+        }
+        // Back to the small set for the fallbacks.
+        defaults.set(setID, forKey: AgentCharacterConfig.themeKey)
+        characters.reload()
+        SharedAgentCharacterSets.qaReset()
+        try await sync()
+        try expect(guest.characterSet?.fallbackReason == nil && drawn(guestTile.qaCharacterLayer)?.pixels == hostDrawn.pixels,
+                   "switching back, the guest draws the small set again")
+
         // Fallbacks: an invalid, an oversized and a missing set draw the built-in one.
         guard let chrome = guest.chrome, let reference = chrome.character?.theme else { throw Failure(description: "no chrome") }
-        var noise = [UInt8](repeating: 0, count: 40 * 1024)
+        // The upper theme bound beside the maximum image payload must still
+        // leave a replayable checkpoint (base64 metadata counts too).
+        let attachment = AgentImageAttachmentID(rawValue: "theme-budget-image")!
+        let block = AgentBlock(id: AgentNodeID(rawValue: "theme-budget-block")!, kind: .imageGallery,
+            payload: .imageGallery(.init(images: [.init(attachment: .init(id: attachment))])))
+        let entry = AgentEntry(id: AgentNodeID(rawValue: "theme-budget-entry")!, role: .user,
+            provenance: .localNotice(reason: "budget fixture"), lifecycle: .finished, blocks: [block])
+        let maxTheme = Wire.CharacterTheme(hash: String(repeating: "a", count: 64),
+                                           deflated: Data(count: Wire.CharacterTheme.maximumSharedDeflatedBytes))
+        let budgetState = SharedAgentTranscriptPublisher.State(current: .init(version: 1, entries: [entry]),
+            roster: nil, details: [:], images: [attachment: Data(count: SharedAgentTranscriptImages.maxTotalBytes)],
+            budget: SharedAgentTranscriptSafeBudget(), published: [], publishedDetails: [:], publishedImages: [:],
+            publishedHelpers: nil, lastVersion: nil, needsCheckpoint: true, bytesSinceCheckpoint: 0,
+            chrome: (chrome: chrome, theme: maxTheme), chromeChanged: true, sentThemes: [])
+        guard case let .checkpoint(budgetPlan) = try SharedAgentTranscriptPublisher.plan(budgetState) else {
+            throw Failure(description: "maximum budget did not checkpoint")
+        }
+        try expect(budgetPlan.imageBodies.reduce(0, { $0 + $1.count }) <= Lane.maxRetainedBytes
+                   && budgetPlan.imageBodies.allSatisfy { $0.count <= Lane.maxFrameBytes },
+                   "maximum theme plus image payload respects the lane retention and frame limits")
+        let themeOps = try budgetPlan.imageBodies.flatMap { try JSONDecoder().decode(Wire.Patch.self, from: $0).ops }
+        try expect(themeOps.filter { if case .characterThemePart = $0 { return true }; return false }.count == 16,
+                   "budget pressure retains all sixteen theme parts")
+        // Past even the parts' limit (256 KiB deflated): noise does not deflate.
+        var noise = [UInt8](repeating: 0, count: 300 * 1024)
         var seed: UInt64 = 0x9E3779B97F4A7C15
         for index in noise.indices { seed = seed &* 6364136223846793005 &+ 1; noise[index] = UInt8(truncatingIfNeeded: seed >> 33) }
-        let cases: [(String, Wire.CharacterTheme?)] = [
-            ("invalid", Wire.CharacterTheme(file: Data("{\"duckherdTheme\":1,\"id\":\"\(setID)\"}".utf8))),
-            ("oversized", Wire.CharacterTheme(hash: String(repeating: "a", count: 64), deflated: Data(noise))),
-            ("missing", nil),
+        // Large-set parts as a guest may receive them: in order (the control),
+        // out of order, with a gap, and with corrupted bytes. Every bad case
+        // draws the built-in set; none fails the frame.
+        guard let largeWire = Wire.CharacterTheme(file: Data(AgentCharacterDuckherdFixture.text().utf8)), !largeWire.isInline else {
+            throw Failure(description: "the Duckherd-shaped set is not a large shared set")
+        }
+        let largeParts = largeWire.parts()
+        var corrupted = largeParts
+        corrupted[0] = .init(hash: largeParts[0].hash, total: largeParts[0].total, offset: 0, bytes: Data(largeParts[0].bytes.reversed()))
+        typealias Case = (name: String, inline: Wire.CharacterTheme?, id: String, hash: String?, parts: [Wire.CharacterTheme.Part], falls: Bool)
+        let cases: [Case] = [
+            ("invalid", Wire.CharacterTheme(file: Data("{\"duckherdTheme\":1,\"id\":\"\(setID)\"}".utf8)), reference.id, nil, [], true),
+            ("oversized", Wire.CharacterTheme(hash: String(repeating: "a", count: 64), deflated: Data(noise)), reference.id, nil, [], true),
+            ("missing", nil, reference.id, nil, [], true),
+            ("in-order parts", nil, AgentCharacterDuckherdFixture.id, largeWire.hash, largeParts, false),
+            ("out-of-order parts", nil, AgentCharacterDuckherdFixture.id, largeWire.hash, largeParts.reversed(), true),
+            ("parts with a gap", nil, AgentCharacterDuckherdFixture.id, largeWire.hash, largeParts.enumerated().filter { $0.offset != 1 }.map(\.element), true),
+            ("corrupted parts", nil, AgentCharacterDuckherdFixture.id, largeWire.hash, corrupted, true),
         ]
-        for (name, file) in cases {
+        for item in cases {
             SharedAgentCharacterSets.qaReset()
             var bad = chrome
-            bad.character?.theme = .init(id: reference.id, hash: file?.hash ?? String(repeating: "b", count: 64))
-            let body = try Wire.encode(Wire.Checkpoint(entries: [], omittedEntries: 0, chrome: bad, characterTheme: file))
-            let (tile, live) = makeGuest(read: { _, _ in .resnapshot(.init(generation: 1, through: 1, body: body), frames: [], more: false) })
+            bad.character?.theme = .init(id: item.id, hash: item.hash ?? item.inline?.hash ?? String(repeating: "b", count: 64))
+            let body = try Wire.encode(Wire.Checkpoint(entries: [], omittedEntries: 0, chrome: bad, characterTheme: item.inline))
+            let frames = try item.parts.enumerated().map { index, part in
+                Lane.Frame(generation: 1, sequence: UInt64(2 + index), body: try Wire.encode(Wire.Patch(ops: [.characterThemePart(part)])))
+            }
+            let (tile, live) = makeGuest(read: { _, _ in
+                .resnapshot(.init(generation: 1, through: 1, body: body), frames: frames, more: false)
+            })
             canvas.addSubview(tile)
             _ = await live.pollTranscript(object, ticket: live.qaTicket, waitMilliseconds: 0)
             try await paint()
-            let fallback = AgentCharacterAtlas(theme: builtIn, character: live.characterSet.map {
-                $0.assignment(for: agent.rawValue, shipped: chrome.character?.assignment, name: nil)?.index ?? -1 } ?? -1,
-                appearance: AgentCharacterController.appearance(of: tile))
-            try expect(live.characterSet?.key == "builtin:\(builtIn.id)" && live.characterSet?.fallbackReason != nil
-                       && drawn(tile.qaCharacterLayer)?.pixels == fallback.pixels,
-                       "\(name) set: the guest falls back to the built-in set (\(live.characterSet?.fallbackReason ?? "no reason"))")
+            if item.falls {
+                let fallback = AgentCharacterAtlas(theme: builtIn, character: live.characterSet.map {
+                    $0.assignment(for: agent.rawValue, shipped: chrome.character?.assignment, name: nil)?.index ?? -1 } ?? -1,
+                    appearance: AgentCharacterController.appearance(of: tile))
+                try expect(live.characterSet?.key == "builtin:\(builtIn.id)" && live.characterSet?.fallbackReason != nil
+                           && drawn(tile.qaCharacterLayer)?.pixels == fallback.pixels
+                           && live.transcriptView.appliedFrames == frames.count,
+                           "\(item.name): the guest falls back to the built-in set, every frame applied (\(live.characterSet?.fallbackReason ?? "no reason"))")
+            } else {
+                try expect(live.characterSet?.key == "shared:" + largeWire.hash && live.characterSet?.fallbackReason == nil,
+                           "\(item.name): control, the guest draws the set (\(live.characterSet?.fallbackReason ?? live.characterSet?.key ?? "none"))")
+            }
             tile.removeFromSuperview()
         }
         let tooBig = Wire.CharacterTheme(file: Data(noise))
-        try expect(tooBig == nil, "a host never ships a set that deflates past \(Wire.CharacterTheme.maximumDeflatedBytes) bytes")
+        try expect(tooBig == nil, "a host never ships a set that deflates past \(Wire.CharacterTheme.maximumSharedDeflatedBytes) bytes")
     }
 }

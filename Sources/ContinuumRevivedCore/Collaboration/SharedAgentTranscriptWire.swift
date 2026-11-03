@@ -53,10 +53,13 @@ public enum SharedAgentTranscriptWire {
         /// A person's own character set, sent once per set before the chrome
         /// that names it.
         case characterTheme(CharacterTheme)
+        /// One slice of a set too large to send inline, in order after a
+        /// checkpoint. A guest before this op skips it and draws its built-in set.
+        case characterThemePart(CharacterTheme.Part)
         /// An op this build does not know (a newer host): decoded and skipped.
         case unknown(String)
 
-        private enum Keys: String, CodingKey { case op, head, after, blocks, entry, block, helpers, detail, manifest, chunk, chrome, theme }
+        private enum Keys: String, CodingKey { case op, head, after, blocks, entry, block, helpers, detail, manifest, chunk, chrome, theme, part }
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: Keys.self)
             let op = try c.decode(String.self, forKey: .op)
@@ -74,6 +77,7 @@ public enum SharedAgentTranscriptWire {
             // never a reason to drop the frame and resnapshot the transcript.
             case "chrome": self = (try? c.decode(Chrome.self, forKey: .chrome)).map(Op.chrome) ?? .unknown(op)
             case "characterTheme": self = (try? c.decode(CharacterTheme.self, forKey: .theme)).map(Op.characterTheme) ?? .unknown(op)
+            case "characterThemePart": self = (try? c.decode(CharacterTheme.Part.self, forKey: .part)).map(Op.characterThemePart) ?? .unknown(op)
             default: self = .unknown(op)
             }
         }
@@ -100,6 +104,8 @@ public enum SharedAgentTranscriptWire {
                 try c.encode("chrome", forKey: .op); try c.encode(chrome, forKey: .chrome)
             case let .characterTheme(theme):
                 try c.encode("characterTheme", forKey: .op); try c.encode(theme, forKey: .theme)
+            case let .characterThemePart(part):
+                try c.encode("characterThemePart", forKey: .op); try c.encode(part, forKey: .part)
             case let .unknown(op):
                 try c.encode(op, forKey: .op)
             }
@@ -237,6 +243,8 @@ public enum SharedAgentTranscriptWire {
         /// Sets kept at once: a host sends the one it shows, and a change of set
         /// sends the new one.
         public static let maximumCharacterThemes = 4
+        /// A large set arriving in parts (`Op.characterThemePart`).
+        private var themeAssembly = CharacterTheme.Assembly()
         public init() {}
 
         private mutating func keep(_ theme: CharacterTheme) {
@@ -264,6 +272,7 @@ public enum SharedAgentTranscriptWire {
                   Set(checkpoint.toolDetails.map(\.block)).count == checkpoint.toolDetails.count else { throw Failure.schema }
             toolDetails = Dictionary(uniqueKeysWithValues: checkpoint.toolDetails.map { ($0.block, $0.detail) })
             images = SharedAgentTranscriptImages.Receiver()
+            themeAssembly = CharacterTheme.Assembly()
             omittedEntries = checkpoint.omittedEntries
             helpers = checkpoint.helpers
             chrome = checkpoint.chrome
@@ -288,6 +297,7 @@ public enum SharedAgentTranscriptWire {
             var roster = helpers
             var pendingChrome: Chrome?
             var pendingThemes: [CharacterTheme] = []
+            var assembly = themeAssembly
             func index(_ id: AgentNodeID) -> Int? { entries.firstIndex { $0.id == id } }
             for op in patch.ops {
                 switch op {
@@ -334,7 +344,16 @@ public enum SharedAgentTranscriptWire {
                 case let .characterTheme(theme):
                     touched.chrome = true
                     pendingThemes.append(theme)
-                case .unknown:
+                case let .characterThemePart(part):
+                    // Presentation: a bad part drops the set in flight, never the frame.
+                    if let theme = assembly.receive(part) {
+                        touched.chrome = true
+                        pendingThemes.append(theme)
+                    }
+                case let .unknown(op):
+                    // A syntactically invalid part is presentation-only too,
+                    // but it must break the pending assembly just like bad metadata.
+                    if op == "characterThemePart" { assembly = .init() }
                     continue
                 }
             }
@@ -358,6 +377,7 @@ public enum SharedAgentTranscriptWire {
             guard touched.ids.filter({ details[$0] != nil }).allSatisfy(validIDs.contains) else { throw Failure.schema }
             toolDetails = details.filter { validIDs.contains($0.key) }
             images = receivedImages
+            themeAssembly = assembly
             for theme in pendingThemes { keep(theme) }
             if let pendingChrome { chrome = pendingChrome }
             // A chrome-only patch leaves the document (and its version) alone,

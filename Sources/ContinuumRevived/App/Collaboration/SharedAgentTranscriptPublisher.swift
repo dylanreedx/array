@@ -63,6 +63,11 @@ final class SharedAgentTranscriptPublisher {
     /// The chrome the guest holds, and the sets it was sent since the last checkpoint.
     private(set) var publishedChrome: Wire.Chrome?
     private var sentThemes: Set<String> = []
+    /// When this publisher last sent each large set's parts. Guests keep a set
+    /// they were sent, so the parts ride a checkpoint at most once per
+    /// `themePartsResendInterval` (for late joiners), never on every checkpoint.
+    private var themePartsSentAt: [String: Date] = [:]
+    static let themePartsResendInterval: TimeInterval = 10 * 60
     private(set) var chromeOps = 0
     private let sink: SharedAgentTranscriptSink
     private let budget: SharedAgentTranscriptBudget
@@ -135,6 +140,10 @@ final class SharedAgentTranscriptPublisher {
     /// Witness only: plan on the main actor, as every publish did before the
     /// work moved off it. Same plan, same order; only the executor differs.
     var qaPlansOnMainActor = false
+    /// Checks only: the clock that paces large sets' parts.
+    var qaNow: () -> Date = Date.init
+    /// Checks only: the next tick sends a checkpoint, as a refusal would.
+    func qaRequestCheckpoint() { needsCheckpoint = true }
 
     /// Ticks called while one is away; resumed when it finishes.
     private var waiting: [CheckedContinuation<Void, Never>] = []
@@ -176,7 +185,10 @@ final class SharedAgentTranscriptPublisher {
                           published: published, publishedDetails: publishedDetails, publishedImages: publishedImages,
                           publishedHelpers: publishedHelpers, lastVersion: lastVersion, needsCheckpoint: needsCheckpoint,
                           bytesSinceCheckpoint: bytesSinceCheckpoint, chrome: chromeNow, chromeChanged: chromeChanged,
-                          sentThemes: sentThemes)
+                          sentThemes: sentThemes,
+                          themePartsDue: chromeNow?.theme.map { theme in
+                              themePartsSentAt[theme.hash].map { qaNow().timeIntervalSince($0) >= Self.themePartsResendInterval } ?? true
+                          } ?? false)
         do {
             switch try await offMain({ try Self.plan(state) }) {
             case .unchanged:
@@ -238,6 +250,7 @@ final class SharedAgentTranscriptPublisher {
         if let roster { let changed = roster != publishedHelpers; publishedHelpers = roster; if changed { onHelpersPublished?(roster) } }
         publishedChrome = chromeNow?.chrome
         sentThemes = Set(chromeNow?.theme.map { [$0.hash] } ?? [])
+        if let hash = plan.themePartsHash { themePartsSentAt[hash] = qaNow() }
     }
 
     /// Whether the guest would draw `a` as it draws `b`. The character's last
@@ -271,16 +284,20 @@ final class SharedAgentTranscriptPublisher {
         let chrome: (chrome: Wire.Chrome, theme: Wire.CharacterTheme?)?
         let chromeChanged: Bool
         let sentThemes: Set<String>
+        /// Whether a large set's parts may ride the next checkpoint.
+        var themePartsDue = true
     }
 
     struct CheckpointPlan: Sendable {
         let body: Data
-        /// Image manifests, then each distinct image's chunks, encoded.
+        /// Theme parts, then image manifests and distinct image chunks, encoded.
         let imageBodies: [Data]
         /// How many of the newest host entries it carries.
         let kept: Int
         let details: [AgentNodeID: SharedAgentToolPresentation]
         let images: [AgentImageAttachmentID: Data]
+        /// The large set whose parts follow this checkpoint, if any.
+        var themePartsHash: String?
     }
 
     enum Plan: Sendable {
@@ -317,7 +334,15 @@ final class SharedAgentTranscriptPublisher {
         if let roster = state.roster, roster != state.publishedHelpers { ops.append(.helpers(roster)) }
         if state.chromeChanged, let chrome = state.chrome {
             // A set travels once, before the first chrome that names it.
-            if let theme = chrome.theme, !state.sentThemes.contains(theme.hash) { ops.append(.characterTheme(theme)) }
+            if let theme = chrome.theme, !state.sentThemes.contains(theme.hash) {
+                if theme.isInline {
+                    ops.append(.characterTheme(theme))
+                } else if state.themePartsDue {
+                    // A set too large for one op follows a checkpoint in parts.
+                    return .checkpoint(try checkpoint(state))
+                }
+                // Parts sent within the interval: guests that were sent them keep them.
+            }
             ops.append(.chrome(chrome.chrome))
         }
         guard !ops.isEmpty else { return .noOps }
@@ -330,8 +355,11 @@ final class SharedAgentTranscriptPublisher {
         // The roster rides inside the same limit (32 helpers, a few KiB), and
         // so do the chrome and a person's own set (at most 32 KiB deflated).
         let rosterBytes = try state.roster.map { try Wire.encode($0).count + 16 } ?? 0
+        // A set too large to ride inline follows the checkpoint in parts, when due.
+        let partsTheme = state.chrome?.theme.flatMap { !$0.isInline && state.themePartsDue ? $0 : nil }
+        let inlineTheme = state.chrome?.theme.flatMap { $0.isInline ? $0 : nil }
         let window = Wire.window(state.current.entries, maxBytes: Lane.maxCheckpointBytes - rosterBytes, budget: state.budget,
-                                 chrome: state.chrome?.chrome, characterTheme: state.chrome?.theme)
+                                 chrome: state.chrome?.chrome, characterTheme: inlineTheme)
         var entries = window.entries
         var omitted = window.omittedEntries
         var selected: [AgentNodeID: SharedAgentToolPresentation] = [:]
@@ -343,26 +371,42 @@ final class SharedAgentTranscriptPublisher {
                 selected[id].map { Wire.ToolDetail(block: id, detail: $0) }
             }
             body = try Wire.encode(Wire.Checkpoint(entries: entries, omittedEntries: omitted, helpers: state.roster, toolDetails: items,
-                                                   chrome: state.chrome?.chrome, characterTheme: state.chrome?.theme))
+                                                   chrome: state.chrome?.chrome, characterTheme: inlineTheme))
             if body.count <= Lane.maxCheckpointBytes || entries.isEmpty { break }
             entries.removeFirst(); omitted += 1
         }
         let visibleIDs = imageIDs(in: entries)
-        let selectedImages = state.images.filter { visibleIDs.contains($0.key) }
-        var imageBodies: [Data] = []
-        var sentHashes: Set<String> = []
-        for id in selectedImages.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
-            guard let data = selectedImages[id] else { continue }
-            let manifest = SharedAgentTranscriptImages.Manifest(attachment: id, data: data)
-            imageBodies.append(try Wire.encode(Wire.Patch(ops: [.imageManifest(manifest)])))
+        var selectedImages = state.images.filter { visibleIDs.contains($0.key) }
+        func bodies() throws -> [Data] {
+            var imageBodies: [Data] = []
+            if let theme = partsTheme {
+                for part in theme.parts() { imageBodies.append(try Wire.encode(Wire.Patch(ops: [.characterThemePart(part)]))) }
+            }
+            var sentHashes: Set<String> = []
+            for id in selectedImages.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+                guard let data = selectedImages[id] else { continue }
+                let manifest = SharedAgentTranscriptImages.Manifest(attachment: id, data: data)
+                imageBodies.append(try Wire.encode(Wire.Patch(ops: [.imageManifest(manifest)])))
+            }
+            for id in selectedImages.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+                guard let data = selectedImages[id] else { continue }
+                let hash = SharedAgentTranscriptImages.digest(data)
+                guard sentHashes.insert(hash).inserted else { continue }
+                for chunk in SharedAgentTranscriptImages.chunks(data) { imageBodies.append(try Wire.encode(Wire.Patch(ops: [.imageChunk(chunk)]))) }
+            }
+            return imageBodies
         }
-        for id in selectedImages.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
-            guard let data = selectedImages[id] else { continue }
-            let hash = SharedAgentTranscriptImages.digest(data)
-            guard sentHashes.insert(hash).inserted else { continue }
-            for chunk in SharedAgentTranscriptImages.chunks(data) { imageBodies.append(try Wire.encode(Wire.Patch(ops: [.imageChunk(chunk)]))) }
+        var imageBodies = try bodies()
+        // Base64 and op metadata count toward retention too. At the maximum
+        // theme size, all 512 KiB of images plus their metadata may not fit.
+        // Keep the theme complete and omit whole images until late join fits.
+        while imageBodies.reduce(0, { $0 + $1.count }) > Lane.maxRetainedBytes,
+              let drop = selectedImages.keys.sorted(by: { $0.rawValue < $1.rawValue }).last {
+            selectedImages[drop] = nil
+            imageBodies = try bodies()
         }
-        return CheckpointPlan(body: body, imageBodies: imageBodies, kept: entries.count, details: selected, images: selectedImages)
+        return CheckpointPlan(body: body, imageBodies: imageBodies, kept: entries.count, details: selected, images: selectedImages,
+                              themePartsHash: partsTheme?.hash)
     }
 
     private static func boundedImages(_ images: [AgentImageAttachmentID: Data]) -> [AgentImageAttachmentID: Data] {

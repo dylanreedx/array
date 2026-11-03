@@ -1,3 +1,4 @@
+import Compression
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
@@ -240,12 +241,101 @@ func runDuckherdShapedThemeChecks(_ expect: (@autoclosure () -> Bool, String) ->
     }
     // The validator a guest uses accepts it too.
     expect((try? AgentCharacterValidator.validate(data: Data(text.utf8)).get()) == theme, "the shared-set validator accepts it")
-    // A shared agent's guest: a set like this deflates past the 32 KiB a relay
-    // frame can carry (the Bleach set deflates to about 100 KiB), so its host
-    // never ships it and the guest draws the built-in set
-    // (`--shared-agent-chrome-check` witnesses that fallback on screen).
-    let wire = SharedAgentTranscriptWire.CharacterTheme(file: Data(text.utf8))
-    expect(wire == nil, "a Duckherd-sized set is not shipped to guests (\(SharedAgentTranscriptWire.CharacterTheme.maximumDeflatedBytes) bytes deflated at most)")
+    // A shared agent's guest: a set like this deflates past the 32 KiB one op may
+    // carry, so it travels in parts after a checkpoint (`--shared-agent-chrome-check`
+    // drives that through the publisher and the guest tile). The parts are bounded
+    // and in order; anything else drops the set in flight, never the frame.
+    typealias WireTheme = SharedAgentTranscriptWire.CharacterTheme
+    guard let wire = WireTheme(file: Data(text.utf8)) else {
+        expect(false, "a Duckherd-sized set can be shared (\(WireTheme.maximumSharedDeflatedBytes) bytes deflated at most)")
+        return ""
+    }
+    let parts = wire.parts()
+    expect(!wire.isInline && parts.count > 1 && parts.count <= WireTheme.maximumSharedDeflatedBytes / WireTheme.partBytes,
+           "the set is not inline and travels in \(parts.count) parts")
+    let partFrames = parts.map { (try? SharedAgentTranscriptWire.encode(SharedAgentTranscriptWire.Patch(ops: [.characterThemePart($0)])).count) ?? .max }
+    expect(partFrames.allSatisfy { $0 <= 48 * 1024 }, "every part frame fits a 48 KiB lane frame (largest \(partFrames.max() ?? 0))")
+    var assembly = WireTheme.Assembly()
+    var assembled: WireTheme?
+    for part in parts { assembled = assembly.receive(part) ?? assembled }
+    expect(assembled == wire && assembled?.file() == Data(text.utf8), "the parts reassemble the file, hash checked")
+    var skipping = WireTheme.Assembly()
+    let noStart = parts.dropFirst().compactMap { skipping.receive($0) }.isEmpty
+    var gap = WireTheme.Assembly()
+    let gapped = parts.count > 2 && gap.receive(parts[0]) == nil && gap.receive(parts[2]) == nil
+        && parts.dropFirst().compactMap { gap.receive($0) }.isEmpty
+    expect(noStart && gapped, "parts without their start, or with a gap, assemble nothing")
+    var oversized = WireTheme.Assembly()
+    let huge = WireTheme.Part(hash: wire.hash, total: WireTheme.maximumSharedDeflatedBytes + 1, offset: 0, bytes: Data([1]))
+    let fat = WireTheme.Part(hash: wire.hash, total: 64 * 1024, offset: 0, bytes: Data(count: WireTheme.partBytes + 1))
+    expect(oversized.receive(huge) == nil && oversized.receive(fat) == nil, "a part past the limits is refused before it is kept")
+    var tampered = WireTheme.Assembly()
+    var forged: WireTheme?
+    for part in parts {
+        let bytes = part.offset == 0 ? Data(part.bytes.reversed()) : part.bytes
+        forged = tampered.receive(.init(hash: part.hash, total: part.total, offset: part.offset, bytes: bytes)) ?? forged
+    }
+    expect(forged != nil && forged?.file() == nil, "a set whose bytes do not match its hash never reaches the validator")
+    // An op this build does not know decodes as skipped: how a 0.7.40 guest reads a part.
+    let renamed = String(decoding: (try? SharedAgentTranscriptWire.encode(SharedAgentTranscriptWire.Patch(ops: [.characterThemePart(parts[0])]))) ?? Data(),
+                         as: UTF8.self).replacingOccurrences(of: "characterThemePart", with: "characterThemePartFromTheFuture")
+    let skipped = try? JSONDecoder().decode(SharedAgentTranscriptWire.Patch.self, from: Data(renamed.utf8))
+    expect(skipped?.ops == [.unknown("characterThemePartFromTheFuture")], "an unknown op is skipped, not a failed frame")
+
+    // Bad metadata clears the in-flight set, and a subsequent good start recovers.
+    let malformed: [WireTheme.Part] = [
+        .init(hash: wire.hash, total: wire.deflated.count, offset: 0, bytes: Data([1])),
+        .init(hash: "bad", total: wire.deflated.count, offset: 0, bytes: Data([1])),
+        .init(hash: wire.hash, total: 0, offset: 0, bytes: Data([1])),
+        .init(hash: wire.hash, total: wire.deflated.count, offset: -1, bytes: Data([1])),
+        .init(hash: wire.hash, total: wire.deflated.count, offset: Int.max, bytes: Data([1])),
+        .init(hash: wire.hash, total: wire.deflated.count, offset: 0, bytes: Data()),
+        .init(hash: String(repeating: "b", count: 64), total: wire.deflated.count, offset: parts[1].offset, bytes: parts[1].bytes),
+        .init(hash: wire.hash, total: wire.deflated.count + 1, offset: parts[1].offset, bytes: parts[1].bytes),
+    ]
+    for bad in malformed {
+        var receiver = WireTheme.Assembly()
+        _ = receiver.receive(parts[0]); _ = receiver.receive(bad)
+        expect(parts.dropFirst().compactMap { receiver.receive($0) }.isEmpty, "bad part metadata clears the pending set")
+        expect(parts.compactMap { receiver.receive($0) }.last == wire, "a fresh start recovers after bad metadata")
+    }
+    var replaced = WireTheme.Assembly()
+    _ = replaced.receive(parts[0])
+    let otherHash = String(repeating: "b", count: 64)
+    let replacement = parts.map { WireTheme.Part(hash: otherHash, total: $0.total, offset: $0.offset, bytes: $0.bytes) }
+    expect(replacement.compactMap { replaced.receive($0) }.last?.hash == otherHash,
+           "a new start replaces the single in-flight set")
+    do {
+        var mirror = SharedAgentTranscriptWire.Mirror()
+        _ = try mirror.install(.init(entries: [], omittedEntries: 0))
+        _ = try mirror.apply(.init(ops: [.characterThemePart(parts[0])]))
+        let malformedFrame = Data("{\"schema\":1,\"ops\":[{\"op\":\"characterThemePart\",\"part\":{\"offset\":\"bad\"}}]}".utf8)
+        let decoded = try JSONDecoder().decode(SharedAgentTranscriptWire.Patch.self, from: malformedFrame)
+        _ = try mirror.apply(decoded)
+        for part in parts.dropFirst() { _ = try mirror.apply(.init(ops: [.characterThemePart(part)])) }
+        expect(mirror.characterThemes.isEmpty && mirror.document.entries.isEmpty,
+               "malformed part schema preserves the transcript and clears the pending assembly")
+        for part in parts { _ = try mirror.apply(.init(ops: [.characterThemePart(part)])) }
+        expect(mirror.characterThemes[wire.hash] == wire, "production mirror recovers on a fresh ordered set")
+    } catch { expect(false, "part presentation never fails the transcript frame: \(error)") }
+    // Prove the upper frame budget at its exact boundary, without private art.
+    let cap = WireTheme(hash: wire.hash, deflated: Data(count: WireTheme.maximumSharedDeflatedBytes))
+    expect(cap.parts().count == 16 && cap.parts().allSatisfy {
+        ((try? SharedAgentTranscriptWire.encode(SharedAgentTranscriptWire.Patch(ops: [.characterThemePart($0)])).count) ?? .max) <= 48 * 1024
+    }, "the exact compressed limit fits in sixteen bounded frames")
+    let overFile = Data(repeating: 65, count: AgentCharacterThemeParser.maximumFileBytes + 1)
+    var compressed = Data(count: overFile.count + 1024)
+    let compressedCount = compressed.withUnsafeMutableBytes { dst in
+        overFile.withUnsafeBytes { src in
+            compression_encode_buffer(dst.bindMemory(to: UInt8.self).baseAddress!, dst.count,
+                                      src.bindMemory(to: UInt8.self).baseAddress!, src.count, nil, COMPRESSION_ZLIB)
+        }
+    }
+    expect(compressedCount > 0, "inflate-limit control compressed successfully")
+    let bomb = WireTheme(hash: WireTheme.hash(overFile), deflated: compressed.prefix(compressedCount))
+    expect(bomb.deflated.count < WireTheme.maximumDeflatedBytes && bomb.file() == nil,
+           "bounded inflate rejects a small compressed file that expands past the file limit")
+    expect(WireTheme(file: overFile) == nil, "publisher rejects files above the inflated-file limit")
 
     // The limits, named.
     // 17 helpers at this size would pass the 3 MB text cap first; the count is
@@ -265,5 +355,5 @@ func runDuckherdShapedThemeChecks(_ expect: (@autoclosure () -> Bool, String) ->
     expect(problems(Fixture.text(leadLevels: [[["A"]], 1])) == ["lead.levels[1]: a set of frames, or the index of another level's frames"],
            "a level naming itself: \(problems(Fixture.text(leadLevels: [[["A"]], 1])))")
     expect(problems(Fixture.text(extraLead: ["shift": []])) == ["lead.shift: 1 to 64 frames"], "an empty shift")
-    return "Duckherd-shaped set: 16 helpers, 151 colours, lead box 112 x 112 from trimmed frames, levels by index, shift kept, \(atlases) atlases, 6 limits named, too large to ship to a guest"
+    return "Duckherd-shaped set: 16 helpers, 151 colours, lead box 112 x 112 from trimmed frames, levels by index, shift kept, \(atlases) atlases, 6 limits named, shared to guests in \(parts.count) bounded parts"
 }
