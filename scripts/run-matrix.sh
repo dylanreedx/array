@@ -1409,6 +1409,10 @@ run_app_check .build/debug/Array --agent-first-paint-check
 # header, which used to paint Idle with Send disabled.
 run_app_check .build/debug/Array --agent-steering-recovery-check
 run_app_check .build/debug/Array --agent-presence-check
+# A browser screenshot published while events are still queued for the tile
+# lands in the tile where the saved transcript (and so a guest or a reload)
+# has it, not ahead of the events the tile had not read yet.
+run_app_check .build/debug/Array --agent-notice-order-check
 # .plans/102: the PARENT's side of a background subagent's hand-back. The
 # production claude runner and supervisor against the fake replaying a real
 # claude 2.1.312 stream: claude's own second turn (fresh init, second result)

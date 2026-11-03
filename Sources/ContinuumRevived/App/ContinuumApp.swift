@@ -3100,6 +3100,23 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // A notice published while events are queued for a tile lands where
+        // the saved transcript has it (AgentNoticeOrderChecks.swift).
+        if CommandLine.arguments.contains("--agent-notice-order-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let summary = try await runAgentNoticeOrderChecks()
+                    print("PASS agent notice order: \(summary)")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-presence-check") {
             _ = NSApplication.shared
             Task { @MainActor in
