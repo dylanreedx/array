@@ -129,7 +129,7 @@ source changes. OWN/HOST paths describe the handover and producers.
 | --- | --- | --- |
 | T-01 | Malformed/unsupported task, duplicate runs, missing root/parent, cyclic/disconnected ancestry, attention missing bounded request identity | Reject projection; no surface request |
 | T-04 | Valid member needs approval/input, including while membership incomplete | One selected blocker alert to active registered phone, linked to that member's agent; approval prioritized then stable run order; identity includes task/run/request |
-| T-02 | No attention; incomplete membership, unknown state, or cancelled child without evidence of successful objective | Quiet, nonterminal projection; never infer completion |
+| T-02 | No attention; incomplete membership, unknown state (including a live native Claude schedule), or cancelled child without evidence of successful objective | Quiet, nonterminal projection; never infer completion |
 | T-03 | No attention/unknown membership; any running or queued run, including grandchildren | Quiet; child success and parent success while descendants run cannot produce completion or end Live Activity |
 | T-07 | All runs settled; root cancelled/interrupted | No completion alert; cancellation semantics on other surfaces |
 | T-05 | All runs settled, root not cancelled, at least one failed run | One root failure alert; no standalone child failure while root runs |
@@ -215,7 +215,7 @@ flowchart TD
 | HOST-02 | Explicit agent delegation/new child, or provider-observed child | Bind actual parent run; provider source replay reuses original child membership, including after parent starts a new task |
 | HOST-03 | Accepted queue/steer/queued compaction/readiness hold | Commit admission barrier and reserved run before storage await; durable item UUID follows normal drain, forced send and consumed steer; accepted queued work prevents completion |
 | HOST-04 | Matching provider lifecycle/request, cancellation/queue clear | Current runner generation plus provider turn fence; cancelled queue stays cancelled; consumed steer settles with parent; child result settles its own run only |
-| HOST-05 | Restart, restored backup, imported legacy queue, missing result, invalid request identity, unknown background work or unrouted provider descendants | Persist/retain unknown or incomplete membership; no guessed success. Restored queues hydrate without a tile. A newer relay revision fences an older local backup. Buffered provider events withhold membership until their announcement supplies a valid parent route; invalid announcements keep it incomplete |
+| HOST-05 | Restart, restored backup, imported legacy queue, missing result, invalid request identity, unknown background work (including acknowledged native Claude schedules) or unrouted provider descendants | Persist/retain unknown or incomplete membership; no guessed success. Restored queues hydrate without a tile. A newer relay revision fences an older local backup. Buffered provider events withhold membership until their announcement supplies a valid parent route; invalid announcements keep it incomplete |
 | HOST-06 | Task metadata changes; continuous activity; paired service running | App uses bounded 0.5s coalescing, service serializes/join-repeats latest task publication before inventory, periodic 10s task refresh; missing canvas/inventory cannot block task metadata |
 | HOST-07 | Relay lacks advertised task.batch.v1 capability | Keep legacy inventory/publication; do not activate task ownership. Owner mismatch, ledger failure or wire capacity failure withholds task publication with redacted diagnostics; inventory remains useful |
 | OWN-01 | Valid full task batch commits | First batch establishes publisher and quiet baseline atomically with event/outbox supersession. Baseline decision IDs stay quiet across interim unknown/recovery. Later task decisions fix currently active recipient cohort; replay cannot enroll a newly paired phone |
@@ -474,6 +474,21 @@ categoryDisabled/deduplicated/sent/tokenExpired/providerTokenExpired/failed,
 or throws. Only successful identities are remembered, in memory. Do not merge
 these claims with H-01–H-05.
 
+### Scheduled agent wakeups
+
+`agent.schedule` / `array_schedule_agent` persists a caller's own timer. At a
+firing, the supervisor reserves the existing queued task run and delivers its
+prompt through the normal queue. This is T-03 (quiet while queued/running), then
+T-04/T-05/T-06 according to the actual turn; no timer-specific alert or recipient
+is added. It also answers a held request through NOTIFY-03 when the queued turn
+is accepted. Schedule/queue persistence failure leaves the outbox pending and
+quiet for retry. Archived/settled agents, disabled workspace tools and explicitly
+held queues do not execute a wakeup. Relaunch resumes only a queue consisting
+entirely of this agent's acknowledged scheduled deliveries; ordinary user
+follow-ups retain their relaunch hold. Native Claude Cron keepalive marks background membership unknown through HOST-05/T-02, keeping completion quiet while that work remains; it adds no sender or recipient.
+Witness: `--agent-presence-check`, schedules section (queued delivery, cancellation,
+and persisted outbox recovery); this does not claim APNs delivery or phone display.
+
 ### Agent-requested notification: `array_notify` (source only)
 
 2026-10-29. Workspace op `agent.notify`, tool `array_notify` for pi and the
@@ -489,7 +504,7 @@ sees is `notify-` plus a hash of agent and idempotency key. In the session prese
 | --- | --- | --- |
 | NOTIFY-01 | `needs_input` from an agent mid-turn | Caller's bound run holds one request (pending needsInput, provider approvals still take precedence) → T-04: one attention alert naming that agent, through the outbox. Result `recorded` |
 | NOTIFY-02 | The turn ends while the request is held | Run stays needsInput (`awaitingAnswer`), never succeeded, so no T-06 completion replaces the attention banner; same decision identity, so no second alert. Later runner stop/runtime error is ignored. A relaunch keeps the wait: it is a settled fact, not lost work |
-| NOTIFY-03 | The agent's next accepted turn (user send, queued or readiness-held send, delegated message) | Answers it: the waiting run settles succeeded and the new turn joins the same task under it → T-03 quiet while it runs, then one T-06 for the whole task. Unsolicited/unknown provider work does not answer |
+| NOTIFY-03 | The agent's next accepted turn (user send, queued or readiness-held send, delegated message, accepted Array scheduled wakeup) | Answers it: the waiting run settles succeeded and the new turn joins the same task under it → T-03 quiet while it runs, then one T-06 for the whole task. Unsolicited/unknown provider work does not answer |
 | NOTIFY-04 | A second `needs_input` in the same run, or any while waiting | `coalesced`; no ledger write, no new decision. Same idempotency key returns the cached result; same key with a different request is `idempotency_conflict` |
 | NOTIFY-05 | `completed` | Never alerts: completion stays T-06 alone, so a child cannot announce its parent's task. Withdraws this turn's own held request if there is one. Result `coalesced` |
 | NOTIFY-06 | Agent idle, tracking unavailable, or turn failed/stopped | `unavailable`, nothing recorded; a failed turn keeps T-05, a stopped turn drops the request |

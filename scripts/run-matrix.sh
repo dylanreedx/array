@@ -60,6 +60,7 @@ IOS_PREVIEW_LIVE_ONLY=0
 IOS_PREVIEW_TILE_ONLY=0
 COLLABORATION_ONLY=0
 SHARE_REVOCATION_ONLY=0
+AGENT_SCHEDULES_ONLY=0
 COMPANION_TASKS_ONLY=0
 NOTIFICATIONS_ONLY=0
 NOTIFICATIONS_LINUX_ONLY=0
@@ -67,6 +68,10 @@ MANAGED_MODE_ONLY=0
 HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    --agent-schedules)
+      AGENT_SCHEDULES_ONLY=1
+      shift
+      ;;
     --share-revocation)
       SHARE_REVOCATION_ONLY=1
       shift
@@ -157,7 +162,9 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
+Usage: scripts/run-matrix.sh [--agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
+
+--agent-schedules rebuilds the app and reports native cron lifetime and durable schedule queue/restart witnesses.
 
 --share-revocation rebuilds app/relay and reports the real-relay share and revocation witness.
 
@@ -602,6 +609,17 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+if [[ "$AGENT_SCHEDULES_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-check
+  export CONTINUUM_PRESENCE_SECTIONS=schedules
+  run_app_check .build/debug/Array --agent-presence-check
+  matrix_report 'Agent schedules matrix (targeted)'
+  exit $?
+fi
+# Focused form of the existing real-relay share leg, including explicit
+# revocation, host teardown, persistence and visible ownership state.
 if [[ "$SHARE_REVOCATION_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run swift build --disable-sandbox --skip-update --product continuum-relay

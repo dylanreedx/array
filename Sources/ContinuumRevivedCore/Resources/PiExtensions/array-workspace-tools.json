@@ -2004,6 +2004,54 @@
           "now"
         ]
       }
+    },
+    {
+      "name": "array_schedule_agent",
+      "label": "Array Schedule Agent",
+      "op": "agent.schedule",
+      "description": "Create, list or delete a durable wakeup for yourself. Array owns the timer and queues the prompt through your normal message queue, starting a stopped session when due. Schedules survive app relaunches. Supports a one-time ISO 8601 runAt, a recurring intervalSeconds (60–2592000), or both. Missed intervals coalesce; at most one queued wakeup per schedule. Completed one-time schedules remain listed until deleted. Delete cancels future and queued wakeups, without interrupting a running turn. User-held queues stay held. Only runs while Array is open; overdue wakeups are considered on next launch.",
+      "promptSnippet": "Schedule your own durable future check-in through Array",
+      "promptGuidelines": [
+        "Create schedules only when the user asked for future or recurring work.",
+        "Use this for work that must survive an app restart. Native Claude CronCreate jobs remain CLI-owned and session-dependent; never create both timers for the same work.",
+        "Reuse the same idempotencyKey for an uncertain create; use list to inspect and delete when the work is finished.",
+        "A queue paused by Stop or containing user follow-ups after relaunch requires the user to resume it. Disabling workspace tools, archiving or settling the agent prevents delivery."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string",
+            "enum": [
+              "create",
+              "list",
+              "delete"
+            ]
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "runAt": {
+            "type": "string",
+            "description": "ISO 8601 date with timezone; optional first firing for a recurring interval."
+          },
+          "intervalSeconds": {
+            "type": "number",
+            "minimum": 60,
+            "maximum": 2592000
+          },
+          "scheduleId": {
+            "type": "string",
+            "description": "The id returned by list/create, required for delete."
+          }
+        },
+        "required": [
+          "op"
+        ]
+      }
     }
   ]
 }

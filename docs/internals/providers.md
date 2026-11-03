@@ -109,3 +109,36 @@ models are preferred when offered. Exact catalogue ids can be selected using
 actual child replies, parent tool calls and answers, selected record identities,
 and delegation chips; a cross-harness follow-up asks the child's own runner for
 a second answer. Missing auth, unavailable models and exhausted usage fail visibly.
+
+## Scheduled wakeups
+
+Claude's native `CronCreate`, `CronDelete`, `CronList` and `ScheduleWakeup`
+acknowledgements feed the runner's background-work state. A live native timer
+keeps its idle process; deleting its last job permits normal reaping. A process
+exit clears these process-local facts. Native jobs are not migrated into Array's
+timer table, and a session-only native timer still depends on that CLI process.
+
+For future work that must survive app relaunch, use `array_schedule_agent`
+(`agent.schedule`) with `op: create`, a stable `idempotencyKey`, `prompt`, and
+`intervalSeconds` (60–2592000), an ISO 8601 `runAt`, or both. `list` returns the
+caller's own schedules; `delete` with `scheduleId` cancels future and queued
+wakeups without interrupting a turn already running. Completed one-time jobs
+remain listed until deleted. Create only in response to the user's request for
+future work. Do not create a native timer for the same work.
+
+The supervisor owns the clock and a private persisted outbox in channel-specific
+app support. A stable delivery ID enters the existing durable message queue;
+the outbox receipt must commit before the queue can drain it. Restarts retry
+that same ID, including a quit between queue commit and receipt commit. A stopped
+session starts through normal queue delivery. Missed recurring intervals
+coalesce, with at most one queued wakeup per schedule. Array must be running to
+fire; overdue work is considered after relaunch. Queues deliberately held by Stop
+or containing ordinary user follow-ups after relaunch keep their holds. Disabled
+workspace tools, settled/archived records and Terminal face defer delivery.
+Persistence failure leaves the outbox pending for retry. The task/notification
+paths are documented in `notification-paths.md` (T-03, NOTIFY-03).
+
+Witness: `scripts/run-matrix.sh --agent-schedules` runs the schedules section of
+`--agent-presence-check`, also included in the normal presence/full gates. The
+native fixture is a redacted pair of real 2.1.316 production transcript tool
+frames; its capture provenance is beside the fixture.

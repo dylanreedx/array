@@ -41,6 +41,10 @@ func runAgentPresenceChecks() async throws {
     if wants("background") { summary.append(try await AgentPresenceChecks.checkMirroredBackgroundChildLifetime(originalPath: originalPath)) }
     if wants("codex-family") { summary.append(try await AgentPresenceChecks.checkCodexDescendantsEndWithSession()) }
     if wants("restore") { summary.append(try await AgentPresenceChecks.checkProviderChildrenSettleOnRestore()) }
+    if wants("schedules") {
+        summary.append(try await AgentScheduleChecks.nativeCronLifetime(originalPath: originalPath))
+        summary.append(try await AgentScheduleChecks.durableWakeups())
+    }
     if wants("activity") { summary.append(try AgentPresenceChecks.checkLastActivityMovesOnFrames()) }
     print("AgentPresenceChecks passed: " + summary.joined(separator: "; "))
 }

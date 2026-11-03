@@ -71,6 +71,7 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     // KB-01 board lifecycle (`WorkspaceAPIContracts+Board.swift`): create,
     // rename or delete a whole board. Appended last.
     case boardManage = "board.manage"
+    case agentSchedule = "agent.schedule"
 }
 
 // MARK: - Identity

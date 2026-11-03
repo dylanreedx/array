@@ -22,7 +22,7 @@ public extension WorkspaceAPIOp {
         .canvasQuery, .agentReveal, .operationGet, .boardQuery, .boardApply, .agentUpdate,
         .browserSnapshot, .browserScreenshot, .browserConsole,
         .agentNotify,
-        .agentReport, .agentStatus,
+        .agentReport, .agentStatus, .agentSchedule,
     ]
 
     /// Outside the preset, but not refused: the service asks the user through

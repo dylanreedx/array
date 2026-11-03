@@ -796,6 +796,21 @@ public actor AgentComposerDraftStore {
         return message
     }
 
+    /// The scheduler's outbox retries a stable id after restart. A successful
+    /// return means the existing queue is durable; a write failure stays retryable.
+    public func enqueueScheduledMessage(id: UUID, text: String, for agentID: AgentID) throws {
+        var current = loadQueue(for: agentID)
+        if current.contains(where: { $0.id == id }) { return }
+        current.append(.prompt(.init(id: id, text: text, queuedAt: clock.now())))
+        try FileManager.default.createDirectory(at: layout.queuedMessagesDirectory,
+            withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: layout.queuedMessagesDirectory.path)
+        let file = layout.queuedMessagesFile(for: agentID)
+        try writer.write(current, to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        queues[agentID] = current
+    }
+
     /// One durable transaction: compaction precedes the exact failed prompt,
     /// before later follow-ups. An app exit can never replay the prompt alone.
     public func enqueueContextRecovery(

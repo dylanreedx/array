@@ -498,6 +498,20 @@ final class WorkspaceAPIService {
             return .error(WorkspaceAPIError(code: .unsupported, message: "Browser tools are not available yet."))
         case .agentReport:
             return fileReport(agentId: agentId, ownHandle: ownHandle, payload: payload)
+        case .agentSchedule:
+            guard payload["agentId"] == nil else {
+                return .error(.init(code: .permissionDenied, message: "Schedules are self-only; omit agentId."))
+            }
+            guard !isCancelled() else { return .error(.init(code: .unsupported, message: "Schedule request cancelled.")) }
+            guard case .allowed = WorkspaceToolGrantEvaluator.evaluate(agentId: agentId, op: .agentSchedule, checkout: ownHandle,
+                requested: .preserveAll, grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId)) else {
+                return .error(.init(code: .permissionDenied, message: "Schedule access is not granted."))
+            }
+            do {
+                let jobs = try supervisor.wakeupRequest(payload, for: agentId)
+                return .result(["schedules": AnyHashableJSON(any: jobs.compactMap { Self.jsonObject($0).map(Self.plain) })])
+            } catch let error as WorkspaceAPIError { return .error(error) }
+            catch { return .error(.init(code: .durabilityFailed, message: "The schedule change could not be saved. Retry with the same key.")) }
         case .agentStatus:
             return declareStatus(agentId: agentId, ownHandle: ownHandle, payload: payload)
         }

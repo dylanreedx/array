@@ -270,6 +270,14 @@ def say(text):
 
 def run_turn(msg):
     text = text_of(msg)
+    if text.startswith("CRON "):
+        with open(os.path.join(HERE, "cron.jsonl")) as f:
+            frames = [json.loads(l) for l in f if l.strip()]
+        out({"type": "system", "subtype": "init", "session_id": SID, "model": "fixture-claude"})
+        for frame in (frames[2:] if "DELETE" in text else frames[:2]):
+            out(frame)
+        result()
+        return
     if shape(text) == "REPLAY":
         with open(os.path.join(HERE, "replay.jsonl")) as f:
             lines = [l for l in f if l.strip()]

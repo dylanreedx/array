@@ -1043,6 +1043,9 @@ final class AgentSupervisor {
     static let replayCap = 500
 
     private let store: AgentStore
+    private var wakeupScheduler: AgentWakeupScheduler?
+    private var scheduledQueueAdmissions: Set<UUID> = []
+    var qaAfterScheduledQueueWrite: (() async -> Void)?
     private var companionTaskLedger: CompanionTaskLedger?
     private var companionTaskTrackingHealthy = true
     private var companionRunBindings: [AgentID: CompanionTaskRunHandle] = [:]
@@ -1573,6 +1576,113 @@ final class AgentSupervisor {
         notifyTurnCapabilitiesChanged(id)
     }
 
+    // MARK: - Durable self wakeups
+
+    func wakeupRequest(_ payload: [String: Any], for id: AgentID) throws -> [AgentWakeupSchedule] {
+        guard let scheduler = wakeupScheduler else {
+            throw WorkspaceAPIError(code: .unsupported, message: "Durable schedules are unavailable because schedule storage or the message queue is unavailable.")
+        }
+        let own = scheduler.store.entries.filter { $0.agent == id }
+        switch payload["op"] as? String {
+        case "list": return own
+        case "delete":
+            guard let raw = payload["scheduleId"] as? String, let wanted = UUID(uuidString: raw) else {
+                throw WorkspaceAPIError(code: .invalidRequest, message: "scheduleId is required.")
+            }
+            let job = own.first { $0.id == wanted }
+            try scheduler.store.replace(scheduler.store.entries.filter { !($0.id == wanted && $0.agent == id) })
+            for delivery in [job?.pendingDelivery, job?.lastEnqueued].compactMap({ $0 }) { cancelQueuedMessage(delivery, for: id) }
+        case "create":
+            guard let key = payload["idempotencyKey"] as? String, !key.isEmpty, key.utf8.count <= 128,
+                  let prompt = payload["prompt"] as? String, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  prompt.utf8.count <= 8192 else {
+                throw WorkspaceAPIError(code: .invalidRequest, message: "A stable idempotencyKey (1–128 bytes) and prompt (1–8192 bytes) are required.")
+            }
+            let interval = (payload["intervalSeconds"] as? Double)
+                ?? (payload["intervalSeconds"] as? Int).map(Double.init)
+            guard payload["intervalSeconds"] == nil || interval != nil else {
+                throw WorkspaceAPIError(code: .invalidRequest, message: "intervalSeconds must be a number.")
+            }
+            if let interval, !interval.isFinite || interval < 60 || interval > 30 * 86400 {
+                throw WorkspaceAPIError(code: .invalidRequest, message: "intervalSeconds must be 60 through 2592000.")
+            }
+            let starts = (payload["runAt"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
+            guard (payload["runAt"] == nil || starts != nil), starts != nil || interval != nil else {
+                throw WorkspaceAPIError(code: .invalidRequest, message: "Supply runAt as an ISO 8601 date, intervalSeconds, or both.")
+            }
+            if let old = own.first(where: { $0.key == key }) {
+                guard old.prompt == prompt, old.startsAt == starts, old.intervalSeconds == interval else {
+                    throw WorkspaceAPIError(code: .idempotencyConflict, message: "This key already names a different schedule.")
+                }
+                return own
+            }
+            guard own.count < 16, scheduler.store.entries.count < 512 else {
+                throw WorkspaceAPIError(code: .invalidRequest, message: "Schedule limit reached; delete completed schedules first.")
+            }
+            let job = AgentWakeupSchedule(id: UUID(), agent: id, key: key, prompt: prompt, startsAt: starts,
+                nextFireAt: starts ?? Date().addingTimeInterval(interval!), intervalSeconds: interval)
+            try scheduler.store.replace(scheduler.store.entries + [job])
+        default: throw WorkspaceAPIError(code: .invalidRequest, message: "op must be create, list or delete.")
+        }
+        return scheduler.store.entries.filter { $0.agent == id }
+    }
+
+    func canDeliverScheduledWakeup(to id: AgentID) -> Bool {
+        guard let record = records[id] else { return false }
+        return record.capabilities.locallyManaged && record.workspaceToolsEnabled && record.archivedAt == nil
+            && record.settledOverride != .settled && !terminalFaceAgents.contains(id)
+    }
+
+    func hasQueuedWakeup(_ message: UUID, for id: AgentID) async -> Bool {
+        await submissionRecoveryStore?.queuedWorkItems(for: id).contains(where: { $0.id == message }) == true
+    }
+
+    func stageScheduledWakeup(_ occurrence: UUID, text: String, for id: AgentID) async throws {
+        guard let queue = submissionRecoveryStore, canDeliverScheduledWakeup(to: id) else {
+            throw WorkspaceAPIError(code: .permissionDenied, message: "The agent cannot receive a scheduled wakeup now.")
+        }
+        var reservation: CompanionTaskRunHandle?
+        var accepted = false
+        updateCompanionTasks { reservation = try $0.reserveQueued(agentID: id.rawValue, itemID: occurrence) }
+        defer { if let reservation { updateCompanionTasks { try $0.resolveQueuedReservation(reservation, accepted: accepted) } } }
+        scheduledQueueAdmissions.insert(occurrence)
+        try await queue.enqueueScheduledMessage(id: occurrence, text: text, for: id)
+        await qaAfterScheduledQueueWrite?()
+        accepted = true
+        queuedWorkItemsCache[id] = await queue.queuedWorkItems(for: id)
+        notifyTurnCapabilitiesChanged(id)
+    }
+
+    func finishScheduledAdmission(_ occurrence: UUID) { scheduledQueueAdmissions.remove(occurrence) }
+
+    func discardScheduledWakeup(_ occurrence: UUID, for id: AgentID) async {
+        cancelQueuedMessage(occurrence, for: id)
+        await queueOpTasks[id]?.value
+        scheduledQueueAdmissions.remove(occurrence)
+    }
+
+    func releaseScheduledWakeups(for id: AgentID, knownIDs: Set<UUID>) async {
+        guard let queue = submissionRecoveryStore, canDeliverScheduledWakeup(to: id) else { return }
+        let items = await queue.queuedWorkItems(for: id)
+        guard !items.isEmpty else { return }
+        queuedWorkItemsCache[id] = items
+        // Only our own durable wakeups auto-resume after relaunch. An ordinary
+        // user follow-up or an explicitly stopped queue keeps its existing hold.
+        if pausedQueues.contains(id), queuePauseReasons[id] == .afterRelaunch,
+           items.allSatisfy({ knownIDs.contains($0.id) }) {
+            pausedQueues.remove(id); queuePauseReasons[id] = nil
+        }
+        notifyTurnCapabilitiesChanged(id)
+        if !pausedQueues.contains(id), runners[id] == nil { drainQueue(for: id) }
+    }
+
+    func scheduleDeliveryFailed(_ error: Error) {
+        // No prompt text in diagnostics. The durable outbox is left for retry.
+        warn("Agent schedule delivery deferred: storage or queue unavailable.")
+    }
+
+    func qaTickWakeups(now: Date) async throws { try await wakeupScheduler?.tick(now: now) }
+
     // MARK: - B4 follow-up queue
     //
     /// Mirrors `AgentComposerDraftStore`'s durable per-agent queue for
@@ -1719,6 +1829,12 @@ final class AgentSupervisor {
         }
         startHelperWatchdog()
         startHelperTileSweep()
+        if submissionRecoveryStore != nil {
+            do {
+                let schedules = try AgentWakeupScheduleStore(applicationSupportDirectory: store.layout.applicationSupportDirectory)
+                wakeupScheduler = AgentWakeupScheduler(store: schedules, owner: self)
+            } catch { warn("Agent schedules unavailable: storage could not be read.") }
+        }
     }
 
     /// Whether the explicit Generate Name action is offered at all. Resolving
@@ -4304,6 +4420,7 @@ final class AgentSupervisor {
     /// without this its Pi process outlives the session that started it. Iterates a
     /// snapshot because `stop` mutates `runners`.
     func stopAll() {
+        wakeupScheduler?.stop()
         for id in Array(helperProviderRetryErrors.keys) { stop(id) }
         for id in Array(runners.keys) { stop(id) }
         for id in Array(idleSessionRunners.keys) {
@@ -9720,6 +9837,8 @@ final class AgentSupervisor {
             await self.qaBeforeQueueDrain?()
             guard self.canDrainQueue(for: id),
                   let next = await store.nextWorkItem(for: id),
+                  !self.scheduledQueueAdmissions.contains(next.id),
+                  self.wakeupScheduler?.store.entries.contains(where: { $0.agent == id && $0.pendingDelivery == next.id }) != true,
                   self.canDrainQueue(for: id) else { return }
             if case .compaction(let compact) = next {
                 // Write-ahead recovery: an app exit from this point onward must

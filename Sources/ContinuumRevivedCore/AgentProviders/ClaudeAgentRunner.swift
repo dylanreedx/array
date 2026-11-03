@@ -526,6 +526,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     private var pendingControls: [String: (semaphore: DispatchSemaphore, success: Bool?)] = [:]
     /// claude's own `background_tasks_changed` list size: Bash background jobs
     /// and background subagents still running inside this process.
+    private var nativeSchedules = ClaudeScheduleTracker()
     private var backgroundTaskCount = 0
     private var spawnHandler: (@Sendable (SpawnRequest) -> Void)?
     private var observationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
@@ -560,7 +561,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// Background jobs or subagents claude reports running in this process.
     /// The idle reaper keeps a session alive while this is true.
     public var hasBackgroundWork: Bool {
-        queue.sync { backgroundTaskCount > 0 }
+        queue.sync { backgroundTaskCount > 0 || nativeSchedules.hasWork() }
     }
 
     /// Claude children this session opened that are still running. Unlike
@@ -953,11 +954,12 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         // and the next send quietly respawned.
         if turn == nil, !stopRequested, let handler = idleExitHandler {
             let tail = AgentFailureText.stderrTail(stderr)
-            let hadBackgroundWork = backgroundTaskCount > 0
+            let hadBackgroundWork = backgroundTaskCount > 0 || nativeSchedules.hasWork()
             DispatchQueue.global(qos: .utility).async { handler(code, tail, hadBackgroundWork) }
         }
         child = nil
         backgroundTaskCount = 0
+        nativeSchedules = ClaudeScheduleTracker()
         // Every child dies with the process; the supervisor settles them.
         translator.subagents = ClaudeSubagentRoster()
         interruptRequested = false
@@ -1029,6 +1031,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         if let data = line.data(using: .utf8),
            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
            let type = object["type"] as? String {
+            nativeSchedules.consume(object)
             switch type {
             case "control_response":
                 // Protocol-only; never part of the transcript.
