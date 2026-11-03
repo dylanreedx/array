@@ -167,8 +167,12 @@ final class SharedAgentComposeStrip: NSView {
         let draft = !composer.draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let presentation = SharedAgentChromePresenter.action(chrome, mayPrompt: mayPrompt, hasDraft: draft, sending: sending)
         if action.presentation != presentation { action.presentation = presentation }
-        action.toolTip = presentation.primaryAction == .stop && !presentation.isEnabled
-            ? "Only its owner can stop it, on the owner's Mac." : nil
+        // A view-only guest's action is unavailable, not resting: it fades like
+        // the provider chips and says why, as the composer does.
+        action.dimsWhenDisabled = readOnlyReason != nil
+        action.unavailableReason = readOnlyReason
+            ?? (presentation.primaryAction == .stop && !presentation.isEnabled ? "Only its owner can stop it, on the owner's Mac." : nil)
+        action.setAccessibilityHelp(action.unavailableReason)
     }
 
     func applyTokens() {

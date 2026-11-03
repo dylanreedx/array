@@ -8,6 +8,12 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
     private let iconView = NSImageView(frame: .zero)
     private let titleLabel = NSTextField(labelWithString: "")
     private var isPressed = false
+    /// Fade when disabled, as a disabled `ChoiceButton` does. Off for the
+    /// local composer, whose disabled Send (no draft yet) is a resting state;
+    /// on where the action cannot be used at all (a shared agent seen view-only).
+    var dimsWhenDisabled = false { didSet { if dimsWhenDisabled != oldValue { applyTokens() } } }
+    /// Says why the action is unavailable, in place of its label's tooltip.
+    var unavailableReason: String? { didSet { if unavailableReason != oldValue { applyPresentationToolTip() } } }
     /// WS5: the tile's page zoom. Every metric below derives from it, so 100%
     /// reproduces the shipped numbers exactly.
     private(set) var pageZoom: AgentPageZoom = .default
@@ -166,7 +172,13 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
         let foreground = showsOperation ? TextToken.textOnAccent.color : TextToken.textSecondary.color
         titleLabel.textColor = foreground.nsColor(for: theme)
         iconView.contentTintColor = foreground.nsColor(for: theme)
-        alphaValue = isPressed ? 0.78 : 1
+        alphaValue = isPressed ? 0.78 : (dimsWhenDisabled && !isEnabled ? Self.disabledAlpha : 1)
+    }
+    /// A disabled `ChoiceButton`'s fade.
+    static let disabledAlpha: CGFloat = 0.58
+
+    private func applyPresentationToolTip() {
+        toolTip = unavailableReason ?? presentation.accessibilityLabel
     }
 
     /// WS5: re-derive every zoom-owned metric from scratch. Idempotent, and safe
@@ -186,7 +198,7 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
         setAccessibilityLabel(presentation.accessibilityLabel)
         setAccessibilityEnabled(presentation.isEnabled)
         setAccessibilityValue(presentation.isLoading ? "In progress" : nil)
-        toolTip = presentation.accessibilityLabel
+        applyPresentationToolTip()
         invalidateIntrinsicContentSize()
         needsLayout = true
         applyTokens()

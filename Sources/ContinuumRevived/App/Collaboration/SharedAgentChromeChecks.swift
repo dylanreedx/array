@@ -196,6 +196,12 @@ enum SharedAgentChromeChecks {
                    "the guest's primary action is the host's, and nothing here can act on the host's turn")
         try expect(guest.strip.composer.readOnlyReason?.isEmpty == false && !guest.offersComposer && !guest.strip.composer.textView.isEditable,
                    "a guest who may not prompt from here gets a read-only composer that says why (\(guest.strip.composer.readOnlyReason ?? "nil"))")
+        let action = guest.strip.action
+        try expect(!action.isEnabled && action.alphaValue == ComposerActionButton.disabledAlpha
+                   && action.toolTip == guest.strip.composer.readOnlyReason && action.accessibilityHelp() == guest.strip.composer.readOnlyReason,
+                   "a view-only guest's action looks disabled, like the provider chips, and gives the composer's reason (alpha \(action.alphaValue), \(action.toolTip ?? "no tooltip"))")
+        try expect(hostTile.qaPageZoomActionButton?.alphaValue == 1,
+                   "control: the host's own resting action keeps full strength")
 
         // The ⋯ menu: the host's items, each disabled with a reason; Stop too.
         let menu = guestTile.qaTileContextMenu()?.items ?? []
