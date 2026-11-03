@@ -230,6 +230,11 @@ if CommandLine.arguments.contains("--claude-hook-bridge-check") {
     runClaudeHookBridgeChecks()
     Foundation.exit(0)
 }
+// Duckherd stays off inside Managed Claude agents, untouched in Free ones.
+if CommandLine.arguments.contains("--managed-duckherd-check") {
+    runManagedDuckherdChecks()
+    Foundation.exit(0)
+}
 // CX-01 hardening: the transport's write serialisation, runnable without the
 // load-sensitive legs ahead of it in the full run.
 if CommandLine.arguments.contains("--pi-rpc-transport-check") {

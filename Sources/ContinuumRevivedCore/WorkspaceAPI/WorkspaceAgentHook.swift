@@ -70,8 +70,18 @@ public enum WorkspaceAgentHook {
 
     /// Claude's `--settings` JSON: the hook command on every observed event.
     /// It merges with the user's and the project's own hooks (P0 V2); Array
-    /// never passes `--setting-sources`, which drops them.
-    public static func claudeSettingsJSON(command: String) -> String {
+    /// never passes `--setting-sources`, which drops them. A Managed session
+    /// adds `pluginConfigs` (`ClaudeDuckherd`); nil leaves the Free value
+    /// byte-identical to P1's.
+    public static func claudeSettingsJSON(command: String?, pluginConfigs: [String: Any]? = nil) -> String {
+        var object: [String: Any] = [:]
+        if let command { object["hooks"] = claudeHooks(command: command) }
+        if let pluginConfigs { object["pluginConfigs"] = pluginConfigs }
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return "{}" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    static func claudeHooks(command: String) -> [String: Any] {
         var hooks: [String: Any] = [:]
         for event in claudeEvents {
             var group: [String: Any] = [
@@ -80,8 +90,7 @@ public enum WorkspaceAgentHook {
             if toolMatcherEvents.contains(event) { group["matcher"] = "*" }
             hooks[event] = [group]
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: ["hooks": hooks], options: [.sortedKeys]) else { return "{}" }
-        return String(decoding: data, as: UTF8.self)
+        return hooks
     }
 
     static func shellQuoted(_ value: String) -> String {

@@ -280,7 +280,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         extraArgs: [String],
         workspaceMCP: WorkspaceMCPConfiguration? = nil,
         mode: AgentMode = .free,
-        hookSurfaceAvailable: Bool = true
+        hookSurfaceAvailable: Bool = true,
+        duckherdPluginKeys: [String] = []
     ) -> [String] {
         let sessionArgs: [String]
         switch sessionMode {
@@ -304,8 +305,16 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             + ["--permission-mode", "bypassPermissions"]
             + sessionArgs
             + extraArgs
+        // A Managed session is Array's conductor, so Duckherd starts off in it
+        // (`ClaudeDuckherd`). The switch rides in the one `--settings` value;
+        // a Free session's settings are untouched.
+        let pluginConfigs = mode == .managed
+            ? ClaudeDuckherd.switchedOffPluginConfigs(installedKeys: duckherdPluginKeys) : nil
         if mode == .managed {
             args += ["--disallowed-tools", "Edit,Write,MultiEdit,NotebookEdit" + (workspaceMCP == nil ? "" : ",ListAgents")]
+            if workspaceMCP == nil || !hookSurfaceAvailable {
+                args += ["--settings", WorkspaceAgentHook.claudeSettingsJSON(command: nil, pluginConfigs: pluginConfigs)]
+            }
         }
         if let workspaceMCP {
             // The guidance line rides in the system prompt because Claude
@@ -324,7 +333,10 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             args += ["--append-system-prompt", WorkspaceMCPConfiguration.agentGuidance,
                      "--allowedTools", "mcp__array_workspace"]
                 + (mode == .free ? ["--disallowedTools", "ListAgents"] : [])
-            if hookSurfaceAvailable { args += ["--settings", workspaceMCP.claudeHookSettingsJSON] }
+            if hookSurfaceAvailable {
+                args += ["--settings", WorkspaceAgentHook.claudeSettingsJSON(
+                    command: workspaceMCP.claudeHookCommand, pluginConfigs: pluginConfigs)]
+            }
             args += ["--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigPath]
         }
         return args
@@ -399,9 +411,13 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     public enum RunError: Error, CustomStringConvertible, AgentRunFailureDescribing {
         case launchFailed(String)
         case claudeFailed(exitCode: Int32, stderr: String)
+        /// Array declined to send this prompt; nothing reached claude.
+        case declined(String)
 
         public var description: String {
             switch self {
+            case .declined(let message):
+                return "declined(\(message))"
             case .launchFailed(let message):
                 return "launchFailed(\(SecretRedactor.redactLocalDiagnostics(message)))"
             case .claudeFailed(let exitCode, let stderr):
@@ -411,6 +427,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
 
         public var userFacingDescription: String {
             switch self {
+            case .declined(let message):
+                return message
             case .launchFailed(let message):
                 return "Claude Code could not start: \(SecretRedactor.redactLocalDiagnostics(message))"
             case .claudeFailed(let exitCode, let stderr):
@@ -592,13 +610,43 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// pair from the one-shot runner, unchanged. A `/clear` rotation is one
     /// `--fork-session` attempt with no retry.
     public func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        if config.mode == .managed, ClaudeDuckherd.isSwitchOnCommand(Self.userMessageText(prompt)) {
+            throw RunError.declined(Self.duckherdDeclinedText)
+        }
         let line: String
         do {
             line = try Self.userMessageLine(prompt)
         } catch {
             throw RunError.launchFailed("could not prepare a local image attachment")
         }
+        try keepDuckherdOffOnResume()
         try drive(line: line, onEvent: onEvent)
+    }
+
+    static let duckherdDeclinedText =
+        "Duckherd stays off in Managed agents, because Array leads this one. Switch the agent to Free to use Duckherd."
+
+    /// A Managed session starts Duckherd off through `--settings`, but
+    /// Duckherd checks its own saved `/duckherd on` for the session first, so
+    /// a resumed session that was once switched on would come back on. Before
+    /// the first prompt of a process that resumes such a session, the runner
+    /// sends `/duckherd off` and publishes nothing from it. Claude answers the
+    /// command itself, at no cost. Duckherd then saves "off" for this session,
+    /// which a later Free run of the same session also sees.
+    private func keepDuckherdOffOnResume() throws {
+        guard config.mode == .managed, !config.forkSession || queue.sync(execute: { forkConsumed }),
+              queue.sync(execute: { child == nil }),
+              ClaudeDuckherd.sessionSwitchedOn(
+                sessionId: config.sessionId,
+                configDirectory: ClaudeDuckherd.configDirectory(config.configDirectory)) else { return }
+        do {
+            try drive(line: try Self.userMessageLine(AgentPrompt(ClaudeDuckherd.switchOffCommand)), onEvent: { _ in })
+        } catch let stopped as AgentRunStopped {
+            throw stopped
+        } catch {
+            // The prompt's own drive starts the process again and reports
+            // anything real.
+        }
     }
 
     /// Text-only compatibility wrapper, matching PiAgentRunner's.
@@ -733,6 +781,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// `interruptRequestLine`).
     public func steer(_ prompt: AgentPrompt, id: UUID) throws {
         let text = Self.userMessageText(prompt)
+        if config.mode == .managed, ClaudeDuckherd.isSwitchOnCommand(text) {
+            throw AgentSteerNotAccepted(Self.duckherdDeclinedText)
+        }
         let line: String
         do {
             line = try Self.userMessageLine(prompt, uuid: id)
@@ -860,7 +911,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             extraArgs: config.extraArgs,
             workspaceMCP: config.workspaceMCP,
             mode: config.mode,
-            hookSurfaceAvailable: config.workspaceMCP != nil && AgentHookSurfaceCatalog.shared.claudeAvailable(command: command)
+            hookSurfaceAvailable: config.workspaceMCP != nil && AgentHookSurfaceCatalog.shared.claudeAvailable(command: command),
+            duckherdPluginKeys: config.mode == .managed
+                ? ClaudeDuckherd.installedPluginKeys(configDirectory: ClaudeDuckherd.configDirectory(config.configDirectory)) : []
         )
         let spawned: ProcessGroupChild
         do {

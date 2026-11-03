@@ -825,6 +825,7 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
   run swift build --disable-sandbox --skip-update --product array-workspace-mcp
   run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
   run_app_check .build/debug/Array --workspace-hook-bridge-check
@@ -866,6 +867,7 @@ if [[ "$HOOK_BRIDGE_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
   run swift build --disable-sandbox --skip-update --product array-workspace-mcp
   run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
@@ -1111,6 +1113,10 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
 # hooks through one --settings value: exactly seven events, a short timeout,
 # earlier flags unchanged, never --setting-sources (it drops the user's hooks).
 run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
+# Duckherd stays off inside a Managed Claude lead (pluginConfigs startOn false
+# under every installed key, plus one unpublished /duckherd off on a resume
+# Duckherd saved as on), declines /duckherd on there, and Free is untouched.
+run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
 # .plans/102 P2a: array_report/array_status bounds, the once-only push-back
 # decision and its wording, the courier unchanged without a report, and the

@@ -90,6 +90,15 @@ enum ManagedModeChecks {
         return args
     }
 
+    /// Whether a real launch's one `--settings` starts Duckherd off
+    /// (`ClaudeDuckherd`): Managed leads only, never Free agents.
+    static func startsDuckherdOff(_ args: [String]) -> Bool {
+        guard args.filter({ $0 == "--settings" }).count == 1, let i = args.firstIndex(of: "--settings"), i + 1 < args.count,
+              let settings = (try? JSONSerialization.jsonObject(with: Data(args[i + 1].utf8))) as? [String: Any],
+              let duck = (settings["pluginConfigs"] as? [String: Any])?[ClaudeDuckherd.pluginName] as? [String: Any] else { return false }
+        return (duck["options"] as? [String: Any])?["startOn"] as? Bool == false && settings["hooks"] != nil
+    }
+
     static func launch() async throws {
         let b = try bench("managed-launch"); defer { b.tearDown() }
         let managed = try await delegate(b, mode: "managed", label: "managed")
@@ -98,6 +107,7 @@ enum ManagedModeChecks {
         let args = try argv(b, managed)
         if section != "switch" && section != "free-argv" {
             try expect(args.contains("--disallowed-tools") && args.contains("Edit,Write,MultiEdit,NotebookEdit,ListAgents"), "managed real argv lacks native edit exclusion: \(args)")
+            try expect(startsDuckherdOff(args), "managed real argv must start Duckherd off beside Array's hooks: \(args)")
         }
         let free = try await delegate(b, mode: nil, label: "free")
         try await settled(b, free)
@@ -126,7 +136,7 @@ enum ManagedModeChecks {
         let resumed = try argv(b, free)
         try expect(launches(b, free).count == count + 1, "switch reused the old process")
         try expect(resumed.contains("--resume") && resumed.contains(sid)
-            && resumed.contains("Edit,Write,MultiEdit,NotebookEdit,ListAgents"), "switch did not restart with resume and managed argv: \(resumed)")
+            && resumed.contains("Edit,Write,MultiEdit,NotebookEdit,ListAgents") && startsDuckherdOff(resumed), "switch did not restart with resume and managed argv: \(resumed)")
 
         // A switch during a turn must leave that process/policy intact until
         // the following submitted turn, then remove the native restrictions.
@@ -141,8 +151,9 @@ enum ManagedModeChecks {
         try expect(b.supervisor.send("free again", to: free), "free turn refused")
         try await settled(b, free)
         let again = try argv(b, free)
-        try expect(launches(b, free).count == heldCount + 1 && again.contains("--resume") && !again.contains("Edit,Write,MultiEdit,NotebookEdit,ListAgents"), "switch back did not resume free")
-        print("Managed mode launch checks passed: real lead argv, free byte equality, deferred switches both directions and resume, cold-cache flag")
+        try expect(launches(b, free).count == heldCount + 1 && again.contains("--resume") && !again.contains("Edit,Write,MultiEdit,NotebookEdit,ListAgents")
+            && !startsDuckherdOff(again) && !again.contains { $0.contains("pluginConfigs") }, "switch back did not resume free: \(again)")
+        print("Managed mode launch checks passed: real lead argv with Duckherd started off, free byte equality, deferred switches both directions and resume, cold-cache flag")
     }
 
     static func hook(_ b: WorkspaceAgentReportChecks.Bench, _ id: AgentID, _ payload: [String: Any]) async throws -> [String: Any] {
