@@ -60,6 +60,7 @@ enum AgentFirstPaintChecks {
 
     @MainActor
     static func run() throws {
+        try checkAcceptedSendClearsNativeEditor()
         try checkEchoPrecedesTheSink()
         try checkRefusalIsSaidOutLoud()
         try checkOptimisticWindowSurvivesSynchronize()
@@ -309,6 +310,59 @@ enum AgentFirstPaintChecks {
                 + "permanently rather than deferring them"
             )
         }
+    }
+
+    /// Send reads the native editor. A deferred TextKit notification must not
+    /// make that same submitted text look like a newer draft during acceptance.
+    @MainActor
+    private static func checkAcceptedSendClearsNativeEditor() throws {
+        for variant in [AgentComposerVariant.fullTurn, .compactFreeform] {
+            for editDuringSend in [false, true] {
+                let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 320, height: 80), variant: variant)
+                let text = "how about claude desktop app???"
+                // Hold the native notification until the echo callback below.
+                composer.textView.composerObserver = nil
+                composer.textView.string = text
+                composer.textView.composerObserver = composer
+                // Native text is present before its model notification. Painting
+                // the optimistic echo can reenter through a selection update.
+                composer.onSubmissionStarted = { _ in
+                    composer.composerSelectionDidChange(composer.textView)
+                }
+                let sink = OrderRecordingSink(.accepted, hold: {
+                    if editDuringSend {
+                        composer.textView.insertText(" next", replacementRange: NSRange(location: text.utf16.count, length: 0))
+                    }
+                })
+                composer.bindActionSink(sink, agentID: AgentID(rawValue: UUID()), snapshot: .init(
+                    state: .ready, capabilities: .sendStop(canSend: true, canStop: false), turnStartedAt: nil))
+                composer.composerRequestedSend(composer.textView)
+                let deadline = Date().addingTimeInterval(2)
+                while !sink.events.contains("accept-returned") && Date() < deadline {
+                    RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+                }
+                guard sink.receivedIntents.count == 1 else { throw fail("send-clear: sink did not receive the prompt") }
+                let expected = editDuringSend ? text + " next" : ""
+                guard composer.textView.string == expected, composer.draft.text == expected else {
+                    throw fail("send-clear: accepted prompt remained in native editor or newer edit was lost; expected \(expected.debugDescription), editor \(composer.textView.string.debugDescription), model \(composer.draft.text.debugDescription)")
+                }
+            }
+        }
+        // Fire-and-forget owners (shared views) acknowledge later. Their newer
+        // text must survive acceptance too; refusal never acknowledges at all.
+        for editDuringSend in [false, true] {
+            let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
+            composer.apply(.init(text: "sent", selection: NSRange(location: 4, length: 0), revision: 1))
+            var delivered: String?
+            composer.onSubmitPrompt = { delivered = $0 }
+            composer.composerRequestedSend(composer.textView)
+            guard delivered == "sent", composer.textView.string == "sent" else { throw fail("send-clear: unacknowledged draft changed") }
+            if editDuringSend { composer.textView.insertText(" next", replacementRange: NSRange(location: 4, length: 0)) }
+            composer.acceptCurrentSendIntent()
+            let expected = editDuringSend ? "sent next" : ""
+            guard composer.textView.string == expected else { throw fail("send-clear: asynchronous acknowledgement erased a newer draft") }
+        }
+        print("Composer send-clear checks passed: both variants clear accepted native text after deferred notifications; pending edits and unacknowledged drafts survive")
     }
 
     /// THE assertion: acknowledgement is a function of the keystroke, not of how

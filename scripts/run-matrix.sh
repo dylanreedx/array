@@ -43,6 +43,7 @@ if [[ -n "$MATRIX_TMUX_BIN" ]]; then
   esac
 fi
 
+COMPOSER_SEND_ONLY=0
 CROSS_HARNESS_DELEGATION_ONLY=0
 SIDEBAR_REFINEMENTS_ONLY=0
 FAST=0
@@ -58,6 +59,7 @@ IOS_PREVIEW_PROOF_ONLY=0
 IOS_PREVIEW_LIVE_ONLY=0
 IOS_PREVIEW_TILE_ONLY=0
 COLLABORATION_ONLY=0
+SHARE_REVOCATION_ONLY=0
 COMPANION_TASKS_ONLY=0
 NOTIFICATIONS_ONLY=0
 NOTIFICATIONS_LINUX_ONLY=0
@@ -65,6 +67,14 @@ MANAGED_MODE_ONLY=0
 HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    --share-revocation)
+      SHARE_REVOCATION_ONLY=1
+      shift
+      ;;
+    --composer-send)
+      COMPOSER_SEND_ONLY=1
+      shift
+      ;;
     --collaboration)
       COLLABORATION_ONLY=1
       shift
@@ -147,7 +157,11 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
+Usage: scripts/run-matrix.sh [--share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
+
+--share-revocation rebuilds app/relay and reports the real-relay share and revocation witness.
+
+--composer-send rebuilds the app and reports native composer acceptance, refusal and in-flight edit checks.
 
 --boards rebuilds app/CoreChecks and reports the board library, lifecycle, API and reference witnesses.
 
@@ -588,6 +602,20 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+if [[ "$SHARE_REVOCATION_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array
+  run swift build --disable-sandbox --skip-update --product continuum-relay
+  run_app_check .build/debug/Array --share-agent-relay-check
+  matrix_report 'Share revocation matrix (targeted)'
+  exit $?
+fi
+if [[ "$COMPOSER_SEND_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array
+  run_app_check .build/debug/Array --agent-first-paint-check
+  run_app_check .build/debug/Array --composer-key-routing-check
+  matrix_report 'Composer send matrix (targeted)'
+  exit $?
+fi
 if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks

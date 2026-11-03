@@ -30,6 +30,53 @@ enum ShareEntryRelayChecks {
         throw Failure(description: "share entry (relay): timeout: \(label)")
     }
 
+    /// An empty room stays shared; explicit revocation must either finish or
+    /// retain a retryable state. These use the same popover session as the UI.
+    private static func revocationFailures() async throws {
+        let links = ShareEntryChecks.FakeLinks(), zones = ShareEntryChecks.FakeZones()
+        let area = UUID(), tile = UUID()
+        let target = ShareTarget(workspaceID: UUID(), origin: .agent,
+            items: [.init(key: .init(projectID: UUID(), tileID: tile), title: "Agent", kind: .managedAgent)], area: area)
+        let board = NSPasteboard(name: .init("dev.arrayapp.revoke-failures." + UUID().uuidString))
+        defer { board.releaseGlobally() }
+        let session = ShareLinkSession(target: target, links: links, zones: zones, pasteboard: board)
+        await session.refreshAccess()
+        try expect(session.area == area && zones.stoppedShares.isEmpty,
+            "zero collaborators does not disable sharing")
+        let link = try await links.createShareLink(area: area, slug: "fresh-link", lifetime: .untilRevoked)
+        links.access[link.id] = .init(id: link.id, area: .init(area), slug: link.slug, lifetime: link.lifetime,
+                                    status: .active, createdAt: link.createdAt, people: [])
+        // No refresh: Revoke must read this new link itself.
+        links.refuseRevoke = true
+        await session.revoke()
+        try expect(session.failure != nil && session.area == area && zones.stoppedShares.isEmpty,
+            "failed relay revocation keeps the host and a retryable session")
+        links.refuseRevoke = false; zones.refuseStop = true
+        await session.revoke()
+        try expect(session.failure != nil && session.area == area && zones.stoppedShares.isEmpty,
+            "failed host persistence reports failure and remains retryable")
+        zones.refuseStop = false
+        await session.revoke()
+        try expect(links.revoked.contains(link.id) && zones.stoppedShares == [area]
+            && session.area == nil && session.accessRows.isEmpty && session.people.isEmpty,
+            "retry revokes newly discovered links and clears the sharing session")
+        await session.refreshAccess()
+        try expect(session.phase == .revoked(area: area), "polling cannot resurrect a revoked share")
+        await session.newLink()
+        try expect(zones.agentShares.count == 1 && session.area != area && session.link != nil,
+            "New link after teardown publishes and hosts a fresh share")
+        let replacement = session.link!
+        links.access[replacement.id] = .init(id: replacement.id, area: replacement.area,
+            slug: replacement.slug, lifetime: replacement.lifetime, status: .revoked,
+            createdAt: replacement.createdAt, people: [])
+        await session.refreshAccess()
+        try expect(session.area == replacement.area.rawValue && zones.stoppedShares == [area],
+            "a relay-revoked link alone keeps its tile host enabled")
+        await session.newLink()
+        try expect(session.area == replacement.area.rawValue && zones.agentShares.count == 1,
+            "replacing a relay-revoked link reuses the still-enabled host")
+    }
+
     // MARK: The local relay
 
     /// `continuum-relay` on loopback with its own databases and keys, the way
@@ -130,6 +177,7 @@ enum ShareEntryRelayChecks {
     // MARK: Run
 
     static func run() async throws {
+        try await revocationFailures()
         guard let support = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] else {
             throw Failure(description: "isolated app support required")
         }
@@ -387,6 +435,11 @@ enum ShareEntryRelayChecks {
         let afterRevoke = try await app.shareLinks.listAccess(area: areaA)
         try expect(afterRevoke.allSatisfy { $0.status == .revoked } && afterRevoke.flatMap(\.people).allSatisfy { !$0.active },
             "Revoke everyone's access ends every link on the area and Sam's access")
+        try expect(app.hostedAgentArea(forTile: agentA) == nil
+            && HostedAgentShareIndex(directory: account.storeDirectory).entries.isEmpty
+            && app.sharedAreaHostSessions.keys.allSatisfy { !$0.hasSuffix("/" + areaA.uuidString) }
+            && canvas.tileView(for: agentA)?.ownershipMark == nil,
+            "explicit revocation disables tile collaboration, removes its persisted host and clears its ownership mark")
         app.shareEntry.dismiss()
         let revokable = try await app.shareLinks.createShareLink(area: areaA, slug: "revoked-checkout-link", lifetime: .untilRevoked)
         try await app.shareLinks.revokeLink(area: areaA, link: revokable.id)

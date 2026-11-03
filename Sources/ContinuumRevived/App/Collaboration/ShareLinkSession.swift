@@ -85,6 +85,8 @@ protocol SharedZoneCreating: AnyObject {
     /// into a new area and host it, with no zone and no tile moved. Returns the area.
     func shareAgent(tile: UUID, name: String) async throws -> UUID
     func cancelAgentShare(area: UUID) async
+    /// Explicit revocation also removes the persisted host and visible sharing state.
+    func stopSharing(area: UUID) async throws
     /// Mode B (`Portal/SharedPortalHost.swift`): publish the tiles into a new
     /// area where they sit, as one portal, with no zone and no tile moved.
     func sharePortal(tiles: [UUID], name: String) async throws -> UUID
@@ -128,6 +130,8 @@ final class ShareLinkSession {
     private let pasteboard: NSPasteboard
 
     private(set) var phase: Phase = .draft
+    /// A revoked link alone does not mean the tile's host was turned off.
+    private var sharingStopped = false
     private(set) var slug: String
     private(set) var lifetime: Collaboration.ShareLinkLifetime = .once
     private(set) var people: [Collaboration.ShareLinkPerson] = []
@@ -165,7 +169,8 @@ final class ShareLinkSession {
     var area: UUID? {
         switch phase {
         case .live(let link), .used(let link): return link.area.rawValue
-        case .revoked(let area), .existing(let area): return area
+        case .existing(let area): return area
+        case .revoked(let area): return sharingStopped ? nil : area
         default: return nil
         }
     }
@@ -270,14 +275,21 @@ final class ShareLinkSession {
                 // Every listed tile goes in; a terminal as a card that carries nothing.
                 self.publishedTileIDs = self.target.tileIDs
             }
+            self.sharingStopped = false
             self.phase = .live(link)
             self.write(link)
         }
     }
 
-    /// After a "Works once" link is spent, or after Revoke: a fresh link for
-    /// the same area.
+    /// A spent link gets a replacement on the same hosted area. Explicit
+    /// revocation ended the host, so sharing again creates a fresh area.
     func newLink() async {
+        if case .revoked = phase, sharingStopped {
+            // The old area no longer has a host. Share anew before minting a link.
+            phase = .draft
+            await copy()
+            return
+        }
         let spent: Bool
         switch phase {
         case .used, .revoked, .existing: spent = true
@@ -295,12 +307,19 @@ final class ShareLinkSession {
     /// admits or holds someone, and everyone's access through them.
     func revoke() async {
         guard let area else { return }
-        var ids = accessRows.filter { $0.status != .revoked }.map(\.id)
-        if let link, !ids.contains(link.id) { ids.append(link.id) }
-        guard !ids.isEmpty else { return }
+        let currentLink = link
         await run {
+            // Read the relay now: another popover may have minted a link since
+            // our last poll. A read/revoke failure must not claim sharing is off.
+            let rows = try await self.links.listAccess(area: area)
+            var ids = rows.filter { $0.status != .revoked }.map(\.id)
+            if let link = currentLink, !ids.contains(link.id) { ids.append(link.id) }
             for id in ids { try await self.links.revokeLink(area: area, link: id) }
+            try await self.zones.stopSharing(area: area)
             self.people = []
+            self.accessRows = []
+            self.publishedTileIDs = []
+            self.sharingStopped = true
             self.phase = .revoked(area: area)
             self.copied = false
         }

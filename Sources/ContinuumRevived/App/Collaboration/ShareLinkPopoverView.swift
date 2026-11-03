@@ -164,8 +164,9 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
         peopleHeader.isHidden = session.people.isEmpty
         // A link in hand, or on an already-shared area any link that still
         // admits or holds someone.
-        let revocable = session.link != nil
-            || { if case .existing = phase { return session.accessRows.contains { $0.status != .revoked } }; return false }()
+        // An already-hosted tile can be turned off even when every link was
+        // revoked previously, or teardown needs retrying after a disk failure.
+        let revocable = session.area != nil
         revokeButton.isHidden = !revocable || !session.people.isEmpty
         revokeEveryoneButton.isHidden = !revocable || session.people.isEmpty
         if let failure = session.failure {

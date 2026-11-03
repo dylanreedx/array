@@ -52,8 +52,10 @@ final class HostedPortalIndex {
     }
     func remove(area: UUID) throws {
         guard entries.contains(where: { $0.area == area }) else { return }
+        let previous = entries
         entries.removeAll { $0.area == area }
-        try save()
+        do { try save() }
+        catch { entries = previous; throw error }
     }
     private func save() throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

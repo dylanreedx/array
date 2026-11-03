@@ -41,8 +41,10 @@ final class HostedAgentShareIndex {
     }
     func remove(area: UUID) throws {
         guard entries.contains(where: { $0.area == area }) else { return }
+        let previous = entries
         entries.removeAll { $0.area == area }
-        try save()
+        do { try save() }
+        catch { entries = previous; throw error }
     }
     private func save() throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -224,6 +226,17 @@ extension AppDelegate {
         return area
     }
 
+    /// Explicit Revoke: persist the decision before stopping hosts, so a
+    /// relaunch cannot resume the share. Failed persistence remains retryable.
+    func stopSharing(area: UUID) async throws {
+        try hostedAgentShares?.remove(area: area)
+        try hostedPortalIndex?.remove(area: area)
+        hostedAgentPeople.removeValue(forKey: area)
+        await cancelPortalShare(area: area)
+        await cancelAgentShare(area: area)
+        await cancelSharedZone(areaId: area)
+    }
+
     /// Undo of `shareAgent` when no link could be minted: the agent leaves the
     /// area and this Mac stops hosting it.
     func cancelAgentShare(area: UUID) async {
@@ -328,7 +341,8 @@ extension AppDelegate {
               let entries = hostedAgentShares?.entries(account: account) else { return }
         var changed = false
         for entry in entries {
-            guard let rows = try? await shareLinks.listAccess(area: entry.area) else { continue }
+            guard let rows = try? await shareLinks.listAccess(area: entry.area),
+                  hostedAgentShares?.entries.contains(where: { $0.area == entry.area }) == true else { continue }
             var seen = Set<UUID>()
             let names = rows.filter { $0.status != .revoked }.flatMap(\.people)
                 .filter { $0.active && seen.insert($0.person.rawValue).inserted }.map(\.label)

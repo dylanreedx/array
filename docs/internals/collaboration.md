@@ -465,6 +465,15 @@ Share on the same tile reopens that area's popover. The tile's tab reads
 quit each host ends its run (`SharedAreaHostHeartbeat.endAtQuit`, bounded), so
 teammates see it offline at once instead of after `offlineAfter`.
 
+Explicit **Revoke link / Revoke everyone's access** turns sharing off for the
+area: the popover reads and revokes every current relay link, then removes the
+saved agent/portal host entries, stops hosts and presence, and clears ownership
+marks. A failed relay request or host-index write reports failure and permits
+retry. An empty room or a spent single-use link alone keeps sharing enabled.
+**New link** after explicit revocation publishes and hosts a fresh share.
+Witness: `--share-agent-relay-check`, also reported by
+`scripts/run-matrix.sh --share-revocation`.
+
 A link whose area holds exactly one agent observation owned by someone else
 lands as one `.sharedAgent` tile in the receiver's armed zone, through
 `TileSpawner.spawnSharedAgent` (one target zone for placement, siblings, z and

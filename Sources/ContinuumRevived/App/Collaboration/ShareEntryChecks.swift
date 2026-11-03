@@ -51,6 +51,7 @@ enum ShareEntryChecks {
         var access: [UUID: Collaboration.ShareLinkAccess] = [:]
         /// The next mint refuses, as the relay does for a slug in use.
         var refuseNext: (any Error)?
+        var refuseRevoke = false
         private var count = 0
 
         func createShareLink(area areaId: UUID, slug: String, lifetime: Lifetime) async throws -> Collaboration.ShareLink {
@@ -60,7 +61,10 @@ enum ShareEntryChecks {
             return Collaboration.ShareLink(id: UUID(), area: .init(areaId), slug: slug,
                                            token: "checkToken_\(count)_abcdefgh", lifetime: lifetime, createdAt: Date())
         }
-        func revokeLink(area: UUID, link: UUID) async throws { revoked.append(link) }
+        func revokeLink(area: UUID, link: UUID) async throws {
+            if refuseRevoke { throw Failure(description: "scripted relay unavailable") }
+            revoked.append(link)
+        }
         func removeAccess(area: UUID, link: UUID, person: SharedArea.ID<SharedArea.Person>) async throws { removed.append(person) }
         func listAccess(area: UUID) async throws -> [Collaboration.ShareLinkAccess] { Array(access.values) }
     }
@@ -77,6 +81,12 @@ enum ShareEntryChecks {
         /// Mode A: one agent shares into a new area with no zone.
         var agentShares: [(tile: UUID, name: String, area: UUID)] = []
         var cancelledAgentShares: [UUID] = []
+        var stoppedShares: [UUID] = []
+        var refuseStop = false
+        func stopSharing(area: UUID) async throws {
+            if refuseStop { throw Failure(description: "scripted disk unavailable") }
+            stoppedShares.append(area)
+        }
         func shareAgent(tile: UUID, name: String) async throws -> UUID {
             let area = UUID()
             agentShares.append((tile, name, area))

@@ -177,6 +177,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     private var submissionLease: AgentComposerSubmissionLease?
     private var submissionReleaseTask: Task<Void, Never>?
     private var pendingSubmittedPrompt: String?
+    private var pendingSubmittedRevision: UInt64?
     private var pendingSubmittedDraft: AgentComposerDraft?
     private var pendingSubmittedDraftAgentID: AgentID?
     private var pendingSubmittedLease: AgentComposerSubmissionLease?
@@ -990,6 +991,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             dictation.finish()
             return
         }
+        // Send reads the native editor, whose TextKit change notification can
+        // still be pending. Synchronize before capturing the revision: painting
+        // the echo can reenter through a selection notification, and that must
+        // not make the text being submitted look like an edit made after Send.
+        if textView.string != draft.text { publishDraftChange() }
+        let submittedRevision = draft.revision
         qaSendRequestCount += 1
         let prompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || !importedAgentReferences.isEmpty || !importedBoardReferences.isEmpty || draft.taskContext != nil else { return }
@@ -1047,14 +1054,15 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             submitBoundIntent(
                 intent,
                 submittedPrompt: prompt,
-                submittedRevision: draft.revision
+                submittedRevision: submittedRevision
             )
         } else if let onSubmitIntent {
             pendingSubmittedPrompt = nil
             guard onSubmitIntent(BoardReferencePromptEnvelope.text(AgentReferencePromptEnvelope.text(prompt, references: importedAgentReferences), references: importedBoardReferences)) else { return }
-            completeAcceptedSend(prompt)
+            completeAcceptedSend(prompt, submittedRevision: submittedRevision)
         } else if let onSubmitPrompt {
             pendingSubmittedPrompt = prompt
+            pendingSubmittedRevision = submittedRevision
             onSubmitPrompt(BoardReferencePromptEnvelope.text(AgentReferencePromptEnvelope.text(prompt, references: importedAgentReferences), references: importedBoardReferences))
         }
     }
@@ -1063,7 +1071,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// A click or rejected request must not call this method.
     func acceptCurrentSendIntent() {
         guard let prompt = pendingSubmittedPrompt else { return }
-        completeAcceptedSend(prompt)
+        completeAcceptedSend(prompt, submittedRevision: pendingSubmittedRevision)
     }
 
     func composerRequestedCompletionCommand(
