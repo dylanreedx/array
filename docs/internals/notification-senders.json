@@ -3,7 +3,7 @@
     "local-banner": { "count": 1, "paths": ["MAC-02"] }
   },
   "Sources/ContinuumRevived/App/AgentSoundSystem.swift": {
-    "audio": { "count": 1, "paths": ["MAC-03", "MAC-04", "MAC-05", "MAC-06", "MAC-09"] }
+    "audio": { "count": 1, "paths": ["MAC-03", "MAC-04", "MAC-05", "MAC-06", "MAC-09", "MAC-10", "MAC-11", "MAC-12", "MAC-13"] }
   },
   "Sources/ContinuumRevived/App/ContinuumApp.swift": {
     "dock-badge": { "count": 9, "paths": ["MAC-01", "QA-05"] }

@@ -84,6 +84,14 @@ final class AgentCharacterController {
             return nil
         }
     }
+    /// The file a user set `id` was read from (`<id>/theme.json` or `*.theme.json`),
+    /// whose folder holds the set's sounds. nil for the built-in set.
+    func userThemeFileURL(id: String) -> URL? {
+        userThemeFiles.first { file in
+            if case let .success(theme) = file.result { return theme.id == id }
+            return lastGoodFileIDs[file.url] == id
+        }?.url
+    }
     /// The user sets that show: the valid ones, plus last-good versions of broken ones.
     var userThemes: [AgentCharacterTheme] { lastGoodUserThemes.values.sorted { $0.title < $1.title } }
     private var stream: FSEventStreamRef?

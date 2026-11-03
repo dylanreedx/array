@@ -15,7 +15,7 @@ Array is distributed under the MIT License in the repository root. The component
 | swift-system | 1.8.1 | Apache-2.0 | [Apache-2.0.txt](Apache-2.0.txt) |
 | swift-markdown | 0.8.0 | Apache-2.0 with Runtime Library Exception | [SwiftMarkdown-Apache-2.0-Runtime-Exception.txt](SwiftMarkdown-Apache-2.0-Runtime-Exception.txt) |
 | swift-cmark | 0.8.0 | BSD-3-Clause | [swift-cmark-BSD-3-Clause.txt](swift-cmark-BSD-3-Clause.txt) |
-| Built-in agent characters ("Ducks"), exported from Duckherd (github.com/AliAlsalkhadi/duckherd) at `ea44e834` | bundled in `Sources/ContinuumRevivedCore/Resources/AgentCharacters` | MIT | [AgentCharacters-Ducks-MIT.txt](AgentCharacters-Ducks-MIT.txt) |
+| Built-in agent characters ("Ducks") and character sounds (quack, honk, chirp), from Duckherd by Ali Alsalkhadi (github.com/AliAlsalkhadi/duckherd) at `ea44e834` | bundled in `Sources/ContinuumRevivedCore/Resources/AgentCharacters` | MIT | [AgentCharacters-Ducks-MIT.txt](AgentCharacters-Ducks-MIT.txt) |
 | GhosttyKit | supplied separately by a Ghostty source checkout; not tracked in this repository | MIT, plus licenses for components included by that checkout | [Ghostty-MIT.txt](Ghostty-MIT.txt); see the matching Ghostty checkout for its component notices |
 
 Swift package versions are taken from `Package.resolved`. GhosttyKit is linked from a separately supplied source checkout by `scripts/prepare-ghosttykit.sh`; its exact revision and any bundled component notices therefore depend on the checkout used to build Array.

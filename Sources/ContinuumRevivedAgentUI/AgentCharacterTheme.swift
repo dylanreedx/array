@@ -527,7 +527,7 @@ public enum AgentCharacterThemeParser {
     }
 
     /// `^[A-Za-z0-9][A-Za-z0-9 _.-]{0,80}\.(wav|mp3)$`, and never `..`.
-    static func isSoundFileName(_ file: String) -> Bool {
+    public static func isSoundFileName(_ file: String) -> Bool {
         guard !file.contains(".."), file.hasSuffix(".wav") || file.hasSuffix(".mp3") else { return false }
         let stem = Array(file.unicodeScalars.dropLast(4))
         guard (1...81).contains(stem.count) else { return false }

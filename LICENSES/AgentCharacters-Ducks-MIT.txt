@@ -1,6 +1,9 @@
 The built-in agent characters ("Ducks", ducks.theme.json) are pixel art by
 Ali Alsalkhadi, drawn by the source code of an MIT-licensed Claude Code plugin
-and exported to its theme file format. They are used under this license:
+(Duckherd, github.com/AliAlsalkhadi/duckherd) and exported to its theme file
+format. The character sounds (sounds/quack.wav, sounds/honk.wav,
+sounds/chirp.wav) are Duckherd's original synthesised duck sounds, copied
+unchanged from its sounds folder at ea44e834. Both are used under this license:
 
 MIT License
 

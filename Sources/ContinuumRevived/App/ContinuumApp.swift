@@ -2793,6 +2793,18 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // Character sounds (MAC-10…MAC-13): import keeps a set's sounds within caps,
+        // and each moment plays one sound into a recording sink, never the speakers.
+        if CommandLine.arguments.contains("--character-sounds-check") {
+            _ = NSApplication.shared
+            do {
+                print(try CharacterSoundsChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL character sounds: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         // Plan 110 › lead: one lead per pack, distinct helpers in delegation order.
         if CommandLine.arguments.contains("--lead-character-check") {
             _ = NSApplication.shared
@@ -7112,6 +7124,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         return center
     }()
+    /// Character sounds (MAC-10…MAC-13), fed beside `agentSignalCenter`. Internal
+    /// so its witness can hand it a recording sink.
+    lazy var characterSoundCenter = AgentCharacterSoundCenter(
+        speaker: AgentCharacterSoundCenter.productionSpeaker { [weak self] id in
+            self?.agentSupervisor.records[AgentID(rawValue: id)]
+        })
     private var workspaceTopBarView: WorkspaceTopBarView?
     /// 0.7.30 — what agents left running. Started on a real launch only.
     lazy var agentProcessTracker = AgentProcessTracker(
@@ -20639,12 +20657,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // an agent with a tile signals, a headless child does not.
         if let tileId {
             let overrides = canvasView?.allWorkspaceTiles().first(where: { $0.id == tileId })?.metadata.agentSoundOverrides
-            _ = agentSignalCenter.ingest(
+            let signal = agentSignalCenter.ingest(
                 event: event,
                 agentID: agentId,
                 tileID: tileId,
                 overrides: overrides
             )
+            // The character speaks only where the alert sound stayed quiet.
+            characterSoundCenter.ingest(
+                event: event, agentID: agentId.rawValue,
+                isHelper: agentSupervisor.records[agentId]?.parentAgentID != nil,
+                overrides: overrides,
+                alertSounded: signal.map { $0.id == agentSignalCenter.lastSoundedSignalID } ?? false)
             // WS4: the live half of a watched arrival, run here because this is the
             // first moment the signal for it exists.
             applyPendingWatchedArrival(tileID: tileId)

@@ -275,6 +275,12 @@ final class SettingsModel {
         set { defaults.set(newValue, forKey: AgentSoundConfig.masterEnabledKey); revision += 1 }
     }
 
+    /// Character sounds (MAC-10…MAC-13); off by default.
+    var characterSoundsEnabled: Bool {
+        get { _ = revision; return AgentCharacterSoundConfig.isEnabled(defaults) }
+        set { defaults.set(newValue, forKey: AgentCharacterSoundConfig.enabledKey); revision += 1 }
+    }
+
     var soundVolume: Double {
         get { _ = revision; return AgentSoundConfig.resolvedVolume(defaults: defaults) }
         set { defaults.set(min(1, max(0, newValue)), forKey: AgentSoundConfig.volumeKey); revision += 1 }

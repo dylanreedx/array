@@ -153,8 +153,16 @@ protocol AgentSoundPlaying: AnyObject {
     func play(_ reference: AgentSoundReference, priority: Int, volume: Double, library: AgentSoundLibrary)
 }
 
+/// What `AgentCharacterSoundCenter` plays through: the same `AgentSoundPlayer`
+/// as the alert sounds (one voice, so a character never talks over an alert), or
+/// a recorder in a witness. Never a subprocess.
 @MainActor
-final class AgentSoundPlayer: NSObject, AVAudioPlayerDelegate, AgentSoundPlaying {
+protocol AgentCharacterSoundPlaying: AnyObject {
+    func playCharacterSound(_ url: URL, priority: Int, volume: Double)
+}
+
+@MainActor
+final class AgentSoundPlayer: NSObject, AVAudioPlayerDelegate, AgentSoundPlaying, AgentCharacterSoundPlaying {
     static let shared = AgentSoundPlayer()
     private var player: AVAudioPlayer?
     private var currentPriority = 0
@@ -166,6 +174,19 @@ final class AgentSoundPlayer: NSObject, AVAudioPlayerDelegate, AgentSoundPlaying
         // Film build only: a film records the sound for the edit and never plays it.
         if let film = FilmPanelHost.sound { film(reference, priority); return }
         #endif
+        start(url, priority: priority, volume: volume)
+    }
+
+    /// MAC-10…MAC-12: a character sound. Character priorities sit below every
+    /// alert's, so one never cuts an alert off.
+    func playCharacterSound(_ url: URL, priority: Int, volume: Double) {
+        #if ARRAY_FILM
+        if FilmPanelHost.sound != nil { return }
+        #endif
+        start(url, priority: priority, volume: volume)
+    }
+
+    private func start(_ url: URL, priority: Int, volume: Double) {
         if let player, player.isPlaying, priority < currentPriority { return }
         player?.stop()
         do {
@@ -252,6 +273,10 @@ final class AgentSignalCenter {
     /// for "the live signal really was cleared here, not merely absent".
     private(set) var qaAcknowledgedCompletionCount = 0
 
+    /// The last signal this center played a sound for. A character sound for the
+    /// same moment stays quiet when it is the one just ingested.
+    private(set) var lastSoundedSignalID: String?
+
     func markViewed(tileID: UUID) {
         guard let current = currentByTile[tileID], current.kind != .actionRequired else { return }
         currentByTile.removeValue(forKey: tileID)
@@ -287,6 +312,7 @@ final class AgentSignalCenter {
             available: library.availableReferences, defaults: defaults) {
             player.play(sound, priority: signal.kind.priority,
                         volume: AgentSoundConfig.resolvedVolume(defaults: defaults), library: library)
+            lastSoundedSignalID = signal.id
         }
         notify(tileID: signal.tileID)
     }

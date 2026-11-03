@@ -768,6 +768,15 @@ private struct SettingsSoundRows: View {
                 .settingsAnchor("sounds.kind.\(kind.rawValue)", model: model)
         }
 
+        Toggle(isOn: Binding(get: { model.characterSoundsEnabled }, set: { model.characterSoundsEnabled = $0 })) {
+            SettingsRowLabel(title: "Character sounds",
+                             help: "While characters show, they quack when an agent hands back to you, chirp when it needs you and honk when it fails, or use their set's own voices. A sound turned on above for the same moment plays instead.")
+        }
+        .toggleStyle(.switch)
+        .disabled(!model.soundsEnabled)
+        .accessibilityIdentifier("ArraySettingsCharacterSounds")
+        .settingsAnchor("sounds.characters", model: model)
+
         LabeledContent {
             HStack {
                 Button("Import…") { model.importSounds() }

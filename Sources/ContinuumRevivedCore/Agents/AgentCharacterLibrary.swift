@@ -25,6 +25,12 @@ public enum AgentCharacterBundled {
 
     public static var themeURL: URL? { folderURL()?.appendingPathComponent(themeFileName) }
     public static var licenseURL: URL? { folderURL()?.appendingPathComponent(licenseFileName) }
+    /// A bundled character sound (Duckherd's, MIT): `<folder>/sounds/<name>.wav`.
+    public static func soundURL(_ sound: AgentCharacterBaseSound) -> URL? {
+        guard let url = folderURL()?.appendingPathComponent("sounds").appendingPathComponent(sound.fileName),
+              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
+    }
 
     nonisolated(unsafe) private static var cached: AgentCharacterTheme?
     private static let lock = NSLock()
@@ -315,15 +321,20 @@ public enum AgentCharacterImports {
     }
 
     public enum ImportResult: Equatable, Sendable {
-        case imported(AgentCharacterTheme)
+        /// `audio`: the set's voices and sounds copied beside it, and those left out.
+        case imported(AgentCharacterTheme, audio: AgentCharacterAudioImport.Report)
         /// The file is not a valid theme: its first problems, each saying where.
         case invalid(file: URL, problems: [String])
         case unreadable(file: URL, reason: String)
     }
 
-    /// Validate `file` and copy exactly it into `directory/<id>/theme.json`.
-    /// Nothing is written when the file has a problem.
-    public static func importTheme(from file: URL, into directory: URL) -> ImportResult {
+    /// Validate `file` and copy it into `directory/<id>/theme.json`, with the
+    /// audio its `voices` and `sounds` name from beside it (within caps; see
+    /// `AgentCharacterAudioImport`). Nothing is written when the file has a problem.
+    public static func importTheme(
+        from file: URL, into directory: URL,
+        audioDuration: (URL) -> TimeInterval? = AgentCharacterAudioImport.decodedDuration
+    ) -> ImportResult {
         let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue ?? 0
         guard size <= AgentCharacterThemeParser.maximumFileBytes else {
             return .invalid(file: file, problems: ["the file is over 3 MB"])
@@ -339,25 +350,41 @@ public enum AgentCharacterImports {
                 return .invalid(file: file, problems: ["\"id\" \(theme.id) is the built-in set's; give the set its own id"])
             }
             let folder = directory.appendingPathComponent(theme.id, isDirectory: true)
+            let source = file.deletingLastPathComponent()
+            // Re-importing Array's own copy keeps the audio already beside it.
+            let reimport = source.standardizedFileURL.resolvingSymlinksInPath()
+                == folder.standardizedFileURL.resolvingSymlinksInPath()
             do {
+                if !reimport, FileManager.default.fileExists(atPath: folder.path) {
+                    try FileManager.default.removeItem(at: folder)
+                }
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 try data.write(to: folder.appendingPathComponent(fileName), options: .atomic)
             } catch {
                 return .unreadable(file: file, reason: "Array could not save its copy: \(error.localizedDescription)")
             }
-            return .imported(theme)
+            let voices = AgentCharacterVoices.parse(themeData: data)
+            var audio = reimport ? AgentCharacterAudioImport.Report()
+                : AgentCharacterAudioImport.copy(voices, from: source, to: folder, duration: audioDuration)
+            audio.dropped = voices.problems.map {
+                (file: $0, reason: "not a .wav or .mp3 path inside the set's folder")
+            } + audio.dropped
+            return .imported(theme, audio: audio)
         }
     }
 
     /// Import every candidate in a folder (scanned the way the format scans its
     /// themes folder), or the file itself.
-    public static func importAll(from url: URL, into directory: URL) -> [ImportResult] {
+    public static func importAll(
+        from url: URL, into directory: URL,
+        audioDuration: (URL) -> TimeInterval? = AgentCharacterAudioImport.decodedDuration
+    ) -> [ImportResult] {
         var isFolder: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder) else {
             return [.unreadable(file: url, reason: "The file is gone.")]
         }
-        guard isFolder.boolValue else { return [importTheme(from: url, into: directory)] }
-        return candidates(inFolder: url).map { importTheme(from: $0, into: directory) }
+        guard isFolder.boolValue else { return [importTheme(from: url, into: directory, audioDuration: audioDuration)] }
+        return candidates(inFolder: url).map { importTheme(from: $0, into: directory, audioDuration: audioDuration) }
     }
 
     /// Remove a user set: its imported copy's folder, or the file it was written as.

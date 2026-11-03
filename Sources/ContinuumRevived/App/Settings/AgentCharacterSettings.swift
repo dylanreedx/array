@@ -25,6 +25,8 @@ final class AgentCharacterSettingsModel {
     private(set) var problems: [String] = []
     private(set) var problemFile: URL?
     private(set) var message: String?
+    /// Sound files the last import left out, each with why ("file: reason").
+    private(set) var droppedSounds: [String] = []
     private(set) var selectedID: String
     /// Files in the themes folder that are not valid sets right now.
     private(set) var folderProblems: [(file: URL, problems: [String])] = []
@@ -84,11 +86,16 @@ final class AgentCharacterSettingsModel {
         problems = []
         problemFile = nil
         message = nil
+        droppedSounds = []
         let results = AgentCharacterImports.importAll(from: url, into: importsDirectory)
         var added: [AgentCharacterTheme] = []
+        var sounds = 0
         for result in results {
             switch result {
-            case let .imported(theme): added.append(theme)
+            case let .imported(theme, audio):
+                added.append(theme)
+                sounds += audio.copied.count
+                droppedSounds += audio.dropped.map { "\($0.file): \($0.reason)" }
             case let .invalid(file, list):
                 if problems.isEmpty { problems = list; problemFile = file }
             case let .unreadable(file, reason):
@@ -98,9 +105,10 @@ final class AgentCharacterSettingsModel {
         if results.isEmpty { message = "No theme files in that folder." }
         refresh()
         if let first = added.first {
+            let withSounds = sounds == 0 ? "" : sounds == 1 ? ", 1 sound" : ", \(sounds) sounds"
             message = added.count == 1
-                ? "Imported \(first.title): \(first.characters.count) characters."
-                : "Imported \(added.count) sets."
+                ? "Imported \(first.title): \(first.characters.count) characters\(withSounds)."
+                : "Imported \(added.count) sets\(withSounds)."
             select(id: first.id)
         }
     }
@@ -279,6 +287,17 @@ struct AgentCharacterSettingsRows: View {
         InfoRow(text: "Each agent gets a character from its id. To choose one for an agent, use Character in its tile's ⋯ menu.")
         if let message = model.message {
             InfoRow(text: message)
+        }
+        if !model.droppedSounds.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Some of the set's sounds were left out.", systemImage: "speaker.slash")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                ForEach(Array(model.droppedSounds.prefix(8).enumerated()), id: \.offset) { _, line in
+                    Text(line).font(.callout.monospaced()).foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityIdentifier("ArrayAgentCharacterDroppedSounds")
         }
         if !model.problems.isEmpty {
             VStack(alignment: .leading, spacing: 4) {

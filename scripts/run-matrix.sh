@@ -2280,6 +2280,11 @@ run_app_check .build/debug/Array --character-settings-check
 # Update by content hash, one row per byte-identical file, an invalid file's
 # reason in place of its at-rest preview; Import and Update pressed in the view.
 run_app_check .build/debug/Array --found-character-themes-check
+# Character sounds (MAC-10…MAC-13): a set's voices import within caps (bad audio
+# left out with a reason); through the supervisor's delivery each moment plays one
+# sound from the set's clip or the bundled Duckherd sound into a recording sink;
+# toggle off, master off and hidden characters are silent; an alert sound wins.
+run_app_check .build/debug/Array --character-sounds-check
 # Plan 110: agent-made sets in the themes folder reach the row and the tile header
 # live (new, edited, half-written, removed), and the validator binary's verdicts.
 run_app_check .build/debug/Array --character-themes-live-check

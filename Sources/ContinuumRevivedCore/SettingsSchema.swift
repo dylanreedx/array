@@ -466,6 +466,8 @@ public enum SettingsSchema {
             ] + AgentSignalKind.allCases.sorted(by: { $0.priority > $1.priority }).map { kind in
                 CustomEntry(anchor: "sounds.kind.\(kind.rawValue)", label: "\(kind.displayName) sound", keywords: sound)
             } + [
+                CustomEntry(anchor: "sounds.characters", label: "Character sounds",
+                            keywords: sound + ["characters", "ducks", "quack", "voices", "duckherd"]),
                 CustomEntry(anchor: "sounds.library", label: "Custom sounds", keywords: sound + ["import", "library"]),
             ]
         case .custom("harnessStatus", _):

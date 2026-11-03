@@ -1,6 +1,6 @@
 # Notification paths
 
-Maintained contract and source inventory. Last audited: 2026-10-29.
+Maintained contract and source inventory. Last audited: 2026-11-03 (character sounds MAC-10…13).
 
 Every Array-owned agent notification needs a stable path ID and an explicit
 trigger → policy → recipient → delivery surface → tap/action → outcome chain.
@@ -443,6 +443,25 @@ These do not pass through Fly or the phone classifier.
 | MAC-07 | Completion arrives while authoritatively actively viewed | Completion-awareness policy can advance read watermark, clear success signal, and acknowledge visually | Failure retains stronger semantics; unknown visibility means away. Does not suppress hosted push |
 | MAC-08 | User visits tile; turn starts; request resolves | Clear appropriate live/read attention | Action-required not cleared by ordinary markViewed; new turn clears settled success/failure |
 | MAC-09 | User previews sound in Settings | Explicit audio preview | Local only, never phone push |
+| MAC-10 | A lead with a tile delegates a helper (`childAgentSpawned`) | Character sound: the shown set's `voices.spawn` clip, else `voices.any`; the built-in set and sets without spawn voices are silent | Replayed spawn of the same child ignored; within 1.5 s of the last character sound dropped (one sound per fan-out) |
+| MAC-11 | A helper's turn completes; a top-level agent's turn of 30 s or more completes ("over to you") | Character sound: helper → its character's `voices.done.<name>`, else `voices.done`, else `voices.any`, else the set's `sounds.quack`, else bundled Duckherd quack; top-level → `sounds.quack`, else bundled quack | Top-level turn under 30 s, or its start unseen: quiet. Interrupted/cancelled: quiet. Replay ignored. 1.5 s gap applies |
+| MAC-12 | A turn fails or a runtime error arrives; an approval or user-input request opens | Character sound: the set's `sounds.honk` / `sounds.chirp`, else bundled honk / chirp | Exempt from the 1.5 s gap. Replay ignored |
+| MAC-13 | Every MAC-10…12 event that does not sound | Quiet, recorded with its reason in `AgentCharacterSoundCenter.outcomes` | Toggle off (default) `off`; agent sound master off `masterOff`; characters hidden `charactersHidden`; tile override mutes the matching event `muted`; Array's alert sound played for the same signal `alertPlayed`; gap `tooSoon`; no clip and no bundled file `noSound`. A headless agent (no tile) and a shared agent's guest are never fed. Player failure: logged to stderr, nothing retried; a playing alert of higher priority keeps playing and the character sound is dropped |
+
+Character sounds (MAC-10…13) are Settings › Notifications & Sounds › Character
+sounds, off by default, under the same master switch and volume, through the same
+`AgentSoundPlayer` (AVAudioPlayer, never a subprocess) at priorities below every
+alert. They are fed from `recordManagedActivity` beside the alert sounds, for
+agents with a tile on this Mac. Precedence: when Array's alert sound for the same
+signal plays, the character stays quiet, so one moment never makes two sounds.
+Sources: a set's own audio (its `voices`, and its `sounds` replacements), copied
+into Array's copy of the set at import within caps (2 MB and 10 s per file, 16 MB
+and 64 files per set, must decode as WAV/MP3; each file left out is reported
+with its reason), else Duckherd's MIT-licensed quack/honk/chirp bundled in Core's
+AgentCharacters resources (credit: Duckherd and Ali Alsalkhadi). Like every Mac
+agent sound here, macOS Focus does not gate them: Focus filters notifications,
+and these are in-app audio. Witness: `--character-sounds-check` (recording sink,
+no real audio), reported by the matrix next to the character legs.
 
 Agent sound master defaults on, individual events opt in; fresh install remains
 silent. Per-tile overrides and volume apply. Current audio player stops/replaces
@@ -451,7 +470,8 @@ notification sound. A single runtime event can currently generate independent
 Mac awareness, a Mac banner and a phone alert: cross-surface dedupe is absent.
 
 Sources: App/NeedsAttentionNotification.swift; AgentCLIUpdateCenter.swift;
-AgentSoundSystem.swift; Core/AgentAwareness.swift; App/CompletionAwarenessChecks.swift;
+AgentSoundSystem.swift; App/AgentCharacters/AgentCharacterSoundCenter.swift;
+Core/Agents/AgentCharacterSounds.swift; Core/AgentAwareness.swift; App/CompletionAwarenessChecks.swift;
 ContinuumApp.updateAgentAttentionSurface/recordManagedActivity.
 
 ## Diagnostic and alternate paths
