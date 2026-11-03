@@ -200,6 +200,10 @@ enum WorkspaceAPICanvasChecks {
         let liveAfter = zoneBWorldFrames(f)
         try expect(liveAfter[f.agentTileB] == actual, "A2: the tile's live WORLD frame equals the result's actualWorldRect (\(String(describing: liveAfter[f.agentTileB])) vs \(actual))")
         try expect(actual != before.live[f.agentTileB] && actual.x > 3900, "A2: the tile actually moved toward the requested origin, got \(actual)")
+        // An unclamped API move is exact: auto layout makes room around it and
+        // never settles it somewhere else (fan-out and nudging are for pointer drops).
+        try expect(actual == TileFrame(x: 4100, y: 500, width: 240, height: 160),
+                   "A2: an unclamped move lands exactly on the requested frame, got \(actual)")
         try expect(uuid(moved["actualZoneId"]) == f.zoneB && moved["durability"]?.string == "committed" && moved["clamped"]?.bool == false, "A2: committed in zoneB, unclamped: \(moved)")
         try expect(f.runtime.structuralRevision == before.structure + 1 && moved["revision"]?.object?["structure"]?.int == Int(before.structure + 1),
                    "A2: one committed geometry transaction bumps the structural revision once (\(before.structure) → \(f.runtime.structuralRevision))")

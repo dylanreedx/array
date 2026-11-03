@@ -8230,7 +8230,10 @@ final class CanvasNSView: NSView, TokenThemed {
         if action == .moveTile {
             updateTile(next, recalculateZoneBounds: false, notifyChange: false)
             _ = reevaluateZoneMembership(forMovedTile: tileId, notifyChange: false)
-            settleAutoLayoutAfterMove(tileId: tileId, honorSnap: false)
+            // An explicit frame is authoritative: the mover settles PINNED where
+            // it was asked to go and residents make room. Magnetizing it onto a
+            // neighbour is for pointer drops, where the drop point is approximate.
+            settleAutoLayoutAfterMove(tileId: tileId, honorSnap: true)
         } else {
             updateTile(next, notifyChange: false)
         }
