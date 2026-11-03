@@ -1563,6 +1563,16 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if let index = CommandLine.arguments.firstIndex(of: "--fanout-film-render") {
+            do {
+                let artifact = try FanoutFilmRender.run(arguments: Array(CommandLine.arguments.dropFirst(index + 1)))
+                print("FanoutFilmRender complete: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --fanout-film-render: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--tile-multiselect-check") {
             do {
                 _ = NSApplication.shared
@@ -3498,6 +3508,29 @@ enum ContinuumApp {
             }
             RunLoop.main.run()
             return
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--auto-layout-settings-render"),
+           index + 1 < CommandLine.arguments.count {
+            do {
+                _ = NSApplication.shared
+                try AutoLayoutFanoutChecks.renderSettings(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+                print("auto-layout settings render complete")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --auto-layout-settings-render: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--auto-layout-fanout-app-check") {
+            do {
+                _ = NSApplication.shared
+                try AutoLayoutFanoutChecks.run()
+                print("AutoLayoutFanoutChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --auto-layout-fanout-app-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
         }
         if CommandLine.arguments.contains("--canvas-pointer-path-check") {
             _ = NSApplication.shared
@@ -15957,10 +15990,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Internal sidebar operations are AgentSupervisor.popOut/foldBack/setPinned.
     /// This adapter owns only project canvas/session presentation state.
     private func popOutHelper(_ id: AgentID, beside lead: AgentID) throws -> UUID {
-        guard let (spawner, scope, point) = spawnPlacementBesideParent(of: id, parentID: lead) else {
+        guard let (spawner, scope, point, size) = spawnPlacementBesideParent(of: id, parentID: lead) else {
             throw AgentSupervisor.HelperTileError(message: "Open the lead's workspace and tile before popping out this helper.")
         }
-        switch spawner.spawnManagedAgentForExistingAgent(id, supervisor: agentSupervisor, at: point, creationScope: scope) {
+        switch spawner.spawnManagedAgentForExistingAgent(id, supervisor: agentSupervisor, at: point, creationScope: scope, size: size) {
         case let .spawned(tileId):
             wireManagedAgentTile(tileId, agentID: id)
             workspaceRuntime?.noteStructuralCommit()
@@ -16021,10 +16054,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         defer { if scopeOverrideApplied { explicitCreationScopeOverride = nil } }
 
         let spawner: TileSpawner
-        var besideParent: (scope: CreationScope, worldPoint: CGPoint?)?
-        if let (scoped, scope, worldPoint) = spawnPlacementBesideParent(of: agentId) {
+        var besideParent: (scope: CreationScope, worldPoint: CGPoint?, size: CGSize?)?
+        if let (scoped, scope, worldPoint, size) = spawnPlacementBesideParent(of: agentId) {
             spawner = scoped
-            besideParent = (scope, worldPoint)
+            besideParent = (scope, worldPoint, size)
         } else if let recordProject, let (scoped, scope) = spawnerAndScope(forProject: recordProject) {
             spawner = scoped
             explicitCreationScopeOverride = scope
@@ -16049,7 +16082,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // resolution so this call site cannot omit the lookup again.
         switch spawner.spawnManagedAgentForExistingAgent(
             agentId, supervisor: agentSupervisor,
-            at: besideParent?.worldPoint, creationScope: besideParent?.scope) {
+            at: besideParent?.worldPoint, creationScope: besideParent?.scope, size: besideParent?.size) {
         case let .spawned(tileId):
             wireManagedAgentTile(tileId, agentID: agentId)
             scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "inbox-reveal-attach", debounce: 0.2)
@@ -16077,7 +16110,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// placement takes over. The whole answer is nil when the
     /// parent has no tile on this canvas or its zone belongs to a project other
     /// than the child's.
-    private func spawnPlacementBesideParent(of agentId: AgentID, parentID: AgentID? = nil) -> (TileSpawner, CreationScope, CGPoint?)? {
+    /// Where (and, under auto layout, how big) a child agent's tile opens
+    /// beside its parent. The size is nil outside auto layout: the default.
+    private func spawnPlacementBesideParent(of agentId: AgentID, parentID: AgentID? = nil) -> (TileSpawner, CreationScope, CGPoint?, CGSize?)? {
         guard let record = agentSupervisor.records[agentId],
               let parentId = parentID ?? record.parentAgentID,
               let parentTileId = agentSupervisor.records[parentId]?.tileId,
@@ -16090,7 +16125,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let size = CanvasEngine.defaultFrame(for: .managedAgent)
         let gap = TileGapResolver.resolvedGap()
         let zoneRect = CGRect(x: zone.origin.x, y: zone.origin.y, width: zone.size.width, height: zone.size.height)
-        let occupied = (canvasView.tilesInWorldFrames(forZoneId: zoneId) ?? []).map {
+        let zoneTiles = canvasView.tilesInWorldFrames(forZoneId: zoneId) ?? []
+        // Auto layout fans a helper out around its lead and the lead's other
+        // helpers, shaped for the screen (.plans/107). The column scan below
+        // always started right of the lead and only searched inside the zone's
+        // current rect, so a snug zone sent every helper down the right-hand
+        // fallback and the cluster grew in a line.
+        if canvasView.isAutoLayoutActive(inZone: zoneId) {
+            // Size-aware (.plans/107 model B): a helper is its lead's width and
+            // half its height, never below an agent's minimum, so two helpers
+            // stack exactly beside their lead.
+            let minimum = CanvasEngine.minimumFrame(for: .managedAgent)
+            let helperSize = CGSize(
+                width: max(Double(minimum.width), parent.worldFrame.width),
+                height: max(Double(minimum.height), (parent.worldFrame.height - gap) / 2))
+            let familyTileIds = Set(agentSupervisor.records.values
+                .filter { $0.parentAgentID == parentId && $0.id != agentId }
+                .compactMap(\.tileId))
+            let hosts = [parent.worldFrame] + zoneTiles.filter { familyTileIds.contains($0.id) }.map(\.frame)
+            let zoom = canvasView.viewport.zoom.isFinite && canvasView.viewport.zoom > 0 ? canvasView.viewport.zoom : 1
+            let placed = TileSpawnPlacement.automatic(TileSpawnPlacement.Context(
+                newSize: helperSize,
+                viewport: CanvasViewport(x: canvasView.viewport.x, y: canvasView.viewport.y, zoom: zoom),
+                visibleSize: canvasView.bounds.size,
+                siblings: zoneTiles,
+                gap: gap,
+                fanOut: TileSpawnPlacement.FanOut(
+                    hosts: hosts,
+                    targetAspect: canvasView.bounds.height > 0 ? Double(canvasView.bounds.width / canvasView.bounds.height) : 1.6,
+                    growth: CanvasAutoLayoutConfig.growth(defaults: canvasView.autoLayoutDefaults),
+                    focus: CGPoint(x: parent.worldFrame.x + parent.worldFrame.width / 2,
+                                   y: parent.worldFrame.y + parent.worldFrame.height / 2))))
+            return (spawner, scope, CGPoint(x: placed.x + placed.width / 2, y: placed.y + placed.height / 2), helperSize)
+        }
+        let occupied = zoneTiles.map {
             CGRect(x: $0.frame.x, y: $0.frame.y, width: $0.frame.width, height: $0.frame.height)
         }
         var column = CGRect(
@@ -16100,13 +16168,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var slot = column
             while zoneRect.contains(slot) {
                 if !occupied.contains(where: { $0.intersects(slot) }) {
-                    return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY))
+                    return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY), nil)
                 }
                 slot.origin.y += size.height + gap
             }
             column.origin.x += size.width + gap
         }
-        return (spawner, scope, nil)
+        return (spawner, scope, nil, nil)
     }
 
     @objc func toggleWorkspaceSidebarFromMenu(_ sender: Any?) {
@@ -23160,6 +23228,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `applicationDidFinishLaunching` so a fixture that drives
     /// `mountWorkspaceSceneAtBoot` also drives these closures; while they lived
     /// inline, a leg's rename reached a nil `onZoneRenamed` and persisted nothing.
+    /// A lead agent's tile and its helpers' tiles, from the agent records
+    /// (.plans/107 model B). A helper answers with its lead's cluster.
+    func autoLayoutCluster(forTile tileId: UUID) -> CanvasNSView.AutoLayoutCluster? {
+        let records = agentSupervisor.records
+        guard let record = records.values.first(where: { $0.tileId == tileId }) else { return nil }
+        let leadId = record.parentAgentID.flatMap { parent in records[parent]?.tileId != nil ? parent : nil } ?? record.id
+        guard let leadTile = records[leadId]?.tileId else { return nil }
+        let helpers = records.values.filter { $0.parentAgentID == leadId }.compactMap(\.tileId)
+        return helpers.isEmpty ? nil : CanvasNSView.AutoLayoutCluster(lead: leadTile, helpers: helpers)
+    }
+
     func wireCanvasCallbacks(_ canvasView: CanvasNSView) {
         canvasView.delegate = self
         canvasView.tileRevealURLProvider = { [weak self] tileId in self?.revealInFinderURL(forTile: tileId) }
@@ -23172,6 +23251,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         canvasView.leaderJumpBadgeAccentProvider = { [weak self] tileId in
             self?.leaderJumpBadgeAccent(forTile: tileId)
+        }
+        canvasView.autoLayoutClusterProvider = { [weak self] tileId in
+            self?.autoLayoutCluster(forTile: tileId)
         }
         canvasView.onZoneCreated = { [weak self] placement in
             self?.persistCreatedGroupZone(placement)

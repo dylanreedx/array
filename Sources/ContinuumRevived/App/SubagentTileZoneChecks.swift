@@ -236,11 +236,14 @@ enum SubagentTileZoneChecks {
                 throw Failure(message: "\(route): the child tile was not persisted into its project's canvas")
             }
             let frame = persisted.frame
-            try expect(frame.x >= fanOutRect.x - 0.001 && frame.y >= fanOutRect.y - 0.001
-                       && frame.x + frame.width <= fanOutRect.x + fanOutRect.width + 0.001
-                       && frame.y + frame.height <= fanOutRect.y + fanOutRect.height + 0.001,
+            // The zone as it is NOW: under auto layout it grows to take a child
+            // that fans out past its edge (.plans/107).
+            let liveRect = canvas.zonePlacement(for: zoneFanOut).map(CanvasEngine.zoneWorldFrame) ?? fanOutRect
+            try expect(frame.x >= liveRect.x - 0.001 && frame.y >= liveRect.y - 0.001
+                       && frame.x + frame.width <= liveRect.x + liveRect.width + 0.001
+                       && frame.y + frame.height <= liveRect.y + liveRect.height + 0.001,
                        "\(route): the child's WORLD frame \(describe(frame)) must sit inside the "
-                       + "parent's zone \(describe(fanOutRect))")
+                       + "parent's zone \(describe(liveRect))")
             return childTile
         }
         for (index, childId) in children.enumerated() {
@@ -260,10 +263,35 @@ enum SubagentTileZoneChecks {
         let gap = first.x - (parentFrame.x + parentFrame.width)
         try expect(gap >= 0 && gap <= TileGapResolver.defaultGap * 3 && abs(first.y - parentFrame.y) < 0.5,
                    "\(mode): the first child must open docked beside its parent \(describe(parentFrame)); got \(describe(first))")
-        let stackGap = second.y - (first.y + first.height)
-        try expect(abs(second.x - first.x) < 0.5 && stackGap >= 0 && stackGap <= TileGapResolver.defaultGap * 3,
-                   "\(mode): the second child must stack under the first, beside the parent; first "
-                   + "\(describe(first)), second \(describe(second))")
+        func adjacent(_ a: TileFrame, _ b: TileFrame) -> Bool {
+            let sepX = max(a.x - (b.x + b.width), b.x - (a.x + a.width))
+            let sepY = max(a.y - (b.y + b.height), b.y - (a.y + a.height))
+            let limit = TileGapResolver.defaultGap * 3
+            return (sepX >= -0.5 && sepX <= limit && sepY < 0) || (sepY >= -0.5 && sepY <= limit && sepX < 0)
+        }
+        if autoLayoutDefaults.bool(forKey: CanvasAutoLayoutConfig.enabledKey) {
+            // Size-aware (.plans/107 model B): a child is its parent's width and
+            // half its height, so two stack exactly beside the parent.
+            let expectedHeight = max(Double(CanvasEngine.minimumFrame(for: .managedAgent).height),
+                                     (parentFrame.height - TileGapResolver.resolvedGap()) / 2)
+            for child in [first, second] {
+                try expect(abs(child.width - parentFrame.width) < 0.5 && abs(child.height - expectedHeight) < 0.5,
+                           "\(mode): a child opened beside its parent must be \(parentFrame.width)x\(expectedHeight); "
+                           + "got \(describe(child))")
+            }
+            // Auto layout fans children out around the parent (.plans/107): the
+            // second docks against the parent or the first child, and does not
+            // continue the row to the right. That row is the shipped defect.
+            try expect((adjacent(second, parentFrame) || adjacent(second, first))
+                           && !(abs(second.y - first.y) < 0.5 && second.x > first.x),
+                       "\(mode): the second child must fan out against the parent or the first child, not "
+                       + "extend the row; parent \(describe(parentFrame)), first \(describe(first)), second \(describe(second))")
+        } else {
+            let stackGap = second.y - (first.y + first.height)
+            try expect(abs(second.x - first.x) < 0.5 && stackGap >= 0 && stackGap <= TileGapResolver.defaultGap * 3,
+                       "\(mode): the second child must stack under the first, beside the parent; first "
+                       + "\(describe(first)), second \(describe(second))")
+        }
 
         // A full column. The film's fan-out zone held two children beside its
         // Lead; the third found no free slot in the column, fell back to the
@@ -272,7 +300,11 @@ enum SubagentTileZoneChecks {
         // Children past the column's last row start the next column at the
         // parent's top, and no child ever overlaps another tile of the zone.
         let rowHeight = first.height + gap
-        let rowsInColumn = Int((fanOutRect.y + fanOutRect.height - parentFrame.y + gap) / rowHeight)
+        // Auto layout has no column to fill (children fan out, .plans/107), and
+        // half-height children would ask for more than the helper tile cap of
+        // three: there it opens exactly three children, the third the overflow.
+        let rowsInColumn = autoLayoutDefaults.bool(forKey: CanvasAutoLayoutConfig.enabledKey)
+            ? 2 : Int((fanOutRect.y + fanOutRect.height - parentFrame.y + gap) / rowHeight)
         let overflow = mintChild("child-overflow")
         for index in 2..<rowsInColumn {
             let filler = mintChild("child-\(index + 1)")
@@ -304,11 +336,18 @@ enum SubagentTileZoneChecks {
         guard let overflowFrame = try store.loadCanvas().tiles.first(where: { $0.id == overflowTile })?.frame else {
             throw Failure(message: "\(mode): the overflow child was not persisted")
         }
-        let columnGap = overflowFrame.x - (first.x + first.width)
-        try expect(abs(overflowFrame.y - parentFrame.y) < 0.5 && columnGap >= 0
-                   && columnGap <= TileGapResolver.defaultGap * 3,
-                   "\(mode): the child past a full column must start the next column at the parent's top; "
-                   + "first \(describe(first)), overflow \(describe(overflowFrame))")
+        if autoLayoutDefaults.bool(forKey: CanvasAutoLayoutConfig.enabledKey) {
+            let family = zoneTiles.filter { opened.contains($0.id) || $0.id == parentTile }
+                .filter { $0.id != overflowTile }.map(\.frame)
+            try expect(family.contains { adjacent(overflowFrame, $0) },
+                       "\(mode): the overflow child must dock against the parent or a sibling; got \(describe(overflowFrame))")
+        } else {
+            let columnGap = overflowFrame.x - (first.x + first.width)
+            try expect(abs(overflowFrame.y - parentFrame.y) < 0.5 && columnGap >= 0
+                       && columnGap <= TileGapResolver.defaultGap * 3,
+                       "\(mode): the child past a full column must start the next column at the parent's top; "
+                       + "first \(describe(first)), overflow \(describe(overflowFrame))")
+        }
 
         print("subagent-tile-zone: \(mode): \(rowsInColumn + 1) children opened from the parent's chip landed beside it in its zone, "
               + "a full column wrapping to the next, with another zone of the same project armed")

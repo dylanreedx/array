@@ -330,6 +330,41 @@ final class CanvasNSView: NSView, TokenThemed {
     private(set) var autoLayoutLatchedSlot: TileFrame?
     private var autoLayoutMovePointer: CGPoint?
     private var autoLayoutPreferSwap = false
+    /// Pointer speed of the live move in screen points per second, from the
+    /// last two event samples. Fast passes acquire no swap (.plans/107).
+    /// A lead agent's tile and its helpers' tiles (.plans/107 model B). The app
+    /// answers from the agent records; nil means the tile is in no cluster.
+    struct AutoLayoutCluster: Equatable {
+        var lead: UUID
+        var helpers: [UUID]
+        var all: Set<UUID> { Set(helpers + [lead]) }
+    }
+    var autoLayoutClusterProvider: ((UUID) -> AutoLayoutCluster?)?
+
+    /// The cluster a tile belongs to, limited to tiles of the same zone, with at
+    /// least one helper tile on the canvas.
+    func autoLayoutCluster(for tileId: UUID) -> AutoLayoutCluster? {
+        guard isAutoLayoutEnabled, let raw = autoLayoutClusterProvider?(tileId) else { return nil }
+        let scene = autoLayoutScene()
+        guard let zone = scene.tiles.first(where: { $0.id == raw.lead })?.zoneId,
+              isAutoLayoutActive(inZone: zone) else { return nil }
+        let helpers = raw.helpers.filter { id in scene.tiles.contains { $0.id == id && $0.zoneId == zone } }
+        guard !helpers.isEmpty, raw.all.contains(tileId) else { return nil }
+        return AutoLayoutCluster(lead: raw.lead, helpers: helpers)
+    }
+
+    /// The tiles a drag of `tileId` carries: a lead takes its helpers along.
+    func autoLayoutCarry(for tileId: UUID) -> Set<UUID>? {
+        guard let cluster = autoLayoutCluster(for: tileId), cluster.lead == tileId else { return nil }
+        return cluster.all
+    }
+    private var autoLayoutGestureCluster: (tile: UUID, scope: Set<UUID>?)?
+    /// A fast drag event that then goes still sends no further events, so the
+    /// dwell that would latch a swap or slide-in is detected by this timer
+    /// (.plans/107): the pointer resting 120 ms counts as a dwell.
+    private var autoLayoutDwellTimer: Timer?
+    private var autoLayoutMovePointerSpeed: Double?
+    private var autoLayoutMovePointerSample: (point: NSPoint, time: TimeInterval)?
     private var autoLayoutDeferredUntilEdit = false
     private let autoLayoutUndoToast = InboxUndoToast()
     private var autoLayoutUndoTimer: Timer?
@@ -505,14 +540,47 @@ final class CanvasNSView: NSView, TokenThemed {
         autoLayoutLatchedSlot = nil
         autoLayoutMovePointer = nil
         autoLayoutPreferSwap = false
+        autoLayoutMovePointerSpeed = nil
+        autoLayoutMovePointerSample = nil
+        autoLayoutGestureCluster = nil
+        autoLayoutDwellTimer?.invalidate()
+        autoLayoutDwellTimer = nil
     }
 
     /// The pointer of a live tile move, in WINDOW coordinates, and whether ⌥ is
     /// held. Whether the move slides in between tiles or swaps with one is
     /// decided by where the pointer is, not by the tile's centre.
-    func setAutoLayoutMovePointer(windowPoint: NSPoint, preferSwap: Bool) {
-        autoLayoutMovePointer = CanvasEngine.screenToWorld(convert(windowPoint, from: nil), viewport: viewport)
+    private func scheduleAutoLayoutDwell(tileId: UUID, frame: TileFrame) {
+        autoLayoutDwellTimer?.invalidate()
+        let pointer = autoLayoutMovePointer
+        let timer = Timer(timeInterval: 0.12, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let baseline = self.autoLayoutGestureBaseline,
+                      self.autoLayoutMovePointer == pointer,
+                      self.autoLayoutScene().tiles.first(where: { $0.id == tileId })?.frame == frame else { return }
+                self.autoLayoutMovePointerSpeed = 0
+                self.applyAutoLayout(.tile(id: tileId, frame: frame), baseline: baseline)
+                if let slot = self.autoLayoutLatchedSlot { self.showDragGhost(at: slot) }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        autoLayoutDwellTimer = timer
+    }
+
+    func setAutoLayoutMovePointer(windowPoint: NSPoint, preferSwap: Bool, timestamp: TimeInterval? = nil) {
+        let local = convert(windowPoint, from: nil)
+        autoLayoutMovePointer = CanvasEngine.screenToWorld(local, viewport: viewport)
         autoLayoutPreferSwap = preferSwap
+        if let timestamp {
+            if let last = autoLayoutMovePointerSample {
+                let distance = hypot(local.x - last.point.x, local.y - last.point.y)
+                let elapsed = timestamp - last.time
+                // Two events with no time between them (a script's burst) say
+                // nothing about speed; real pointer events always have some.
+                if elapsed > 0.0005 { autoLayoutMovePointerSpeed = Double(distance) / elapsed }
+            }
+            autoLayoutMovePointerSample = (local, timestamp)
+        }
     }
 
     /// A held move (an agent header drag over a reference target) points the
@@ -520,6 +588,7 @@ final class CanvasNSView: NSView, TokenThemed {
     func setAutoLayoutMovePointer(worldPoint: CGPoint) {
         autoLayoutMovePointer = worldPoint
         autoLayoutPreferSwap = false
+        autoLayoutMovePointerSpeed = nil
     }
 
     var isAutoLayoutEnabled: Bool { CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) }
@@ -542,12 +611,34 @@ final class CanvasNSView: NSView, TokenThemed {
             headerHeight: Double(ZoneChromeNSView.headerHeight),
             latched: autoLayoutMoveLatch,
             pointer: autoLayoutMovePointer,
-            preferSwap: autoLayoutPreferSwap
+            preferSwap: autoLayoutPreferSwap,
+            pointerSpeed: autoLayoutMovePointerSpeed,
+            previousFrames: {
+                // What is on screen now: the push budget spans two frames (.plans/107).
+                guard case .tile = mutation else { return nil }
+                return firstWinsDictionary(autoLayoutScene().tiles.map { ($0.id, $0.frame) })
+            }(),
+            interactive: {
+                // A helper dragged inside its cluster disturbs only that cluster.
+                // Resolved once per gesture, not on every pointer event.
+                guard case let .tile(id, _) = mutation else { return nil }
+                if let cached = autoLayoutGestureCluster, cached.tile == id { return cached.scope }
+                let cluster = autoLayoutCluster(for: id)
+                // The lead is the cluster's anchor: a helper reorders among its
+                // sibling helpers only, and never swaps or shoves its lead.
+                let scope = cluster.flatMap { $0.lead == id ? nil : Set($0.helpers) }
+                autoLayoutGestureCluster = (id, scope)
+                return scope
+            }()
         )
         autoLayoutBlockedZoneIds = transaction.blockedZoneIds
         if case .tile = mutation {
             autoLayoutMoveLatch = transaction.moveLatch
             autoLayoutLatchedSlot = transaction.latchedSlot
+        }
+        if case let .tile(id, frame) = mutation, let speed = autoLayoutMovePointerSpeed,
+           speed > CanvasAutoLayoutEngine.swapAcquireSpeed, autoLayoutGestureBaseline != nil {
+            scheduleAutoLayoutDwell(tileId: id, frame: frame)
         }
         let activeTileId: UUID?
         let activeZoneId: UUID?
@@ -2276,6 +2367,28 @@ final class CanvasNSView: NSView, TokenThemed {
         // PINNED: residents are pushed aside, never the mover into a different
         // lane. (The latch and gesture baseline are still alive here — the
         // gesture finishes in commitGeometryGesture.)
+        // The release is a dwell (.plans/107): re-solve the last frame at rest,
+        // so dropping onto a tile the drag passed over quickly still swaps.
+        if !honorSnap, autoLayoutMovePointerSpeed != nil, let gestureBaseline = autoLayoutGestureBaseline,
+           gestureBaseline.tiles.contains(where: { $0.id == tileId && $0.zoneId == zoneId }) {
+            autoLayoutMovePointerSpeed = nil
+            applyAutoLayout(.tile(id: tileId, frame: member.frame), baseline: gestureBaseline)
+            scene = autoLayoutScene()
+        }
+        // An unlatched drop relaxes the drag's pushes: they made room for a tile
+        // in transit, and the mover settles against its neighbours at rest.
+        if autoLayoutMoveLatch == nil, let gestureBaseline = autoLayoutGestureBaseline {
+            var relax = CanvasLayoutTransaction()
+            for rest in gestureBaseline.tiles where rest.id != tileId && rest.zoneId == zoneId {
+                if let now = scene.tiles.first(where: { $0.id == rest.id }), now.zoneId == zoneId, now.frame != rest.frame {
+                    relax.tileFrames[rest.id] = rest.frame
+                }
+            }
+            if !relax.tileFrames.isEmpty {
+                applyLayoutTransaction(relax)
+                scene = autoLayoutScene()
+            }
+        }
         var pinned = honorSnap
         if !honorSnap, autoLayoutMoveLatch != nil, let slot = autoLayoutLatchedSlot,
            autoLayoutGestureBaseline?.tiles.first(where: { $0.id == tileId })?.zoneId == zoneId {
@@ -3129,7 +3242,10 @@ final class CanvasNSView: NSView, TokenThemed {
                 zonePadding: ZoneBoundsConfig.padding(defaults: autoLayoutDefaults),
                 headerHeight: Double(ZoneChromeNSView.headerHeight),
                 latched: autoLayoutMoveLatch, pointer: autoLayoutMovePointer,
-                preferSwap: autoLayoutPreferSwap)
+                preferSwap: autoLayoutPreferSwap,
+                pointerSpeed: autoLayoutMovePointerSpeed,
+                previousFrames: firstWinsDictionary(autoLayoutScene().tiles.map { ($0.id, $0.frame) }),
+                latching: !tileSelection.isCarrying)
             autoLayoutMoveLatch = transaction.moveLatch
             autoLayoutLatchedSlot = transaction.latchedSlot
             autoLayoutBlockedZoneIds = transaction.blockedZoneIds
@@ -3177,6 +3293,19 @@ final class CanvasNSView: NSView, TokenThemed {
 
     func settleSelectionAfterMove(_ ids: Set<UUID>, honorSnap: Bool) {
         guard isAutoLayoutEnabled else { return }
+        // An unlatched group drop relaxes the drag's pushes, as a lone drop does
+        // (.plans/107): they made room for tiles in transit.
+        if autoLayoutMoveLatch == nil, let gestureBaseline = autoLayoutGestureBaseline {
+            let current = autoLayoutScene()
+            var relax = CanvasLayoutTransaction()
+            for rest in gestureBaseline.tiles where !ids.contains(rest.id) {
+                if let now = current.tiles.first(where: { $0.id == rest.id }), now.zoneId == rest.zoneId,
+                   now.frame != rest.frame {
+                    relax.tileFrames[rest.id] = rest.frame
+                }
+            }
+            if !relax.tileFrames.isEmpty { applyLayoutTransaction(relax) }
+        }
         let before = autoLayoutScene()
         let zones = Set(before.tiles.filter { ids.contains($0.id) }.compactMap(\.zoneId))
         for id in zones { expandZoneToContainMembers(id) }

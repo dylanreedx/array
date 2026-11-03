@@ -1863,7 +1863,8 @@ final class TileSpawner {
         providerSettings: AgentModelConfig.Resolution? = nil,
         mirrored: Bool = false,
         announcesReady: Bool = true,
-        creationScope explicitScope: CreationScope? = nil
+        creationScope explicitScope: CreationScope? = nil,
+        size: CGSize? = nil
     ) -> ManagedAgentOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         // CX-01 Phase 2b: the workspace API targets the PARENT's zone, not the
@@ -1881,7 +1882,7 @@ final class TileSpawner {
         let targetZoneId = creationScope?.zoneId
         let frame = makeProjectTilePlacement(
             worldPoint: worldPoint,
-            size: CanvasEngine.defaultFrame(for: .managedAgent),
+            size: size ?? CanvasEngine.defaultFrame(for: .managedAgent),
             in: canvasView,
             targetZoneId: targetZoneId
         )
@@ -2094,14 +2095,16 @@ final class TileSpawner {
         _ agentID: AgentID,
         supervisor: AgentSupervisor,
         at worldPoint: CGPoint? = nil,
-        creationScope: CreationScope? = nil
+        creationScope: CreationScope? = nil,
+        size: CGSize? = nil
     ) -> ManagedAgentOutcome {
         spawnManagedAgent(
             at: worldPoint,
             launchSelection: supervisor.launchSelection(for: agentID),
             mirrored: supervisor.records[agentID]?.capabilities.locallyManaged == false,
             announcesReady: supervisor.records[agentID]?.externalSession == nil,
-            creationScope: creationScope)
+            creationScope: creationScope,
+            size: size)
     }
 
     /// Deterministic witness for ⌘K's explicit-model spawn contract.
@@ -5007,12 +5010,13 @@ final class TileSpawner {
                         TileFrame(x: 1328, y: 300, width: 640, height: 560),
                         "an explicitly anchored file stays gap-adjacent to its anchor")
 
-        // A file opened with no anchor and no point is an automatic spawn: it takes the
-        // centre policy. The centre is inside the note, so the note anchors it — and the
-        // right side is now blocked by the anchored file, so the fully visible left
-        // candidate wins on visibility over below/above (which are half off screen) and
-        // over the outward right ring. Anchor 680..1320 x 300..700 -> left candidate
-        // x = 680-8-640, y = 500-280.
+        // A file opened with no anchor and no point is an automatic spawn. This zone
+        // runs auto layout, so it fans out (.plans/107): edge-aligned slots around
+        // every tile of the zone, at least half visible first, then the zone shape
+        // closest to the screen's, then nearest the camera. The right of the note is
+        // taken by the anchored file and below/above are half off screen, so it docks
+        // LEFT of the note, top-aligned with it (no longer centre-aligned): note
+        // 680..1320 x 300..700 -> x = 680-8-640, y = 300.
         let autoFilePath = layerFixture.root.appendingPathComponent("automatic.txt")
         try Data("automatic".utf8).write(to: autoFilePath)
         let autoFileId: UUID
@@ -5023,8 +5027,8 @@ final class TileSpawner {
         case let .failure(error): throw CheckError.failed("spawnFile automatic failed: \(error)")
         }
         try expectFrame(try placedFrame(layerFixture, autoFileId),
-                        TileFrame(x: 32, y: 220, width: 640, height: 560),
-                        "an anchorless file open docks beside the tile under the viewport centre")
+                        TileFrame(x: 32, y: 300, width: 640, height: 560),
+                        "an anchorless file open in an auto-layout zone docks edge-aligned beside the note")
 
         let manifest: [String: Any] = [
             "check": "spawn-placement",
@@ -8720,7 +8724,17 @@ final class TileSpawner {
             // then sent the tile to the zone's far edge, off screen (0.7.30;
             // `--zone-arming-check` §10b).
             bounds: canvasView.isAutoLayoutActive(inZone: zone.zoneId)
-                ? nil : zoneLocalContentRect(zone, defaults: canvasView.autoLayoutDefaults)
+                ? nil : zoneLocalContentRect(zone, defaults: canvasView.autoLayoutDefaults),
+            // Auto layout fans out around every tile of the zone, shaped for the
+            // screen, instead of docking right of whatever the camera is on
+            // (.plans/107).
+            fanOut: canvasView.isAutoLayoutActive(inZone: zone.zoneId)
+                ? TileSpawnPlacement.FanOut(
+                    hosts: siblingTiles(in: canvasView, targetZoneId: zone.zoneId).map(\.frame),
+                    targetAspect: canvasView.bounds.height > 0
+                        ? Double(canvasView.bounds.width / canvasView.bounds.height) : 1.6,
+                    growth: CanvasAutoLayoutConfig.growth(defaults: canvasView.autoLayoutDefaults))
+                : nil
         ))
     }
 

@@ -15,7 +15,10 @@ public enum TileSelectionPlacement {
         pointer: CGPoint? = nil,
         preferSwap: Bool = false,
         settle: Bool = false,
-        honorSnap: Bool = false
+        honorSnap: Bool = false,
+        pointerSpeed: Double? = nil,
+        previousFrames: [UUID: TileFrame]? = nil,
+        latching: Bool = true
     ) -> CanvasLayoutTransaction {
         // The first occurrence is the scene owner's authoritative occurrence,
         // matching the underlying solver's treatment of duplicate identities.
@@ -48,16 +51,22 @@ public enum TileSelectionPlacement {
             // A multi-zone selection has one authoritative requested translation.
             // Pointing inside the baseline envelope suppresses slot latching,
             // so each zone can push residents without snapping its subset apart.
-            let probe = oneZone ? pointer : CGPoint(x: original.x + original.width / 2,
-                                                    y: original.y + original.height / 2)
+            // A carried cluster (`latching: false`, .plans/107 model B) is too big
+            // to swap or slide in: one step would throw a row ~1,300 pt. It
+            // moves as a block, nudging neighbours, and docks at the drop.
+            let probe = oneZone && latching ? pointer : CGPoint(x: original.x + original.width / 2,
+                                                                y: original.y + original.height / 2)
             let mutation: CanvasAutoLayoutEngine.Mutation = settle
                 ? .settle(zoneId: zoneId, anchor: proxyId, pin: oneZone ? honorSnap : true)
                 : .tile(id: proxyId, frame: requested)
             let solved = CanvasAutoLayoutEngine.solve(
                 scene: virtualScene, mutation: mutation,
                 gap: gap, zonePadding: zonePadding, headerHeight: headerHeight,
-                latched: oneZone ? latched : nil, pointer: probe,
-                preferSwap: oneZone && preferSwap)
+                latched: oneZone && latching ? latched : nil, pointer: probe,
+                preferSwap: oneZone && preferSwap,
+                // The same dwell gate and two-frame push budget a lone drag gets
+                // (.plans/107): a carried cluster is a drag too.
+                pointerSpeed: pointerSpeed, previousFrames: previousFrames)
             for (id, frame) in solved.tileFrames where !selected.contains(id) {
                 result.tileFrames[id] = frame
             }

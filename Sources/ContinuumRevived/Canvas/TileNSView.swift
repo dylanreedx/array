@@ -1293,15 +1293,24 @@ class TileNSView: NSView, TokenThemed {
                 }
             }
             canvas.setAutoLayoutMovePointer(
-                windowPoint: event.locationInWindow, preferSwap: event.modifierFlags.contains(.option))
+                windowPoint: event.locationInWindow, preferSwap: event.modifierFlags.contains(.option),
+                timestamp: event.timestamp)
             // While the move is latched (a swap partner, or a slot it slides
             // into) the latch owns the destination: no magnetic snap.
             let placement = canvas.autoLayoutLatchedSlot == nil
                 ? canvas.magneticPlacement(freeWorldFrame: free, tileId: tile.id, previous: magneticTarget)
                 : MagneticPlacement.Result(frame: free, target: nil)
             magneticTarget = placement.target
+            // The pointer owns the dragged tile (.plans/107). The magnet may pull
+            // it within the release distance, the feel of a snap; a farther
+            // target (the escape slot offered while crossing the cluster) is the
+            // drop preview only. Holding the tile there trailed the pointer by
+            // ~400 pt and then jumped it there in one frame.
+            let zoom = canvas.viewport.zoom > 0 ? canvas.viewport.zoom : 1
+            let pull = max(abs(placement.frame.x - free.x), abs(placement.frame.y - free.y))
+            let live = pull <= DragMagnetizeConfig.snapReleaseScreenPoints / zoom ? placement.frame : free
             var next = tile
-            next.frame = canvas.tileFrame(fromWorldFrame: placement.frame, tileId: tile.id)
+            next.frame = canvas.tileFrame(fromWorldFrame: live, tileId: tile.id)
             canvas.updateTile(next, recalculateZoneBounds: false, notifyChange: false)
             if let slot = canvas.autoLayoutLatchedSlot {
                 magneticTarget = nil
@@ -1380,6 +1389,9 @@ class TileNSView: NSView, TokenThemed {
         // Tear down the live resize readout (no-op if it was never shown).
         canvas?.hideResizeDimensions()
 
+        // A latch the dwell timer found after the last drag event owns the drop,
+        // not a magnet target left over from that event (.plans/107).
+        if canvas?.autoLayoutLatchedSlot != nil { dragSnapTarget = nil }
         let committedSnap = dragSnapTarget != nil
         let snapStartOrigin = layer?.presentation()?.frame.origin ?? frame.origin
         // Commit exactly the previewed world destination before settling.

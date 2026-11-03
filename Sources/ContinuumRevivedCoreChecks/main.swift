@@ -384,6 +384,16 @@ if CommandLine.arguments.contains("--agent-context-gravity-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--auto-layout-fanout-check") {
+    runFanoutLayoutCheck()
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--fanout-layout-probe") {
+    runFanoutLayoutProbe()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--jelly-trajectory-probe") {
     runJellyTrajectoryProbe()
     Foundation.exit(0)
@@ -11861,6 +11871,15 @@ func runStatusVocabularyUnificationChecks() {
 /// TELEPORT (a passive tile jumped more than half its size in one frame),
 /// STUCK (the drag retreated but a pushed tile did not relax back).
 func runJellyTrajectoryProbe() {
+    var anomalyCount = 0
+    defer {
+        // A witness, not just a printout (.plans/107): any ORTHO, FLIP,
+        // TELEPORT or STUCK frame fails the leg.
+        if anomalyCount > 0 {
+            fputs("FAIL: jelly trajectory probe found \(anomalyCount) anomalous frame(s)\n", stderr)
+            Foundation.exit(1)
+        }
+    }
     struct Fixture {
         var name: String
         var tiles: [CanvasAutoLayoutEngine.LayoutTile]
@@ -11956,7 +11975,7 @@ func runJellyTrajectoryProbe() {
                     }
                 }
             }
-            if !anomalies.isEmpty { line += "   !! " + anomalies.joined(separator: ", ") }
+            if !anomalies.isEmpty { line += "   !! " + anomalies.joined(separator: ", "); anomalyCount += anomalies.count }
             print(line)
             previous = current
             previousRequestedDX = step.dx

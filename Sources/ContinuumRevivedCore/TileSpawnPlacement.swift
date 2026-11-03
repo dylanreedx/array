@@ -38,6 +38,10 @@ public enum TileSpawnPlacement {
         /// gets an overlapping tile INSIDE it rather than one hanging out of it; on
         /// an axis the tile is too big for, it starts at the leading edge.
         public var bounds: CGRect?
+        /// Auto-layout zones only (.plans/107): dock onto `hosts` instead of the
+        /// tile under the camera, choosing by the zone's shape. `nil` keeps the
+        /// .plans/18 policy everywhere else.
+        public var fanOut: FanOut?
 
         public init(
             newSize: CGSize,
@@ -45,7 +49,8 @@ public enum TileSpawnPlacement {
             visibleSize: CGSize,
             siblings: [Tile],
             gap: Double,
-            bounds: CGRect? = nil
+            bounds: CGRect? = nil,
+            fanOut: FanOut? = nil
         ) {
             self.newSize = newSize
             self.viewport = viewport
@@ -53,6 +58,35 @@ public enum TileSpawnPlacement {
             self.siblings = siblings
             self.gap = gap
             self.bounds = bounds
+            self.fanOut = fanOut
+        }
+    }
+
+    /// Fan-out placement (.plans/107). The shipped rule docked onto the tile
+    /// under the camera and broke ties to the RIGHT; the camera then followed
+    /// the new tile, so every spawn docked right of the last one and a zone grew
+    /// into a single row. Here every host is a candidate anchor, slots are edge
+    /// aligned (shared edges keep rows readable), and the ranking is, in order:
+    /// visible at least half, the user's growth direction, the zone's shape
+    /// closest to the screen's, then nearness to `focus` (the camera centre
+    /// unless a lead is given).
+    public struct FanOut: Equatable, Sendable {
+        /// The tiles the new one may dock against: a lead and its helpers for a
+        /// helper, every tile of the zone otherwise.
+        public var hosts: [TileFrame]
+        /// The screen's width / height.
+        public var targetAspect: Double
+        public var growth: CanvasGrowthDirection
+        /// What the final tie-break pulls toward: a helper's lead, so helpers
+        /// cluster around it rather than around wherever the camera went.
+        /// `nil` is the camera centre.
+        public var focus: CGPoint?
+
+        public init(hosts: [TileFrame], targetAspect: Double, growth: CanvasGrowthDirection = .fan, focus: CGPoint? = nil) {
+            self.hosts = hosts
+            self.targetAspect = targetAspect
+            self.growth = growth
+            self.focus = focus
         }
     }
 
@@ -110,6 +144,11 @@ public enum TileSpawnPlacement {
             return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
         }
 
+        if let fanOut = context.fanOut,
+           let placed = fanOutPlacement(fanOut, size: size, viewport: viewportRect, obstacles: obstacles, gap: gap) {
+            return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
+        }
+
         var candidates: [Candidate]
         if let anchor = anchorRect(at: centre, siblings: context.siblings) {
             candidates = dockCandidates(anchor: anchor, size: size, gap: gap, obstacles: obstacles)
@@ -137,6 +176,48 @@ public enum TileSpawnPlacement {
             return TileFrame(x: centre.x - size.width / 2, y: centre.y - size.height / 2, width: size.width, height: size.height)
         }
         return TileFrame(x: chosen.rect.minX, y: chosen.rect.minY, width: size.width, height: size.height)
+    }
+
+    // MARK: - Fan out
+
+    private static func fanOutPlacement(
+        _ fanOut: FanOut, size: CGSize, viewport: CGRect, obstacles: [CGRect], gap: Double
+    ) -> CGRect? {
+        let hosts = fanOut.hosts.map { rect(for: $0) }.filter { $0.width > 0 && $0.height > 0 }
+        guard !hosts.isEmpty else { return nil }
+        let w = size.width, h = size.height
+        let aspect = fanOut.targetAspect.isFinite && fanOut.targetAspect > 0 ? fanOut.targetAspect : 1.6
+        let occupied = obstacles.reduce(CGRect.null) { $0.union($1) }
+        let centre = fanOut.focus ?? CGPoint(x: viewport.midX, y: viewport.midY)
+        var best: (rect: CGRect, key: [Double])?
+        for host in hosts {
+            let slots = [
+                CGRect(x: host.maxX + gap, y: host.minY, width: w, height: h),
+                CGRect(x: host.maxX + gap, y: host.maxY - h, width: w, height: h),
+                CGRect(x: host.minX, y: host.maxY + gap, width: w, height: h),
+                CGRect(x: host.maxX - w, y: host.maxY + gap, width: w, height: h),
+                CGRect(x: host.minX - gap - w, y: host.minY, width: w, height: h),
+                CGRect(x: host.minX, y: host.minY - gap - h, width: w, height: h),
+            ]
+            for slot in slots {
+                // Free with the standard gap to every other tile, not just the host.
+                let guarded = slot.insetBy(dx: -(gap - 0.5), dy: -(gap - 0.5))
+                guard !obstacles.contains(where: { $0.intersects(guarded) }) else { continue }
+                let visible = visibleArea(slot, in: viewport) / max(w * h, 1)
+                let growthMiss: Double
+                switch fanOut.growth {
+                case .fan: growthMiss = 0
+                case .right: growthMiss = slot.minX >= host.maxX ? 0 : 1
+                case .down: growthMiss = slot.minY >= host.maxY ? 0 : 1
+                }
+                let envelope = occupied.isNull ? slot : occupied.union(slot)
+                let shape = abs(log(envelope.width / max(envelope.height, 1)) - log(aspect))
+                let key = [visible >= 0.5 ? 0 : 1, growthMiss, (shape * 20).rounded() / 20,
+                           hypot(slot.midX - centre.x, slot.midY - centre.y)]
+                if best == nil || key.lexicographicallyPrecedes(best!.key) { best = (slot, key) }
+            }
+        }
+        return best?.rect
     }
 
     // MARK: - Anchor

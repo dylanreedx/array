@@ -1034,6 +1034,11 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --external-session-discovery-che
 # "Messaged …" row. Neither section it draws from is a leg of its own.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-message-transcript-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
+# .plans/107: a live drag moves at most three other tiles a frame and nothing
+# teleports; spawns fan out screen-shaped; the jelly trajectory fails on any
+# ORTHO/FLIP/TELEPORT/STUCK frame.
+run_leg .build/debug/ContinuumRevivedCoreChecks --auto-layout-fanout-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --jelly-trajectory-probe
 run_leg .build/debug/ContinuumRevivedCoreChecks --tile-selection-geometry-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
 # Film phase 1: the pairing page and the user-facing copy that must say Array.
@@ -1443,6 +1448,7 @@ run_app_check .build/debug/Array --zone-close-keep-delete-check
 run_app_check .build/debug/Array --zone-chrome-zorder-check
 run_app_check .build/debug/Array --zone-resize-check
 run_app_check .build/debug/Array --jelly-auto-layout-check
+run_app_check .build/debug/Array --auto-layout-fanout-app-check
 run_app_check .build/debug/Array --zone-adaptive-bounds-check
 run_app_check .build/debug/Array --agent-status-check
 run_app_check .build/debug/Array --tile-world-bounds-check

@@ -122,6 +122,10 @@ enum TileInsertSlideChecks {
             last = NSPoint(x: grab.x + (point.x - grabWorld.x), y: grab.y - (point.y - grabWorld.y))
             view.mouseDragged(with: try event(.leftMouseDragged, last))
         }
+        // The pointer rests on the slot, as a hand does: a slide-in or swap
+        // latches on that dwell (.plans/107), not on a pass.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        m.canvas.layoutSubtreeIfNeeded()
         try inspect()
         view.mouseUp(with: try event(.leftMouseUp, last))
         m.canvas.layoutSubtreeIfNeeded()

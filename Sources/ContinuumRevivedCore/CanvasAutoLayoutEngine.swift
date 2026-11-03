@@ -104,7 +104,7 @@ public enum CanvasAutoLayoutEngine {
     /// `pointer` (WORLD) is where the user is pointing during a member move.
     /// Without one the dragged tile's centre stands in and the move can only
     /// swap, never slide in between. `preferSwap` is ⌥: swap only.
-    public static func solve(scene: Scene, mutation: Mutation, gap preferredGap: Double, zonePadding preferredPadding: Double, headerHeight: Double, latched: MoveLatch? = nil, pointer: CGPoint? = nil, preferSwap: Bool = false) -> CanvasLayoutTransaction {
+    public static func solve(scene: Scene, mutation: Mutation, gap preferredGap: Double, zonePadding preferredPadding: Double, headerHeight: Double, latched: MoveLatch? = nil, pointer: CGPoint? = nil, preferSwap: Bool = false, pointerSpeed: Double? = nil, previousFrames: [UUID: TileFrame]? = nil, interactive: Set<UUID>? = nil) -> CanvasLayoutTransaction {
         let gap = max(0, preferredGap.isFinite ? preferredGap : 0)
         let padding = max(0, preferredPadding.isFinite ? preferredPadding : 0)
         let header = max(0, headerHeight.isFinite ? headerHeight : 0)
@@ -265,7 +265,8 @@ public enum CanvasAutoLayoutEngine {
                     activeTile: activeTile, originalFrame: original,
                     memberIds: memberIds, tiles: tiles, zone: zone,
                     gap: gap, padding: padding, header: header,
-                    latched: latched, pointer: pointer, preferSwap: preferSwap)
+                    latched: latched, pointer: pointer, preferSwap: preferSwap, pointerSpeed: pointerSpeed,
+                    previous: previousFrames, interactive: interactive)
                 for (id, frame) in outcome.frames { tiles[id]?.frame = frame }
                 newLatch = outcome.latch
                 newSlot = outcome.slot
@@ -557,6 +558,72 @@ public enum CanvasAutoLayoutEngine {
         }
     }
 
+    /// Screen points per second above which a drag is passing over tiles
+    /// rather than dwelling on one (.plans/107).
+    public static let swapAcquireSpeed = 600.0
+
+    /// Most tiles one live-drag frame may move by pushing (.plans/107).
+    public static let livePushBudget = 3
+
+    /// The live-drag push (.plans/107). A tile `source` presses on moves along
+    /// the pair's own baseline axis, by the minimal amount, never past the
+    /// content wall and never further than a quarter of its own length from
+    /// rest. Pushes may chain, but at most `livePushBudget` tiles move: a push
+    /// that would need one more does not happen and the pusher overlaps instead.
+    /// Unbounded chains moved every tile of a zone at once, and an unbounded
+    /// push let a swap teleport a tile back from far away.
+    private static func pushNeighbors(
+        of sourceId: UUID, frames: inout [UUID: TileFrame], baseline: [UUID: TileFrame],
+        exclude: Set<UUID>, content: CGRect, gap: Double, reserved: Set<UUID> = []
+    ) {
+        let ids = frames.keys.sorted(by: uuidLess)
+        var moved = Set<UUID>()
+        var queue = [sourceId]
+        // At most `livePushBudget` tiles can move, so a few expansions settle
+        // it; the bound stops two pushers bouncing a tile back and forth.
+        var expansions = 0
+        while !queue.isEmpty, expansions < 4 * (livePushBudget + 1) {
+            expansions += 1
+            let pusher = queue.removeFirst()
+            guard let a = frames[pusher] else { continue }
+            let pusherRest = baseline[pusher] ?? a
+            for id in ids where id != pusher && id != sourceId && !exclude.contains(id) {
+                guard let b = frames[id], let rest = baseline[id], overlapsOrUnderGap(a, b, gap: gap) else { continue }
+                guard moved.contains(id) || reserved.contains(id)
+                        || moved.union(reserved).count < livePushBudget else { continue }
+                let axis = pushAxis(baselineA: pusherRest, baselineB: rest, currentA: a, currentB: b, gap: gap)
+                // The gap only exists along a shared edge. Two tiles that merely
+                // meet at a corner do not push: hand jitter grazing that corner
+                // twitched diagonal neighbours on and off every frame.
+                let shared = axis == .horizontal
+                    ? min(a.y + a.height, b.y + b.height) - max(a.y, b.y)
+                    : min(a.x + a.width, b.x + b.width) - max(a.x, b.x)
+                guard shared > 0.5 else { continue }
+                var next = b
+                switch axis {
+                case .horizontal:
+                    let positive = rest.x + rest.width / 2 >= pusherRest.x + pusherRest.width / 2
+                    next.x = positive ? max(b.x, a.x + a.width + gap) : min(b.x, a.x - gap - b.width)
+                    next.x = min(max(next.x, rest.x - rest.width / 4), rest.x + rest.width / 4)
+                    next.x = min(max(next.x, content.minX), max(content.minX, content.maxX - b.width))
+                case .vertical:
+                    let positive = rest.y + rest.height / 2 >= pusherRest.y + pusherRest.height / 2
+                    next.y = positive ? max(b.y, a.y + a.height + gap) : min(b.y, a.y - gap - b.height)
+                    next.y = min(max(next.y, rest.y - rest.height / 4), rest.y + rest.height / 4)
+                    next.y = min(max(next.y, content.minY), max(content.minY, content.maxY - b.height))
+                }
+                guard next != b else { continue }
+                // A tile that may not move is a wall: never push into it.
+                if exclude.contains(where: { frozen in
+                    frames[frozen].map { overlapsOrUnderGap(next, $0, gap: gap - 0.26) } == true
+                }) { continue }
+                frames[id] = next
+                moved.insert(id)
+                queue.append(id)
+            }
+        }
+    }
+
     /// The member-move solver: the active tile always keeps its pointer frame.
     /// Unlatched, siblings receive minimal single-axis pushes. Latched to a
     /// `.swap`, that sibling takes the active tile's old origin; latched to an
@@ -566,7 +633,8 @@ public enum CanvasAutoLayoutEngine {
         activeTile: UUID, originalFrame: TileFrame, memberIds: [UUID],
         tiles: [UUID: LayoutTile], zone: ZonePlacement,
         gap: Double, padding: Double, header: Double, latched: MoveLatch?,
-        pointer: CGPoint? = nil, preferSwap: Bool = false
+        pointer: CGPoint? = nil, preferSwap: Bool = false, pointerSpeed: Double? = nil,
+        previous: [UUID: TileFrame]? = nil, interactive: Set<UUID>? = nil
     ) -> (frames: [UUID: TileFrame], latch: MoveLatch?, slot: TileFrame?) {
         guard let requested = tiles[activeTile]?.frame else { return ([:], nil, nil) }
         let content = contentRect(zone: zone, padding: padding, header: header)
@@ -576,60 +644,114 @@ public enum CanvasAutoLayoutEngine {
         let probe = pointer ?? CGPoint(x: requested.x + requested.width / 2, y: requested.y + requested.height / 2)
         // The hysteresis band keeps edge jitter from oscillating the topology.
         let releaseBand = max(24, gap * 1.5)
-        let rows = memberRows(memberIds.filter { $0 != activeTile }, frames: baseline)
+        // A helper dragged inside its lead's cluster (.plans/107 model B) only
+        // ever disturbs that cluster: every other tile is a fixed obstacle that
+        // is never pushed, swapped or slid.
+        let frozen: Set<UUID> = interactive.map { cluster in
+            Set(memberIds.filter { $0 != activeTile && !cluster.contains($0) })
+        } ?? []
+        let rows = memberRows(memberIds.filter { $0 != activeTile && !frozen.contains($0) }, frames: baseline)
+        // Tiles the previous frame left off their rest: they count against the
+        // push budget until they are back, so a handover between push sets
+        // relaxes the old ones a frame before it pushes new ones.
+        let stillDisplaced: Set<UUID> = Set(memberIds.filter { id in
+            guard id != activeTile, let was = previous?[id], let rest = baseline[id] else { return false }
+            return was != rest
+        })
+
+        /// The frames for one latch state, solved fresh from the gesture baseline.
+        func arrange(_ latch: MoveLatch?, pushing: Bool = true) -> (frames: [UUID: TileFrame], slot: TileFrame?) {
+            var frames = baseline
+            frames[activeTile] = requested
+            var slot: TileFrame?
+            switch latch {
+            case let .swap(sibling)?:
+                if var displaced = frames[sibling], let target = baseline[sibling] {
+                    displaced.x = originalFrame.x
+                    displaced.y = originalFrame.y
+                    frames[sibling] = clampIntoContent(displaced, content: content)
+                    // An exchanged tile larger than the slot it inherits may press
+                    // on its new neighbours: one level, never against the active.
+                    pushNeighbors(of: sibling, frames: &frames, baseline: baseline,
+                                  exclude: frozen.union([activeTile]), content: content, gap: gap, reserved: stillDisplaced)
+                    slot = TileFrame(x: target.x, y: target.y, width: requested.width, height: requested.height)
+                }
+            case let .insert(row, index)?:
+                if rows.indices.contains(row) {
+                    slot = layoutInsertion(
+                        row: rows[row], index: index, active: requested, home: originalFrame,
+                        baseline: baseline, frames: &frames, exclude: frozen.union([activeTile]), gap: gap)
+                }
+            case nil:
+                if pushing {
+                    pushNeighbors(of: activeTile, frames: &frames, baseline: baseline,
+                                  exclude: frozen, content: content, gap: gap, reserved: stillDisplaced)
+                }
+            }
+            return (frames, slot)
+        }
+
+        // A sibling is hit where it is DRAWN as well as where it rests: the
+        // previous latch's arrangement is what is on screen. Pushes are capped
+        // at a quarter tile, so the two never lie far apart, and a swap can no
+        // longer fire over empty space a pushed tile has left (.plans/107).
+        let shownArrangement = arrange(latched)
+        let shown = shownArrangement.frames
         // Sliding in between is a pointer gesture. A move with no pointer (an
         // API or programmatic move) keeps the exchange-only latch, as does ⌥.
-        let latch = preferSwap || pointer == nil
+        var latch = preferSwap || pointer == nil
             ? swapOnlyLatch(probe: probe, home: originalFrame, siblings: rows.flatMap { $0 },
-                            baseline: baseline, latched: latched, releaseBand: releaseBand)
+                            baseline: baseline, shown: shown, latched: latched, releaseBand: releaseBand)
             : slideOrSwapLatch(probe: probe, home: originalFrame, rows: rows,
-                               baseline: baseline, latched: latched, releaseBand: releaseBand)
-
-        var frames = baseline
-        frames[activeTile] = requested
-        var slot: TileFrame?
-        switch latch {
-        case let .swap(sibling)?:
-            if var displaced = frames[sibling], let target = baseline[sibling] {
-                displaced.x = originalFrame.x
-                displaced.y = originalFrame.y
-                frames[sibling] = clampIntoContent(displaced, content: content)
-                // An exchanged tile larger than the slot it inherits may press on
-                // other siblings; resolve that minimally, never against the active.
-                propagatePushes(
-                    from: sibling, frames: &frames, baseline: baseline,
-                    exclude: [activeTile], content: content, gap: gap)
-                slot = TileFrame(x: target.x, y: target.y, width: requested.width, height: requested.height)
+                               baseline: baseline, shown: shown, latched: latched, releaseBand: releaseBand)
+        // A pointer passing over tiles on its way elsewhere must not swap them
+        // or slide in among them: a NEW latch is only acquired while the pointer
+        // dwells. A held latch holds, a release releases, and a slide already
+        // running in a row keeps following the pointer along it, at any speed.
+        if let speed = pointerSpeed, speed > swapAcquireSpeed, let candidate = latch, candidate != latched {
+            var slidingAlongRow = false
+            if case let .insert(row, _) = candidate, case let .insert(heldRow, _)? = latched, row == heldRow {
+                slidingAlongRow = true
             }
-        case let .insert(row, index)?:
-            slot = layoutInsertion(
-                row: rows[row], index: index, active: requested, home: originalFrame,
-                baseline: baseline, frames: &frames, gap: gap)
-        case nil:
-            propagatePushes(
-                from: activeTile, frames: &frames, baseline: baseline,
-                exclude: [], content: content, gap: gap)
+            if !slidingAlongRow { latch = nil }
         }
-        return (frames, latch, slot)
+        var arranged = latch == latched ? shownArrangement : arrange(latch)
+        // A new swap that would move more than the budget at once (its partner
+        // plus every push relaxing) waits one frame: this frame only relaxes.
+        if case .swap? = latch, latch != latched, let previous {
+            let changes = memberIds.filter { id in
+                id != activeTile && previous[id] != nil && previous[id] != arranged.frames[id]
+            }.count
+            if changes > livePushBudget {
+                latch = latched
+                arranged = arrange(latched, pushing: false)
+            }
+        }
+        return (arranged.frames, latch, arranged.slot)
     }
 
-    /// Zone members grouped into rows: tiles whose vertical spans overlap
-    /// (transitively), rows top to bottom, each row left to right.
+    /// Zone members grouped into rows, top to bottom, each left to right. A
+    /// tile joins a row only if it overlaps the row's FIRST tile vertically by
+    /// at least half the shorter height. The old rule chained (A overlaps B, B
+    /// overlaps C), so a zone of mixed heights became one row and a slide-in
+    /// re-laid every tile of it in a line (.plans/107).
     private static func memberRows(_ ids: [UUID], frames: [UUID: TileFrame]) -> [[UUID]] {
         let byTop = ids.filter { frames[$0] != nil }.sorted {
             let a = frames[$0]!, b = frames[$1]!
             return a.y == b.y ? uuidLess($0, $1) : a.y < b.y
         }
         var rows: [[UUID]] = []
-        var rowBottom = -Double.infinity
+        var seeds: [TileFrame] = []
         for id in byTop {
             let frame = frames[id]!
-            if rows.isEmpty || frame.y >= rowBottom - 0.5 {
-                rows.append([id])
-                rowBottom = frame.y + frame.height
+            if let index = seeds.firstIndex(where: { seed in
+                let overlap = min(seed.y + seed.height, frame.y + frame.height) - max(seed.y, frame.y)
+                return overlap >= min(seed.height, frame.height) / 2
+            }) {
+                rows[index].append(id)
             } else {
-                rows[rows.count - 1].append(id)
-                rowBottom = max(rowBottom, frame.y + frame.height)
+                rows.append([id])
+                seeds.append(frame)
             }
         }
         return rows.map { row in
@@ -660,7 +782,7 @@ public enum CanvasAutoLayoutEngine {
     /// different sibling re-latches.
     private static func swapOnlyLatch(
         probe: CGPoint, home: TileFrame, siblings: [UUID], baseline: [UUID: TileFrame],
-        latched: MoveLatch?, releaseBand: Double
+        shown: [UUID: TileFrame], latched: MoveLatch?, releaseBand: Double
     ) -> MoveLatch? {
         var latch: UUID?
         if case let .swap(id)? = latched, let frame = baseline[id], siblings.contains(id),
@@ -668,7 +790,9 @@ public enum CanvasAutoLayoutEngine {
             latch = id
         }
         if rectContains(home, probe) { return nil }
-        if let entered = siblings.first(where: { baseline[$0].map { rectContains($0, probe) } == true }) {
+        if let entered = siblings.first(where: { id in
+            [baseline[id], shown[id]].contains { $0.map { rectContains($0, probe) } == true }
+        }) {
             latch = entered
         }
         return latch.map { .swap($0) }
@@ -681,17 +805,19 @@ public enum CanvasAutoLayoutEngine {
     /// than the band. Back over its own place, nothing is latched.
     private static func slideOrSwapLatch(
         probe: CGPoint, home: TileFrame, rows: [[UUID]], baseline: [UUID: TileFrame],
-        latched: MoveLatch?, releaseBand: Double
+        shown: [UUID: TileFrame], latched: MoveLatch?, releaseBand: Double
     ) -> MoveLatch? {
         if rectContains(home, probe) { return nil }
-        func middleHalf(_ id: UUID) -> TileFrame? {
-            baseline[id].map { TileFrame(x: $0.x + $0.width / 4, y: $0.y, width: $0.width / 2, height: $0.height) }
+        func middleHalf(_ id: UUID, in frames: [UUID: TileFrame] = baseline) -> TileFrame? {
+            frames[id].map { TileFrame(x: $0.x + $0.width / 4, y: $0.y, width: $0.width / 2, height: $0.height) }
         }
         if case let .swap(id)? = latched, rows.contains(where: { $0.contains(id) }),
            let half = middleHalf(id), rectContains(half, probe, inset: releaseBand) {
             return .swap(id)
         }
-        if let entered = rows.joined().first(where: { middleHalf($0).map { rectContains($0, probe) } == true }) {
+        if let entered = rows.joined().first(where: { id in
+            [middleHalf(id), middleHalf(id, in: shown)].contains { $0.map { rectContains($0, probe) } == true }
+        }) {
             return .swap(entered)
         }
         var held: (row: Int, index: Int)?
@@ -717,30 +843,56 @@ public enum CanvasAutoLayoutEngine {
         return .insert(row: rowIndex, index: index)
     }
 
-    /// The row's other tiles in order with the dragged tile's slot left empty at
-    /// `index`: sizes unchanged, tops aligned to the row, exact gaps, starting
-    /// where the row starts (its left edge includes the dragged tile's home when
-    /// that is in this row). Returns the slot.
+    /// Slide-in, kept local (.plans/107). Nobody's y changes, and only tiles
+    /// actually in the way move, sideways:
+    /// - the dragged tile came from this row: the tiles between its old place
+    ///   and the slot shift one place toward it, a reorder;
+    /// - it came from elsewhere: the tiles from the slot rightward shift right
+    ///   by the minimum that clears it, and anything they then press on moves
+    ///   right as well.
+    /// The old version re-laid the whole row from its left edge with tops
+    /// aligned, which flattened a zone of mixed heights into one line.
+    /// Returns the slot.
     private static func layoutInsertion(
         row: [UUID], index: Int, active: TileFrame, home: TileFrame,
-        baseline: [UUID: TileFrame], frames: inout [UUID: TileFrame], gap: Double
+        baseline: [UUID: TileFrame], frames: inout [UUID: TileFrame], exclude: Set<UUID>, gap: Double
     ) -> TileFrame {
+        let members = row.compactMap { baseline[$0] }
+        guard !members.isEmpty else { return active }
         let extent = rowExtent(row, frames: baseline)
         let homeInRow = home.y < extent.y + extent.height && extent.y < home.y + home.height
-        var x = homeInRow ? min(extent.x, home.x) : extent.x
-        var slot = TileFrame(x: x, y: extent.y, width: active.width, height: active.height)
-        for (position, id) in row.enumerated() {
-            if position == index {
-                slot.x = x
-                x += active.width + gap
+        let step = active.width + gap
+        let homeIndex = homeInRow ? members.filter { $0.x + $0.width / 2 < home.x + home.width / 2 }.count : nil
+        // Align to the neighbour the slot sits beside.
+        let neighbour = members[max(0, min(members.count - 1, index > 0 ? index - 1 : 0))]
+        var slot = TileFrame(x: 0, y: neighbour.y, width: active.width, height: active.height)
+        if let homeIndex {
+            if index > homeIndex {
+                for position in homeIndex..<index { frames[row[position]]?.x = members[position].x - step }
+                slot.x = members[index - 1].x + members[index - 1].width - active.width
+            } else {
+                for position in index..<homeIndex { frames[row[position]]?.x = members[position].x + step }
+                slot.x = members[index].x
             }
-            guard var frame = baseline[id] else { continue }
-            frame.x = x
-            frame.y = extent.y
-            frames[id] = frame
-            x += frame.width + gap
+            return slot
         }
-        if index >= row.count { slot.x = x }
+        slot.x = index == 0 ? members[0].x : members[index - 1].x + members[index - 1].width + gap
+        // Shift right whatever the slot (then each shifted tile) presses on.
+        var queue = [slot]
+        var shifted = Set<UUID>()
+        var visits = 0
+        while !queue.isEmpty, visits < max(64, frames.count * 4) {
+            visits += 1
+            let pusher = queue.removeFirst()
+            for id in frames.keys.sorted(by: uuidLess) where !exclude.contains(id) && !shifted.contains(id) {
+                guard var b = frames[id], overlapsOrUnderGap(pusher, b, gap: gap - 0.26),
+                      b.x + b.width / 2 >= pusher.x + pusher.width / 2 - 0.5 else { continue }
+                b.x = max(b.x, pusher.x + pusher.width + gap)
+                frames[id] = b
+                shifted.insert(id)
+                queue.append(b)
+            }
+        }
         return slot
     }
 
@@ -773,9 +925,25 @@ public enum CanvasAutoLayoutEngine {
         // never relocate — in particular never to a different lane.
         if pinMover, let mover, result[mover] != nil {
             propagatePushes(from: mover, frames: &result, baseline: result, exclude: [], content: content, gap: gap)
-            var cluster: [TileFrame] = [result[mover]!]
-            pending.removeAll { $0 == mover }
-            absorb(pending: &pending, cluster: &cluster, result: &result, mover: nil, content: content, gap: gap)
+            return result
+        }
+        // A settle with a mover resolves the MOVER only (.plans/107). Every
+        // other member keeps its place, so the cluster is all of them as they
+        // stand. Re-growing the cluster from the topmost member re-placed any
+        // tile that had touched the others only through the mover: dropping one
+        // tile moved the lead agent across the zone.
+        if let mover, result[mover] != nil, pending.contains(where: { $0 != mover }) {
+            var cluster = pending.filter { $0 != mover }.compactMap { result[$0] }
+            pending = [mover]
+            let growContent = growing ? content.insetBy(dx: -1_000_000, dy: -1_000_000) : nil
+            absorb(pending: &pending, cluster: &cluster, result: &result, mover: mover, content: content, gap: gap,
+                   growContent: growContent, view: view)
+            if let moved = result[mover],
+               result.contains(where: { $0.key != mover && overlapsOrUnderGap(moved, $0.value, gap: gap - 0.26) }) {
+                var frames = result
+                propagatePushes(from: mover, frames: &frames, baseline: result, exclude: [], content: content, gap: gap)
+                result = frames
+            }
             return result
         }
         let anchorPool = pending.contains { $0 != mover } ? pending.filter { $0 != mover } : pending

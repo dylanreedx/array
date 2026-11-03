@@ -1026,6 +1026,10 @@ enum ZoneArmingChecks {
         arguments[AgentModelConfig.modelKey] = AgentCatalogQAFixture.pi[0]
         arguments[AgentModelConfig.thinkingKey] = AgentModelConfig.defaultThinking
         arguments[CanvasAutoLayoutConfig.enabledKey] = true
+        // Fan-out grows a zone toward free space (.plans/107), which here is
+        // away from both neighbours. The user's growth direction is what can
+        // still drive a zone into one: pin it Right, toward Birch.
+        arguments[CanvasAutoLayoutConfig.growthKey] = CanvasGrowthDirection.right.rawValue
         UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
         defer {
             UserDefaults.standard.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)

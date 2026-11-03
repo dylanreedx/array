@@ -8,6 +8,12 @@ import ContinuumRevivedCore
 final class CanvasTileSelection {
     weak var canvas: CanvasNSView?
     private(set) var ids: Set<UUID> = []
+    /// A lead's cluster carried by a plain header drag (.plans/107 model B): it
+    /// drives the group gesture without becoming the visible selection.
+    private var carry: Set<UUID>?
+    private var groupIds: Set<UUID> { carry ?? ids }
+    /// A lead's cluster is being carried (no swap or slide-in latching).
+    var isCarrying: Bool { carry != nil && gesture != nil }
     private var overlay: TileSelectionOverlay?
     private var consumedHeaderClick = false
     private var worldFrames: [(id: UUID, frame: TileFrame)] = []
@@ -81,23 +87,30 @@ final class CanvasTileSelection {
             return begin(event: event, edge: nil, pressedTileId: tile.tile.id)
         }
         selectOnly(tile.tile.id)
+        if isHeader, !isResize, let cluster = canvas.autoLayoutCarry(for: tile.tile.id) {
+            carry = cluster
+            if begin(event: event, edge: nil, pressedTileId: tile.tile.id) { return true }
+            carry = nil
+        }
         return false
     }
 
     @discardableResult
     func begin(event: NSEvent, edge: ResizeEdge?, pressedTileId: UUID? = nil) -> Bool {
-        guard let canvas, gesture == nil, ids.count > 1,
+        guard let canvas, gesture == nil, groupIds.count > 1,
               let snapshot = TileSelectionGeometry.Snapshot(tiles: selectedWorldTiles()),
-              snapshot.frames.count == ids.count,
+              snapshot.frames.count == groupIds.count,
               canvas.beginGeometryEdit(edge == nil ? .moveTile : .resizeTile,
-                                       tileIds: ids, includeAllZones: true) else { return false }
+                                       tileIds: groupIds, includeAllZones: true) else { return false }
         consumedHeaderClick = false
         gesture = Gesture(snapshot: snapshot, start: event.locationInWindow,
                           zoom: canvas.viewport.zoom, edge: edge, pressedTileId: pressedTileId)
         if edge == nil, pressedTileId != nil {
-            let views = canvas.tileViewsInVisualOrder.filter { ids.contains($0.tile.id) }
+            // A carried cluster references its lead only, as a lone drag would.
+            let sourceIds = carry != nil ? Set([pressedTileId!]) : ids
+            let views = canvas.tileViewsInVisualOrder.filter { sourceIds.contains($0.tile.id) }
             let sources = views.compactMap { $0 as? ManagedAgentTileNSView }
-            if sources.count == ids.count {
+            if sources.count == sourceIds.count {
                 gesture?.referenceDrag = AgentReferenceDrag(sources: sources, canvas: canvas)
             }
         }
@@ -143,7 +156,8 @@ final class CanvasTileSelection {
             self.gesture = gesture
         }
         canvas.setAutoLayoutMovePointer(windowPoint: event.locationInWindow,
-                                        preferSwap: event.modifierFlags.contains(.option))
+                                        preferSwap: event.modifierFlags.contains(.option),
+                                        timestamp: event.timestamp)
         let frames: [UUID: TileFrame]?
         if let edge = gesture.edge {
             frames = gesture.snapshot.resized(byWorldDelta: delta, edge: edge)
@@ -151,7 +165,7 @@ final class CanvasTileSelection {
             var free = gesture.snapshot.bounds
             free.x += delta.width
             free.y += delta.height
-            let placement = canvas.selectionMagneticPlacement(free: free, excluding: ids,
+            let placement = canvas.selectionMagneticPlacement(free: free, excluding: groupIds,
                                                               previous: gesture.magneticTarget)
             gesture.magneticTarget = placement.target
             frames = gesture.snapshot.translated(byWorldDelta: CGSize(
@@ -212,11 +226,12 @@ final class CanvasTileSelection {
                 worldFrames = frames.map { ($0.key, $0.value) }
                 _ = canvas.applySelectionFrames(frames)
             }
-            canvas.settleSelectionAfterMove(ids, honorSnap: gesture.dropBounds != nil)
+            canvas.settleSelectionAfterMove(groupIds, honorSnap: gesture.dropBounds != nil)
         }
         canvas.hideDragGhost()
         _ = canvas.finishAutoLayoutGesture()
         self.gesture = nil
+        carry = nil
         _ = canvas.commitGeometryEdit()
         refresh()
         return true
@@ -226,6 +241,7 @@ final class CanvasTileSelection {
         guard let gesture else { return }
         gesture.referenceDrag?.end()
         self.gesture = nil
+        carry = nil
         consumedHeaderClick = true
         canvas?.hideDragGhost()
         _ = canvas?.finishAutoLayoutGesture()
@@ -256,6 +272,7 @@ final class CanvasTileSelection {
     private func resolveClick(on id: UUID) {
         gesture?.referenceDrag?.end()
         gesture = nil
+        carry = nil
         canvas?.cancelGeometryEdit()
         consumedHeaderClick = true
         ids = [id]
@@ -265,6 +282,7 @@ final class CanvasTileSelection {
     private func selectedWorldTiles() -> [Tile] {
         guard let canvas else { return [] }
         let collapsed = Set(canvas.workspaceZonePlacementsForPersistence().filter(\.collapsed).map(\.zoneId))
+        let ids = groupIds
         if ids.count == 1, let id = ids.first, var tile = canvas.tileRecord(for: id) {
             guard !(tile.zoneId.map { collapsed.contains($0) } ?? false) else { return [] }
             tile.frame = canvas.worldFrame(forTileFrame: tile.frame, tileId: id)
