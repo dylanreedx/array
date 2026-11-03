@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedCore
 import Foundation
 import WebKit
@@ -48,7 +49,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     private let findRowHeightConstraint: NSLayoutConstraint
     private let errorBanner: NSTextField
     private let passkeyNotice = BrowserPasskeyNotice(frame: .zero)
-    private let tabStrip: NSStackView
+    private let tabStrip: BrowserTabStripView
     private let newTabButton: NSButton
     private let closeTabButton: NSButton
     private var tabModel: BrowserTabModel
@@ -80,10 +81,11 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         self.findCloseButton = NSButton(title: "×", target: nil, action: nil)
         self.findRow = NSStackView()
         self.findRowHeightConstraint = findRow.heightAnchor.constraint(equalToConstant: 0)
-        self.errorBanner = NSTextField(labelWithString: "")
-        self.tabStrip = NSStackView()
-        self.newTabButton = NSButton(title: "+", target: nil, action: nil)
-        self.closeTabButton = NSButton(title: "×", target: nil, action: nil)
+        self.errorBanner = BrowserChromeStyle.makeErrorBanner()
+        let tabStrip = BrowserTabStripView(readOnly: false)
+        self.tabStrip = tabStrip
+        self.newTabButton = tabStrip.newTabButton
+        self.closeTabButton = tabStrip.closeTabButton
         let now = Date()
         if let browserTile {
             self.tabModel = BrowserTabModel(tabs: browserTile.tabs, activeTabId: browserTile.activeTabId)
@@ -144,14 +146,10 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
 
         newTabButton.target = self
         newTabButton.action = #selector(handleNewTab(_:))
-        newTabButton.bezelStyle = .rounded
         closeTabButton.target = self
         closeTabButton.action = #selector(handleCloseTab(_:))
-        closeTabButton.bezelStyle = .rounded
-        tabStrip.orientation = .horizontal
-        tabStrip.spacing = 4
-        tabStrip.alignment = .centerY
-        tabStrip.distribution = .fill
+        tabStrip.tabTarget = self
+        tabStrip.tabAction = #selector(handleSelectTab(_:))
         tabStrip.translatesAutoresizingMaskIntoConstraints = false
 
         let navRow = NSStackView(views: [backButton, forwardButton, reloadButton, faviconLabel, urlField, progressIndicator, agentControlButton, profileMenuButton])
@@ -203,11 +201,6 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         findRow.isHidden = true
         findRow.translatesAutoresizingMaskIntoConstraints = false
 
-        errorBanner.font = .systemFont(ofSize: 11)
-        errorBanner.textColor = .systemRed
-        errorBanner.maximumNumberOfLines = 2
-        errorBanner.lineBreakMode = .byTruncatingTail
-        errorBanner.isHidden = true
         errorBanner.translatesAutoresizingMaskIntoConstraints = false
 
         hostView.translatesAutoresizingMaskIntoConstraints = false
@@ -414,19 +407,21 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         }
         guard signature != tabStripRenderSignature else { return }
         tabStripRenderSignature = signature
-        tabStrip.setViews([], in: .leading)
         tabButtonIds.removeAll()
-        for (index, tab) in tabModel.tabs.enumerated() {
-            let title = tab.title.isEmpty ? (URL(string: tab.url)?.host ?? tab.url) : tab.title
-            let button = NSButton(title: title.isEmpty ? "Browser" : title, target: self, action: #selector(handleSelectTab(_:)))
-            button.tag = index
-            tabButtonIds[index] = tab.id
-            button.bezelStyle = tab.id == tabModel.activeTabId ? .regularSquare : .texturedRounded
-            tabStrip.addArrangedSubview(button)
-        }
-        tabStrip.addArrangedSubview(newTabButton)
-        tabStrip.addArrangedSubview(closeTabButton)
+        for (index, tab) in tabModel.tabs.enumerated() { tabButtonIds[index] = tab.id }
+        tabStrip.render(labels: tabModel.tabs.map { BrowserTabStripView.label(title: $0.title, url: $0.url) },
+                        active: tabModel.tabs.firstIndex { $0.id == tabModel.activeTabId })
     }
+
+    /// The tab row as it may leave this Mac for a teammate's shared browser:
+    /// labels only (`BrowserTabStripView.sharedLabel`), never a tab's address.
+    var sharedTabs: Collaboration.LiveTile.BrowserTabs {
+        Collaboration.LiveTile.BrowserTabs(
+            labels: tabModel.tabs.map { BrowserTabStripView.sharedLabel(title: $0.title, url: $0.url) },
+            active: tabModel.tabs.firstIndex { $0.id == tabModel.activeTabId })
+    }
+    var tabStripLabelsForQA: [String] { tabStrip.qaLabels }
+    var tabStripActiveForQA: Int? { tabStrip.qaActive }
 
     private func refresh() {
         refreshBrowserProfileLabel()

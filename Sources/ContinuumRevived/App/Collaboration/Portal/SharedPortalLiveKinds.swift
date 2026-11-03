@@ -101,7 +101,8 @@ struct SharedPortalBrowserKind: SharedPortalKind {
         let view: @MainActor () -> BrowserTileNSView? = { host.tileView(id) as? BrowserTileNSView }
         return BrowserLiveSource(webView: { (view()?.runtime as? WKWebViewBrowserRuntime)?.webView },
                                  address: { (view()?.runtime.url).flatMap { $0.isEmpty ? nil : $0 } ?? host.tile(id)?.metadata.url ?? "" },
-                                 title: { view()?.runtime.title ?? host.tile(id)?.title ?? "" })
+                                 title: { view()?.runtime.title ?? host.tile(id)?.title ?? "" },
+                                 tabs: { view()?.sharedTabs })
     }
     /// The contract's payload: `browser.json`, and for a private page the still.
     static func draft(_ payload: Collaboration.LiveTile.Payload?, still: Data?) -> SharedArtifactProducer.Draft? {
